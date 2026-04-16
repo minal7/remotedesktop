@@ -1,0 +1,74 @@
+name: RemoteDesktopHost
+options:
+  bundleIdPrefix: com.threadmark.remotedesktop
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+
+settings:
+  SWIFT_VERSION: "5.10"
+  SWIFT_STRICT_CONCURRENCY: targeted
+  ENABLE_USER_SCRIPT_SANDBOXING: YES
+
+packages:
+  LiveKitWebRTC:
+    url: https://github.com/livekit/webrtc-xcframework.git
+    exactVersion: 144.7559.03
+
+targets:
+  RemoteDesktopHost:
+    type: application
+    platform: macOS
+    sources:
+      - path: RemoteDesktopHost
+      - path: RemoteDesktopHost/WebRTCAliases.swift
+      - path: ../protocol/Swift
+        group: Shared
+    dependencies:
+      - package: LiveKitWebRTC
+    info:
+      path: RemoteDesktopHost/Info.plist
+      properties:
+        LSUIElement: true
+        CFBundleDisplayName: Remote Desktop Host
+        NSAudioCaptureUsageDescription: "Remote Desktop Host captures your Mac's system audio so sound playing on the host can be heard on your client device."
+        NSMicrophoneUsageDescription: "Remote Desktop Host uses the microphone permission because the host audio pipeline relies on the system audio engine's recording path to forward your Mac's sound to your client device. The app does not transmit microphone audio."
+        NSHumanReadableCopyright: "Copyright © 2026"
+        NSSupportsAutomaticTermination: false
+        NSSupportsSuddenTermination: false
+    # Sandbox is intentionally OFF: Accessibility-based CGEvent
+    # injection is incompatible with the App Sandbox. This host
+    # ships as a signed, notarized user-installed agent (not App
+    # Store) — same model as every other remote-control tool.
+    entitlements:
+      path: RemoteDesktopHost/RemoteDesktopHost.entitlements
+      properties:
+        com.apple.developer.aps-environment: development
+        com.apple.developer.icloud-container-identifiers:
+          - iCloud.com.threadmark.remotedesktop
+        com.apple.developer.icloud-services:
+          - CloudKit
+        com.apple.security.device.audio-input: true
+    settings:
+      CODE_SIGN_IDENTITY: Apple Development
+      CODE_SIGN_STYLE: Automatic
+      DEVELOPMENT_TEAM: V9AX39SPJD
+      PRODUCT_BUNDLE_IDENTIFIER: com.threadmark.remotedesktop.host
+      COMBINE_HIDPI_IMAGES: YES
+      ENABLE_HARDENED_RUNTIME: YES
+      MACOSX_DEPLOYMENT_TARGET: "14.0"
+
+  RemoteDesktopHostTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: RemoteDesktopHostTests
+    dependencies:
+      - target: RemoteDesktopHost
+    settings:
+      CODE_SIGN_IDENTITY: Apple Development
+      CODE_SIGN_STYLE: Automatic
+      DEVELOPMENT_TEAM: V9AX39SPJD
+      PRODUCT_BUNDLE_IDENTIFIER: com.threadmark.remotedesktop.host.tests
+      MACOSX_DEPLOYMENT_TARGET: "14.0"
+      GENERATE_INFOPLIST_FILE: YES

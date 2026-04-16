@@ -1,0 +1,17 @@
+name = "remotedesktop-signaling"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+
+# One Durable Object per pairing room — holds offer/answer/ICE trickle
+# until both sides have consumed them, then expires.
+[[durable_objects.bindings]]
+name = "ROOMS"
+class_name = "SignalingRoom"
+
+[[migrations]]
+tag = "v1"
+new_classes = ["SignalingRoom"]
+
+# Cap request body size (SDP is ~5 KB, ICE candidates < 1 KB each).
+# [limits]
+# cpu_ms = 50

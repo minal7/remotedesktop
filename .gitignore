@@ -1,0 +1,50 @@
+# macOS
+.DS_Store
+
+# Xcode
+build/
+DerivedData/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+*.xcuserstate
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Swift Package Manager
+.build/
+Packages/
+Package.resolved
+.swiftpm/
+*.profraw
+
+# CocoaPods / Carthage (if we add them later)
+Pods/
+Carthage/Build/
+
+# Generated Xcode projects (from XcodeGen) — regenerate with `xcodegen`
+ios/RemoteDesktop.xcodeproj/
+host-mac/RemoteDesktop.xcodeproj/
+
+# Node / Cloudflare Worker
+node_modules/
+.wrangler/
+dist/
+*.log
+
+# Windows
+*.obj
+*.pdb
+*.exe
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+
+# Secrets
+.env
+.env.local
+*.pem
+*.p12
+*.mobileprovision

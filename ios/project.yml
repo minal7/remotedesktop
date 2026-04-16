@@ -1,0 +1,86 @@
+name: RemoteDesktop
+options:
+  bundleIdPrefix: com.threadmark.remotedesktop
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: true
+
+settings:
+  SWIFT_VERSION: "5.10"
+  ENABLE_USER_SCRIPT_SANDBOXING: YES
+  SWIFT_STRICT_CONCURRENCY: targeted
+
+packages:
+  LiveKitWebRTC:
+    url: https://github.com/livekit/webrtc-xcframework.git
+    exactVersion: 144.7559.03
+
+targets:
+  RemoteDesktop:
+    type: application
+    platform: iOS
+    sources:
+      - path: RemoteDesktop
+      - path: RemoteDesktop/Transport/WebRTCAliases.swift
+      - path: ../protocol/Swift
+        group: Shared
+    dependencies:
+      - package: LiveKitWebRTC
+    entitlements:
+      path: RemoteDesktop/RemoteDesktop.entitlements
+      properties:
+        aps-environment: development
+        com.apple.developer.icloud-container-identifiers:
+          - iCloud.com.threadmark.remotedesktop
+        com.apple.developer.icloud-services:
+          - CloudKit
+    info:
+      path: RemoteDesktop/Info.plist
+      properties:
+        CFBundleDisplayName: Remote Desktop
+        UILaunchScreen: {}
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        "UISupportedInterfaceOrientations~ipad":
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UIRequiresFullScreen: false
+        NSLocalNetworkUsageDescription: >
+          Remote Desktop uses your local network for faster, direct connections
+          to your computer when both devices are on the same Wi-Fi.
+        NSMicrophoneUsageDescription: >
+          Remote Desktop does not record or transmit audio from this device.
+          iOS requires this permission because the audio playback engine used
+          to play sound streamed from your computer opens a full-duplex audio
+          session under the hood.
+        NSBonjourServices:
+          - _remotedesktop._tcp
+        ITSAppUsesNonExemptEncryption: false
+    settings:
+      CODE_SIGN_STYLE: Automatic
+      DEVELOPMENT_TEAM: V9AX39SPJD
+      PRODUCT_BUNDLE_IDENTIFIER: com.threadmark.remotedesktop.client
+      TARGETED_DEVICE_FAMILY: "1,2"
+      SUPPORTS_MACCATALYST: NO
+      INFOPLIST_KEY_UIStatusBarHidden: NO
+
+  RemoteDesktopTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: RemoteDesktopTests
+    dependencies:
+      - target: RemoteDesktop
+    settings:
+      DEVELOPMENT_TEAM: V9AX39SPJD
+      PRODUCT_BUNDLE_IDENTIFIER: com.threadmark.remotedesktop.client.tests
+      GENERATE_INFOPLIST_FILE: YES

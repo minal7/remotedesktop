@@ -1,0 +1,27 @@
+[package]
+name = "remote-desktop-host"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Windows host agent for Remote Desktop (CloudKit-signaled WebRTC)."
+
+# Keep dependencies narrow until each subsystem is actually wired in —
+# the versions below are the anchor points we want to land on, not a
+# "install everything" sheet.
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Stubbed for later: webrtc, windows, enigo, tauri, wry, keyring.
+# Adding them earlier just pays compile cost without gain.
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

@@ -1,0 +1,558 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		0A2E96270BBA27C6B9005085 /* HostSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7893923A36DECAC9886D28EF /* HostSession.swift */; };
+		132CF5F7F52A948326D88F07 /* AudioInputEntitlements.swift in Sources */ = {isa = PBXBuildFile; fileRef = E92C4B9CB81E1F8B6CBE22DA /* AudioInputEntitlements.swift */; };
+		18A1BC70ECAA283CF2368B53 /* HostSessionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9B1DAF90A32ED728B525762F /* HostSessionTests.swift */; };
+		329C35890F366BD995FDF8A7 /* PermissionsProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5AEEF525524B99DFE1BEBFDC /* PermissionsProvider.swift */; };
+		335F3049413654BA69CF7721 /* LiveKitWebRTC in Frameworks */ = {isa = PBXBuildFile; productRef = B32C5B551A8501593D407B76 /* LiveKitWebRTC */; };
+		41BE421BE5A6C2A37C4D9F65 /* MenuContent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6704F4EF5979DBED1CBB31D5 /* MenuContent.swift */; };
+		453DCAD598997A2C642D501A /* HostPeerSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5409F40C641B07FBB4D367EC /* HostPeerSession.swift */; };
+		5904006F8408628325366659 /* BonjourAdvertiser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4770C8CE9BED4CC5EFB3A726 /* BonjourAdvertiser.swift */; };
+		5BEA124BF32042E307D79208 /* ScreenCapture.swift in Sources */ = {isa = PBXBuildFile; fileRef = 138F44F93B9F279F9495A485 /* ScreenCapture.swift */; };
+		608B3DF5E693D7F3BD1D6928 /* CloudKitSignalingClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6DA7B1D695BC75E69194B0A /* CloudKitSignalingClient.swift */; };
+		62DA5B6673EA5CBE3D1697E2 /* DeviceIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E6A11B60193093594AABA25 /* DeviceIdentity.swift */; };
+		63A185B24B8A07ABEC2DD9FC /* InputInjector.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE8CCAE6B38CDDD22B43E761 /* InputInjector.swift */; };
+		6D6AC21CC6C01821F4B30731 /* App.swift in Sources */ = {isa = PBXBuildFile; fileRef = 75EE7C6868D1A93B054508AE /* App.swift */; };
+		7E9180D7DA2E0B106F51AAAE /* HostConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = 76B373BE70CB02CAA21FB9F8 /* HostConfig.swift */; };
+		82F7EB7D6C73B7C48D1E09B5 /* ICEConfigFetcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A8E13306E6FC7B8FF07239C /* ICEConfigFetcher.swift */; };
+		8A75048F122E44B655F410CF /* SignalingEnvelope.swift in Sources */ = {isa = PBXBuildFile; fileRef = 89E37207F908B9627D856D43 /* SignalingEnvelope.swift */; };
+		963F2EF70B3726CF3EF3D44A /* WebRTCAliases.swift in Sources */ = {isa = PBXBuildFile; fileRef = 199B8A0D8EBEE0F556692058 /* WebRTCAliases.swift */; };
+		9774C8DAD590EBB177FB4BAA /* SystemAudioBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C10787D47D68714896956E4 /* SystemAudioBridge.swift */; };
+		9D70032A603AC37CEF77F3B9 /* WireFormat.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E396D7E6189E66F789A9466 /* WireFormat.swift */; };
+		B52D07F032EEF5EA41C14534 /* HIDUsage.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC26EE65BC584A891CDF9054 /* HIDUsage.swift */; };
+		ED079874829511ED2203A189 /* ScreenCaptureSizingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 037B0683983EF3DD797F9355 /* ScreenCaptureSizingTests.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		1131BCABBEB5AE62ACCC4BDA /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 6427EDFCA7F6AC317B1DC1CF /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 7718B6018ABC06EC12EB9438;
+			remoteInfo = RemoteDesktopHost;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		037B0683983EF3DD797F9355 /* ScreenCaptureSizingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenCaptureSizingTests.swift; sourceTree = "<group>"; };
+		10A95BA0C09D6E6B9620E977 /* RemoteDesktopHost.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = RemoteDesktopHost.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		138F44F93B9F279F9495A485 /* ScreenCapture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenCapture.swift; sourceTree = "<group>"; };
+		178543C74F742896058F900E /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		199B8A0D8EBEE0F556692058 /* WebRTCAliases.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebRTCAliases.swift; sourceTree = "<group>"; };
+		1FDAD0CCA04F6601347F37EE /* RemoteDesktopHostTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = RemoteDesktopHostTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		2C10787D47D68714896956E4 /* SystemAudioBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemAudioBridge.swift; sourceTree = "<group>"; };
+		4770C8CE9BED4CC5EFB3A726 /* BonjourAdvertiser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BonjourAdvertiser.swift; sourceTree = "<group>"; };
+		5409F40C641B07FBB4D367EC /* HostPeerSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostPeerSession.swift; sourceTree = "<group>"; };
+		5A8E13306E6FC7B8FF07239C /* ICEConfigFetcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ICEConfigFetcher.swift; sourceTree = "<group>"; };
+		5AEEF525524B99DFE1BEBFDC /* PermissionsProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PermissionsProvider.swift; sourceTree = "<group>"; };
+		5E6A11B60193093594AABA25 /* DeviceIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceIdentity.swift; sourceTree = "<group>"; };
+		6704F4EF5979DBED1CBB31D5 /* MenuContent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuContent.swift; sourceTree = "<group>"; };
+		75EE7C6868D1A93B054508AE /* App.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App.swift; sourceTree = "<group>"; };
+		76B373BE70CB02CAA21FB9F8 /* HostConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostConfig.swift; sourceTree = "<group>"; };
+		7893923A36DECAC9886D28EF /* HostSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostSession.swift; sourceTree = "<group>"; };
+		89E37207F908B9627D856D43 /* SignalingEnvelope.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignalingEnvelope.swift; sourceTree = "<group>"; };
+		9B1DAF90A32ED728B525762F /* HostSessionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostSessionTests.swift; sourceTree = "<group>"; };
+		9E396D7E6189E66F789A9466 /* WireFormat.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WireFormat.swift; sourceTree = "<group>"; };
+		9F6F855555A1D4FB18F7FE69 /* RemoteDesktopHost.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = RemoteDesktopHost.entitlements; sourceTree = "<group>"; };
+		E92C4B9CB81E1F8B6CBE22DA /* AudioInputEntitlements.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioInputEntitlements.swift; sourceTree = "<group>"; };
+		EE8CCAE6B38CDDD22B43E761 /* InputInjector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InputInjector.swift; sourceTree = "<group>"; };
+		F6DA7B1D695BC75E69194B0A /* CloudKitSignalingClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudKitSignalingClient.swift; sourceTree = "<group>"; };
+		FC26EE65BC584A891CDF9054 /* HIDUsage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HIDUsage.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		A5C619AFE920969112122A57 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				335F3049413654BA69CF7721 /* LiveKitWebRTC in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		0BC1F2632977B5A1FC430F8B /* Swift */ = {
+			isa = PBXGroup;
+			children = (
+				F6DA7B1D695BC75E69194B0A /* CloudKitSignalingClient.swift */,
+				5E6A11B60193093594AABA25 /* DeviceIdentity.swift */,
+				5A8E13306E6FC7B8FF07239C /* ICEConfigFetcher.swift */,
+				89E37207F908B9627D856D43 /* SignalingEnvelope.swift */,
+			);
+			name = Swift;
+			path = ../protocol/Swift;
+			sourceTree = "<group>";
+		};
+		25AEA74181EE6FA97709F31A /* remotedesktop */ = {
+			isa = PBXGroup;
+			children = (
+				9CEB7593C312A4294E6C50EF /* protocol */,
+			);
+			name = remotedesktop;
+			path = ..;
+			sourceTree = "<group>";
+		};
+		4885DCDFB02BFA1895DB672B /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				10A95BA0C09D6E6B9620E977 /* RemoteDesktopHost.app */,
+				1FDAD0CCA04F6601347F37EE /* RemoteDesktopHostTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		983BE310333FC5B708F128A0 = {
+			isa = PBXGroup;
+			children = (
+				25AEA74181EE6FA97709F31A /* remotedesktop */,
+				B400D9D1DB22687D5CC6C610 /* RemoteDesktopHost */,
+				A52F892D85EBF7AABE36F075 /* RemoteDesktopHostTests */,
+				AA17F406530ED55A1C9BF9F9 /* Shared */,
+				4885DCDFB02BFA1895DB672B /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		9CEB7593C312A4294E6C50EF /* protocol */ = {
+			isa = PBXGroup;
+			children = (
+				0BC1F2632977B5A1FC430F8B /* Swift */,
+			);
+			path = protocol;
+			sourceTree = "<group>";
+		};
+		A52F892D85EBF7AABE36F075 /* RemoteDesktopHostTests */ = {
+			isa = PBXGroup;
+			children = (
+				9B1DAF90A32ED728B525762F /* HostSessionTests.swift */,
+				037B0683983EF3DD797F9355 /* ScreenCaptureSizingTests.swift */,
+			);
+			path = RemoteDesktopHostTests;
+			sourceTree = "<group>";
+		};
+		AA17F406530ED55A1C9BF9F9 /* Shared */ = {
+			isa = PBXGroup;
+			children = (
+				0BC1F2632977B5A1FC430F8B /* Swift */,
+			);
+			name = Shared;
+			sourceTree = "<group>";
+		};
+		B400D9D1DB22687D5CC6C610 /* RemoteDesktopHost */ = {
+			isa = PBXGroup;
+			children = (
+				75EE7C6868D1A93B054508AE /* App.swift */,
+				E92C4B9CB81E1F8B6CBE22DA /* AudioInputEntitlements.swift */,
+				4770C8CE9BED4CC5EFB3A726 /* BonjourAdvertiser.swift */,
+				FC26EE65BC584A891CDF9054 /* HIDUsage.swift */,
+				76B373BE70CB02CAA21FB9F8 /* HostConfig.swift */,
+				5409F40C641B07FBB4D367EC /* HostPeerSession.swift */,
+				7893923A36DECAC9886D28EF /* HostSession.swift */,
+				178543C74F742896058F900E /* Info.plist */,
+				EE8CCAE6B38CDDD22B43E761 /* InputInjector.swift */,
+				6704F4EF5979DBED1CBB31D5 /* MenuContent.swift */,
+				5AEEF525524B99DFE1BEBFDC /* PermissionsProvider.swift */,
+				9F6F855555A1D4FB18F7FE69 /* RemoteDesktopHost.entitlements */,
+				138F44F93B9F279F9495A485 /* ScreenCapture.swift */,
+				2C10787D47D68714896956E4 /* SystemAudioBridge.swift */,
+				199B8A0D8EBEE0F556692058 /* WebRTCAliases.swift */,
+				9E396D7E6189E66F789A9466 /* WireFormat.swift */,
+			);
+			path = RemoteDesktopHost;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		448F4C82608EB62344AD7B34 /* RemoteDesktopHostTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 89A033F45AF650704A7632F8 /* Build configuration list for PBXNativeTarget "RemoteDesktopHostTests" */;
+			buildPhases = (
+				192394340FDBC2F69860C6F1 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				89090C71E39AA7E9F5A9CD86 /* PBXTargetDependency */,
+			);
+			name = RemoteDesktopHostTests;
+			packageProductDependencies = (
+			);
+			productName = RemoteDesktopHostTests;
+			productReference = 1FDAD0CCA04F6601347F37EE /* RemoteDesktopHostTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		7718B6018ABC06EC12EB9438 /* RemoteDesktopHost */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 282335BE42FAD27C3C278BF3 /* Build configuration list for PBXNativeTarget "RemoteDesktopHost" */;
+			buildPhases = (
+				36071E0A1C4DE28AB3DBB4AC /* Sources */,
+				A5C619AFE920969112122A57 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = RemoteDesktopHost;
+			packageProductDependencies = (
+				B32C5B551A8501593D407B76 /* LiveKitWebRTC */,
+			);
+			productName = RemoteDesktopHost;
+			productReference = 10A95BA0C09D6E6B9620E977 /* RemoteDesktopHost.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		6427EDFCA7F6AC317B1DC1CF /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					448F4C82608EB62344AD7B34 = {
+						DevelopmentTeam = V9AX39SPJD;
+						ProvisioningStyle = Automatic;
+					};
+					7718B6018ABC06EC12EB9438 = {
+						DevelopmentTeam = V9AX39SPJD;
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = 8484E372ACAE832AA037946C /* Build configuration list for PBXProject "RemoteDesktopHost" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 983BE310333FC5B708F128A0;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				B71750C11654D825677D35E4 /* XCRemoteSwiftPackageReference "webrtc-xcframework" */,
+			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 4885DCDFB02BFA1895DB672B /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				7718B6018ABC06EC12EB9438 /* RemoteDesktopHost */,
+				448F4C82608EB62344AD7B34 /* RemoteDesktopHostTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		192394340FDBC2F69860C6F1 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				18A1BC70ECAA283CF2368B53 /* HostSessionTests.swift in Sources */,
+				ED079874829511ED2203A189 /* ScreenCaptureSizingTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		36071E0A1C4DE28AB3DBB4AC /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				6D6AC21CC6C01821F4B30731 /* App.swift in Sources */,
+				132CF5F7F52A948326D88F07 /* AudioInputEntitlements.swift in Sources */,
+				5904006F8408628325366659 /* BonjourAdvertiser.swift in Sources */,
+				608B3DF5E693D7F3BD1D6928 /* CloudKitSignalingClient.swift in Sources */,
+				62DA5B6673EA5CBE3D1697E2 /* DeviceIdentity.swift in Sources */,
+				B52D07F032EEF5EA41C14534 /* HIDUsage.swift in Sources */,
+				7E9180D7DA2E0B106F51AAAE /* HostConfig.swift in Sources */,
+				453DCAD598997A2C642D501A /* HostPeerSession.swift in Sources */,
+				0A2E96270BBA27C6B9005085 /* HostSession.swift in Sources */,
+				82F7EB7D6C73B7C48D1E09B5 /* ICEConfigFetcher.swift in Sources */,
+				63A185B24B8A07ABEC2DD9FC /* InputInjector.swift in Sources */,
+				41BE421BE5A6C2A37C4D9F65 /* MenuContent.swift in Sources */,
+				329C35890F366BD995FDF8A7 /* PermissionsProvider.swift in Sources */,
+				5BEA124BF32042E307D79208 /* ScreenCapture.swift in Sources */,
+				8A75048F122E44B655F410CF /* SignalingEnvelope.swift in Sources */,
+				9774C8DAD590EBB177FB4BAA /* SystemAudioBridge.swift in Sources */,
+				963F2EF70B3726CF3EF3D44A /* WebRTCAliases.swift in Sources */,
+				9D70032A603AC37CEF77F3B9 /* WireFormat.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		89090C71E39AA7E9F5A9CD86 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 7718B6018ABC06EC12EB9438 /* RemoteDesktopHost */;
+			targetProxy = 1131BCABBEB5AE62ACCC4BDA /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		2DDF6F90340B830B8F7B4DD7 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = RemoteDesktopHost/RemoteDesktopHost.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				DEVELOPMENT_TEAM = V9AX39SPJD;
+				ENABLE_HARDENED_RUNTIME = YES;
+				INFOPLIST_FILE = RemoteDesktopHost/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.threadmark.remotedesktop.host;
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
+		2DE8DC0ED4EF9F4C962AE4B2 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_STRICT_CONCURRENCY = targeted;
+				SWIFT_VERSION = 5.10;
+			};
+			name = Release;
+		};
+		84FA2E1CA452A456140EC44B /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				DEVELOPMENT_TEAM = V9AX39SPJD;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.threadmark.remotedesktop.host.tests;
+				SDKROOT = macosx;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/RemoteDesktopHost.app/Contents/MacOS/RemoteDesktopHost";
+			};
+			name = Debug;
+		};
+		8F79344B318250BA6FF7F51D /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				DEVELOPMENT_TEAM = V9AX39SPJD;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.threadmark.remotedesktop.host.tests;
+				SDKROOT = macosx;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/RemoteDesktopHost.app/Contents/MacOS/RemoteDesktopHost";
+			};
+			name = Release;
+		};
+		BD6BF6747F1524E61B32B443 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_STRICT_CONCURRENCY = targeted;
+				SWIFT_VERSION = 5.10;
+			};
+			name = Debug;
+		};
+		D9B1D0B96D14BB51A1D67312 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = RemoteDesktopHost/RemoteDesktopHost.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				DEVELOPMENT_TEAM = V9AX39SPJD;
+				ENABLE_HARDENED_RUNTIME = YES;
+				INFOPLIST_FILE = RemoteDesktopHost/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.threadmark.remotedesktop.host;
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		282335BE42FAD27C3C278BF3 /* Build configuration list for PBXNativeTarget "RemoteDesktopHost" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				D9B1D0B96D14BB51A1D67312 /* Debug */,
+				2DDF6F90340B830B8F7B4DD7 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		8484E372ACAE832AA037946C /* Build configuration list for PBXProject "RemoteDesktopHost" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				BD6BF6747F1524E61B32B443 /* Debug */,
+				2DE8DC0ED4EF9F4C962AE4B2 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		89A033F45AF650704A7632F8 /* Build configuration list for PBXNativeTarget "RemoteDesktopHostTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				84FA2E1CA452A456140EC44B /* Debug */,
+				8F79344B318250BA6FF7F51D /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		B71750C11654D825677D35E4 /* XCRemoteSwiftPackageReference "webrtc-xcframework" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/livekit/webrtc-xcframework.git";
+			requirement = {
+				kind = exactVersion;
+				version = 144.7559.03;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		B32C5B551A8501593D407B76 /* LiveKitWebRTC */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = B71750C11654D825677D35E4 /* XCRemoteSwiftPackageReference "webrtc-xcframework" */;
+			productName = LiveKitWebRTC;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = 6427EDFCA7F6AC317B1DC1CF /* Project object */;
+}
