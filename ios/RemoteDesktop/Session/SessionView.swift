@@ -21,6 +21,10 @@ struct SessionView: View {
     @State private var chromeRevealed = false
     @State private var hideTask: Task<Void, Never>?
 
+    // Special-key idle translucency (landscape only)
+    @State private var specialKeysIdle = false
+    @State private var specialKeysIdleTask: Task<Void, Never>?
+
     // Swipe-to-disconnect state
     @State private var disconnectDragOffset: CGFloat = 0
     @State private var disconnectTriggered = false
@@ -58,8 +62,8 @@ struct SessionView: View {
                     .transition(.move(edge: .top).combined(with: .opacity))
             }
 
-            // ── Keyboard controls (always visible) ─────────────
-            keyboardControls
+            // ── Special keys (orientation-aware) ───────────────
+            specialKeys
 
             // ── Invisible soft-keyboard capture ────────────────
             if softKeyboardOpen {
@@ -192,51 +196,97 @@ struct SessionView: View {
         }
     }
 
-    // MARK: - Keyboard controls (always visible)
+    // MARK: - Special keys (orientation-aware)
 
     @ViewBuilder
-    private var keyboardControls: some View {
+    private var specialKeys: some View {
         let mode = accessories.chromeMode
         let needsKeyboard = mode == .full || mode == .partial(missing: .keyboard)
         let needsModifiers = mode == .full
 
         if needsKeyboard || needsModifiers {
-            VStack(spacing: 12) {
+            VStack(spacing: 0) {
                 Spacer()
+                specialKeysContent(needsKeyboard: needsKeyboard,
+                                   needsModifiers: needsModifiers)
+            }
+            .opacity(isPortrait ? 1.0 : (specialKeysIdle ? 0.35 : 1.0))
+            .animation(.easeInOut(duration: 0.4), value: specialKeysIdle)
+            .onAppear { scheduleSpecialKeysIdle() }
+        }
+    }
 
+    /// Builds the actual row of controls. In portrait they sit as a compact
+    /// bar just above the keyboard (bottom safe-area edge); in landscape they
+    /// anchor flush at the very bottom of the screen.
+    @ViewBuilder
+    private func specialKeysContent(needsKeyboard: Bool,
+                                    needsModifiers: Bool) -> some View {
+        if isPortrait {
+            // ── Portrait: bottom-aligned, compact row ──────────
+            HStack(spacing: 12) {
                 if needsModifiers {
                     ModifierBar()
                 }
-
+                Spacer()
                 if needsKeyboard {
                     softKeyboardButton
                 }
             }
-            .padding(.bottom, 16)
+            .padding(.horizontal, 16)
+            .padding(.bottom, 8)
+        } else {
+            // ── Landscape: free-floating buttons at screen bottom ──
+            HStack(spacing: 14) {
+                if needsModifiers {
+                    ModifierBar()
+                }
+                Spacer()
+                if needsKeyboard {
+                    softKeyboardButton
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.bottom, 10)
+        }
+    }
+
+    // MARK: - Idle translucency helpers
+
+    private func wakeSpecialKeys() {
+        specialKeysIdle = false
+        scheduleSpecialKeysIdle()
+    }
+
+    private func scheduleSpecialKeysIdle() {
+        specialKeysIdleTask?.cancel()
+        specialKeysIdleTask = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(3))
+            guard !Task.isCancelled else { return }
+            if !isPortrait {
+                specialKeysIdle = true
+            }
         }
     }
 
     private var softKeyboardButton: some View {
-        HStack {
-            Spacer()
-            Button {
-                softKeyboardOpen.toggle()
-            } label: {
-                Image(systemName: softKeyboardOpen
-                      ? "keyboard.chevron.compact.down"
-                      : "keyboard")
-                    .font(.system(size: 20, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.85))
-                    .padding(14)
-                    .background(
-                        .ultraThinMaterial,
-                        in: Circle()
-                    )
-                    .shadow(color: .black.opacity(0.3), radius: 8, y: 2)
-            }
-            .padding(.trailing, 20)
-            .accessibilityLabel(softKeyboardOpen ? "Hide keyboard" : "Show keyboard")
+        Button {
+            softKeyboardOpen.toggle()
+            wakeSpecialKeys()
+        } label: {
+            Image(systemName: softKeyboardOpen
+                  ? "keyboard.chevron.compact.down"
+                  : "keyboard")
+                .font(.system(size: 20, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.85))
+                .padding(14)
+                .background(
+                    .ultraThinMaterial,
+                    in: Circle()
+                )
+                .shadow(color: .black.opacity(0.3), radius: 8, y: 2)
         }
+        .accessibilityLabel(softKeyboardOpen ? "Hide keyboard" : "Show keyboard")
     }
 
     // MARK: - Swipe-right to disconnect
