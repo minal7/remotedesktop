@@ -103,6 +103,13 @@ final class HostSession: ObservableObject {
 
     func start() {
         guard case .idle = state else { return }
+        startListening()
+    }
+
+    /// Internal entry point shared by `start()` and auto-restart.
+    /// Validates permissions, generates a new pairing code, and kicks
+    /// off the signaling run-loop.
+    private func startListening() {
         refreshPermissions()
         guard permissions.ok else {
             if let message = microphoneBuildIssueMessage {
@@ -188,8 +195,7 @@ final class HostSession: ObservableObject {
                                 iceConfig: iceConfig,
                                 onEnded: { [weak self] reason in
                                     Task { @MainActor in
-                                        self?.state = .idle
-                                        self?.peerSession = nil
+                                        self?.handleDisconnect(reason: reason)
                                     }
                                 })
                         }
@@ -236,13 +242,13 @@ final class HostSession: ObservableObject {
                     // Host doesn't receive answers.
                     log.warning("unexpected answer from client")
                 case .bye:
-                    log.info("client said bye")
+                    log.info("client said bye — will restart listening")
                     advertiser.stop()
                     peerSession?.close(reason: env.payload["reason"] ?? "user")
                     peerSession = nil
                     resetPendingRemoteICE()
                     await client.cleanup()
-                    state = .idle
+                    handleDisconnect(reason: env.payload["reason"] ?? "user")
                     return
                 }
             }
@@ -251,6 +257,24 @@ final class HostSession: ObservableObject {
         }
         resetPendingRemoteICE()
         await client.cleanup()
+    }
+
+    /// Called when a peer session disconnects for any reason (WebRTC
+    /// state change, client bye, etc.). Tears down the current peer
+    /// session and immediately begins listening again with a fresh
+    /// pairing code.
+    private func handleDisconnect(reason: String) {
+        // If the user already called stop(), state is .idle and we
+        // should not auto-restart.
+        guard state != .idle else { return }
+        log.info("connection ended (\(reason, privacy: .public)) — restarting listener")
+        peerSession?.close(reason: reason)
+        peerSession = nil
+        resetPendingRemoteICE()
+        advertiser.stop()
+        signalingTask?.cancel()
+        signalingTask = nil
+        startListening()
     }
 
     // MARK: -

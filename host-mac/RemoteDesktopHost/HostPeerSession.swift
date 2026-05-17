@@ -466,8 +466,15 @@ extension HostPeerSession: RTCPeerConnectionDelegate {
     }
 
     func peerConnection(_ peerConnection: RTCPeerConnection, didChange stateChanged: RTCConnectionState) {
-        if stateChanged == .failed || stateChanged == .disconnected || stateChanged == .closed {
+        log.info("peer connection state → \(String(describing: stateChanged), privacy: .public)")
+        switch stateChanged {
+        case .disconnected:
+            // Transient — ICE may recover on its own. Log but don't tear down.
+            log.warning("peer connection is disconnected (may recover)")
+        case .failed, .closed:
             onEnded("The peer connection closed.")
+        default:
+            break
         }
     }
 
