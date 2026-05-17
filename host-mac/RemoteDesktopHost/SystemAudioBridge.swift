@@ -1,31 +1,36 @@
 import AVFoundation
 import CoreMedia
 import Foundation
+import LiveKitWebRTC
 import os
 
+/// Bridges ScreenCaptureKit system-audio buffers into WebRTC's
+/// audio-engine recording graph using the public
+/// `RTCAudioDeviceModuleDelegate` hooks exposed by LiveKitWebRTC.
+///
+/// Mirrors LiveKit's `MixerEngineObserver` pattern: a push-driven
+/// `AVAudioPlayerNode` feeds a dedicated app mixer, which is mixed
+/// into the ADM's input mixer alongside the (silenced) mic path.
+/// The pure `AVAudioSourceNode` approach does not work here because
+/// the ADM's input tap never pulls it while the engine is only
+/// running the recording chain.
 final class SystemAudioBridge: NSObject {
-    private struct PendingBuffer {
-        let buffer: AVAudioPCMBuffer
-        var frameOffset: Int = 0
-    }
-
     private let queue = DispatchQueue(label: "com.threadmark.remotedesktop.host.audio.bridge")
     private let log = Logger(subsystem: "com.threadmark.remotedesktop.host", category: "audio")
-    private let pendingBuffersLock = NSLock()
 
     private weak var engine: AVAudioEngine?
-    private weak var sourceNode: AVAudioNode?
-    private weak var destinationNode: AVAudioNode?
-    private var bridgeNode: AVAudioSourceNode?
-    private var targetFormat: AVAudioFormat?
-    private var pendingBuffers: [PendingBuffer] = []
-    private var pendingBufferHead = 0
-    private var activePendingBuffer: PendingBuffer?
+    private var playerNode: AVAudioPlayerNode?
+    private var appMixerNode: AVAudioMixerNode?
+    private var micMixerNode: AVAudioMixerNode?
+    private weak var inputMixerNode: AVAudioMixerNode?
+    private var playerNodeFormat: AVAudioFormat?
+    private var engineFormat: AVAudioFormat?
+    private var converter: AVAudioConverter?
+    private var converterSourceFormat: AVAudioFormat?
+
     private var loggedFirstEnqueue = false
     private var loggedEngineConfiguration = false
-    private var loggedBridgeReconnect = false
-    private var loggedFirstRenderPull = false
-    private var loggedFirstNonZeroRender = false
+    private var loggedFirstPlayerStart = false
 
     func attach(to audioDeviceModule: RTCAudioDeviceModule) {
         audioDeviceModule.observer = self
@@ -36,243 +41,141 @@ final class SystemAudioBridge: NSObject {
             audioDeviceModule.observer = nil
         }
         queue.sync {
-            teardownBridgeNode()
+            detachNodes()
             loggedFirstEnqueue = false
             loggedEngineConfiguration = false
-            loggedBridgeReconnect = false
-            loggedFirstRenderPull = false
-            loggedFirstNonZeroRender = false
+            loggedFirstPlayerStart = false
         }
     }
 
     func enqueue(_ sampleBuffer: CMSampleBuffer) {
         queue.async { [weak self] in
             guard let self,
-                  let targetFormat = self.targetFormat,
+                  let playerNode = self.playerNode,
+                  let engine = self.engine, engine.isRunning,
+                  let playerNodeFormat = self.playerNodeFormat,
                   let sourceBuffer = self.pcmBuffer(from: sampleBuffer),
-                  let outputBuffer = self.convert(sourceBuffer, to: targetFormat) else {
+                  let outputBuffer = self.convert(sourceBuffer, to: playerNodeFormat) else {
                 return
             }
+
             if !self.loggedFirstEnqueue {
                 self.loggedFirstEnqueue = true
                 self.log.info(
-                    "enqueuing first bridged system audio buffer srcSr=\(sourceBuffer.format.sampleRate, privacy: .public) srcCh=\(sourceBuffer.format.channelCount, privacy: .public) dstSr=\(targetFormat.sampleRate, privacy: .public) dstCh=\(targetFormat.channelCount, privacy: .public) frames=\(outputBuffer.frameLength, privacy: .public)")
+                    "enqueuing first bridged system audio buffer srcSr=\(sourceBuffer.format.sampleRate, privacy: .public) srcCh=\(sourceBuffer.format.channelCount, privacy: .public) dstSr=\(playerNodeFormat.sampleRate, privacy: .public) dstCh=\(playerNodeFormat.channelCount, privacy: .public) frames=\(outputBuffer.frameLength, privacy: .public)")
             }
-            self.appendPendingBuffer(outputBuffer)
+
+            playerNode.scheduleBuffer(outputBuffer, completionHandler: nil)
+            if !playerNode.isPlaying {
+                playerNode.play()
+                if !self.loggedFirstPlayerStart {
+                    self.loggedFirstPlayerStart = true
+                    self.log.info("audio bridge player node started")
+                }
+            }
         }
     }
 
-    private func installBridgeNode(
+    private func attachNodes(to engine: AVAudioEngine) {
+        if self.engine !== engine {
+            detachNodes()
+        }
+        self.engine = engine
+        guard playerNode == nil else { return }
+
+        let playerNode = AVAudioPlayerNode()
+        let appMixer = AVAudioMixerNode()
+        let micMixer = AVAudioMixerNode()
+
+        // Match the outputNode's maximumFramesToRender so the engine can
+        // allocate buffers large enough for the whole graph. LiveKit's
+        // MixerEngineObserver applies the same workaround for
+        // kAudioUnitErr_TooManyFramesToProcess (-10874).
+        let maxFrames = engine.outputNode.auAudioUnit.maximumFramesToRender
+        playerNode.auAudioUnit.maximumFramesToRender = maxFrames
+        appMixer.auAudioUnit.maximumFramesToRender = maxFrames
+        micMixer.auAudioUnit.maximumFramesToRender = maxFrames
+
+        engine.attach(playerNode)
+        engine.attach(appMixer)
+        engine.attach(micMixer)
+
+        // We are bridging system audio only; silence the mic contribution
+        // outright so the ADM still has a valid input chain but we never
+        // ship microphone samples to remote peers.
+        micMixer.outputVolume = 0
+
+        self.playerNode = playerNode
+        self.appMixerNode = appMixer
+        self.micMixerNode = micMixer
+    }
+
+    private func detachNodes() {
+        let engine = self.engine
+        if let engine {
+            if let playerNode {
+                if playerNode.isPlaying { playerNode.stop() }
+                engine.detach(playerNode)
+            }
+            if let appMixerNode {
+                engine.detach(appMixerNode)
+            }
+            if let micMixerNode {
+                engine.detach(micMixerNode)
+            }
+        }
+        playerNode = nil
+        appMixerNode = nil
+        micMixerNode = nil
+        inputMixerNode = nil
+        playerNodeFormat = nil
+        engineFormat = nil
+        converter = nil
+        converterSourceFormat = nil
+        self.engine = nil
+    }
+
+    private func configureConnections(
         on engine: AVAudioEngine,
         source: AVAudioNode?,
-        destination: AVAudioNode,
+        inputMixer: AVAudioMixerNode,
         format: AVAudioFormat
     ) {
-        if self.engine !== engine {
-            teardownBridgeNode()
-            self.engine = engine
-        }
-        sourceNode = source
-        destinationNode = destination
-
-        if let source {
-            engine.disconnectNodeOutput(source)
-        }
-
-        let bridgeNode: AVAudioSourceNode
-        if let existing = self.bridgeNode, existing.engine === engine {
-            bridgeNode = existing
-        } else {
-            let node = AVAudioSourceNode { [weak self] _, _, frameCount, audioBufferList in
-                guard let self else {
-                    Self.zeroAudioBuffers(UnsafeMutableAudioBufferListPointer(audioBufferList))
-                    return noErr
-                }
-                return self.renderAudio(into: audioBufferList, frameCount: frameCount)
-            }
-            engine.attach(node)
-            self.bridgeNode = node
-            bridgeNode = node
-        }
-
-        engine.disconnectNodeOutput(bridgeNode)
-        engine.connect(bridgeNode, to: destination, format: format)
-        targetFormat = format
-        resetPendingBuffers()
-        loggedBridgeReconnect = false
-    }
-
-    private func teardownBridgeNode() {
-        resetPendingBuffers()
-        guard let bridgeNode else {
-            sourceNode = nil
-            destinationNode = nil
-            targetFormat = nil
+        attachNodes(to: engine)
+        guard let playerNode, let appMixer = appMixerNode, let micMixer = micMixerNode else {
             return
         }
-        if let engine {
-            engine.disconnectNodeOutput(bridgeNode)
-            engine.detach(bridgeNode)
-        }
-        self.bridgeNode = nil
-        sourceNode = nil
-        destinationNode = nil
-        targetFormat = nil
-    }
 
-    private func appendPendingBuffer(_ buffer: AVAudioPCMBuffer) {
-        pendingBuffersLock.lock()
-        pendingBuffers.append(PendingBuffer(buffer: buffer))
-        pendingBuffersLock.unlock()
-    }
-
-    private func resetPendingBuffers() {
-        pendingBuffersLock.lock()
-        pendingBuffers.removeAll(keepingCapacity: false)
-        pendingBufferHead = 0
-        activePendingBuffer = nil
-        pendingBuffersLock.unlock()
-    }
-
-    private func dequeuePendingBufferLocked() -> PendingBuffer? {
-        guard pendingBufferHead < pendingBuffers.count else {
-            pendingBuffers.removeAll(keepingCapacity: false)
-            pendingBufferHead = 0
-            return nil
+        // AVAudioPlayerNode only supports Float32; derive a matching format
+        // so converted ScreenCaptureKit samples can be scheduled directly.
+        guard let playerNodeFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: format.sampleRate,
+            channels: format.channelCount,
+            interleaved: format.isInterleaved) else {
+            log.error(
+                "failed to build player node format sr=\(format.sampleRate, privacy: .public) ch=\(format.channelCount, privacy: .public)")
+            return
         }
 
-        let buffer = pendingBuffers[pendingBufferHead]
-        pendingBufferHead += 1
+        self.playerNodeFormat = playerNodeFormat
+        self.engineFormat = format
+        self.inputMixerNode = inputMixer
 
-        if pendingBufferHead >= pendingBuffers.count {
-            pendingBuffers.removeAll(keepingCapacity: true)
-            pendingBufferHead = 0
-        } else if pendingBufferHead > 32 && pendingBufferHead * 2 > pendingBuffers.count {
-            pendingBuffers.removeFirst(pendingBufferHead)
-            pendingBufferHead = 0
+        engine.disconnectNodeOutput(playerNode)
+        engine.disconnectNodeOutput(appMixer)
+        engine.disconnectNodeOutput(micMixer)
+
+        // playerNode (system audio) -> appMixer -> inputMixer
+        engine.connect(playerNode, to: appMixer, format: playerNodeFormat)
+        engine.connect(appMixer, to: inputMixer, format: format)
+
+        // mic (device) -> micMixer -> inputMixer, muted via micMixer.outputVolume = 0
+        if let source {
+            engine.disconnectNodeOutput(source)
+            engine.connect(source, to: micMixer, format: format)
         }
-
-        return buffer
-    }
-
-    private func renderAudio(
-        into audioBufferList: UnsafeMutablePointer<AudioBufferList>,
-        frameCount: AVAudioFrameCount
-    ) -> OSStatus {
-        let destinationBuffers = UnsafeMutableAudioBufferListPointer(audioBufferList)
-        Self.zeroAudioBuffers(destinationBuffers)
-
-        if !loggedFirstRenderPull {
-            loggedFirstRenderPull = true
-            log.info("audio bridge render pulled for first time frames=\(frameCount, privacy: .public)")
-        }
-
-        pendingBuffersLock.lock()
-        defer { pendingBuffersLock.unlock() }
-
-        var framesWritten = 0
-        let requestedFrames = Int(frameCount)
-
-        while framesWritten < requestedFrames {
-            if activePendingBuffer == nil {
-                activePendingBuffer = dequeuePendingBufferLocked()
-            }
-            guard var activePendingBuffer else { break }
-
-            let copiedFrames = copyFrames(
-                from: activePendingBuffer.buffer,
-                sourceFrameOffset: activePendingBuffer.frameOffset,
-                to: destinationBuffers,
-                destinationFrameOffset: framesWritten,
-                requestedFrames: requestedFrames - framesWritten)
-
-            guard copiedFrames > 0 else {
-                self.activePendingBuffer = nil
-                continue
-            }
-
-            activePendingBuffer.frameOffset += copiedFrames
-            framesWritten += copiedFrames
-
-            if !loggedFirstNonZeroRender && copiedFrames > 0 {
-                loggedFirstNonZeroRender = true
-                log.info("audio bridge first non-zero render copied=\(copiedFrames, privacy: .public)")
-            }
-
-            if activePendingBuffer.frameOffset >= Int(activePendingBuffer.buffer.frameLength) {
-                self.activePendingBuffer = nil
-            } else {
-                self.activePendingBuffer = activePendingBuffer
-            }
-        }
-
-        return noErr
-    }
-
-    private func copyFrames(
-        from sourceBuffer: AVAudioPCMBuffer,
-        sourceFrameOffset: Int,
-        to destinationBuffers: UnsafeMutableAudioBufferListPointer,
-        destinationFrameOffset: Int,
-        requestedFrames: Int
-    ) -> Int {
-        let sourceBuffers = UnsafeMutableAudioBufferListPointer(sourceBuffer.mutableAudioBufferList)
-        let bytesPerFrame = Int(sourceBuffer.format.streamDescription.pointee.mBytesPerFrame)
-        let availableFrames = Int(sourceBuffer.frameLength) - sourceFrameOffset
-        let framesToCopy = min(requestedFrames, availableFrames)
-
-        guard framesToCopy > 0, bytesPerFrame > 0 else {
-            return 0
-        }
-        guard sourceBuffers.count == destinationBuffers.count else {
-            return 0
-        }
-
-        let byteCount = framesToCopy * bytesPerFrame
-        let sourceByteOffset = sourceFrameOffset * bytesPerFrame
-        let destinationByteOffset = destinationFrameOffset * bytesPerFrame
-
-        for bufferIndex in 0..<sourceBuffers.count {
-            guard let sourceData = sourceBuffers[bufferIndex].mData,
-                  let destinationData = destinationBuffers[bufferIndex].mData else {
-                continue
-            }
-            memcpy(
-                destinationData.advanced(by: destinationByteOffset),
-                sourceData.advanced(by: sourceByteOffset),
-                byteCount)
-        }
-
-        return framesToCopy
-    }
-
-    private static func zeroAudioBuffers(_ buffers: UnsafeMutableAudioBufferListPointer) {
-        for buffer in buffers {
-            guard let data = buffer.mData else { continue }
-            memset(data, 0, Int(buffer.mDataByteSize))
-        }
-    }
-
-    private func reconnectBridgeNode(
-        on engine: AVAudioEngine,
-        destination: AVAudioNode,
-        format: AVAudioFormat
-    ) {
-        guard let bridgeNode = self.bridgeNode else { return }
-        if !loggedBridgeReconnect {
-            loggedBridgeReconnect = true
-            log.warning("audio bridge source node disconnected; reconnecting to engine graph")
-        }
-        if let sourceNode {
-            engine.disconnectNodeOutput(sourceNode)
-        }
-        engine.disconnectNodeOutput(bridgeNode)
-        engine.connect(bridgeNode, to: destination, format: format)
-    }
-
-    private func bridgeNodeIsConnected(_ bridgeNode: AVAudioSourceNode, on engine: AVAudioEngine) -> Bool {
-        guard bridgeNode.engine === engine else { return false }
-        return !engine.outputConnectionPoints(for: bridgeNode, outputBus: 0).isEmpty
+        engine.connect(micMixer, to: inputMixer, format: format)
     }
 
     private func pcmBuffer(from sampleBuffer: CMSampleBuffer) -> AVAudioPCMBuffer? {
@@ -301,13 +204,15 @@ final class SystemAudioBridge: NSObject {
     }
 
     private func convert(_ sourceBuffer: AVAudioPCMBuffer, to targetFormat: AVAudioFormat) -> AVAudioPCMBuffer? {
-        if sourceBuffer.format == targetFormat || sourceBuffer.format.isEqual(targetFormat) {
+        if sourceBuffer.format.isEqual(targetFormat) {
             return sourceBuffer
         }
 
-        guard let converter = AVAudioConverter(from: sourceBuffer.format, to: targetFormat) else {
-            return nil
+        if converter == nil || converterSourceFormat != sourceBuffer.format {
+            converter = AVAudioConverter(from: sourceBuffer.format, to: targetFormat)
+            converterSourceFormat = sourceBuffer.format
         }
+        guard let converter else { return nil }
 
         let ratio = targetFormat.sampleRate / sourceBuffer.format.sampleRate
         let frameCapacity = AVAudioFrameCount((Double(sourceBuffer.frameLength) * ratio).rounded(.up)) + 32
@@ -341,8 +246,8 @@ extension SystemAudioBridge: RTCAudioDeviceModuleDelegate {
     func audioDeviceModule(_ audioDeviceModule: RTCAudioDeviceModule, didReceiveSpeechActivityEvent speechActivityEvent: RTCSpeechActivityEvent) {}
 
     func audioDeviceModule(_ audioDeviceModule: RTCAudioDeviceModule, didCreateEngine engine: AVAudioEngine) -> NSInteger {
-        queue.async { [weak self] in
-            self?.engine = engine
+        queue.sync {
+            attachNodes(to: engine)
         }
         return 0
     }
@@ -352,23 +257,16 @@ extension SystemAudioBridge: RTCAudioDeviceModuleDelegate {
     }
 
     func audioDeviceModule(_ audioDeviceModule: RTCAudioDeviceModule, willStartEngine engine: AVAudioEngine, isPlayoutEnabled: Bool, isRecordingEnabled: Bool) -> NSInteger {
-        queue.async { [weak self] in
-            guard let self,
-                  let bridgeNode = self.bridgeNode,
-                  let destinationNode = self.destinationNode,
-                  let targetFormat = self.targetFormat else { return }
-            guard !self.bridgeNodeIsConnected(bridgeNode, on: engine) else {
-                self.loggedBridgeReconnect = false
-                return
-            }
-            self.reconnectBridgeNode(on: engine, destination: destinationNode, format: targetFormat)
+        queue.sync {
+            playerNode?.reset()
         }
         return 0
     }
 
     func audioDeviceModule(_ audioDeviceModule: RTCAudioDeviceModule, didStopEngine engine: AVAudioEngine, isPlayoutEnabled: Bool, isRecordingEnabled: Bool) -> NSInteger {
-        queue.async { [weak self] in
-            self?.resetPendingBuffers()
+        queue.sync {
+            playerNode?.stop()
+            loggedFirstPlayerStart = false
         }
         return 0
     }
@@ -378,21 +276,28 @@ extension SystemAudioBridge: RTCAudioDeviceModuleDelegate {
     }
 
     func audioDeviceModule(_ audioDeviceModule: RTCAudioDeviceModule, willReleaseEngine engine: AVAudioEngine) -> NSInteger {
-        queue.async { [weak self] in
-            self?.teardownBridgeNode()
-            self?.engine = nil
+        queue.sync {
+            detachNodes()
         }
         return 0
     }
 
     func audioDeviceModule(_ audioDeviceModule: RTCAudioDeviceModule, engine: AVAudioEngine, configureInputFromSource source: AVAudioNode?, toDestination destination: AVAudioNode, format: AVAudioFormat, context: [AnyHashable: Any]) -> NSInteger {
         queue.sync {
+            guard let inputMixer = context[kLKRTCAudioEngineInputMixerNodeKey] as? AVAudioMixerNode else {
+                log.error("input mixer missing from configureInputFromSource context")
+                return
+            }
             if !loggedEngineConfiguration {
                 loggedEngineConfiguration = true
                 log.info(
-                    "configuring host audio bridge engine sr=\(format.sampleRate, privacy: .public) ch=\(format.channelCount, privacy: .public) source=\(String(describing: source), privacy: .public)")
+                    "configuring host audio bridge engine sr=\(format.sampleRate, privacy: .public) ch=\(format.channelCount, privacy: .public) source=\(String(describing: source), privacy: .public) inputMixer=\(String(describing: inputMixer), privacy: .public) destination=\(String(describing: destination), privacy: .public)")
             }
-            installBridgeNode(on: engine, source: source, destination: destination, format: format)
+            configureConnections(
+                on: engine,
+                source: source,
+                inputMixer: inputMixer,
+                format: format)
         }
         return 0
     }

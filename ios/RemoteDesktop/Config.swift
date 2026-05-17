@@ -16,7 +16,7 @@ enum Config {
     /// Protocol version advertised in `hello`.
     static let protocolVersion = 1
 
-    /// Host audio is temporarily disabled while we stabilize the
-    /// LiveKit/WebRTC audio-session behavior on iOS.
+    /// Whether the client should negotiate and render the host's
+    /// system-audio track.
     static let enableHostAudio = true
 }

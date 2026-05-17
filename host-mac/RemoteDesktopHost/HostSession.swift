@@ -4,13 +4,8 @@ import Foundation
 import os
 
 /// Top-level state holder for the host agent. Owns the pairing code,
-/// signaling client, capture, and input injector; exposes a small
-/// enum state that the menu bar UI renders.
-///
-/// Phase 2 scaffold: pairing + signaling work end-to-end against the
-/// Cloudflare Worker. WebRTC peer-connection wiring is a Phase 3 task —
-/// when an offer arrives here, we log it and advance to `paired` so the
-/// UX path can be validated against the iOS client's mock transport.
+/// signaling client, capture, live WebRTC peer session, and input
+/// injector; exposes a small enum state that the menu bar UI renders.
 @MainActor
 final class HostSession: ObservableObject {
     enum State: Equatable {
@@ -166,9 +161,6 @@ final class HostSession: ObservableObject {
             code: code)
         log.info("advertising code=\(code, privacy: .public)")
 
-        // Long-poll loop. In Phase 3 the handlers below will feed a
-        // live RTCPeerConnection — for now they just log and advance
-        // state so the pairing UX can be end-to-end tested.
         while !Task.isCancelled {
             let envelopes: [SignalingEnvelope]
             do {

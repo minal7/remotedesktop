@@ -32,44 +32,44 @@ Developer team with Automatically manage signing enabled. The target's
 iCloud capability should include CloudKit for container
 `iCloud.com.threadmark.remotedesktop`.
 
-If you keep Hardened Runtime enabled, also make sure the host carries
-the `Audio Input` entitlement. Without it, macOS will not surface the
-microphone permission prompt and the app will not appear under
-System Settings > Privacy & Security > Microphone.
-
 The generated target builds as a `LSUIElement` menu bar app. For local
 dev against the signaling Worker, set `SIGNALING_URL=http://127.0.0.1:8787`
 in the scheme's Run environment.
 
-## What works today (Phase 2)
+## What works today
 
 - Menu bar icon + popover (SwiftUI inside `NSHostingController`)
 - Generates a random 6-digit pairing code on "Start listening"
 - Claims the room on the signaling Worker as `host`
-- Long-polls for client envelopes; advances state on `offer` / `bye`
+- Long-polls CloudKit signaling envelopes and negotiates `offer` / `answer` / `ice` / `bye`
 - TCC permission preflight (Screen Recording + Accessibility) with
   deep-links to System Settings
+- Microphone entitlement + permission preflight for the host audio
+  bridge. LiveKitWebRTC's macOS audio engine still relies on the
+  recording path to publish the ScreenCaptureKit system-audio feed,
+  even though the host does not transmit microphone audio itself.
 - `ScreenCapture` (ScreenCaptureKit) — captures display + audio at
   60 fps, delivers `CMSampleBuffer`s on capture queues
+- WebRTC media pipeline built on LiveKitWebRTC's public APIs:
+  `RTCPeerConnectionFactory`, Unified Plan transceivers,
+  `RTCVideoSource.videoSourceForScreenCast(_:)`, and the audio-engine
+  `RTCAudioDeviceModuleDelegate` bridge for system audio
 - `InputInjector` — consumes `ControlMessage.pointer|scroll|key|text`
   and posts `CGEvent`s with correct button transitions and drag types
 - Full HID → macOS virtual-keycode translation table for common keys
 
-## What's stubbed (Phase 3)
+## Current limitations
 
-- No `RTCPeerConnection` — when an SDP offer arrives in `HostSession`,
-  we log it and advance state but don't create an answer. Next pass
-  wires Google's `WebRTC.framework` into both iOS and Mac, feeds
-  `SCStream` samples into an `RTCVideoSource`, and negotiates the
-  peer connection end-to-end.
 - `WireFormat.swift` and `SignalingClient.swift` are duplicated
   between `ios/` and `host-mac/`. Extract to a shared SPM package
   under `protocol/Swift/` before further divergence.
 
 ## First-run permissions
 
-Screen Recording, Accessibility, and (when system audio is enabled)
-Microphone all surface as TCC prompts the first time the app tries to
-use them. The popover's footer shows live status and links to System
-Settings if any are missing. Granting these once per install is a
-platform requirement — we can't avoid it.
+Screen Recording and Accessibility surface as TCC prompts the first
+time the host tries to use them. When system audio is enabled, the
+host also needs the hardened runtime Audio Input entitlement plus
+Microphone permission so LiveKitWebRTC can start its recording graph
+for the outbound audio track. The app forwards ScreenCaptureKit system
+audio, not microphone audio, but macOS still requires the recording
+path to be available.

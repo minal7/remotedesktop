@@ -77,7 +77,7 @@ final class HostSessionTests: XCTestCase {
 
         provider.microphone = true
         session.refreshPermissions()
-        XCTAssertTrue(session.permissions.ok, "both grants enable the Start button")
+        XCTAssertTrue(session.permissions.ok, "all required permissions enable the Start button")
     }
 
     /// Calling `start()` while permissions are denied must leave the

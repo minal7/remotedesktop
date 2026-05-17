@@ -1,5 +1,4 @@
 import AppKit
-import AVFoundation
 import CoreMedia
 import Foundation
 import LiveKitWebRTC
@@ -25,6 +24,7 @@ final class HostPeerSession: NSObject {
     private let iceConfig: ICEConfig
     private let onEnded: @Sendable (String) -> Void
     private let log = Logger(subsystem: "com.threadmark.remotedesktop.host", category: "webrtc")
+    private let signalingStateQueue = DispatchQueue(label: "com.threadmark.remotedesktop.host.webrtc.signaling")
 
     private let factory: RTCPeerConnectionFactory
     private let audioBridge: SystemAudioBridge
@@ -33,12 +33,12 @@ final class HostPeerSession: NSObject {
     private let videoSource: RTCVideoSource
     private let videoTrack: RTCVideoTrack
     private let videoCapturer: RTCVideoCapturer
-    private let signalingStateQueue = DispatchQueue(label: "com.threadmark.remotedesktop.host.webrtc.signaling")
 
     private var peerConnection: RTCPeerConnection?
     private var dataChannel: RTCDataChannel?
     private var captureStarted = false
     private var audioRecordingStarted = false
+    private var localMediaConfigured = false
     private var hostSeq: UInt32 = 0
     private var answerSent = false
     private var pendingLocalICEPayloads: [[String: String]] = []
@@ -62,11 +62,7 @@ final class HostPeerSession: NSObject {
             encoderFactory: RTCDefaultVideoEncoderFactory(),
             decoderFactory: RTCDefaultVideoDecoderFactory(),
             audioProcessingModule: nil)
-        // The host never forwards microphone audio, but the LiveKit/WebRTC
-        // audio-engine bridge still needs the recording path available so the
-        // local audio track can consume the ScreenCaptureKit system-audio feed
-        // injected by SystemAudioBridge. Keep output available too so the ADM
-        // builds the full engine graph expected by the delegate callbacks.
+        let voiceProcessingStatus = factory.audioDeviceModule.setVoiceProcessingEnabled(false)
         _ = factory.audioDeviceModule.setEngineAvailability(
             RTCAudioEngineAvailability(
                 isInputAvailable: ObjCBool(HostConfig.enableSystemAudio),
@@ -74,10 +70,11 @@ final class HostPeerSession: NSObject {
         self.audioBridge = SystemAudioBridge()
         self.audioSource = factory.audioSource(with: nil)
         self.audioTrack = factory.audioTrack(with: audioSource, trackId: "system-audio")
-        self.videoSource = factory.videoSource()
+        self.videoSource = factory.videoSource(forScreenCast: true)
         self.videoTrack = factory.videoTrack(with: videoSource, trackId: "screen")
         self.videoCapturer = RTCVideoCapturer(delegate: videoSource)
         super.init()
+        log.info("host audio ADM voiceProcessingEnabled=false status=\(voiceProcessingStatus, privacy: .public)")
         audioBridge.attach(to: factory.audioDeviceModule)
         configureCaptureCallbacks()
     }
@@ -86,15 +83,18 @@ final class HostPeerSession: NSObject {
         resetBufferedLocalICE()
         if peerConnection == nil {
             peerConnection = try makePeerConnection()
-            if HostConfig.enableSystemAudio {
-                _ = peerConnection?.add(audioTrack, streamIds: ["system"])
-            }
-            _ = peerConnection?.add(videoTrack, streamIds: ["screen"])
         }
 
-        guard let peerConnection else { return }
-        let remote = RTCSessionDescription(type: .offer, sdp: sdp)
-        try await setRemoteDescription(remote, on: peerConnection)
+        guard let peerConnection else {
+            throw NSError(
+                domain: "HostPeerSession",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "Peer connection was released."])
+        }
+
+        let remoteDescription = RTCSessionDescription(type: .offer, sdp: sdp)
+        try await setRemoteDescription(remoteDescription, on: peerConnection)
+        try configureLocalMedia(on: peerConnection)
         let answer = try await createAnswer(on: peerConnection)
         try await setLocalDescription(answer, on: peerConnection)
         startAudioRecordingIfNeeded()
@@ -116,7 +116,9 @@ final class HostPeerSession: NSObject {
 
     func addRemoteIce(_ payload: [String: String]) {
         guard let peerConnection,
-              let candidate = iceCandidate(from: payload) else { return }
+              let candidate = iceCandidate(from: payload) else {
+            return
+        }
         peerConnection.add(candidate) { [log] error in
             if let error {
                 log.error("failed to add remote ICE candidate: \(String(describing: error), privacy: .public)")
@@ -137,27 +139,89 @@ final class HostPeerSession: NSObject {
             await capture.stop()
         }
         captureStarted = false
+        localMediaConfigured = false
     }
 
     private func makePeerConnection() throws -> RTCPeerConnection {
-        let config = RTCConfiguration()
-        config.sdpSemantics = .unifiedPlan
-        config.continualGatheringPolicy = .gatherContinually
-        config.iceServers = iceConfig.iceServers
+        let configuration = RTCConfiguration()
+        configuration.sdpSemantics = .unifiedPlan
+        configuration.continualGatheringPolicy = .gatherContinually
+        configuration.iceServers = iceConfig.iceServers
 
         let constraints = RTCMediaConstraints(
             mandatoryConstraints: nil,
-            optionalConstraints: ["DtlsSrtpKeyAgreement": "true"])
+            optionalConstraints: nil)
 
         guard let peerConnection = factory.peerConnection(
-            with: config,
+            with: configuration,
             constraints: constraints,
             delegate: self) else {
-            throw NSError(domain: "HostPeerSession", code: -1, userInfo: [
-                NSLocalizedDescriptionKey: "Couldn't create the peer connection."
-            ])
+            throw NSError(
+                domain: "HostPeerSession",
+                code: -2,
+                userInfo: [NSLocalizedDescriptionKey: "Couldn't create the peer connection."])
         }
         return peerConnection
+    }
+
+    private func configureLocalMedia(on peerConnection: RTCPeerConnection?) throws {
+        guard let peerConnection else {
+            throw NSError(
+                domain: "HostPeerSession",
+                code: -3,
+                userInfo: [NSLocalizedDescriptionKey: "Missing peer connection."])
+        }
+        guard !localMediaConfigured else {
+            return
+        }
+
+        try addOutboundVideoTrack(on: peerConnection)
+        if HostConfig.enableSystemAudio {
+            try bindAudioTrackToExistingTransceiver(on: peerConnection)
+        }
+        localMediaConfigured = true
+    }
+
+    private func addOutboundVideoTrack(on peerConnection: RTCPeerConnection) throws {
+        guard let sender = peerConnection.add(videoTrack, streamIds: ["screen"]) else {
+            throw NSError(
+                domain: "HostPeerSession",
+                code: -5,
+                userInfo: [NSLocalizedDescriptionKey: "Couldn't attach the video track to the peer connection."])
+        }
+        let transceiverMid = peerConnection.transceivers.first(where: { $0.sender.senderId == sender.senderId })?.mid ?? "nil"
+        log.info("bound video sender to negotiated transceiver mid=\(transceiverMid, privacy: .public)")
+    }
+
+    /// Finds the audio transceiver already created by `setRemoteDescription`
+    /// (from the client's `recvOnly` audio m-line) and sets our audio track
+    /// on its sender. This avoids creating a second, unmatched audio m-line
+    /// that `peerConnection.add(track:)` would produce.
+    private func bindAudioTrackToExistingTransceiver(on peerConnection: RTCPeerConnection) throws {
+        // After setRemoteDescription with the client's recvOnly audio offer,
+        // the host has a transceiver with direction sendOnly and no local track.
+        let audioTransceiver = peerConnection.transceivers.first { transceiver in
+            transceiver.mediaType == .audio
+        }
+
+        guard let audioTransceiver else {
+            // Fallback: no pre-existing transceiver, add one explicitly.
+            let transceiverInit = RTCRtpTransceiverInit()
+            transceiverInit.direction = .sendOnly
+            transceiverInit.streamIds = ["system"]
+            guard let fallback = peerConnection.addTransceiver(with: audioTrack, init: transceiverInit) else {
+                throw NSError(
+                    domain: "HostPeerSession",
+                    code: -5,
+                    userInfo: [NSLocalizedDescriptionKey: "Couldn't create an audio transceiver."])
+            }
+            log.info("created fallback audio transceiver mid=\(fallback.mid ?? "nil", privacy: .public)")
+            return
+        }
+
+        audioTransceiver.sender.track = audioTrack
+        audioTransceiver.setDirection(.sendOnly, error: nil)
+        log.info("bound audio track to existing transceiver mid=\(audioTransceiver.mid ?? "nil", privacy: .public) direction=\(String(describing: audioTransceiver.direction), privacy: .public)")
     }
 
     private func configureCaptureCallbacks() {
@@ -178,27 +242,32 @@ final class HostPeerSession: NSObject {
     }
 
     private func pushVideoSample(_ sampleBuffer: CMSampleBuffer) {
-        guard let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        guard let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
+            return
+        }
         let normalizedSize = CaptureSizing.normalized(
             width: CVPixelBufferGetWidth(imageBuffer),
             height: CVPixelBufferGetHeight(imageBuffer))
-        let width = Int32(normalizedSize.width)
-        let height = Int32(normalizedSize.height)
-        videoSource.adaptOutputFormat(toWidth: width, height: height, fps: 60)
+        videoSource.adaptOutputFormat(
+            toWidth: Int32(normalizedSize.width),
+            height: Int32(normalizedSize.height),
+            fps: 60)
 
         let rtcBuffer = RTCCVPixelBuffer(pixelBuffer: imageBuffer)
-        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-        let timeNs = Int64(CMTimeGetSeconds(pts) * 1_000_000_000)
-        let frame = RTCVideoFrame(buffer: rtcBuffer, rotation: ._0, timeStampNs: timeNs)
+        let presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        let timestampNs = Int64(CMTimeGetSeconds(presentationTime) * 1_000_000_000)
+        let frame = RTCVideoFrame(buffer: rtcBuffer, rotation: ._0, timeStampNs: timestampNs)
         videoSource.capturer(videoCapturer, didCapture: frame)
     }
 
     private func send(_ message: ControlMessage) {
-        guard let dataChannel, dataChannel.readyState == .open else { return }
+        guard let dataChannel, dataChannel.readyState == .open else {
+            return
+        }
         hostSeq &+= 1
-        let ts = UInt64(DispatchTime.now().uptimeNanoseconds / 1_000)
-        let buffer = RTCDataBuffer(data: messageData(for: message, seq: hostSeq, ts: ts), isBinary: false)
-        dataChannel.sendData(buffer)
+        let timestamp = UInt64(DispatchTime.now().uptimeNanoseconds / 1_000)
+        let payload = messageData(for: message, seq: hostSeq, ts: timestamp)
+        dataChannel.sendData(RTCDataBuffer(data: payload, isBinary: false))
     }
 
     private func messageData(for message: ControlMessage, seq: UInt32, ts: UInt64) -> Data {
@@ -216,8 +285,11 @@ final class HostPeerSession: NSObject {
     }
 
     private func sendHelloAckAndDisplay() {
-        guard let dataChannel, dataChannel.readyState == .open else { return }
-        let ts = UInt64(DispatchTime.now().uptimeNanoseconds / 1_000)
+        guard let dataChannel, dataChannel.readyState == .open else {
+            return
+        }
+
+        let timestamp = UInt64(DispatchTime.now().uptimeNanoseconds / 1_000)
         hostSeq &+= 1
         let hello = HostMessageEncoder.helloAck(
             proto: HostConfig.protocolVersion,
@@ -226,7 +298,7 @@ final class HostPeerSession: NSObject {
             audio: HostConfig.enableSystemAudio,
             monitors: NSScreen.screens.count,
             seq: hostSeq,
-            ts: ts)
+            ts: timestamp)
         dataChannel.sendData(RTCDataBuffer(data: hello, isBinary: false))
 
         let frame = NSScreen.main?.frame ?? .zero
@@ -237,12 +309,14 @@ final class HostPeerSession: NSObject {
             height: Int(frame.height.rounded()),
             scale: scale,
             seq: hostSeq,
-            ts: ts)
+            ts: timestamp)
         dataChannel.sendData(RTCDataBuffer(data: display, isBinary: false))
     }
 
     private func iceCandidate(from payload: [String: String]) -> RTCIceCandidate? {
-        guard let sdp = payload["candidate"] else { return nil }
+        guard let sdp = payload["candidate"] else {
+            return nil
+        }
         let sdpMid = payload["sdpMid"]
         let lineIndex = Int32(payload["sdpMLineIndex"] ?? "") ?? 0
         return RTCIceCandidate(sdp: sdp, sdpMLineIndex: lineIndex, sdpMid: sdpMid)
@@ -283,7 +357,9 @@ final class HostPeerSession: NSObject {
             }
             return true
         }
-        guard shouldSendImmediately else { return }
+        guard shouldSendImmediately else {
+            return
+        }
         sendLocalICE(payload)
     }
 
@@ -304,31 +380,29 @@ final class HostPeerSession: NSObject {
     }
 
     private func createAnswer(on peerConnection: RTCPeerConnection) async throws -> RTCSessionDescription {
-        // No legacy OfferToReceive constraints — under Unified Plan the
-        // transceiver directions (sendonly for host audio/video, recvonly on
-        // the client) negotiate correctly on their own. Setting
-        // OfferToReceiveAudio:"false" would mark the audio m-line as
-        // `inactive` in the answer SDP, killing the audio stream entirely.
         let constraints = RTCMediaConstraints(
             mandatoryConstraints: nil,
             optionalConstraints: nil)
         return try await withCheckedThrowingContinuation { continuation in
-            peerConnection.answer(for: constraints) { sdp, error in
+            peerConnection.answer(for: constraints) { description, error in
                 if let error {
                     continuation.resume(throwing: error)
-                } else if let sdp {
-                    continuation.resume(returning: sdp)
+                } else if let description {
+                    continuation.resume(returning: description)
                 } else {
                     continuation.resume(throwing: NSError(
                         domain: "HostPeerSession",
-                        code: -2,
+                        code: -4,
                         userInfo: [NSLocalizedDescriptionKey: "Answer creation returned no SDP."]))
                 }
             }
         }
     }
 
-    private func setLocalDescription(_ description: RTCSessionDescription, on peerConnection: RTCPeerConnection) async throws {
+    private func setLocalDescription(
+        _ description: RTCSessionDescription,
+        on peerConnection: RTCPeerConnection
+    ) async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             peerConnection.setLocalDescription(description) { error in
                 if let error {
@@ -340,7 +414,10 @@ final class HostPeerSession: NSObject {
         }
     }
 
-    private func setRemoteDescription(_ description: RTCSessionDescription, on peerConnection: RTCPeerConnection) async throws {
+    private func setRemoteDescription(
+        _ description: RTCSessionDescription,
+        on peerConnection: RTCPeerConnection
+    ) async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             peerConnection.setRemoteDescription(description) { error in
                 if let error {
@@ -353,22 +430,22 @@ final class HostPeerSession: NSObject {
     }
 
     private func startAudioRecordingIfNeeded() {
-        guard HostConfig.enableSystemAudio, !audioRecordingStarted else { return }
-        let adm = factory.audioDeviceModule
-        let prepareStatus = adm.setRecordingAlwaysPreparedMode(true)
-        // Do NOT mute the microphone: the WebRTC ADM treats this as "zero the
-        // recording tap", which silences the frames our SystemAudioBridge is
-        // injecting. The bridge already disconnects the real mic input, so
-        // there is no user voice to worry about leaking.
-        _ = adm.setMicrophoneMuted(false)
-        let startStatus = adm.initAndStartRecording()
+        guard HostConfig.enableSystemAudio, !audioRecordingStarted else {
+            return
+        }
+        let audioDeviceModule = factory.audioDeviceModule
+        let prepareStatus = audioDeviceModule.setRecordingAlwaysPreparedMode(true)
+        let muteStatus = audioDeviceModule.setMicrophoneMuted(true)
+        let startStatus = audioDeviceModule.initAndStartRecording()
         log.info(
-            "host audio ADM prepare=\(prepareStatus, privacy: .public) start=\(startStatus, privacy: .public) recordingInit=\(adm.isRecordingInitialized, privacy: .public) recording=\(adm.isRecording, privacy: .public) engineRunning=\(adm.isEngineRunning, privacy: .public)")
+            "host audio ADM prepare=\(prepareStatus, privacy: .public) mute=\(muteStatus, privacy: .public) muted=\(audioDeviceModule.isMicrophoneMuted, privacy: .public) start=\(startStatus, privacy: .public) recordingInit=\(audioDeviceModule.isRecordingInitialized, privacy: .public) recording=\(audioDeviceModule.isRecording, privacy: .public) engineRunning=\(audioDeviceModule.isEngineRunning, privacy: .public)")
         audioRecordingStarted = startStatus == 0
     }
 
     private func stopAudioRecording() {
-        guard audioRecordingStarted else { return }
+        guard audioRecordingStarted else {
+            return
+        }
         let stopStatus = factory.audioDeviceModule.stopRecording()
         log.info("host audio ADM stop=\(stopStatus, privacy: .public)")
         audioRecordingStarted = false
@@ -404,7 +481,9 @@ extension HostPeerSession: RTCDataChannelDelegate {
     func dataChannelDidChangeState(_ dataChannel: RTCDataChannel) {}
 
     func dataChannel(_ dataChannel: RTCDataChannel, didReceiveMessageWith buffer: RTCDataBuffer) {
-        guard let message = ControlMessage.decode(buffer.data) else { return }
+        guard let message = ControlMessage.decode(buffer.data) else {
+            return
+        }
         switch message {
         case .hello(let proto):
             guard proto == HostConfig.protocolVersion else {
