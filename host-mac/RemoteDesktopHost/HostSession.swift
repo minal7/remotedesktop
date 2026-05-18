@@ -38,6 +38,9 @@ final class HostSession: ObservableObject {
     private let validateAudioInputEntitlements: @Sendable () throws -> Void
     private var pendingRemoteICEPayloads: [[String: String]] = []
     private var loggedPendingRemoteICE = false
+    private var disconnecting = false
+    private let iceConfigFetcher = ICEConfigFetcher(
+        containerIdentifier: HostConfig.cloudKitContainerIdentifier)
 
     init(
         permissionsProvider: PermissionsProvider = SystemPermissionsProvider(),
@@ -159,8 +162,10 @@ final class HostSession: ObservableObject {
             return
         }
 
-        let iceConfig = await ICEConfigFetcher(
-            containerIdentifier: HostConfig.cloudKitContainerIdentifier).get()
+        // Reset the cached ICE config so we get a fresh fetch,
+        // important when the network topology changed (VPN, Wi-Fi handoff).
+        await iceConfigFetcher.reset()
+        let iceConfig = await iceConfigFetcher.get()
 
         state = .advertising(code: code)
         advertiser.publish(
@@ -267,6 +272,13 @@ final class HostSession: ObservableObject {
         // If the user already called stop(), state is .idle and we
         // should not auto-restart.
         guard state != .idle else { return }
+        // Guard against re-entrancy: both screen-capture-stop and
+        // peer-connection-failure can fire onEnded nearly simultaneously.
+        guard !disconnecting else {
+            log.info("handleDisconnect re-entered (reason=\(reason, privacy: .public)) — skipping")
+            return
+        }
+        disconnecting = true
         log.info("connection ended (\(reason, privacy: .public)) — restarting listener")
         peerSession?.close(reason: reason)
         peerSession = nil
@@ -274,6 +286,7 @@ final class HostSession: ObservableObject {
         advertiser.stop()
         signalingTask?.cancel()
         signalingTask = nil
+        disconnecting = false
         startListening()
     }
 

@@ -64,6 +64,14 @@ public actor ICEConfigFetcher {
         return config
     }
 
+    /// Clears the cached config so the next `get()` re-fetches from
+    /// CloudKit. Call when the network topology changes (e.g. VPN
+    /// connect/disconnect, Wi-Fi → cellular handoff) and the cached
+    /// STUN/TURN list may no longer be appropriate.
+    public func reset() {
+        cached = nil
+    }
+
     // MARK: Internals
 
     private let containerIdentifier: String

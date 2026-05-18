@@ -24,6 +24,7 @@ enum CaptureSizing {
 /// want a per-frame actor hop at 60 fps.
 final class ScreenCapture: NSObject, @unchecked Sendable {
     private var stream: SCStream?
+    private var stopping = false
     private let videoQueue = DispatchQueue(
         label: "com.threadmark.remotedesktop.host.capture.video",
         qos: .userInteractive)
@@ -46,6 +47,7 @@ final class ScreenCapture: NSObject, @unchecked Sendable {
     /// at up to 60 fps with system audio. Throws if ScreenCaptureKit
     /// can't start (typically: missing TCC approval).
     func start() async throws {
+        stopping = false
         loggedFirstAudioSample = false
         let content = try await SCShareableContent.excludingDesktopWindows(
             false, onScreenWindowsOnly: false)
@@ -83,12 +85,17 @@ final class ScreenCapture: NSObject, @unchecked Sendable {
 
     func stop() async {
         guard let s = stream else { return }
+        stopping = true
         stream = nil
         do { try await s.stopCapture() }
         catch {
-            guard !Self.isAlreadyStopped(error) else { return }
+            guard !Self.isAlreadyStopped(error) else {
+                stopping = false
+                return
+            }
             log.error("stop failed: \(String(describing: error), privacy: .public)")
         }
+        stopping = false
     }
 }
 
@@ -121,6 +128,9 @@ extension ScreenCapture: SCStreamDelegate, SCStreamOutput {
         }
         guard !Self.isAlreadyStopped(error) else { return }
         log.error("stream stopped: \(String(describing: error), privacy: .public)")
+        // Don't fire onStopped during an intentional stop() call —
+        // the caller already knows and will handle teardown.
+        guard !stopping else { return }
         onStopped?(error)
     }
 }

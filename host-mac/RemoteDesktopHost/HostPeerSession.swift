@@ -39,6 +39,7 @@ final class HostPeerSession: NSObject {
     private var captureStarted = false
     private var audioRecordingStarted = false
     private var localMediaConfigured = false
+    private var ended = false
     private var hostSeq: UInt32 = 0
     private var answerSent = false
     private var pendingLocalICEPayloads: [[String: String]] = []
@@ -127,6 +128,7 @@ final class HostPeerSession: NSObject {
     }
 
     func close(reason: String) {
+        ended = true
         resetBufferedLocalICE()
         send(.bye(reason: reason))
         dataChannel?.close()
@@ -135,6 +137,9 @@ final class HostPeerSession: NSObject {
         peerConnection = nil
         audioBridge.detach(from: factory.audioDeviceModule)
         stopAudioRecording()
+        // Clear capture callbacks before stopping to prevent the
+        // delegate's didStopWithError from re-firing onEnded.
+        capture.onStopped = nil
         Task {
             await capture.stop()
         }
@@ -236,8 +241,9 @@ final class HostPeerSession: NSObject {
             capture.onAudioSample = nil
         }
         capture.onStopped = { [weak self] error in
-            self?.log.error("screen capture stopped: \(String(describing: error), privacy: .public)")
-            self?.onEnded("Screen capture stopped.")
+            guard let self, !self.ended else { return }
+            self.log.error("screen capture stopped: \(String(describing: error), privacy: .public)")
+            self.onEnded("Screen capture stopped.")
         }
     }
 
@@ -467,6 +473,7 @@ extension HostPeerSession: RTCPeerConnectionDelegate {
 
     func peerConnection(_ peerConnection: RTCPeerConnection, didChange stateChanged: RTCConnectionState) {
         log.info("peer connection state → \(String(describing: stateChanged), privacy: .public)")
+        guard !ended else { return }
         switch stateChanged {
         case .disconnected:
             // Transient — ICE may recover on its own. Log but don't tear down.
