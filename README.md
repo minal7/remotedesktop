@@ -34,7 +34,7 @@ internet. No port forwarding, no self-hosted server.
 | --- | --- |
 | `ios/` | SwiftUI iPad + iPhone client |
 | `host-mac/` | Menu-bar Swift agent using ScreenCaptureKit + CGEvent + CoreAudio |
-| `host-windows/` | C++ agent using DXGI Desktop Duplication + SendInput + WASAPI loopback |
+| `host-windows/` | Rust Windows host process; CloudKit/Apple ID auth is wired, WebRTC/capture/input next |
 | `signaling/` | Cloudflare Worker — pairing rooms, SDP + ICE relay |
 | `protocol/` | Wire-format spec shared across all three clients |
 
@@ -48,7 +48,7 @@ internet. No port forwarding, no self-hosted server.
 | iOS client — WebRTC peer connection | **not yet** |
 | Mac host agent — menu bar + capture + injection + signaling | scaffolded |
 | Mac host agent — WebRTC peer connection | **not yet** |
-| Windows host agent | **not yet** |
+| Windows host agent — Apple ID auth + CloudKit pairing | scaffolded |
 
 End-to-end pairing (iOS ↔ Worker ↔ Mac host) is testable once `SIGNALING_URL`
 points at a running Worker. Actual video/audio/input over WebRTC lands in

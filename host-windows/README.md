@@ -5,18 +5,14 @@ CloudKit-backed signaling — just different system APIs under the hood.
 
 ## Stack
 
-- **Rust + Tauri 2** for the tray/UI shell (small system webview, no
-  Electron bloat).
-- **`webrtc-rs`** — peer connection, media tracks, data channel.
-- **`windows-rs`** for Windows.Graphics.Capture (fast path) and WASAPI
-  loopback (system audio).
-- **`enigo`** for synthetic keyboard/mouse input injection.
-- **CloudKit Web Services** (REST) via `reqwest`. First launch pops a
-  tiny `wry` webview to sign the user into iCloud and obtain a web-auth
-  token; the token is persisted via the Windows Credential Manager. All
-  subsequent signaling traffic is polled over HTTPS at 2 s cadence —
-  same polling model as the native Apple clients, since there's no
-  CloudKit native client on Windows.
+- **Rust** host process for the first Windows milestone.
+- **CloudKit Web Services** (REST) via `reqwest`. Launch is gated by
+  Apple ID/iCloud sign-in; the host will not advertise a pairing code
+  until a CloudKit Web Auth Token is obtained and validated.
+- **Windows Credential Manager** via `keyring` for the CloudKit web-auth
+  token and persistent device sender ID.
+- **Next:** `webrtc-rs`, `windows-rs`, `enigo`, then the Tauri tray/UI
+  shell once the transport is alive.
 
 ## Why Rust + Tauri (and not C#/WinUI)
 
@@ -29,21 +25,66 @@ CloudKit-backed signaling — just different system APIs under the hood.
 - A single language across host + signaling + input keeps the scope
   manageable for v1.
 
-## CloudKit on Windows — the catch
+## CloudKit on Windows
 
 There is no first-party CloudKit client for Windows. We use CloudKit's
 public **Web Services** REST API (`https://api.apple-cloudkit.com`)
 with **Web Auth Token** authentication:
 
-1. First launch opens `wry` webview to `https://icloud.com` for login.
-2. The app captures the Web Auth Token (`ckWebAuthToken`) from the
-   authenticated session.
-3. Token goes into Windows Credential Manager for reuse across launches.
-4. All subsequent CloudKit record ops hit the REST API with that token.
+1. The host probes CloudKit. If no valid token is stored, startup is
+   blocked.
+2. The host opens Apple's sign-in page in the default browser.
+3. Apple redirects back to the local loopback callback with
+   `ckWebAuthToken`.
+4. The token goes into Windows Credential Manager for reuse across
+   launches.
+5. All subsequent private-database record ops include the token.
+
+Apple documents these web-auth tokens as short-lived and single-use;
+CloudKit may rotate the token in responses, and the host stores a
+replacement token whenever one is returned.
+
+## Configure Apple ID Sign-In
+
+Create a CloudKit API token for `iCloud.com.threadmark.remotedesktop`.
+Set the token's **Sign in Callback** / URL Redirect to:
+
+```text
+http://127.0.0.1:48172/icloud-auth-callback
+```
+
+Then launch the host with:
+
+```powershell
+$env:REMOTE_DESKTOP_CLOUDKIT_API_TOKEN = "<CloudKit API token>"
+$env:REMOTE_DESKTOP_CLOUDKIT_ENV = "development"
+cargo run
+```
+
+Optional environment variables:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `REMOTE_DESKTOP_CLOUDKIT_CONTAINER` | `iCloud.com.threadmark.remotedesktop` | CloudKit container ID |
+| `REMOTE_DESKTOP_CLOUDKIT_ENV` | `development` | `development` or `production` |
+| `REMOTE_DESKTOP_AUTH_CALLBACK_BIND` | `127.0.0.1:48172` | Local listener for Apple ID redirect |
+| `REMOTE_DESKTOP_AUTH_CALLBACK_PATH` | `/icloud-auth-callback` | Callback path configured on the API token |
+| `REMOTE_DESKTOP_POLL_SECONDS` | `2` | CloudKit short-poll cadence |
+| `REMOTE_DESKTOP_STALE_SECONDS` | `300` | Stale signaling cutoff |
 
 ## Status
 
-Not yet implemented. This folder is a skeleton — see `PROGRESS.md` at
-the repo root for the ordered task list. First milestone: reach pairing
-parity with the Mac host (advertise a `HostAdvertisement`, accept an
-offer over CloudKit, round-trip ICE, produce a black-video answer).
+Implemented:
+
+- Mandatory Apple ID/iCloud auth gate before the host can run.
+- CloudKit Web Services client for authenticated private-database
+  requests.
+- Persistent Windows host device identity.
+- `HostAdvertisement` publishing and `WebRTCSignal` polling.
+- Preflight offer response for the transitional signaling transport.
+
+Not implemented yet:
+
+- WebRTC answer generation, ICE handling, screen capture, system audio,
+  and input injection.
+- Tauri tray/UI shell. Current milestone is a Rust host process.

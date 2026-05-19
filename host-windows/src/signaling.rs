@@ -1,16 +1,402 @@
-//! CloudKit signaling client (Web Services REST).
-//!
-//! Planned surface:
-//! - `HostAdvertisement` record writes on pairing-code show.
-//! - `WebRTCSignal` record poll at 2 s cadence; `targetID == self` filter.
-//! - Web Auth Token bootstrapped via a one-shot `wry` webview and stored
-//!   in the Windows Credential Manager.
-//!
-//! Until any of that exists, this file is a placeholder to wire the
-//! module path into the binary.
+use crate::cloudkit::{CloudKitClient, CloudKitError};
+use anyhow::{anyhow, Context, Result};
+use rand::Rng;
+use serde_json::{json, Map, Value};
+use std::{
+    collections::HashSet,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
-use tracing::debug;
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Role {
+    Host,
+    Client,
+}
 
-pub fn hello() {
-    debug!("signaling module: stub — nothing wired yet.");
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Kind {
+    Offer,
+    Answer,
+    Ice,
+    Bye,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SignalingEnvelope {
+    pub role: Role,
+    pub kind: Kind,
+    pub payload: Map<String, Value>,
+    pub ts: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct HostSignalingOptions {
+    pub code: String,
+    pub sender_id: String,
+    pub host_name: String,
+    pub stale_record_seconds: u64,
+}
+
+#[derive(Debug)]
+pub struct HostSignalingClient {
+    cloudkit: CloudKitClient,
+    options: HostSignalingOptions,
+    target_id: Option<String>,
+    owned_record_names: HashSet<String>,
+    consumed_record_names: HashSet<String>,
+    started_at_ms: u64,
+}
+
+impl HostSignalingClient {
+    pub fn new(cloudkit: CloudKitClient, options: HostSignalingOptions) -> Self {
+        Self {
+            cloudkit,
+            options,
+            target_id: None,
+            owned_record_names: HashSet::new(),
+            consumed_record_names: HashSet::new(),
+            started_at_ms: now_ms(),
+        }
+    }
+
+    pub fn code(&self) -> &str {
+        &self.options.code
+    }
+
+    pub async fn claim(&mut self) -> Result<()> {
+        self.write_advertisement()
+            .await
+            .context("couldn't publish Windows host pairing advertisement")
+    }
+
+    pub async fn poll(&mut self) -> Result<Vec<SignalingEnvelope>> {
+        let cutoff_ms = now_ms().saturating_sub(self.options.stale_record_seconds * 1000);
+        let min_created_at = cutoff_ms.max(self.started_at_ms);
+        let body = json!({
+            "zoneID": { "zoneName": "_defaultZone" },
+            "resultsLimit": 50,
+            "numbersAsStrings": false,
+            "query": {
+                "recordType": "WebRTCSignal",
+                "filterBy": [
+                    {
+                        "fieldName": "targetID",
+                        "comparator": "EQUALS",
+                        "fieldValue": string_field(&self.options.sender_id),
+                    },
+                    {
+                        "fieldName": "createdAt",
+                        "comparator": "GREATER_THAN",
+                        "fieldValue": timestamp_field(min_created_at),
+                    }
+                ],
+                "sortBy": [
+                    { "fieldName": "createdAt", "ascending": true }
+                ]
+            }
+        });
+
+        let value = match self
+            .cloudkit
+            .post_authenticated("private", "records/query", &body)
+            .await
+        {
+            Ok(value) => value,
+            Err(CloudKitError::Server { code, .. }) if code == "UNKNOWN_ITEM" => {
+                return Ok(Vec::new());
+            }
+            Err(error) => return Err(error.into()),
+        };
+
+        let records = value
+            .get("records")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+
+        let mut envelopes = Vec::new();
+        for record in records {
+            if record.get("serverErrorCode").is_some() {
+                continue;
+            }
+            let Some(record_name) = record.get("recordName").and_then(Value::as_str) else {
+                continue;
+            };
+            if !self.consumed_record_names.insert(record_name.to_string()) {
+                continue;
+            }
+            if let Some(envelope) = self.envelope_from_record(&record) {
+                envelopes.push(envelope);
+            }
+        }
+
+        Ok(envelopes)
+    }
+
+    pub async fn send(&mut self, envelope: SignalingEnvelope) -> Result<()> {
+        let target_id = self
+            .target_id
+            .clone()
+            .ok_or_else(|| anyhow!("can't send before a client target is known"))?;
+        let payload = serde_json::to_string(&envelope.payload)?;
+        let body = json!({
+            "operations": [
+                {
+                    "operationType": "create",
+                    "record": {
+                        "recordType": "WebRTCSignal",
+                        "fields": {
+                            "senderID": string_field(&self.options.sender_id),
+                            "targetID": string_field(&target_id),
+                            "pairingCode": string_field(&self.options.code),
+                            "kind": string_field(envelope.kind.as_str()),
+                            "payload": string_field(&payload),
+                            "createdAt": timestamp_field(now_ms()),
+                        }
+                    }
+                }
+            ]
+        });
+
+        let value = self
+            .cloudkit
+            .post_authenticated("private", "records/modify", &body)
+            .await?;
+        self.record_owned_names(&value)?;
+        Ok(())
+    }
+
+    pub async fn cleanup(&mut self) -> Result<()> {
+        if self.owned_record_names.is_empty() {
+            return Ok(());
+        }
+
+        let operations: Vec<Value> = self
+            .owned_record_names
+            .iter()
+            .map(|record_name| {
+                json!({
+                    "operationType": "forceDelete",
+                    "record": { "recordName": record_name }
+                })
+            })
+            .collect();
+
+        let body = json!({ "operations": operations, "atomic": false });
+        match self
+            .cloudkit
+            .post_authenticated("private", "records/modify", &body)
+            .await
+        {
+            Ok(_) => {
+                self.owned_record_names.clear();
+                Ok(())
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn envelope_from_record(&mut self, record: &Value) -> Option<SignalingEnvelope> {
+        let fields = record.get("fields")?.as_object()?;
+        let sender_id = field_string(fields, "senderID")?;
+        self.target_id = Some(sender_id.clone());
+
+        let kind = Kind::from_str(&field_string(fields, "kind")?)?;
+        let payload_string = field_string(fields, "payload")?;
+        let payload = serde_json::from_str::<Map<String, Value>>(&payload_string).ok()?;
+        let role = if sender_id == self.options.sender_id {
+            Role::Host
+        } else {
+            Role::Client
+        };
+        let ts = field_u64(fields, "createdAt").unwrap_or_else(now_ms) / 1000;
+
+        Some(SignalingEnvelope {
+            role,
+            kind,
+            payload,
+            ts,
+        })
+    }
+
+    async fn write_advertisement(&mut self) -> Result<()> {
+        let body = json!({
+            "operations": [
+                {
+                    "operationType": "create",
+                    "record": {
+                        "recordType": "HostAdvertisement",
+                        "fields": {
+                            "senderID": string_field(&self.options.sender_id),
+                            "pairingCode": string_field(&self.options.code),
+                            "hostName": string_field(&self.options.host_name),
+                            "createdAt": timestamp_field(now_ms()),
+                        }
+                    }
+                }
+            ]
+        });
+
+        let value = self
+            .cloudkit
+            .post_authenticated("private", "records/modify", &body)
+            .await?;
+        self.record_owned_names(&value)?;
+        Ok(())
+    }
+
+    fn record_owned_names(&mut self, value: &Value) -> Result<()> {
+        let records = value
+            .get("records")
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow!("CloudKit modify response did not include records"))?;
+
+        for record in records {
+            if let Some(code) = record.get("serverErrorCode").and_then(Value::as_str) {
+                let reason = record
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("CloudKit record operation failed");
+                return Err(anyhow!(
+                    "CloudKit record operation failed: {code}: {reason}"
+                ));
+            }
+            if let Some(record_name) = record.get("recordName").and_then(Value::as_str) {
+                self.owned_record_names.insert(record_name.to_string());
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Kind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Offer => "offer",
+            Self::Answer => "answer",
+            Self::Ice => "ice",
+            Self::Bye => "bye",
+        }
+    }
+
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "offer" => Some(Self::Offer),
+            "answer" => Some(Self::Answer),
+            "ice" => Some(Self::Ice),
+            "bye" => Some(Self::Bye),
+            _ => None,
+        }
+    }
+}
+
+impl SignalingEnvelope {
+    pub fn host_answer(payload: Map<String, Value>) -> Self {
+        Self {
+            role: Role::Host,
+            kind: Kind::Answer,
+            payload,
+            ts: now_ms() / 1000,
+        }
+    }
+
+    pub fn host_bye(reason: &str) -> Self {
+        Self {
+            role: Role::Host,
+            kind: Kind::Bye,
+            payload: Map::from_iter([("reason".to_string(), Value::String(reason.to_string()))]),
+            ts: now_ms() / 1000,
+        }
+    }
+}
+
+pub fn new_pairing_code() -> String {
+    let code = rand::rng().random_range(0..1_000_000);
+    format!("{code:06}")
+}
+
+fn string_field(value: &str) -> Value {
+    json!({ "value": value, "type": "STRING" })
+}
+
+fn timestamp_field(timestamp_ms: u64) -> Value {
+    json!({ "value": timestamp_ms, "type": "TIMESTAMP" })
+}
+
+fn field_string(fields: &Map<String, Value>, key: &str) -> Option<String> {
+    fields
+        .get(key)?
+        .get("value")?
+        .as_str()
+        .map(ToString::to_string)
+}
+
+fn field_u64(fields: &Map<String, Value>, key: &str) -> Option<u64> {
+    let value = fields.get(key)?.get("value")?;
+    value
+        .as_u64()
+        .or_else(|| value.as_i64().and_then(|n| u64::try_from(n).ok()))
+        .or_else(|| value.as_str().and_then(|s| s.parse().ok()))
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock before Unix epoch")
+        .as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pairing_code_is_six_digits() {
+        let code = new_pairing_code();
+        assert_eq!(code.len(), 6);
+        assert!(code.chars().all(|c| c.is_ascii_digit()));
+    }
+
+    #[test]
+    fn timestamp_field_uses_cloudkit_timestamp_type() {
+        assert_eq!(
+            timestamp_field(1_700_000_000_000),
+            json!({ "value": 1_700_000_000_000_u64, "type": "TIMESTAMP" })
+        );
+    }
+
+    #[test]
+    fn parses_signal_record_payload() {
+        let cloudkit = CloudKitClient::new(
+            crate::config::CloudKitConfig {
+                container_identifier: "iCloud.com.example".to_string(),
+                environment: crate::config::CloudKitEnvironment::Development,
+                api_token: "token".to_string(),
+            },
+            crate::credentials::CredentialStore::new(),
+        );
+        let mut client = HostSignalingClient::new(
+            cloudkit,
+            HostSignalingOptions {
+                code: "123456".to_string(),
+                sender_id: "host-id".to_string(),
+                host_name: "Windows".to_string(),
+                stale_record_seconds: 300,
+            },
+        );
+        let record = json!({
+            "recordName": "record-1",
+            "fields": {
+                "senderID": { "value": "client-id" },
+                "kind": { "value": "offer" },
+                "payload": { "value": "{\"client\":\"iPad\"}" },
+                "createdAt": { "value": 1_700_000_000_000_u64 }
+            }
+        });
+
+        let envelope = client.envelope_from_record(&record).unwrap();
+        assert_eq!(envelope.kind, Kind::Offer);
+        assert_eq!(client.target_id.as_deref(), Some("client-id"));
+        assert_eq!(envelope.payload["client"], "iPad");
+    }
 }

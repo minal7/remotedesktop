@@ -150,13 +150,16 @@ records; keeps re-queries idempotent during the 2s poll loop.
   left in tree for now.
 - [x] **Windows host scaffold** — `host-windows/` (Rust crate stub with
   module layout + README pinning the stack). Real work begins next.
+- [x] **Windows Apple ID auth gate + CloudKit signaling** —
+  `host-windows/` now requires CloudKit Web Auth Token sign-in before it
+  advertises, stores credentials in Windows Credential Manager, publishes
+  `HostAdvertisement`, polls `WebRTCSignal`, and answers preflight offers.
 
 ## Next up (ordered)
 
-1. **Windows CloudKit REST client** — `host-windows/src/signaling.rs`
-   Web Services implementation, Web Auth Token bootstrap via `wry`.
-2. **Windows WebRTC + capture + input** — `webrtc-rs`, Windows.Graphics.Capture,
+1. **Windows WebRTC + capture + input** — `webrtc-rs`, Windows.Graphics.Capture,
    `enigo`.
+2. **Tauri tray/UI shell** around the Rust host process.
 3. **End-to-end iCloud pairing test** on real devices (out-of-band Apple
    Developer portal work required first; see below).
 4. **Production CloudKit schema promotion** once dev-DB records land.
@@ -179,6 +182,9 @@ CloudKit Dashboard:
      - `pairingCode` (queryable)
      - `targetID` (queryable)
      - `createdAt` (queryable)
+   - Add **queryable** indexes on `HostAdvertisement`:
+     - `pairingCode` (queryable)
+     - `createdAt` (queryable)
    - Create the single `ICEConfig` record in the Public DB with
      `recordName = "default"` and the STUN list.
 
@@ -194,7 +200,8 @@ CloudKit Dashboard:
 - **iOS Simulator CloudKit quirk:** simulators signed into "Simulator
   Apple ID" sometimes fail to create subscriptions. Run on a real device
   when in doubt.
-- **Windows + CloudKit:** CloudKit JS via a small `wry` webview for the
-  one-time iCloud sign-in. All subsequent records are fetched via the
-  CloudKit Web Services REST API (token from the webview), polled 2s.
+- **Windows + CloudKit:** the Windows host uses a browser-based Apple ID
+  web-auth prompt with a local loopback callback, then stores the
+  CloudKit Web Auth Token in Windows Credential Manager. All subsequent
+  records are fetched via the CloudKit Web Services REST API, polled 2s.
   There is no push channel on Windows — same polling model.
