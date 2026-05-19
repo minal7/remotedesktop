@@ -78,6 +78,13 @@ impl VideoEncoder {
 
 /// BGRA8888 → planar I420 (BT.601 limited range), matching what the
 /// browser/iOS H.264 decoder expects. `width`/`height` must be even.
+///
+/// Hot path at 1080p × 60 fps the encoder thread spends most of its
+/// time here, so the body is structured to give the autovectorizer the
+/// best shot: two source rows are walked together so that the Y, U and
+/// V outputs for each 2×2 chroma block fall out of one straight-line
+/// inner loop with no per-pixel branches, no repeated index math, and
+/// chunked slicing the bounds-check elider can collapse.
 pub fn bgra_to_i420(bgra: &[u8], width: usize, height: usize) -> Vec<u8> {
     let y_size = width * height;
     let c_size = (width / 2) * (height / 2);
@@ -85,26 +92,62 @@ pub fn bgra_to_i420(bgra: &[u8], width: usize, height: usize) -> Vec<u8> {
     let (y_plane, uv) = out.split_at_mut(y_size);
     let (u_plane, v_plane) = uv.split_at_mut(c_size);
 
-    for row in 0..height {
-        for col in 0..width {
-            let i = (row * width + col) * 4;
-            let b = bgra[i] as i32;
-            let g = bgra[i + 1] as i32;
-            let r = bgra[i + 2] as i32;
+    let half_width = width / 2;
+    let half_height = height / 2;
+    let row_bytes = width * 4;
 
-            let y = (66 * r + 129 * g + 25 * b + 128) >> 8;
-            y_plane[row * width + col] = (y + 16).clamp(0, 255) as u8;
+    for block_y in 0..half_height {
+        let top_row = block_y * 2;
+        let src_top = &bgra[top_row * row_bytes..top_row * row_bytes + row_bytes];
+        let src_bot = &bgra[(top_row + 1) * row_bytes..(top_row + 1) * row_bytes + row_bytes];
+        let (y_top, y_bot) = y_plane
+            [top_row * width..(top_row + 2) * width]
+            .split_at_mut(width);
+        let u_row = &mut u_plane[block_y * half_width..(block_y + 1) * half_width];
+        let v_row = &mut v_plane[block_y * half_width..(block_y + 1) * half_width];
 
-            if row % 2 == 0 && col % 2 == 0 {
-                let u = (-38 * r - 74 * g + 112 * b + 128) >> 8;
-                let v = (112 * r - 94 * g - 18 * b + 128) >> 8;
-                let ci = (row / 2) * (width / 2) + (col / 2);
-                u_plane[ci] = (u + 128).clamp(0, 255) as u8;
-                v_plane[ci] = (v + 128).clamp(0, 255) as u8;
-            }
+        for block_x in 0..half_width {
+            let off = block_x * 8; // two BGRA pixels per chroma column
+
+            let b00 = src_top[off] as i32;
+            let g00 = src_top[off + 1] as i32;
+            let r00 = src_top[off + 2] as i32;
+            let b01 = src_top[off + 4] as i32;
+            let g01 = src_top[off + 5] as i32;
+            let r01 = src_top[off + 6] as i32;
+            let b10 = src_bot[off] as i32;
+            let g10 = src_bot[off + 1] as i32;
+            let r10 = src_bot[off + 2] as i32;
+            let b11 = src_bot[off + 4] as i32;
+            let g11 = src_bot[off + 5] as i32;
+            let r11 = src_bot[off + 6] as i32;
+
+            let col0 = block_x * 2;
+            y_top[col0] = clamp_u8(((66 * r00 + 129 * g00 + 25 * b00 + 128) >> 8) + 16);
+            y_top[col0 + 1] = clamp_u8(((66 * r01 + 129 * g01 + 25 * b01 + 128) >> 8) + 16);
+            y_bot[col0] = clamp_u8(((66 * r10 + 129 * g10 + 25 * b10 + 128) >> 8) + 16);
+            y_bot[col0 + 1] = clamp_u8(((66 * r11 + 129 * g11 + 25 * b11 + 128) >> 8) + 16);
+
+            // Average the 2×2 BGR cluster before computing chroma —
+            // gives better quality than sampling a single corner and
+            // costs only four adds per block.
+            let r = r00 + r01 + r10 + r11;
+            let g = g00 + g01 + g10 + g11;
+            let b = b00 + b01 + b10 + b11;
+            // Coefficients are the BT.601 weights × 4 (because we
+            // summed four pixels), still divided by 256.
+            let u = (-38 * r - 74 * g + 112 * b + 512) >> 10;
+            let v = (112 * r - 94 * g - 18 * b + 512) >> 10;
+            u_row[block_x] = clamp_u8(u + 128);
+            v_row[block_x] = clamp_u8(v + 128);
         }
     }
     out
+}
+
+#[inline(always)]
+fn clamp_u8(value: i32) -> u8 {
+    value.clamp(0, 255) as u8
 }
 
 pub struct AudioEncoder {

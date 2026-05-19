@@ -3,12 +3,17 @@
 //! WASAPI render-loopback (system audio). Every other module is
 //! portable, so only this file is `cfg`-gated.
 //!
-//! Frames and audio flow over `std::sync::mpsc` so the encoder threads
-//! can own the receivers directly. Video uses a depth-2 channel and
-//! drops the oldest frame under back-pressure — for a live screen the
-//! freshest frame always wins; queuing them just adds latency.
+//! Video uses a single-slot latest-frame channel: the capture callback
+//! always overwrites the slot with the freshest frame, and the encoder
+//! always pops the freshest frame. This bounds the producer→encoder
+//! queueing delay to one frame regardless of encoder speed — older
+//! frames are silently dropped, never queued.
+//!
+//! Audio flows over `std::sync::mpsc` with a generous depth — Opus is
+//! cheap to encode so back-pressure here is rare.
 
 use std::sync::mpsc::Receiver;
+use std::sync::{Arc, Condvar, Mutex};
 
 /// One captured screen frame: tightly packed BGRA8888, top-down.
 pub struct ScreenFrame {
@@ -21,25 +26,97 @@ pub struct ScreenFrame {
 pub struct Capture {
     pub width: u32,
     pub height: u32,
-    pub video_rx: Receiver<ScreenFrame>,
+    pub video_rx: LatestFrameReceiver,
     /// Interleaved-stereo f32 @ 48 kHz, arbitrary chunk lengths. Stays
     /// silent (sender dropped) when system-audio capture is unavailable.
     pub audio_rx: Receiver<Vec<f32>>,
     pub stop: StopHandle,
 }
 
+/// Single-slot, latest-only frame channel. The producer always
+/// overwrites the slot, dropping any pending unread frame; the consumer
+/// blocks until a frame appears or the sender is dropped. This is the
+/// right semantics for a live screen — `mpsc::sync_channel(N)` does the
+/// opposite (drops the newest frame when full), which forces the
+/// encoder to chew through stale frames before getting the current
+/// pixels.
+struct FrameSlot {
+    state: Mutex<FrameSlotState>,
+    cv: Condvar,
+}
+
+struct FrameSlotState {
+    frame: Option<ScreenFrame>,
+    closed: bool,
+}
+
+pub struct LatestFrameSender(Arc<FrameSlot>);
+pub struct LatestFrameReceiver(Arc<FrameSlot>);
+
+impl LatestFrameSender {
+    pub fn send(&self, frame: ScreenFrame) {
+        let mut state = self.0.state.lock().expect("frame slot poisoned");
+        state.frame = Some(frame);
+        self.0.cv.notify_one();
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.0
+            .state
+            .lock()
+            .map(|s| s.closed)
+            .unwrap_or(true)
+    }
+}
+
+impl Drop for LatestFrameSender {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.0.state.lock() {
+            state.closed = true;
+            self.0.cv.notify_all();
+        }
+    }
+}
+
+impl LatestFrameReceiver {
+    /// Block until a frame is available or the sender is dropped.
+    /// Returns `None` only after the sender side has gone away.
+    pub fn recv(&self) -> Option<ScreenFrame> {
+        let mut state = self.0.state.lock().expect("frame slot poisoned");
+        loop {
+            if let Some(frame) = state.frame.take() {
+                return Some(frame);
+            }
+            if state.closed {
+                return None;
+            }
+            state = self.0.cv.wait(state).expect("frame slot poisoned");
+        }
+    }
+}
+
+pub fn latest_frame_channel() -> (LatestFrameSender, LatestFrameReceiver) {
+    let slot = Arc::new(FrameSlot {
+        state: Mutex::new(FrameSlotState {
+            frame: None,
+            closed: false,
+        }),
+        cv: Condvar::new(),
+    });
+    (LatestFrameSender(Arc::clone(&slot)), LatestFrameReceiver(slot))
+}
+
 #[cfg(windows)]
 mod platform {
     use super::*;
 
-    const VIDEO_CHANNEL_DEPTH: usize = 2;
     const AUDIO_CHANNEL_DEPTH: usize = 64;
     use crate::media::{OPUS_CHANNELS, OPUS_SAMPLE_RATE};
     use anyhow::{Context, Result};
     use std::collections::VecDeque;
     use std::fmt;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::mpsc::{sync_channel, Sender, SyncSender, TrySendError};
+    use std::sync::mpsc::{sync_channel, Sender, SyncSender};
     use std::sync::Arc;
     use tracing::{info, warn};
     use wasapi::{Direction, SampleType, StreamMode, WaveFormat};
@@ -64,12 +141,12 @@ mod platform {
     impl std::error::Error for HandlerError {}
 
     struct FrameSink {
-        tx: SyncSender<ScreenFrame>,
+        tx: LatestFrameSender,
         scratch: Vec<u8>,
     }
 
     impl GraphicsCaptureApiHandler for FrameSink {
-        type Flags = SyncSender<ScreenFrame>;
+        type Flags = LatestFrameSender;
         type Error = HandlerError;
 
         fn new(ctx: WcContext<Self::Flags>) -> Result<Self, Self::Error> {
@@ -84,6 +161,12 @@ mod platform {
             frame: &mut Frame,
             capture_control: InternalCaptureControl,
         ) -> Result<(), Self::Error> {
+            // If the encoder side has gone away, stop the grabber.
+            if self.tx.is_closed() {
+                capture_control.stop();
+                return Ok(());
+            }
+
             let buffer = frame
                 .buffer()
                 .map_err(|e| HandlerError(format!("frame buffer: {e}")))?;
@@ -91,15 +174,13 @@ mod platform {
             let height = buffer.height() as usize;
             let bytes = buffer.as_nopadding_buffer(&mut self.scratch);
 
-            let screen = ScreenFrame {
+            // Latest-only: the slot is overwritten unconditionally so
+            // any older unconsumed frame is dropped, never queued.
+            self.tx.send(ScreenFrame {
                 data: bytes.to_vec(),
                 width,
                 height,
-            };
-            match self.tx.try_send(screen) {
-                Ok(()) | Err(TrySendError::Full(_)) => {}
-                Err(TrySendError::Disconnected(_)) => capture_control.stop(),
-            }
+            });
             Ok(())
         }
 
@@ -138,7 +219,7 @@ mod platform {
         let width = monitor.width().context("monitor width")?;
         let height = monitor.height().context("monitor height")?;
 
-        let (video_tx, video_rx) = sync_channel::<ScreenFrame>(VIDEO_CHANNEL_DEPTH);
+        let (video_tx, video_rx) = latest_frame_channel();
         let settings = Settings::new(
             monitor,
             CursorCaptureSettings::WithCursor,

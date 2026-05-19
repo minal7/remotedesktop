@@ -11,7 +11,7 @@
 //! lives on its own OS thread fed by the capture channels; small async
 //! tasks pump the encoded bitstream onto the WebRTC tracks.
 
-use crate::capture::{self, ScreenFrame};
+use crate::capture::{self, LatestFrameReceiver};
 use crate::input::InputInjector;
 use crate::media::{AudioEncoder, VideoEncoder, OPUS_FRAME_INTERLEAVED};
 use crate::protocol::{self, ClientMessage, DisplayInfo, HostInfo, PROTOCOL_VERSION};
@@ -22,8 +22,8 @@ use serde_json::{Map, Value};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::Receiver as StdReceiver;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio::sync::mpsc::{channel, unbounded_channel, UnboundedSender};
 use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
@@ -51,6 +51,14 @@ use webrtc::track::track_local::TrackLocal;
 
 const VIDEO_BITRATE_BPS: u32 = 8_000_000;
 const TARGET_FPS: f32 = 60.0;
+
+struct EncodedFrame {
+    data: Vec<u8>,
+    /// Captured at the moment the encoder finished this frame. Used by
+    /// the writer to derive the RTP duration from real wall-clock time
+    /// rather than a fixed `1/TARGET_FPS`.
+    captured_at: Instant,
+}
 
 pub struct WebRtcHost {
     pc: Arc<RTCPeerConnection>,
@@ -284,11 +292,16 @@ impl WebRtcHost {
 
     async fn spawn_video_pipeline(
         &self,
-        frames: StdReceiver<ScreenFrame>,
+        frames: LatestFrameReceiver,
         track: Arc<TrackLocalStaticSample>,
         keyframe_request: Arc<AtomicBool>,
     ) {
-        let (enc_tx, mut enc_rx) = unbounded_channel::<Vec<u8>>();
+        // Bounded encoder→writer queue: prevents encoded H.264 frames
+        // from piling up under network back-pressure. `blocking_send`
+        // in the encoder thread stalls naturally when the writer is
+        // saturated, which keeps glass-to-glass latency bounded instead
+        // of growing without limit.
+        let (enc_tx, mut enc_rx) = channel::<EncodedFrame>(2);
 
         // Encoder thread: OpenH264 is not `Send`, so build it here and
         // keep it on this thread for the session's lifetime.
@@ -304,7 +317,7 @@ impl WebRtcHost {
                 };
                 let mut raw = 0u64;
                 let mut encoded = 0u64;
-                while let Ok(frame) = frames.recv() {
+                while let Some(frame) = frames.recv() {
                     raw += 1;
                     if raw == 1 {
                         info!("video: first raw frame {}x{}", frame.width, frame.height);
@@ -313,6 +326,7 @@ impl WebRtcHost {
                         encoder.force_intra_frame();
                         info!("video: forcing IDR (receiver PLI/FIR)");
                     }
+                    let captured_at = Instant::now();
                     match encoder.encode_bgra(&frame.data, frame.width, frame.height) {
                         Ok(annex_b) if !annex_b.is_empty() => {
                             encoded += 1;
@@ -322,7 +336,13 @@ impl WebRtcHost {
                                     annex_b.len()
                                 );
                             }
-                            if enc_tx.send(annex_b).is_err() {
+                            if enc_tx
+                                .blocking_send(EncodedFrame {
+                                    data: annex_b,
+                                    captured_at,
+                                })
+                                .is_err()
+                            {
                                 break;
                             }
                         }
@@ -333,14 +353,29 @@ impl WebRtcHost {
             })
             .expect("spawn video encoder thread");
 
-        let frame_duration = Duration::from_secs_f32(1.0 / TARGET_FPS);
+        let default_frame_duration = Duration::from_secs_f32(1.0 / TARGET_FPS);
         let writer = tokio::spawn(async move {
             let mut written = 0u64;
-            while let Some(annex_b) = enc_rx.recv().await {
+            let mut last_sent_at: Option<Instant> = None;
+            while let Some(frame) = enc_rx.recv().await {
+                // Sample `duration` advances the RTP timestamp, which
+                // drives the receiver's jitter buffer. Using a constant
+                // 1/TARGET_FPS even when frames actually arrive slower
+                // makes the receiver clock drift behind wall time and
+                // over-buffer. Use the real interval since the last
+                // pushed sample instead, clamped to a sane range.
+                let duration = match last_sent_at {
+                    Some(prev) => frame
+                        .captured_at
+                        .saturating_duration_since(prev)
+                        .clamp(Duration::from_millis(1), Duration::from_secs(1)),
+                    None => default_frame_duration,
+                };
+                last_sent_at = Some(frame.captured_at);
                 match track
                     .write_sample(&Sample {
-                        data: Bytes::from(annex_b),
-                        duration: frame_duration,
+                        data: Bytes::from(frame.data),
+                        duration,
                         ..Default::default()
                     })
                     .await
