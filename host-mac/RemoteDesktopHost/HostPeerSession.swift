@@ -40,9 +40,17 @@ final class HostPeerSession: NSObject {
     private var audioRecordingStarted = false
     private var localMediaConfigured = false
     private var ended = false
+    private var captureRestartTask: Task<Void, Never>?
     private var hostSeq: UInt32 = 0
     private var answerSent = false
     private var pendingLocalICEPayloads: [[String: String]] = []
+    private let captureRestartBackoff: [Duration] = [
+        .milliseconds(250),
+        .seconds(1),
+        .seconds(2),
+        .seconds(5),
+        .seconds(10),
+    ]
 
     init(
         signaling: any SignalingChannel,
@@ -110,8 +118,7 @@ final class HostPeerSession: NSObject {
         flushBufferedLocalICEAfterAnswer()
 
         if !captureStarted {
-            try await capture.start()
-            captureStarted = true
+            try await startCapture()
         }
     }
 
@@ -129,6 +136,8 @@ final class HostPeerSession: NSObject {
 
     func close(reason: String) {
         ended = true
+        captureRestartTask?.cancel()
+        captureRestartTask = nil
         resetBufferedLocalICE()
         send(.bye(reason: reason))
         dataChannel?.close()
@@ -242,8 +251,60 @@ final class HostPeerSession: NSObject {
         }
         capture.onStopped = { [weak self] error in
             guard let self, !self.ended else { return }
-            self.log.error("screen capture stopped: \(String(describing: error), privacy: .public)")
-            self.onEnded("Screen capture stopped.")
+            self.handleCaptureStopped(error)
+        }
+    }
+
+    private func startCapture() async throws {
+        try await capture.start()
+        captureStarted = true
+    }
+
+    private func handleCaptureStopped(_ error: Error?) {
+        captureStarted = false
+        guard let error else {
+            log.error("screen capture stopped without an error")
+            onEnded("Screen capture stopped.")
+            return
+        }
+
+        guard ScreenCapture.isSystemStopped(error) else {
+            log.error("screen capture stopped: \(String(describing: error), privacy: .public)")
+            onEnded("Screen capture stopped.")
+            return
+        }
+
+        restartCaptureAfterSystemStop(error)
+    }
+
+    private func restartCaptureAfterSystemStop(_ error: Error) {
+        guard captureRestartTask == nil else {
+            log.info("screen capture restart already pending")
+            return
+        }
+
+        log.warning("screen capture was stopped by the system; attempting in-place restart: \(String(describing: error), privacy: .public)")
+        captureRestartTask = Task { [weak self] in
+            await self?.restartCaptureLoop()
+        }
+    }
+
+    private func restartCaptureLoop() async {
+        var attempt = 0
+        while !Task.isCancelled {
+            guard !ended else { return }
+            do {
+                try await startCapture()
+                log.info("screen capture restarted after system stop")
+                captureRestartTask = nil
+                return
+            } catch {
+                attempt += 1
+                captureStarted = false
+                log.error("screen capture restart attempt \(attempt, privacy: .public) failed: \(String(describing: error), privacy: .public)")
+                let delay = captureRestartBackoff[min(attempt - 1, captureRestartBackoff.count - 1)]
+                try? await Task.sleep(for: delay)
+            }
         }
     }
 

@@ -23,4 +23,22 @@ final class ScreenCaptureSizingTests: XCTestCase {
         XCTAssertEqual(normalized.width, 2)
         XCTAssertEqual(normalized.height, 2)
     }
+
+    func test_systemStoppedStreamError_isRecognizedAsRecoverableInterruption() {
+        let error = NSError(
+            domain: "com.apple.ScreenCaptureKit.SCStreamErrorDomain",
+            code: -3821)
+
+        XCTAssertTrue(ScreenCapture.isSystemStopped(error))
+        XCTAssertFalse(ScreenCapture.isAlreadyStopped(error))
+    }
+
+    func test_alreadyStoppedStreamError_isNotSystemStopped() {
+        let error = NSError(
+            domain: "com.apple.ScreenCaptureKit.SCStreamErrorDomain",
+            code: -3808)
+
+        XCTAssertTrue(ScreenCapture.isAlreadyStopped(error))
+        XCTAssertFalse(ScreenCapture.isSystemStopped(error))
+    }
 }

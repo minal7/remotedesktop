@@ -37,6 +37,15 @@ struct SessionView: View {
         isPortrait || chromeRevealed
     }
 
+    private var specialKeysAttentive: Bool {
+        !specialKeysIdle || softKeyboardOpen || session.softModifierMask != 0
+    }
+
+    private var specialKeysIdleOpacity: Double {
+        // Keep the composited controls above SwiftUI's low-opacity hit-test edge.
+        isPortrait ? 0.62 : 0.56
+    }
+
     var body: some View {
         ZStack(alignment: .top) {
             // ── Remote screen ──────────────────────────────────
@@ -82,7 +91,7 @@ struct SessionView: View {
         .statusBarHidden(!shouldShowChrome)
         .persistentSystemOverlays(.hidden)
         .animation(.easeInOut(duration: 0.25), value: shouldShowChrome)
-        .onChange(of: isPortrait) { _ in
+        .onChange(of: isPortrait) { _, _ in
             // Reset landscape chrome state when rotating back to portrait.
             if isPortrait {
                 hideTask?.cancel()
@@ -210,9 +219,28 @@ struct SessionView: View {
                 specialKeysContent(needsKeyboard: needsKeyboard,
                                    needsModifiers: needsModifiers)
             }
-            .opacity(isPortrait ? 1.0 : (specialKeysIdle ? 0.35 : 1.0))
-            .animation(.easeInOut(duration: 0.4), value: specialKeysIdle)
+            .opacity(specialKeysAttentive ? 1.0 : specialKeysIdleOpacity)
+            .animation(.easeInOut(duration: 0.35), value: specialKeysAttentive)
             .onAppear { scheduleSpecialKeysIdle() }
+            .onDisappear {
+                specialKeysIdleTask?.cancel()
+                specialKeysIdle = false
+            }
+            .onChange(of: isPortrait) { _, _ in wakeSpecialKeys() }
+            .onChange(of: softKeyboardOpen) { _, open in
+                if open {
+                    wakeSpecialKeys()
+                } else {
+                    scheduleSpecialKeysIdle()
+                }
+            }
+            .onChange(of: session.softModifierMask) { _, mask in
+                if mask == 0 {
+                    scheduleSpecialKeysIdle()
+                } else {
+                    wakeSpecialKeys()
+                }
+            }
         }
     }
 
@@ -226,7 +254,8 @@ struct SessionView: View {
             // ── Portrait: bottom-aligned, compact row ──────────
             HStack(spacing: 12) {
                 if needsModifiers {
-                    ModifierBar()
+                    ModifierBar(attentive: specialKeysAttentive,
+                                onInteraction: wakeSpecialKeys)
                 }
                 Spacer()
                 if needsKeyboard {
@@ -239,7 +268,8 @@ struct SessionView: View {
             // ── Landscape: free-floating buttons at screen bottom ──
             HStack(spacing: 14) {
                 if needsModifiers {
-                    ModifierBar()
+                    ModifierBar(attentive: specialKeysAttentive,
+                                onInteraction: wakeSpecialKeys)
                 }
                 Spacer()
                 if needsKeyboard {
@@ -263,13 +293,15 @@ struct SessionView: View {
         specialKeysIdleTask = Task { @MainActor in
             try? await Task.sleep(for: .seconds(3))
             guard !Task.isCancelled else { return }
-            if !isPortrait {
-                specialKeysIdle = true
-            }
+            guard !softKeyboardOpen, session.softModifierMask == 0 else { return }
+            specialKeysIdle = true
         }
     }
 
+    @ViewBuilder
     private var softKeyboardButton: some View {
+        let attentive = specialKeysAttentive
+
         Button {
             softKeyboardOpen.toggle()
             wakeSpecialKeys()
@@ -278,15 +310,34 @@ struct SessionView: View {
                   ? "keyboard.chevron.compact.down"
                   : "keyboard")
                 .font(.system(size: 20, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.85))
-                .padding(14)
-                .background(
-                    .ultraThinMaterial,
-                    in: Circle()
-                )
-                .shadow(color: .black.opacity(0.3), radius: 8, y: 2)
+                .foregroundStyle(.white.opacity(softKeyboardOpen ? 1 : (attentive ? 0.88 : 0.64)))
+                .frame(width: 52, height: 52)
+                .background {
+                    Circle()
+                        .fill(.ultraThinMaterial)
+                    Circle()
+                        .fill(
+                            softKeyboardOpen
+                                ? Color.accentColor.opacity(0.86)
+                                : Color.black.opacity(attentive ? 0.16 : 0.04)
+                        )
+                }
+                .overlay {
+                    Circle()
+                        .strokeBorder(
+                            Color.white.opacity(softKeyboardOpen ? 0.26 : (attentive ? 0.16 : 0.08)),
+                            lineWidth: 1
+                        )
+                }
+                .shadow(color: .black.opacity(attentive ? 0.3 : 0.12),
+                        radius: attentive ? 12 : 4,
+                        y: attentive ? 4 : 1)
+                .scaleEffect(softKeyboardOpen ? 1.05 : 1)
         }
+        .buttonStyle(.plain)
         .accessibilityLabel(softKeyboardOpen ? "Hide keyboard" : "Show keyboard")
+        .animation(.easeInOut(duration: 0.25), value: softKeyboardOpen)
+        .animation(.easeInOut(duration: 0.3), value: attentive)
     }
 
     // MARK: - Swipe-right to disconnect

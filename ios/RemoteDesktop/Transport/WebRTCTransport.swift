@@ -28,6 +28,8 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
     private let signalingFactory: (String) -> any SignalingChannel
     private let iceConfigProvider: @Sendable () async -> ICEConfig
     private let iceConnectTimeout: Duration = .seconds(25)
+    private let connectionRecoveryTimeout: Duration = .seconds(12)
+    private let mutedSystemVolumeThreshold: Float = 0.0625
 
     private var signaling: (any SignalingChannel)?
     private var peerConnection: RTCPeerConnection?
@@ -37,11 +39,16 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
     private var renderer: RTCVideoRenderer?
     private var pollTask: Task<Void, Never>?
     private var iceDeadlineTask: Task<Void, Never>?
+    private var connectionRecoveryTask: Task<Void, Never>?
     private var connectedOnce = false
     private var sentHello = false
     private var answerApplied = false
+    private var isClosing = false
+    private var didReportDisconnect = false
     private var pendingRemoteICECandidates: [RTCIceCandidate] = []
     private var loggedPendingRemoteICE = false
+    private var systemOutputVolume: Float = AVAudioSession.sharedInstance().outputVolume
+    private var appliedRemoteAudioGain: Double?
 
     init(
         signalingFactory: ((String) -> any SignalingChannel)? = nil,
@@ -68,13 +75,24 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
             self.iceConfigProvider = { await fetcher.get() }
         }
         super.init()
+        let audioSession = RTCAudioSession.sharedInstance()
+        systemOutputVolume = audioSession.outputVolume
+        audioSession.add(self)
         configureAudioSession()
     }
 
+    deinit {
+        RTCAudioSession.sharedInstance().remove(self)
+    }
+
     func connect(pairingCode: String) async throws {
+        isClosing = false
+        didReportDisconnect = false
         connectedOnce = false
         sentHello = false
         answerApplied = false
+        connectionRecoveryTask?.cancel()
+        connectionRecoveryTask = nil
         pendingRemoteICECandidates.removeAll()
         loggedPendingRemoteICE = false
 
@@ -119,9 +137,11 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         iceDeadlineTask?.cancel()
         iceDeadlineTask = Task { [weak self, iceConnectTimeout] in
             try? await Task.sleep(for: iceConnectTimeout)
+            guard !Task.isCancelled else { return }
             await MainActor.run {
-                guard let self, !self.connectedOnce else { return }
-                self.onDisconnect?("Can't reach your computer — try putting both devices on the same Wi-Fi.")
+                guard let self, !self.isClosing, !self.connectedOnce else { return }
+                self.iceDeadlineTask = nil
+                self.finishDisconnect(reason: "Can't reach your computer — try putting both devices on the same Wi-Fi.")
             }
         }
     }
@@ -135,11 +155,28 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
     }
 
     func disconnect(reason: String) {
-        send(.bye(reason: reason), seq: 0, ts: UInt64(DispatchTime.now().uptimeNanoseconds / 1_000))
+        close(reason: reason, notifyRemote: true)
+    }
+
+    private func finishDisconnect(reason: String) {
+        guard !didReportDisconnect else { return }
+        didReportDisconnect = true
+        let callback = onDisconnect
+        close(reason: reason, notifyRemote: false)
+        callback?(reason)
+    }
+
+    private func close(reason: String, notifyRemote: Bool) {
+        isClosing = true
+        if notifyRemote {
+            send(.bye(reason: reason), seq: 0, ts: UInt64(DispatchTime.now().uptimeNanoseconds / 1_000))
+        }
         pollTask?.cancel()
         pollTask = nil
         iceDeadlineTask?.cancel()
         iceDeadlineTask = nil
+        connectionRecoveryTask?.cancel()
+        connectionRecoveryTask = nil
         connectedOnce = false
         if let renderer {
             remoteVideoTrack?.remove(renderer)
@@ -147,6 +184,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         remoteAudioTrack?.isEnabled = false
         remoteVideoTrack = nil
         remoteAudioTrack = nil
+        appliedRemoteAudioGain = nil
         dataChannel?.close()
         dataChannel = nil
         peerConnection?.close()
@@ -206,7 +244,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         configuration.category = AVAudioSession.Category.playAndRecord.rawValue
         configuration.categoryOptions = [
             .defaultToSpeaker,
-            .allowBluetooth,
+            .allowBluetoothHFP,
             .allowBluetoothA2DP,
         ]
         configuration.mode = AVAudioSession.Mode.default.rawValue
@@ -216,6 +254,8 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         defer { session.unlockForConfiguration() }
         do {
             try session.setConfiguration(configuration, active: true)
+            systemOutputVolume = session.outputVolume
+            applyRemoteAudioGainForSystemVolume()
             log.info("configured RTCAudioSession for playAndRecord")
         } catch {
             log.error("failed to configure RTCAudioSession: \(error.localizedDescription, privacy: .public)")
@@ -236,8 +276,24 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         let audioDeviceModule = factory.audioDeviceModule
         let initStatus = audioDeviceModule.initPlayout()
         let startStatus = audioDeviceModule.startPlayout()
+        applyRemoteAudioGainForSystemVolume()
         log.info(
             "client audio ADM initPlayout=\(initStatus, privacy: .public) startPlayout=\(startStatus, privacy: .public) isPlaying=\(audioDeviceModule.isPlaying, privacy: .public)")
+    }
+
+    private func applySystemOutputVolume(_ outputVolume: Float) {
+        systemOutputVolume = outputVolume
+        applyRemoteAudioGainForSystemVolume()
+    }
+
+    private func applyRemoteAudioGainForSystemVolume() {
+        guard let remoteAudioTrack else { return }
+        let gain = systemOutputVolume <= mutedSystemVolumeThreshold ? 0.0 : 1.0
+        remoteAudioTrack.source.volume = gain
+        guard appliedRemoteAudioGain != gain else { return }
+        appliedRemoteAudioGain = gain
+        log.info(
+            "client remote audio gain=\(gain, privacy: .public) systemVolume=\(self.systemOutputVolume, privacy: .public)")
     }
 
     private func pollLoop() async {
@@ -267,9 +323,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
                         }
                         try await handleRemoteICECandidate(candidate)
                     case .bye:
-                        await MainActor.run { [weak self] in
-                            self?.onDisconnect?(envelope.payload["reason"] ?? "Disconnected")
-                        }
+                        finishDisconnect(reason: envelope.payload["reason"] ?? "Disconnected")
                         return
                     case .offer:
                         continue
@@ -280,11 +334,9 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
                     return
                 }
                 log.error("poll loop failed: \(String(describing: error), privacy: .public)")
-                await MainActor.run { [weak self] in
-                    let message = (error as? LocalizedError)?.errorDescription
-                        ?? error.localizedDescription
-                    self?.onDisconnect?("The WebRTC signaling loop ended unexpectedly: \(message)")
-                }
+                let message = (error as? LocalizedError)?.errorDescription
+                    ?? error.localizedDescription
+                finishDisconnect(reason: "The WebRTC signaling loop ended unexpectedly: \(message)")
                 return
             }
 
@@ -301,6 +353,25 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
             .hello(proto: Config.protocolVersion),
             seq: 0,
             ts: UInt64(DispatchTime.now().uptimeNanoseconds / 1_000))
+    }
+
+    private func scheduleConnectionRecoveryTimeout() {
+        guard connectionRecoveryTask == nil else { return }
+        log.warning("peer connection is disconnected; waiting for ICE recovery")
+        connectionRecoveryTask = Task { [weak self, connectionRecoveryTimeout] in
+            try? await Task.sleep(for: connectionRecoveryTimeout)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                guard let self, !self.isClosing, self.connectedOnce else { return }
+                self.connectionRecoveryTask = nil
+                self.finishDisconnect(reason: "The peer connection did not recover.")
+            }
+        }
+    }
+
+    private func cancelConnectionRecoveryTimeout() {
+        connectionRecoveryTask?.cancel()
+        connectionRecoveryTask = nil
     }
 
     private func iceCandidate(from payload: [String: String]) -> RTCIceCandidate? {
@@ -415,8 +486,18 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         remoteAudioTrack?.isEnabled = false
         remoteAudioTrack = track
         track.isEnabled = true
+        appliedRemoteAudioGain = nil
+        applyRemoteAudioGainForSystemVolume()
         log.info("adopting remote audio track id=\(track.trackId, privacy: .public) enabled=\(track.isEnabled, privacy: .public)")
         ensureAudioPlayoutStarted()
+    }
+}
+
+extension WebRTCTransport: RTCAudioSessionDelegate {
+    nonisolated func audioSession(_ audioSession: RTCAudioSession, didChangeOutputVolume outputVolume: Float) {
+        Task { @MainActor [weak self] in
+            self?.applySystemOutputVolume(outputVolume)
+        }
     }
 }
 
@@ -431,19 +512,25 @@ extension WebRTCTransport: RTCPeerConnectionDelegate {
     nonisolated func peerConnection(_ peerConnection: RTCPeerConnection, didChange stateChanged: RTCConnectionState) {
         Task { @MainActor [weak self] in
             guard let self else { return }
+            log.info("peer connection state → \(String(describing: stateChanged), privacy: .public)")
+            guard !isClosing else { return }
             switch stateChanged {
             case .connected:
                 connectedOnce = true
                 iceDeadlineTask?.cancel()
                 iceDeadlineTask = nil
+                cancelConnectionRecoveryTimeout()
             case .failed:
                 if !connectedOnce {
-                    onDisconnect?("Can't reach your computer — try putting both devices on the same Wi-Fi.")
+                    finishDisconnect(reason: "Can't reach your computer — try putting both devices on the same Wi-Fi.")
                 } else {
-                    onDisconnect?("The peer connection closed.")
+                    finishDisconnect(reason: "The peer connection failed.")
                 }
-            case .disconnected, .closed:
-                onDisconnect?("The peer connection closed.")
+            case .disconnected:
+                guard connectedOnce else { return }
+                scheduleConnectionRecoveryTimeout()
+            case .closed:
+                finishDisconnect(reason: "The peer connection closed.")
             default:
                 break
             }
@@ -533,7 +620,7 @@ extension WebRTCTransport: RTCDataChannelDelegate {
             case .display(let display):
                 onDisplay?(display)
             case .bye(let reason):
-                onDisconnect?(reason)
+                finishDisconnect(reason: reason)
             case nil:
                 break
             }

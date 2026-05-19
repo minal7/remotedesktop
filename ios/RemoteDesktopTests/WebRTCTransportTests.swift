@@ -24,6 +24,23 @@ final class WebRTCTransportTests: XCTestCase {
             snapshot.sent.first?.payload["sdp"]?.contains("m=audio") == true,
             "expected the client offer to negotiate an audio m-line for host audio")
     }
+
+    func test_disconnectDoesNotReportCancelledIceDeadlineAsFailure() async throws {
+        let channel = FakeWebRTCSignalingChannel()
+        let transport = WebRTCTransport(
+            signalingFactory: { _ in channel },
+            iceConfigProvider: { .fallback })
+        var disconnectReasons: [String] = []
+        transport.onDisconnect = { reason in
+            disconnectReasons.append(reason)
+        }
+
+        try await transport.connect(pairingCode: "123456")
+        transport.disconnect(reason: "test")
+        try await Task.sleep(for: .milliseconds(100))
+
+        XCTAssertTrue(disconnectReasons.isEmpty)
+    }
 }
 
 private final class FakeWebRTCSignalingChannel: SignalingChannel, @unchecked Sendable {

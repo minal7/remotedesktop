@@ -47,6 +47,7 @@ final class ScreenCapture: NSObject, @unchecked Sendable {
     /// at up to 60 fps with system audio. Throws if ScreenCaptureKit
     /// can't start (typically: missing TCC approval).
     func start() async throws {
+        guard stream == nil else { return }
         stopping = false
         loggedFirstAudioSample = false
         let content = try await SCShareableContent.excludingDesktopWindows(
@@ -127,7 +128,11 @@ extension ScreenCapture: SCStreamDelegate, SCStreamOutput {
             self.stream = nil
         }
         guard !Self.isAlreadyStopped(error) else { return }
-        log.error("stream stopped: \(String(describing: error), privacy: .public)")
+        if Self.isSystemStopped(error) {
+            log.warning("stream stopped by the system: \(String(describing: error), privacy: .public)")
+        } else {
+            log.error("stream stopped: \(String(describing: error), privacy: .public)")
+        }
         // Don't fire onStopped during an intentional stop() call —
         // the caller already knows and will handle teardown.
         guard !stopping else { return }
@@ -135,9 +140,18 @@ extension ScreenCapture: SCStreamDelegate, SCStreamOutput {
     }
 }
 
-private extension ScreenCapture {
+extension ScreenCapture {
     static func isAlreadyStopped(_ error: Error) -> Bool {
         let nsError = error as NSError
-        return nsError.domain == "com.apple.ScreenCaptureKit.SCStreamErrorDomain" && nsError.code == -3808
+        return isStreamError(nsError, code: -3808)
+    }
+
+    static func isSystemStopped(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        return isStreamError(nsError, code: -3821)
+    }
+
+    private static func isStreamError(_ error: NSError, code: Int) -> Bool {
+        error.domain == "com.apple.ScreenCaptureKit.SCStreamErrorDomain" && error.code == code
     }
 }

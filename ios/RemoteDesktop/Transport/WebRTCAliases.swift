@@ -3,11 +3,13 @@ import LiveKitWebRTC
 typealias RTCConfiguration = LKRTCConfiguration
 typealias RTCAudioSession = LKRTCAudioSession
 typealias RTCAudioSessionConfiguration = LKRTCAudioSessionConfiguration
+typealias RTCAudioSessionDelegate = LKRTCAudioSessionDelegate
 typealias RTCAudioDeviceModule = LKRTCAudioDeviceModule
 typealias RTCAudioDeviceModuleDelegate = LKRTCAudioDeviceModuleDelegate
 typealias RTCAudioDeviceModuleType = LKRTCAudioDeviceModuleType
 typealias RTCAudioEngineAvailability = LKRTCAudioEngineAvailability
 typealias RTCSpeechActivityEvent = LKRTCSpeechActivityEvent
+typealias RTCAudioSource = LKRTCAudioSource
 typealias RTCAudioTrack = LKRTCAudioTrack
 typealias RTCAudioRenderer = LKRTCAudioRenderer
 typealias RTCConnectionState = LKRTCPeerConnectionState
