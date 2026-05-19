@@ -5,25 +5,31 @@ CloudKit-backed signaling — just different system APIs under the hood.
 
 ## Stack
 
-- **Rust** host process for the first Windows milestone.
-- **CloudKit Web Services** (REST) via `reqwest`. Launch is gated by
-  Apple ID/iCloud sign-in; the host will not advertise a pairing code
-  until a CloudKit Web Auth Token is obtained and validated.
-- **Windows Credential Manager** via `keyring` for the CloudKit web-auth
-  token and persistent device sender ID.
-- **Next:** `webrtc-rs`, `windows-rs`, `enigo`, then the Tauri tray/UI
-  shell once the transport is alive.
+- **`webrtc-rs`** — peer connection, H.264 + Opus sample tracks, the
+  `control` data channel, ICE trickle.
+- **`windows-capture`** — Windows.Graphics.Capture (BGRA frames).
+- **`wasapi`** — WASAPI render-endpoint loopback (system audio).
+- **`openh264`** — software H.264 encoder (BGRA → I420 → Annex-B).
+- **`audiopus`** — Opus encoder (48 kHz stereo, 20 ms frames).
+- **`enigo`** — synthetic keyboard / mouse / text injection.
+- **CloudKit Web Services** (REST) via `reqwest`, gated by Apple
+  ID/iCloud sign-in. The host will not advertise until a CloudKit Web
+  Auth Token is obtained and validated.
+- **Windows Credential Manager** via `keyring` for the web-auth token
+  and the persistent device sender ID.
 
-## Why Rust + Tauri (and not C#/WinUI)
+Console app — it prints the pairing code to stdout. There is no
+Tauri/tray shell: the protocol only *recommends* a session indicator,
+and a system-webview shell is a large dependency the "it just works"
+path doesn't need. Deliberate v1 scope trim from the original plan.
+
+## Why Rust (and not C#/WinUI)
 
 - Rust gives us first-class `webrtc-rs` — the C# WebRTC ecosystem is
   stuck on ancient Microsoft-maintained forks.
-- Tauri is ~10 MB installed; WinUI + WebView2 is ~60 MB and drags
-  more deployment pain.
-- Windows.Graphics.Capture and enigo both have clean Rust bindings, so
-  there is nothing we'd gain by dropping into C#.
-- A single language across host + signaling + input keeps the scope
-  manageable for v1.
+- `windows-capture`, `wasapi` and `enigo` all have clean Rust bindings.
+- A single language across host + signaling + input + media keeps the
+  scope manageable for v1.
 
 ## CloudKit on Windows
 
@@ -53,12 +59,23 @@ Set the token's **Sign in Callback** / URL Redirect to:
 http://127.0.0.1:48172/icloud-auth-callback
 ```
 
+## Build prerequisites (Windows)
+
+The media encoders compile native code, so a release build needs:
+
+- The MSVC build tools (`cl.exe`) — OpenH264 (`openh264-sys2`) compiles
+  from source via `cc`.
+- **CMake** on `PATH` — `audiopus_sys` builds libopus from source.
+
+No prebuilt binary is shipped yet; build with `cargo build --release`
+and run `target/release/remote-desktop-host.exe`.
+
 Then launch the host with:
 
 ```powershell
 $env:REMOTE_DESKTOP_CLOUDKIT_API_TOKEN = "<CloudKit API token>"
 $env:REMOTE_DESKTOP_CLOUDKIT_ENV = "development"
-cargo run
+cargo run --release
 ```
 
 Optional environment variables:
@@ -74,17 +91,29 @@ Optional environment variables:
 
 ## Status
 
-Implemented:
+Implemented end-to-end:
 
 - Mandatory Apple ID/iCloud auth gate before the host can run.
-- CloudKit Web Services client for authenticated private-database
-  requests.
-- Persistent Windows host device identity.
-- `HostAdvertisement` publishing and `WebRTCSignal` polling.
-- Preflight offer response for the transitional signaling transport.
+- CloudKit Web Services client; `HostAdvertisement` publish +
+  `WebRTCSignal` poll; preflight-offer response.
+- `ICEConfig` (public DB) STUN fetch with baked-in fallback.
+- WebRTC: accept the client SDP offer, add a send-only H.264 screen
+  track and send-only Opus system-audio track, answer, trickle ICE
+  both ways, auto-restart the listener when a session ends.
+- `control` data channel: `hello` → `hello_ack` + `display`; routes
+  `pointer` / `scroll` / `key` / `text` into the input injector; `bye`
+  ends the session.
+- Screen capture (Windows.Graphics.Capture), system-audio loopback
+  (WASAPI), H.264/Opus encode, `SendInput` injection.
 
-Not implemented yet:
+### What is verified
 
-- WebRTC answer generation, ICE handling, screen capture, system audio,
-  and input injection.
-- Tauri tray/UI shell. Current milestone is a Rust host process.
+The portable surface — protocol codec, HID→key mapping, BGRA→I420 +
+H.264 + Opus encoders, signaling, ICE config — compiles and unit-tests
+on any host (`cargo test`, 26 tests).
+
+**Windows-only, unverified here:** the capture seam in `src/capture.rs`
+(`windows-capture` + `wasapi`) is `#[cfg(windows)]` and can only be
+exercised by building and running on Windows. It mirrors the macOS host
+behavior but has not been run on a Windows machine in this workspace —
+validate screen capture, loopback audio, and `SendInput` there.

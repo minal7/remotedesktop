@@ -5,9 +5,6 @@ edition = "2021"
 publish = false
 description = "Windows host agent for Remote Desktop (CloudKit-signaled WebRTC)."
 
-# Keep dependencies narrow until each subsystem is actually wired in —
-# the versions below are the anchor points we want to land on, not a
-# "install everything" sheet.
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "signal"] }
 serde = { version = "1", features = ["derive"] }
@@ -24,8 +21,22 @@ uuid = { version = "1", features = ["v4"] }
 webbrowser = "1"
 hostname = "0.4"
 
-# Stubbed for later: webrtc, windows, enigo, tauri/wry shell chrome.
-# This milestone wires the mandatory Apple ID + CloudKit signaling gate first.
+# WebRTC + media. All cross-platform: the peer connection, codecs,
+# input injection and the H.264/Opus encoders compile and unit-test on
+# any host. Only raw frame/audio capture is OS-specific (see below).
+webrtc = "0.17"
+bytes = "1"
+async-trait = "0.1"
+openh264 = "0.9"
+audiopus = "0.2"
+enigo = "0.6"
+
+# Windows-only capture. Everything else is portable so `cargo check`
+# and `cargo test` exercise the whole pipeline on the dev machine; the
+# screen/audio grabbers are the single OS-gated seam.
+[target.'cfg(windows)'.dependencies]
+windows-capture = "2"
+wasapi = "0.23"
 
 [profile.release]
 lto = "thin"

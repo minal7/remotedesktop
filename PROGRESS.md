@@ -157,11 +157,17 @@ records; keeps re-queries idempotent during the 2s poll loop.
 
 ## Next up (ordered)
 
-1. **Windows WebRTC + capture + input** — `webrtc-rs`, Windows.Graphics.Capture,
-   `enigo`.
-2. **Tauri tray/UI shell** around the Rust host process.
+1. ~~**Windows WebRTC + capture + input**~~ — DONE. `webrtc-rs` peer
+   session, `windows-capture` screen grab, `wasapi` loopback audio,
+   `openh264`/`audiopus` encode, `enigo` injection. Portable surface
+   unit-tested on macOS; the `#[cfg(windows)]` capture seam in
+   `host-windows/src/capture.rs` still needs a real Windows run.
+2. **Tauri tray/UI shell** — dropped for v1. Host is a console app
+   that prints the pairing code; protocol only *recommends* a session
+   indicator. Revisit post-v1 if a tray is wanted.
 3. **End-to-end iCloud pairing test** on real devices (out-of-band Apple
-   Developer portal work required first; see below).
+   Developer portal work required first; see below). Now also covers
+   the Windows host: build with MSVC + CMake, `cargo run --release`.
 4. **Production CloudKit schema promotion** once dev-DB records land.
 
 ## Work you (the user) need to do out-of-band

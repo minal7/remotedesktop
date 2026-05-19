@@ -1,22 +1,34 @@
 use anyhow::{Context, Result};
 use serde_json::{Map, Value};
+use std::sync::Arc;
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+use tokio::sync::Notify;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 mod auth;
+mod capture;
 mod cloudkit;
 mod config;
 mod credentials;
+mod iceconfig;
 mod identity;
+mod input;
+mod media;
+mod protocol;
 mod signaling;
+mod webrtc_host;
 
 use auth::AppleIdAuthenticator;
 use cloudkit::CloudKitClient;
 use config::AppConfig;
 use credentials::CredentialStore;
+use input::InputInjector;
+use protocol::HostInfo;
 use signaling::{
     new_pairing_code, HostSignalingClient, HostSignalingOptions, Kind, SignalingEnvelope,
 };
+use webrtc_host::WebRtcHost;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -49,7 +61,11 @@ async fn main() -> Result<()> {
 
     let sender_id = identity::get_or_create_device_id(&credentials)?;
     let host_name = host_name();
-    run_host(config, cloudkit, sender_id, host_name).await
+    let stun_urls = iceconfig::stun_urls(&cloudkit).await;
+    let injector = InputInjector::spawn()
+        .context("couldn't start input injection (is this account allowed to send input?)")?;
+
+    run_host(config, cloudkit, sender_id, host_name, stun_urls, injector).await
 }
 
 async fn run_host(
@@ -57,6 +73,8 @@ async fn run_host(
     cloudkit: CloudKitClient,
     sender_id: String,
     host_name: String,
+    stun_urls: Vec<String>,
+    injector: InputInjector,
 ) -> Result<()> {
     loop {
         let code = new_pairing_code();
@@ -76,7 +94,10 @@ async fn run_host(
         println!("Pairing code: {}", signaling.code());
         info!("advertising Windows host code={}", signaling.code());
 
-        let loop_exit = advertising_loop(&mut signaling, &config).await;
+        let session = Session::new(stun_urls.clone(), host_name.clone(), injector.clone());
+        let loop_exit = session.advertising_loop(&mut signaling, &config).await;
+        session.shutdown_peer().await;
+
         if let Err(error) = signaling.cleanup().await {
             warn!("CloudKit cleanup failed: {error:#}");
         }
@@ -94,93 +115,174 @@ enum LoopExit {
     Shutdown,
 }
 
-async fn advertising_loop(
-    signaling: &mut HostSignalingClient,
-    config: &AppConfig,
-) -> Result<LoopExit> {
-    loop {
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
-                info!("shutdown requested");
-                return Ok(LoopExit::Shutdown);
-            }
-            poll_result = signaling.poll() => {
-                match poll_result {
-                    Ok(envelopes) => {
-                        for envelope in envelopes {
-                            if handle_envelope(signaling, envelope).await? == EnvelopeAction::Restart {
-                                return Ok(LoopExit::Restart);
+/// One pairing attempt: drives signaling, owns the live peer session
+/// and the channel the peer uses to push answer/ICE back out.
+struct Session {
+    stun_urls: Vec<String>,
+    host_name: String,
+    injector: InputInjector,
+    ended: Arc<Notify>,
+    outbound_tx: UnboundedSender<SignalingEnvelope>,
+    outbound_rx: tokio::sync::Mutex<UnboundedReceiver<SignalingEnvelope>>,
+    peer: tokio::sync::Mutex<Option<Arc<WebRtcHost>>>,
+    buffered_remote_ice: tokio::sync::Mutex<Vec<Map<String, Value>>>,
+}
+
+impl Session {
+    fn new(stun_urls: Vec<String>, host_name: String, injector: InputInjector) -> Self {
+        let (outbound_tx, outbound_rx) = unbounded_channel();
+        Self {
+            stun_urls,
+            host_name,
+            injector,
+            ended: Arc::new(Notify::new()),
+            outbound_tx,
+            outbound_rx: tokio::sync::Mutex::new(outbound_rx),
+            peer: tokio::sync::Mutex::new(None),
+            buffered_remote_ice: tokio::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    async fn advertising_loop(
+        &self,
+        signaling: &mut HostSignalingClient,
+        config: &AppConfig,
+    ) -> Result<LoopExit> {
+        let mut outbound_rx = self.outbound_rx.lock().await;
+        loop {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {
+                    info!("shutdown requested");
+                    return Ok(LoopExit::Shutdown);
+                }
+                _ = self.ended.notified() => {
+                    info!("peer session ended — restarting listener");
+                    return Ok(LoopExit::Restart);
+                }
+                Some(envelope) = outbound_rx.recv() => {
+                    if let Err(error) = signaling.send(envelope).await {
+                        error!("couldn't forward signaling envelope: {error:#}");
+                    }
+                }
+                _ = tokio::time::sleep(config.poll_interval) => {
+                    match signaling.poll().await {
+                        Ok(envelopes) => {
+                            for envelope in envelopes {
+                                if self.handle_envelope(signaling, envelope).await? == Action::Restart {
+                                    return Ok(LoopExit::Restart);
+                                }
                             }
                         }
-                    }
-                    Err(error) => {
-                        error!("CloudKit poll failed: {error:#}");
+                        Err(error) => error!("CloudKit poll failed: {error:#}"),
                     }
                 }
             }
         }
+    }
 
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
-                info!("shutdown requested");
-                return Ok(LoopExit::Shutdown);
+    async fn handle_envelope(
+        &self,
+        signaling: &mut HostSignalingClient,
+        envelope: SignalingEnvelope,
+    ) -> Result<Action> {
+        match envelope.kind {
+            Kind::Offer => {
+                let client = string_payload(&envelope.payload, "client").unwrap_or("client");
+                match envelope.payload.get("sdp").and_then(Value::as_str) {
+                    Some(sdp) => self.start_peer(client, sdp.to_string()).await,
+                    None => {
+                        info!("received preflight offer from {client}");
+                        signaling
+                            .send(SignalingEnvelope::host_answer(host_metadata(
+                                &self.host_name,
+                            )))
+                            .await
+                            .context("couldn't send preflight answer")?;
+                        Ok(Action::Continue)
+                    }
+                }
             }
-            _ = tokio::time::sleep(config.poll_interval) => {}
+            Kind::Ice => {
+                let peer = self.peer.lock().await;
+                if let Some(peer) = peer.as_ref() {
+                    peer.add_remote_ice(&envelope.payload).await;
+                } else {
+                    self.buffered_remote_ice.lock().await.push(envelope.payload);
+                }
+                Ok(Action::Continue)
+            }
+            Kind::Bye => {
+                info!("client ended the pairing attempt");
+                Ok(Action::Restart)
+            }
+            Kind::Answer => {
+                warn!("host received unexpected answer envelope");
+                Ok(Action::Continue)
+            }
         }
     }
-}
 
-async fn handle_envelope(
-    signaling: &mut HostSignalingClient,
-    envelope: SignalingEnvelope,
-) -> Result<EnvelopeAction> {
-    match envelope.kind {
-        Kind::Offer => {
-            let client = string_payload(&envelope.payload, "client").unwrap_or("client");
-            if envelope.payload.get("sdp").is_some() {
-                warn!(
-                    "received WebRTC SDP offer from {client}; full Windows WebRTC is not wired yet"
-                );
-                signaling
-                    .send(SignalingEnvelope::host_bye(
-                        "Windows host sign-in and pairing are ready; WebRTC screen capture is not implemented yet.",
-                    ))
-                    .await
-                    .context("couldn't notify client that Windows WebRTC is not ready")?;
-                return Ok(EnvelopeAction::Continue);
+    async fn start_peer(&self, client: &str, sdp: String) -> Result<Action> {
+        if self.peer.lock().await.is_some() {
+            return Ok(Action::Continue);
+        }
+        info!("received WebRTC offer from {client}");
+        match WebRtcHost::start(
+            sdp,
+            self.stun_urls.clone(),
+            self.outbound_tx.clone(),
+            self.ended.clone(),
+            self.injector.clone(),
+            host_info(&self.host_name),
+        )
+        .await
+        {
+            Ok(host) => {
+                let buffered: Vec<_> =
+                    self.buffered_remote_ice.lock().await.drain(..).collect();
+                for payload in buffered {
+                    host.add_remote_ice(&payload).await;
+                }
+                *self.peer.lock().await = Some(host);
+                Ok(Action::Continue)
             }
+            Err(error) => {
+                error!("couldn't start WebRTC session: {error:#}");
+                self.outbound_tx
+                    .send(SignalingEnvelope::host_bye(&format!(
+                        "The Windows host couldn't start the screen session: {error}"
+                    )))
+                    .ok();
+                Ok(Action::Restart)
+            }
+        }
+    }
 
-            info!("received preflight offer from {client}");
-            signaling
-                .send(SignalingEnvelope::host_answer(host_metadata()))
-                .await
-                .context("couldn't send preflight answer")?;
-            Ok(EnvelopeAction::Continue)
-        }
-        Kind::Ice => {
-            info!("buffering/ignoring ICE until Windows WebRTC host peer is implemented");
-            Ok(EnvelopeAction::Continue)
-        }
-        Kind::Bye => {
-            info!("client ended the pairing attempt");
-            Ok(EnvelopeAction::Restart)
-        }
-        Kind::Answer => {
-            warn!("host received unexpected answer envelope");
-            Ok(EnvelopeAction::Continue)
+    async fn shutdown_peer(&self) {
+        if let Some(peer) = self.peer.lock().await.take() {
+            peer.close().await;
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-enum EnvelopeAction {
+enum Action {
     Continue,
     Restart,
 }
 
-fn host_metadata() -> Map<String, Value> {
+fn host_info(host_name: &str) -> HostInfo {
+    HostInfo {
+        app: "RemoteDesktop-Windows".to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        os: windows_version_label(),
+        hostname: host_name.to_string(),
+    }
+}
+
+fn host_metadata(host_name: &str) -> Map<String, Value> {
     Map::from_iter([
-        ("host".to_string(), Value::String(host_name())),
+        ("host".to_string(), Value::String(host_name.to_string())),
         (
             "app".to_string(),
             Value::String("RemoteDesktop-Windows".to_string()),
@@ -190,7 +292,7 @@ fn host_metadata() -> Map<String, Value> {
             Value::String(env!("CARGO_PKG_VERSION").to_string()),
         ),
         ("os".to_string(), Value::String(windows_version_label())),
-        ("audio".to_string(), Value::String("false".to_string())),
+        ("audio".to_string(), Value::String("true".to_string())),
         ("monitors".to_string(), Value::String("1".to_string())),
         ("displayWidth".to_string(), Value::String("0".to_string())),
         ("displayHeight".to_string(), Value::String("0".to_string())),
