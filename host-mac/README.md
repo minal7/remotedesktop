@@ -36,6 +36,43 @@ The generated target builds as a `LSUIElement` menu bar app. For local
 dev against the signaling Worker, set `SIGNALING_URL=http://127.0.0.1:8787`
 in the scheme's Run environment.
 
+## CLI install and headless setup
+
+For a developer Mac mini or other screenless host, build and install from SSH:
+
+```sh
+cd host-mac
+./scripts/install_host.sh --headless --start-at-login --launch --request-permissions --ssh-permission-report
+```
+
+The script installs `RemoteDesktopHost.app` into `/Applications`, enables a
+per-user LaunchAgent when requested, starts listening on launch in headless
+mode, and writes the current pairing code to:
+
+```sh
+~/Library/Application Support/RemoteDesktopHost/pairing-code.txt
+```
+
+You can check host readiness from the installed app binary:
+
+```sh
+/Applications/RemoteDesktopHost.app/Contents/MacOS/RemoteDesktopHost --check-permissions
+/Applications/RemoteDesktopHost.app/Contents/MacOS/RemoteDesktopHost --check-permissions-json
+/Applications/RemoteDesktopHost.app/Contents/MacOS/RemoteDesktopHost --ssh-permission-report
+```
+
+To generate an MDM Privacy Preferences Policy Control profile for managed Macs:
+
+```sh
+./scripts/install_host.sh --generate-pppc-profile ./RemoteDesktopHost.pppc.mobileconfig
+```
+
+Apple's TCC rules are intentionally strict: plain SSH can install, launch,
+request prompts, and verify status, but it cannot grant every required
+permission. The generated PPPC profile allows Accessibility/PostEvent and
+delegates ScreenCapture approval to managed standard users; Screen Recording
+and Microphone still cannot be silently granted by a local SSH script.
+
 ## What works today
 
 - Menu bar icon + popover (SwiftUI inside `NSHostingController`)
@@ -44,6 +81,9 @@ in the scheme's Run environment.
 - Long-polls CloudKit signaling envelopes and negotiates `offer` / `answer` / `ice` / `bye`
 - TCC permission preflight (Screen Recording + Accessibility) with
   deep-links to System Settings
+- CLI permission check/request commands plus a scriptable installer for
+  `/Applications`, LaunchAgent startup, headless auto-listen, and pairing-code
+  file export.
 - Microphone entitlement + permission preflight for the host audio
   bridge. LiveKitWebRTC's macOS audio engine still relies on the
   recording path to publish the ScreenCaptureKit system-audio feed,

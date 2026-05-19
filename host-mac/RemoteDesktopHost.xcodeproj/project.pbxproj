@@ -19,12 +19,14 @@
 		608B3DF5E693D7F3BD1D6928 /* CloudKitSignalingClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6DA7B1D695BC75E69194B0A /* CloudKitSignalingClient.swift */; };
 		62DA5B6673EA5CBE3D1697E2 /* DeviceIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E6A11B60193093594AABA25 /* DeviceIdentity.swift */; };
 		63A185B24B8A07ABEC2DD9FC /* InputInjector.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE8CCAE6B38CDDD22B43E761 /* InputInjector.swift */; };
+		69E1EB52E6F06EABED9B9163 /* HostCommandLine.swift in Sources */ = {isa = PBXBuildFile; fileRef = B104C1229A29AC3A660D5AE2 /* HostCommandLine.swift */; };
 		6D6AC21CC6C01821F4B30731 /* App.swift in Sources */ = {isa = PBXBuildFile; fileRef = 75EE7C6868D1A93B054508AE /* App.swift */; };
 		7E9180D7DA2E0B106F51AAAE /* HostConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = 76B373BE70CB02CAA21FB9F8 /* HostConfig.swift */; };
 		82F7EB7D6C73B7C48D1E09B5 /* ICEConfigFetcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A8E13306E6FC7B8FF07239C /* ICEConfigFetcher.swift */; };
 		8A75048F122E44B655F410CF /* SignalingEnvelope.swift in Sources */ = {isa = PBXBuildFile; fileRef = 89E37207F908B9627D856D43 /* SignalingEnvelope.swift */; };
 		963F2EF70B3726CF3EF3D44A /* WebRTCAliases.swift in Sources */ = {isa = PBXBuildFile; fileRef = 199B8A0D8EBEE0F556692058 /* WebRTCAliases.swift */; };
 		9774C8DAD590EBB177FB4BAA /* SystemAudioBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C10787D47D68714896956E4 /* SystemAudioBridge.swift */; };
+		9D448E71B0B80DF5EB39C9C9 /* HeadlessHostSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2701911382BBCEBD2F15D6F9 /* HeadlessHostSettings.swift */; };
 		9D70032A603AC37CEF77F3B9 /* WireFormat.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E396D7E6189E66F789A9466 /* WireFormat.swift */; };
 		B52D07F032EEF5EA41C14534 /* HIDUsage.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC26EE65BC584A891CDF9054 /* HIDUsage.swift */; };
 		ED079874829511ED2203A189 /* ScreenCaptureSizingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 037B0683983EF3DD797F9355 /* ScreenCaptureSizingTests.swift */; };
@@ -47,6 +49,7 @@
 		178543C74F742896058F900E /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		199B8A0D8EBEE0F556692058 /* WebRTCAliases.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebRTCAliases.swift; sourceTree = "<group>"; };
 		1FDAD0CCA04F6601347F37EE /* RemoteDesktopHostTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = RemoteDesktopHostTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		2701911382BBCEBD2F15D6F9 /* HeadlessHostSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HeadlessHostSettings.swift; sourceTree = "<group>"; };
 		2C10787D47D68714896956E4 /* SystemAudioBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemAudioBridge.swift; sourceTree = "<group>"; };
 		4770C8CE9BED4CC5EFB3A726 /* BonjourAdvertiser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BonjourAdvertiser.swift; sourceTree = "<group>"; };
 		5409F40C641B07FBB4D367EC /* HostPeerSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostPeerSession.swift; sourceTree = "<group>"; };
@@ -61,6 +64,7 @@
 		9B1DAF90A32ED728B525762F /* HostSessionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostSessionTests.swift; sourceTree = "<group>"; };
 		9E396D7E6189E66F789A9466 /* WireFormat.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WireFormat.swift; sourceTree = "<group>"; };
 		9F6F855555A1D4FB18F7FE69 /* RemoteDesktopHost.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = RemoteDesktopHost.entitlements; sourceTree = "<group>"; };
+		B104C1229A29AC3A660D5AE2 /* HostCommandLine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostCommandLine.swift; sourceTree = "<group>"; };
 		E92C4B9CB81E1F8B6CBE22DA /* AudioInputEntitlements.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioInputEntitlements.swift; sourceTree = "<group>"; };
 		EE8CCAE6B38CDDD22B43E761 /* InputInjector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InputInjector.swift; sourceTree = "<group>"; };
 		F6DA7B1D695BC75E69194B0A /* CloudKitSignalingClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudKitSignalingClient.swift; sourceTree = "<group>"; };
@@ -151,7 +155,9 @@
 				75EE7C6868D1A93B054508AE /* App.swift */,
 				E92C4B9CB81E1F8B6CBE22DA /* AudioInputEntitlements.swift */,
 				4770C8CE9BED4CC5EFB3A726 /* BonjourAdvertiser.swift */,
+				2701911382BBCEBD2F15D6F9 /* HeadlessHostSettings.swift */,
 				FC26EE65BC584A891CDF9054 /* HIDUsage.swift */,
+				B104C1229A29AC3A660D5AE2 /* HostCommandLine.swift */,
 				76B373BE70CB02CAA21FB9F8 /* HostConfig.swift */,
 				5409F40C641B07FBB4D367EC /* HostPeerSession.swift */,
 				7893923A36DECAC9886D28EF /* HostSession.swift */,
@@ -270,6 +276,8 @@
 				608B3DF5E693D7F3BD1D6928 /* CloudKitSignalingClient.swift in Sources */,
 				62DA5B6673EA5CBE3D1697E2 /* DeviceIdentity.swift in Sources */,
 				B52D07F032EEF5EA41C14534 /* HIDUsage.swift in Sources */,
+				9D448E71B0B80DF5EB39C9C9 /* HeadlessHostSettings.swift in Sources */,
+				69E1EB52E6F06EABED9B9163 /* HostCommandLine.swift in Sources */,
 				7E9180D7DA2E0B106F51AAAE /* HostConfig.swift in Sources */,
 				453DCAD598997A2C642D501A /* HostPeerSession.swift in Sources */,
 				0A2E96270BBA27C6B9005085 /* HostSession.swift in Sources */,

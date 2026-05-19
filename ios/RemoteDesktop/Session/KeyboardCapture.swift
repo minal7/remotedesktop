@@ -112,6 +112,10 @@ struct SoftKeyboardCapture: UIViewRepresentable {
         }
     }
 
+    static func dismantleUIView(_ uiView: UIView, coordinator: ()) {
+        (uiView as? CaptureField)?.resignFirstResponder()
+    }
+
     final class CaptureField: UITextField, UITextFieldDelegate {
         weak var session: SessionModel?
 

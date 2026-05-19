@@ -1,9 +1,18 @@
 import AppKit
+import Combine
+import Darwin
+import Foundation
 import SwiftUI
 
 @main
 struct RemoteDesktopHostApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+
+    init() {
+        if let exitCode = HostCommandLine.runIfNeeded() {
+            Darwin.exit(exitCode)
+        }
+    }
 
     var body: some Scene {
         // Empty scene — UI lives in an NSStatusItem popover managed
@@ -19,6 +28,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var popover: NSPopover!
     private var activationObserver: NSObjectProtocol?
+    private var stateObserver: AnyCancellable?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -55,12 +65,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Refresh permissions on first show so the UI reflects reality.
         session.refreshPermissions()
+        configureHeadlessMode()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         if let obs = activationObserver {
             NotificationCenter.default.removeObserver(obs)
         }
+        stateObserver?.cancel()
+        clearPairingCodeFile()
         session.stop()
     }
 
@@ -73,5 +86,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             popover.contentViewController?.view.window?.makeKey()
         }
+    }
+
+    private func configureHeadlessMode() {
+        stateObserver = session.$state.sink { [weak self] state in
+            self?.syncPairingCodeFile(for: state)
+        }
+
+        guard HeadlessHostSettings.startListeningOnLaunch else { return }
+        session.start()
+    }
+
+    private func syncPairingCodeFile(for state: HostSession.State) {
+        switch state {
+        case .advertising(let code):
+            writePairingCodeFile(code)
+        case .idle, .starting, .paired(_), .error(_):
+            clearPairingCodeFile()
+        }
+    }
+
+    private func writePairingCodeFile(_ code: String) {
+        guard let url = HeadlessHostSettings.pairingCodeFileURL else { return }
+        do {
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true)
+            try "\(code)\n".write(to: url, atomically: true, encoding: .utf8)
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        } catch {
+            NSLog("RemoteDesktopHost could not write pairing code file: \(error.localizedDescription)")
+        }
+    }
+
+    private func clearPairingCodeFile() {
+        guard let url = HeadlessHostSettings.pairingCodeFileURL else { return }
+        try? FileManager.default.removeItem(at: url)
     }
 }

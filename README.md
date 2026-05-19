@@ -89,6 +89,21 @@ open RemoteDesktopHost.xcodeproj
 First run will prompt for Screen Recording and Accessibility permissions.
 Set `SIGNALING_URL` in the scheme if running against a local Worker.
 
+For a screenless developer Mac mini, the host can be installed and launched
+from SSH:
+
+```sh
+cd host-mac
+./scripts/install_host.sh --headless --start-at-login --launch --request-permissions --ssh-permission-report
+cat ~/Library/Application\ Support/RemoteDesktopHost/pairing-code.txt
+```
+
+The installed binary also supports `--check-permissions` and
+`--check-permissions-json`. Plain SSH cannot grant every required macOS TCC
+permission; `--ssh-permission-report` prints the exact breakdown. Use the
+generated PPPC profile with user-approved MDM when you need the managed parts
+of permission setup.
+
 ## App Store compliance notes
 
 - Remote-control apps are permitted (Apple App Review Guidelines 4.2.7) as

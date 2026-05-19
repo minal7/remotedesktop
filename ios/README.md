@@ -39,7 +39,9 @@ For local development against a dev signaling Worker:
 - Hardware keyboard via `GCKeyboard`: raw HID keycodes + modifier mask.
 - Touch-cursor mode (no accessories): finger-delta cursor at 1.2×
   gain, tap = left click, long-press = right click, two-finger pan = scroll.
-- Soft keyboard, floating button, on-screen modifier keys.
+- Soft keyboard, floating button, on-screen modifier keys, and a hardware
+  keyboard handoff that hides the soft layout while a keyboard is attached and
+  restores it smoothly when the keyboard disconnects.
 - Chrome collapses to a thin status strip when keyboard + pointer are
   both connected, per the project's UX contract.
 

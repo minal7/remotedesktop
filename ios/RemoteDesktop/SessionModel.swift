@@ -107,7 +107,7 @@ final class SessionModel: ObservableObject {
         }
     }
 
-    private func releaseSoftModifiers() {
+    func releaseSoftModifiers() {
         guard softModifierMask != 0 else { return }
         let latched = SoftModifier.allCases.filter(isSoftModifierLatched)
         for modifier in latched.reversed() {

@@ -18,6 +18,7 @@ struct SessionView: View {
     @Environment(\.verticalSizeClass) private var verticalSizeClass
 
     @State private var softKeyboardOpen = false
+    @State private var restoreSoftKeyboardAfterHardwareDisconnect = false
     @State private var chromeRevealed = false
     @State private var hideTask: Task<Void, Never>?
 
@@ -39,6 +40,19 @@ struct SessionView: View {
 
     private var specialKeysAttentive: Bool {
         !specialKeysIdle || softKeyboardOpen || session.softModifierMask != 0
+    }
+
+    private var inputModeTitle: String {
+        switch (accessories.hasHardwareKeyboard, accessories.hasIndirectPointer) {
+        case (true, true):
+            return "Keyboard and pointer"
+        case (true, false):
+            return "Keyboard and touch cursor"
+        case (false, true):
+            return "Pointer and soft keys"
+        case (false, false):
+            return "Touch cursor and soft keys"
+        }
     }
 
     private var specialKeysIdleOpacity: Double {
@@ -71,11 +85,11 @@ struct SessionView: View {
                     .transition(.move(edge: .top).combined(with: .opacity))
             }
 
-            // ── Special keys (orientation-aware) ───────────────
-            specialKeys
+            // ── Input controls (orientation-aware) ─────────────
+            inputDock
 
             // ── Invisible soft-keyboard capture ────────────────
-            if softKeyboardOpen {
+            if softKeyboardOpen && !accessories.hasHardwareKeyboard {
                 SoftKeyboardCapture(isOpen: $softKeyboardOpen)
                     .frame(width: 1, height: 1)
                     .opacity(0.001)
@@ -91,12 +105,17 @@ struct SessionView: View {
         .statusBarHidden(!shouldShowChrome)
         .persistentSystemOverlays(.hidden)
         .animation(.easeInOut(duration: 0.25), value: shouldShowChrome)
+        .animation(.smooth(duration: 0.32), value: accessories.hasHardwareKeyboard)
+        .animation(.smooth(duration: 0.32), value: accessories.hasIndirectPointer)
         .onChange(of: isPortrait) { _, _ in
             // Reset landscape chrome state when rotating back to portrait.
             if isPortrait {
                 hideTask?.cancel()
                 chromeRevealed = false
             }
+        }
+        .onChange(of: accessories.hasHardwareKeyboard) { _, connected in
+            handleHardwareKeyboardChange(connected)
         }
     }
 
@@ -169,14 +188,20 @@ struct SessionView: View {
     private var statusStrip: some View {
         HStack(spacing: 10) {
             // Connection indicator
-            HStack(spacing: 6) {
+            HStack(spacing: 8) {
                 Circle()
                     .fill(Color.green)
-                    .frame(width: 7, height: 7)
+                    .frame(width: 8, height: 8)
                     .shadow(color: .green.opacity(0.6), radius: 4, y: 0)
-                Text(session.hostName ?? "Connecting…")
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.white.opacity(0.7))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(session.hostName ?? "Connecting...")
+                        .font(.subheadline.weight(.semibold))
+                        .lineLimit(1)
+                    Text(inputModeTitle)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
             }
 
             Spacer()
@@ -187,14 +212,16 @@ struct SessionView: View {
             } label: {
                 Image(systemName: "xmark.circle.fill")
                     .font(.system(size: 18))
-                    .foregroundStyle(.white.opacity(0.45))
+                    .foregroundStyle(.red.opacity(0.86))
+                    .frame(width: 32, height: 32)
+                    .background(.thinMaterial, in: Circle())
             }
             .accessibilityLabel("Disconnect")
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
         .background(
-            .ultraThinMaterial,
+            .regularMaterial,
             in: RoundedRectangle(cornerRadius: 0)
         )
         .overlay(alignment: .bottom) {
@@ -205,22 +232,22 @@ struct SessionView: View {
         }
     }
 
-    // MARK: - Special keys (orientation-aware)
+    // MARK: - Input dock (orientation-aware)
 
     @ViewBuilder
-    private var specialKeys: some View {
-        let mode = accessories.chromeMode
-        let needsKeyboard = mode == .full || mode == .partial(missing: .keyboard)
-        let needsModifiers = mode == .full
+    private var inputDock: some View {
+        let needsKeyboard = !accessories.hasHardwareKeyboard
+        let needsModifiers = !accessories.hasHardwareKeyboard
 
         if needsKeyboard || needsModifiers {
             VStack(spacing: 0) {
                 Spacer()
-                specialKeysContent(needsKeyboard: needsKeyboard,
-                                   needsModifiers: needsModifiers)
+                inputDockContent(needsKeyboard: needsKeyboard,
+                                 needsModifiers: needsModifiers)
             }
             .opacity(specialKeysAttentive ? 1.0 : specialKeysIdleOpacity)
             .animation(.easeInOut(duration: 0.35), value: specialKeysAttentive)
+            .transition(.move(edge: .bottom).combined(with: .opacity))
             .onAppear { scheduleSpecialKeysIdle() }
             .onDisappear {
                 specialKeysIdleTask?.cancel()
@@ -248,36 +275,52 @@ struct SessionView: View {
     /// bar just above the keyboard (bottom safe-area edge); in landscape they
     /// anchor flush at the very bottom of the screen.
     @ViewBuilder
-    private func specialKeysContent(needsKeyboard: Bool,
-                                    needsModifiers: Bool) -> some View {
+    private func inputDockContent(needsKeyboard: Bool,
+                                  needsModifiers: Bool) -> some View {
         if isPortrait {
             // ── Portrait: bottom-aligned, compact row ──────────
-            HStack(spacing: 12) {
-                if needsModifiers {
-                    ModifierBar(attentive: specialKeysAttentive,
-                                onInteraction: wakeSpecialKeys)
-                }
-                Spacer()
-                if needsKeyboard {
-                    softKeyboardButton
-                }
-            }
+            inputDockRow(needsKeyboard: needsKeyboard,
+                         needsModifiers: needsModifiers)
             .padding(.horizontal, 16)
             .padding(.bottom, 8)
         } else {
             // ── Landscape: free-floating buttons at screen bottom ──
-            HStack(spacing: 14) {
-                if needsModifiers {
-                    ModifierBar(attentive: specialKeysAttentive,
-                                onInteraction: wakeSpecialKeys)
-                }
-                Spacer()
-                if needsKeyboard {
-                    softKeyboardButton
-                }
-            }
+            inputDockRow(needsKeyboard: needsKeyboard,
+                         needsModifiers: needsModifiers)
             .padding(.horizontal, 20)
             .padding(.bottom, 10)
+        }
+    }
+
+    private func inputDockRow(needsKeyboard: Bool,
+                              needsModifiers: Bool) -> some View {
+        HStack(spacing: 12) {
+            if needsModifiers {
+                ModifierBar(attentive: specialKeysAttentive,
+                            onInteraction: wakeSpecialKeys)
+            }
+            Spacer(minLength: 8)
+            if needsKeyboard {
+                softKeyboardButton
+            }
+        }
+    }
+
+    private func handleHardwareKeyboardChange(_ connected: Bool) {
+        withAnimation(.smooth(duration: 0.32)) {
+            if connected {
+                restoreSoftKeyboardAfterHardwareDisconnect = softKeyboardOpen
+                softKeyboardOpen = false
+                session.releaseSoftModifiers()
+                specialKeysIdle = true
+            } else {
+                specialKeysIdle = false
+                if restoreSoftKeyboardAfterHardwareDisconnect {
+                    softKeyboardOpen = true
+                    restoreSoftKeyboardAfterHardwareDisconnect = false
+                }
+                wakeSpecialKeys()
+            }
         }
     }
 
