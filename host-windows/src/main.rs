@@ -1,11 +1,20 @@
+#![cfg_attr(
+    all(windows, not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
+
 use anyhow::{Context, Result};
 use serde_json::{Map, Value};
 use std::sync::Arc;
+use std::sync::RwLock;
+use std::thread;
+use tokio::runtime::Runtime;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::sync::Notify;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
+mod app_state;
 mod auth;
 mod capture;
 mod cloudkit;
@@ -17,8 +26,10 @@ mod input;
 mod media;
 mod protocol;
 mod signaling;
+mod ui;
 mod webrtc_host;
 
+use app_state::{AppState, Command, CommandSender, HostStatus, SharedState};
 use auth::AppleIdAuthenticator;
 use cloudkit::CloudKitClient;
 use config::AppConfig;
@@ -30,15 +41,227 @@ use signaling::{
 };
 use webrtc_host::WebRtcHost;
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("info,remote_desktop_host=debug")),
-        )
-        .init();
+fn main() -> Result<()> {
+    init_logging();
 
+    let state: SharedState = Arc::new(RwLock::new(AppState::default()));
+    let (cmd_tx, cmd_rx) = unbounded_channel::<Command>();
+    let commands = CommandSender(cmd_tx);
+
+    let state_for_runtime = state.clone();
+    let runtime_thread = thread::Builder::new()
+        .name("host-runtime".to_string())
+        .spawn(move || run_runtime(state_for_runtime, cmd_rx))
+        .context("failed to start runtime thread")?;
+
+    let icon = ui::make_icon();
+    let native_options = eframe::NativeOptions {
+        viewport: eframe::egui::ViewportBuilder::default()
+            .with_title("Remote Desktop Host")
+            .with_inner_size([380.0, 460.0])
+            .with_min_inner_size([320.0, 380.0])
+            .with_icon(Arc::new(icon)),
+        ..Default::default()
+    };
+
+    let ui_state = state.clone();
+    let ui_commands = commands.clone();
+    let result = eframe::run_native(
+        "Remote Desktop Host",
+        native_options,
+        Box::new(move |cc| {
+            cc.egui_ctx.set_visuals(eframe::egui::Visuals::dark());
+            Ok(Box::new(ui::HostApp::new(ui_state, ui_commands)))
+        }),
+    );
+
+    // UI is closed. The HostApp's on_exit handler already enqueued
+    // Command::Quit so the runtime should be tearing itself down.
+    let _ = runtime_thread.join();
+
+    if let Err(error) = result {
+        eprintln!("eframe failed: {error}");
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn run_runtime(state: SharedState, cmd_rx: UnboundedReceiver<Command>) {
+    let runtime = match Runtime::new() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            error!("failed to start tokio runtime: {error:#}");
+            app_state::set_status(
+                &state,
+                HostStatus::Error(format!("Couldn't start runtime: {error}")),
+            );
+            return;
+        }
+    };
+    runtime.block_on(controller(state, cmd_rx));
+}
+
+fn init_logging() {
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info,remote_desktop_host=debug"));
+
+    let log_path = log_path();
+    if let Some(parent) = log_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        Ok(file) => {
+            let writer = std::sync::Mutex::new(file);
+            tracing_subscriber::fmt()
+                .with_env_filter(env_filter)
+                .with_ansi(false)
+                .with_writer(writer)
+                .init();
+        }
+        Err(_) => {
+            tracing_subscriber::fmt()
+                .with_env_filter(env_filter)
+                .init();
+        }
+    }
+}
+
+fn log_path() -> std::path::PathBuf {
+    let base = std::env::var_os("LOCALAPPDATA")
+        .or_else(|| std::env::var_os("APPDATA"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    base.join("RemoteDesktopHost").join("host.log")
+}
+
+#[derive(Clone)]
+struct ControllerDeps {
+    config: AppConfig,
+    cloudkit: CloudKitClient,
+    sender_id: String,
+    host_name: String,
+    stun_urls: Vec<String>,
+    injector: InputInjector,
+}
+
+async fn controller(state: SharedState, mut cmd_rx: UnboundedReceiver<Command>) {
+    let deps = match setup(&state).await {
+        Ok(deps) => deps,
+        Err(error) => {
+            error!("setup failed: {error:#}");
+            app_state::set_status(
+                &state,
+                HostStatus::Error(format!("Couldn't start: {error}")),
+            );
+            // Still drain commands so UI buttons aren't deadlocked.
+            while let Some(cmd) = cmd_rx.recv().await {
+                if matches!(cmd, Command::Quit) {
+                    return;
+                }
+            }
+            return;
+        }
+    };
+
+    app_state::set_host_name(&state, deps.host_name.clone());
+
+    let (session_end_tx, mut session_end_rx) = unbounded_channel::<Result<()>>();
+
+    // Match the historical Windows host behavior: as soon as setup
+    // completes, start advertising automatically. The user can still
+    // press Stop in the UI to go idle, then Start to resume.
+    app_state::set_status(&state, HostStatus::Starting);
+    let auto_start = Arc::new(Notify::new());
+    spawn_session(
+        &deps,
+        state.clone(),
+        auto_start.clone(),
+        session_end_tx.clone(),
+    );
+    let mut current_shutdown: Option<Arc<Notify>> = Some(auto_start);
+    info!("controller ready, auto-started advertising");
+
+    loop {
+        tokio::select! {
+            cmd = cmd_rx.recv() => {
+                let Some(cmd) = cmd else { return; };
+                match cmd {
+                    Command::Start => {
+                        if current_shutdown.is_some() {
+                            continue;
+                        }
+                        app_state::set_status(&state, HostStatus::Starting);
+                        let shutdown = Arc::new(Notify::new());
+                        spawn_session(
+                            &deps,
+                            state.clone(),
+                            shutdown.clone(),
+                            session_end_tx.clone(),
+                        );
+                        current_shutdown = Some(shutdown);
+                    }
+                    Command::Stop => {
+                        if let Some(shutdown) = current_shutdown.take() {
+                            shutdown.notify_one();
+                            let result = session_end_rx.recv().await;
+                            log_session_result(result);
+                        }
+                        app_state::set_status(&state, HostStatus::Idle);
+                    }
+                    Command::Quit => {
+                        if let Some(shutdown) = current_shutdown.take() {
+                            shutdown.notify_one();
+                            let _ = session_end_rx.recv().await;
+                        }
+                        return;
+                    }
+                }
+            }
+            Some(result) = session_end_rx.recv() => {
+                current_shutdown = None;
+                match result {
+                    Ok(()) => {
+                        app_state::set_status(&state, HostStatus::Idle);
+                    }
+                    Err(error) => {
+                        app_state::set_status(
+                            &state,
+                            HostStatus::Error(format!("{error}")),
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn log_session_result(result: Option<Result<()>>) {
+    match result {
+        Some(Ok(())) => info!("session stopped cleanly"),
+        Some(Err(error)) => warn!("session ended with error: {error:#}"),
+        None => warn!("session result channel closed unexpectedly"),
+    }
+}
+
+fn spawn_session(
+    deps: &ControllerDeps,
+    state: SharedState,
+    shutdown: Arc<Notify>,
+    session_end_tx: UnboundedSender<Result<()>>,
+) {
+    let deps = deps.clone();
+    tokio::spawn(async move {
+        let result = run_host(state.clone(), shutdown, deps).await;
+        let _ = session_end_tx.send(result);
+    });
+}
+
+async fn setup(state: &SharedState) -> Result<ControllerDeps> {
     let config = AppConfig::from_env()?;
     info!(
         "CloudKit Apple ID callback URL must be configured as {}",
@@ -53,6 +276,8 @@ async fn main() -> Result<()> {
         config.auth_callback_bind,
         config.auth_callback_path.clone(),
     );
+
+    app_state::set_status(state, HostStatus::SigningIn);
     let user = authenticator.require_signed_in().await?;
     info!(
         "Apple ID CloudKit sign-in accepted for user record {}",
@@ -65,17 +290,30 @@ async fn main() -> Result<()> {
     let injector = InputInjector::spawn()
         .context("couldn't start input injection (is this account allowed to send input?)")?;
 
-    run_host(config, cloudkit, sender_id, host_name, stun_urls, injector).await
+    Ok(ControllerDeps {
+        config,
+        cloudkit,
+        sender_id,
+        host_name,
+        stun_urls,
+        injector,
+    })
 }
 
 async fn run_host(
-    config: AppConfig,
-    cloudkit: CloudKitClient,
-    sender_id: String,
-    host_name: String,
-    stun_urls: Vec<String>,
-    injector: InputInjector,
+    state: SharedState,
+    shutdown: Arc<Notify>,
+    deps: ControllerDeps,
 ) -> Result<()> {
+    let ControllerDeps {
+        config,
+        cloudkit,
+        sender_id,
+        host_name,
+        stun_urls,
+        injector,
+    } = deps;
+
     let mdns = mdns_sd::ServiceDaemon::new().ok();
 
     loop {
@@ -91,9 +329,12 @@ async fn run_host(
         );
 
         signaling.claim().await?;
-        println!("Remote Desktop Host for Windows");
-        println!("Signed in with Apple ID and advertising this computer.");
-        println!("Pairing code: {}", signaling.code());
+        app_state::set_status(
+            &state,
+            HostStatus::Advertising {
+                code: signaling.code().to_string(),
+            },
+        );
         info!("advertising Windows host code={}", signaling.code());
 
         let instance_name = format!("{} [{}]", host_name, signaling.code());
@@ -122,8 +363,16 @@ async fn run_host(
             }
         }
 
-        let session = Session::new(stun_urls.clone(), host_name.clone(), injector.clone());
-        let loop_exit = session.advertising_loop(&mut signaling, &config).await;
+        let session = Session::new(
+            stun_urls.clone(),
+            host_name.clone(),
+            injector.clone(),
+            state.clone(),
+            shutdown.clone(),
+        );
+        let loop_exit = session
+            .advertising_loop(&mut signaling, &config)
+            .await;
         session.shutdown_peer().await;
 
         if let Some(mdns) = &mdns {
@@ -154,6 +403,8 @@ struct Session {
     host_name: String,
     injector: InputInjector,
     ended: Arc<Notify>,
+    shutdown: Arc<Notify>,
+    state: SharedState,
     outbound_tx: UnboundedSender<SignalingEnvelope>,
     outbound_rx: tokio::sync::Mutex<UnboundedReceiver<SignalingEnvelope>>,
     peer: tokio::sync::Mutex<Option<Arc<WebRtcHost>>>,
@@ -161,13 +412,21 @@ struct Session {
 }
 
 impl Session {
-    fn new(stun_urls: Vec<String>, host_name: String, injector: InputInjector) -> Self {
+    fn new(
+        stun_urls: Vec<String>,
+        host_name: String,
+        injector: InputInjector,
+        state: SharedState,
+        shutdown: Arc<Notify>,
+    ) -> Self {
         let (outbound_tx, outbound_rx) = unbounded_channel();
         Self {
             stun_urls,
             host_name,
             injector,
             ended: Arc::new(Notify::new()),
+            shutdown,
+            state,
             outbound_tx,
             outbound_rx: tokio::sync::Mutex::new(outbound_rx),
             peer: tokio::sync::Mutex::new(None),
@@ -183,7 +442,7 @@ impl Session {
         let mut outbound_rx = self.outbound_rx.lock().await;
         loop {
             tokio::select! {
-                _ = tokio::signal::ctrl_c() => {
+                _ = self.shutdown.notified() => {
                     info!("shutdown requested");
                     return Ok(LoopExit::Shutdown);
                 }
@@ -275,6 +534,12 @@ impl Session {
                     host.add_remote_ice(&payload).await;
                 }
                 *self.peer.lock().await = Some(host);
+                app_state::set_status(
+                    &self.state,
+                    HostStatus::Paired {
+                        client: client.to_string(),
+                    },
+                );
                 Ok(Action::Continue)
             }
             Err(error) => {

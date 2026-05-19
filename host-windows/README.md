@@ -18,10 +18,14 @@ CloudKit-backed signaling — just different system APIs under the hood.
 - **Windows Credential Manager** via `keyring` for the web-auth token
   and the persistent device sender ID.
 
-Console app — it prints the pairing code to stdout. There is no
-Tauri/tray shell: the protocol only *recommends* a session indicator,
-and a system-webview shell is a large dependency the "it just works"
-path doesn't need. Deliberate v1 scope trim from the original plan.
+Ships with a small `eframe`/`egui` window that mirrors the macOS
+status popover — same five states (idle → starting → advertising →
+paired → error) and the same Start / Stop / Quit affordances. The
+window registers a procedurally-drawn monitor icon, so the host shows
+up in the Windows taskbar with a recognizable icon and is brought to
+focus on click. Release builds use `windows_subsystem = "windows"` so
+no console window flashes on launch; logs go to
+`%LOCALAPPDATA%\RemoteDesktopHost\host.log` instead of stdout.
 
 ## Why Rust (and not C#/WinUI)
 

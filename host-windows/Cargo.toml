@@ -32,6 +32,12 @@ openh264 = "0.9"
 audiopus = "0.2"
 enigo = "0.6"
 
+# GUI: small egui/eframe window that mirrors the macOS popover. Pulls
+# in winit + glow so the binary shows up in the Windows taskbar with
+# our icon and can render the same five-state status surface as the
+# Mac host.
+eframe = { version = "0.29", default-features = false, features = ["default_fonts", "glow"] }
+
 # Windows-only capture. Everything else is portable so `cargo check`
 # and `cargo test` exercise the whole pipeline on the dev machine; the
 # screen/audio grabbers are the single OS-gated seam.
