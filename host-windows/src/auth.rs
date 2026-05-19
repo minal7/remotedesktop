@@ -155,7 +155,7 @@ fn parse_web_auth_token_request_line(request_line: &str, callback_path: &str) ->
 
     url.query_pairs()
         .find(|(key, _)| key == "ckWebAuthToken")
-        .map(|(_, value)| value.into_owned())
+        .map(|(_, value)| value.into_owned().replace(' ', "+"))
         .filter(|value| !value.trim().is_empty())
 }
 

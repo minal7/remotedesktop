@@ -2,7 +2,6 @@ use keyring::Entry;
 use thiserror::Error;
 
 const SERVICE: &str = "com.threadmark.remotedesktop.host-windows";
-const WEB_AUTH_TOKEN_ACCOUNT: &str = "cloudkit-web-auth-token";
 const DEVICE_ID_ACCOUNT: &str = "device-id";
 
 #[derive(Clone, Debug, Default)]
@@ -19,16 +18,32 @@ impl CredentialStore {
         Self
     }
 
+    fn token_path() -> std::path::PathBuf {
+        let mut path = std::env::var("LOCALAPPDATA")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::path::PathBuf::from("C:\\ProgramData"));
+        path.push("remote-desktop-host");
+        let _ = std::fs::create_dir_all(&path);
+        path.push("cloudkit_token.txt");
+        path
+    }
+
     pub fn web_auth_token(&self) -> Result<Option<String>, CredentialError> {
-        self.get_secret(WEB_AUTH_TOKEN_ACCOUNT)
+        match std::fs::read_to_string(Self::token_path()) {
+            Ok(token) if token.trim().is_empty() => Ok(None),
+            Ok(token) => Ok(Some(token)),
+            Err(_) => Ok(None),
+        }
     }
 
     pub fn set_web_auth_token(&self, token: &str) -> Result<(), CredentialError> {
-        self.set_secret(WEB_AUTH_TOKEN_ACCOUNT, token)
+        let _ = std::fs::write(Self::token_path(), token);
+        Ok(())
     }
 
     pub fn clear_web_auth_token(&self) -> Result<(), CredentialError> {
-        self.delete_secret(WEB_AUTH_TOKEN_ACCOUNT)
+        let _ = std::fs::remove_file(Self::token_path());
+        Ok(())
     }
 
     pub fn device_id(&self) -> Result<Option<String>, CredentialError> {
@@ -54,12 +69,19 @@ impl CredentialStore {
         entry.set_password(secret)?;
         Ok(())
     }
+}
 
-    fn delete_secret(&self, account: &str) -> Result<(), CredentialError> {
-        let entry = Entry::new(SERVICE, account)?;
-        match entry.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(error) => Err(error.into()),
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_large_secret() {
+        let store = CredentialStore::new();
+        let large_token = "a".repeat(2000);
+        store.set_web_auth_token(&large_token).unwrap();
+        let retrieved = store.web_auth_token().unwrap().unwrap();
+        assert_eq!(large_token, retrieved);
+        store.clear_web_auth_token().unwrap();
     }
 }

@@ -77,7 +77,9 @@ impl ClientMessage {
                 dx: int(obj.get("dx")).unwrap_or(0) as i32,
                 dy: int(obj.get("dy")).unwrap_or(0) as i32,
                 phase: ScrollPhase::from_str(
-                    obj.get("phase").and_then(Value::as_str).unwrap_or("changed"),
+                    obj.get("phase")
+                        .and_then(Value::as_str)
+                        .unwrap_or("changed"),
                 ),
             }),
             "key" => Some(Self::Key {
@@ -86,7 +88,10 @@ impl ClientMessage {
                 modifiers: (int(obj.get("modifiers")).unwrap_or(0) & 0xFFFF) as u16,
             }),
             "text" => Some(Self::Text(
-                obj.get("s2").and_then(Value::as_str).unwrap_or("").to_string(),
+                obj.get("s2")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
             )),
             "qos" => Some(Self::Qos {
                 target_fps: int(obj.get("targetFps")).unwrap_or(60),
@@ -198,8 +203,7 @@ mod tests {
 
     #[test]
     fn decodes_pointer_and_masks_buttons() {
-        let msg =
-            ClientMessage::decode(br#"{"t":"pointer","x":10,"y":20,"buttons":511}"#).unwrap();
+        let msg = ClientMessage::decode(br#"{"t":"pointer","x":10,"y":20,"buttons":511}"#).unwrap();
         assert_eq!(
             msg,
             ClientMessage::Pointer {

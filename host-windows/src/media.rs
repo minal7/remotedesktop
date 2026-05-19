@@ -7,7 +7,7 @@
 //!   packet per call.
 
 use anyhow::{Context, Result};
-use openh264::encoder::{Encoder, EncoderConfig, FrameRate, UsageType};
+use openh264::encoder::{Encoder, EncoderConfig, FrameRate, IntraFramePeriod, UsageType};
 use openh264::formats::YUVBuffer;
 use openh264::OpenH264API;
 
@@ -25,14 +25,28 @@ pub struct VideoEncoder {
 
 impl VideoEncoder {
     pub fn new(target_bitrate_bps: u32, max_fps: f32) -> Result<Self> {
+        // Periodic IDR every `gop_frames` frames (~2 s at 60 fps) so a
+        // late-joining decoder recovers without RTCP feedback, and
+        // anyone who drops a P-frame resyncs quickly. PLI/FIR from the
+        // receiver still triggers an out-of-band keyframe via
+        // `force_intra_frame`.
+        let gop_frames = (max_fps * 2.0).max(30.0) as u32;
         let config = EncoderConfig::new()
             .usage_type(UsageType::ScreenContentRealTime)
             .bitrate(openh264::encoder::BitRate::from_bps(target_bitrate_bps))
             .max_frame_rate(FrameRate::from_hz(max_fps))
+            .intra_frame_period(IntraFramePeriod::from_num_frames(gop_frames))
             .skip_frames(true);
         let encoder = Encoder::with_api_config(OpenH264API::from_source(), config)
             .context("couldn't initialize the OpenH264 encoder")?;
         Ok(Self { encoder })
+    }
+
+    /// Flags the next encoded frame as an IDR keyframe. Used to satisfy
+    /// receiver PLI/FIR (an iOS client that joins after the initial IDR
+    /// needs a fresh one to start decoding).
+    pub fn force_intra_frame(&mut self) {
+        self.encoder.force_intra_frame();
     }
 
     /// Encodes one BGRA frame (top-down, tightly packed `w*h*4`) and
@@ -44,7 +58,11 @@ impl VideoEncoder {
             "frame too small after even-rounding: {width}x{height}"
         );
         anyhow::ensure!(
-            bgra.len() >= width.checked_mul(height).and_then(|p| p.checked_mul(4)).unwrap_or(0),
+            bgra.len()
+                >= width
+                    .checked_mul(height)
+                    .and_then(|p| p.checked_mul(4))
+                    .unwrap_or(0),
             "BGRA buffer {} too small for {width}x{height}",
             bgra.len()
         );

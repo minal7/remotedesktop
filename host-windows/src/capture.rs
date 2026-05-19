@@ -126,6 +126,13 @@ mod platform {
         }
     }
 
+    pub fn display_info() -> Result<(u32, u32)> {
+        let monitor = Monitor::primary().context("no primary monitor")?;
+        let width = monitor.width().context("monitor width")?;
+        let height = monitor.height().context("monitor height")?;
+        Ok((width, height))
+    }
+
     pub fn start() -> Result<Capture> {
         let monitor = Monitor::primary().context("no primary monitor")?;
         let width = monitor.width().context("monitor width")?;
@@ -263,6 +270,10 @@ mod platform {
 
     pub struct StopHandle;
 
+    pub fn display_info() -> Result<(u32, u32)> {
+        Ok((1920, 1080))
+    }
+
     pub fn start() -> Result<Capture> {
         anyhow::bail!(
             "screen and audio capture are implemented for Windows only; \
@@ -271,5 +282,6 @@ mod platform {
     }
 }
 
+pub use platform::display_info;
 pub use platform::start;
 pub use platform::StopHandle;

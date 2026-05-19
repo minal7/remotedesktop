@@ -7,9 +7,7 @@
 //! public `InputInjector` is a cheap, cloneable handle.
 
 use crate::protocol::ClientMessage;
-use enigo::{
-    Axis, Button, Coordinate, Direction, Enigo, Keyboard, Key, Mouse, Settings,
-};
+use enigo::{Axis, Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings};
 use std::sync::mpsc::{self, Sender};
 use std::thread;
 use tracing::{debug, warn};
@@ -69,11 +67,7 @@ fn apply(enigo: &mut Enigo, state: &mut PointerState, message: ClientMessage) {
     let result = match message {
         ClientMessage::Pointer { x, y, buttons } => inject_pointer(enigo, state, x, y, buttons),
         ClientMessage::Scroll { dx, dy, .. } => inject_scroll(enigo, dx, dy),
-        ClientMessage::Key {
-            usage,
-            down,
-            ..
-        } => inject_key(enigo, usage, down),
+        ClientMessage::Key { usage, down, .. } => inject_key(enigo, usage, down),
         ClientMessage::Text(text) => enigo.text(&text).map(|_| ()),
         // hello / qos / bye are handled by the session, never injected.
         ClientMessage::Hello { .. } | ClientMessage::Qos { .. } | ClientMessage::Bye { .. } => {

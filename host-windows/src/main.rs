@@ -76,6 +76,8 @@ async fn run_host(
     stun_urls: Vec<String>,
     injector: InputInjector,
 ) -> Result<()> {
+    let mdns = mdns_sd::ServiceDaemon::new().ok();
+
     loop {
         let code = new_pairing_code();
         let mut signaling = HostSignalingClient::new(
@@ -94,9 +96,39 @@ async fn run_host(
         println!("Pairing code: {}", signaling.code());
         info!("advertising Windows host code={}", signaling.code());
 
+        let instance_name = format!("{} [{}]", host_name, signaling.code());
+        let service_type = "_remotedesktop._tcp.local.";
+        let fullname = format!("{}.{}", instance_name, service_type);
+        if let Some(mdns) = &mdns {
+            let host_name_local = format!("{}.local.", host_name.replace(" ", "-"));
+            let properties: [(&str, &str); 0] = [];
+            match mdns_sd::ServiceInfo::new(
+                service_type,
+                &instance_name,
+                &host_name_local,
+                "0.0.0.0",
+                9,
+                &properties[..],
+            ) {
+                Ok(info) => {
+                    let info = info.enable_addr_auto();
+                    if let Err(error) = mdns.register(info) {
+                        warn!("mDNS registration failed: {error:#}");
+                    }
+                }
+                Err(error) => {
+                    warn!("mDNS ServiceInfo creation failed: {error:#}");
+                }
+            }
+        }
+
         let session = Session::new(stun_urls.clone(), host_name.clone(), injector.clone());
         let loop_exit = session.advertising_loop(&mut signaling, &config).await;
         session.shutdown_peer().await;
+
+        if let Some(mdns) = &mdns {
+            let _ = mdns.unregister(&fullname);
+        }
 
         if let Err(error) = signaling.cleanup().await {
             warn!("CloudKit cleanup failed: {error:#}");
@@ -238,8 +270,7 @@ impl Session {
         .await
         {
             Ok(host) => {
-                let buffered: Vec<_> =
-                    self.buffered_remote_ice.lock().await.drain(..).collect();
+                let buffered: Vec<_> = self.buffered_remote_ice.lock().await.drain(..).collect();
                 for payload in buffered {
                     host.add_remote_ice(&payload).await;
                 }
@@ -281,6 +312,7 @@ fn host_info(host_name: &str) -> HostInfo {
 }
 
 fn host_metadata(host_name: &str) -> Map<String, Value> {
+    let (width, height) = crate::capture::display_info().unwrap_or((0, 0));
     Map::from_iter([
         ("host".to_string(), Value::String(host_name.to_string())),
         (
@@ -294,8 +326,11 @@ fn host_metadata(host_name: &str) -> Map<String, Value> {
         ("os".to_string(), Value::String(windows_version_label())),
         ("audio".to_string(), Value::String("true".to_string())),
         ("monitors".to_string(), Value::String("1".to_string())),
-        ("displayWidth".to_string(), Value::String("0".to_string())),
-        ("displayHeight".to_string(), Value::String("0".to_string())),
+        ("displayWidth".to_string(), Value::String(width.to_string())),
+        (
+            "displayHeight".to_string(),
+            Value::String(height.to_string()),
+        ),
         (
             "displayScale".to_string(),
             Value::String("1.00".to_string()),

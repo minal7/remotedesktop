@@ -14,9 +14,7 @@
 use crate::capture::{self, ScreenFrame};
 use crate::input::InputInjector;
 use crate::media::{AudioEncoder, VideoEncoder, OPUS_FRAME_INTERLEAVED};
-use crate::protocol::{
-    self, ClientMessage, DisplayInfo, HostInfo, PROTOCOL_VERSION,
-};
+use crate::protocol::{self, ClientMessage, DisplayInfo, HostInfo, PROTOCOL_VERSION};
 use crate::signaling::{Kind, Role, SignalingEnvelope};
 use anyhow::{Context, Result};
 use bytes::Bytes;
@@ -42,7 +40,12 @@ use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
+use webrtc::rtcp::payload_feedbacks::full_intra_request::FullIntraRequest;
+use webrtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability;
+use webrtc::rtp_transceiver::rtp_sender::RTCRtpSender;
+use webrtc::rtp_transceiver::rtp_transceiver_direction::RTCRtpTransceiverDirection;
+use webrtc::rtp_transceiver::RTCRtpTransceiverInit;
 use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
 use webrtc::track::track_local::TrackLocal;
 
@@ -111,20 +114,32 @@ impl WebRtcHost {
             "remote-desktop".to_owned(),
         ));
 
-        // Remote description first, so the client's recvonly transceivers
-        // exist for our tracks to bind to (→ sendonly in the answer).
+        // Create the send-only transceivers *before* applying the
+        // client's offer. webrtc-rs's m-line matcher
+        // (`satisfy_type_and_direction`) pairs each remote `recvonly`
+        // audio/video section with a pre-existing local `sendonly`
+        // transceiver of the same kind. If we instead set the remote
+        // description first and `add_track` after, webrtc-rs leaves the
+        // real m-lines `recvonly` (no media ever flows) and appends
+        // unmatched `sendrecv` transceivers with no answer section —
+        // which is why screen + audio were dead while the data channel
+        // (its own m-line) still worked.
+        let video_sender = add_send_transceiver(&pc, "video", Arc::clone(&video_track))
+            .await
+            .context("add video transceiver")?;
+        let _audio_sender = add_send_transceiver(&pc, "audio", Arc::clone(&audio_track))
+            .await
+            .context("add audio transceiver")?;
+
+        // Set by the RTCP reader task on PLI/FIR and consumed by the
+        // video encoder thread to flag the next frame as an IDR.
+        let keyframe_request = Arc::new(AtomicBool::new(false));
+
         pc.set_remote_description(
             RTCSessionDescription::offer(offer_sdp).context("parse client offer")?,
         )
         .await
         .context("set remote description")?;
-
-        pc.add_track(Arc::clone(&video_track) as Arc<dyn TrackLocal + Send + Sync>)
-            .await
-            .context("add video track")?;
-        pc.add_track(Arc::clone(&audio_track) as Arc<dyn TrackLocal + Send + Sync>)
-            .await
-            .context("add audio track")?;
 
         let closed = Arc::new(AtomicBool::new(false));
 
@@ -162,8 +177,7 @@ impl WebRtcHost {
                         RTCPeerConnectionState::Disconnected => {
                             warn!("peer connection disconnected (may recover)");
                         }
-                        RTCPeerConnectionState::Failed
-                        | RTCPeerConnectionState::Closed => {
+                        RTCPeerConnectionState::Failed | RTCPeerConnectionState::Closed => {
                             if !closed.swap(true, Ordering::SeqCst) {
                                 ended.notify_one();
                             }
@@ -203,6 +217,17 @@ impl WebRtcHost {
             .send(answer_envelope(&answer.sdp))
             .context("queue SDP answer for signaling")?;
 
+        for t in pc.get_transceivers().await {
+            info!(
+                "answer transceiver kind={} mid={:?} direction={:?} current={:?}",
+                t.kind(),
+                t.mid(),
+                t.direction(),
+                t.current_direction()
+            );
+        }
+        tracing::debug!("local answer SDP:\n{}", answer.sdp);
+
         // Capture is Windows-only; on the dev machine this returns a
         // clear error and the session ends gracefully.
         let cap = capture::start().context("start screen/audio capture")?;
@@ -215,7 +240,10 @@ impl WebRtcHost {
             tasks: Mutex::new(Vec::new()),
         });
 
-        host.spawn_video_pipeline(cap.video_rx, video_track).await;
+        host.spawn_keyframe_listener(video_sender, Arc::clone(&keyframe_request))
+            .await;
+        host.spawn_video_pipeline(cap.video_rx, video_track, keyframe_request)
+            .await;
         host.spawn_audio_pipeline(cap.audio_rx, audio_track).await;
         Ok(host)
     }
@@ -258,6 +286,7 @@ impl WebRtcHost {
         &self,
         frames: StdReceiver<ScreenFrame>,
         track: Arc<TrackLocalStaticSample>,
+        keyframe_request: Arc<AtomicBool>,
     ) {
         let (enc_tx, mut enc_rx) = unbounded_channel::<Vec<u8>>();
 
@@ -273,9 +302,26 @@ impl WebRtcHost {
                         return;
                     }
                 };
+                let mut raw = 0u64;
+                let mut encoded = 0u64;
                 while let Ok(frame) = frames.recv() {
+                    raw += 1;
+                    if raw == 1 {
+                        info!("video: first raw frame {}x{}", frame.width, frame.height);
+                    }
+                    if keyframe_request.swap(false, Ordering::SeqCst) {
+                        encoder.force_intra_frame();
+                        info!("video: forcing IDR (receiver PLI/FIR)");
+                    }
                     match encoder.encode_bgra(&frame.data, frame.width, frame.height) {
                         Ok(annex_b) if !annex_b.is_empty() => {
+                            encoded += 1;
+                            if encoded % 120 == 1 {
+                                info!(
+                                    "video: encoded {encoded}/{raw} frames ({} B)",
+                                    annex_b.len()
+                                );
+                            }
                             if enc_tx.send(annex_b).is_err() {
                                 break;
                             }
@@ -289,8 +335,9 @@ impl WebRtcHost {
 
         let frame_duration = Duration::from_secs_f32(1.0 / TARGET_FPS);
         let writer = tokio::spawn(async move {
+            let mut written = 0u64;
             while let Some(annex_b) = enc_rx.recv().await {
-                if let Err(error) = track
+                match track
                     .write_sample(&Sample {
                         data: Bytes::from(annex_b),
                         duration: frame_duration,
@@ -298,8 +345,16 @@ impl WebRtcHost {
                     })
                     .await
                 {
-                    warn!("video write_sample failed: {error}");
-                    break;
+                    Ok(()) => {
+                        written += 1;
+                        if written % 120 == 1 {
+                            info!("video: write_sample ok x{written}");
+                        }
+                    }
+                    Err(error) => {
+                        warn!("video write_sample failed: {error}");
+                        break;
+                    }
                 }
             }
         });
@@ -324,13 +379,22 @@ impl WebRtcHost {
                     }
                 };
                 let mut pending: Vec<f32> = Vec::with_capacity(OPUS_FRAME_INTERLEAVED * 4);
+                let mut chunks = 0u64;
+                let mut encoded = 0u64;
                 while let Ok(chunk) = samples.recv() {
+                    chunks += 1;
+                    if chunks == 1 {
+                        info!("audio: first loopback chunk ({} samples)", chunk.len());
+                    }
                     pending.extend_from_slice(&chunk);
                     while pending.len() >= OPUS_FRAME_INTERLEAVED {
-                        let frame: Vec<f32> =
-                            pending.drain(..OPUS_FRAME_INTERLEAVED).collect();
+                        let frame: Vec<f32> = pending.drain(..OPUS_FRAME_INTERLEAVED).collect();
                         match encoder.encode_frame(&frame) {
                             Ok(packet) => {
+                                encoded += 1;
+                                if encoded % 250 == 1 {
+                                    info!("audio: encoded {encoded} opus frames");
+                                }
                                 if enc_tx.send(packet).is_err() {
                                     return;
                                 }
@@ -343,8 +407,9 @@ impl WebRtcHost {
             .expect("spawn audio encoder thread");
 
         let writer = tokio::spawn(async move {
+            let mut written = 0u64;
             while let Some(packet) = enc_rx.recv().await {
-                if let Err(error) = track
+                match track
                     .write_sample(&Sample {
                         data: Bytes::from(packet),
                         duration: Duration::from_millis(20),
@@ -352,13 +417,77 @@ impl WebRtcHost {
                     })
                     .await
                 {
-                    warn!("audio write_sample failed: {error}");
-                    break;
+                    Ok(()) => {
+                        written += 1;
+                        if written % 250 == 1 {
+                            info!("audio: write_sample ok x{written}");
+                        }
+                    }
+                    Err(error) => {
+                        warn!("audio write_sample failed: {error}");
+                        break;
+                    }
                 }
             }
         });
         self.tasks.lock().await.push(writer);
     }
+
+    /// Drains RTCP from the video sender and flips `flag` whenever the
+    /// receiver asks for a keyframe (PLI or FIR). The encoder thread
+    /// consumes the flag before its next encode. Without this the iOS
+    /// decoder is stuck on the first P-frame if it joined the session
+    /// after the initial IDR was already sent.
+    async fn spawn_keyframe_listener(&self, sender: Arc<RTCRtpSender>, flag: Arc<AtomicBool>) {
+        let task = tokio::spawn(async move {
+            loop {
+                let pkts = match sender.read_rtcp().await {
+                    Ok((pkts, _)) => pkts,
+                    Err(_) => return, // sender closed
+                };
+                for pkt in pkts {
+                    let any = pkt.as_any();
+                    if any.is::<PictureLossIndication>() || any.is::<FullIntraRequest>() {
+                        if !flag.swap(true, Ordering::SeqCst) {
+                            info!("video: receiver requested keyframe (PLI/FIR)");
+                        }
+                        break;
+                    }
+                }
+            }
+        });
+        self.tasks.lock().await.push(task);
+    }
+}
+
+/// Adds a `sendonly` transceiver carrying `track`. Must be called
+/// before `set_remote_description`: webrtc-rs then matches the client's
+/// `recvonly` audio/video m-line to this local transceiver by kind +
+/// direction (`satisfy_type_and_direction`). `add_transceiver_from_track`
+/// builds a fully-initialized sender (with RTP encodings), so the track
+/// actually sends — unlike `RTCRtpSender::replace_track`, which requires
+/// pre-existing encodings and rejects an initial bind.
+async fn add_send_transceiver(
+    pc: &RTCPeerConnection,
+    label: &str,
+    track: Arc<TrackLocalStaticSample>,
+) -> Result<Arc<RTCRtpSender>> {
+    let track_dyn: Arc<dyn TrackLocal + Send + Sync> = track;
+    let transceiver = pc
+        .add_transceiver_from_track(
+            track_dyn,
+            Some(RTCRtpTransceiverInit {
+                direction: RTCRtpTransceiverDirection::Sendonly,
+                send_encodings: vec![],
+            }),
+        )
+        .await?;
+    info!(
+        "added sendonly {label} transceiver kind={} direction={:?}",
+        transceiver.kind(),
+        transceiver.direction()
+    );
+    Ok(transceiver.sender().await)
 }
 
 /// Wires up the host side of the `control` data channel.
@@ -385,8 +514,7 @@ fn serve_control_channel(
             match message {
                 ClientMessage::Hello { proto } => {
                     if proto != PROTOCOL_VERSION {
-                        send_dc(&dc, protocol::encode_bye(next(&seq), now_us(), "protocol"))
-                            .await;
+                        send_dc(&dc, protocol::encode_bye(next(&seq), now_us(), "protocol")).await;
                         if !closed.swap(true, Ordering::SeqCst) {
                             ended.notify_one();
                         }
@@ -404,14 +532,15 @@ fn serve_control_channel(
                         ),
                     )
                     .await;
+                    let (width, height) = crate::capture::display_info().unwrap_or((0, 0));
                     send_dc(
                         &dc,
                         protocol::encode_display(
                             next(&seq),
                             now_us(),
                             DisplayInfo {
-                                width: 0,
-                                height: 0,
+                                width: width as i32,
+                                height: height as i32,
                                 scale: 1.0,
                             },
                         ),
