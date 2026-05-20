@@ -17,7 +17,57 @@ pub struct HostApp {
 }
 
 impl HostApp {
-    pub fn new(state: SharedState, commands: CommandSender) -> Self {
+    pub fn new(
+        state: SharedState,
+        commands: CommandSender,
+        ctx: egui::Context,
+        show_item_id: tray_icon::menu::MenuId,
+        quit_item_id: tray_icon::menu::MenuId,
+    ) -> Self {
+        let ctx_clone = ctx.clone();
+        let show_id = show_item_id.clone();
+        let quit_id = quit_item_id.clone();
+        let commands_clone = commands.clone();
+
+        std::thread::spawn(move || {
+            loop {
+                // Poll tray events
+                if let Ok(event) = tray_icon::TrayIconEvent::receiver().try_recv() {
+                    match event {
+                        tray_icon::TrayIconEvent::Click {
+                            button: tray_icon::MouseButton::Left,
+                            ..
+                        }
+                        | tray_icon::TrayIconEvent::DoubleClick {
+                            button: tray_icon::MouseButton::Left,
+                            ..
+                        } => {
+                            #[cfg(windows)]
+                            set_window_native_visibility(true);
+                            ctx_clone.request_repaint();
+                        }
+                        _ => {}
+                    }
+                }
+
+                // Poll menu events
+                if let Ok(event) = tray_icon::menu::MenuEvent::receiver().try_recv() {
+                    if event.id == show_id {
+                        #[cfg(windows)]
+                        set_window_native_visibility(true);
+                        ctx_clone.request_repaint();
+                    } else if event.id == quit_id {
+                        commands_clone.send(Command::Quit);
+                        ctx_clone.send_viewport_cmd(egui::ViewportCommand::Close);
+                        ctx_clone.request_repaint();
+                        break;
+                    }
+                }
+
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        });
+
         Self {
             state,
             commands,
@@ -28,6 +78,14 @@ impl HostApp {
 
 impl eframe::App for HostApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if ctx.input(|i| i.viewport().close_requested()) {
+            if !self.quitting {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                #[cfg(windows)]
+                set_window_native_visibility(false);
+            }
+        }
+
         // Keep refreshing so background state changes show up quickly.
         // egui is otherwise lazy when no input events arrive.
         ctx.request_repaint_after(Duration::from_millis(200));
@@ -325,5 +383,32 @@ pub fn make_icon() -> egui::IconData {
         rgba,
         width: SIZE,
         height: SIZE,
+    }
+}
+
+#[cfg(windows)]
+fn set_window_native_visibility(visible: bool) {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use std::iter::once;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        FindWindowW, ShowWindow, SW_HIDE, SW_SHOW, SW_RESTORE
+    };
+
+    let title: Vec<u16> = OsStr::new("Remote Desktop Host")
+        .encode_wide()
+        .chain(once(0))
+        .collect();
+
+    unsafe {
+        let hwnd = FindWindowW(std::ptr::null(), title.as_ptr());
+        if hwnd != std::ptr::null_mut() {
+            if visible {
+                ShowWindow(hwnd, SW_SHOW);
+                ShowWindow(hwnd, SW_RESTORE);
+            } else {
+                ShowWindow(hwnd, SW_HIDE);
+            }
+        }
     }
 }

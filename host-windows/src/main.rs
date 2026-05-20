@@ -41,6 +41,7 @@ use signaling::{
 use webrtc_host::WebRtcHost;
 
 fn main() -> Result<()> {
+    let _ = dotenvy::dotenv();
     init_logging();
 
     let state: SharedState = Arc::new(RwLock::new(AppState::default()));
@@ -54,6 +55,26 @@ fn main() -> Result<()> {
         .context("failed to start runtime thread")?;
 
     let icon = ui::make_icon();
+    let tray_menu = tray_icon::menu::Menu::new();
+    let show_item = tray_icon::menu::MenuItem::new("Show Remote Desktop Host", true, None);
+    let quit_item = tray_icon::menu::MenuItem::new("Quit", true, None);
+    let _ = tray_menu.append_items(&[
+        &show_item,
+        &tray_icon::menu::PredefinedMenuItem::separator(),
+        &quit_item,
+    ]);
+
+    let tray_icon = tray_icon::Icon::from_rgba(icon.rgba.clone(), icon.width, icon.height)
+        .expect("failed to create tray icon");
+
+    let _tray = tray_icon::TrayIconBuilder::new()
+        .with_menu(Box::new(tray_menu))
+        .with_tooltip("Remote Desktop Host")
+        .with_icon(tray_icon)
+        .with_menu_on_left_click(false)
+        .build()
+        .expect("failed to build tray icon");
+
     let native_options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("Remote Desktop Host")
@@ -65,12 +86,20 @@ fn main() -> Result<()> {
 
     let ui_state = state.clone();
     let ui_commands = commands.clone();
+    let show_item_id = show_item.id().clone();
+    let quit_item_id = quit_item.id().clone();
     let result = eframe::run_native(
         "Remote Desktop Host",
         native_options,
         Box::new(move |cc| {
             cc.egui_ctx.set_visuals(eframe::egui::Visuals::dark());
-            Ok(Box::new(ui::HostApp::new(ui_state, ui_commands)))
+            Ok(Box::new(ui::HostApp::new(
+                ui_state,
+                ui_commands,
+                cc.egui_ctx.clone(),
+                show_item_id,
+                quit_item_id,
+            )))
         }),
     );
 
