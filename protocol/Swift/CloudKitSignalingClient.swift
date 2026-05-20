@@ -61,6 +61,22 @@ enum CloudKitEntitlements {
     }
 }
 
+public struct CloudKitHostAdvertisement: Identifiable, Equatable, Sendable {
+    public let senderID: String
+    public let hostName: String
+    public let pairingCode: String
+    public let updatedAt: Date
+
+    public var id: String { senderID }
+
+    public init(senderID: String, hostName: String, pairingCode: String, updatedAt: Date) {
+        self.senderID = senderID
+        self.hostName = hostName
+        self.pairingCode = pairingCode
+        self.updatedAt = updatedAt
+    }
+}
+
 /// CloudKit-backed signaling. Replaces the Cloudflare Worker.
 ///
 /// ## Model
@@ -81,9 +97,82 @@ enum CloudKitEntitlements {
 /// ## Cleanup
 /// The session owner deletes its own records on `close()`. Stale records
 /// older than 5 minutes are ignored on read and garbage-collected
-/// opportunistically.
+/// opportunistically. Hosts refresh their advertisement while listening
+/// so a long-running host does not age out before the client connects.
 public actor CloudKitSignalingClient: SignalingChannel {
     // MARK: Public API
+
+    public static let defaultStaleSeconds: TimeInterval = 300
+
+    public nonisolated static func advertisementRefreshInterval(
+        staleSeconds: TimeInterval = defaultStaleSeconds
+    ) -> TimeInterval {
+        max(1, min(120, staleSeconds * 0.5))
+    }
+
+    public nonisolated static func advertisementRecordName(senderID: String) -> String {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_"))
+        let suffix = String(senderID.unicodeScalars.map { scalar in
+            allowed.contains(scalar) ? Character(scalar) : "_"
+        })
+        return "HostAdvertisement-\(suffix)"
+    }
+
+    public nonisolated static func fetchAvailableHostAdvertisements(
+        containerIdentifier: String,
+        staleSeconds: TimeInterval = defaultStaleSeconds
+    ) async throws -> [CloudKitHostAdvertisement] {
+        try CloudKitEntitlements.validate(containerIdentifier: containerIdentifier)
+
+        let container = CKContainer(identifier: containerIdentifier)
+        do {
+            guard try await container.accountStatus() == .available else {
+                return []
+            }
+        } catch let error as CKError where error.code == .notAuthenticated {
+            return []
+        }
+
+        let cutoff = Date(timeIntervalSinceNow: -staleSeconds)
+        let predicate = NSPredicate(format: "createdAt > %@", cutoff as NSDate)
+        let query = CKQuery(recordType: "HostAdvertisement", predicate: predicate)
+        query.sortDescriptors = [NSSortDescriptor(key: "createdAt", ascending: false)]
+
+        let database = container.privateCloudDatabase
+        let matchResults: [(CKRecord.ID, Result<CKRecord, Error>)]
+        do {
+            let response = try await database.records(
+                matching: query,
+                inZoneWith: nil,
+                desiredKeys: ["senderID", "pairingCode", "hostName", "createdAt"],
+                resultsLimit: 100)
+            matchResults = response.matchResults
+        } catch let error as CKError where error.code == .unknownItem {
+            return []
+        }
+
+        var newestBySenderID: [String: CloudKitHostAdvertisement] = [:]
+        for (_, result) in matchResults {
+            guard case .success(let record) = result,
+                  let advertisement = Self.hostAdvertisement(from: record) else {
+                continue
+            }
+
+            if let existing = newestBySenderID[advertisement.senderID],
+               existing.updatedAt >= advertisement.updatedAt {
+                continue
+            }
+            newestBySenderID[advertisement.senderID] = advertisement
+        }
+
+        return newestBySenderID.values.sorted { lhs, rhs in
+            let nameOrder = lhs.hostName.localizedCaseInsensitiveCompare(rhs.hostName)
+            if nameOrder == .orderedSame {
+                return lhs.pairingCode < rhs.pairingCode
+            }
+            return nameOrder == .orderedAscending
+        }
+    }
 
     /// `code` is the 6-digit pairing code. `role` determines whether
     /// `claim()` advertises (host) or looks up (client).
@@ -95,7 +184,7 @@ public actor CloudKitSignalingClient: SignalingChannel {
         role: SignalingEnvelope.Role,
         hostName: String? = nil,
         senderID: String = DeviceIdentity.get(),
-        staleSeconds: TimeInterval = 300
+        staleSeconds: TimeInterval = defaultStaleSeconds
     ) {
         self.containerIdentifier = containerIdentifier
         self.code = code
@@ -171,6 +260,52 @@ public actor CloudKitSignalingClient: SignalingChannel {
         return envelopes
     }
 
+    /// Host-only keepalive for the `HostAdvertisement` record. Clients
+    /// only consider advertisements with a fresh `createdAt`, so a host
+    /// that is left running must keep that field current until pairing.
+    public func refreshAdvertisement() async throws {
+        guard role == .host else { return }
+        guard let advertisementRecord else {
+            try await writeAdvertisement()
+            return
+        }
+
+        updateAdvertisementFields(on: advertisementRecord)
+
+        let database = try cloudKitDatabase()
+        do {
+            let saved = try await database.save(advertisementRecord)
+            self.advertisementRecord = saved
+            ownedRecordIDs.insert(saved.recordID)
+        } catch let refreshError {
+            let staleRecord = self.advertisementRecord
+            self.advertisementRecord = nil
+            do {
+                try await writeAdvertisement()
+            } catch let recreateError {
+                self.advertisementRecord = staleRecord
+                throw SignalingError.transport(
+                    "Couldn't refresh the pairing advertisement: \(refreshError.localizedDescription); recreate failed: \(recreateError.localizedDescription)")
+            }
+        }
+    }
+
+    /// Removes only the live `HostAdvertisement` record while keeping the
+    /// signaling records needed by an active peer session.
+    public func stopAdvertising() async {
+        guard role == .host else { return }
+
+        let recordID = advertisementRecord?.recordID
+            ?? Self.advertisementRecordID(senderID: senderID)
+        do {
+            try await deleteRecordIDs([recordID])
+            ownedRecordIDs.remove(recordID)
+            advertisementRecord = nil
+        } catch {
+            log.warning("advertisement delete failed (non-fatal): \(String(describing: error), privacy: .public)")
+        }
+    }
+
     /// Deletes every record this client created for the pairing code.
     /// Call from the session's teardown path.
     public func cleanup() async {
@@ -191,8 +326,35 @@ public actor CloudKitSignalingClient: SignalingChannel {
     private var targetID: String?
     private var ownedRecordIDs: Set<CKRecord.ID> = []
     private var consumedRecordIDs: Set<CKRecord.ID> = []
+    private var advertisementRecord: CKRecord?
     private var container: CKContainer?
     private var database: CKDatabase?
+
+    private nonisolated static func advertisementRecordID(senderID: String) -> CKRecord.ID {
+        CKRecord.ID(recordName: advertisementRecordName(senderID: senderID))
+    }
+
+    private nonisolated static func hostAdvertisement(from record: CKRecord) -> CloudKitHostAdvertisement? {
+        guard let senderID = record["senderID"] as? String,
+              senderID.isEmpty == false,
+              let hostName = record["hostName"] as? String,
+              hostName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false,
+              let pairingCode = record["pairingCode"] as? String,
+              pairingCode.count == 6,
+              pairingCode.allSatisfy(\.isNumber) else {
+            return nil
+        }
+
+        let updatedAt = (record["createdAt"] as? Date)
+            ?? record.modificationDate
+            ?? record.creationDate
+            ?? .distantPast
+        return CloudKitHostAdvertisement(
+            senderID: senderID,
+            hostName: hostName,
+            pairingCode: pairingCode,
+            updatedAt: updatedAt)
+    }
 
     private func ensureAccountAvailable() async throws {
         let container = try cloudKit().container
@@ -224,19 +386,35 @@ public actor CloudKitSignalingClient: SignalingChannel {
     }
 
     private func writeAdvertisement() async throws {
-        let record = CKRecord(recordType: "HostAdvertisement")
-        record["senderID"] = senderID as CKRecordValue
-        record["pairingCode"] = code as CKRecordValue
-        record["hostName"] = (hostName ?? "Mac") as CKRecordValue
-        record["createdAt"] = Date() as CKRecordValue
         let database = try cloudKitDatabase()
+        let recordID = Self.advertisementRecordID(senderID: senderID)
+        let record: CKRecord
+
         do {
-            _ = try await database.save(record)
-            ownedRecordIDs.insert(record.recordID)
+            record = try await database.record(for: recordID)
+        } catch let error as CKError where error.code == .unknownItem {
+            record = CKRecord(recordType: "HostAdvertisement", recordID: recordID)
+        } catch {
+            throw SignalingError.transport(
+                "Couldn't load the pairing advertisement: \(error.localizedDescription)")
+        }
+
+        updateAdvertisementFields(on: record)
+        do {
+            let saved = try await database.save(record)
+            advertisementRecord = saved
+            ownedRecordIDs.insert(saved.recordID)
         } catch {
             throw SignalingError.transport(
                 "Couldn't publish the pairing advertisement: \(error.localizedDescription)")
         }
+    }
+
+    private func updateAdvertisementFields(on record: CKRecord) {
+        record["senderID"] = senderID as CKRecordValue
+        record["pairingCode"] = code as CKRecordValue
+        record["hostName"] = (hostName ?? "Mac") as CKRecordValue
+        record["createdAt"] = Date() as CKRecordValue
     }
 
     private func resolveHostSenderID() async throws -> String {
@@ -293,27 +471,32 @@ public actor CloudKitSignalingClient: SignalingChannel {
     private func deleteOwnRecords(forPairingCode code: String) async throws {
         // Query WebRTCSignal + HostAdvertisement for records we wrote with
         // this pairing code. Cheapest correct approach: iterate ownedRecordIDs
-        // and delete in batches. Records from prior runs (different process
-        // lifetime) aren't in the set — they age out via the staleness
-        // filter on read.
+        // and delete in batches. The host advertisement uses a stable record
+        // name, so it is included here after the current run writes it.
         guard !ownedRecordIDs.isEmpty else { return }
         let ids = Array(ownedRecordIDs)
-        let database = try cloudKitDatabase()
         do {
-            let op = CKModifyRecordsOperation(recordsToSave: nil, recordIDsToDelete: ids)
-            op.savePolicy = .allKeys
-            _ = try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-                op.modifyRecordsResultBlock = { result in
-                    switch result {
-                    case .success: cont.resume(returning: ())
-                    case .failure(let error): cont.resume(throwing: error)
-                    }
-                }
-                database.add(op)
-            }
+            try await deleteRecordIDs(ids)
             ownedRecordIDs.removeAll()
+            advertisementRecord = nil
         } catch {
             log.warning("cleanup delete failed (non-fatal): \(String(describing: error), privacy: .public)")
+        }
+    }
+
+    private func deleteRecordIDs(_ ids: [CKRecord.ID]) async throws {
+        guard !ids.isEmpty else { return }
+        let database = try cloudKitDatabase()
+        let op = CKModifyRecordsOperation(recordsToSave: nil, recordIDsToDelete: ids)
+        op.savePolicy = .allKeys
+        _ = try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            op.modifyRecordsResultBlock = { result in
+                switch result {
+                case .success: cont.resume(returning: ())
+                case .failure(let error): cont.resume(throwing: error)
+                }
+            }
+            database.add(op)
         }
     }
 

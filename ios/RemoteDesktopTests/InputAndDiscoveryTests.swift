@@ -8,6 +8,7 @@ final class InputAndDiscoveryTests: XCTestCase {
 
         XCTAssertEqual(parsed?.hostname, "Studio Mac")
         XCTAssertEqual(parsed?.code, "123456")
+        XCTAssertEqual(parsed?.source, .localNetwork)
     }
 
     func test_localHostAdvertisement_rejects_invalid_names() {

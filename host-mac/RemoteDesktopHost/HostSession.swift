@@ -173,7 +173,24 @@ final class HostSession: ObservableObject {
             code: code)
         log.info("advertising code=\(code, privacy: .public)")
 
+        let advertisementRefreshInterval = CloudKitSignalingClient
+            .advertisementRefreshInterval()
+        var nextAdvertisementRefresh = Date()
+            .addingTimeInterval(advertisementRefreshInterval)
+
         while !Task.isCancelled {
+            if case .advertising = state, Date() >= nextAdvertisementRefresh {
+                do {
+                    try await client.refreshAdvertisement()
+                    nextAdvertisementRefresh = Date()
+                        .addingTimeInterval(advertisementRefreshInterval)
+                    log.debug("refreshed advertisement code=\(code, privacy: .public)")
+                } catch {
+                    log.error("advertisement refresh failed: \(String(describing: error), privacy: .public)")
+                    nextAdvertisementRefresh = Date().addingTimeInterval(30)
+                }
+            }
+
             let envelopes: [SignalingEnvelope]
             do {
                 envelopes = try await client.poll()
@@ -208,6 +225,7 @@ final class HostSession: ObservableObject {
                             try await peerSession?.acceptOffer(sdp: sdp)
                             flushPendingRemoteICEIfPossible()
                             advertiser.stop()
+                            await client.stopAdvertising()
                             state = .paired(clientDescription: clientName)
                         } catch {
                             log.error("failed to accept WebRTC offer: \(String(describing: error), privacy: .public)")
@@ -229,6 +247,7 @@ final class HostSession: ObservableObject {
                         do {
                             try await client.send(ack)
                             advertiser.stop()
+                            await client.stopAdvertising()
                         } catch {
                             log.error("failed to send preflight answer: \(String(describing: error), privacy: .public)")
                             state = .error("Client reached the host, but the host couldn't reply over signaling.")

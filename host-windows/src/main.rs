@@ -1,13 +1,11 @@
-#![cfg_attr(
-    all(windows, not(debug_assertions)),
-    windows_subsystem = "windows"
-)]
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 use anyhow::{Context, Result};
 use serde_json::{Map, Value};
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::thread;
+use std::time::{Duration, Instant};
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::sync::Notify;
@@ -37,7 +35,8 @@ use credentials::CredentialStore;
 use input::InputInjector;
 use protocol::HostInfo;
 use signaling::{
-    new_pairing_code, HostSignalingClient, HostSignalingOptions, Kind, SignalingEnvelope,
+    advertisement_refresh_interval, new_pairing_code, HostSignalingClient, HostSignalingOptions,
+    Kind, SignalingEnvelope,
 };
 use webrtc_host::WebRtcHost;
 
@@ -124,9 +123,7 @@ fn init_logging() {
                 .init();
         }
         Err(_) => {
-            tracing_subscriber::fmt()
-                .with_env_filter(env_filter)
-                .init();
+            tracing_subscriber::fmt().with_env_filter(env_filter).init();
         }
     }
 }
@@ -300,11 +297,7 @@ async fn setup(state: &SharedState) -> Result<ControllerDeps> {
     })
 }
 
-async fn run_host(
-    state: SharedState,
-    shutdown: Arc<Notify>,
-    deps: ControllerDeps,
-) -> Result<()> {
+async fn run_host(state: SharedState, shutdown: Arc<Notify>, deps: ControllerDeps) -> Result<()> {
     let ControllerDeps {
         config,
         cloudkit,
@@ -370,9 +363,7 @@ async fn run_host(
             state.clone(),
             shutdown.clone(),
         );
-        let loop_exit = session
-            .advertising_loop(&mut signaling, &config)
-            .await;
+        let loop_exit = session.advertising_loop(&mut signaling, &config).await;
         session.shutdown_peer().await;
 
         if let Some(mdns) = &mdns {
@@ -440,6 +431,11 @@ impl Session {
         config: &AppConfig,
     ) -> Result<LoopExit> {
         let mut outbound_rx = self.outbound_rx.lock().await;
+        let advertisement_refresh_interval =
+            advertisement_refresh_interval(config.stale_record_seconds);
+        let advertisement_refresh_retry_interval =
+            Duration::from_secs(30).min(advertisement_refresh_interval);
+        let mut next_advertisement_refresh = Instant::now() + advertisement_refresh_interval;
         loop {
             tokio::select! {
                 _ = self.shutdown.notified() => {
@@ -456,6 +452,23 @@ impl Session {
                     }
                 }
                 _ = tokio::time::sleep(config.poll_interval) => {
+                    if Instant::now() >= next_advertisement_refresh
+                        && self.peer.lock().await.is_none()
+                    {
+                        match signaling.refresh_advertisement().await {
+                            Ok(()) => {
+                                info!("refreshed Windows host advertisement");
+                                next_advertisement_refresh =
+                                    Instant::now() + advertisement_refresh_interval;
+                            }
+                            Err(error) => {
+                                error!("CloudKit advertisement refresh failed: {error:#}");
+                                next_advertisement_refresh =
+                                    Instant::now() + advertisement_refresh_retry_interval;
+                            }
+                        }
+                    }
+
                     match signaling.poll().await {
                         Ok(envelopes) => {
                             for envelope in envelopes {
@@ -480,7 +493,17 @@ impl Session {
             Kind::Offer => {
                 let client = string_payload(&envelope.payload, "client").unwrap_or("client");
                 match envelope.payload.get("sdp").and_then(Value::as_str) {
-                    Some(sdp) => self.start_peer(client, sdp.to_string()).await,
+                    Some(sdp) => {
+                        let action = self.start_peer(client, sdp.to_string()).await?;
+                        if self.peer.lock().await.is_some() {
+                            if let Err(error) = signaling.stop_advertising().await {
+                                error!(
+                                    "couldn't remove host advertisement after pairing: {error:#}"
+                                );
+                            }
+                        }
+                        Ok(action)
+                    }
                     None => {
                         info!("received preflight offer from {client}");
                         signaling
@@ -489,6 +512,9 @@ impl Session {
                             )))
                             .await
                             .context("couldn't send preflight answer")?;
+                        if let Err(error) = signaling.stop_advertising().await {
+                            error!("couldn't remove host advertisement after preflight pairing: {error:#}");
+                        }
                         Ok(Action::Continue)
                     }
                 }

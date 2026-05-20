@@ -4,7 +4,7 @@ use rand::Rng;
 use serde_json::{json, Map, Value};
 use std::{
     collections::HashSet,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -42,6 +42,7 @@ pub struct HostSignalingClient {
     cloudkit: CloudKitClient,
     options: HostSignalingOptions,
     target_id: Option<String>,
+    advertisement_record_name: Option<String>,
     owned_record_names: HashSet<String>,
     consumed_record_names: HashSet<String>,
     started_at_ms: u64,
@@ -49,10 +50,12 @@ pub struct HostSignalingClient {
 
 impl HostSignalingClient {
     pub fn new(cloudkit: CloudKitClient, options: HostSignalingOptions) -> Self {
+        let advertisement_record_name = Some(advertisement_record_name(&options.sender_id));
         Self {
             cloudkit,
             options,
             target_id: None,
+            advertisement_record_name,
             owned_record_names: HashSet::new(),
             consumed_record_names: HashSet::new(),
             started_at_ms: now_ms(),
@@ -67,6 +70,48 @@ impl HostSignalingClient {
         self.write_advertisement()
             .await
             .context("couldn't publish Windows host pairing advertisement")
+    }
+
+    pub async fn refresh_advertisement(&mut self) -> Result<()> {
+        if self.advertisement_record_name.is_none() {
+            self.advertisement_record_name =
+                Some(advertisement_record_name(&self.options.sender_id));
+            return self
+                .write_advertisement()
+                .await
+                .context("couldn't publish Windows host pairing advertisement");
+        }
+
+        if let Err(error) = self.update_advertisement().await {
+            warn_refresh_fallback(&error);
+            self.advertisement_record_name = None;
+            self.write_advertisement().await.context(
+                "couldn't recreate Windows host pairing advertisement after refresh failed",
+            )?;
+        }
+        Ok(())
+    }
+
+    pub async fn stop_advertising(&mut self) -> Result<()> {
+        let Some(record_name) = self.advertisement_record_name.take() else {
+            return Ok(());
+        };
+
+        let body = json!({
+            "operations": [
+                {
+                    "operationType": "forceDelete",
+                    "record": { "recordName": record_name.clone() }
+                }
+            ],
+            "atomic": false
+        });
+
+        self.cloudkit
+            .post_authenticated("private", "records/modify", &body)
+            .await?;
+        self.owned_record_names.remove(&record_name);
+        Ok(())
     }
 
     pub async fn poll(&mut self) -> Result<Vec<SignalingEnvelope>> {
@@ -220,11 +265,14 @@ impl HostSignalingClient {
     }
 
     async fn write_advertisement(&mut self) -> Result<()> {
+        let record_name = advertisement_record_name(&self.options.sender_id);
+        self.advertisement_record_name = Some(record_name.clone());
         let body = json!({
             "operations": [
                 {
-                    "operationType": "create",
+                    "operationType": "forceUpdate",
                     "record": {
+                        "recordName": record_name,
                         "recordType": "HostAdvertisement",
                         "fields": {
                             "senderID": string_field(&self.options.sender_id),
@@ -241,16 +289,55 @@ impl HostSignalingClient {
             .cloudkit
             .post_authenticated("private", "records/modify", &body)
             .await?;
-        self.record_owned_names(&value)?;
+        let names = self.record_owned_names(&value)?;
+        if let Some(record_name) = names.into_iter().next() {
+            self.advertisement_record_name = Some(record_name);
+        }
         Ok(())
     }
 
-    fn record_owned_names(&mut self, value: &Value) -> Result<()> {
+    async fn update_advertisement(&mut self) -> Result<()> {
+        let record_name = self
+            .advertisement_record_name
+            .clone()
+            .unwrap_or_else(|| advertisement_record_name(&self.options.sender_id));
+        self.advertisement_record_name = Some(record_name.clone());
+        let body = json!({
+            "operations": [
+                {
+                    "operationType": "forceUpdate",
+                    "record": {
+                        "recordName": record_name,
+                        "recordType": "HostAdvertisement",
+                        "fields": {
+                            "senderID": string_field(&self.options.sender_id),
+                            "pairingCode": string_field(&self.options.code),
+                            "hostName": string_field(&self.options.host_name),
+                            "createdAt": timestamp_field(now_ms()),
+                        }
+                    }
+                }
+            ]
+        });
+
+        let value = self
+            .cloudkit
+            .post_authenticated("private", "records/modify", &body)
+            .await?;
+        let names = self.record_owned_names(&value)?;
+        if let Some(record_name) = names.into_iter().next() {
+            self.advertisement_record_name = Some(record_name);
+        }
+        Ok(())
+    }
+
+    fn record_owned_names(&mut self, value: &Value) -> Result<Vec<String>> {
         let records = value
             .get("records")
             .and_then(Value::as_array)
             .ok_or_else(|| anyhow!("CloudKit modify response did not include records"))?;
 
+        let mut names = Vec::new();
         for record in records {
             if let Some(code) = record.get("serverErrorCode").and_then(Value::as_str) {
                 let reason = record
@@ -263,9 +350,10 @@ impl HostSignalingClient {
             }
             if let Some(record_name) = record.get("recordName").and_then(Value::as_str) {
                 self.owned_record_names.insert(record_name.to_string());
+                names.push(record_name.to_string());
             }
         }
-        Ok(())
+        Ok(names)
     }
 }
 
@@ -315,6 +403,28 @@ pub fn new_pairing_code() -> String {
     format!("{code:06}")
 }
 
+pub fn advertisement_refresh_interval(stale_record_seconds: u64) -> Duration {
+    Duration::from_secs((stale_record_seconds.max(1) / 2).clamp(1, 120))
+}
+
+pub fn advertisement_record_name(sender_id: &str) -> String {
+    let suffix = sender_id
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    format!("HostAdvertisement-{suffix}")
+}
+
+fn warn_refresh_fallback(error: &anyhow::Error) {
+    tracing::warn!("CloudKit advertisement refresh failed; recreating record: {error:#}");
+}
+
 fn string_field(value: &str) -> Value {
     json!({ "value": value, "type": "STRING" })
 }
@@ -362,6 +472,28 @@ mod tests {
         assert_eq!(
             timestamp_field(1_700_000_000_000),
             json!({ "value": 1_700_000_000_000_u64, "type": "TIMESTAMP" })
+        );
+    }
+
+    #[test]
+    fn advertisement_refresh_interval_stays_inside_stale_window() {
+        assert_eq!(
+            advertisement_refresh_interval(300),
+            Duration::from_secs(120)
+        );
+        assert_eq!(advertisement_refresh_interval(20), Duration::from_secs(10));
+        assert_eq!(advertisement_refresh_interval(0), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn advertisement_record_name_is_stable_per_sender() {
+        assert_eq!(
+            advertisement_record_name("host-id"),
+            "HostAdvertisement-host-id"
+        );
+        assert_eq!(
+            advertisement_record_name("host id/1"),
+            "HostAdvertisement-host_id_1"
         );
     }
 

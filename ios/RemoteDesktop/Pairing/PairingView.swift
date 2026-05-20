@@ -253,7 +253,7 @@ struct PairingView: View {
                         .font(.body.weight(.semibold))
                         .foregroundStyle(.primary)
                         .lineLimit(1)
-                    Text("Ready to connect")
+                    Text(host.source == .cloudKit ? "Ready through iCloud" : "Ready nearby")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }

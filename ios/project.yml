@@ -14,7 +14,7 @@ settings:
 packages:
   LiveKitWebRTC:
     url: https://github.com/livekit/webrtc-xcframework.git
-    exactVersion: 144.7559.03
+    exactVersion: 144.7559.3
 
 targets:
   RemoteDesktop:
@@ -27,6 +27,7 @@ targets:
         group: Shared
     dependencies:
       - package: LiveKitWebRTC
+        product: LiveKitWebRTC
     entitlements:
       path: RemoteDesktop/RemoteDesktop.entitlements
       properties:

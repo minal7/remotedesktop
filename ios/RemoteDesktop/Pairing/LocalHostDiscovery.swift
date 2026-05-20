@@ -4,13 +4,32 @@ import Foundation
 struct LocalHostAdvertisement: Identifiable, Equatable {
     static let serviceType = "_remotedesktop._tcp."
 
+    enum Source: String {
+        case localNetwork
+        case cloudKit
+    }
+
     let hostname: String
     let code: String
+    let source: Source
+    let senderID: String?
 
-    var id: String { "\(hostname)|\(code)" }
+    var id: String { senderID ?? "\(source.rawValue)|\(hostname)|\(code)" }
 
     static func serviceName(hostname: String, code: String) -> String {
         "\(hostname) [\(code)]"
+    }
+
+    init(
+        hostname: String,
+        code: String,
+        source: Source = .localNetwork,
+        senderID: String? = nil
+    ) {
+        self.hostname = hostname
+        self.code = code
+        self.source = source
+        self.senderID = senderID
     }
 
     static func parse(serviceName: String) -> LocalHostAdvertisement? {
@@ -48,8 +67,11 @@ final class LocalHostDiscovery: NSObject, ObservableObject {
         services.removeAll()
         ckHosts = []
         hosts = []
+        guard !Self.isRunningUnitTests else {
+            return
+        }
         browser.searchForServices(ofType: LocalHostAdvertisement.serviceType, inDomain: "local.")
-        
+
         startCloudKitPolling()
     }
 
@@ -77,26 +99,17 @@ final class LocalHostDiscovery: NSObject, ObservableObject {
     }
 
     private func fetchCloudKitHosts() async {
-        let container = CKContainer(identifier: Config.cloudKitContainerIdentifier)
-        let database = container.privateCloudDatabase
-
-        // Query active advertisements in the user's private database created within the last 5 minutes
-        let cutoff = Date(timeIntervalSinceNow: -300)
-        let predicate = NSPredicate(format: "createdAt > %@", cutoff as NSDate)
-        let query = CKQuery(recordType: "HostAdvertisement", predicate: predicate)
-        query.sortDescriptors = [NSSortDescriptor(key: "createdAt", ascending: false)]
-
         do {
-            let (matchResults, _) = try await database.records(matching: query, inZoneWith: nil, desiredKeys: nil, resultsLimit: 50)
-            var fetched: [LocalHostAdvertisement] = []
-            for (_, result) in matchResults {
-                if case .success(let record) = result,
-                   let hostname = record["hostName"] as? String,
-                   let code = record["pairingCode"] as? String {
-                    fetched.append(LocalHostAdvertisement(hostname: hostname, code: code))
-                }
+            let advertisements = try await CloudKitSignalingClient
+                .fetchAvailableHostAdvertisements(
+                    containerIdentifier: Config.cloudKitContainerIdentifier)
+            self.ckHosts = advertisements.map {
+                LocalHostAdvertisement(
+                    hostname: $0.hostName,
+                    code: $0.pairingCode,
+                    source: .cloudKit,
+                    senderID: $0.senderID)
             }
-            self.ckHosts = fetched
             self.syncHosts()
         } catch let error as CKError {
             if error.code == .unknownItem {
@@ -113,18 +126,17 @@ final class LocalHostDiscovery: NSObject, ObservableObject {
     }
 
     private func syncHosts() {
-        // Collect mDNS hosts
-        var allHosts = Array(services.values)
+        var hostsByCode: [String: LocalHostAdvertisement] = [:]
 
-        // Merge CloudKit hosts, ensuring uniqueness by pairing code
-        for ckHost in ckHosts {
-            if !allHosts.contains(where: { $0.code == ckHost.code }) {
-                allHosts.append(ckHost)
-            }
+        for localHost in services.values {
+            hostsByCode[localHost.code] = localHost
         }
 
-        // Sort by hostname then code
-        let sorted = allHosts.sorted { lhs, rhs in
+        for cloudHost in ckHosts where hostsByCode[cloudHost.code] == nil {
+            hostsByCode[cloudHost.code] = cloudHost
+        }
+
+        let sorted = hostsByCode.values.sorted { lhs, rhs in
             if lhs.hostname == rhs.hostname {
                 return lhs.code < rhs.code
             }
@@ -132,6 +144,10 @@ final class LocalHostDiscovery: NSObject, ObservableObject {
         }
 
         self.hosts = sorted
+    }
+
+    private static var isRunningUnitTests: Bool {
+        ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
     }
 }
 

@@ -225,6 +225,27 @@ final class HostSessionTests: XCTestCase {
         }
     }
 
+    func test_advertisementRefreshInterval_refreshesBeforeStaleCutoff() {
+        XCTAssertEqual(
+            CloudKitSignalingClient.advertisementRefreshInterval(),
+            120)
+        XCTAssertLessThan(
+            CloudKitSignalingClient.advertisementRefreshInterval(),
+            CloudKitSignalingClient.defaultStaleSeconds)
+        XCTAssertEqual(
+            CloudKitSignalingClient.advertisementRefreshInterval(staleSeconds: 20),
+            10)
+    }
+
+    func test_advertisementRecordName_isStablePerSender() {
+        XCTAssertEqual(
+            CloudKitSignalingClient.advertisementRecordName(senderID: "HOST-ID"),
+            "HostAdvertisement-HOST-ID")
+        XCTAssertEqual(
+            CloudKitSignalingClient.advertisementRecordName(senderID: "host id/1"),
+            "HostAdvertisement-host_id_1")
+    }
+
     // MARK: Issue 4 — CloudKit signing must be validated before CKContainer
 
     func test_cloudKitEntitlements_requireCloudKitService() {
