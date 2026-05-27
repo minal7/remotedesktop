@@ -14,6 +14,7 @@ use tracing_subscriber::EnvFilter;
 
 mod app_state;
 mod auth;
+mod autostart;
 mod capture;
 mod cloudkit;
 mod config;
@@ -23,6 +24,7 @@ mod identity;
 mod input;
 mod media;
 mod protocol;
+mod settings;
 mod signaling;
 mod ui;
 mod webrtc_host;
@@ -43,6 +45,22 @@ use webrtc_host::WebRtcHost;
 fn main() -> Result<()> {
     let _ = dotenvy::dotenv();
     init_logging();
+
+    // Reconcile the "launch at login" preference with the OS registry
+    // before anything else. First run defaults to enabled so a fresh
+    // install is reachable without the user opening the app; afterwards
+    // the stored preference wins, and we re-assert it every launch in
+    // case the executable moved.
+    let loaded_settings = settings::load();
+    let launch_at_login = loaded_settings.settings.launch_at_login;
+    if let Err(error) = autostart::apply(launch_at_login) {
+        warn!("couldn't update launch-at-login registration: {error:#}");
+    }
+    if loaded_settings.first_run {
+        if let Err(error) = settings::save(&loaded_settings.settings) {
+            warn!("couldn't persist initial settings: {error:#}");
+        }
+    }
 
     let state: SharedState = Arc::new(RwLock::new(AppState::default()));
     let (cmd_tx, cmd_rx) = unbounded_channel::<Command>();
@@ -99,6 +117,7 @@ fn main() -> Result<()> {
                 cc.egui_ctx.clone(),
                 show_item_id,
                 quit_item_id,
+                launch_at_login,
             )))
         }),
     );

@@ -19,7 +19,7 @@ use crate::signaling::{Kind, Role, SignalingEnvelope};
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use serde_json::{Map, Value};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::Receiver as StdReceiver;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -29,6 +29,7 @@ use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::{MediaEngine, MIME_TYPE_H264, MIME_TYPE_OPUS};
+use webrtc::api::setting_engine::SettingEngine;
 use webrtc::api::APIBuilder;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::data_channel::RTCDataChannel;
@@ -51,6 +52,19 @@ use webrtc::track::track_local::TrackLocal;
 
 const VIDEO_BITRATE_BPS: u32 = 8_000_000;
 const TARGET_FPS: f32 = 60.0;
+
+/// How long the connection may sit in ICE `disconnected` before we tear
+/// the session down and return to advertising. webrtc-rs only emits
+/// `failed` after `ICE_FAILED_TIMEOUT` of further silence, so without
+/// this grace timer an abruptly-gone iOS client (app killed, Wi-Fi
+/// dropped — no `bye` sent) would keep the host "Connected" for ~30s.
+const DISCONNECT_GRACE: Duration = Duration::from_secs(3);
+/// Shorter-than-default ICE liveness windows so a dead peer is noticed
+/// quickly. Defaults are 5s/25s/2s; media flows continuously while a
+/// session is healthy, so these only bite once the peer truly stops.
+const ICE_DISCONNECTED_TIMEOUT: Duration = Duration::from_secs(3);
+const ICE_FAILED_TIMEOUT: Duration = Duration::from_secs(7);
+const ICE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(1);
 
 struct EncodedFrame {
     data: Vec<u8>,
@@ -87,9 +101,16 @@ impl WebRtcHost {
         let mut registry = Registry::new();
         registry = register_default_interceptors(registry, &mut media_engine)
             .context("register WebRTC interceptors")?;
+        let mut setting_engine = SettingEngine::default();
+        setting_engine.set_ice_timeouts(
+            Some(ICE_DISCONNECTED_TIMEOUT),
+            Some(ICE_FAILED_TIMEOUT),
+            Some(ICE_KEEPALIVE_INTERVAL),
+        );
         let api = APIBuilder::new()
             .with_media_engine(media_engine)
             .with_interceptor_registry(registry)
+            .with_setting_engine(setting_engine)
             .build();
 
         let config = RTCConfiguration {
@@ -171,21 +192,49 @@ impl WebRtcHost {
         }
 
         // Connection-state changes → end the session (auto-restart in
-        // the main loop). `disconnected` may self-recover, so only
-        // `failed`/`closed` tear down — same policy as the Mac host.
+        // the main loop). `disconnected` can self-recover from a brief
+        // blip, so we give it `DISCONNECT_GRACE` to come back before
+        // tearing down; `failed`/`closed` tear down immediately. The
+        // generation counter cancels a pending grace timer the moment a
+        // newer state transition arrives, so a recovered peer is never
+        // killed by a stale timer.
+        let connection_generation = Arc::new(AtomicU64::new(0));
         {
             let ended = ended.clone();
             let closed = closed.clone();
+            let connection_generation = connection_generation.clone();
             pc.on_peer_connection_state_change(Box::new(move |state| {
                 let ended = ended.clone();
                 let closed = closed.clone();
+                let connection_generation = connection_generation.clone();
                 Box::pin(async move {
                     info!("peer connection state → {state:?}");
                     match state {
+                        RTCPeerConnectionState::Connected => {
+                            // Supersede any in-flight disconnect grace timer.
+                            connection_generation.fetch_add(1, Ordering::SeqCst);
+                        }
                         RTCPeerConnectionState::Disconnected => {
-                            warn!("peer connection disconnected (may recover)");
+                            warn!(
+                                "peer connection disconnected (waiting {DISCONNECT_GRACE:?} for recovery)"
+                            );
+                            let generation =
+                                connection_generation.fetch_add(1, Ordering::SeqCst) + 1;
+                            let ended = ended.clone();
+                            let closed = closed.clone();
+                            let connection_generation = connection_generation.clone();
+                            tokio::spawn(async move {
+                                tokio::time::sleep(DISCONNECT_GRACE).await;
+                                let superseded = connection_generation.load(Ordering::SeqCst)
+                                    != generation;
+                                if !superseded && !closed.swap(true, Ordering::SeqCst) {
+                                    warn!("peer still disconnected after grace — ending session");
+                                    ended.notify_one();
+                                }
+                            });
                         }
                         RTCPeerConnectionState::Failed | RTCPeerConnectionState::Closed => {
+                            connection_generation.fetch_add(1, Ordering::SeqCst);
                             if !closed.swap(true, Ordering::SeqCst) {
                                 ended.notify_one();
                             }

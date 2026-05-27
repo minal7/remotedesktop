@@ -5,15 +5,19 @@
 //! macOS host gets for free via the system iCloud session.
 
 use crate::app_state::{Command, CommandSender, HostStatus, SharedState};
-use eframe::egui::{
-    self, Align, Color32, Layout, RichText, Rounding, Stroke, Vec2,
-};
+use eframe::egui::{self, Align, Color32, Layout, RichText, Rounding, Stroke, Vec2};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 pub struct HostApp {
     state: SharedState,
     commands: CommandSender,
-    quitting: bool,
+    // Shared so the tray thread can flag a real quit before asking the
+    // window to close; `update` checks it to know whether a close request
+    // should hide-to-tray (X button) or actually terminate (Quit).
+    quitting: Arc<AtomicBool>,
+    launch_at_login: bool,
 }
 
 impl HostApp {
@@ -23,11 +27,14 @@ impl HostApp {
         ctx: egui::Context,
         show_item_id: tray_icon::menu::MenuId,
         quit_item_id: tray_icon::menu::MenuId,
+        launch_at_login: bool,
     ) -> Self {
+        let quitting = Arc::new(AtomicBool::new(false));
         let ctx_clone = ctx.clone();
         let show_id = show_item_id.clone();
         let quit_id = quit_item_id.clone();
         let commands_clone = commands.clone();
+        let quitting_tray = quitting.clone();
 
         std::thread::spawn(move || {
             loop {
@@ -57,7 +64,15 @@ impl HostApp {
                         set_window_native_visibility(true);
                         ctx_clone.request_repaint();
                     } else if event.id == quit_id {
+                        // Flag the quit *before* requesting close so the
+                        // window's close handler tears down instead of
+                        // hiding to tray. Make it visible first so the
+                        // event loop is awake to process the close even
+                        // when we'd previously hidden it.
+                        quitting_tray.store(true, Ordering::SeqCst);
                         commands_clone.send(Command::Quit);
+                        #[cfg(windows)]
+                        set_window_native_visibility(true);
                         ctx_clone.send_viewport_cmd(egui::ViewportCommand::Close);
                         ctx_clone.request_repaint();
                         break;
@@ -71,19 +86,21 @@ impl HostApp {
         Self {
             state,
             commands,
-            quitting: false,
+            quitting,
+            launch_at_login,
         }
     }
 }
 
 impl eframe::App for HostApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if ctx.input(|i| i.viewport().close_requested()) {
-            if !self.quitting {
-                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                #[cfg(windows)]
-                set_window_native_visibility(false);
-            }
+        let quitting = self.quitting.load(Ordering::SeqCst);
+        if ctx.input(|i| i.viewport().close_requested()) && !quitting {
+            // Plain window-close (X button) hides to tray instead of
+            // quitting; a real Quit sets `quitting` and falls through.
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            #[cfg(windows)]
+            set_window_native_visibility(false);
         }
 
         // Keep refreshing so background state changes show up quickly.
@@ -110,7 +127,7 @@ impl eframe::App for HostApp {
             });
         });
 
-        if self.quitting {
+        if quitting {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
     }
@@ -127,11 +144,7 @@ impl HostApp {
             display_glyph(ui, 40.0, accent_color());
             ui.add_space(10.0);
             ui.vertical(|ui| {
-                ui.label(
-                    RichText::new("Remote Desktop Host")
-                        .strong()
-                        .size(16.0),
-                );
+                ui.label(RichText::new("Remote Desktop Host").strong().size(16.0));
                 ui.label(
                     RichText::new(snapshot.status.short_label())
                         .color(Color32::from_gray(150))
@@ -197,13 +210,11 @@ impl HostApp {
                     );
                 });
             ui.add_space(14.0);
-            let stop = egui::Button::new(
-                RichText::new("Stop").size(13.0).color(Color32::WHITE),
-            )
-            .min_size(Vec2::new(100.0, 28.0))
-            .fill(Color32::from_rgba_unmultiplied(255, 255, 255, 18))
-            .rounding(Rounding::same(6.0))
-            .stroke(Stroke::NONE);
+            let stop = egui::Button::new(RichText::new("Stop").size(13.0).color(Color32::WHITE))
+                .min_size(Vec2::new(100.0, 28.0))
+                .fill(Color32::from_rgba_unmultiplied(255, 255, 255, 18))
+                .rounding(Rounding::same(6.0))
+                .stroke(Stroke::NONE);
             if ui.add(stop).clicked() {
                 self.commands.send(Command::Stop);
             }
@@ -255,13 +266,11 @@ impl HostApp {
         });
         ui.add_space(12.0);
         ui.horizontal(|ui| {
-            let retry = egui::Button::new(
-                RichText::new("Retry").color(Color32::WHITE).size(13.0),
-            )
-            .min_size(Vec2::new(90.0, 28.0))
-            .fill(accent_color())
-            .rounding(Rounding::same(6.0))
-            .stroke(Stroke::NONE);
+            let retry = egui::Button::new(RichText::new("Retry").color(Color32::WHITE).size(13.0))
+                .min_size(Vec2::new(90.0, 28.0))
+                .fill(accent_color())
+                .rounding(Rounding::same(6.0))
+                .stroke(Stroke::NONE);
             if ui.add(retry).clicked() {
                 self.commands.send(Command::Start);
             }
@@ -269,6 +278,8 @@ impl HostApp {
     }
 
     fn footer(&mut self, ui: &mut egui::Ui, snapshot: &crate::app_state::AppState) {
+        // Bottom-up layout: this host/quit row sits at the very bottom,
+        // the launch-at-login row is added afterwards so it renders above.
         ui.horizontal(|ui| {
             if !snapshot.host_name.is_empty() {
                 ui.label(
@@ -289,10 +300,32 @@ impl HostApp {
                 .stroke(Stroke::new(1.0, Color32::from_gray(80)));
                 if ui.add(quit).clicked() {
                     self.commands.send(Command::Quit);
-                    self.quitting = true;
+                    self.quitting.store(true, Ordering::SeqCst);
                 }
             });
         });
+        ui.add_space(6.0);
+        self.launch_at_login_toggle(ui);
+    }
+
+    fn launch_at_login_toggle(&mut self, ui: &mut egui::Ui) {
+        let checkbox = ui.checkbox(
+            &mut self.launch_at_login,
+            RichText::new("Open automatically at startup")
+                .color(Color32::from_gray(170))
+                .size(12.0),
+        );
+        if checkbox.changed() {
+            if let Err(error) = crate::autostart::apply(self.launch_at_login) {
+                tracing::warn!("couldn't update launch-at-login registration: {error:#}");
+            }
+            let settings = crate::settings::Settings {
+                launch_at_login: self.launch_at_login,
+            };
+            if let Err(error) = crate::settings::save(&settings) {
+                tracing::warn!("couldn't persist launch-at-login preference: {error:#}");
+            }
+        }
     }
 }
 
@@ -353,9 +386,8 @@ pub fn make_icon() -> egui::IconData {
     let screen = [58u8, 132, 255, 255];
     let stand = [180u8, 180, 190, 255];
 
-    let in_rect = |x: u32, y: u32, x0: u32, x1: u32, y0: u32, y1: u32| {
-        x >= x0 && x < x1 && y >= y0 && y < y1
-    };
+    let in_rect =
+        |x: u32, y: u32, x0: u32, x1: u32, y0: u32, y1: u32| x >= x0 && x < x1 && y >= y0 && y < y1;
 
     for y in 0..SIZE {
         for x in 0..SIZE {
@@ -389,10 +421,10 @@ pub fn make_icon() -> egui::IconData {
 #[cfg(windows)]
 fn set_window_native_visibility(visible: bool) {
     use std::ffi::OsStr;
-    use std::os::windows::ffi::OsStrExt;
     use std::iter::once;
+    use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        FindWindowW, ShowWindow, SW_HIDE, SW_SHOW, SW_RESTORE
+        FindWindowW, ShowWindow, SW_HIDE, SW_RESTORE, SW_SHOW,
     };
 
     let title: Vec<u16> = OsStr::new("Remote Desktop Host")

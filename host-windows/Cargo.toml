@@ -47,7 +47,7 @@ tray-icon = "0.24.0"
 [target.'cfg(windows)'.dependencies]
 windows-capture = "2"
 wasapi = "0.23"
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Registry"] }
 
 [profile.release]
 lto = "thin"
