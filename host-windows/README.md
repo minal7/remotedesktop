@@ -71,8 +71,9 @@ The media encoders compile native code, so a release build needs:
   from source via `cc`.
 - **CMake** on `PATH` — `audiopus_sys` builds libopus from source.
 
-No prebuilt binary is shipped yet; build with `cargo build --release`
-and run `target/release/remote-desktop-host.exe`.
+For local development, build with `cargo build --release` and run
+`target/release/remote-desktop-host.exe`. For shipping a distributable
+build, see [Packaging & distribution](#packaging--distribution) below.
 
 Then launch the host with:
 
@@ -121,3 +122,147 @@ on any host (`cargo test`, 26 tests).
 exercised by building and running on Windows. It mirrors the macOS host
 behavior but has not been run on a Windows machine in this workspace —
 validate screen capture, loopback audio, and `SendInput` there.
+
+## Packaging & distribution
+
+The release build is a single, self-contained `.exe`:
+
+- **No CloudKit token prompt.** The token is baked into the binary at
+  compile time. `config.rs` reads it from the process environment first
+  (so `.env` / shell vars still win for local dev) and otherwise falls
+  back to a value embedded via `option_env!`. A build with the env var
+  set ships a binary that runs with zero per-machine setup. CloudKit Web
+  Services API tokens are designed to be client-embedded — the real
+  per-user secret is the web-auth token obtained at Apple ID sign-in.
+- **No VC++ Redistributable needed.** `.cargo/config.toml` statically
+  links the MSVC C runtime (`+crt-static`); the bundled C encoders are
+  compiled with the matching `/MT` runtime.
+- **Real icon + version metadata.** `build.rs` embeds
+  `assets/icon.ico` and file-properties via `winresource`. Regenerate
+  the icon with `pwsh packaging/generate-icon.ps1` only if the design in
+  `src/ui.rs` changes.
+
+### Automated GitHub release (recommended)
+
+`.github/workflows/release.yml` builds, packages, and publishes on a tag.
+
+One-time setup in the GitHub repo (Settings → Secrets and variables →
+Actions):
+
+- **Secret** `CLOUDKIT_API_TOKEN` — the CloudKit Web Services API token.
+- **Variable** `CLOUDKIT_ENV` *(optional)* — `production` (default) or
+  `development`.
+
+Cut a release:
+
+```powershell
+# 1. Bump the version (source of truth for the embedded build).
+#    Edit `version` in host-windows/Cargo.toml, then refresh the lock:
+cargo update -p remote-desktop-host
+# 2. Commit Cargo.toml + Cargo.lock.
+# 3. Tag with a matching v-prefixed version and push:
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The workflow verifies the tag matches `Cargo.toml`, builds with the
+token baked in, and attaches two artifacts to a GitHub Release:
+
+- `RemoteDesktopHost-Setup-<version>.exe` — Inno Setup installer.
+- `RemoteDesktopHost-<version>-portable-x64.zip` — the bare `.exe`.
+
+### Building the installer locally
+
+To produce/test the installer without CI, install
+[Inno Setup 6](https://jrsoftware.org/isdl.php), then:
+
+```powershell
+$env:REMOTE_DESKTOP_CLOUDKIT_API_TOKEN = "<token>"
+$env:REMOTE_DESKTOP_CLOUDKIT_ENV = "production"
+cargo build --release
+iscc /DMyAppVersion=0.1.0 packaging/installer.iss
+# → dist/RemoteDesktopHost-Setup-0.1.0.exe
+```
+
+The installer defaults to a per-user install (no UAC prompt), adds a
+Start Menu shortcut, cleans up the launch-at-login registry value and
+log directory on uninstall, and closes/relaunches a running instance on
+upgrade.
+
+### Code signing & SmartScreen
+
+The released exe/installer is **unsigned**. On first download users see
+a Microsoft Defender SmartScreen "unknown publisher" warning and must
+click *More info → Run anyway*. To remove it, sign the artifacts with an
+Authenticode certificate (an EV cert clears SmartScreen reputation
+immediately). Wire `signtool sign /fd sha256 /tr <timestamp-url> ...`
+into the workflow after the build and installer steps once a cert is
+available. The Microsoft Store path (below) signs the package for you.
+
+## Microsoft Store (MSIX) — future
+
+The Store accepts the same win32 executable wrapped in an **MSIX**
+package, and signs it on ingestion (no cert purchase needed for the
+Store channel). High-level path:
+
+1. Reserve the app name and create an app in
+   [Partner Center](https://partner.microsoft.com/dashboard); note the
+   assigned **Package/Identity/Name** and **Publisher** values.
+2. Author an `AppxManifest.xml` (template below), providing PNG assets
+   (Square44x44Logo, Square150x150Logo, etc.) generated from the same
+   icon design.
+3. Build the MSIX from the release `.exe`:
+   ```powershell
+   makeappx pack /d <staging-dir> /p RemoteDesktopHost.msix
+   ```
+   or drive it with the **MSIX Packaging Tool** (GUI).
+4. Upload the `.msix` to Partner Center; the Store re-signs and
+   distributes it.
+
+Caveats to validate before committing to the Store path:
+
+- **Per-user autostart**: the HKCU `Run` key write in `autostart.rs`
+  works for sideloaded MSIX but Store packages should prefer the
+  `windows.startupTask` extension declared in the manifest.
+- **Input injection** (`SendInput`) and **screen capture**
+  (Windows.Graphics.Capture) run fine in a packaged context, but
+  Store certification scrutinizes apps that inject input — be ready to
+  document the remote-control use case.
+
+Minimal manifest template to adapt (replace the `Identity` values with
+the ones Partner Center assigns):
+
+```xml
+<?xml version="1.0" encoding="utf-8"?>
+<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+         xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+         xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities">
+  <Identity Name="Threadmark.RemoteDesktopHost"
+            Publisher="CN=<from Partner Center>"
+            Version="0.1.0.0"
+            ProcessorArchitecture="x64" />
+  <Properties>
+    <DisplayName>Remote Desktop Host</DisplayName>
+    <PublisherDisplayName>Threadmark</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+  </Properties>
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0"
+                        MaxVersionTested="10.0.22621.0" />
+  </Dependencies>
+  <Resources><Resource Language="en-us" /></Resources>
+  <Applications>
+    <Application Id="RemoteDesktopHost" Executable="remote-desktop-host.exe"
+                 EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements DisplayName="Remote Desktop Host"
+                          Description="Remote Desktop Host"
+                          BackgroundColor="transparent"
+                          Square150x150Logo="Assets\Square150x150Logo.png"
+                          Square44x44Logo="Assets\Square44x44Logo.png" />
+    </Application>
+  </Applications>
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+  </Capabilities>
+</Package>
+```

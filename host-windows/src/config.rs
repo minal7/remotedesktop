@@ -29,14 +29,21 @@ pub enum CloudKitEnvironment {
 
 impl AppConfig {
     pub fn from_env() -> Result<Self> {
-        let api_token = env::var("REMOTE_DESKTOP_CLOUDKIT_API_TOKEN").context(
-            "REMOTE_DESKTOP_CLOUDKIT_API_TOKEN is required. Create a CloudKit API token for the container and set it before launching the Windows host.",
+        let api_token = resolve(
+            env::var("REMOTE_DESKTOP_CLOUDKIT_API_TOKEN").ok(),
+            option_env!("REMOTE_DESKTOP_CLOUDKIT_API_TOKEN"),
+        )
+        .context(
+            "REMOTE_DESKTOP_CLOUDKIT_API_TOKEN is required. Create a CloudKit API token for the container and set it before launching the Windows host (or bake it in at build time).",
         )?;
 
-        let environment = env::var("REMOTE_DESKTOP_CLOUDKIT_ENV")
-            .unwrap_or_else(|_| "development".to_string())
-            .parse()
-            .context("REMOTE_DESKTOP_CLOUDKIT_ENV must be either development or production")?;
+        let environment = resolve(
+            env::var("REMOTE_DESKTOP_CLOUDKIT_ENV").ok(),
+            option_env!("REMOTE_DESKTOP_CLOUDKIT_ENV"),
+        )
+        .unwrap_or_else(|| "development".to_string())
+        .parse()
+        .context("REMOTE_DESKTOP_CLOUDKIT_ENV must be either development or production")?;
 
         let auth_callback_bind = env::var("REMOTE_DESKTOP_AUTH_CALLBACK_BIND")
             .unwrap_or_else(|_| DEFAULT_AUTH_CALLBACK_BIND.to_string())
@@ -54,8 +61,11 @@ impl AppConfig {
 
         Ok(Self {
             cloudkit: CloudKitConfig {
-                container_identifier: env::var("REMOTE_DESKTOP_CLOUDKIT_CONTAINER")
-                    .unwrap_or_else(|_| DEFAULT_CONTAINER_IDENTIFIER.to_string()),
+                container_identifier: resolve(
+                    env::var("REMOTE_DESKTOP_CLOUDKIT_CONTAINER").ok(),
+                    option_env!("REMOTE_DESKTOP_CLOUDKIT_CONTAINER"),
+                )
+                .unwrap_or_else(|| DEFAULT_CONTAINER_IDENTIFIER.to_string()),
                 environment,
                 api_token,
             },
@@ -95,6 +105,18 @@ impl FromStr for CloudKitEnvironment {
     }
 }
 
+/// Resolve a setting, preferring a value set in the process environment
+/// (handy for local dev / `.env` overrides) and falling back to a value
+/// baked into the binary at compile time via `option_env!`. Distributed
+/// release builds embed the CloudKit token this way so the executable
+/// runs with no per-machine setup; blank values are treated as unset.
+fn resolve(runtime: Option<String>, compiled: Option<&'static str>) -> Option<String> {
+    runtime
+        .or_else(|| compiled.map(str::to_string))
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 fn read_u64_env(key: &str, default: u64) -> Result<u64> {
     match env::var(key) {
         Ok(value) => value
@@ -132,5 +154,25 @@ mod tests {
     fn normalize_path_adds_leading_slash() {
         assert_eq!(normalize_path("callback".to_string()), "/callback");
         assert_eq!(normalize_path("/callback".to_string()), "/callback");
+    }
+
+    #[test]
+    fn resolve_prefers_runtime_over_compiled() {
+        assert_eq!(
+            resolve(Some("runtime".to_string()), Some("compiled")),
+            Some("runtime".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_falls_back_to_compiled() {
+        assert_eq!(resolve(None, Some("compiled")), Some("compiled".to_string()));
+    }
+
+    #[test]
+    fn resolve_treats_blank_as_unset() {
+        assert_eq!(resolve(Some("   ".to_string()), Some("compiled")), None);
+        assert_eq!(resolve(None, Some("")), None);
+        assert_eq!(resolve(None, None), None);
     }
 }

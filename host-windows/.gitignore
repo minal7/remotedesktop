@@ -1,4 +1,10 @@
 target/
-Cargo.lock
 .env
+
+# Packaging output (installer + portable zip).
+dist/
+
+# Cargo.lock is intentionally committed: this crate ships as a
+# distributable binary and the release workflow builds with --locked
+# for reproducible builds.
 

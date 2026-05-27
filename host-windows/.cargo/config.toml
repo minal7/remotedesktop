@@ -1,0 +1,6 @@
+# Statically link the MSVC C runtime so the distributed .exe runs on a
+# clean Windows machine without the "VC++ Redistributable" installed.
+# The `cc` crate honors this flag and compiles the bundled C encoders
+# (openh264, opus) with the matching /MT runtime.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

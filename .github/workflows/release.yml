@@ -1,0 +1,117 @@
+name: Release (Windows host)
+
+# Builds the Windows host, bakes in the CloudKit token from a repository
+# secret, packages a portable .zip and an Inno Setup installer, and
+# attaches both to a GitHub Release.
+#
+# Trigger by pushing a version tag:
+#   git tag v0.1.0 && git push origin v0.1.0
+# or run manually from the Actions tab (workflow_dispatch).
+#
+# Required repository secret:
+#   CLOUDKIT_API_TOKEN  - CloudKit Web Services API token for the container
+# Optional repository variable:
+#   CLOUDKIT_ENV        - "production" (default) or "development"
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build (without leading v), e.g. 0.1.0"
+        required: true
+        default: "0.1.0"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: version
+        working-directory: host-windows
+        run: |
+          # Cargo.toml is the source of truth for the embedded version.
+          $cargo = (Select-String -Path Cargo.toml -Pattern '^version = "([^"]+)"' | Select-Object -First 1).Matches.Groups[1].Value
+          if (-not $cargo) { throw "Could not read version from Cargo.toml" }
+          if ($env:GITHUB_REF -like "refs/tags/v*") {
+            $tag = $env:GITHUB_REF -replace "^refs/tags/v", ""
+            if ($tag -ne $cargo) {
+              throw "Tag v$tag does not match Cargo.toml version $cargo. Bump host-windows/Cargo.toml (and commit Cargo.lock) before tagging."
+            }
+          }
+          "version=$cargo" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "Building version $cargo"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: host-windows
+
+      - name: Build release
+        working-directory: host-windows
+        env:
+          REMOTE_DESKTOP_CLOUDKIT_API_TOKEN: ${{ secrets.CLOUDKIT_API_TOKEN }}
+          REMOTE_DESKTOP_CLOUDKIT_ENV: ${{ vars.CLOUDKIT_ENV || 'production' }}
+        run: cargo build --release --locked
+
+      - name: Verify executable
+        working-directory: host-windows
+        run: |
+          $exe = "target/release/remote-desktop-host.exe"
+          if (-not (Test-Path $exe)) { throw "Build did not produce $exe" }
+          Get-Item $exe | Select-Object Name, Length, VersionInfo
+
+      - name: Package portable zip
+        working-directory: host-windows
+        run: |
+          $v = "${{ steps.version.outputs.version }}"
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $staging = "dist/portable"
+          New-Item -ItemType Directory -Force -Path $staging | Out-Null
+          Copy-Item "target/release/remote-desktop-host.exe" $staging
+          Copy-Item "README.md" $staging
+          Compress-Archive -Path "$staging/*" -DestinationPath "dist/RemoteDesktopHost-$v-portable-x64.zip" -Force
+          Remove-Item -Recurse -Force $staging
+
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: Build installer
+        working-directory: host-windows/packaging
+        run: |
+          $v = "${{ steps.version.outputs.version }}"
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DMyAppVersion=$v" installer.iss
+
+      - name: List artifacts
+        working-directory: host-windows
+        run: Get-ChildItem dist
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('v{0}', steps.version.outputs.version) }}
+          name: Remote Desktop Host ${{ steps.version.outputs.version }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            host-windows/dist/RemoteDesktopHost-Setup-${{ steps.version.outputs.version }}.exe
+            host-windows/dist/RemoteDesktopHost-${{ steps.version.outputs.version }}-portable-x64.zip
