@@ -78,18 +78,6 @@ jobs:
           if (-not (Test-Path $exe)) { throw "Build did not produce $exe" }
           Get-Item $exe | Select-Object Name, Length, VersionInfo
 
-      - name: Package portable zip
-        working-directory: host-windows
-        run: |
-          $v = "${{ steps.version.outputs.version }}"
-          New-Item -ItemType Directory -Force -Path dist | Out-Null
-          $staging = "dist/portable"
-          New-Item -ItemType Directory -Force -Path $staging | Out-Null
-          Copy-Item "target/release/remote-desktop-host.exe" $staging
-          Copy-Item "README.md" $staging
-          Compress-Archive -Path "$staging/*" -DestinationPath "dist/RemoteDesktopHost-$v-portable-x64.zip" -Force
-          Remove-Item -Recurse -Force $staging
-
       - name: Install Inno Setup
         run: choco install innosetup --no-progress -y
 
@@ -114,4 +102,3 @@ jobs:
           fail_on_unmatched_files: true
           files: |
             host-windows/dist/RemoteDesktopHost-Setup-${{ steps.version.outputs.version }}.exe
-            host-windows/dist/RemoteDesktopHost-${{ steps.version.outputs.version }}-portable-x64.zip

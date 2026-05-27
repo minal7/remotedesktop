@@ -20,12 +20,13 @@ CloudKit-backed signaling — just different system APIs under the hood.
 
 Ships with a small `eframe`/`egui` window that mirrors the macOS
 status popover — same five states (idle → starting → advertising →
-paired → error) and the same Start / Stop / Quit affordances. The
-window registers a procedurally-drawn monitor icon, so the host shows
-up in the Windows taskbar with a recognizable icon and is brought to
-focus on click. Release builds use `windows_subsystem = "windows"` so
-no console window flashes on launch; logs go to
-`%LOCALAPPDATA%\RemoteDesktopHost\host.log` instead of stdout.
+paired → error) and the same Start / Stop / Quit affordances. At
+runtime the window and tray use a procedurally-drawn monitor icon; the
+`.exe` itself also carries a real multi-resolution icon embedded by
+`build.rs` (see [Packaging & distribution](#packaging--distribution)),
+so Explorer, the taskbar and shortcuts all show it. Release builds use
+`windows_subsystem = "windows"` so no console window flashes on launch;
+logs go to `%LOCALAPPDATA%\RemoteDesktopHost\host.log` instead of stdout.
 
 ## Why Rust (and not C#/WinUI)
 
@@ -63,6 +64,16 @@ Set the token's **Sign in Callback** / URL Redirect to:
 http://127.0.0.1:48172/icloud-auth-callback
 ```
 
+The app/container name a user sees on Apple's sign-in consent page is
+**not** set in this code — the host only sends `ckAPIToken` and follows
+Apple's `redirectURL`. That name comes from the iCloud container's
+**Description** in the Apple Developer portal (Certificates, Identifiers
+& Profiles → Identifiers → iCloud Containers → the container). The
+container *identifier* (`iCloud.com.threadmark.remotedesktop`) can't be
+renamed; to show a different name, edit the container description, or
+create a new container and point `REMOTE_DESKTOP_CLOUDKIT_CONTAINER` at
+it.
+
 ## Build prerequisites (Windows)
 
 The media encoders compile native code, so a release build needs:
@@ -70,6 +81,13 @@ The media encoders compile native code, so a release build needs:
 - The MSVC build tools (`cl.exe`) — OpenH264 (`openh264-sys2`) compiles
   from source via `cc`.
 - **CMake** on `PATH` — `audiopus_sys` builds libopus from source.
+- The **Windows SDK** (`rc.exe`, installed with the MSVC build tools) —
+  `winresource` uses it to embed the icon + version metadata. If it's
+  missing the build still succeeds with a warning, just without the
+  embedded resources.
+
+These are all present on the GitHub Actions `windows-latest` runner, so
+the release workflow needs no extra setup.
 
 For local development, build with `cargo build --release` and run
 `target/release/remote-desktop-host.exe`. For shipping a distributable
@@ -115,13 +133,16 @@ Implemented end-to-end:
 
 The portable surface — protocol codec, HID→key mapping, BGRA→I420 +
 H.264 + Opus encoders, signaling, ICE config — compiles and unit-tests
-on any host (`cargo test`, 26 tests).
+on any host (`cargo test`, 32 tests).
 
-**Windows-only, unverified here:** the capture seam in `src/capture.rs`
-(`windows-capture` + `wasapi`) is `#[cfg(windows)]` and can only be
-exercised by building and running on Windows. It mirrors the macOS host
-behavior but has not been run on a Windows machine in this workspace —
-validate screen capture, loopback audio, and `SendInput` there.
+The release build compiles and runs on Windows and produces a working,
+distributable `.exe` (see [Packaging & distribution](#packaging--distribution)).
+
+**Still to validate through a live session:** the capture seam in
+`src/capture.rs` (`windows-capture` + `wasapi`) is `#[cfg(windows)]` and
+can only be exercised by completing a pairing — confirm screen capture,
+loopback audio, and `SendInput` injection once a client connects to a
+running host.
 
 ## Packaging & distribution
 
@@ -163,16 +184,15 @@ Cut a release:
 #    Edit `version` in host-windows/Cargo.toml, then refresh the lock:
 cargo update -p remote-desktop-host
 # 2. Commit Cargo.toml + Cargo.lock.
-# 3. Tag with a matching v-prefixed version and push:
-git tag v0.1.0
-git push origin v0.1.0
+# 3. Tag with a matching v-prefixed version and push (use your new version):
+git tag v0.2.0
+git push origin v0.2.0
 ```
 
 The workflow verifies the tag matches `Cargo.toml`, builds with the
-token baked in, and attaches two artifacts to a GitHub Release:
+token baked in, and attaches the installer to a GitHub Release:
 
 - `RemoteDesktopHost-Setup-<version>.exe` — Inno Setup installer.
-- `RemoteDesktopHost-<version>-portable-x64.zip` — the bare `.exe`.
 
 ### Building the installer locally
 
@@ -181,7 +201,7 @@ To produce/test the installer without CI, install
 
 ```powershell
 $env:REMOTE_DESKTOP_CLOUDKIT_API_TOKEN = "<token>"
-$env:REMOTE_DESKTOP_CLOUDKIT_ENV = "production"
+$env:REMOTE_DESKTOP_CLOUDKIT_ENV = "development"
 cargo build --release
 iscc /DMyAppVersion=0.1.0 packaging/installer.iss
 # → dist/RemoteDesktopHost-Setup-0.1.0.exe
