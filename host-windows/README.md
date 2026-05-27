@@ -149,9 +149,12 @@ The release build is a single, self-contained `.exe`:
 One-time setup in the GitHub repo (Settings → Secrets and variables →
 Actions):
 
-- **Secret** `CLOUDKIT_API_TOKEN` — the CloudKit Web Services API token.
-- **Variable** `CLOUDKIT_ENV` *(optional)* — `production` (default) or
-  `development`.
+- **Secret** `REMOTE_DESKTOP_CLOUDKIT_API_TOKEN` — the CloudKit Web
+  Services API token.
+- **Variable** `CLOUDKIT_ENV` *(optional)* — `development` (default) or
+  `production`. Must match the environment your iOS/Mac clients use, or
+  pairing fails. Use `production` only once the CloudKit container schema
+  is deployed to the Production environment.
 
 Cut a release:
 

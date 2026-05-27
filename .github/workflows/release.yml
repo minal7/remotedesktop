@@ -9,9 +9,9 @@ name: Release (Windows host)
 # or run manually from the Actions tab (workflow_dispatch).
 #
 # Required repository secret:
-#   CLOUDKIT_API_TOKEN  - CloudKit Web Services API token for the container
+#   REMOTE_DESKTOP_CLOUDKIT_API_TOKEN  - CloudKit Web Services API token
 # Optional repository variable:
-#   CLOUDKIT_ENV        - "production" (default) or "development"
+#   CLOUDKIT_ENV  - "development" (default) or "production"
 
 on:
   push:
@@ -67,8 +67,8 @@ jobs:
       - name: Build release
         working-directory: host-windows
         env:
-          REMOTE_DESKTOP_CLOUDKIT_API_TOKEN: ${{ secrets.CLOUDKIT_API_TOKEN }}
-          REMOTE_DESKTOP_CLOUDKIT_ENV: ${{ vars.CLOUDKIT_ENV || 'production' }}
+          REMOTE_DESKTOP_CLOUDKIT_API_TOKEN: ${{ secrets.REMOTE_DESKTOP_CLOUDKIT_API_TOKEN }}
+          REMOTE_DESKTOP_CLOUDKIT_ENV: ${{ vars.CLOUDKIT_ENV || 'development' }}
         run: cargo build --release --locked
 
       - name: Verify executable
