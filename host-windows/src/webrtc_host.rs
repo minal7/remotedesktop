@@ -19,6 +19,7 @@ use crate::signaling::{Kind, Role, SignalingEnvelope};
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use serde_json::{Map, Value};
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::Receiver as StdReceiver;
 use std::sync::Arc;
@@ -107,6 +108,15 @@ impl WebRtcHost {
             Some(ICE_FAILED_TIMEOUT),
             Some(ICE_KEEPALIVE_INTERVAL),
         );
+        // Drop ICE candidates that can never carry a real session. A
+        // multi-homed Windows host (e.g. Wi-Fi + a 100.64/10 CGNAT path,
+        // plus dead 169.254 link-local addresses) otherwise gathers
+        // candidates on every interface; ICE then nominates a pair that
+        // passes the one-shot STUN check but can't sustain the DTLS
+        // handshake, so the peer times out. Keep ordinary LAN, public,
+        // and global IPv6 addresses; discard link-local, CGNAT/shared,
+        // and unique-local addresses.
+        setting_engine.set_ip_filter(Box::new(usable_ice_ip));
         let api = APIBuilder::new()
             .with_media_engine(media_engine)
             .with_interceptor_registry(registry)
@@ -666,6 +676,27 @@ fn now_s() -> u64 {
         .unwrap_or(0)
 }
 
+/// ICE candidate IP filter: `true` keeps the address. Discards classes
+/// that can't form a usable peer path — IPv4 link-local (169.254/16) and
+/// CGNAT/shared (100.64/10), and IPv6 link-local (fe80::/10) and
+/// unique-local (fc00::/7) — while keeping ordinary private LAN, public,
+/// and global IPv6 addresses.
+fn usable_ice_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            let is_cgnat = o[0] == 100 && (o[1] & 0xC0) == 0x40; // 100.64.0.0/10
+            !v4.is_link_local() && !is_cgnat && !v4.is_loopback() && !v4.is_unspecified()
+        }
+        IpAddr::V6(v6) => {
+            let seg0 = v6.segments()[0];
+            let is_link_local = (seg0 & 0xFFC0) == 0xFE80; // fe80::/10
+            let is_unique_local = (seg0 & 0xFE00) == 0xFC00; // fc00::/7
+            !is_link_local && !is_unique_local && !v6.is_loopback() && !v6.is_unspecified()
+        }
+    }
+}
+
 fn answer_envelope(sdp: &str) -> SignalingEnvelope {
     let mut payload = Map::new();
     payload.insert("sdp".to_string(), Value::String(sdp.to_string()));
@@ -697,5 +728,35 @@ fn ice_envelope(init: &RTCIceCandidateInit) -> SignalingEnvelope {
         kind: Kind::Ice,
         payload,
         ts: now_s(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::usable_ice_ip;
+    use std::net::IpAddr;
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn keeps_lan_public_and_global_ipv6() {
+        assert!(usable_ice_ip(ip("192.168.4.24"))); // LAN
+        assert!(usable_ice_ip(ip("10.0.0.5"))); // LAN
+        assert!(usable_ice_ip(ip("172.16.3.9"))); // LAN
+        assert!(usable_ice_ip(ip("23.93.209.157"))); // public srflx
+        assert!(usable_ice_ip(ip("2600:1010:b216:468d::1"))); // global IPv6
+    }
+
+    #[test]
+    fn drops_link_local_cgnat_and_unique_local() {
+        assert!(!usable_ice_ip(ip("169.254.100.182"))); // IPv4 link-local
+        assert!(!usable_ice_ip(ip("100.80.197.84"))); // CGNAT 100.64/10
+        assert!(!usable_ice_ip(ip("100.64.0.1"))); // CGNAT lower bound
+        assert!(!usable_ice_ip(ip("100.127.255.255"))); // CGNAT upper bound
+        assert!(usable_ice_ip(ip("100.128.0.1"))); // just outside CGNAT — kept
+        assert!(!usable_ice_ip(ip("fe80::1"))); // IPv6 link-local
+        assert!(!usable_ice_ip(ip("fd40:be80:c900::1"))); // IPv6 unique-local
     }
 }
