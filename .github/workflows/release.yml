@@ -17,7 +17,7 @@ name: Release
 #   APPLE_APP_SPECIFIC_PASSWORD             - App-specific password for APPLE_ID
 #   APPLE_TEAM_ID                           - Apple Developer Team ID
 # Optional repository variables:
-#   CLOUDKIT_ENV              - "development" (default) or "production"
+#   CLOUDKIT_ENV              - "production" (default) or "development"
 #   MACOS_CODE_SIGN_IDENTITY  - Defaults to "Developer ID Application"
 
 on:
@@ -100,7 +100,7 @@ jobs:
         working-directory: host-windows
         env:
           REMOTE_DESKTOP_CLOUDKIT_API_TOKEN: ${{ secrets.REMOTE_DESKTOP_CLOUDKIT_API_TOKEN }}
-          REMOTE_DESKTOP_CLOUDKIT_ENV: ${{ vars.CLOUDKIT_ENV || 'development' }}
+          REMOTE_DESKTOP_CLOUDKIT_ENV: ${{ vars.CLOUDKIT_ENV || 'production' }}
         run: cargo build --release --locked
 
       - name: Verify executable
