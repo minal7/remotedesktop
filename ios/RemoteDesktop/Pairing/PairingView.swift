@@ -41,16 +41,22 @@ struct PairingView: View {
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Connect to host")
-                .font(.largeTitle.weight(.bold))
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
+        HStack(alignment: .center, spacing: 16) {
+            AppLogo(size: 54)
+                .padding(10)
+                .logoGlassPlate(size: 74, cornerRadius: 22)
 
-            Text("Choose an available device first. If your host is not listed, enter its pairing code.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Connect to host")
+                    .font(.largeTitle.weight(.bold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+
+                Text("Choose an available device first. If your host is not listed, enter its pairing code.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .padding(.bottom, 6)
         .accessibilityElement(children: .combine)
@@ -298,11 +304,7 @@ struct PairingView: View {
 
 private extension View {
     func sectionSurface() -> some View {
-        background(.regularMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: 22, style: .continuous)
-                    .strokeBorder(Color.white.opacity(0.28), lineWidth: 1)
-            }
+        adaptiveGlassSurface(cornerRadius: 22)
             .shadow(color: Color.black.opacity(0.06), radius: 18, x: 0, y: 10)
     }
 }

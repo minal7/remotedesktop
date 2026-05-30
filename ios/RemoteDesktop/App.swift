@@ -8,7 +8,6 @@ struct RemoteDesktopApp: App {
         WindowGroup {
             ContentView()
                 .environmentObject(session)
-                .preferredColorScheme(.dark)
         }
     }
 }

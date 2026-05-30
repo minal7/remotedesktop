@@ -18,6 +18,7 @@ struct MenuContent: View {
         }
         .padding(18)
         .frame(width: 340)
+        .adaptiveGlassSurface(cornerRadius: 24)
         .onAppear { session.refreshPermissions() }
     }
 
@@ -35,9 +36,9 @@ struct MenuContent: View {
 
     private var header: some View {
         HStack(spacing: 10) {
-            Image(systemName: "display")
-                .font(.largeTitle)
-                .foregroundStyle(.tint)
+            AppLogo(size: 34)
+                .padding(7)
+                .logoGlassPlate(size: 48, cornerRadius: 14)
             VStack(alignment: .leading, spacing: 2) {
                 Text("Remote Desktop Host").font(.headline)
                 Text(statusLine)

@@ -72,6 +72,7 @@ targets:
       PRODUCT_BUNDLE_IDENTIFIER: com.threadmark.remotedesktop.client
       TARGETED_DEVICE_FAMILY: "1,2"
       SUPPORTS_MACCATALYST: NO
+      ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
       INFOPLIST_KEY_UIStatusBarHidden: NO
 
   RemoteDesktopTests:
