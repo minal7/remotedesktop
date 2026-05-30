@@ -70,17 +70,6 @@ private enum IconAppearance: String, CaseIterable {
         }
     }
 
-    var screenColor: NSColor {
-        switch self {
-        case .light:
-            return NSColor(hex: 0xF4F8FF)
-        case .dark:
-            return NSColor(hex: 0xFFFFFF)
-        case .tinted:
-            return NSColor(hex: 0xF2F2F2)
-        }
-    }
-
     var standColor: NSColor {
         switch self {
         case .light:
@@ -140,21 +129,15 @@ private func renderIcon(size: Int, appearance: IconAppearance, transparent: Bool
         )
 
         let scale = CGFloat(size) / 64.0
-        let plateRect = CGRect(x: 8 * scale, y: 8 * scale, width: 48 * scale, height: 48 * scale)
-        let platePath = CGPath(
-            roundedRect: plateRect,
-            cornerWidth: 15 * scale,
-            cornerHeight: 15 * scale,
+        let glowRect = CGRect(x: 11 * scale, y: 10 * scale, width: 42 * scale, height: 34 * scale)
+        context.addPath(CGPath(
+            roundedRect: glowRect,
+            cornerWidth: 12 * scale,
+            cornerHeight: 12 * scale,
             transform: nil
-        )
-        context.setFillColor(NSColor.white.withAlphaComponent(appearance == .dark ? 0.09 : 0.34).deviceCGColor)
-        context.addPath(platePath)
+        ))
+        context.setFillColor(NSColor.white.withAlphaComponent(appearance == .dark ? 0.05 : 0.20).deviceCGColor)
         context.fillPath()
-
-        context.setStrokeColor(NSColor.white.withAlphaComponent(appearance == .dark ? 0.20 : 0.45).deviceCGColor)
-        context.setLineWidth(1.4 * scale)
-        context.addPath(platePath)
-        context.strokePath()
     }
 
     func rect(_ x0: CGFloat, _ y0: CGFloat, _ x1: CGFloat, _ y1: CGFloat) -> CGRect {
@@ -197,8 +180,6 @@ private func renderIcon(size: Int, appearance: IconAppearance, transparent: Bool
     let scale = CGFloat(size) / 64.0
     let stroke = transparent ? 4.1 : 3.7
     let screenRect = rect(10, 12, 54, 42)
-    let innerRect = screenRect.insetBy(dx: 4.5 * scale, dy: 4.5 * scale)
-
     context.saveGState()
     context.setShadow(
         offset: CGSize(width: 0, height: transparent ? -1.2 * scale : -2.2 * scale),
@@ -207,13 +188,6 @@ private func renderIcon(size: Int, appearance: IconAppearance, transparent: Bool
     )
     strokeRounded(screenRect, radius: 7.5, color: appearance.bezelColor, lineWidth: stroke)
     context.restoreGState()
-
-    if !transparent {
-        fillRounded(innerRect, radius: 4.8, color: appearance.screenColor.withAlphaComponent(appearance == .dark ? 0.12 : 0.34))
-
-        let highlightRect = rect(16, 17, 48, 20)
-        fillRounded(highlightRect, radius: 1.3, color: NSColor.white.withAlphaComponent(appearance == .dark ? 0.26 : 0.42))
-    }
 
     let standColor = transparent ? appearance.bezelColor : appearance.standColor
     fillRounded(rect(30, 42, 34, 50), radius: 1.9, color: standColor)

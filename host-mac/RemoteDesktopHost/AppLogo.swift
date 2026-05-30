@@ -4,10 +4,10 @@ struct AppLogo: View {
     var size: CGFloat
 
     var body: some View {
-        Image(systemName: "display")
-            .symbolRenderingMode(.hierarchical)
-            .font(.system(size: size * 0.62, weight: .semibold))
-            .foregroundStyle(.primary)
+        Image("AppLogo")
+            .resizable()
+            .renderingMode(.original)
+            .scaledToFit()
             .frame(width: size, height: size)
             .accessibilityHidden(true)
     }
