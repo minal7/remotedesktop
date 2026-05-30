@@ -172,10 +172,11 @@ Actions):
 
 - **Secret** `REMOTE_DESKTOP_CLOUDKIT_API_TOKEN` — the CloudKit Web
   Services API token.
-- **Variable** `CLOUDKIT_ENV` *(optional)* — `development` (default) or
-  `production`. Must match the environment your iOS/Mac clients use, or
-  pairing fails. Use `production` only once the CloudKit container schema
-  is deployed to the Production environment.
+- **Variable** `CLOUDKIT_ENV` *(optional)* — `production` (default) or
+  `development`. Must match the environment your iOS/Mac clients use, or
+  pairing fails. App Store/TestFlight iOS builds always use Production, so
+  released hosts must too. Set this to `development` only for dev-channel
+  builds paired with an Xcode-run client.
 
 Cut a release:
 

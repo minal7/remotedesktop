@@ -48,6 +48,11 @@ targets:
         com.apple.developer.aps-environment: development
         com.apple.developer.icloud-container-identifiers:
           - iCloud.com.threadmark.remotedesktop
+        # Directly-distributed (Developer ID, non-App-Store) builds pick
+        # their CloudKit environment from this entitlement. Without it the
+        # app defaults to Development, which is invisible to the App
+        # Store/TestFlight iOS client (always Production).
+        com.apple.developer.icloud-container-environment: Production
         com.apple.developer.icloud-services:
           - CloudKit
         com.apple.security.device.audio-input: true
