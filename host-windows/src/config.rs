@@ -78,7 +78,7 @@ impl AppConfig {
 
     pub fn auth_callback_url(&self) -> String {
         format!(
-            "http://{}{}",
+            "https://{}{}",
             self.auth_callback_bind, self.auth_callback_path
         )
     }

@@ -23,6 +23,13 @@ hostname = "0.4"
 mdns-sd = "0.13"
 dotenvy = "0.15"
 
+# Self-signed TLS for the localhost Apple ID sign-in callback. CloudKit
+# requires an https Sign-In Callback URL in the production environment, so
+# the host terminates TLS on 127.0.0.1 with a certificate generated at
+# runtime. The browser warns about the untrusted cert; the user proceeds.
+tokio-rustls = "0.26"
+rcgen = "0.13"
+
 
 # WebRTC + media. All cross-platform: the peer connection, codecs,
 # input injection and the H.264/Opus encoders compile and unit-test on

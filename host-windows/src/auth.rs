@@ -3,11 +3,19 @@ use crate::{
     credentials::CredentialStore,
 };
 use anyhow::{anyhow, Context, Result};
-use std::{net::SocketAddr, time::Duration};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
     time::{timeout, Instant},
+};
+use tokio_rustls::{
+    rustls::{
+        crypto::aws_lc_rs,
+        pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer},
+        ServerConfig,
+    },
+    TlsAcceptor,
 };
 use tracing::{info, warn};
 use url::Url;
@@ -60,10 +68,12 @@ impl AppleIdAuthenticator {
             .await
             .with_context(|| {
                 format!(
-                    "couldn't listen for Apple ID callback on http://{}{}",
+                    "couldn't listen for Apple ID callback on https://{}{}",
                     self.callback_bind, self.callback_path
                 )
             })?;
+        let acceptor =
+            build_tls_acceptor().context("couldn't set up TLS for the Apple ID callback")?;
 
         let redirect_url = self
             .cloudkit
@@ -76,13 +86,16 @@ impl AppleIdAuthenticator {
             "Apple ID sign-in required. A browser window is opening so this Windows host can use your private CloudKit signaling records."
         );
         println!(
-            "CloudKit API token callback must be configured as: http://{}{}",
+            "CloudKit API token Sign-In Callback must be configured as: https://{}{}",
             self.callback_bind, self.callback_path
+        );
+        println!(
+            "Your browser will warn about the local self-signed certificate; choose to proceed to finish signing in."
         );
         webbrowser::open(&redirect_url)
             .with_context(|| format!("couldn't open Apple ID sign-in URL: {redirect_url}"))?;
 
-        let token = wait_for_callback(listener, &self.callback_path, AUTH_TIMEOUT).await?;
+        let token = wait_for_callback(listener, acceptor, &self.callback_path, AUTH_TIMEOUT).await?;
         self.cloudkit_credentials_set_web_auth_token(&token)?;
         Ok(())
     }
@@ -97,8 +110,32 @@ impl AppleIdAuthenticator {
     }
 }
 
+/// Builds a TLS acceptor backed by a fresh self-signed certificate for
+/// `127.0.0.1`/`localhost`. CloudKit demands an `https` Sign-In Callback in
+/// production; the cert is untrusted, so the browser shows a one-time warning
+/// the user clicks through to deliver the `ckWebAuthToken` to the host.
+fn build_tls_acceptor() -> Result<TlsAcceptor> {
+    let certified = rcgen::generate_simple_self_signed(vec![
+        "127.0.0.1".to_string(),
+        "localhost".to_string(),
+    ])
+    .context("couldn't generate a self-signed certificate for the callback listener")?;
+    let cert_der = certified.cert.der().clone();
+    let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(certified.key_pair.serialize_der()));
+
+    let config = ServerConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
+        .with_safe_default_protocol_versions()
+        .context("couldn't select TLS protocol versions for the callback listener")?
+        .with_no_client_auth()
+        .with_single_cert(vec![cert_der], key_der)
+        .context("couldn't load the self-signed certificate for the callback listener")?;
+
+    Ok(TlsAcceptor::from(Arc::new(config)))
+}
+
 async fn wait_for_callback(
     listener: TcpListener,
+    acceptor: TlsAcceptor,
     callback_path: &str,
     auth_timeout: Duration,
 ) -> Result<String> {
@@ -108,9 +145,16 @@ async fn wait_for_callback(
         let remaining = deadline
             .checked_duration_since(Instant::now())
             .ok_or_else(|| anyhow!("timed out waiting for Apple ID sign-in"))?;
-        let (mut stream, _) = timeout(remaining, listener.accept())
+        let (tcp_stream, _) = timeout(remaining, listener.accept())
             .await
             .map_err(|_| anyhow!("timed out waiting for Apple ID sign-in"))??;
+        let mut stream = match acceptor.accept(tcp_stream).await {
+            Ok(stream) => stream,
+            Err(error) => {
+                warn!("TLS handshake on the Apple ID callback failed: {error}");
+                continue;
+            }
+        };
 
         let mut buffer = vec![0_u8; 8192];
         let bytes_read = stream.read(&mut buffer).await?;
@@ -123,6 +167,7 @@ async fn wait_for_callback(
                 "Remote Desktop Host is signed in. You can close this window.",
             );
             stream.write_all(response.as_bytes()).await?;
+            stream.flush().await?;
             return Ok(token);
         }
 
@@ -132,6 +177,7 @@ async fn wait_for_callback(
             "Remote Desktop Host did not receive a CloudKit auth token. Return to the sign-in page and try again.",
         );
         stream.write_all(response.as_bytes()).await?;
+        stream.flush().await?;
     }
 }
 

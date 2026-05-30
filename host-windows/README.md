@@ -45,8 +45,8 @@ with **Web Auth Token** authentication:
 1. The host probes CloudKit. If no valid token is stored, startup is
    blocked.
 2. The host opens Apple's sign-in page in the default browser.
-3. Apple redirects back to the local loopback callback with
-   `ckWebAuthToken`.
+3. Apple redirects back to the local loopback callback (served over TLS
+   with a runtime self-signed cert) with `ckWebAuthToken`.
 4. The token goes into Windows Credential Manager for reuse across
    launches.
 5. All subsequent private-database record ops include the token.
@@ -61,8 +61,20 @@ Create a CloudKit API token for `iCloud.com.threadmark.remotedesktop`.
 Set the token's **Sign in Callback** / URL Redirect to:
 
 ```text
-http://127.0.0.1:48172/icloud-auth-callback
+https://127.0.0.1:48172/icloud-auth-callback
 ```
+
+The **production** environment only accepts an `https` Sign-In Callback,
+so the host serves the loopback callback over TLS using a self-signed
+certificate generated at startup. The browser will warn that the
+certificate is untrusted on the redirect back to `127.0.0.1`; choose to
+proceed to complete sign-in. (In development CloudKit also accepts an
+`http://` callback, but `https` works for both, so use it everywhere.)
+
+Also note the API token is **bound to the CloudKit environments that
+exist when it is created**: a token made before you deploy the container
+to Production works only in Development. Deploy the schema to Production
+first, then create the token you bake into the release.
 
 The app/container name a user sees on Apple's sign-in consent page is
 **not** set in this code — the host only sends `ckAPIToken` and follows
