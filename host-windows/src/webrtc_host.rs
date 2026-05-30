@@ -53,6 +53,16 @@ use webrtc::track::track_local::TrackLocal;
 
 const VIDEO_BITRATE_BPS: u32 = 8_000_000;
 const TARGET_FPS: f32 = 60.0;
+/// Hard ceiling on the wall-clock gap between IDR frames. OpenH264's
+/// frame-count GOP (`IntraFramePeriod`) turns into a wall-clock interval
+/// of `GOP / actual_fps`, so when the encoder runs below `TARGET_FPS`
+/// (1440p on a busy machine often only manages 7–10 fps), the "every 2s"
+/// nominal GOP stretches to 15+ s of P-frame-only output. A late-joining
+/// or briefly-deafened iOS decoder then sits black until the next
+/// PLI/FIR loops around. Forcing an IDR every `IDR_WALL_INTERVAL` of
+/// real time bounds that recovery window regardless of encoder
+/// throughput.
+const IDR_WALL_INTERVAL: Duration = Duration::from_secs(2);
 
 /// How long the connection may sit in ICE `disconnected` before we tear
 /// the session down and return to advertising. webrtc-rs only emits
@@ -213,16 +223,32 @@ impl WebRtcHost {
             let ended = ended.clone();
             let closed = closed.clone();
             let connection_generation = connection_generation.clone();
+            let keyframe_request = Arc::clone(&keyframe_request);
             pc.on_peer_connection_state_change(Box::new(move |state| {
                 let ended = ended.clone();
                 let closed = closed.clone();
                 let connection_generation = connection_generation.clone();
+                let keyframe_request = Arc::clone(&keyframe_request);
                 Box::pin(async move {
                     info!("peer connection state → {state:?}");
                     match state {
                         RTCPeerConnectionState::Connected => {
                             // Supersede any in-flight disconnect grace timer.
                             connection_generation.fetch_add(1, Ordering::SeqCst);
+                            // Force an IDR as soon as SRTP is actually up.
+                            // The encoder has been running since `start()`
+                            // returned — well before ICE/DTLS finished —
+                            // so its initial IDR was packetized into a
+                            // socket that had nowhere to send. Without
+                            // this nudge, a slow client sees only
+                            // P-frames until the next periodic IDR
+                            // (~2s of encoder time later) or until iOS
+                            // gets around to sending a PLI, which is
+                            // what made the screen stay black while
+                            // mouse input still worked.
+                            if !keyframe_request.swap(true, Ordering::SeqCst) {
+                                info!("video: requesting IDR after peer became connected");
+                            }
                         }
                         RTCPeerConnectionState::Disconnected => {
                             warn!(
@@ -376,14 +402,26 @@ impl WebRtcHost {
                 };
                 let mut raw = 0u64;
                 let mut encoded = 0u64;
+                // `last_idr_at = None` so the very first encoded frame
+                // counts as the session's IDR (OpenH264 always emits one
+                // up front) and the wall-clock timer starts from there.
+                let mut last_idr_at: Option<Instant> = None;
                 while let Some(frame) = frames.recv() {
                     raw += 1;
                     if raw == 1 {
                         info!("video: first raw frame {}x{}", frame.width, frame.height);
                     }
-                    if keyframe_request.swap(false, Ordering::SeqCst) {
+                    let pli_requested = keyframe_request.swap(false, Ordering::SeqCst);
+                    let wall_clock_overdue = last_idr_at
+                        .map(|t| t.elapsed() >= IDR_WALL_INTERVAL)
+                        .unwrap_or(false);
+                    if pli_requested || wall_clock_overdue {
                         encoder.force_intra_frame();
-                        info!("video: forcing IDR (receiver PLI/FIR)");
+                        if pli_requested {
+                            info!("video: forcing IDR (receiver PLI/FIR)");
+                        } else {
+                            info!("video: forcing IDR (wall-clock fallback)");
+                        }
                     }
                     let captured_at = Instant::now();
                     match encoder.encode_bgra(&frame.data, frame.width, frame.height) {
@@ -394,6 +432,16 @@ impl WebRtcHost {
                                     "video: encoded {encoded}/{raw} frames ({} B)",
                                     annex_b.len()
                                 );
+                            }
+                            // Reset the wall-clock IDR timer whenever a
+                            // frame actually lands. We can't tell from
+                            // here whether OpenH264 emitted an IDR or a
+                            // P-frame, but on the first frame and after
+                            // a `force_intra_frame()` call it always
+                            // emits an IDR, so the timer represents an
+                            // upper bound on time-since-last-IDR.
+                            if last_idr_at.is_none() || pli_requested || wall_clock_overdue {
+                                last_idr_at = Some(captured_at);
                             }
                             if enc_tx
                                 .blocking_send(EncodedFrame {
