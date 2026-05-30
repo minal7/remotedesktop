@@ -48,6 +48,38 @@ public struct ICEConfig: Sendable, Equatable {
         updatedAt: nil)
 }
 
+private struct ICEConfigFetchTimedOut: Error, LocalizedError {
+    var errorDescription: String? {
+        "ICEConfig fetch timed out."
+    }
+}
+
+private final class ICEConfigContinuationBox<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Value, Error>?
+
+    init(_ continuation: CheckedContinuation<Value, Error>) {
+        self.continuation = continuation
+    }
+
+    func resume(with result: Result<Value, Error>) {
+        lock.lock()
+        guard let continuation else {
+            lock.unlock()
+            return
+        }
+        self.continuation = nil
+        lock.unlock()
+
+        switch result {
+        case .success(let value):
+            continuation.resume(returning: value)
+        case .failure(let error):
+            continuation.resume(throwing: error)
+        }
+    }
+}
+
 public actor ICEConfigFetcher {
     public init(containerIdentifier: String, recordName: String = "default") {
         self.containerIdentifier = containerIdentifier
@@ -90,43 +122,54 @@ public actor ICEConfigFetcher {
             return .fallback
         }
 
-        // Cap the fetch at 3 s — CloudKit without entitlements (unit tests,
-        // simulator without iCloud) can otherwise block indefinitely. The
-        // fallback list is fine on a cold start; the authoritative record
-        // will be picked up on the next session.
-        let result = await withTaskGroup(of: ICEConfig?.self) { group -> ICEConfig? in
-            group.addTask { [database, recordID, log] in
-                do {
-                    let record = try await database.record(for: recordID)
-                    let urls = (record["stunURLs"] as? [String]) ?? []
-                    guard !urls.isEmpty else {
-                        log.info("ICEConfig record present but stunURLs empty; using fallback")
-                        return nil
-                    }
-                    let turnURLs = (record["turnURLs"] as? [String]) ?? []
-                    let turnUsername = record["turnUsername"] as? String
-                    let turnCredential = record["turnCredential"] as? String
-                    let updatedAt = record["updatedAt"] as? Date
-                    return ICEConfig(
-                        stunURLs: urls,
-                        turnURLs: turnURLs,
-                        turnUsername: turnUsername,
-                        turnCredential: turnCredential,
-                        updatedAt: updatedAt)
-                } catch {
-                    log.info("ICEConfig fetch failed (\(String(describing: error), privacy: .public)); using fallback")
-                    return nil
+        // Cap the fetch at 3 s. This uses a callback-based CloudKit wrapper
+        // so the timeout can resume even if CloudKit's async bridge stalls.
+        do {
+            let record = try await fetchRecordWithTimeout(
+                withID: recordID,
+                from: database,
+                timeout: 3)
+            let urls = (record["stunURLs"] as? [String]) ?? []
+            guard !urls.isEmpty else {
+                log.info("ICEConfig record present but stunURLs empty; using fallback")
+                return .fallback
+            }
+            let turnURLs = (record["turnURLs"] as? [String]) ?? []
+            let turnUsername = record["turnUsername"] as? String
+            let turnCredential = record["turnCredential"] as? String
+            let updatedAt = record["updatedAt"] as? Date
+            return ICEConfig(
+                stunURLs: urls,
+                turnURLs: turnURLs,
+                turnUsername: turnUsername,
+                turnCredential: turnCredential,
+                updatedAt: updatedAt)
+        } catch {
+            log.info("ICEConfig fetch failed (\(String(describing: error), privacy: .public)); using fallback")
+            return .fallback
+        }
+    }
+
+    private func fetchRecordWithTimeout(
+        withID recordID: CKRecord.ID,
+        from database: CKDatabase,
+        timeout: TimeInterval
+    ) async throws -> CKRecord {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<CKRecord, Error>) in
+            let box = ICEConfigContinuationBox(continuation)
+            database.fetch(withRecordID: recordID) { record, error in
+                if let record {
+                    box.resume(with: .success(record))
+                } else if let error {
+                    box.resume(with: .failure(error))
+                } else {
+                    box.resume(with: .failure(ICEConfigFetchTimedOut()))
                 }
             }
-            group.addTask {
-                try? await Task.sleep(for: .seconds(3))
-                return nil
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
+                box.resume(with: .failure(ICEConfigFetchTimedOut()))
             }
-            let value = await group.next() ?? nil
-            group.cancelAll()
-            return value ?? nil
         }
-        return result ?? .fallback
     }
 
     private func publicDatabase() throws -> CKDatabase {

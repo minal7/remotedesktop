@@ -17,17 +17,17 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0</string>
+	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSAudioCaptureUsageDescription</key>
 	<string>Remote Desktop Host captures your Mac's system audio so sound playing on the host can be heard on your client device.</string>
-	<key>NSMicrophoneUsageDescription</key>
-	<string>Remote Desktop Host uses the microphone permission because the host audio pipeline relies on the system audio engine's recording path to forward your Mac's sound to your client device. The app does not transmit microphone audio.</string>
 	<key>NSHumanReadableCopyright</key>
 	<string>Copyright © 2026</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Remote Desktop Host uses the microphone permission because the host audio pipeline relies on the system audio engine's recording path to forward your Mac's sound to your client device. The app does not transmit microphone audio.</string>
 	<key>NSSupportsAutomaticTermination</key>
 	<false/>
 	<key>NSSupportsSuddenTermination</key>

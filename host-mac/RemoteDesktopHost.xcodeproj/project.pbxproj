@@ -91,8 +91,7 @@
 				5A8E13306E6FC7B8FF07239C /* ICEConfigFetcher.swift */,
 				89E37207F908B9627D856D43 /* SignalingEnvelope.swift */,
 			);
-			name = Swift;
-			path = ../protocol/Swift;
+			path = Swift;
 			sourceTree = "<group>";
 		};
 		25AEA74181EE6FA97709F31A /* remotedesktop */ = {
@@ -119,7 +118,6 @@
 				25AEA74181EE6FA97709F31A /* remotedesktop */,
 				B400D9D1DB22687D5CC6C610 /* RemoteDesktopHost */,
 				A52F892D85EBF7AABE36F075 /* RemoteDesktopHostTests */,
-				AA17F406530ED55A1C9BF9F9 /* Shared */,
 				4885DCDFB02BFA1895DB672B /* Products */,
 			);
 			sourceTree = "<group>";
@@ -139,14 +137,6 @@
 				037B0683983EF3DD797F9355 /* ScreenCaptureSizingTests.swift */,
 			);
 			path = RemoteDesktopHostTests;
-			sourceTree = "<group>";
-		};
-		AA17F406530ED55A1C9BF9F9 /* Shared */ = {
-			isa = PBXGroup;
-			children = (
-				0BC1F2632977B5A1FC430F8B /* Swift */,
-			);
-			name = Shared;
 			sourceTree = "<group>";
 		};
 		B400D9D1DB22687D5CC6C610 /* RemoteDesktopHost */ = {
@@ -312,6 +302,7 @@
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = V9AX39SPJD;
 				ENABLE_HARDENED_RUNTIME = YES;
 				INFOPLIST_FILE = RemoteDesktopHost/Info.plist;
@@ -320,6 +311,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 0.1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.threadmark.remotedesktop.host;
 				SDKROOT = macosx;
 			};
@@ -498,6 +490,7 @@
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = V9AX39SPJD;
 				ENABLE_HARDENED_RUNTIME = YES;
 				INFOPLIST_FILE = RemoteDesktopHost/Info.plist;
@@ -506,6 +499,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 0.1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.threadmark.remotedesktop.host;
 				SDKROOT = macosx;
 			};

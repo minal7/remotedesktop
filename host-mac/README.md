@@ -36,6 +36,14 @@ The generated target builds as a `LSUIElement` menu bar app. For local
 dev against the signaling Worker, set `SIGNALING_URL=http://127.0.0.1:8787`
 in the scheme's Run environment.
 
+## GitHub release package
+
+The GitHub `Release` workflow builds the macOS target as a signed,
+notarized app archive and attaches `RemoteDesktopHost-macOS-<version>.zip`
+beside the Windows installer. Configure the macOS signing and notarization
+secrets listed at the top of `.github/workflows/release.yml` before pushing
+a `v<version>` tag.
+
 ## CLI install and headless setup
 
 For a developer Mac mini or other screenless host, build and install from SSH:

@@ -1,3 +1,4 @@
+import CloudKit
 import XCTest
 @testable import RemoteDesktopHost
 
@@ -117,6 +118,30 @@ final class HostSessionTests: XCTestCase {
                           "session must leave .idle so a pairing code can be generated")
         if case .error(let msg) = session.state {
             XCTFail("expected non-error transition, got error: \(msg)")
+        }
+
+        session.stop()
+    }
+
+    func test_start_retriesFromErrorAfterPermissionsAreGranted() {
+        let provider = MockPermissionsProvider()
+        let session = makeSession(provider)
+
+        session.start()
+        if case .error = session.state {
+            // Expected precondition.
+        } else {
+            XCTFail("expected missing permissions to enter .error, got \(session.state)")
+        }
+
+        provider.accessibility = true
+        provider.screenRecording = true
+        provider.microphone = true
+        session.start()
+
+        XCTAssertNotEqual(session.state, .idle)
+        if case .error(let msg) = session.state {
+            XCTFail("expected retry to leave error, got: \(msg)")
         }
 
         session.stop()
@@ -246,6 +271,40 @@ final class HostSessionTests: XCTestCase {
             "HostAdvertisement-host_id_1")
     }
 
+    func test_startListeningOnLaunch_defaultsToTrue() {
+        withTemporaryDefaults { defaults in
+            XCTAssertTrue(HeadlessHostSettings.startListeningOnLaunch(
+                defaults: defaults,
+                arguments: ["RemoteDesktopHost"]))
+        }
+    }
+
+    func test_startListeningOnLaunch_respectsExplicitFalse() {
+        withTemporaryDefaults { defaults in
+            defaults.set(false, forKey: HeadlessHostSettings.startListeningOnLaunchKey)
+
+            XCTAssertFalse(HeadlessHostSettings.startListeningOnLaunch(
+                defaults: defaults,
+                arguments: ["RemoteDesktopHost"]))
+        }
+    }
+
+    func test_startListeningArgumentOverridesExplicitFalse() {
+        withTemporaryDefaults { defaults in
+            defaults.set(false, forKey: HeadlessHostSettings.startListeningOnLaunchKey)
+
+            XCTAssertTrue(HeadlessHostSettings.startListeningOnLaunch(
+                defaults: defaults,
+                arguments: ["RemoteDesktopHost", "--start-listening"]))
+        }
+    }
+
+    func test_startAtLogin_defaultsToTrue() {
+        withTemporaryDefaults { defaults in
+            XCTAssertTrue(HeadlessHostSettings.startAtLogin(defaults: defaults))
+        }
+    }
+
     // MARK: Issue 4 — CloudKit signing must be validated before CKContainer
 
     func test_cloudKitEntitlements_requireCloudKitService() {
@@ -282,10 +341,37 @@ final class HostSessionTests: XCTestCase {
                     containers: [HostConfig.cloudKitContainerIdentifier])))
     }
 
+    func test_cloudKitRetryClassifier_onlyRetriesTransientErrors() {
+        let networkFailure = NSError(
+            domain: CKErrorDomain,
+            code: CKError.Code.networkFailure.rawValue)
+        let unknownItem = NSError(
+            domain: CKErrorDomain,
+            code: CKError.Code.unknownItem.rawValue)
+        let unrelated = NSError(domain: NSURLErrorDomain, code: NSURLErrorTimedOut)
+
+        XCTAssertTrue(CloudKitSignalingClient.isTransientCloudKitError(networkFailure))
+        XCTAssertFalse(CloudKitSignalingClient.isTransientCloudKitError(unknownItem))
+        XCTAssertFalse(CloudKitSignalingClient.isTransientCloudKitError(unrelated))
+    }
+
     private func makeSession(_ provider: MockPermissionsProvider) -> HostSession {
         HostSession(
             permissionsProvider: provider,
             validateAudioInputEntitlements: {})
+    }
+
+    private func withTemporaryDefaults(_ body: (UserDefaults) -> Void) {
+        let suiteName = "RemoteDesktopHostTests.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            XCTFail("could not create temporary defaults suite")
+            return
+        }
+        defaults.removePersistentDomain(forName: suiteName)
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+        body(defaults)
     }
 }
 

@@ -2,6 +2,7 @@ import AppKit
 import Combine
 import Darwin
 import Foundation
+import ServiceManagement
 import SwiftUI
 
 @main
@@ -65,6 +66,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Refresh permissions on first show so the UI reflects reality.
         session.refreshPermissions()
+        configureStartAtLogin()
         configureHeadlessMode()
     }
 
@@ -93,8 +95,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.syncPairingCodeFile(for: state)
         }
 
+        guard !isRunningUnitTests else { return }
         guard HeadlessHostSettings.startListeningOnLaunch else { return }
         session.start()
+    }
+
+    private func configureStartAtLogin() {
+        guard !isRunningUnitTests else { return }
+        guard !isRunningFromDerivedData else { return }
+        guard HeadlessHostSettings.startAtLogin else { return }
+        guard !legacyLaunchAgentExists else { return }
+
+        let service = SMAppService.mainApp
+        switch service.status {
+        case .notRegistered:
+            do {
+                try service.register()
+            } catch {
+                NSLog("RemoteDesktopHost could not register login item: \(error.localizedDescription)")
+            }
+        case .enabled, .requiresApproval, .notFound:
+            break
+        @unknown default:
+            break
+        }
+    }
+
+    private var legacyLaunchAgentExists: Bool {
+        let launchAgent = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/LaunchAgents/com.threadmark.remotedesktop.host.plist")
+        return FileManager.default.fileExists(atPath: launchAgent.path)
+    }
+
+    private var isRunningUnitTests: Bool {
+        ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+    }
+
+    private var isRunningFromDerivedData: Bool {
+        Bundle.main.bundleURL.path.contains("/DerivedData/")
     }
 
     private func syncPairingCodeFile(for state: HostSession.State) {

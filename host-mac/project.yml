@@ -23,7 +23,6 @@ targets:
       - path: RemoteDesktopHost
       - path: RemoteDesktopHost/WebRTCAliases.swift
       - path: ../protocol/Swift
-        group: Shared
     dependencies:
       - package: LiveKitWebRTC
         product: LiveKitWebRTC
@@ -32,6 +31,8 @@ targets:
       properties:
         LSUIElement: true
         CFBundleDisplayName: Remote Desktop Host
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         NSAudioCaptureUsageDescription: "Remote Desktop Host captures your Mac's system audio so sound playing on the host can be heard on your client device."
         NSMicrophoneUsageDescription: "Remote Desktop Host uses the microphone permission because the host audio pipeline relies on the system audio engine's recording path to forward your Mac's sound to your client device. The app does not transmit microphone audio."
         NSHumanReadableCopyright: "Copyright © 2026"
@@ -55,6 +56,8 @@ targets:
       CODE_SIGN_STYLE: Automatic
       DEVELOPMENT_TEAM: V9AX39SPJD
       PRODUCT_BUNDLE_IDENTIFIER: com.threadmark.remotedesktop.host
+      MARKETING_VERSION: 0.1.0
+      CURRENT_PROJECT_VERSION: 1
       COMBINE_HIDPI_IMAGES: YES
       ENABLE_HARDENED_RUNTIME: YES
       MACOSX_DEPLOYMENT_TARGET: "14.0"

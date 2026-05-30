@@ -226,7 +226,9 @@ public actor CloudKitSignalingClient: SignalingChannel {
         record["createdAt"] = Date() as CKRecordValue
         let database = try cloudKitDatabase()
         do {
-            _ = try await database.save(record)
+            _ = try await retryingCloudKit("send signaling envelope") {
+                try await database.save(record)
+            }
             ownedRecordIDs.insert(record.recordID)
         } catch {
             throw SignalingError.transport("CloudKit send failed: \(error.localizedDescription)")
@@ -274,7 +276,9 @@ public actor CloudKitSignalingClient: SignalingChannel {
 
         let database = try cloudKitDatabase()
         do {
-            let saved = try await database.save(advertisementRecord)
+            let saved = try await retryingCloudKit("refresh pairing advertisement") {
+                try await database.save(advertisementRecord)
+            }
             self.advertisementRecord = saved
             ownedRecordIDs.insert(saved.recordID)
         } catch let refreshError {
@@ -360,7 +364,9 @@ public actor CloudKitSignalingClient: SignalingChannel {
         let container = try cloudKit().container
         let status: CKAccountStatus
         do {
-            status = try await container.accountStatus()
+            status = try await retryingCloudKit("check iCloud account") {
+                try await container.accountStatus()
+            }
         } catch {
             throw SignalingError.iCloudUnavailable(
                 "Couldn't reach iCloud: \(error.localizedDescription)")
@@ -391,7 +397,9 @@ public actor CloudKitSignalingClient: SignalingChannel {
         let record: CKRecord
 
         do {
-            record = try await database.record(for: recordID)
+            record = try await retryingCloudKit("load pairing advertisement") {
+                try await database.record(for: recordID)
+            }
         } catch let error as CKError where error.code == .unknownItem {
             record = CKRecord(recordType: "HostAdvertisement", recordID: recordID)
         } catch {
@@ -401,7 +409,9 @@ public actor CloudKitSignalingClient: SignalingChannel {
 
         updateAdvertisementFields(on: record)
         do {
-            let saved = try await database.save(record)
+            let saved = try await retryingCloudKit("publish pairing advertisement") {
+                try await database.save(record)
+            }
             advertisementRecord = saved
             ownedRecordIDs.insert(saved.recordID)
         } catch {
@@ -497,6 +507,51 @@ public actor CloudKitSignalingClient: SignalingChannel {
                 }
             }
             database.add(op)
+        }
+    }
+
+    private func retryingCloudKit<Value>(
+        _ operation: String,
+        run: () async throws -> Value
+    ) async throws -> Value {
+        let delays: [Duration] = [
+            .milliseconds(500),
+            .seconds(1),
+            .seconds(2),
+            .seconds(4),
+        ]
+
+        for (attempt, delay) in delays.enumerated() {
+            do {
+                return try await run()
+            } catch {
+                guard Self.isTransientCloudKitError(error), !Task.isCancelled else {
+                    throw error
+                }
+                log.warning("\(operation, privacy: .public) failed transiently on attempt \(attempt + 1, privacy: .public); retrying: \(String(describing: error), privacy: .public)")
+                try await Task.sleep(for: delay)
+            }
+        }
+
+        return try await run()
+    }
+
+    nonisolated static func isTransientCloudKitError(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        guard nsError.domain == CKErrorDomain,
+              let code = CKError.Code(rawValue: nsError.code) else {
+            return false
+        }
+
+        switch code {
+        case .networkUnavailable,
+             .networkFailure,
+             .serviceUnavailable,
+             .requestRateLimited,
+             .zoneBusy:
+            return true
+        default:
+            return false
         }
     }
 

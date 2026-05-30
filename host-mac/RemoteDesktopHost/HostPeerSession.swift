@@ -229,13 +229,13 @@ final class HostPeerSession: NSObject {
                     code: -5,
                     userInfo: [NSLocalizedDescriptionKey: "Couldn't create an audio transceiver."])
             }
-            log.info("created fallback audio transceiver mid=\(fallback.mid ?? "nil", privacy: .public)")
+            log.info("created fallback audio transceiver mid=\(fallback.mid, privacy: .public)")
             return
         }
 
         audioTransceiver.sender.track = audioTrack
         audioTransceiver.setDirection(.sendOnly, error: nil)
-        log.info("bound audio track to existing transceiver mid=\(audioTransceiver.mid ?? "nil", privacy: .public) direction=\(String(describing: audioTransceiver.direction), privacy: .public)")
+        log.info("bound audio track to existing transceiver mid=\(audioTransceiver.mid, privacy: .public) direction=\(String(describing: audioTransceiver.direction), privacy: .public)")
     }
 
     private func configureCaptureCallbacks() {

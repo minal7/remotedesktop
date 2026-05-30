@@ -105,7 +105,12 @@ final class HostSession: ObservableObject {
     }
 
     func start() {
-        guard case .idle = state else { return }
+        guard case .idle = state else {
+            if case .error = state {
+                startListening()
+            }
+            return
+        }
         startListening()
     }
 
@@ -124,6 +129,10 @@ final class HostSession: ObservableObject {
         }
 
         let code = Self.newPairingCode()
+        signalingTask?.cancel()
+        signalingTask = nil
+        advertiser.stop()
+        resetPendingRemoteICE()
         state = .starting
         signalingTask = Task { await run(code: code) }
     }
@@ -162,16 +171,16 @@ final class HostSession: ObservableObject {
             return
         }
 
-        // Reset the cached ICE config so we get a fresh fetch,
-        // important when the network topology changed (VPN, Wi-Fi handoff).
-        await iceConfigFetcher.reset()
-        let iceConfig = await iceConfigFetcher.get()
-
         state = .advertising(code: code)
         advertiser.publish(
             hostname: Host.current().localizedName ?? ProcessInfo.processInfo.hostName,
             code: code)
         log.info("advertising code=\(code, privacy: .public)")
+
+        // Reset the cached ICE config so we get a fresh fetch,
+        // important when the network topology changed (VPN, Wi-Fi handoff).
+        await iceConfigFetcher.reset()
+        let iceConfig = await iceConfigFetcher.get()
 
         let advertisementRefreshInterval = CloudKitSignalingClient
             .advertisementRefreshInterval()
