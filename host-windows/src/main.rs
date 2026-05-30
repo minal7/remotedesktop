@@ -31,7 +31,7 @@ mod webrtc_host;
 
 use app_state::{AppState, Command, CommandSender, HostStatus, SharedState};
 use auth::AppleIdAuthenticator;
-use cloudkit::CloudKitClient;
+use cloudkit::{CloudKitClient, CloudKitError};
 use config::AppConfig;
 use credentials::CredentialStore;
 use input::InputInjector;
@@ -188,6 +188,7 @@ fn log_path() -> std::path::PathBuf {
 struct ControllerDeps {
     config: AppConfig,
     cloudkit: CloudKitClient,
+    authenticator: AppleIdAuthenticator,
     sender_id: String,
     host_name: String,
     stun_urls: Vec<String>,
@@ -338,6 +339,7 @@ async fn setup(state: &SharedState) -> Result<ControllerDeps> {
     Ok(ControllerDeps {
         config,
         cloudkit,
+        authenticator,
         sender_id,
         host_name,
         stun_urls,
@@ -349,6 +351,7 @@ async fn run_host(state: SharedState, shutdown: Arc<Notify>, deps: ControllerDep
     let ControllerDeps {
         config,
         cloudkit,
+        authenticator,
         sender_id,
         host_name,
         stun_urls,
@@ -411,7 +414,9 @@ async fn run_host(state: SharedState, shutdown: Arc<Notify>, deps: ControllerDep
             state.clone(),
             shutdown.clone(),
         );
-        let loop_exit = session.advertising_loop(&mut signaling, &config).await;
+        let loop_exit = session
+            .advertising_loop(&mut signaling, &config, &authenticator, &state)
+            .await;
         session.shutdown_peer().await;
 
         if let Some(mdns) = &mdns {
@@ -477,6 +482,8 @@ impl Session {
         &self,
         signaling: &mut HostSignalingClient,
         config: &AppConfig,
+        authenticator: &AppleIdAuthenticator,
+        state: &SharedState,
     ) -> Result<LoopExit> {
         let mut outbound_rx = self.outbound_rx.lock().await;
         let advertisement_refresh_interval =
@@ -513,6 +520,11 @@ impl Session {
                                 error!("CloudKit advertisement refresh failed: {error:#}");
                                 next_advertisement_refresh =
                                     Instant::now() + advertisement_refresh_retry_interval;
+                                if is_auth_error(&error) {
+                                    return self
+                                        .handle_auth_lost(authenticator, state, &error)
+                                        .await;
+                                }
                             }
                         }
                     }
@@ -525,11 +537,44 @@ impl Session {
                                 }
                             }
                         }
-                        Err(error) => error!("CloudKit poll failed: {error:#}"),
+                        Err(error) => {
+                            error!("CloudKit poll failed: {error:#}");
+                            if is_auth_error(&error) {
+                                return self
+                                    .handle_auth_lost(authenticator, state, &error)
+                                    .await;
+                            }
+                        }
                     }
                 }
             }
         }
+    }
+
+    /// Re-run the Apple ID sign-in flow when CloudKit rejects the cached
+    /// `ckWebAuthToken` mid-session (Apple rotates these and they're
+    /// short-lived). Without this the host gets stuck polling forever
+    /// with a stale token, visible to the user as "Windows host never
+    /// appears". On success we return `Restart` so the outer loop builds
+    /// a fresh `HostSignalingClient` with a new pairing code and the
+    /// renewed token; on failure we surface the error so the UI shows
+    /// what went wrong instead of looping silently.
+    async fn handle_auth_lost(
+        &self,
+        authenticator: &AppleIdAuthenticator,
+        state: &SharedState,
+        original_error: &anyhow::Error,
+    ) -> Result<LoopExit> {
+        warn!(
+            "CloudKit rejected cached Apple ID token; re-running sign-in flow: {original_error:#}"
+        );
+        app_state::set_status(state, HostStatus::SigningIn);
+        authenticator
+            .require_signed_in()
+            .await
+            .context("Apple ID re-authentication failed after CloudKit token expired")?;
+        info!("Apple ID re-authentication succeeded — restarting advertising loop");
+        Ok(LoopExit::Restart)
     }
 
     async fn handle_envelope(
@@ -639,6 +684,26 @@ impl Session {
 enum Action {
     Continue,
     Restart,
+}
+
+/// True if `error` is one of the CloudKit auth-failure variants —
+/// covers both the "we have no token at all" and "Apple rejected the
+/// cached token" paths. The latter is fired by `clear_token_if_auth_failed`
+/// inside `CloudKitClient::send`, which wipes the bad token and then the
+/// next request surfaces `MissingWebAuthToken` instead, so both variants
+/// must trigger re-auth.
+///
+/// Walks the whole error chain so `.context("…")` wrappers on the
+/// signaling-layer call sites don't hide the typed cause.
+fn is_auth_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<CloudKitError>(),
+            Some(CloudKitError::MissingWebAuthToken)
+                | Some(CloudKitError::AuthenticationRequired { .. })
+                | Some(CloudKitError::AuthenticationFailed(_))
+        )
+    })
 }
 
 fn host_info(host_name: &str) -> HostInfo {
