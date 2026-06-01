@@ -308,6 +308,16 @@ fn spawn_session(
 }
 
 async fn setup(state: &SharedState) -> Result<ControllerDeps> {
+    // Single-instance: terminate any leftover host processes before we
+    // touch the auth callback port. A previous host that crashed during
+    // the Apple ID browser handshake leaves PID 22104-style zombies
+    // holding `127.0.0.1:48172` in LISTENING + CLOSE_WAIT, which makes
+    // every subsequent launch die in `prompt_for_apple_id` with
+    // WSAEADDRINUSE. The launcher / Inno Setup upgrade flow can also
+    // produce two live instances side-by-side; killing siblings here
+    // covers both.
+    terminate_stale_host_siblings();
+
     let config = AppConfig::from_env()?;
     info!(
         "CloudKit Apple ID callback URL must be configured as {}",
@@ -684,6 +694,78 @@ impl Session {
 enum Action {
     Continue,
     Restart,
+}
+
+/// Best-effort: terminate other live instances of this same binary so
+/// they release the Apple ID callback port (and the CloudKit identity
+/// they're using). Falls back silently on any error — this is a "make
+/// startup more robust" measure, not a correctness requirement, and we
+/// shouldn't refuse to launch just because `tasklist` was unavailable.
+///
+/// Uses `tasklist` + `taskkill` instead of pulling a fresh `windows-sys`
+/// feature gate just for `EnumProcesses` / `OpenProcess` /
+/// `TerminateProcess`. Both binaries ship with every supported Windows
+/// version.
+fn terminate_stale_host_siblings() {
+    use std::process::Command;
+    let my_pid = std::process::id();
+    let Ok(me) = std::env::current_exe() else {
+        return;
+    };
+    let Some(image) = me.file_name().and_then(|s| s.to_str()) else {
+        return;
+    };
+
+    let Ok(output) = Command::new("tasklist")
+        .args([
+            "/FO",
+            "CSV",
+            "/NH",
+            "/FI",
+            &format!("IMAGENAME eq {image}"),
+        ])
+        .output()
+    else {
+        return;
+    };
+    if !output.status.success() {
+        return;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut killed_any = false;
+    for line in stdout.lines() {
+        // CSV row: "remote-desktop-host.exe","12345","Console","1","12,345 K"
+        // Quoted, so the second comma-separated field is the PID.
+        let Some(pid_field) = line.split(',').nth(1) else {
+            continue;
+        };
+        let pid_str = pid_field.trim().trim_matches('"');
+        let Ok(pid) = pid_str.parse::<u32>() else {
+            continue;
+        };
+        if pid == my_pid {
+            continue;
+        }
+        let kill = Command::new("taskkill")
+            .args(["/F", "/PID", &pid.to_string()])
+            .output();
+        match kill {
+            Ok(out) if out.status.success() => {
+                info!("terminated stale {image} pid={pid} before claiming auth callback port");
+                killed_any = true;
+            }
+            Ok(_) | Err(_) => {
+                warn!("couldn't terminate stale {image} pid={pid}; will retry the bind anyway");
+            }
+        }
+    }
+
+    if killed_any {
+        // Give the kernel a moment to release the sockets owned by the
+        // killed processes before whoever called us tries to bind.
+        std::thread::sleep(Duration::from_millis(500));
+    }
 }
 
 /// True if `error` is one of the CloudKit auth-failure variants —

@@ -21,6 +21,13 @@ use tracing::{info, warn};
 use url::Url;
 
 const AUTH_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+/// How long we'll keep retrying `bind` on the callback port before
+/// giving up. Spans the worst-case TCP cleanup interval (Windows holds
+/// FIN_WAIT_2 / CLOSE_WAIT around 60–120 s) so that a previous host
+/// process that crashed mid-handshake has time to fully release the
+/// socket without the user having to reboot.
+const BIND_RETRY_TOTAL: Duration = Duration::from_secs(180);
+const BIND_RETRY_BACKOFF: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Debug)]
 pub struct AppleIdAuthenticator {
@@ -64,14 +71,7 @@ impl AppleIdAuthenticator {
     }
 
     async fn prompt_for_apple_id(&self) -> Result<()> {
-        let listener = TcpListener::bind(self.callback_bind)
-            .await
-            .with_context(|| {
-                format!(
-                    "couldn't listen for Apple ID callback on https://{}{}",
-                    self.callback_bind, self.callback_path
-                )
-            })?;
+        let listener = self.bind_callback_listener().await?;
         let acceptor =
             build_tls_acceptor().context("couldn't set up TLS for the Apple ID callback")?;
 
@@ -98,6 +98,63 @@ impl AppleIdAuthenticator {
         let token = wait_for_callback(listener, acceptor, &self.callback_path, AUTH_TIMEOUT).await?;
         self.cloudkit_credentials_set_web_auth_token(&token)?;
         Ok(())
+    }
+
+    /// Claim the callback port, tolerating brief contention. Two
+    /// realistic failure modes hit this path in production:
+    ///
+    /// 1. The previous host process crashed during the browser handshake
+    ///    and the kernel is still holding its `LISTEN` / `CLOSE_WAIT`
+    ///    sockets — `Get-Process` reports the PID as gone but
+    ///    `Get-NetTCPConnection` still attributes the port to it.
+    ///    Windows clears those after the TCP timeout (~60–120 s).
+    /// 2. The user launched the host twice and the older instance is
+    ///    legitimately listening. `terminate_stale_host_siblings`
+    ///    runs before this, but the kernel needs a moment to release
+    ///    the socket after the kill.
+    ///
+    /// Both resolve by themselves within `BIND_RETRY_TOTAL`; only
+    /// fail hard after that, with a message that tells the user
+    /// what to actually do.
+    async fn bind_callback_listener(&self) -> Result<TcpListener> {
+        let deadline = Instant::now() + BIND_RETRY_TOTAL;
+        let mut warned = false;
+        loop {
+            match TcpListener::bind(self.callback_bind).await {
+                Ok(listener) => return Ok(listener),
+                Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+                    if Instant::now() >= deadline {
+                        return Err(error).with_context(|| format!(
+                            "couldn't claim Apple ID callback port https://{}{} after {}s — another \
+                             process is holding it. Close any other `remote-desktop-host.exe` \
+                             instances and try again; if none are running, reboot Windows to clear \
+                             orphaned sockets, or wait ~2 minutes for the TCP timeout to fire.",
+                            self.callback_bind,
+                            self.callback_path,
+                            BIND_RETRY_TOTAL.as_secs()
+                        ));
+                    }
+                    if !warned {
+                        warned = true;
+                        warn!(
+                            "Apple ID callback port {} is in use (likely a previous host that \
+                             didn't release the socket cleanly); retrying for up to {}s",
+                            self.callback_bind,
+                            BIND_RETRY_TOTAL.as_secs()
+                        );
+                    }
+                    tokio::time::sleep(BIND_RETRY_BACKOFF).await;
+                }
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "couldn't listen for Apple ID callback on https://{}{}",
+                            self.callback_bind, self.callback_path
+                        )
+                    });
+                }
+            }
+        }
     }
 
     fn cloudkit_credentials_set_web_auth_token(&self, token: &str) -> Result<()> {
