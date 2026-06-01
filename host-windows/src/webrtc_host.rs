@@ -201,6 +201,10 @@ impl WebRtcHost {
                     let Some(candidate) = candidate else { return };
                     match candidate.to_json() {
                         Ok(init) => {
+                            if !candidate_usable_for_signaling(&init.candidate) {
+                                info!("dropping local ICE candidate from an unusable interface");
+                                return;
+                            }
                             let _ = outbound.send(ice_envelope(&init));
                         }
                         Err(error) => {
@@ -745,6 +749,36 @@ fn usable_ice_ip(ip: IpAddr) -> bool {
     }
 }
 
+fn candidate_usable_for_signaling(candidate: &str) -> bool {
+    let fields = candidate.split_whitespace().collect::<Vec<_>>();
+    let Some(address) = fields.get(4).and_then(|value| value.parse::<IpAddr>().ok()) else {
+        return true;
+    };
+    let candidate_type = field_after(&fields, "typ");
+    if candidate_type == Some("relay") {
+        return true;
+    }
+    if !usable_ice_ip(address) {
+        return false;
+    }
+
+    if matches!(candidate_type, Some("srflx" | "prflx")) {
+        if let Some(related_address) =
+            field_after(&fields, "raddr").and_then(|value| value.parse::<IpAddr>().ok())
+        {
+            return usable_ice_ip(related_address);
+        }
+    }
+
+    true
+}
+
+fn field_after<'a>(fields: &'a [&str], key: &str) -> Option<&'a str> {
+    fields
+        .windows(2)
+        .find_map(|pair| (pair[0] == key).then_some(pair[1]))
+}
+
 fn answer_envelope(sdp: &str) -> SignalingEnvelope {
     let mut payload = Map::new();
     payload.insert("sdp".to_string(), Value::String(sdp.to_string()));
@@ -781,7 +815,7 @@ fn ice_envelope(init: &RTCIceCandidateInit) -> SignalingEnvelope {
 
 #[cfg(test)]
 mod tests {
-    use super::usable_ice_ip;
+    use super::{candidate_usable_for_signaling, usable_ice_ip};
     use std::net::IpAddr;
 
     fn ip(s: &str) -> IpAddr {
@@ -806,5 +840,31 @@ mod tests {
         assert!(usable_ice_ip(ip("100.128.0.1"))); // just outside CGNAT — kept
         assert!(!usable_ice_ip(ip("fe80::1"))); // IPv6 link-local
         assert!(!usable_ice_ip(ip("fd40:be80:c900::1"))); // IPv6 unique-local
+    }
+
+    #[test]
+    fn drops_signaled_candidates_from_unusable_interfaces() {
+        assert!(!candidate_usable_for_signaling(
+            "candidate:1 1 udp 2122260223 100.89.100.91 51101 typ host"
+        ));
+        assert!(!candidate_usable_for_signaling(
+            "candidate:2 1 udp 1686052607 174.239.179.186 3731 typ srflx raddr 100.89.100.91 rport 51101"
+        ));
+        assert!(!candidate_usable_for_signaling(
+            "candidate:3 1 udp 2122260223 fd40:be80:c900::1 57031 typ host"
+        ));
+    }
+
+    #[test]
+    fn keeps_signaled_candidates_from_reachable_interfaces() {
+        assert!(candidate_usable_for_signaling(
+            "candidate:1 1 udp 2122260223 192.168.4.24 63374 typ host"
+        ));
+        assert!(candidate_usable_for_signaling(
+            "candidate:2 1 udp 1686052607 23.93.209.157 64080 typ srflx raddr 192.168.4.24 rport 64080"
+        ));
+        assert!(candidate_usable_for_signaling(
+            "candidate:3 1 udp 41885695 203.0.113.10 50000 typ relay raddr 100.89.100.91 rport 51101"
+        ));
     }
 }
