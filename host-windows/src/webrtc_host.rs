@@ -128,21 +128,25 @@ impl WebRtcHost {
         // and global IPv6 addresses; discard link-local, CGNAT/shared,
         // and unique-local addresses.
         setting_engine.set_ip_filter(Box::new(usable_ice_ip));
-        // IPv4-only ICE. The Windows host's IPv6 stack is unreliable for
-        // ICE: webrtc-rs mis-parses some Windows IPv6 interface addresses
-        // (the logs show garbage binds like `80fe::…`, a byte-swapped
-        // `fe80::`, and `::100`, all failing with os error 10049), and
-        // Windows IPv6 privacy/temporary addresses mean the source
-        // address of our replies often differs from the candidate we
-        // gathered. The net effect is an IPv6 pair that passes the tiny
-        // STUN connectivity check — so ICE goes `connected` — but then
-        // can't carry the larger DTLS handshake, so the peer connection
-        // never reaches `Connected` and the iOS client times out with
-        // "can't reach your computer". The macOS host has a healthy IPv6
-        // stack and isn't affected, which is why this is Windows-only.
-        // Restricting to IPv4 keeps ICE on the path that actually works
-        // here (LAN host + STUN-reflexive), matching the production flow.
-        setting_engine.set_network_types(vec![NetworkType::Udp4, NetworkType::Tcp4]);
+        // IPv4 + IPv6 ICE. IPv6 is back on now that the real cause of the
+        // Windows IPv6 failure is fixed: webrtc-util mis-parsed Windows
+        // IPv6 interface addresses, byte-swapping every 16-bit group
+        // (`fe80::b774:…` came back as `80fe::74b7:…`), so the host could
+        // never bind an IPv6 socket and gathered no usable IPv6
+        // candidate. The earlier symptom — ICE flips to `connected` over
+        // an IPv6 pair but DTLS never completes and the iOS client times
+        // out with "can't reach your computer" — came from that corruption.
+        // The fix lives in the vendored webrtc-util (see the `[patch]` in
+        // Cargo.toml); with correct addresses, a direct IPv6 path is the
+        // fastest route when both ends have global IPv6. `usable_ice_ip`
+        // still drops link-local / ULA / CGNAT so only routable addresses
+        // are offered.
+        setting_engine.set_network_types(vec![
+            NetworkType::Udp4,
+            NetworkType::Tcp4,
+            NetworkType::Udp6,
+            NetworkType::Tcp6,
+        ]);
         let api = APIBuilder::new()
             .with_media_engine(media_engine)
             .with_interceptor_registry(registry)
