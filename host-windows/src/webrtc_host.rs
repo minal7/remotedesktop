@@ -34,6 +34,7 @@ use webrtc::api::setting_engine::SettingEngine;
 use webrtc::api::APIBuilder;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::data_channel::RTCDataChannel;
+use webrtc::ice::network_type::NetworkType;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::interceptor::registry::Registry;
@@ -127,6 +128,21 @@ impl WebRtcHost {
         // and global IPv6 addresses; discard link-local, CGNAT/shared,
         // and unique-local addresses.
         setting_engine.set_ip_filter(Box::new(usable_ice_ip));
+        // IPv4-only ICE. The Windows host's IPv6 stack is unreliable for
+        // ICE: webrtc-rs mis-parses some Windows IPv6 interface addresses
+        // (the logs show garbage binds like `80fe::…`, a byte-swapped
+        // `fe80::`, and `::100`, all failing with os error 10049), and
+        // Windows IPv6 privacy/temporary addresses mean the source
+        // address of our replies often differs from the candidate we
+        // gathered. The net effect is an IPv6 pair that passes the tiny
+        // STUN connectivity check — so ICE goes `connected` — but then
+        // can't carry the larger DTLS handshake, so the peer connection
+        // never reaches `Connected` and the iOS client times out with
+        // "can't reach your computer". The macOS host has a healthy IPv6
+        // stack and isn't affected, which is why this is Windows-only.
+        // Restricting to IPv4 keeps ICE on the path that actually works
+        // here (LAN host + STUN-reflexive), matching the production flow.
+        setting_engine.set_network_types(vec![NetworkType::Udp4, NetworkType::Tcp4]);
         let api = APIBuilder::new()
             .with_media_engine(media_engine)
             .with_interceptor_registry(registry)
@@ -145,6 +161,23 @@ impl WebRtcHost {
                 .await
                 .context("create peer connection")?,
         );
+
+        // Log the nominated ICE pair so the path that actually carries
+        // (or fails to carry) DTLS + media is visible in host.log. This
+        // is the difference between "ICE says connected" and "the peer
+        // connection reached Connected": if these diverge, the selected
+        // pair passed STUN but couldn't complete DTLS.
+        {
+            let dtls_transport = pc.sctp().transport();
+            let ice_transport = dtls_transport.ice_transport();
+            ice_transport.on_selected_candidate_pair_change(Box::new(|pair| {
+                info!(
+                    "ICE selected pair: local={} remote={}",
+                    pair.local.address, pair.remote.address
+                );
+                Box::pin(async {})
+            }));
+        }
 
         let video_track = Arc::new(TrackLocalStaticSample::new(
             RTCRtpCodecCapability {
