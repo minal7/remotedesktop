@@ -175,9 +175,20 @@ impl WebRtcHost {
             let dtls_transport = pc.sctp().transport();
             let ice_transport = dtls_transport.ice_transport();
             ice_transport.on_selected_candidate_pair_change(Box::new(|pair| {
+                // Type + protocol are the diagnosis: a `relay` on either
+                // side means TURN is in play; `srflx`/`prflx` that then
+                // fails to complete DTLS is the classic no-TURN cross-NAT
+                // failure; `host`/`host` is a direct same-network path.
                 info!(
-                    "ICE selected pair: local={} remote={}",
-                    pair.local.address, pair.remote.address
+                    "ICE selected pair: local={:?}/{} {}:{} remote={:?}/{} {}:{}",
+                    pair.local.typ,
+                    pair.local.protocol,
+                    pair.local.address,
+                    pair.local.port,
+                    pair.remote.typ,
+                    pair.remote.protocol,
+                    pair.remote.address,
+                    pair.remote.port,
                 );
                 Box::pin(async {})
             }));
@@ -239,9 +250,16 @@ impl WebRtcHost {
                     match candidate.to_json() {
                         Ok(init) => {
                             if !candidate_usable_for_signaling(&init.candidate) {
-                                info!("dropping local ICE candidate from an unusable interface");
+                                info!(
+                                    "dropping local ICE candidate from an unusable interface: {}",
+                                    init.candidate
+                                );
                                 return;
                             }
+                            info!(
+                                "signaling local ICE candidate to client: {}",
+                                init.candidate
+                            );
                             let _ = outbound.send(ice_envelope(&init));
                         }
                         Err(error) => {
@@ -386,6 +404,13 @@ impl WebRtcHost {
         let Some(candidate) = payload.get("candidate").and_then(Value::as_str) else {
             return;
         };
+        // Log the remote (iOS) candidate verbatim. The `typ` token in the
+        // SDP string is the key signal for the TURN diagnosis: if the
+        // client ever sends `typ relay`, it fetched a TURN server from
+        // ICEConfig (works cross-NAT); if we only ever see `typ host` and
+        // `typ srflx`, the client is STUN-only and any path that needs a
+        // relay will fail.
+        info!("remote ICE candidate from client: {candidate}");
         let init = RTCIceCandidateInit {
             candidate: candidate.to_owned(),
             sdp_mid: payload
