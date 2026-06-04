@@ -84,13 +84,6 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
         longPress.delegate = self
         addGestureRecognizer(longPress)
 
-        // Mouse buttons on indirect pointers (right-click, middle-click)
-        // arrive as UIPress / scroll events on iPadOS 13.4+. We listen
-        // for buttonMask via a dedicated recognizer.
-        let buttonTracker = IndirectButtonTracker(target: self, action: #selector(onIndirectButtons(_:)))
-        buttonTracker.delegate = self
-        addGestureRecognizer(buttonTracker)
-
         isMultipleTouchEnabled = true
     }
     required init?(coder: NSCoder) { fatalError() }
@@ -143,6 +136,7 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
 
     private var lastPointerButtons: UInt8 = 0
     private var lastPointerLocation: CGPoint = .zero
+    private var isTrackingIndirectClick = false
 
     @objc private func onHover(_ g: UIHoverGestureRecognizer) {
         switch g.state {
@@ -176,17 +170,6 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
         sendScroll(at: lastPointerLocation, dx: t.x, dy: t.y, phase: phase)
     }
 
-    // MARK: - Indirect buttons
-
-    @objc private func onIndirectButtons(_ g: IndirectButtonTracker) {
-        // Button state changed on an indirect pointer device. Use the
-        // tracker's captured location (the touch that caused the change)
-        // and fall back to the last hover position if unset.
-        lastPointerButtons = g.currentButtons
-        let p = g.currentLocation == .zero ? lastPointerLocation : g.currentLocation
-        sendPointer(at: p, buttons: lastPointerButtons)
-    }
-
     // MARK: - Touch cursor mode
 
     private var activeTouch: UITouch?
@@ -196,6 +179,10 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
     private var rightClickFired = false
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        if handleIndirectPointerTouches(touches, with: event, phase: .began) {
+            return
+        }
+
         guard accessories?.hasIndirectPointer != true,
               touches.count == 1,
               let t = touches.first else {
@@ -217,6 +204,10 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+        if handleIndirectPointerTouches(touches, with: event, phase: .moved) {
+            return
+        }
+
         guard let t = activeTouch, touches.contains(t), touchStart != nil else { return }
         let prev = t.previousLocation(in: self)
         let now = t.location(in: self)
@@ -227,6 +218,10 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        if handleIndirectPointerTouches(touches, with: event, phase: .ended) {
+            return
+        }
+
         guard let t = activeTouch, touches.contains(t) else { return }
         let duration = CACurrentMediaTime() - touchStartedAt
         let cursor = cursorLayer.cursorCenter
@@ -244,6 +239,10 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
     }
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        if handleIndirectPointerTouches(touches, with: event, phase: .cancelled) {
+            return
+        }
+
         if isDragging {
             sendPointer(at: cursorLayer.cursorCenter, buttons: 0)
         }
@@ -251,6 +250,48 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
         touchStart = nil
         isDragging = false
         rightClickFired = false
+    }
+
+    // MARK: - Indirect buttons
+
+    private func handleIndirectPointerTouches(
+        _ touches: Set<UITouch>,
+        with event: UIEvent?,
+        phase: IndirectPointerClickPolicy.Phase
+    ) -> Bool {
+        guard let touch = touches.first(where: { $0.type == .indirectPointer }) else {
+            return false
+        }
+
+        accessories?.noteIndirectPointer(active: true)
+        cursorLayer.hide()
+
+        let location = touch.location(in: self)
+        lastPointerLocation = location
+
+        let buttons = IndirectPointerClickPolicy.buttons(
+            for: event?.buttonMask ?? UIEvent.ButtonMask(),
+            phase: phase,
+            previousButtons: lastPointerButtons
+        )
+
+        switch phase {
+        case .began:
+            isTrackingIndirectClick = true
+            lastPointerButtons = buttons
+            sendPointer(at: location, buttons: buttons)
+        case .moved:
+            lastPointerButtons = buttons
+            sendPointer(at: location, buttons: buttons)
+        case .ended, .cancelled:
+            if isTrackingIndirectClick || lastPointerButtons != 0 {
+                sendPointer(at: location, buttons: 0)
+            }
+            isTrackingIndirectClick = false
+            lastPointerButtons = 0
+        }
+
+        return true
     }
 
     @objc private func onLongPress(_ g: UILongPressGestureRecognizer) {
@@ -385,71 +426,36 @@ enum TouchCursorPolicy {
     }
 }
 
-// MARK: - IndirectButtonTracker
-
-/// Captures mouse-button state from indirect pointing devices (Magic
-/// Mouse right/middle click, trackpad physical click). Two things kept
-/// this honest:
-///
-/// 1. `allowedTouchTypes = [.indirectPointer]` so direct finger taps
-///    and Pencil input don't get funneled here — those are handled by
-///    the view's own touch handlers.
-/// 2. The recognizer only advances its state (and therefore only
-///    triggers its action) when the button bitmask *changes*. Without
-///    that, every single move in a press reports the same buttons at
-///    60+ Hz.
-///
-/// `currentLocation` is captured from the touch itself so the handler
-/// doesn't have to rely on a cached hover position that may be stale.
-private final class IndirectButtonTracker: UIGestureRecognizer {
-    var currentButtons: UInt8 = 0
-    var currentLocation: CGPoint = .zero
-
-    override init(target: Any?, action: Selector?) {
-        super.init(target: target, action: action)
-        allowedTouchTypes = [NSNumber(value: UITouch.TouchType.indirectPointer.rawValue)]
-        cancelsTouchesInView = false
-        delaysTouchesBegan = false
-        delaysTouchesEnded = false
+enum IndirectPointerClickPolicy {
+    enum Phase {
+        case began
+        case moved
+        case ended
+        case cancelled
     }
 
-    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
-        captureLocation(touches)
-        if updateButtons(from: event) { state = .began }
-        else { state = .failed }
-    }
-
-    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
-        captureLocation(touches)
-        if updateButtons(from: event) { state = .changed }
-    }
-
-    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
-        captureLocation(touches)
-        _ = updateButtons(from: event)
-        state = .ended
-    }
-
-    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) {
-        state = .cancelled
-    }
-
-    private func captureLocation(_ touches: Set<UITouch>) {
-        guard let v = view, let t = touches.first else { return }
-        currentLocation = t.location(in: v)
-    }
-
-    /// Update `currentButtons` from the event's buttonMask.
-    /// Returns true iff it actually changed — callers gate state
-    /// transitions on this to suppress redundant action fires.
-    private func updateButtons(from event: UIEvent) -> Bool {
-        let mask = event.buttonMask
+    static func buttons(from mask: UIEvent.ButtonMask) -> UInt8 {
         var out: UInt8 = 0
         if mask.contains(.primary)   { out |= 0b001 }
         if mask.contains(.secondary) { out |= 0b010 }
         if mask.rawValue & (1 << 2) != 0 { out |= 0b100 } // middle, best-effort
-        guard out != currentButtons else { return false }
-        currentButtons = out
-        return true
+        return out
+    }
+
+    static func buttons(
+        for mask: UIEvent.ButtonMask,
+        phase: Phase,
+        previousButtons: UInt8
+    ) -> UInt8 {
+        let mapped = buttons(from: mask)
+
+        switch phase {
+        case .began:
+            return mapped == 0 ? 0b001 : mapped
+        case .moved:
+            return mapped == 0 ? previousButtons : mapped
+        case .ended, .cancelled:
+            return 0
+        }
     }
 }

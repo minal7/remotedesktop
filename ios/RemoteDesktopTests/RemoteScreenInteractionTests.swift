@@ -1,7 +1,21 @@
 import XCTest
+import SwiftUI
+import UIKit
 @testable import RemoteDesktop
 
 final class RemoteScreenInteractionTests: XCTestCase {
+    func test_sessionChromePolicy_retractsTopBarOnIPad() {
+        XCTAssertFalse(SessionChromePolicy.pinsTopBar(
+            verticalSizeClass: .regular,
+            userInterfaceIdiom: .pad))
+        XCTAssertFalse(SessionChromePolicy.pinsTopBar(
+            verticalSizeClass: .compact,
+            userInterfaceIdiom: .phone))
+        XCTAssertTrue(SessionChromePolicy.pinsTopBar(
+            verticalSizeClass: .regular,
+            userInterfaceIdiom: .phone))
+    }
+
     func test_interactiveRect_matchesAspectFitDisplayArea() {
         let geometry = RemoteScreenGeometry(
             bounds: CGRect(x: 0, y: 0, width: 1024, height: 768),
@@ -43,6 +57,30 @@ final class RemoteScreenInteractionTests: XCTestCase {
         XCTAssertEqual(
             TouchCursorPolicy.endButtonSequence(duration: 0.5, isDragging: false, rightClickFired: true),
             [])
+    }
+
+    func test_indirectPointerClickPolicy_mapsButtonsAndKeepsClickState() {
+        XCTAssertEqual(
+            IndirectPointerClickPolicy.buttons(from: [.primary, .secondary]),
+            0b011)
+        XCTAssertEqual(
+            IndirectPointerClickPolicy.buttons(
+                for: UIEvent.ButtonMask(),
+                phase: .began,
+                previousButtons: 0),
+            0b001)
+        XCTAssertEqual(
+            IndirectPointerClickPolicy.buttons(
+                for: UIEvent.ButtonMask(),
+                phase: .moved,
+                previousButtons: 0b001),
+            0b001)
+        XCTAssertEqual(
+            IndirectPointerClickPolicy.buttons(
+                for: .primary,
+                phase: .ended,
+                previousButtons: 0b001),
+            0)
     }
 
     func test_touchCursorCenter_canReachInteractiveEdges() {

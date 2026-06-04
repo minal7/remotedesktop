@@ -1,14 +1,16 @@
 import SwiftUI
+import UIKit
 
 /// Top-level in-session UI. Layers accessory-aware chrome over a
 /// full-bleed `RemoteScreenView`.
 ///
-/// **Portrait** – chrome (status strip + keyboard controls) is always
-/// visible; there's plenty of vertical space and hiding it would make
-/// the disconnect action unreachable.
+/// **Pinned chrome** – iPhone portrait keeps the status strip visible;
+/// there's plenty of vertical space and hiding it would make the
+/// disconnect action less discoverable.
 ///
-/// **Landscape** – chrome hides after 3 s and is revealed by dragging
-/// down from the top edge, keeping the remote screen unobstructed.
+/// **Retractable chrome** – iPad and compact-height iPhone layouts hide
+/// chrome after reveal and bring it back with a drag from the top edge,
+/// keeping the remote screen unobstructed.
 ///
 /// A left → right swipe across the full screen triggers disconnect
 /// with a visual progress indicator.
@@ -22,7 +24,7 @@ struct SessionView: View {
     @State private var chromeRevealed = false
     @State private var hideTask: Task<Void, Never>?
 
-    // Special-key idle translucency (landscape only)
+    // Special-key idle translucency (retractable layouts)
     @State private var specialKeysIdle = false
     @State private var specialKeysIdleTask: Task<Void, Never>?
 
@@ -30,12 +32,18 @@ struct SessionView: View {
     @State private var disconnectDragOffset: CGFloat = 0
     @State private var disconnectTriggered = false
 
-    /// In portrait (`.regular` vertical size class) chrome is permanent.
-    private var isPortrait: Bool { verticalSizeClass == .regular }
+    /// iPhone portrait keeps the status strip pinned. iPad and compact-height
+    /// layouts use the same retractable chrome behavior.
+    private var hasPinnedChrome: Bool {
+        SessionChromePolicy.pinsTopBar(
+            verticalSizeClass: verticalSizeClass,
+            userInterfaceIdiom: UIDevice.current.userInterfaceIdiom
+        )
+    }
 
     /// Whether the chrome overlay should be showing right now.
     private var shouldShowChrome: Bool {
-        isPortrait || chromeRevealed
+        hasPinnedChrome || chromeRevealed
     }
 
     private var specialKeysAttentive: Bool {
@@ -57,7 +65,7 @@ struct SessionView: View {
 
     private var specialKeysIdleOpacity: Double {
         // Keep the composited controls above SwiftUI's low-opacity hit-test edge.
-        isPortrait ? 0.62 : 0.56
+        hasPinnedChrome ? 0.62 : 0.56
     }
 
     var body: some View {
@@ -74,9 +82,9 @@ struct SessionView: View {
             // ── Left-edge swipe strip (disconnect) ─────────────
             leftEdgeSwipeStrip
 
-            // ── Top-edge drag handle (landscape only) ──────────
-            if !isPortrait && !chromeRevealed {
-                landscapeDragHandle
+            // ── Top-edge drag handle (retractable chrome only) ─
+            if !hasPinnedChrome && !chromeRevealed {
+                topEdgeDragHandle
             }
 
             // ── Chrome overlay ─────────────────────────────────
@@ -107,9 +115,9 @@ struct SessionView: View {
         .animation(.easeInOut(duration: 0.25), value: shouldShowChrome)
         .animation(.smooth(duration: 0.32), value: accessories.hasHardwareKeyboard)
         .animation(.smooth(duration: 0.32), value: accessories.hasIndirectPointer)
-        .onChange(of: isPortrait) { _, _ in
-            // Reset landscape chrome state when rotating back to portrait.
-            if isPortrait {
+        .onChange(of: hasPinnedChrome) { _, pinned in
+            // Reset retractable chrome state when returning to a pinned layout.
+            if pinned {
                 hideTask?.cancel()
                 chromeRevealed = false
             }
@@ -135,9 +143,9 @@ struct SessionView: View {
         .ignoresSafeArea()
     }
 
-    // MARK: - Landscape top-edge drag handle
+    // MARK: - Retractable top-edge drag handle
 
-    private var landscapeDragHandle: some View {
+    private var topEdgeDragHandle: some View {
         VStack(spacing: 0) {
             // The handle itself
             Color.clear
@@ -162,7 +170,7 @@ struct SessionView: View {
         }
     }
 
-    // MARK: - Chrome reveal / auto-hide (landscape only)
+    // MARK: - Chrome reveal / auto-hide
 
     private func revealChrome() {
         chromeRevealed = true
@@ -253,7 +261,7 @@ struct SessionView: View {
                 specialKeysIdleTask?.cancel()
                 specialKeysIdle = false
             }
-            .onChange(of: isPortrait) { _, _ in wakeSpecialKeys() }
+            .onChange(of: hasPinnedChrome) { _, _ in wakeSpecialKeys() }
             .onChange(of: softKeyboardOpen) { _, open in
                 if open {
                     wakeSpecialKeys()
@@ -271,20 +279,19 @@ struct SessionView: View {
         }
     }
 
-    /// Builds the actual row of controls. In portrait they sit as a compact
-    /// bar just above the keyboard (bottom safe-area edge); in landscape they
-    /// anchor flush at the very bottom of the screen.
+    /// Builds the actual row of controls. Pinned layouts sit as a compact bar
+    /// near the bottom safe-area edge; retractable layouts float at the bottom.
     @ViewBuilder
     private func inputDockContent(needsKeyboard: Bool,
                                   needsModifiers: Bool) -> some View {
-        if isPortrait {
-            // ── Portrait: bottom-aligned, compact row ──────────
+        if hasPinnedChrome {
+            // ── Pinned chrome: bottom-aligned, compact row ─────
             inputDockRow(needsKeyboard: needsKeyboard,
                          needsModifiers: needsModifiers)
             .padding(.horizontal, 16)
             .padding(.bottom, 8)
         } else {
-            // ── Landscape: free-floating buttons at screen bottom ──
+            // ── Retractable chrome: free-floating bottom row ───
             inputDockRow(needsKeyboard: needsKeyboard,
                          needsModifiers: needsModifiers)
             .padding(.horizontal, 20)
@@ -459,5 +466,14 @@ struct SessionView: View {
         }
         .ignoresSafeArea()
         .allowsHitTesting(false)
+    }
+}
+
+enum SessionChromePolicy {
+    static func pinsTopBar(
+        verticalSizeClass: UserInterfaceSizeClass?,
+        userInterfaceIdiom: UIUserInterfaceIdiom
+    ) -> Bool {
+        userInterfaceIdiom != .pad && verticalSizeClass == .regular
     }
 }
