@@ -46,6 +46,24 @@ fn main() -> Result<()> {
     let _ = dotenvy::dotenv();
     init_logging();
 
+    // rustls 0.23 refuses to auto-select a CryptoProvider when more than one
+    // is linked into the process — and this binary links two: `ring` (via
+    // webrtc's `dtls` crate) and `aws-lc-rs` (via reqwest + the Apple ID TLS
+    // callback). With no explicit default, the `dtls` crate's
+    // `WebPkiServerVerifier::builder(...)` calls `CryptoProvider::get_default()`
+    // and PANICS on first use. That panic happens inside the spawned WebRTC
+    // DTLS task and is silent (this is a windowed app with no console), so the
+    // DTLS handshake never starts: the transport sticks at `Connecting` and the
+    // iOS client times out while ICE shows "connected". Installing one
+    // process-wide default up front (matching the `aws_lc_rs` provider the auth
+    // callback already uses) lets the DTLS handshake run.
+    if tokio_rustls::rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .is_err()
+    {
+        warn!("a rustls CryptoProvider was already installed at startup");
+    }
+
     // Reconcile the "launch at login" preference with the OS registry
     // before anything else. First run defaults to enabled so a fresh
     // install is reachable without the user opening the app; afterwards

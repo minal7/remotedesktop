@@ -203,9 +203,12 @@ impl HostSignalingClient {
             ]
         });
 
+        // Retry through production CloudKit throttling: a dropped ICE
+        // candidate here means the iOS client never learns this path and
+        // ICE can settle on an unusable pair, stalling DTLS.
         let value = self
             .cloudkit
-            .post_authenticated("private", "records/modify", &body)
+            .post_authenticated_retrying("private", "records/modify", &body)
             .await?;
         self.record_owned_names(&value)?;
         Ok(())
@@ -287,7 +290,7 @@ impl HostSignalingClient {
 
         let value = self
             .cloudkit
-            .post_authenticated("private", "records/modify", &body)
+            .post_authenticated_retrying("private", "records/modify", &body)
             .await?;
         let names = self.record_owned_names(&value)?;
         if let Some(record_name) = names.into_iter().next() {
@@ -322,7 +325,7 @@ impl HostSignalingClient {
 
         let value = self
             .cloudkit
-            .post_authenticated("private", "records/modify", &body)
+            .post_authenticated_retrying("private", "records/modify", &body)
             .await?;
         let names = self.record_owned_names(&value)?;
         if let Some(record_name) = names.into_iter().next() {

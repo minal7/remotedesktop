@@ -4,10 +4,20 @@ use crate::{
 };
 use reqwest::Method;
 use serde_json::Value;
+use std::time::Duration;
 use thiserror::Error;
 use url::Url;
 
 const CLOUDKIT_BASE_URL: &str = "https://api.apple-cloudkit.com";
+
+/// Backoff schedule for retrying transient CloudKit failures (throttling,
+/// service-busy, transport blips). Mirrors the Apple client's
+/// `retryingCloudKit`. The production CloudKit environment rate-limits far
+/// more aggressively than development; without these retries the host
+/// silently drops signaling writes (notably trickled ICE candidates), so
+/// the iOS client never learns the host's direct LAN candidate and ICE
+/// falls back to an unusable server-reflexive pair that DTLS can't run on.
+const CLOUDKIT_RETRY_BACKOFF_MS: [u64; 4] = [200, 500, 1000, 2000];
 
 #[derive(Clone, Debug)]
 pub struct CloudKitClient {
@@ -43,6 +53,30 @@ pub enum CloudKitError {
     Json(#[from] serde_json::Error),
     #[error(transparent)]
     Credentials(#[from] CredentialError),
+}
+
+impl CloudKitError {
+    /// Transient CloudKit failures that are safe to retry with backoff —
+    /// throttling, service-busy, and transport blips. Mirrors the Apple
+    /// client's `isTransientCloudKitError` (rate-limited / zone-busy /
+    /// service-unavailable / network). Auth and validation errors are NOT
+    /// transient and must surface immediately.
+    pub fn is_transient(&self) -> bool {
+        match self {
+            CloudKitError::Server { code, .. } => matches!(
+                code.as_str(),
+                "TRY_AGAIN_LATER"
+                    | "SERVICE_UNAVAILABLE"
+                    | "ZONE_BUSY"
+                    | "THROTTLED"
+                    | "REQUEST_RATE_LIMITED"
+            ),
+            // Reqwest transport errors (timeouts, connection resets) are
+            // worth one more shot too.
+            CloudKitError::Http(_) => true,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -122,6 +156,35 @@ impl CloudKitClient {
             WebAuth::Required,
         )
         .await
+    }
+
+    /// Like [`post_authenticated`], but retries transient CloudKit failures
+    /// (throttling / service-busy / transport blips) with backoff. Use for
+    /// signaling writes that must not be silently dropped — production
+    /// CloudKit throttles hard enough that a single attempt regularly loses
+    /// trickled ICE candidates, which breaks ICE pairing. Non-transient
+    /// errors (auth, validation) return immediately.
+    pub async fn post_authenticated_retrying(
+        &self,
+        database: &str,
+        operation_path: &str,
+        body: &Value,
+    ) -> Result<Value, CloudKitError> {
+        let mut attempt = 0;
+        loop {
+            match self.post_authenticated(database, operation_path, body).await {
+                Ok(value) => return Ok(value),
+                Err(error) if error.is_transient() && attempt < CLOUDKIT_RETRY_BACKOFF_MS.len() => {
+                    let delay = CLOUDKIT_RETRY_BACKOFF_MS[attempt];
+                    attempt += 1;
+                    tracing::warn!(
+                        "CloudKit {operation_path} transient failure ({error}); retry {attempt} in {delay}ms"
+                    );
+                    tokio::time::sleep(Duration::from_millis(delay)).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
 
     async fn send(
