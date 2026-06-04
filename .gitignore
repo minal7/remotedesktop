@@ -48,3 +48,6 @@ x86/
 *.pem
 *.p12
 *.mobileprovision
+
+# Claude Code local worktrees (must not be committed)
+.claude/worktrees/
