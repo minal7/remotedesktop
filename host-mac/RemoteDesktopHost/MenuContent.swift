@@ -18,7 +18,6 @@ struct MenuContent: View {
         }
         .padding(18)
         .frame(width: 340)
-        .adaptiveGlassSurface(cornerRadius: 24)
         .onAppear { session.refreshPermissions() }
     }
 

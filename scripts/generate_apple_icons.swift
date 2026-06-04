@@ -128,16 +128,6 @@ private func renderIcon(size: Int, appearance: IconAppearance, transparent: Bool
             options: []
         )
 
-        let scale = CGFloat(size) / 64.0
-        let glowRect = CGRect(x: 11 * scale, y: 10 * scale, width: 42 * scale, height: 34 * scale)
-        context.addPath(CGPath(
-            roundedRect: glowRect,
-            cornerWidth: 12 * scale,
-            cornerHeight: 12 * scale,
-            transform: nil
-        ))
-        context.setFillColor(NSColor.white.withAlphaComponent(appearance == .dark ? 0.05 : 0.20).deviceCGColor)
-        context.fillPath()
     }
 
     func rect(_ x0: CGFloat, _ y0: CGFloat, _ x1: CGFloat, _ y1: CGFloat) -> CGRect {
