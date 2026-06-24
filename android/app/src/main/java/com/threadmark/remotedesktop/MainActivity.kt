@@ -1,10 +1,13 @@
 package com.threadmark.remotedesktop
 
 import android.app.Activity
+import android.app.AlertDialog
+import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -20,6 +23,9 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.Window
+import android.view.WindowInsets
+import android.view.WindowInsetsController
+import android.view.WindowManager
 import android.view.inputmethod.InputMethodManager
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -43,6 +49,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import java.io.ByteArrayInputStream
 import kotlin.math.abs
+import kotlin.math.max
 
 class MainActivity : Activity(), CoroutineScope by MainScope() {
     private lateinit var tokenStore: TokenStore
@@ -61,6 +68,9 @@ class MainActivity : Activity(), CoroutineScope by MainScope() {
     private var showCodeEntry = false
     private var lastScreen: Screen = Screen.Auth
     private var codeEntry: EditText? = null
+    private var playReviewAccess = false
+    private var reviewLogoTapCount = 0
+    private var reviewCredentialDialog: AlertDialog? = null
 
     // In-session chrome (retractable status bar + idle-translucent input dock)
     private val uiHandler = Handler(Looper.getMainLooper())
@@ -83,6 +93,7 @@ class MainActivity : Activity(), CoroutineScope by MainScope() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         requestWindowFeature(Window.FEATURE_NO_TITLE)
+        setFullscreenDisplayCutouts(false)
         tokenStore = TokenStore(this)
         cloudKit = CloudKitClient(tokenStore)
         renderCheckingLogin()
@@ -95,6 +106,24 @@ class MainActivity : Activity(), CoroutineScope by MainScope() {
         detachRemoteSurface()
         transport?.dispose()
         cancel()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) {
+            applySystemChromeForCurrentScreen()
+            if (lastScreen == Screen.Session) {
+                applyChromeRevealed(isPortraitOrientation(), animate = false)
+            }
+        }
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        applySystemChromeForCurrentScreen()
+        if (lastScreen == Screen.Session) {
+            applyChromeRevealed(isPortraitOrientation(), animate = false)
+        }
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
@@ -140,6 +169,7 @@ class MainActivity : Activity(), CoroutineScope by MainScope() {
     }
 
     private fun startLogin() {
+        playReviewAccess = false
         launch {
             renderAuth(checking = true)
             try {
@@ -170,6 +200,7 @@ class MainActivity : Activity(), CoroutineScope by MainScope() {
         val root = ScrollView(this).apply {
             setBackgroundColor(Color.rgb(243, 245, 247))
             isFillViewport = true
+            applyPortraitSystemInsets()
         }
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -177,8 +208,21 @@ class MainActivity : Activity(), CoroutineScope by MainScope() {
             setPadding(dp(28), dp(54), dp(28), dp(32))
         }
         root.addView(content, ViewGroup.LayoutParams(match, wrap))
-        content.addView(LogoView(this), LinearLayout.LayoutParams(dp(82), dp(82)))
-        content.addView(label("RemoteDesktop", 31f, Color.rgb(12, 18, 31), bold = true).withTop(22))
+        val logo = LogoView(this).apply {
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { handleReviewLogoTap() }
+        }
+        content.addView(logo, LinearLayout.LayoutParams(dp(82), dp(82)))
+        content.addView(
+            label(
+                getString(R.string.app_name),
+                31f,
+                Color.rgb(12, 18, 31),
+                bold = true,
+                gravity = Gravity.CENTER,
+            ).withTop(22)
+        )
         content.addView(
             label(
                 "Sign in with the same Apple ID used on your host, then choose a nearby device or enter its pairing code.",
@@ -199,12 +243,82 @@ class MainActivity : Activity(), CoroutineScope by MainScope() {
         setContentView(root)
     }
 
+    private fun handleReviewLogoTap() {
+        if (!PLAY_REVIEW_ACCESS_ENABLED) return
+        reviewLogoTapCount += 1
+        if (reviewLogoTapCount >= REVIEW_LOGO_TAP_THRESHOLD) {
+            reviewLogoTapCount = 0
+            showReviewCredentialDialog()
+        }
+    }
+
+    private fun showReviewCredentialDialog() {
+        reviewCredentialDialog?.dismiss()
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(8), dp(20), 0)
+        }
+        val username = EditText(this).apply {
+            hint = "Username"
+            isSingleLine = true
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+        }
+        val password = EditText(this).apply {
+            hint = "Password"
+            isSingleLine = true
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+        }
+        val error = label("Invalid username or password.", 13f, Color.rgb(190, 18, 60)).apply {
+            visibility = View.GONE
+        }
+        container.addView(username, LinearLayout.LayoutParams(match, wrap))
+        container.addView(password, LinearLayout.LayoutParams(match, wrap).apply { topMargin = dp(8) })
+        container.addView(error, LinearLayout.LayoutParams(match, wrap).apply { topMargin = dp(8) })
+
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("Reviewer access")
+            .setView(container)
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Continue", null)
+            .create()
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val valid = username.text.toString() == PLAY_REVIEW_USERNAME &&
+                    password.text.toString() == PLAY_REVIEW_PASSWORD
+                if (valid) {
+                    dialog.dismiss()
+                    startPlayReviewAccess()
+                } else {
+                    error.visibility = View.VISIBLE
+                }
+            }
+        }
+        dialog.setOnDismissListener {
+            if (reviewCredentialDialog === dialog) reviewCredentialDialog = null
+        }
+        reviewCredentialDialog = dialog
+        dialog.show()
+        username.requestFocus()
+        (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager)
+            .showSoftInput(username, InputMethodManager.SHOW_IMPLICIT)
+    }
+
+    private fun startPlayReviewAccess() {
+        playReviewAccess = true
+        pairingError = null
+        hostName = null
+        displayInfo = null
+        softModifierMask = 0
+        renderPairing()
+    }
+
     private fun renderWebLogin(url: String) {
         lastScreen = Screen.Auth
         showSystemChrome()
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Color.WHITE)
+            applyPortraitSystemInsets()
         }
         val top = LinearLayout(this).apply {
             gravity = Gravity.CENTER_VERTICAL
@@ -295,18 +409,24 @@ class MainActivity : Activity(), CoroutineScope by MainScope() {
 
     private fun renderPairing() {
         lastScreen = Screen.Pairing
-        showSystemChrome()
+        applySystemChromeForCurrentScreen()
         detachRemoteSurface()
         transport?.dispose()
         transport = null
         hostName = null
         displayInfo = null
         softModifierMask = 0
-        startDiscovery()
+        if (playReviewAccess) {
+            stopDiscovery()
+            hosts = reviewHosts()
+        } else {
+            startDiscovery()
+        }
 
         val scrollView = ScrollView(this).apply {
             isFillViewport = true
             background = verticalGradient(Color.rgb(242, 245, 249), Color.rgb(232, 237, 244))
+            applyPortraitSystemInsets()
         }
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -450,12 +570,31 @@ class MainActivity : Activity(), CoroutineScope by MainScope() {
         rowButton(
             title = host.hostname,
             accessory = "›",
-            subtitle = if (host.source == LocalHostAdvertisement.Source.CloudKit) "Ready through iCloud" else "Ready nearby",
+            subtitle = if (playReviewAccess) {
+                "Reviewer demo mode"
+            } else if (host.source == LocalHostAdvertisement.Source.CloudKit) {
+                "Ready through iCloud"
+            } else {
+                "Ready nearby"
+            },
         ) {
             connect(host.code)
         }
 
+    private fun reviewHosts(): List<LocalHostAdvertisement> =
+        listOf(
+            LocalHostAdvertisement(
+                hostname = PLAY_REVIEW_HOST_NAME,
+                code = PLAY_REVIEW_PAIRING_CODE,
+                source = LocalHostAdvertisement.Source.LocalNetwork,
+            )
+        )
+
     private fun connect(code: String) {
+        if (playReviewAccess) {
+            renderPlayReviewSession()
+            return
+        }
         stopDiscovery()
         pairingError = null
         hostName = null
@@ -494,33 +633,40 @@ class MainActivity : Activity(), CoroutineScope by MainScope() {
 
     private fun renderSession(connecting: Boolean = false) {
         lastScreen = Screen.Session
-        hideSystemChrome()
+        applySystemChromeForCurrentScreen()
         detachRemoteSurface()
 
         val transport = transport
         val root = FrameLayout(this).apply {
             setBackgroundColor(Color.BLACK)
+            applyPortraitSystemInsets()
         }
 
-        val surface = RemoteScreenSurface(this)
-        remoteSurface = surface
-        surface.displayInfo = displayInfo
-        surface.onPointer = { x, y, buttons ->
-            transport?.send(ControlMessage.Pointer(x, y, buttons))
+        if (playReviewAccess) {
+            root.addView(playReviewDemoSurface(), FrameLayout.LayoutParams(match, match))
+        } else {
+            val surface = RemoteScreenSurface(this)
+            remoteSurface = surface
+            surface.displayInfo = displayInfo
+            surface.onPointer = { x, y, buttons ->
+                transport?.send(ControlMessage.Pointer(x, y, buttons))
+            }
+            surface.onScroll = { x, y, dx, dy, phase ->
+                transport?.send(ControlMessage.Scroll(x, y, dx, dy, phase))
+            }
+            if (transport != null) {
+                surface.initRenderer(transport.eglContext)
+                surface.onVideoReady = { attachVideoIfReady() }
+                // Attach anyway if the host never sends a display message, so video
+                // is never blocked waiting on it.
+                uiHandler.postDelayed(videoAttachFallback, 1500L)
+            }
+            root.addView(surface, FrameLayout.LayoutParams(match, match))
         }
-        surface.onScroll = { x, y, dx, dy, phase ->
-            transport?.send(ControlMessage.Scroll(x, y, dx, dy, phase))
-        }
-        if (transport != null) {
-            surface.initRenderer(transport.eglContext)
-            surface.onVideoReady = { attachVideoIfReady() }
-            // Attach anyway if the host never sends a display message, so video
-            // is never blocked waiting on it.
-            uiHandler.postDelayed(videoAttachFallback, 1500L)
-        }
-        root.addView(surface, FrameLayout.LayoutParams(match, match))
 
-        root.addView(leftEdgeSwipeStrip(), FrameLayout.LayoutParams(dp(24), match, Gravity.START))
+        if (!playReviewAccess) {
+            root.addView(leftEdgeSwipeStrip(), FrameLayout.LayoutParams(dp(24), match, Gravity.START))
+        }
 
         val strip = statusStrip(connecting)
         statusStripView = strip
@@ -535,12 +681,54 @@ class MainActivity : Activity(), CoroutineScope by MainScope() {
         root.addView(softKeyboardCapture(), FrameLayout.LayoutParams(dp(1), dp(1), Gravity.BOTTOM or Gravity.END))
         setContentView(root)
 
-        // Retract the status bar like iOS; the user pulls it down to reveal it.
-        applyChromeRevealed(false, animate = false)
+        // Portrait keeps the connection strip visible below the OS status bar;
+        // landscape keeps the existing retractable full-screen behavior.
+        applyChromeRevealed(isPortraitOrientation(), animate = false)
         dockIdle = false
         inputDockView?.alpha = 1f
         scheduleDockIdle()
     }
+
+    private fun renderPlayReviewSession() {
+        playReviewAccess = true
+        stopDiscovery()
+        transport?.dispose()
+        transport = null
+        pairingError = null
+        hostName = PLAY_REVIEW_HOST_NAME
+        displayInfo = DisplayInfo(1920, 1080, 1.0)
+        softModifierMask = 0
+        renderSession(connecting = false)
+    }
+
+    private fun playReviewDemoSurface(): View {
+        val surface = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setPadding(dp(28), dp(28), dp(28), dp(28))
+            setBackgroundColor(Color.BLACK)
+        }
+        val desktop = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setPadding(dp(22), dp(22), dp(22), dp(22))
+            background = rounded(Color.rgb(19, 25, 39), dp(18), Color.argb(60, 148, 163, 184), 1)
+        }
+        desktop.addView(label("Review demo desktop", 20f, Color.WHITE, bold = true, gravity = Gravity.CENTER))
+        desktop.addView(
+            label(
+                "Temporary Google Play reviewer access",
+                14f,
+                Color.rgb(203, 213, 225),
+                gravity = Gravity.CENTER,
+            ).withTop(8)
+        )
+        surface.addView(desktop, LinearLayout.LayoutParams(match, wrap).apply {
+            width = minOf(resources.displayMetrics.widthPixels - dp(56), dp(520))
+        })
+        return surface
+    }
+
 
     // MARK: - Swipe-to-disconnect (left edge → right, like iOS)
 
@@ -619,7 +807,9 @@ class MainActivity : Activity(), CoroutineScope by MainScope() {
             strip.alpha = if (revealed) 1f else 0f
             handle?.alpha = if (revealed) 0f else 1f
         }
-        if (revealed) uiHandler.postDelayed(hideChromeRunnable, 3000L)
+        if (revealed && !isPortraitOrientation()) {
+            uiHandler.postDelayed(hideChromeRunnable, 3000L)
+        }
     }
 
     // MARK: - Idle-translucent input dock
@@ -666,7 +856,12 @@ class MainActivity : Activity(), CoroutineScope by MainScope() {
         labels.addView(statusModeText)
         strip.addView(labels, LinearLayout.LayoutParams(0, wrap, 1f))
         strip.addView(iconButton("×", Color.rgb(220, 38, 38)) {
-            transport?.disconnect()
+            if (playReviewAccess) {
+                playReviewAccess = false
+                renderAuth()
+            } else {
+                transport?.disconnect()
+            }
         })
         return strip
     }
@@ -881,6 +1076,7 @@ class MainActivity : Activity(), CoroutineScope by MainScope() {
             gravity = Gravity.CENTER
             setPadding(dp(28), dp(28), dp(28), dp(28))
             setBackgroundColor(Color.rgb(243, 245, 247))
+            applyPortraitSystemInsets()
         }
 
     private fun cardContainer(): LinearLayout =
@@ -996,17 +1192,117 @@ class MainActivity : Activity(), CoroutineScope by MainScope() {
         }
 
     private fun hideSystemChrome() {
-        window.decorView.systemUiVisibility =
+        setFullscreenDisplayCutouts(true)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            window.setDecorFitsSystemWindows(false)
+        }
+        window.statusBarColor = Color.TRANSPARENT
+        window.navigationBarColor = Color.TRANSPARENT
+        val decorView = window.decorView
+        decorView.systemUiVisibility =
             View.SYSTEM_UI_FLAG_FULLSCREEN or
                 View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
                 View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
                 View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
                 View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or
                 View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            decorView.windowInsetsController?.let { controller ->
+                controller.hide(WindowInsets.Type.systemBars())
+                controller.setSystemBarsAppearance(
+                    0,
+                    WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS,
+                )
+                controller.systemBarsBehavior =
+                    WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            }
+        }
     }
 
     private fun showSystemChrome() {
-        window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+        setFullscreenDisplayCutouts(false)
+        val decorView = window.decorView
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            window.setDecorFitsSystemWindows(true)
+            decorView.windowInsetsController?.show(WindowInsets.Type.systemBars())
+            decorView.windowInsetsController?.setSystemBarsAppearance(
+                WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS,
+                WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS,
+            )
+        }
+        window.statusBarColor = Color.rgb(243, 245, 247)
+        window.navigationBarColor = Color.rgb(10, 10, 12)
+        decorView.systemUiVisibility =
+            View.SYSTEM_UI_FLAG_LAYOUT_STABLE or View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
+    }
+
+    private fun applySystemChromeForCurrentScreen() {
+        if (usesImmersiveChrome()) {
+            hideSystemChrome()
+        } else {
+            showSystemChrome()
+        }
+        window.decorView.requestApplyInsets()
+    }
+
+    private fun usesImmersiveChrome(): Boolean =
+        (lastScreen == Screen.Pairing || lastScreen == Screen.Session) && !isPortraitOrientation()
+
+    private fun isPortraitOrientation(): Boolean =
+        resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT
+
+    private fun setFullscreenDisplayCutouts(fullscreen: Boolean) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            window.attributes = window.attributes.apply {
+                layoutInDisplayCutoutMode =
+                    if (!fullscreen) {
+                        WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_DEFAULT
+                    } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+                    } else {
+                        WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+                    }
+            }
+        }
+    }
+
+    private fun View.applyPortraitSystemInsets() {
+        val baseLeft = paddingLeft
+        val baseTop = paddingTop
+        val baseRight = paddingRight
+        val baseBottom = paddingBottom
+        setOnApplyWindowInsetsListener { view, insets ->
+            val insetTop: Int
+            val insetBottom: Int
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                val bars = insets.getInsets(WindowInsets.Type.systemBars())
+                val cutout = insets.getInsets(WindowInsets.Type.displayCutout())
+                insetTop = max(bars.top, cutout.top)
+                insetBottom = bars.bottom
+            } else {
+                @Suppress("DEPRECATION")
+                insetTop = max(
+                    insets.systemWindowInsetTop,
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                        insets.displayCutout?.safeInsetTop ?: 0
+                    } else {
+                        0
+                    }
+                )
+                @Suppress("DEPRECATION")
+                insetBottom = insets.systemWindowInsetBottom
+            }
+            val useInsets = isPortraitOrientation()
+            view.setPadding(
+                baseLeft,
+                baseTop + if (useInsets) insetTop else 0,
+                baseRight,
+                baseBottom + if (useInsets) insetBottom else 0,
+            )
+            insets
+        }
+        requestApplyInsets()
+        post { requestApplyInsets() }
     }
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
@@ -1071,5 +1367,13 @@ class MainActivity : Activity(), CoroutineScope by MainScope() {
         private const val match = ViewGroup.LayoutParams.MATCH_PARENT
         private const val wrap = ViewGroup.LayoutParams.WRAP_CONTENT
         private const val SOFT_KEYBOARD_CAPTURE_ID = 0x220781
+        // Temporary Play review access. Remove this flag and the reviewer
+        // helpers after Google Play approval if you no longer need them.
+        private const val PLAY_REVIEW_ACCESS_ENABLED = true
+        private const val REVIEW_LOGO_TAP_THRESHOLD = 10
+        private const val PLAY_REVIEW_HOST_NAME = "Review demo desktop"
+        private const val PLAY_REVIEW_PAIRING_CODE = "000000"
+        private const val PLAY_REVIEW_USERNAME = "googleplayreviewdemo"
+        private const val PLAY_REVIEW_PASSWORD = "demoreview6769"
     }
 }

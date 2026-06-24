@@ -4,4 +4,8 @@ build/
 app/build/
 local.properties
 .env
+key.properties
+play-publisher-service-account.json
+*.jks
+*.keystore
 *.iml
