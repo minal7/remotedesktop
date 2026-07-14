@@ -44,8 +44,8 @@ enum HostCommandLine {
           RemoteDesktopHost --start-listening
 
         --request-permissions asks macOS to surface available TCC prompts. macOS
-        still requires user or MDM approval for protected services such as Screen
-        Recording and Microphone.
+        still requires user or MDM approval for Screen Recording and
+        Accessibility. Mac audio is optional and is enabled from the app UI.
         """)
     }
 
@@ -53,13 +53,6 @@ enum HostCommandLine {
         let provider = SystemPermissionsProvider()
         provider.requestPrompt(for: .screenRecording)
         provider.requestPrompt(for: .accessibility)
-
-        guard HostConfig.enableSystemAudio else { return }
-        let semaphore = DispatchSemaphore(value: 0)
-        provider.requestMicrophoneAccess { _ in
-            semaphore.signal()
-        }
-        _ = semaphore.wait(timeout: .now() + 30)
     }
 
     private static func printSSHPermissionReport() {
@@ -81,14 +74,11 @@ private struct PermissionSnapshot {
     let screenRecording: Bool
     let accessibility: Bool
     let microphone: Bool
-    let audioRequired: Bool
+    let audioAvailable: Bool
     let entitlementError: String?
 
     var ok: Bool {
-        screenRecording
-            && accessibility
-            && (!audioRequired || microphone)
-            && entitlementError == nil
+        screenRecording && accessibility
     }
 
     static func read() -> PermissionSnapshot {
@@ -105,7 +95,7 @@ private struct PermissionSnapshot {
             screenRecording: provider.screenRecordingGranted(),
             accessibility: provider.accessibilityGranted(),
             microphone: provider.microphoneGranted(),
-            audioRequired: HostConfig.enableSystemAudio,
+            audioAvailable: HostConfig.enableSystemAudio,
             entitlementError: entitlementError)
     }
 
@@ -115,17 +105,21 @@ private struct PermissionSnapshot {
             "Accessibility: \(accessibility ? "granted" : "missing")",
         ]
 
-        if audioRequired {
-            lines.append("Microphone: \(microphone ? "granted" : "missing")")
+        if audioAvailable, microphone {
+            lines.append("Mac audio: enabled")
+        } else if audioAvailable {
+            lines.append("Mac audio: off (optional; video and control still work)")
         } else {
-            lines.append("Microphone: not required")
+            lines.append("Mac audio: unavailable in this build")
         }
 
         if let entitlementError {
-            lines.append("Build: \(entitlementError)")
+            lines.append("Optional Mac audio: \(entitlementError)")
         }
 
-        lines.append(ok ? "All required permissions are ready." : "One or more permissions still need approval.")
+        lines.append(ok
+            ? "Screen viewing and remote control are ready."
+            : "Screen Recording or Accessibility still needs approval.")
         return lines.joined(separator: "\n")
     }
 
@@ -134,7 +128,8 @@ private struct PermissionSnapshot {
             ("screenRecording", screenRecording ? "true" : "false"),
             ("accessibility", accessibility ? "true" : "false"),
             ("microphone", microphone ? "true" : "false"),
-            ("audioRequired", audioRequired ? "true" : "false"),
+            ("audioRequired", "false"),
+            ("audioEnabled", audioAvailable && microphone ? "true" : "false"),
             ("ok", ok ? "true" : "false"),
             ("entitlementError", entitlementError.map { "\"\(Self.escape($0))\"" } ?? "null"),
         ]

@@ -11,12 +11,22 @@ public struct SignalingEnvelope: Codable, Sendable {
     public let kind: Kind
     public let payload: [String: String]
     public let ts: Double
+    /// Transport-authenticated source metadata. CloudKit fills this on read;
+    /// it is not trusted from the serialized SDP payload.
+    public let senderID: String?
 
-    public init(role: Role, kind: Kind, payload: [String: String], ts: Double) {
+    public init(
+        role: Role,
+        kind: Kind,
+        payload: [String: String],
+        ts: Double,
+        senderID: String? = nil
+    ) {
         self.role = role
         self.kind = kind
         self.payload = payload
         self.ts = ts
+        self.senderID = senderID
     }
 }
 

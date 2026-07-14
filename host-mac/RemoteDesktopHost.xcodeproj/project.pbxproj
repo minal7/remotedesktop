@@ -9,29 +9,75 @@
 /* Begin PBXBuildFile section */
 		011F517DDAFBE8E5487AC981 /* AppLogo.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4BCF8A7A47830BB9DBB25CE9 /* AppLogo.swift */; };
 		0A2E96270BBA27C6B9005085 /* HostSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7893923A36DECAC9886D28EF /* HostSession.swift */; };
+		0B188FC0D9277C223393FC7F /* ComputerUseHTTPDownloader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 78822BFE81EBBCDA015B9FE4 /* ComputerUseHTTPDownloader.swift */; };
+		0BDF187861C7C7A6E4EF3AF6 /* ComputerUseTaskLedger.swift in Sources */ = {isa = PBXBuildFile; fileRef = 67C543A6C4E8B98B5C1BA245 /* ComputerUseTaskLedger.swift */; };
+		0CC0ECEBE3B8D6BF000EE971 /* OSAtlasComputerUseExecutor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66AA7B54532AAB1346B64BE7 /* OSAtlasComputerUseExecutor.swift */; };
+		13010C7EF366983504391D6E /* RemoteDesktopMailMCP.swift in Sources */ = {isa = PBXBuildFile; fileRef = C9BE58B6666FC5BBCD6E2DBE /* RemoteDesktopMailMCP.swift */; };
 		132CF5F7F52A948326D88F07 /* AudioInputEntitlements.swift in Sources */ = {isa = PBXBuildFile; fileRef = E92C4B9CB81E1F8B6CBE22DA /* AudioInputEntitlements.swift */; };
+		136D5381E8778E789C2BA5CD /* MCPServerRegistry.swift in Sources */ = {isa = PBXBuildFile; fileRef = 85CCC99CA7C9C57C77F670E7 /* MCPServerRegistry.swift */; };
+		14C0A61C170946E483C2E07D /* SystemPackage in Frameworks */ = {isa = PBXBuildFile; productRef = BDCD8AEF5F8B7F191D3D34D4 /* SystemPackage */; };
+		171058C690276E55ABCDE63A /* HostComputerUseManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = CB753FA95C04BD2BE084E213 /* HostComputerUseManager.swift */; };
 		18A1BC70ECAA283CF2368B53 /* HostSessionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9B1DAF90A32ED728B525762F /* HostSessionTests.swift */; };
+		2042D882CA5FC124D16E9A9C /* MacControlMCPInstallerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EF30648C9B8BB3F139DCD4CA /* MacControlMCPInstallerTests.swift */; };
+		2A73337CEE303568F6881543 /* OS-ATLAS-APACHE-2.0-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = 7D98C1008558E1DAD992F9B0 /* OS-ATLAS-APACHE-2.0-LICENSE.txt */; };
+		2BB4F312F1FA16AD43D21ECB /* FoundationMCPJSONSchemaBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 87DBA79B150564718516A5FE /* FoundationMCPJSONSchemaBridge.swift */; };
+		2E117598F13A014329CD22FE /* MCPFirstComputerUseExecutorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49CF19459819E5602DB03150 /* MCPFirstComputerUseExecutorTests.swift */; };
+		2F8D30B0C5CB5F9100627C63 /* MacControlMCPInstaller.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0EED9EA8BD57F31F7C87F4C /* MacControlMCPInstaller.swift */; };
 		329C35890F366BD995FDF8A7 /* PermissionsProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5AEEF525524B99DFE1BEBFDC /* PermissionsProvider.swift */; };
 		335F3049413654BA69CF7721 /* LiveKitWebRTC in Frameworks */ = {isa = PBXBuildFile; productRef = B32C5B551A8501593D407B76 /* LiveKitWebRTC */; };
+		37F053BBB872177DD6DC7615 /* MCPFoundationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C8A7FBD347C34995D3AEC37F /* MCPFoundationTests.swift */; };
+		3D7BE1972BA0547D0B21E541 /* RemoteDesktopMailAutomationPreflight.swift in Sources */ = {isa = PBXBuildFile; fileRef = A548774FD133C86136F2D8CA /* RemoteDesktopMailAutomationPreflight.swift */; };
 		41BE421BE5A6C2A37C4D9F65 /* MenuContent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6704F4EF5979DBED1CBB31D5 /* MenuContent.swift */; };
 		453DCAD598997A2C642D501A /* HostPeerSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5409F40C641B07FBB4D367EC /* HostPeerSession.swift */; };
+		4B2A36D879E44A9EC6B98840 /* MCP in Frameworks */ = {isa = PBXBuildFile; productRef = A77ACE1093362DEE23B1D0F4 /* MCP */; };
+		4BA0007ECE780B500E8B7EB9 /* MacControlMCPArtifact.swift in Sources */ = {isa = PBXBuildFile; fileRef = F91AC2C48158859F12AB043A /* MacControlMCPArtifact.swift */; };
+		4C9693292EA211546C26D75B /* OSAtlasLlamaRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5FCB3255850270CBF08A86D0 /* OSAtlasLlamaRuntime.swift */; };
+		511514C02A183941333B0803 /* MacControlMCPArchiveExtractor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7DEB12F1337DC8272D20BD2A /* MacControlMCPArchiveExtractor.swift */; };
+		538B1C81F0766A5A01A59C66 /* OSAtlasComputerUseExecutorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3349CC549DF18D316358D45F /* OSAtlasComputerUseExecutorTests.swift */; };
 		5904006F8408628325366659 /* BonjourAdvertiser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4770C8CE9BED4CC5EFB3A726 /* BonjourAdvertiser.swift */; };
 		5BEA124BF32042E307D79208 /* ScreenCapture.swift in Sources */ = {isa = PBXBuildFile; fileRef = 138F44F93B9F279F9495A485 /* ScreenCapture.swift */; };
+		5EA25BB8F67C3AD701724649 /* AppleFoundationMCPPlannerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD18C4E425AE91D459520417 /* AppleFoundationMCPPlannerTests.swift */; };
 		608B3DF5E693D7F3BD1D6928 /* CloudKitSignalingClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6DA7B1D695BC75E69194B0A /* CloudKitSignalingClient.swift */; };
+		62C20EC90B2BCFF0066A3538 /* ComputerUseLicenseComplianceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 37BA471798CCE46AB3ED62F5 /* ComputerUseLicenseComplianceTests.swift */; };
 		62DA5B6673EA5CBE3D1697E2 /* DeviceIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E6A11B60193093594AABA25 /* DeviceIdentity.swift */; };
 		630D66E302FADD1EC9C7608B /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F5991731ED21FDC001946561 /* Assets.xcassets */; };
 		63A185B24B8A07ABEC2DD9FC /* InputInjector.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE8CCAE6B38CDDD22B43E761 /* InputInjector.swift */; };
 		69E1EB52E6F06EABED9B9163 /* HostCommandLine.swift in Sources */ = {isa = PBXBuildFile; fileRef = B104C1229A29AC3A660D5AE2 /* HostCommandLine.swift */; };
 		6D6AC21CC6C01821F4B30731 /* App.swift in Sources */ = {isa = PBXBuildFile; fileRef = 75EE7C6868D1A93B054508AE /* App.swift */; };
+		708DF3BE5C4A24255B9E8F58 /* MCPClientPool.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E8CC4B1A8E8D3C92F38FBDE /* MCPClientPool.swift */; };
 		7E9180D7DA2E0B106F51AAAE /* HostConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = 76B373BE70CB02CAA21FB9F8 /* HostConfig.swift */; };
 		82F7EB7D6C73B7C48D1E09B5 /* ICEConfigFetcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A8E13306E6FC7B8FF07239C /* ICEConfigFetcher.swift */; };
+		8592737ECDD81494512864E3 /* MCPApprovalPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF13696DF259DFFE5A67A5EA /* MCPApprovalPresentation.swift */; };
+		8A37A3B49D4108FD8664CB63 /* LLAMA-CPP-MIT-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = 07BE29E09643E04555FE686A /* LLAMA-CPP-MIT-LICENSE.txt */; };
 		8A75048F122E44B655F410CF /* SignalingEnvelope.swift in Sources */ = {isa = PBXBuildFile; fileRef = 89E37207F908B9627D856D43 /* SignalingEnvelope.swift */; };
+		8AD76727F65B619CA61816CC /* ComputerUseClarificationPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = E985DBBFDBA3E8C04A0C63D2 /* ComputerUseClarificationPolicy.swift */; };
+		90EB1522061B6B7656D2F5A7 /* MAC-CONTROL-MCP-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = 277FCD68C34B9D5FA45E2B0D /* MAC-CONTROL-MCP-LICENSE.txt */; };
+		945AC9201E86F8BF3D56308A /* ComputerUseActionSafetyPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = E71D4CCB8CB0475455583D09 /* ComputerUseActionSafetyPolicy.swift */; };
+		95BF6B6A752CF923886D40E4 /* ComputerUseInstaller.swift in Sources */ = {isa = PBXBuildFile; fileRef = DFFCDBD869B91E3FA729B1B9 /* ComputerUseInstaller.swift */; };
 		963F2EF70B3726CF3EF3D44A /* WebRTCAliases.swift in Sources */ = {isa = PBXBuildFile; fileRef = 199B8A0D8EBEE0F556692058 /* WebRTCAliases.swift */; };
 		9774C8DAD590EBB177FB4BAA /* SystemAudioBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C10787D47D68714896956E4 /* SystemAudioBridge.swift */; };
+		97FFC5206C74AE0DE79AAE74 /* MCPToolSafetyPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5B91C35C5B9D22BB94FB5576 /* MCPToolSafetyPolicy.swift */; };
+		9B16F67C2F12C6B2EC4E993E /* MCPApprovalPresentationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9EE79F7708D562EA715453FD /* MCPApprovalPresentationTests.swift */; };
 		9D448E71B0B80DF5EB39C9C9 /* HeadlessHostSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2701911382BBCEBD2F15D6F9 /* HeadlessHostSettings.swift */; };
 		9D70032A603AC37CEF77F3B9 /* WireFormat.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E396D7E6189E66F789A9466 /* WireFormat.swift */; };
+		9D81BB015279178B6603C67D /* RemoteDesktopMailMCPTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E08F96816C348D00A1C3EC18 /* RemoteDesktopMailMCPTests.swift */; };
+		A1AD1DF5F32B1BFE7CBE7FC1 /* OSAtlasRuntimeInstallationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BAD30262E2C7207F3FCF5E54 /* OSAtlasRuntimeInstallationTests.swift */; };
+		B160F5360090B524D897F503 /* MCPFirstComputerUseExecutor.swift in Sources */ = {isa = PBXBuildFile; fileRef = F5D92D8EBF4D6263DDCFD0DF /* MCPFirstComputerUseExecutor.swift */; };
+		B2DFFB922AEFC361EC219915 /* ComputerUseTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66E1A3BCCCB20F05C6898FCF /* ComputerUseTests.swift */; };
 		B52D07F032EEF5EA41C14534 /* HIDUsage.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC26EE65BC584A891CDF9054 /* HIDUsage.swift */; };
+		B719FEA1E23F3779D4083566 /* ComputerUseRuntimeTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1011F8B532D93C2004CCFA98 /* ComputerUseRuntimeTypes.swift */; };
+		B9E3A137D7B18F63AE4AC4E2 /* OSAtlasRuntimeInstallation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 16CB73E4E41BE0E7586E4129 /* OSAtlasRuntimeInstallation.swift */; };
+		BC393D0286409F0A6B367D79 /* ComputerUseMobileInitiationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC7C60E90BCD41A69C849F4B /* ComputerUseMobileInitiationTests.swift */; };
+		C7AE7D151153F5457AF1A27B /* MCPClientSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6CDAD78ED761DA2254F0F6BC /* MCPClientSession.swift */; };
+		C90476214B9BEF6C1D0D53FA /* HostSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 63433D0B8027A723A9C0090E /* HostSettingsView.swift */; };
+		C9C3A5C0046F855F65A0D8EE /* CloudKitComputerUseChannel.swift in Sources */ = {isa = PBXBuildFile; fileRef = BE05E1F678802C54EF3D44AD /* CloudKitComputerUseChannel.swift */; };
+		CA5095CA26D04D0DA3336222 /* MCPTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D2FEC98D1A8EA9C7CAE9D27 /* MCPTypes.swift */; };
+		D184F2F3A70A20D0AE2C6A95 /* ComputerUseArtifactManifest.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7196F80FEC0A28B03B3D49A /* ComputerUseArtifactManifest.swift */; };
+		D69461347BA90EA816D813C4 /* ComputerUseProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 48A968CEDB6DC8E31EAD80B9 /* ComputerUseProtocol.swift */; };
+		DFE68A099F0C07CA6598E619 /* AppleFoundationMCPPlanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01D4A4CBD5E28C53D7C11C24 /* AppleFoundationMCPPlanner.swift */; };
+		E47AD513E1617BE306A6B446 /* NOTICE.txt in Resources */ = {isa = PBXBuildFile; fileRef = 11941D3F38B1D9FBA3206FF2 /* NOTICE.txt */; };
 		ED079874829511ED2203A189 /* ScreenCaptureSizingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 037B0683983EF3DD797F9355 /* ScreenCaptureSizingTests.swift */; };
+		FCA720672E14ABB217211ED5 /* HostSetupView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 72EC39F2E8D1A2EF246C1CB7 /* HostSetupView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -45,34 +91,78 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		01D4A4CBD5E28C53D7C11C24 /* AppleFoundationMCPPlanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleFoundationMCPPlanner.swift; sourceTree = "<group>"; };
 		037B0683983EF3DD797F9355 /* ScreenCaptureSizingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenCaptureSizingTests.swift; sourceTree = "<group>"; };
+		07BE29E09643E04555FE686A /* LLAMA-CPP-MIT-LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "LLAMA-CPP-MIT-LICENSE.txt"; sourceTree = "<group>"; };
+		1011F8B532D93C2004CCFA98 /* ComputerUseRuntimeTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseRuntimeTypes.swift; sourceTree = "<group>"; };
 		10A95BA0C09D6E6B9620E977 /* RemoteDesktopHost.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = RemoteDesktopHost.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		11941D3F38B1D9FBA3206FF2 /* NOTICE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = NOTICE.txt; sourceTree = "<group>"; };
 		138F44F93B9F279F9495A485 /* ScreenCapture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenCapture.swift; sourceTree = "<group>"; };
+		16CB73E4E41BE0E7586E4129 /* OSAtlasRuntimeInstallation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OSAtlasRuntimeInstallation.swift; sourceTree = "<group>"; };
 		178543C74F742896058F900E /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		199B8A0D8EBEE0F556692058 /* WebRTCAliases.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebRTCAliases.swift; sourceTree = "<group>"; };
 		1FDAD0CCA04F6601347F37EE /* RemoteDesktopHostTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = RemoteDesktopHostTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		2701911382BBCEBD2F15D6F9 /* HeadlessHostSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HeadlessHostSettings.swift; sourceTree = "<group>"; };
+		277FCD68C34B9D5FA45E2B0D /* MAC-CONTROL-MCP-LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "MAC-CONTROL-MCP-LICENSE.txt"; sourceTree = "<group>"; };
 		2C10787D47D68714896956E4 /* SystemAudioBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemAudioBridge.swift; sourceTree = "<group>"; };
+		3349CC549DF18D316358D45F /* OSAtlasComputerUseExecutorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OSAtlasComputerUseExecutorTests.swift; sourceTree = "<group>"; };
+		37BA471798CCE46AB3ED62F5 /* ComputerUseLicenseComplianceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseLicenseComplianceTests.swift; sourceTree = "<group>"; };
 		4770C8CE9BED4CC5EFB3A726 /* BonjourAdvertiser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BonjourAdvertiser.swift; sourceTree = "<group>"; };
+		48A968CEDB6DC8E31EAD80B9 /* ComputerUseProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseProtocol.swift; sourceTree = "<group>"; };
+		49CF19459819E5602DB03150 /* MCPFirstComputerUseExecutorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPFirstComputerUseExecutorTests.swift; sourceTree = "<group>"; };
 		4BCF8A7A47830BB9DBB25CE9 /* AppLogo.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppLogo.swift; sourceTree = "<group>"; };
 		5409F40C641B07FBB4D367EC /* HostPeerSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostPeerSession.swift; sourceTree = "<group>"; };
 		5A8E13306E6FC7B8FF07239C /* ICEConfigFetcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ICEConfigFetcher.swift; sourceTree = "<group>"; };
 		5AEEF525524B99DFE1BEBFDC /* PermissionsProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PermissionsProvider.swift; sourceTree = "<group>"; };
+		5B91C35C5B9D22BB94FB5576 /* MCPToolSafetyPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPToolSafetyPolicy.swift; sourceTree = "<group>"; };
 		5E6A11B60193093594AABA25 /* DeviceIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceIdentity.swift; sourceTree = "<group>"; };
+		5E8CC4B1A8E8D3C92F38FBDE /* MCPClientPool.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPClientPool.swift; sourceTree = "<group>"; };
+		5FCB3255850270CBF08A86D0 /* OSAtlasLlamaRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OSAtlasLlamaRuntime.swift; sourceTree = "<group>"; };
+		63433D0B8027A723A9C0090E /* HostSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostSettingsView.swift; sourceTree = "<group>"; };
+		66AA7B54532AAB1346B64BE7 /* OSAtlasComputerUseExecutor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OSAtlasComputerUseExecutor.swift; sourceTree = "<group>"; };
+		66E1A3BCCCB20F05C6898FCF /* ComputerUseTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseTests.swift; sourceTree = "<group>"; };
 		6704F4EF5979DBED1CBB31D5 /* MenuContent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuContent.swift; sourceTree = "<group>"; };
+		67C543A6C4E8B98B5C1BA245 /* ComputerUseTaskLedger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseTaskLedger.swift; sourceTree = "<group>"; };
+		6CDAD78ED761DA2254F0F6BC /* MCPClientSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPClientSession.swift; sourceTree = "<group>"; };
+		72EC39F2E8D1A2EF246C1CB7 /* HostSetupView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostSetupView.swift; sourceTree = "<group>"; };
 		75EE7C6868D1A93B054508AE /* App.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App.swift; sourceTree = "<group>"; };
 		76B373BE70CB02CAA21FB9F8 /* HostConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostConfig.swift; sourceTree = "<group>"; };
+		78822BFE81EBBCDA015B9FE4 /* ComputerUseHTTPDownloader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseHTTPDownloader.swift; sourceTree = "<group>"; };
 		7893923A36DECAC9886D28EF /* HostSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostSession.swift; sourceTree = "<group>"; };
+		7D98C1008558E1DAD992F9B0 /* OS-ATLAS-APACHE-2.0-LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "OS-ATLAS-APACHE-2.0-LICENSE.txt"; sourceTree = "<group>"; };
+		7DEB12F1337DC8272D20BD2A /* MacControlMCPArchiveExtractor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacControlMCPArchiveExtractor.swift; sourceTree = "<group>"; };
+		85CCC99CA7C9C57C77F670E7 /* MCPServerRegistry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPServerRegistry.swift; sourceTree = "<group>"; };
+		87DBA79B150564718516A5FE /* FoundationMCPJSONSchemaBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FoundationMCPJSONSchemaBridge.swift; sourceTree = "<group>"; };
 		89E37207F908B9627D856D43 /* SignalingEnvelope.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignalingEnvelope.swift; sourceTree = "<group>"; };
+		8D2FEC98D1A8EA9C7CAE9D27 /* MCPTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPTypes.swift; sourceTree = "<group>"; };
 		9B1DAF90A32ED728B525762F /* HostSessionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostSessionTests.swift; sourceTree = "<group>"; };
 		9E396D7E6189E66F789A9466 /* WireFormat.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WireFormat.swift; sourceTree = "<group>"; };
+		9EE79F7708D562EA715453FD /* MCPApprovalPresentationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPApprovalPresentationTests.swift; sourceTree = "<group>"; };
 		9F6F855555A1D4FB18F7FE69 /* RemoteDesktopHost.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = RemoteDesktopHost.entitlements; sourceTree = "<group>"; };
+		A0EED9EA8BD57F31F7C87F4C /* MacControlMCPInstaller.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacControlMCPInstaller.swift; sourceTree = "<group>"; };
+		A548774FD133C86136F2D8CA /* RemoteDesktopMailAutomationPreflight.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteDesktopMailAutomationPreflight.swift; sourceTree = "<group>"; };
 		B104C1229A29AC3A660D5AE2 /* HostCommandLine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostCommandLine.swift; sourceTree = "<group>"; };
+		B7196F80FEC0A28B03B3D49A /* ComputerUseArtifactManifest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseArtifactManifest.swift; sourceTree = "<group>"; };
+		BAD30262E2C7207F3FCF5E54 /* OSAtlasRuntimeInstallationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OSAtlasRuntimeInstallationTests.swift; sourceTree = "<group>"; };
+		BC7C60E90BCD41A69C849F4B /* ComputerUseMobileInitiationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseMobileInitiationTests.swift; sourceTree = "<group>"; };
+		BE05E1F678802C54EF3D44AD /* CloudKitComputerUseChannel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudKitComputerUseChannel.swift; sourceTree = "<group>"; };
+		BF13696DF259DFFE5A67A5EA /* MCPApprovalPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPApprovalPresentation.swift; sourceTree = "<group>"; };
+		C8A7FBD347C34995D3AEC37F /* MCPFoundationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPFoundationTests.swift; sourceTree = "<group>"; };
+		C9BE58B6666FC5BBCD6E2DBE /* RemoteDesktopMailMCP.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteDesktopMailMCP.swift; sourceTree = "<group>"; };
+		CB753FA95C04BD2BE084E213 /* HostComputerUseManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostComputerUseManager.swift; sourceTree = "<group>"; };
+		DFFCDBD869B91E3FA729B1B9 /* ComputerUseInstaller.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseInstaller.swift; sourceTree = "<group>"; };
+		E08F96816C348D00A1C3EC18 /* RemoteDesktopMailMCPTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteDesktopMailMCPTests.swift; sourceTree = "<group>"; };
+		E71D4CCB8CB0475455583D09 /* ComputerUseActionSafetyPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseActionSafetyPolicy.swift; sourceTree = "<group>"; };
 		E92C4B9CB81E1F8B6CBE22DA /* AudioInputEntitlements.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioInputEntitlements.swift; sourceTree = "<group>"; };
+		E985DBBFDBA3E8C04A0C63D2 /* ComputerUseClarificationPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseClarificationPolicy.swift; sourceTree = "<group>"; };
 		EE8CCAE6B38CDDD22B43E761 /* InputInjector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InputInjector.swift; sourceTree = "<group>"; };
+		EF30648C9B8BB3F139DCD4CA /* MacControlMCPInstallerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacControlMCPInstallerTests.swift; sourceTree = "<group>"; };
 		F5991731ED21FDC001946561 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		F5D92D8EBF4D6263DDCFD0DF /* MCPFirstComputerUseExecutor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPFirstComputerUseExecutor.swift; sourceTree = "<group>"; };
 		F6DA7B1D695BC75E69194B0A /* CloudKitSignalingClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudKitSignalingClient.swift; sourceTree = "<group>"; };
+		F91AC2C48158859F12AB043A /* MacControlMCPArtifact.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacControlMCPArtifact.swift; sourceTree = "<group>"; };
 		FC26EE65BC584A891CDF9054 /* HIDUsage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HIDUsage.swift; sourceTree = "<group>"; };
+		FD18C4E425AE91D459520417 /* AppleFoundationMCPPlannerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleFoundationMCPPlannerTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -81,16 +171,31 @@
 			buildActionMask = 2147483647;
 			files = (
 				335F3049413654BA69CF7721 /* LiveKitWebRTC in Frameworks */,
+				4B2A36D879E44A9EC6B98840 /* MCP in Frameworks */,
+				14C0A61C170946E483C2E07D /* SystemPackage in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		024558D97D74B61BE62C9D17 /* ThirdPartyNotices */ = {
+			isa = PBXGroup;
+			children = (
+				07BE29E09643E04555FE686A /* LLAMA-CPP-MIT-LICENSE.txt */,
+				277FCD68C34B9D5FA45E2B0D /* MAC-CONTROL-MCP-LICENSE.txt */,
+				11941D3F38B1D9FBA3206FF2 /* NOTICE.txt */,
+				7D98C1008558E1DAD992F9B0 /* OS-ATLAS-APACHE-2.0-LICENSE.txt */,
+			);
+			path = ThirdPartyNotices;
+			sourceTree = "<group>";
+		};
 		0BC1F2632977B5A1FC430F8B /* Swift */ = {
 			isa = PBXGroup;
 			children = (
+				BE05E1F678802C54EF3D44AD /* CloudKitComputerUseChannel.swift */,
 				F6DA7B1D695BC75E69194B0A /* CloudKitSignalingClient.swift */,
+				48A968CEDB6DC8E31EAD80B9 /* ComputerUseProtocol.swift */,
 				5E6A11B60193093594AABA25 /* DeviceIdentity.swift */,
 				5A8E13306E6FC7B8FF07239C /* ICEConfigFetcher.swift */,
 				89E37207F908B9627D856D43 /* SignalingEnvelope.swift */,
@@ -137,10 +242,53 @@
 		A52F892D85EBF7AABE36F075 /* RemoteDesktopHostTests */ = {
 			isa = PBXGroup;
 			children = (
+				FD18C4E425AE91D459520417 /* AppleFoundationMCPPlannerTests.swift */,
+				37BA471798CCE46AB3ED62F5 /* ComputerUseLicenseComplianceTests.swift */,
+				BC7C60E90BCD41A69C849F4B /* ComputerUseMobileInitiationTests.swift */,
+				66E1A3BCCCB20F05C6898FCF /* ComputerUseTests.swift */,
 				9B1DAF90A32ED728B525762F /* HostSessionTests.swift */,
+				EF30648C9B8BB3F139DCD4CA /* MacControlMCPInstallerTests.swift */,
+				9EE79F7708D562EA715453FD /* MCPApprovalPresentationTests.swift */,
+				49CF19459819E5602DB03150 /* MCPFirstComputerUseExecutorTests.swift */,
+				C8A7FBD347C34995D3AEC37F /* MCPFoundationTests.swift */,
+				3349CC549DF18D316358D45F /* OSAtlasComputerUseExecutorTests.swift */,
+				BAD30262E2C7207F3FCF5E54 /* OSAtlasRuntimeInstallationTests.swift */,
+				E08F96816C348D00A1C3EC18 /* RemoteDesktopMailMCPTests.swift */,
 				037B0683983EF3DD797F9355 /* ScreenCaptureSizingTests.swift */,
 			);
 			path = RemoteDesktopHostTests;
+			sourceTree = "<group>";
+		};
+		B29901137009531DE2AB2EA4 /* ComputerUse */ = {
+			isa = PBXGroup;
+			children = (
+				01D4A4CBD5E28C53D7C11C24 /* AppleFoundationMCPPlanner.swift */,
+				E71D4CCB8CB0475455583D09 /* ComputerUseActionSafetyPolicy.swift */,
+				B7196F80FEC0A28B03B3D49A /* ComputerUseArtifactManifest.swift */,
+				E985DBBFDBA3E8C04A0C63D2 /* ComputerUseClarificationPolicy.swift */,
+				78822BFE81EBBCDA015B9FE4 /* ComputerUseHTTPDownloader.swift */,
+				DFFCDBD869B91E3FA729B1B9 /* ComputerUseInstaller.swift */,
+				1011F8B532D93C2004CCFA98 /* ComputerUseRuntimeTypes.swift */,
+				67C543A6C4E8B98B5C1BA245 /* ComputerUseTaskLedger.swift */,
+				87DBA79B150564718516A5FE /* FoundationMCPJSONSchemaBridge.swift */,
+				CB753FA95C04BD2BE084E213 /* HostComputerUseManager.swift */,
+				7DEB12F1337DC8272D20BD2A /* MacControlMCPArchiveExtractor.swift */,
+				F91AC2C48158859F12AB043A /* MacControlMCPArtifact.swift */,
+				A0EED9EA8BD57F31F7C87F4C /* MacControlMCPInstaller.swift */,
+				BF13696DF259DFFE5A67A5EA /* MCPApprovalPresentation.swift */,
+				5E8CC4B1A8E8D3C92F38FBDE /* MCPClientPool.swift */,
+				6CDAD78ED761DA2254F0F6BC /* MCPClientSession.swift */,
+				F5D92D8EBF4D6263DDCFD0DF /* MCPFirstComputerUseExecutor.swift */,
+				85CCC99CA7C9C57C77F670E7 /* MCPServerRegistry.swift */,
+				5B91C35C5B9D22BB94FB5576 /* MCPToolSafetyPolicy.swift */,
+				8D2FEC98D1A8EA9C7CAE9D27 /* MCPTypes.swift */,
+				66AA7B54532AAB1346B64BE7 /* OSAtlasComputerUseExecutor.swift */,
+				5FCB3255850270CBF08A86D0 /* OSAtlasLlamaRuntime.swift */,
+				16CB73E4E41BE0E7586E4129 /* OSAtlasRuntimeInstallation.swift */,
+				A548774FD133C86136F2D8CA /* RemoteDesktopMailAutomationPreflight.swift */,
+				C9BE58B6666FC5BBCD6E2DBE /* RemoteDesktopMailMCP.swift */,
+			);
+			path = ComputerUse;
 			sourceTree = "<group>";
 		};
 		B400D9D1DB22687D5CC6C610 /* RemoteDesktopHost */ = {
@@ -157,6 +305,8 @@
 				76B373BE70CB02CAA21FB9F8 /* HostConfig.swift */,
 				5409F40C641B07FBB4D367EC /* HostPeerSession.swift */,
 				7893923A36DECAC9886D28EF /* HostSession.swift */,
+				63433D0B8027A723A9C0090E /* HostSettingsView.swift */,
+				72EC39F2E8D1A2EF246C1CB7 /* HostSetupView.swift */,
 				178543C74F742896058F900E /* Info.plist */,
 				EE8CCAE6B38CDDD22B43E761 /* InputInjector.swift */,
 				6704F4EF5979DBED1CBB31D5 /* MenuContent.swift */,
@@ -166,6 +316,8 @@
 				2C10787D47D68714896956E4 /* SystemAudioBridge.swift */,
 				199B8A0D8EBEE0F556692058 /* WebRTCAliases.swift */,
 				9E396D7E6189E66F789A9466 /* WireFormat.swift */,
+				B29901137009531DE2AB2EA4 /* ComputerUse */,
+				024558D97D74B61BE62C9D17 /* ThirdPartyNotices */,
 			);
 			path = RemoteDesktopHost;
 			sourceTree = "<group>";
@@ -198,6 +350,7 @@
 				36071E0A1C4DE28AB3DBB4AC /* Sources */,
 				B5662E2745E42D0F64BEF37C /* Resources */,
 				A5C619AFE920969112122A57 /* Frameworks */,
+				FBFCD18DAF207639E367C773 /* Package and Sign Pinned llama.cpp Runtime */,
 			);
 			buildRules = (
 			);
@@ -206,6 +359,8 @@
 			name = RemoteDesktopHost;
 			packageProductDependencies = (
 				B32C5B551A8501593D407B76 /* LiveKitWebRTC */,
+				A77ACE1093362DEE23B1D0F4 /* MCP */,
+				BDCD8AEF5F8B7F191D3D34D4 /* SystemPackage */,
 			);
 			productName = RemoteDesktopHost;
 			productReference = 10A95BA0C09D6E6B9620E977 /* RemoteDesktopHost.app */;
@@ -241,6 +396,8 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				B71750C11654D825677D35E4 /* XCRemoteSwiftPackageReference "webrtc-xcframework" */,
+				BD4062DB93FE8B308C629268 /* XCRemoteSwiftPackageReference "swift-sdk" */,
+				5A12B4AE0B5019E36FDE9E2B /* XCRemoteSwiftPackageReference "swift-system" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 4885DCDFB02BFA1895DB672B /* Products */;
@@ -259,17 +416,79 @@
 			buildActionMask = 2147483647;
 			files = (
 				630D66E302FADD1EC9C7608B /* Assets.xcassets in Resources */,
+				8A37A3B49D4108FD8664CB63 /* LLAMA-CPP-MIT-LICENSE.txt in Resources */,
+				90EB1522061B6B7656D2F5A7 /* MAC-CONTROL-MCP-LICENSE.txt in Resources */,
+				E47AD513E1617BE306A6B446 /* NOTICE.txt in Resources */,
+				2A73337CEE303568F6881543 /* OS-ATLAS-APACHE-2.0-LICENSE.txt in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		FBFCD18DAF207639E367C773 /* Package and Sign Pinned llama.cpp Runtime */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/scripts/package_llama_runtime.sh",
+				"$(SRCROOT)/scripts/verify_llama_runtime.py",
+				"$(SRCROOT)/ThirdPartyRuntime/llama-b9992/runtime-manifest.json",
+				"$(SRCROOT)/ThirdPartyRuntime/llama-b9992/llama-server",
+				"$(SRCROOT)/ThirdPartyRuntime/llama-b9992/libggml-base.0.16.0.dylib",
+				"$(SRCROOT)/ThirdPartyRuntime/llama-b9992/libggml-base.0.dylib",
+				"$(SRCROOT)/ThirdPartyRuntime/llama-b9992/libggml-blas.0.16.0.dylib",
+				"$(SRCROOT)/ThirdPartyRuntime/llama-b9992/libggml-blas.0.dylib",
+				"$(SRCROOT)/ThirdPartyRuntime/llama-b9992/libggml-cpu.0.16.0.dylib",
+				"$(SRCROOT)/ThirdPartyRuntime/llama-b9992/libggml-cpu.0.dylib",
+				"$(SRCROOT)/ThirdPartyRuntime/llama-b9992/libggml-metal.0.16.0.dylib",
+				"$(SRCROOT)/ThirdPartyRuntime/llama-b9992/libggml-metal.0.dylib",
+				"$(SRCROOT)/ThirdPartyRuntime/llama-b9992/libggml-rpc.0.16.0.dylib",
+				"$(SRCROOT)/ThirdPartyRuntime/llama-b9992/libggml-rpc.0.dylib",
+				"$(SRCROOT)/ThirdPartyRuntime/llama-b9992/libggml.0.16.0.dylib",
+				"$(SRCROOT)/ThirdPartyRuntime/llama-b9992/libggml.0.dylib",
+				"$(SRCROOT)/ThirdPartyRuntime/llama-b9992/libllama-common.0.0.9992.dylib",
+				"$(SRCROOT)/ThirdPartyRuntime/llama-b9992/libllama-common.0.dylib",
+				"$(SRCROOT)/ThirdPartyRuntime/llama-b9992/libllama-server-impl.dylib",
+				"$(SRCROOT)/ThirdPartyRuntime/llama-b9992/libllama.0.0.9992.dylib",
+				"$(SRCROOT)/ThirdPartyRuntime/llama-b9992/libllama.0.dylib",
+				"$(SRCROOT)/ThirdPartyRuntime/llama-b9992/libmtmd.0.0.9992.dylib",
+				"$(SRCROOT)/ThirdPartyRuntime/llama-b9992/libmtmd.0.dylib",
+			);
+			name = "Package and Sign Pinned llama.cpp Runtime";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/ComputerUseRuntime/llama-b9992",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/bash;
+			shellScript = "#!/usr/bin/env bash\nset -euo pipefail\n\n# Xcode executes this as the final target build phase, before it signs the\n# enclosing .app. The source payload is repository-local and checksum-pinned;\n# this script deliberately contains no network or archive extraction path.\n\nrequired_variables=(\n  SRCROOT\n  TARGET_BUILD_DIR\n  UNLOCALIZED_RESOURCES_FOLDER_PATH\n  EXPANDED_CODE_SIGN_IDENTITY\n)\nfor variable in \"${required_variables[@]}\"; do\n  if [[ -z \"${!variable:-}\" ]]; then\n    echo \"Missing required Xcode build variable: $variable\" >&2\n    exit 65\n  fi\ndone\n\nsource_root=\"$SRCROOT/ThirdPartyRuntime/llama-b9992\"\nmanifest=\"$source_root/runtime-manifest.json\"\nverifier=\"$SRCROOT/scripts/verify_llama_runtime.py\"\ndestination_root=\"$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/ComputerUseRuntime/llama-b9992\"\n\n/usr/bin/python3 \"$verifier\" \\\n  --root \"$source_root\" \\\n  --manifest \"$manifest\"\n\n# Source verification above proves that this closed directory contains only\n# the manifest's allowlisted real files and relative symlinks. ditto preserves\n# those symlinks; it never follows them into an unexpected path.\n/bin/rm -rf \"$destination_root\"\n/bin/mkdir -p \"$(/usr/bin/dirname \"$destination_root\")\"\n/usr/bin/ditto --noqtn \"$source_root\" \"$destination_root\"\n\n/usr/bin/python3 \"$verifier\" \\\n  --root \"$destination_root\" \\\n  --manifest \"$manifest\"\n\nsigning_identity=\"$EXPANDED_CODE_SIGN_IDENTITY\"\nif [[ \"$signing_identity\" == \"-\" ]]; then\n  echo \"A real host signing identity is required for the bundled llama runtime.\" >&2\n  exit 65\nfi\n\n# `codesign --verify` can accept a cryptographically intact signature whose\n# leaf certificate was later revoked. Prove the actual identity Xcode selected\n# with mandatory OCSP before it is applied to any bundled executable.\ncertificate_probe_dir=\"$(/usr/bin/mktemp -d /tmp/remotedesktop-runtime-signing.XXXXXX)\"\ncleanup_certificate_probe() {\n  /bin/rm -rf \"$certificate_probe_dir\"\n}\ntrap cleanup_certificate_probe EXIT\n/bin/cp /usr/bin/true \"$certificate_probe_dir/signing-probe\"\n/usr/bin/codesign \\\n  --force \\\n  --sign \"$signing_identity\" \\\n  --timestamp=none \\\n  \"$certificate_probe_dir/signing-probe\" >/dev/null 2>&1\n(\n  cd \"$certificate_probe_dir\"\n  /usr/bin/codesign -d --extract-certificates signing-probe >/dev/null 2>&1\n)\nif ! /usr/bin/security verify-cert \\\n  -c \"$certificate_probe_dir/codesign0\" \\\n  -p codeSign \\\n  -R ocsp \\\n  -R require \\\n  -q; then\n  echo \"The selected code-signing certificate is expired, revoked, or untrusted.\" >&2\n  exit 65\nfi\n/bin/rm -rf \"$certificate_probe_dir\"\ntrap - EXIT\n\nsigning_name=\"${EXPANDED_CODE_SIGN_IDENTITY_NAME:-${CODE_SIGN_IDENTITY:-}}\"\ntimestamp_option=\"--timestamp=none\"\nif [[ \"$signing_name\" == *\"Developer ID Application\"* ]]; then\n  timestamp_option=\"--timestamp\"\nfi\n\n# Sign dylibs before the executable that loads them. Symlink aliases are not\n# signed separately because they resolve to the already signed real files.\nwhile IFS= read -r runtime_file; do\n  /usr/bin/codesign \\\n    --force \\\n    --sign \"$signing_identity\" \\\n    --options runtime \\\n    \"$timestamp_option\" \\\n    \"$runtime_file\"\ndone < <(/usr/bin/find \"$destination_root\" -maxdepth 1 -type f -name '*.dylib' -print | /usr/bin/sort)\n\n/usr/bin/codesign \\\n  --force \\\n  --sign \"$signing_identity\" \\\n  --options runtime \\\n  \"$timestamp_option\" \\\n  \"$destination_root/llama-server\"\n\n/usr/bin/python3 \"$verifier\" \\\n  --root \"$destination_root\" \\\n  --manifest \"$manifest\" \\\n  --signed \\\n  --expected-team \"${DEVELOPMENT_TEAM:-}\"\n";
+			showEnvVarsInLog = 0;
+		};
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		192394340FDBC2F69860C6F1 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				5EA25BB8F67C3AD701724649 /* AppleFoundationMCPPlannerTests.swift in Sources */,
+				62C20EC90B2BCFF0066A3538 /* ComputerUseLicenseComplianceTests.swift in Sources */,
+				BC393D0286409F0A6B367D79 /* ComputerUseMobileInitiationTests.swift in Sources */,
+				B2DFFB922AEFC361EC219915 /* ComputerUseTests.swift in Sources */,
 				18A1BC70ECAA283CF2368B53 /* HostSessionTests.swift in Sources */,
+				9B16F67C2F12C6B2EC4E993E /* MCPApprovalPresentationTests.swift in Sources */,
+				2E117598F13A014329CD22FE /* MCPFirstComputerUseExecutorTests.swift in Sources */,
+				37F053BBB872177DD6DC7615 /* MCPFoundationTests.swift in Sources */,
+				2042D882CA5FC124D16E9A9C /* MacControlMCPInstallerTests.swift in Sources */,
+				538B1C81F0766A5A01A59C66 /* OSAtlasComputerUseExecutorTests.swift in Sources */,
+				A1AD1DF5F32B1BFE7CBE7FC1 /* OSAtlasRuntimeInstallationTests.swift in Sources */,
+				9D81BB015279178B6603C67D /* RemoteDesktopMailMCPTests.swift in Sources */,
 				ED079874829511ED2203A189 /* ScreenCaptureSizingTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -280,20 +499,49 @@
 			files = (
 				6D6AC21CC6C01821F4B30731 /* App.swift in Sources */,
 				011F517DDAFBE8E5487AC981 /* AppLogo.swift in Sources */,
+				DFE68A099F0C07CA6598E619 /* AppleFoundationMCPPlanner.swift in Sources */,
 				132CF5F7F52A948326D88F07 /* AudioInputEntitlements.swift in Sources */,
 				5904006F8408628325366659 /* BonjourAdvertiser.swift in Sources */,
+				C9C3A5C0046F855F65A0D8EE /* CloudKitComputerUseChannel.swift in Sources */,
 				608B3DF5E693D7F3BD1D6928 /* CloudKitSignalingClient.swift in Sources */,
+				945AC9201E86F8BF3D56308A /* ComputerUseActionSafetyPolicy.swift in Sources */,
+				D184F2F3A70A20D0AE2C6A95 /* ComputerUseArtifactManifest.swift in Sources */,
+				8AD76727F65B619CA61816CC /* ComputerUseClarificationPolicy.swift in Sources */,
+				0B188FC0D9277C223393FC7F /* ComputerUseHTTPDownloader.swift in Sources */,
+				95BF6B6A752CF923886D40E4 /* ComputerUseInstaller.swift in Sources */,
+				D69461347BA90EA816D813C4 /* ComputerUseProtocol.swift in Sources */,
+				B719FEA1E23F3779D4083566 /* ComputerUseRuntimeTypes.swift in Sources */,
+				0BDF187861C7C7A6E4EF3AF6 /* ComputerUseTaskLedger.swift in Sources */,
 				62DA5B6673EA5CBE3D1697E2 /* DeviceIdentity.swift in Sources */,
+				2BB4F312F1FA16AD43D21ECB /* FoundationMCPJSONSchemaBridge.swift in Sources */,
 				B52D07F032EEF5EA41C14534 /* HIDUsage.swift in Sources */,
 				9D448E71B0B80DF5EB39C9C9 /* HeadlessHostSettings.swift in Sources */,
 				69E1EB52E6F06EABED9B9163 /* HostCommandLine.swift in Sources */,
+				171058C690276E55ABCDE63A /* HostComputerUseManager.swift in Sources */,
 				7E9180D7DA2E0B106F51AAAE /* HostConfig.swift in Sources */,
 				453DCAD598997A2C642D501A /* HostPeerSession.swift in Sources */,
 				0A2E96270BBA27C6B9005085 /* HostSession.swift in Sources */,
+				C90476214B9BEF6C1D0D53FA /* HostSettingsView.swift in Sources */,
+				FCA720672E14ABB217211ED5 /* HostSetupView.swift in Sources */,
 				82F7EB7D6C73B7C48D1E09B5 /* ICEConfigFetcher.swift in Sources */,
 				63A185B24B8A07ABEC2DD9FC /* InputInjector.swift in Sources */,
+				8592737ECDD81494512864E3 /* MCPApprovalPresentation.swift in Sources */,
+				708DF3BE5C4A24255B9E8F58 /* MCPClientPool.swift in Sources */,
+				C7AE7D151153F5457AF1A27B /* MCPClientSession.swift in Sources */,
+				B160F5360090B524D897F503 /* MCPFirstComputerUseExecutor.swift in Sources */,
+				136D5381E8778E789C2BA5CD /* MCPServerRegistry.swift in Sources */,
+				97FFC5206C74AE0DE79AAE74 /* MCPToolSafetyPolicy.swift in Sources */,
+				CA5095CA26D04D0DA3336222 /* MCPTypes.swift in Sources */,
+				511514C02A183941333B0803 /* MacControlMCPArchiveExtractor.swift in Sources */,
+				4BA0007ECE780B500E8B7EB9 /* MacControlMCPArtifact.swift in Sources */,
+				2F8D30B0C5CB5F9100627C63 /* MacControlMCPInstaller.swift in Sources */,
 				41BE421BE5A6C2A37C4D9F65 /* MenuContent.swift in Sources */,
+				0CC0ECEBE3B8D6BF000EE971 /* OSAtlasComputerUseExecutor.swift in Sources */,
+				4C9693292EA211546C26D75B /* OSAtlasLlamaRuntime.swift in Sources */,
+				B9E3A137D7B18F63AE4AC4E2 /* OSAtlasRuntimeInstallation.swift in Sources */,
 				329C35890F366BD995FDF8A7 /* PermissionsProvider.swift in Sources */,
+				3D7BE1972BA0547D0B21E541 /* RemoteDesktopMailAutomationPreflight.swift in Sources */,
+				13010C7EF366983504391D6E /* RemoteDesktopMailMCP.swift in Sources */,
 				5BEA124BF32042E307D79208 /* ScreenCapture.swift in Sources */,
 				8A75048F122E44B655F410CF /* SignalingEnvelope.swift in Sources */,
 				9774C8DAD590EBB177FB4BAA /* SystemAudioBridge.swift in Sources */,
@@ -322,16 +570,18 @@
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				DEVELOPMENT_TEAM = V9AX39SPJD;
 				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				ICLOUD_CONTAINER_ENVIRONMENT = Production;
 				INFOPLIST_FILE = RemoteDesktopHost/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 0.1.0;
+				MARKETING_VERSION = 0.2.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.threadmark.remotedesktop.host;
 				SDKROOT = macosx;
 			};
@@ -511,16 +761,18 @@
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				DEVELOPMENT_TEAM = V9AX39SPJD;
 				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				ICLOUD_CONTAINER_ENVIRONMENT = Development;
 				INFOPLIST_FILE = RemoteDesktopHost/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 0.1.0;
+				MARKETING_VERSION = 0.2.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.threadmark.remotedesktop.host;
 				SDKROOT = macosx;
 			};
@@ -559,6 +811,14 @@
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */
+		5A12B4AE0B5019E36FDE9E2B /* XCRemoteSwiftPackageReference "swift-system" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/apple/swift-system.git";
+			requirement = {
+				kind = exactVersion;
+				version = 1.7.4;
+			};
+		};
 		B71750C11654D825677D35E4 /* XCRemoteSwiftPackageReference "webrtc-xcframework" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/livekit/webrtc-xcframework.git";
@@ -567,13 +827,31 @@
 				version = 144.7559.3;
 			};
 		};
+		BD4062DB93FE8B308C629268 /* XCRemoteSwiftPackageReference "swift-sdk" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/modelcontextprotocol/swift-sdk.git";
+			requirement = {
+				kind = exactVersion;
+				version = 0.12.1;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
+		A77ACE1093362DEE23B1D0F4 /* MCP */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = BD4062DB93FE8B308C629268 /* XCRemoteSwiftPackageReference "swift-sdk" */;
+			productName = MCP;
+		};
 		B32C5B551A8501593D407B76 /* LiveKitWebRTC */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = B71750C11654D825677D35E4 /* XCRemoteSwiftPackageReference "webrtc-xcframework" */;
 			productName = LiveKitWebRTC;
+		};
+		BDCD8AEF5F8B7F191D3D34D4 /* SystemPackage */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 5A12B4AE0B5019E36FDE9E2B /* XCRemoteSwiftPackageReference "swift-system" */;
+			productName = SystemPackage;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

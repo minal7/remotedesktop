@@ -17,15 +17,22 @@ extension ICEConfig {
     }
 }
 
+enum RemoteAudioSessionPolicy {
+    static let category = AVAudioSession.Category.playback
+    static let categoryOptions: AVAudioSession.CategoryOptions = [.allowBluetoothA2DP]
+    static let mode = AVAudioSession.Mode.default
+}
+
 @MainActor
 final class WebRTCTransport: NSObject, VideoRenderingTransport {
     var onHostHello: (@MainActor (HostHello) -> Void)?
     var onDisplay: (@MainActor (DisplayInfo) -> Void)?
+    var onFirstVideoFrame: (@MainActor () -> Void)?
     var onDisconnect: (@MainActor (String) -> Void)?
 
     private let log = Logger(subsystem: "com.threadmark.remotedesktop", category: "webrtc")
     private let factory: RTCPeerConnectionFactory
-    private let signalingFactory: (String) -> any SignalingChannel
+    private let signalingFactory: (String, String?) -> any SignalingChannel
     private let iceConfigProvider: @Sendable () async -> ICEConfig
     private let iceConnectTimeout: Duration = .seconds(25)
     private let connectionRecoveryTimeout: Duration = .seconds(12)
@@ -37,6 +44,11 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
     private var remoteVideoTrack: RTCVideoTrack?
     private var remoteAudioTrack: RTCAudioTrack?
     private var renderer: RTCVideoRenderer?
+    private lazy var firstVideoFrameProbe = FirstVideoFrameProbe { [weak self] in
+        Task { @MainActor [weak self] in
+            self?.onFirstVideoFrame?()
+        }
+    }
     private var pollTask: Task<Void, Never>?
     private var iceDeadlineTask: Task<Void, Never>?
     private var connectionRecoveryTask: Task<Void, Never>?
@@ -51,7 +63,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
     private var appliedRemoteAudioGain: Double?
 
     init(
-        signalingFactory: ((String) -> any SignalingChannel)? = nil,
+        signalingFactory: ((String, String?) -> any SignalingChannel)? = nil,
         iceConfigProvider: (@Sendable () async -> ICEConfig)? = nil
     ) {
         RTCInitializeSSL()
@@ -61,11 +73,12 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
             encoderFactory: RTCDefaultVideoEncoderFactory(),
             decoderFactory: RTCDefaultVideoDecoderFactory(),
             audioProcessingModule: nil)
-        self.signalingFactory = signalingFactory ?? { code in
+        self.signalingFactory = signalingFactory ?? { code, expectedHostID in
             CloudKitSignalingClient(
                 containerIdentifier: Config.cloudKitContainerIdentifier,
                 code: code,
-                role: .client)
+                role: .client,
+                expectedTargetID: expectedHostID)
         }
         if let iceConfigProvider {
             self.iceConfigProvider = iceConfigProvider
@@ -85,18 +98,19 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         RTCAudioSession.sharedInstance().remove(self)
     }
 
-    func connect(pairingCode: String) async throws {
+    func connect(pairingCode: String, expectedHostID: String?) async throws {
         isClosing = false
         didReportDisconnect = false
         connectedOnce = false
         sentHello = false
         answerApplied = false
+        firstVideoFrameProbe.reset()
         connectionRecoveryTask?.cancel()
         connectionRecoveryTask = nil
         pendingRemoteICECandidates.removeAll()
         loggedPendingRemoteICE = false
 
-        let signaling = signalingFactory(pairingCode)
+        let signaling = signalingFactory(pairingCode, expectedHostID)
         self.signaling = signaling
         try await signaling.claim()
 
@@ -181,6 +195,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         if let renderer {
             remoteVideoTrack?.remove(renderer)
         }
+        remoteVideoTrack?.remove(firstVideoFrameProbe)
         remoteAudioTrack?.isEnabled = false
         remoteVideoTrack = nil
         remoteAudioTrack = nil
@@ -241,13 +256,9 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         session.ignoresPreferredAttributeConfigurationErrors = true
 
         let configuration = RTCAudioSessionConfiguration.webRTC()
-        configuration.category = AVAudioSession.Category.playAndRecord.rawValue
-        configuration.categoryOptions = [
-            .defaultToSpeaker,
-            .allowBluetoothHFP,
-            .allowBluetoothA2DP,
-        ]
-        configuration.mode = AVAudioSession.Mode.default.rawValue
+        configuration.category = RemoteAudioSessionPolicy.category.rawValue
+        configuration.categoryOptions = RemoteAudioSessionPolicy.categoryOptions
+        configuration.mode = RemoteAudioSessionPolicy.mode.rawValue
         RTCAudioSessionConfiguration.setWebRTC(configuration)
 
         session.lockForConfiguration()
@@ -256,7 +267,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
             try session.setConfiguration(configuration, active: true)
             systemOutputVolume = session.outputVolume
             applyRemoteAudioGainForSystemVolume()
-            log.info("configured RTCAudioSession for playAndRecord")
+            log.info("configured RTCAudioSession for playback-only remote audio")
         } catch {
             log.error("failed to configure RTCAudioSession: \(error.localizedDescription, privacy: .public)")
         }
@@ -276,9 +287,14 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         let audioDeviceModule = factory.audioDeviceModule
         let initStatus = audioDeviceModule.initPlayout()
         let startStatus = audioDeviceModule.startPlayout()
+        if audioDeviceModule.isRecording {
+            let stopRecordingStatus = audioDeviceModule.stopRecording()
+            log.error(
+                "unexpected client audio recording stopped status=\(stopRecordingStatus, privacy: .public)")
+        }
         applyRemoteAudioGainForSystemVolume()
         log.info(
-            "client audio ADM initPlayout=\(initStatus, privacy: .public) startPlayout=\(startStatus, privacy: .public) isPlaying=\(audioDeviceModule.isPlaying, privacy: .public)")
+            "client audio ADM initPlayout=\(initStatus, privacy: .public) startPlayout=\(startStatus, privacy: .public) isPlaying=\(audioDeviceModule.isPlaying, privacy: .public) isRecording=\(audioDeviceModule.isRecording, privacy: .public)")
     }
 
     private func applySystemOutputVolume(_ outputVolume: Float) {
@@ -349,6 +365,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
             return
         }
         sentHello = true
+        log.info("WebRTC control data channel opened; sending client hello")
         send(
             .hello(proto: Config.protocolVersion),
             seq: 0,
@@ -467,8 +484,18 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
     }
 
     private func adoptRemoteVideoTrack(_ track: RTCVideoTrack) {
+        if let current = remoteVideoTrack, current.isEqual(track) {
+            return
+        }
+        if let current = remoteVideoTrack {
+            current.remove(firstVideoFrameProbe)
+            if let renderer {
+                current.remove(renderer)
+            }
+        }
         remoteVideoTrack = track
         log.info("adopting remote video track id=\(track.trackId, privacy: .public) rendererAttached=\(self.renderer != nil, privacy: .public)")
+        track.add(firstVideoFrameProbe)
         if let renderer {
             track.add(renderer)
         }
@@ -490,6 +517,38 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         applyRemoteAudioGainForSystemVolume()
         log.info("adopting remote audio track id=\(track.trackId, privacy: .public) enabled=\(track.isEnabled, privacy: .public)")
         ensureAudioPlayoutStarted()
+    }
+}
+
+/// A renderer that observes decoded frames without retaining pixel data. The
+/// callback crosses to `MainActor` in `WebRTCTransport`; the lock only makes
+/// the exactly-once edge safe across WebRTC decoder queues.
+private final class FirstVideoFrameProbe: NSObject, RTCVideoRenderer {
+    private let lock = NSLock()
+    private var didReport = false
+    private let onFirstFrame: @Sendable () -> Void
+
+    init(onFirstFrame: @escaping @Sendable () -> Void) {
+        self.onFirstFrame = onFirstFrame
+    }
+
+    func setSize(_ size: CGSize) {}
+
+    func renderFrame(_ frame: RTCVideoFrame?) {
+        guard frame != nil else { return }
+        lock.lock()
+        let shouldReport = !didReport
+        didReport = true
+        lock.unlock()
+        if shouldReport {
+            onFirstFrame()
+        }
+    }
+
+    func reset() {
+        lock.lock()
+        didReport = false
+        lock.unlock()
     }
 }
 
@@ -560,6 +619,7 @@ extension WebRTCTransport: RTCPeerConnectionDelegate {
 
     nonisolated func peerConnection(_ peerConnection: RTCPeerConnection, didOpen dataChannel: RTCDataChannel) {
         Task { @MainActor [weak self] in
+            self?.log.info("peer connection opened the control data channel")
             self?.dataChannel = dataChannel
             dataChannel.delegate = self
             self?.sendHelloIfPossible()
@@ -616,6 +676,7 @@ extension WebRTCTransport: RTCDataChannelDelegate {
             guard let self else { return }
             switch HostMessage.decode(buffer.data) {
             case .helloAck(let hello):
+                log.info("host acknowledged the WebRTC control channel")
                 onHostHello?(hello)
             case .display(let display):
                 onDisplay?(display)

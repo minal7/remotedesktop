@@ -1,3 +1,4 @@
+import AppKit
 import CoreGraphics
 import Foundation
 import os
@@ -9,16 +10,60 @@ import os
 ///
 /// This is a single-threaded actor — all injection goes through the
 /// same event source so the host OS sees a coherent stream.
-final class InputInjector {
+final class InputInjector: @unchecked Sendable {
+    static let syntheticEventTag: Int64 = 0x52444D414349 // "RDMACI"
+
     private let source = CGEventSource(stateID: .hidSystemState)
+    private let lock = NSLock()
     private let log = Logger(subsystem: "com.threadmark.remotedesktop.host", category: "inject")
+    private let eventPoster: @Sendable (CGEvent) -> Void
+    private let uptime: @Sendable () -> TimeInterval
 
     // Track the most recent button state so transitions can be
     // synthesized as the right CGEventType.
     private var prevButtons: UInt8 = 0
     private var lastPointer = CGPoint.zero
+    private var pressedKeys: [Int: UInt16] = [:]
+    private var lastClickButton: CGMouseButton?
+    private var lastClickPosition = CGPoint.zero
+    private var lastClickUptime: TimeInterval = -.infinity
+    private var lastClickCount = 0
+    private var activeClickCounts: [UInt32: Int64] = [:]
+
+    init(
+        eventPoster: @escaping @Sendable (CGEvent) -> Void = {
+            $0.post(tap: .cghidEventTap)
+        },
+        uptime: @escaping @Sendable () -> TimeInterval = {
+            ProcessInfo.processInfo.systemUptime
+        }
+    ) {
+        self.eventPoster = eventPoster
+        self.uptime = uptime
+    }
 
     func apply(_ message: ControlMessage) {
+        _ = apply(message, ifAllowed: { true })
+    }
+
+    /// Checks the automation gate while holding the same lock used for event
+    /// injection. If a person's WebRTC input closes the gate while an AI
+    /// action is queued, that queued action is dropped before it reaches
+    /// CGEvent.
+    @discardableResult
+    func apply(
+        _ message: ControlMessage,
+        ifAllowed: () -> Bool
+    ) -> Bool {
+        if case .text(let text) = message {
+            return injectText(text, ifAllowed: ifAllowed)
+        }
+        lock.lock()
+        defer { lock.unlock() }
+        guard ifAllowed() else {
+            releaseHeldInput()
+            return false
+        }
         switch message {
         case .pointer(let x, let y, let buttons):
             injectPointer(x: x, y: y, buttons: buttons)
@@ -26,11 +71,24 @@ final class InputInjector {
             injectScroll(dx: dx, dy: dy)
         case .key(let usage, let down, let modifiers):
             injectKey(usage: usage, down: down, modifiers: modifiers)
-        case .text(let s):
-            injectText(s)
+        case .text:
+            assertionFailure("Text input is handled one grapheme at a time")
         case .hello, .qos, .bye:
             break   // handled by HostSession, not injection
         }
+        return true
+    }
+
+    /// Serializes a person's intervention against the same event-posting lock
+    /// used by automation. Once this returns, no checked AI event can slip
+    /// through after the gate was closed, and any held input is released.
+    @discardableResult
+    func interruptAutomation(_ closeGate: () -> Bool) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        let interrupted = closeGate()
+        if interrupted { releaseHeldInput() }
+        return interrupted
     }
 
     // MARK: - Pointer
@@ -56,23 +114,64 @@ final class InputInjector {
         post(mouse: moveType, at: pos, button: .left)
 
         // Button transitions
-        if down & 0b001 != 0 { post(mouse: .leftMouseDown,  at: pos, button: .left) }
-        if up   & 0b001 != 0 { post(mouse: .leftMouseUp,    at: pos, button: .left) }
-        if down & 0b010 != 0 { post(mouse: .rightMouseDown, at: pos, button: .right) }
-        if up   & 0b010 != 0 { post(mouse: .rightMouseUp,   at: pos, button: .right) }
-        if down & 0b100 != 0 { post(mouse: .otherMouseDown, at: pos, button: .center) }
-        if up   & 0b100 != 0 { post(mouse: .otherMouseUp,   at: pos, button: .center) }
+        if down & 0b001 != 0 { postClickDown(.leftMouseDown, at: pos, button: .left) }
+        if up   & 0b001 != 0 { postClickUp(.leftMouseUp, at: pos, button: .left) }
+        if down & 0b010 != 0 { postClickDown(.rightMouseDown, at: pos, button: .right) }
+        if up   & 0b010 != 0 { postClickUp(.rightMouseUp, at: pos, button: .right) }
+        if down & 0b100 != 0 { postClickDown(.otherMouseDown, at: pos, button: .center) }
+        if up   & 0b100 != 0 { postClickUp(.otherMouseUp, at: pos, button: .center) }
 
         prevButtons = buttons
     }
 
-    private func post(mouse type: CGEventType, at pos: CGPoint, button: CGMouseButton) {
+    private func post(
+        mouse type: CGEventType,
+        at pos: CGPoint,
+        button: CGMouseButton,
+        clickCount: Int64? = nil
+    ) {
         guard let e = CGEvent(
             mouseEventSource: source,
             mouseType: type,
             mouseCursorPosition: pos,
             mouseButton: button) else { return }
-        e.post(tap: .cghidEventTap)
+        if let clickCount {
+            e.setIntegerValueField(.mouseEventClickState, value: clickCount)
+        }
+        post(e)
+    }
+
+    /// macOS does not infer a double-click merely from two synthetic down/up
+    /// pairs. The click-state field is what AppKit uses to surface
+    /// `NSEvent.clickCount`, so track the same bounded time/position sequence a
+    /// physical mouse would produce and stamp both halves of each click.
+    private func postClickDown(
+        _ type: CGEventType,
+        at position: CGPoint,
+        button: CGMouseButton
+    ) {
+        let now = uptime()
+        let continuesSequence = lastClickButton == button
+            && now - lastClickUptime <= NSEvent.doubleClickInterval
+            && hypot(
+                position.x - lastClickPosition.x,
+                position.y - lastClickPosition.y) <= 4
+        let count = continuesSequence ? min(lastClickCount + 1, 3) : 1
+        lastClickButton = button
+        lastClickPosition = position
+        lastClickUptime = now
+        lastClickCount = count
+        activeClickCounts[button.rawValue] = Int64(count)
+        post(mouse: type, at: position, button: button, clickCount: Int64(count))
+    }
+
+    private func postClickUp(
+        _ type: CGEventType,
+        at position: CGPoint,
+        button: CGMouseButton
+    ) {
+        let count = activeClickCounts.removeValue(forKey: button.rawValue) ?? 1
+        post(mouse: type, at: position, button: button, clickCount: count)
     }
 
     // MARK: - Scroll
@@ -87,7 +186,7 @@ final class InputInjector {
             wheel1: Int32(clamping: dy),
             wheel2: Int32(clamping: dx),
             wheel3: 0) else { return }
-        e.post(tap: .cghidEventTap)
+        post(e)
     }
 
     // MARK: - Keys
@@ -102,7 +201,12 @@ final class InputInjector {
             virtualKey: keyCode,
             keyDown: down) else { return }
         e.flags = flags(from: modifiers)
-        e.post(tap: .cghidEventTap)
+        post(e)
+        if down {
+            pressedKeys[usage] = modifiers
+        } else {
+            pressedKeys.removeValue(forKey: usage)
+        }
     }
 
     private func flags(from mask: UInt16) -> CGEventFlags {
@@ -117,15 +221,70 @@ final class InputInjector {
 
     // MARK: - Text (IME / soft keyboard fallback)
 
-    private func injectText(_ s: String) {
-        for scalar in s.unicodeScalars {
-            var chars: [UniChar] = [UniChar(scalar.value & 0xFFFF)]
+    private func injectText(
+        _ s: String,
+        ifAllowed: () -> Bool
+    ) -> Bool {
+        // Send one complete extended grapheme at a time. A Unicode scalar is
+        // not necessarily one UTF-16 code unit: truncating it to `UniChar`
+        // corrupts emoji and other supplementary-plane text.
+        for character in s {
+            lock.lock()
+            guard ifAllowed() else {
+                releaseHeldInput()
+                lock.unlock()
+                return false
+            }
+            var chars = Array(String(character).utf16)
             let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true)
-            down?.keyboardSetUnicodeString(stringLength: 1, unicodeString: &chars)
-            down?.post(tap: .cghidEventTap)
+            down?.keyboardSetUnicodeString(
+                stringLength: chars.count,
+                unicodeString: &chars)
+            if let down { post(down) }
             let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false)
-            up?.keyboardSetUnicodeString(stringLength: 1, unicodeString: &chars)
-            up?.post(tap: .cghidEventTap)
+            up?.keyboardSetUnicodeString(
+                stringLength: chars.count,
+                unicodeString: &chars)
+            if let up { post(up) }
+            lock.unlock()
         }
+        return true
+    }
+
+    private func releaseHeldInput() {
+        if prevButtons & 0b001 != 0 {
+            post(mouse: .leftMouseUp, at: lastPointer, button: .left)
+        }
+        if prevButtons & 0b010 != 0 {
+            post(mouse: .rightMouseUp, at: lastPointer, button: .right)
+        }
+        if prevButtons & 0b100 != 0 {
+            post(mouse: .otherMouseUp, at: lastPointer, button: .center)
+        }
+        prevButtons = 0
+
+        let keys = pressedKeys
+        pressedKeys.removeAll()
+        for (usage, modifiers) in keys {
+            guard let keyCode = HIDUsage.toMacKeyCode(usage),
+                  let event = CGEvent(
+                    keyboardEventSource: source,
+                    virtualKey: keyCode,
+                    keyDown: false) else { continue }
+            event.flags = flags(from: modifiers)
+            post(event)
+        }
+    }
+
+    private func post(_ event: CGEvent) {
+        event.setIntegerValueField(
+            .eventSourceUserData,
+            value: Self.syntheticEventTag)
+        eventPoster(event)
+    }
+
+    static func isSynthetic(_ event: NSEvent) -> Bool {
+        event.cgEvent?.getIntegerValueField(.eventSourceUserData)
+            == syntheticEventTag
     }
 }

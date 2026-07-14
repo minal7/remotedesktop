@@ -4,16 +4,11 @@ import UIKit
 @testable import RemoteDesktop
 
 final class RemoteScreenInteractionTests: XCTestCase {
-    func test_sessionChromePolicy_retractsTopBarOnIPad() {
-        XCTAssertFalse(SessionChromePolicy.pinsTopBar(
-            verticalSizeClass: .regular,
-            userInterfaceIdiom: .pad))
-        XCTAssertFalse(SessionChromePolicy.pinsTopBar(
-            verticalSizeClass: .compact,
-            userInterfaceIdiom: .phone))
-        XCTAssertTrue(SessionChromePolicy.pinsTopBar(
-            verticalSizeClass: .regular,
-            userInterfaceIdiom: .phone))
+    func test_sessionChromePolicy_staysVisibleWhileConnectingThenAutoHides() {
+        XCTAssertFalse(SessionChromePolicy.autoHides(after: .connecting))
+        XCTAssertTrue(SessionChromePolicy.autoHides(after: .connected))
+        XCTAssertFalse(SessionChromePolicy.autoHides(after: .idle))
+        XCTAssertFalse(SessionChromePolicy.autoHides(after: .ended("test")))
     }
 
     func test_interactiveRect_matchesAspectFitDisplayArea() {
@@ -105,5 +100,79 @@ final class RemoteScreenInteractionTests: XCTestCase {
 
         XCTAssertEqual(layer.cursorCenter.x, rect.maxX, accuracy: 0.001)
         XCTAssertEqual(layer.cursorCenter.y, rect.maxY, accuracy: 0.001)
+    }
+
+    func test_remoteZoomPolicy_clampsScaleAndUsesFriendlySteps() {
+        XCTAssertEqual(RemoteZoomPolicy.clampedScale(0.5), 1)
+        XCTAssertEqual(RemoteZoomPolicy.clampedScale(5), 4)
+        XCTAssertEqual(RemoteZoomPolicy.nextScale(after: 1), 1.5)
+        XCTAssertEqual(RemoteZoomPolicy.previousScale(before: 3), 2)
+    }
+
+    func test_remoteZoomPolicy_clampsPanToVisibleContent() {
+        let viewport = CGSize(width: 200, height: 100)
+        XCTAssertEqual(
+            RemoteZoomPolicy.clampedOffset(
+                CGPoint(x: 500, y: -500),
+                scale: 2,
+                viewport: viewport),
+            CGPoint(x: 100, y: -50))
+        XCTAssertEqual(
+            RemoteZoomPolicy.clampedOffset(
+                CGPoint(x: 50, y: 50),
+                scale: 1,
+                viewport: viewport),
+            .zero)
+    }
+
+    func test_remoteTouchRoutingPolicy_separatesMoveScreenFromComputerControl() {
+        XCTAssertTrue(RemoteTouchRoutingPolicy.routesTouchesToComputer(
+            moveScreenEnabled: false))
+        XCTAssertFalse(RemoteTouchRoutingPolicy.allowsViewportZoom(
+            moveScreenEnabled: false))
+        XCTAssertFalse(RemoteTouchRoutingPolicy.movesViewport(
+            moveScreenEnabled: false,
+            scale: 2))
+
+        XCTAssertFalse(RemoteTouchRoutingPolicy.routesTouchesToComputer(
+            moveScreenEnabled: true))
+        XCTAssertTrue(RemoteTouchRoutingPolicy.allowsViewportZoom(
+            moveScreenEnabled: true))
+        XCTAssertFalse(RemoteTouchRoutingPolicy.movesViewport(
+            moveScreenEnabled: true,
+            scale: 1))
+        XCTAssertTrue(RemoteTouchRoutingPolicy.movesViewport(
+            moveScreenEnabled: true,
+            scale: 2))
+    }
+
+    @MainActor
+    func test_moveScreenToggle_reconfiguresActualGestureRecognizers() {
+        let controller = RemoteScreenZoomController()
+        let screen = RemoteScreenUIView()
+        screen.bindZoomController(controller)
+
+        XCTAssertEqual(screen.interactionState, RemoteScreenInteractionState(
+            remoteScrollEnabled: true,
+            remoteLongPressEnabled: true,
+            remoteIndirectInputEnabled: true,
+            viewportPinchEnabled: false,
+            viewportPanEnabled: false))
+
+        controller.moveScreenEnabled = true
+        XCTAssertEqual(screen.interactionState, RemoteScreenInteractionState(
+            remoteScrollEnabled: false,
+            remoteLongPressEnabled: false,
+            remoteIndirectInputEnabled: false,
+            viewportPinchEnabled: true,
+            viewportPanEnabled: true))
+
+        controller.moveScreenEnabled = false
+        XCTAssertEqual(screen.interactionState, RemoteScreenInteractionState(
+            remoteScrollEnabled: true,
+            remoteLongPressEnabled: true,
+            remoteIndirectInputEnabled: true,
+            viewportPinchEnabled: false,
+            viewportPanEnabled: false))
     }
 }

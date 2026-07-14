@@ -114,6 +114,8 @@ if [[ ! -d "$built_app" ]]; then
   exit 66
 fi
 
+"$script_dir/verify_host_bundle_trust.sh" "$built_app"
+
 mkdir -p "$install_dir"
 if [[ -d "$installed_app" ]]; then
   rm -rf "$installed_app"

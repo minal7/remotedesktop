@@ -9,32 +9,34 @@ import UIKit
 final class SignalingPreflightTransport: Transport {
     var onHostHello: (@MainActor (HostHello) -> Void)?
     var onDisplay: (@MainActor (DisplayInfo) -> Void)?
+    var onFirstVideoFrame: (@MainActor () -> Void)?
     var onDisconnect: (@MainActor (String) -> Void)?
 
     private let log = Logger(subsystem: "com.threadmark.remotedesktop", category: "preflight")
     private let deviceName: () -> String
     private let handshakeTimeout: Duration
-    private let signalingFactory: (String) -> any SignalingChannel
+    private let signalingFactory: (String, String?) -> any SignalingChannel
     private var signaling: (any SignalingChannel)?
     private var pollTask: Task<Void, Never>?
 
     init(
         deviceName: (() -> String)? = nil,
         handshakeTimeout: Duration = .seconds(10),
-        signalingFactory: ((String) -> any SignalingChannel)? = nil
+        signalingFactory: ((String, String?) -> any SignalingChannel)? = nil
     ) {
         self.deviceName = deviceName ?? { UIDevice.current.name }
         self.handshakeTimeout = handshakeTimeout
-        self.signalingFactory = signalingFactory ?? { code in
+        self.signalingFactory = signalingFactory ?? { code, expectedHostID in
             CloudKitSignalingClient(
                 containerIdentifier: Config.cloudKitContainerIdentifier,
                 code: code,
-                role: .client)
+                role: .client,
+                expectedTargetID: expectedHostID)
         }
     }
 
-    func connect(pairingCode: String) async throws {
-        let signaling = signalingFactory(pairingCode)
+    func connect(pairingCode: String, expectedHostID: String?) async throws {
+        let signaling = signalingFactory(pairingCode, expectedHostID)
         self.signaling = signaling
 
         try await signaling.claim()

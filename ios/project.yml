@@ -24,22 +24,23 @@ targets:
       - path: RemoteDesktop
       - path: RemoteDesktop/Transport/WebRTCAliases.swift
       - path: ../protocol/Swift
-        group: Shared
     dependencies:
       - package: LiveKitWebRTC
         product: LiveKitWebRTC
     entitlements:
       path: RemoteDesktop/RemoteDesktop.entitlements
       properties:
-        aps-environment: development
         com.apple.developer.icloud-container-identifiers:
           - iCloud.com.threadmark.remotedesktop
+        com.apple.developer.icloud-container-environment: $(ICLOUD_CONTAINER_ENVIRONMENT)
         com.apple.developer.icloud-services:
           - CloudKit
     info:
       path: RemoteDesktop/Info.plist
       properties:
         CFBundleDisplayName: Remote Desktop
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         UILaunchScreen: {}
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
@@ -59,21 +60,30 @@ targets:
           Remote Desktop uses your local network for faster, direct connections
           to your computer when both devices are on the same Wi-Fi.
         NSMicrophoneUsageDescription: >
-          Remote Desktop does not record or transmit audio from this device.
-          iOS requires this permission because the audio playback engine used
-          to play sound streamed from your computer opens a full-duplex audio
-          session under the hood.
+          Remote Desktop includes a microphone-capable WebRTC component, but
+          this app only plays audio from your Mac and never records, stores, or
+          transmits audio from your microphone.
         NSBonjourServices:
           - _remotedesktop._tcp
         ITSAppUsesNonExemptEncryption: false
     settings:
-      CODE_SIGN_STYLE: Automatic
-      DEVELOPMENT_TEAM: V9AX39SPJD
-      PRODUCT_BUNDLE_IDENTIFIER: com.threadmark.remotedesktop.client
-      TARGETED_DEVICE_FAMILY: "1,2"
-      SUPPORTS_MACCATALYST: NO
-      ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
-      INFOPLIST_KEY_UIStatusBarHidden: NO
+      base:
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: V9AX39SPJD
+        MARKETING_VERSION: "0.2.0"
+        CURRENT_PROJECT_VERSION: "2"
+        PRODUCT_BUNDLE_IDENTIFIER: com.threadmark.remotedesktop.client
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SUPPORTS_MACCATALYST: NO
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        INFOPLIST_KEY_UIStatusBarHidden: NO
+        # Debug uses the Development database on both devices and Simulator.
+        # Release uses Production so a Release iOS client can find the
+        # officially distributed macOS host.
+        ICLOUD_CONTAINER_ENVIRONMENT: Development
+      configs:
+        Release:
+          ICLOUD_CONTAINER_ENVIRONMENT: Production
 
   RemoteDesktopTests:
     type: bundle.unit-test
@@ -86,3 +96,57 @@ targets:
       DEVELOPMENT_TEAM: V9AX39SPJD
       PRODUCT_BUNDLE_IDENTIFIER: com.threadmark.remotedesktop.client.tests
       GENERATE_INFOPLIST_FILE: YES
+
+  RemoteDesktopLiveE2ETests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: RemoteDesktopLiveE2ETests
+    dependencies:
+      - target: RemoteDesktop
+    settings:
+      DEVELOPMENT_TEAM: V9AX39SPJD
+      PRODUCT_BUNDLE_IDENTIFIER: com.threadmark.remotedesktop.client.live-e2e-tests
+      GENERATE_INFOPLIST_FILE: YES
+
+schemes:
+  RemoteDesktop:
+    build:
+      targets:
+        RemoteDesktop: all
+        RemoteDesktopTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - RemoteDesktopTests
+
+  RemoteDesktopLiveE2E:
+    build:
+      targets:
+        RemoteDesktop: all
+        RemoteDesktopLiveE2ETests: [test]
+    test:
+      # Live UI acceptance connects through the Production CloudKit database
+      # to the officially distributed host. Keep this aligned with the
+      # Release app configuration used by the person running the test.
+      config: Release
+      targets:
+        - RemoteDesktopLiveE2ETests
+      environmentVariables:
+        RUN_COMPUTER_USE_LIVE_E2E: "1"
+        # DoorDash/OS-Atlas is independently gated. Values are command-line
+        # build settings expanded into the test process only for an explicit
+        # run; an ordinary LiveE2E invocation sees empty values and skips it.
+        RUN_OSATLAS_DOORDASH_SIMULATOR_E2E: "$(RUN_OSATLAS_DOORDASH_SIMULATOR_E2E)"
+        RUN_OSATLAS_DOORDASH_GUEST_HANDOFF_SIMULATOR_E2E: "$(RUN_OSATLAS_DOORDASH_GUEST_HANDOFF_SIMULATOR_E2E)"
+        RUN_OSATLAS_DOORDASH_TAKEOVER_RESUME_SIMULATOR_E2E: "$(RUN_OSATLAS_DOORDASH_TAKEOVER_RESUME_SIMULATOR_E2E)"
+        OSATLAS_DOORDASH_EXPECTED_RESTAURANT: "$(OSATLAS_DOORDASH_EXPECTED_RESTAURANT)"
+        OSATLAS_DOORDASH_EXPECTED_ITEM: "$(OSATLAS_DOORDASH_EXPECTED_ITEM)"
+        OSATLAS_DOORDASH_EXPECTED_SUBTOTAL: "$(OSATLAS_DOORDASH_EXPECTED_SUBTOTAL)"
+        OSATLAS_DOORDASH_EXPECTED_DELIVERY_FEE: "$(OSATLAS_DOORDASH_EXPECTED_DELIVERY_FEE)"
+        OSATLAS_DOORDASH_EXPECTED_SERVICE_FEE: "$(OSATLAS_DOORDASH_EXPECTED_SERVICE_FEE)"
+        OSATLAS_DOORDASH_EXPECTED_TAX: "$(OSATLAS_DOORDASH_EXPECTED_TAX)"
+        OSATLAS_DOORDASH_EXPECTED_TOTAL: "$(OSATLAS_DOORDASH_EXPECTED_TOTAL)"
+        OSATLAS_DOORDASH_EXPECTED_ETA: "$(OSATLAS_DOORDASH_EXPECTED_ETA)"

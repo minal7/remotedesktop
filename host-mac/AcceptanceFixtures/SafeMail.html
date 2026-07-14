@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Safe Mail Acceptance Test</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+    }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      background: linear-gradient(145deg, #eef2ff, #f8fafc 45%, #e0f2fe);
+      color: #172033;
+    }
+    main {
+      width: min(720px, calc(100vw - 64px));
+      padding: 28px;
+      border: 1px solid rgba(56, 70, 110, 0.16);
+      border-radius: 24px;
+      background: rgba(255, 255, 255, 0.93);
+      box-shadow: 0 24px 70px rgba(35, 48, 82, 0.16);
+    }
+    header { margin-bottom: 22px; }
+    h1 { margin: 0 0 8px; font-size: 28px; }
+    p { margin: 0; color: #526078; line-height: 1.45; }
+    form { display: grid; gap: 16px; margin-top: 24px; }
+    label { display: grid; gap: 7px; font-weight: 650; }
+    input, textarea {
+      box-sizing: border-box;
+      width: 100%;
+      border: 1px solid #c9d2e5;
+      border-radius: 12px;
+      padding: 12px 14px;
+      background: white;
+      color: #172033;
+      font: inherit;
+    }
+    textarea { min-height: 150px; resize: vertical; }
+    button {
+      justify-self: end;
+      min-width: 150px;
+      min-height: 46px;
+      border: 0;
+      border-radius: 13px;
+      padding: 0 18px;
+      background: #3157d5;
+      color: white;
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    #result {
+      display: none;
+      margin-top: 22px;
+      padding: 18px;
+      border-radius: 14px;
+      background: #dcfce7;
+      color: #14532d;
+      font-weight: 650;
+    }
+    .badge {
+      display: inline-block;
+      margin-bottom: 12px;
+      border-radius: 999px;
+      padding: 6px 10px;
+      background: #e0e7ff;
+      color: #3730a3;
+      font-size: 13px;
+      font-weight: 750;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <span class="badge">No-network acceptance test</span>
+      <h1>Safe Mail Composer</h1>
+      <p>Fill this message and use <strong>Send test email</strong>. No data leaves this Mac; the button only records a local success state.</p>
+    </header>
+
+    <form id="composer">
+      <label>
+        To
+        <input id="recipient" name="recipient" type="email" autocomplete="off" aria-label="Email recipient" required>
+      </label>
+      <label>
+        Subject
+        <input id="subject" name="subject" type="text" autocomplete="off" aria-label="Email subject" required>
+      </label>
+      <label>
+        Message
+        <textarea id="message" name="message" aria-label="Email message" required></textarea>
+      </label>
+      <button id="send" type="submit" aria-label="Send test email">Send test email</button>
+    </form>
+
+    <section id="result" role="status" aria-live="polite">
+      Acceptance email completed locally. Nothing was sent over the network.
+    </section>
+  </main>
+
+  <script>
+    document.getElementById("composer").addEventListener("submit", event => {
+      event.preventDefault();
+      if (!event.currentTarget.reportValidity()) return;
+      document.getElementById("result").style.display = "block";
+      document.getElementById("send").disabled = true;
+      document.getElementById("send").textContent = "Completed locally";
+    });
+  </script>
+</body>
+</html>

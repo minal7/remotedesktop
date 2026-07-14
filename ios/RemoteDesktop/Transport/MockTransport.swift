@@ -8,11 +8,12 @@ import os
 final class MockTransport: Transport {
     var onHostHello: (@MainActor (HostHello) -> Void)?
     var onDisplay: (@MainActor (DisplayInfo) -> Void)?
+    var onFirstVideoFrame: (@MainActor () -> Void)?
     var onDisconnect: (@MainActor (String) -> Void)?
 
     private let log = Logger(subsystem: "com.threadmark.remotedesktop", category: "mock")
 
-    func connect(pairingCode: String) async throws {
+    func connect(pairingCode: String, expectedHostID: String?) async throws {
         log.debug("mock: connect code=\(pairingCode, privacy: .public)")
         try? await Task.sleep(for: .milliseconds(400))
 
@@ -25,6 +26,7 @@ final class MockTransport: Transport {
             monitors: 1))
 
         onDisplay?(DisplayInfo(w: 2560, h: 1440, scale: 2.0))
+        onFirstVideoFrame?()
     }
 
     func send(_ message: ControlMessage, seq: UInt32, ts: UInt64) {

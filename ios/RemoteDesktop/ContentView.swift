@@ -9,7 +9,12 @@ struct ContentView: View {
             case .idle:
                 PairingView()
             case .connecting, .connected:
-                SessionView()
+                if session.experience == .computerUse,
+                   let computerUse = session.computerUseSession {
+                    ComputerUseView(model: computerUse)
+                } else {
+                    SessionView()
+                }
             case .ended(let reason):
                 EndedView(reason: reason)
             }

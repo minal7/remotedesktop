@@ -19,6 +19,11 @@ Package.resolved
 .swiftpm/
 *.profraw
 
+# Local tooling/runtime caches
+.codex/
+__pycache__/
+*.pyc
+
 # CocoaPods / Carthage (if we add them later)
 Pods/
 Carthage/Build/

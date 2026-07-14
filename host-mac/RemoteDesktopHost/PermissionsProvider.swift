@@ -39,8 +39,9 @@ protocol PermissionsProvider: Sendable {
     func requestMicrophoneAccess(completion: @escaping @Sendable (Bool) -> Void)
     func openSystemSettings(for permission: PermissionKind)
 
-    /// Surface the OS-level prompts. Idempotent: after first-run the
-    /// system shows these silently or not at all.
+    /// Surface only the permissions required for screen viewing and control.
+    /// Mac audio is optional and has its own explicit opt-in action so a user
+    /// can finish setup without granting microphone access.
     func requestPrompts()
 }
 
@@ -88,6 +89,5 @@ struct SystemPermissionsProvider: PermissionsProvider {
     func requestPrompts() {
         requestPrompt(for: .screenRecording)
         requestPrompt(for: .accessibility)
-        requestPrompt(for: .microphone)
     }
 }

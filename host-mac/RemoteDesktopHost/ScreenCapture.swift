@@ -5,8 +5,59 @@ import ScreenCaptureKit
 import os
 
 enum CaptureSizing {
+    /// Both H.264 profiles advertised by the bundled WebRTC framework use
+    /// level 3.1 (`profile-level-id` ending in `1f`). Level 3.1 permits at
+    /// most 3,600 16x16 macroblocks per frame. Feeding a Retina display's
+    /// output buffer (for example 1728x1116 on a Retina MacBook) directly to
+    /// VideoToolbox exceeds that limit and the hardware encoder rejects every
+    /// frame with `kVTParameterErr`.
+    static let maximumH264Level31MacroblocksPerFrame = 3_600
+    static let targetFramesPerSecond: Int32 = 30
+
     static func normalized(width: Int, height: Int) -> (width: Int, height: Int) {
         (normalize(width), normalize(height))
+    }
+
+    /// Returns the largest even-sized rectangle with the source aspect ratio
+    /// that fits H.264 level 3.1. Searching the small macroblock grid avoids
+    /// accidentally crossing the limit after 16-pixel alignment.
+    static func encoderSafe(width: Int, height: Int) -> (width: Int, height: Int) {
+        let source = normalized(width: width, height: height)
+        guard macroblockCount(width: source.width, height: source.height)
+                > maximumH264Level31MacroblocksPerFrame else {
+            return source
+        }
+
+        var best = (width: 2, height: 2)
+        var bestArea = 4
+
+        for macroblockHeight in 1...maximumH264Level31MacroblocksPerFrame {
+            let macroblockWidth = maximumH264Level31MacroblocksPerFrame / macroblockHeight
+            guard macroblockWidth > 0 else { continue }
+
+            let scale = min(
+                1,
+                Double(macroblockWidth * 16) / Double(source.width),
+                Double(macroblockHeight * 16) / Double(source.height))
+            let candidate = normalized(
+                width: Int((Double(source.width) * scale).rounded(.down)),
+                height: Int((Double(source.height) * scale).rounded(.down)))
+            let area = candidate.width * candidate.height
+
+            guard macroblockCount(width: candidate.width, height: candidate.height)
+                    <= maximumH264Level31MacroblocksPerFrame,
+                  area > bestArea else {
+                continue
+            }
+            best = candidate
+            bestArea = area
+        }
+
+        return best
+    }
+
+    static func macroblockCount(width: Int, height: Int) -> Int {
+        ((max(1, width) + 15) / 16) * ((max(1, height) + 15) / 16)
     }
 
     private static func normalize(_ value: Int) -> Int {
@@ -15,13 +66,13 @@ enum CaptureSizing {
     }
 }
 
-/// Thin wrapper around `SCStream` that captures the main display and
-/// (on macOS 13+) system audio as `CMSampleBuffer`s delivered on the
+/// Thin wrapper around `SCStream` that captures the main display and,
+/// when the user opted in, system audio as `CMSampleBuffer`s delivered on the
 /// capture queues. Consumers — the WebRTC video/audio encoders in
 /// Phase 3 — handle their own marshalling.
 ///
 /// Not `@MainActor`: callbacks fire on the capture queue and we don't
-/// want a per-frame actor hop at 60 fps.
+/// want a per-frame actor hop at 30 fps.
 final class ScreenCapture: NSObject, @unchecked Sendable {
     private var stream: SCStream?
     private var stopping = false
@@ -32,6 +83,7 @@ final class ScreenCapture: NSObject, @unchecked Sendable {
         label: "com.threadmark.remotedesktop.host.capture.audio",
         qos: .userInteractive)
     private let log = Logger(subsystem: "com.threadmark.remotedesktop.host", category: "capture")
+    private var loggedFirstVideoSample = false
     private var loggedFirstAudioSample = false
 
     /// Invoked on `videoQueue` for each captured frame.
@@ -44,31 +96,26 @@ final class ScreenCapture: NSObject, @unchecked Sendable {
     enum CaptureError: Error { case noDisplay }
 
     /// Picks the display containing the menu bar and starts capturing
-    /// at up to 60 fps with system audio. Throws if ScreenCaptureKit
+    /// at up to 30 fps, adding system audio only when enabled. Throws if ScreenCaptureKit
     /// can't start (typically: missing TCC approval).
-    func start() async throws {
+    func start(audioEnabled: Bool) async throws {
         guard stream == nil else { return }
         stopping = false
+        loggedFirstVideoSample = false
         loggedFirstAudioSample = false
         let content = try await SCShareableContent.excludingDesktopWindows(
             false, onScreenWindowsOnly: false)
         guard let display = content.displays.first else {
             throw CaptureError.noDisplay
         }
-        let normalizedSize = CaptureSizing.normalized(
+        let captureSize = CaptureSizing.encoderSafe(
             width: display.width,
             height: display.height)
 
-        let config = SCStreamConfiguration()
-        config.width = normalizedSize.width
-        config.height = normalizedSize.height
-        config.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
-        config.minimumFrameInterval = CMTime(value: 1, timescale: 60)
-        config.queueDepth = 6
-        config.showsCursor = true
-        config.capturesAudio = true
-        config.sampleRate = 48_000
-        config.channelCount = 2
+        let config = Self.streamConfiguration(
+            width: captureSize.width,
+            height: captureSize.height,
+            audioEnabled: audioEnabled)
 
         let filter = SCContentFilter(
             display: display,
@@ -77,11 +124,14 @@ final class ScreenCapture: NSObject, @unchecked Sendable {
 
         let s = SCStream(filter: filter, configuration: config, delegate: self)
         try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: videoQueue)
-        try s.addStreamOutput(self, type: .audio,  sampleHandlerQueue: audioQueue)
+        if audioEnabled {
+            try s.addStreamOutput(self, type: .audio, sampleHandlerQueue: audioQueue)
+        }
 
         try await s.startCapture()
         stream = s
-        log.info("capture started \(normalizedSize.width, privacy: .public)x\(normalizedSize.height, privacy: .public)")
+        log.info(
+            "capture started source=\(display.width, privacy: .public)x\(display.height, privacy: .public) output=\(captureSize.width, privacy: .public)x\(captureSize.height, privacy: .public) fps=\(CaptureSizing.targetFramesPerSecond, privacy: .public) audio=\(audioEnabled, privacy: .public)")
     }
 
     func stop() async {
@@ -100,6 +150,34 @@ final class ScreenCapture: NSObject, @unchecked Sendable {
     }
 }
 
+extension ScreenCapture {
+    /// Kept as a pure configuration factory so tests can prove that declining
+    /// optional microphone access also disables ScreenCaptureKit audio capture.
+    static func streamConfiguration(
+        width: Int,
+        height: Int,
+        audioEnabled: Bool
+    ) -> SCStreamConfiguration {
+        let config = SCStreamConfiguration()
+        config.width = width
+        config.height = height
+        config.scalesToFit = true
+        config.preservesAspectRatio = true
+        config.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+        config.minimumFrameInterval = CMTime(
+            value: 1,
+            timescale: CaptureSizing.targetFramesPerSecond)
+        config.queueDepth = 6
+        config.showsCursor = true
+        config.capturesAudio = audioEnabled
+        if audioEnabled {
+            config.sampleRate = 48_000
+            config.channelCount = 2
+        }
+        return config
+    }
+}
+
 extension ScreenCapture: SCStreamDelegate, SCStreamOutput {
     func stream(
         _ stream: SCStream,
@@ -108,7 +186,18 @@ extension ScreenCapture: SCStreamDelegate, SCStreamOutput {
     ) {
         guard sampleBuffer.isValid else { return }
         switch type {
-        case .screen: onVideoSample?(sampleBuffer)
+        case .screen:
+            if !loggedFirstVideoSample,
+               let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) {
+                loggedFirstVideoSample = true
+                let width = CVPixelBufferGetWidth(imageBuffer)
+                let height = CVPixelBufferGetHeight(imageBuffer)
+                let pixelFormat = CVPixelBufferGetPixelFormatType(imageBuffer)
+                let macroblocks = CaptureSizing.macroblockCount(width: width, height: height)
+                log.info(
+                    "received first video sample effective=\(width, privacy: .public)x\(height, privacy: .public) macroblocks=\(macroblocks, privacy: .public) pixelFormat=\(pixelFormat, privacy: .public)")
+            }
+            onVideoSample?(sampleBuffer)
         case .audio:
             if !loggedFirstAudioSample,
                let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer) {

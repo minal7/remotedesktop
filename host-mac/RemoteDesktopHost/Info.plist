@@ -20,8 +20,12 @@
 	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.utilities</string>
 	<key>LSUIElement</key>
 	<true/>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Remote Desktop Host uses Apple events only after your approval to open an email draft or send the exact email shown on your mobile device.</string>
 	<key>NSAudioCaptureUsageDescription</key>
 	<string>Remote Desktop Host captures your Mac's system audio so sound playing on the host can be heard on your client device.</string>
 	<key>NSHumanReadableCopyright</key>

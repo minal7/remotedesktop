@@ -4,27 +4,22 @@ import UIKit
 /// Top-level in-session UI. Layers accessory-aware chrome over a
 /// full-bleed `RemoteScreenView`.
 ///
-/// **Pinned chrome** – iPhone portrait keeps the status strip visible;
-/// there's plenty of vertical space and hiding it would make the
-/// disconnect action less discoverable.
-///
-/// **Retractable chrome** – iPad and compact-height iPhone layouts hide
-/// chrome after reveal and bring it back with a drag from the top edge,
-/// keeping the remote screen unobstructed.
+/// The connection strip is shown while the session is being established,
+/// then retracts on every device after a short confirmation period. A drag
+/// from the top edge reveals it again when the user needs to disconnect.
 ///
 /// A left → right swipe across the full screen triggers disconnect
 /// with a visual progress indicator.
 struct SessionView: View {
     @EnvironmentObject private var session: SessionModel
     @StateObject private var accessories = AccessoryMonitor()
-    @Environment(\.verticalSizeClass) private var verticalSizeClass
-
+    @StateObject private var zoom = RemoteScreenZoomController()
     @State private var softKeyboardOpen = false
     @State private var restoreSoftKeyboardAfterHardwareDisconnect = false
     @State private var chromeRevealed = false
     @State private var hideTask: Task<Void, Never>?
 
-    // Special-key idle translucency (retractable layouts)
+    // Special-key idle translucency
     @State private var specialKeysIdle = false
     @State private var specialKeysIdleTask: Task<Void, Never>?
 
@@ -32,18 +27,9 @@ struct SessionView: View {
     @State private var disconnectDragOffset: CGFloat = 0
     @State private var disconnectTriggered = false
 
-    /// iPhone portrait keeps the status strip pinned. iPad and compact-height
-    /// layouts use the same retractable chrome behavior.
-    private var hasPinnedChrome: Bool {
-        SessionChromePolicy.pinsTopBar(
-            verticalSizeClass: verticalSizeClass,
-            userInterfaceIdiom: UIDevice.current.userInterfaceIdiom
-        )
-    }
-
     /// Whether the chrome overlay should be showing right now.
     private var shouldShowChrome: Bool {
-        hasPinnedChrome || chromeRevealed
+        chromeRevealed
     }
 
     private var specialKeysAttentive: Bool {
@@ -65,13 +51,13 @@ struct SessionView: View {
 
     private var specialKeysIdleOpacity: Double {
         // Keep the composited controls above SwiftUI's low-opacity hit-test edge.
-        hasPinnedChrome ? 0.62 : 0.56
+        0.56
     }
 
     var body: some View {
         ZStack(alignment: .top) {
             // ── Remote screen ──────────────────────────────────
-            RemoteScreenView(accessories: accessories)
+            RemoteScreenView(accessories: accessories, zoom: zoom)
                 .ignoresSafeArea()
 
             // ── Disconnect swipe indicator ─────────────────────
@@ -82,8 +68,8 @@ struct SessionView: View {
             // ── Left-edge swipe strip (disconnect) ─────────────
             leftEdgeSwipeStrip
 
-            // ── Top-edge drag handle (retractable chrome only) ─
-            if !hasPinnedChrome && !chromeRevealed {
+            // ── Top-edge drag handle ───────────────────────────
+            if !chromeRevealed {
                 topEdgeDragHandle
             }
 
@@ -95,6 +81,18 @@ struct SessionView: View {
 
             // ── Input controls (orientation-aware) ─────────────
             inputDock
+
+            // Keep zoom and two-finger mode controls in the same predictable
+            // top-left location on iPhone and iPad.
+            VStack {
+                HStack {
+                    RemoteScreenZoomControls(zoom: zoom)
+                    Spacer()
+                }
+                .padding(.leading, 12)
+                .padding(.top, shouldShowChrome ? 60 : 10)
+                Spacer()
+            }
 
             // ── Invisible soft-keyboard capture ────────────────
             if softKeyboardOpen && !accessories.hasHardwareKeyboard {
@@ -113,17 +111,21 @@ struct SessionView: View {
         .statusBarHidden(!shouldShowChrome)
         .persistentSystemOverlays(.hidden)
         .animation(.easeInOut(duration: 0.25), value: shouldShowChrome)
+        .animation(.easeInOut(duration: 0.25), value: zoom.isZoomed)
         .animation(.smooth(duration: 0.32), value: accessories.hasHardwareKeyboard)
         .animation(.smooth(duration: 0.32), value: accessories.hasIndirectPointer)
-        .onChange(of: hasPinnedChrome) { _, pinned in
-            // Reset retractable chrome state when returning to a pinned layout.
-            if pinned {
-                hideTask?.cancel()
-                chromeRevealed = false
-            }
+        .onAppear {
+            synchronizeChrome(with: session.state)
+        }
+        .onChange(of: session.state) { _, state in
+            synchronizeChrome(with: state)
         }
         .onChange(of: accessories.hasHardwareKeyboard) { _, connected in
             handleHardwareKeyboardChange(connected)
+        }
+        .onDisappear {
+            hideTask?.cancel()
+            specialKeysIdleTask?.cancel()
         }
     }
 
@@ -174,13 +176,23 @@ struct SessionView: View {
 
     private func revealChrome() {
         chromeRevealed = true
-        scheduleAutoHide()
+        if SessionChromePolicy.autoHides(after: session.state) {
+            scheduleAutoHide()
+        }
+    }
+
+    private func synchronizeChrome(with state: SessionModel.State) {
+        hideTask?.cancel()
+        chromeRevealed = true
+        if SessionChromePolicy.autoHides(after: state) {
+            scheduleAutoHide()
+        }
     }
 
     private func scheduleAutoHide() {
         hideTask?.cancel()
         hideTask = Task { @MainActor in
-            try? await Task.sleep(for: .seconds(3))
+            try? await Task.sleep(for: SessionChromePolicy.autoHideDelay)
             guard !Task.isCancelled else { return }
             chromeRevealed = false
         }
@@ -238,6 +250,7 @@ struct SessionView: View {
                 .fill(Color.white.opacity(0.08))
                 .frame(height: 0.5)
         }
+        .accessibilityIdentifier("sessionStatusStrip")
     }
 
     // MARK: - Input dock (orientation-aware)
@@ -261,7 +274,6 @@ struct SessionView: View {
                 specialKeysIdleTask?.cancel()
                 specialKeysIdle = false
             }
-            .onChange(of: hasPinnedChrome) { _, _ in wakeSpecialKeys() }
             .onChange(of: softKeyboardOpen) { _, open in
                 if open {
                     wakeSpecialKeys()
@@ -279,24 +291,13 @@ struct SessionView: View {
         }
     }
 
-    /// Builds the actual row of controls. Pinned layouts sit as a compact bar
-    /// near the bottom safe-area edge; retractable layouts float at the bottom.
     @ViewBuilder
     private func inputDockContent(needsKeyboard: Bool,
                                   needsModifiers: Bool) -> some View {
-        if hasPinnedChrome {
-            // ── Pinned chrome: bottom-aligned, compact row ─────
-            inputDockRow(needsKeyboard: needsKeyboard,
-                         needsModifiers: needsModifiers)
-            .padding(.horizontal, 16)
-            .padding(.bottom, 8)
-        } else {
-            // ── Retractable chrome: free-floating bottom row ───
-            inputDockRow(needsKeyboard: needsKeyboard,
-                         needsModifiers: needsModifiers)
-            .padding(.horizontal, 20)
-            .padding(.bottom, 10)
-        }
+        inputDockRow(needsKeyboard: needsKeyboard,
+                     needsModifiers: needsModifiers)
+        .padding(.horizontal, 20)
+        .padding(.bottom, 10)
     }
 
     private func inputDockRow(needsKeyboard: Bool,
@@ -470,10 +471,12 @@ struct SessionView: View {
 }
 
 enum SessionChromePolicy {
-    static func pinsTopBar(
-        verticalSizeClass: UserInterfaceSizeClass?,
-        userInterfaceIdiom: UIUserInterfaceIdiom
-    ) -> Bool {
-        userInterfaceIdiom != .pad && verticalSizeClass == .regular
+    static let autoHideDelay: Duration = .seconds(3)
+
+    static func autoHides(after state: SessionModel.State) -> Bool {
+        if case .connected = state {
+            return true
+        }
+        return false
     }
 }

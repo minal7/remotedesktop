@@ -17,9 +17,9 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0</string>
+	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
 	<key>NSAppTransportSecurity</key>
@@ -35,7 +35,7 @@
 	<string>Remote Desktop uses your local network for faster, direct connections to your computer when both devices are on the same Wi-Fi.
 </string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Remote Desktop does not record or transmit audio from this device. iOS requires this permission because the audio playback engine used to play sound streamed from your computer opens a full-duplex audio session under the hood.
+	<string>Remote Desktop includes a microphone-capable WebRTC component, but this app only plays audio from your Mac and never records, stores, or transmits audio from your microphone.
 </string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>

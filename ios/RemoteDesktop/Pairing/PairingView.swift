@@ -2,9 +2,12 @@ import SwiftUI
 
 struct PairingView: View {
     @EnvironmentObject private var session: SessionModel
+    @EnvironmentObject private var computerUseSetup: ComputerUseSetupCoordinator
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @StateObject private var discovery = LocalHostDiscovery()
     @State private var code: String = ""
     @State private var showCodeEntry = false
+    @State private var aiHelpMessage: String?
     @FocusState private var focused: Bool
 
     var body: some View {
@@ -37,7 +40,20 @@ struct PairingView: View {
                 .ignoresSafeArea()
         }
         .onAppear { discovery.start() }
+        .onChange(of: discovery.hosts) { _, hosts in
+            computerUseSetup.reconcile(hosts: hosts)
+        }
         .onDisappear { discovery.stop() }
+        .alert(
+            "AI Computer Use isn’t available yet",
+            isPresented: Binding(
+                get: { aiHelpMessage != nil },
+                set: { if !$0 { aiHelpMessage = nil } })
+        ) {
+            Button("OK", role: .cancel) { aiHelpMessage = nil }
+        } message: {
+            Text(aiHelpMessage ?? "")
+        }
     }
 
     private var header: some View {
@@ -47,12 +63,14 @@ struct PairingView: View {
                 .logoGlassPlate(size: 74, cornerRadius: 22)
 
             VStack(alignment: .leading, spacing: 10) {
-                Text("Connect to host")
-                    .font(.largeTitle.weight(.bold))
-                    .lineLimit(1)
+                Text("Connect to your computer")
+                    .font(horizontalSizeClass == .compact
+                        ? .title2.weight(.bold)
+                        : .largeTitle.weight(.bold))
+                    .lineLimit(horizontalSizeClass == .compact ? 2 : 1)
                     .minimumScaleFactor(0.8)
 
-                Text("Choose an available device first. If your host is not listed, enter its pairing code.")
+                Text("Choose your Mac below. If it isn’t listed, enter the pairing code shown by Remote Desktop Host on your Mac.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -93,10 +111,32 @@ struct PairingView: View {
                     }
                 }
             }
+
+            #if targetEnvironment(simulator)
+            simulatorCloudKitHint
+            #endif
         }
         .padding(18)
         .sectionSurface()
     }
+
+    #if targetEnvironment(simulator)
+    private var simulatorCloudKitHint: some View {
+        Label {
+            #if DEBUG
+            Text("This Debug Simulator app finds Debug Mac hosts. To connect to the official Mac host, run the iOS app in Release.")
+            #else
+            Text("This Release Simulator app can find the official Mac host through iCloud.")
+            #endif
+        } icon: {
+            Image(systemName: "info.circle")
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .fixedSize(horizontal: false, vertical: true)
+        .accessibilityLabel("Simulator iCloud environment")
+    }
+    #endif
 
     private var emptyDevicesState: some View {
         HStack(alignment: .center, spacing: 14) {
@@ -108,7 +148,7 @@ struct PairingView: View {
                 Text("Searching for hosts")
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.primary)
-                Text("Open the host app, or use a pairing code below.")
+                Text("Open Remote Desktop Host on your Mac, or use a pairing code below.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -241,12 +281,67 @@ struct PairingView: View {
         }
     }
 
+    @ViewBuilder
     private func hostButton(_ host: LocalHostAdvertisement) -> some View {
+        let computerUseAction: ComputerUseRowAction = if host.canOfferComputerUse {
+            ComputerUseRowAction.resolve(
+                host: host,
+                state: computerUseSetup.state(for: host))
+        } else {
+            .unavailable(
+                "Remote control is available nearby. AI Computer Use will become available after iCloud confirms this Mac for the current app version. Keep Remote Desktop Host open and make sure both devices use the same Apple Account.")
+        }
+
+        Group {
+            if horizontalSizeClass == .compact {
+                VStack(spacing: 10) {
+                    remoteControlButton(
+                        host,
+                        computerUseAction: computerUseAction)
+
+                    computerUseActionView(
+                        computerUseAction,
+                        host: host,
+                        fillsWidth: true)
+                }
+            } else {
+                HStack(spacing: 10) {
+                    remoteControlButton(
+                        host,
+                        computerUseAction: computerUseAction)
+
+                    computerUseActionView(
+                        computerUseAction,
+                        host: host,
+                        fillsWidth: false)
+                }
+            }
+        }
+        .padding(10)
+        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.06), lineWidth: 1)
+        }
+    }
+
+    private func remoteControlButton(
+        _ host: LocalHostAdvertisement,
+        computerUseAction: ComputerUseRowAction
+    ) -> some View {
         Button {
-            focused = false
-            code = host.code
-            session.connect(code: host.code)
+            connect(to: host, experience: .remoteControl)
         } label: {
+            hostSummary(host, computerUseAction: computerUseAction)
+        }
+        .buttonStyle(.plain)
+        .disabled(session.state == .connecting)
+    }
+
+    private func hostSummary(
+        _ host: LocalHostAdvertisement,
+        computerUseAction: ComputerUseRowAction
+    ) -> some View {
             HStack(spacing: 14) {
                 Image(systemName: "desktopcomputer")
                     .font(.title3.weight(.semibold))
@@ -262,7 +357,9 @@ struct PairingView: View {
                     Text(host.source == .cloudKit ? "Ready through iCloud" : "Ready nearby")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
+                    computerUseStatus(computerUseAction, host: host)
                 }
+                .layoutPriority(1)
 
                 Spacer()
 
@@ -270,15 +367,224 @@ struct PairingView: View {
                     .font(.footnote.weight(.semibold))
                     .foregroundStyle(.tertiary)
             }
-            .padding(16)
-            .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .strokeBorder(Color.primary.opacity(0.06), lineWidth: 1)
+            .padding(6)
+            .contentShape(Rectangle())
+    }
+
+    @ViewBuilder
+    private func computerUseActionView(
+        _ action: ComputerUseRowAction,
+        host: LocalHostAdvertisement,
+        fillsWidth: Bool
+    ) -> some View {
+        switch action {
+        case .hidden:
+            EmptyView()
+
+        case .unavailable(let message):
+            Button {
+                aiHelpMessage = message
+            } label: {
+                computerUseButtonLabel(
+                    host.canOfferComputerUse ? "AI info" : "Checking",
+                    systemImage: host.canOfferComputerUse ? "info.circle" : "icloud",
+                    fillsWidth: fillsWidth)
+            }
+            .buttonStyle(.bordered)
+            .buttonBorderShape(.roundedRectangle(radius: 14))
+            .tint(.secondary)
+            .accessibilityLabel("AI Computer Use availability for \(host.hostname)")
+            .accessibilityHint(message)
+
+        case .setup:
+            Button {
+                computerUseSetup.startSetup(for: host)
+            } label: {
+                computerUseButtonLabel(
+                    "Set up AI",
+                    systemImage: "sparkles",
+                    fillsWidth: fillsWidth)
+            }
+            .buttonStyle(.borderedProminent)
+            .buttonBorderShape(.roundedRectangle(radius: 14))
+            .tint(.indigo)
+            .disabled(session.state == .connecting)
+            .accessibilityLabel("Set up AI Computer Use on \(host.hostname)")
+            .accessibilityHint("Downloads and prepares AI on your Mac")
+
+        case .progress(let progress):
+            setupProgress(progress, host: host, fillsWidth: fillsWidth)
+
+        case .useAI:
+            Button {
+                connect(to: host, experience: .computerUse)
+            } label: {
+                computerUseButtonLabel(
+                    "Use AI",
+                    systemImage: "sparkles",
+                    fillsWidth: fillsWidth)
+            }
+            .buttonStyle(.borderedProminent)
+            .buttonBorderShape(.roundedRectangle(radius: 14))
+            .tint(.indigo)
+            .disabled(session.state == .connecting)
+            .accessibilityLabel("Use AI Computer Use on \(host.hostname)")
+            .accessibilityHint("Opens a chat with the live computer screen")
+
+        case .retry(let message):
+            Button {
+                computerUseSetup.startSetup(for: host)
+            } label: {
+                computerUseButtonLabel(
+                    "Retry",
+                    systemImage: "arrow.clockwise",
+                    fillsWidth: fillsWidth)
+            }
+            .buttonStyle(.borderedProminent)
+            .buttonBorderShape(.roundedRectangle(radius: 14))
+            .tint(.orange)
+            .disabled(session.state == .connecting)
+            .accessibilityLabel("Retry AI setup on \(host.hostname)")
+            .accessibilityHint(message)
+        }
+    }
+
+    @ViewBuilder
+    private func computerUseButtonLabel(
+        _ title: String,
+        systemImage: String,
+        fillsWidth: Bool
+    ) -> some View {
+        if fillsWidth {
+            Label(title, systemImage: systemImage)
+                .font(.subheadline.weight(.semibold))
+                .frame(maxWidth: .infinity, minHeight: 44)
+        } else {
+            VStack(spacing: 4) {
+                Image(systemName: systemImage)
+                    .font(.title3.weight(.semibold))
+                Text(title)
+                    .font(.caption.weight(.semibold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+            }
+            .frame(width: 68)
+            .frame(minHeight: 52)
+        }
+    }
+
+    @ViewBuilder
+    private func setupProgress(
+        _ progress: ComputerUseSetupProgress,
+        host: LocalHostAdvertisement,
+        fillsWidth: Bool
+    ) -> some View {
+        Group {
+            if fillsWidth {
+                HStack(spacing: 10) {
+                    if let fraction = progress.fractionCompleted {
+                        ProgressView(value: fraction)
+                            .progressViewStyle(.linear)
+                        Text("\(Int((fraction * 100).rounded()))%")
+                            .font(.caption.monospacedDigit().weight(.semibold))
+                    } else {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Setting up AI on your Mac")
+                            .font(.subheadline.weight(.semibold))
+                    }
+                }
+                .frame(maxWidth: .infinity, minHeight: 44)
+            } else {
+                VStack(spacing: 7) {
+                    if let fraction = progress.fractionCompleted {
+                        ProgressView(value: fraction)
+                            .progressViewStyle(.linear)
+                        Text("\(Int((fraction * 100).rounded()))%")
+                            .font(.caption2.monospacedDigit().weight(.semibold))
+                    } else {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Setting up")
+                            .font(.caption2.weight(.semibold))
+                    }
+                }
+                .frame(width: 78)
+                .frame(minHeight: 52)
             }
         }
-        .buttonStyle(.plain)
-        .disabled(session.state == .connecting)
+        .foregroundStyle(.indigo)
+        .padding(.horizontal, 8)
+        .background(Color.indigo.opacity(0.1), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(Color.indigo.opacity(0.2), lineWidth: 1)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Setting up AI Computer Use on \(host.hostname)")
+        .accessibilityValue(progressAccessibilityValue(progress))
+    }
+
+    private func progressAccessibilityValue(_ progress: ComputerUseSetupProgress) -> String {
+        if let fraction = progress.fractionCompleted {
+            return "\(Int((fraction * 100).rounded())) percent, \(progress.detail)"
+        }
+        return progress.detail
+    }
+
+    @ViewBuilder
+    private func computerUseStatus(
+        _ action: ComputerUseRowAction,
+        host: LocalHostAdvertisement
+    ) -> some View {
+        Group {
+            switch action {
+            case .hidden:
+                EmptyView()
+            case .unavailable:
+                if host.canOfferComputerUse {
+                    Label("AI setup unavailable", systemImage: "info.circle")
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.78)
+                } else {
+                    Label("Checking AI availability", systemImage: "icloud")
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.78)
+                }
+            case .setup:
+                Label("AI setup available", systemImage: "sparkles")
+                    .foregroundStyle(.indigo)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.78)
+            case .progress(let progress):
+                Label(progress.detail, systemImage: "arrow.down.circle.fill")
+                    .foregroundStyle(.indigo)
+                    .lineLimit(horizontalSizeClass == .compact ? 2 : 1)
+            case .useAI:
+                Label("AI Computer Use available", systemImage: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.78)
+                    .layoutPriority(1)
+            case .retry(let message):
+                Label(message, systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                    .lineLimit(horizontalSizeClass == .compact ? 2 : 1)
+            }
+        }
+        .font(.footnote.weight(.medium))
+    }
+
+    private func connect(to host: LocalHostAdvertisement, experience: SessionModel.Experience) {
+        focused = false
+        code = host.code
+        session.connect(
+            code: host.code,
+            experience: experience,
+            computerUseHostID: host.senderID,
+            hostName: host.hostname)
     }
 
     private func toggleCodeEntry() {

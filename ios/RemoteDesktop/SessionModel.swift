@@ -6,6 +6,11 @@ import LiveKitWebRTC
 /// lifecycle, and fans input events out as `ControlMessage`s.
 @MainActor
 final class SessionModel: ObservableObject {
+    enum Experience: Equatable {
+        case remoteControl
+        case computerUse
+    }
+
     enum State: Equatable {
         case idle
         case connecting
@@ -16,8 +21,11 @@ final class SessionModel: ObservableObject {
     @Published private(set) var state: State = .idle
     @Published private(set) var hostName: String?
     @Published private(set) var display: DisplayInfo?
+    @Published private(set) var hasReceivedVideoFrame = false
     @Published private(set) var softModifierMask: UInt16 = 0
     @Published var error: String?
+    @Published private(set) var experience: Experience = .remoteControl
+    @Published private(set) var computerUseSession: ComputerUseSessionModel?
 
     private let transportFactory: @MainActor () -> Transport
     private var transport: Transport?
@@ -27,12 +35,35 @@ final class SessionModel: ObservableObject {
         self.transportFactory = transportFactory
     }
 
-    func connect(code: String) {
+    func connect(
+        code: String,
+        experience: Experience = .remoteControl,
+        computerUseHostID: String? = nil,
+        hostName: String = "Mac"
+    ) {
         guard state == .idle || {
             if case .ended = state { return true } else { return false }
         }() else { return }
         state = .connecting
         error = nil
+        hasReceivedVideoFrame = false
+        self.experience = experience
+
+        if experience == .computerUse {
+            guard let computerUseHostID, !computerUseHostID.isEmpty else {
+                self.error = "AI Computer Use isn't available for this Mac yet. Wait a moment and try again."
+                state = .idle
+                return
+            }
+            let computerUse = ComputerUseSessionModel(
+                hostName: hostName,
+                pairingCode: code,
+                hostID: computerUseHostID)
+            computerUseSession = computerUse
+        } else {
+            computerUseSession?.stop()
+            computerUseSession = nil
+        }
 
         let t = transportFactory()
         bind(t)
@@ -40,8 +71,12 @@ final class SessionModel: ObservableObject {
 
         Task { @MainActor in
             do {
-                try await t.connect(pairingCode: code)
+                try await t.connect(
+                    pairingCode: code,
+                    expectedHostID: computerUseHostID)
             } catch {
+                self.computerUseSession?.stop()
+                self.computerUseSession = nil
                 self.transport = nil
                 self.error = (error as? LocalizedError)?.errorDescription ?? "Couldn't connect: \(error.localizedDescription)"
                 self.state = .idle
@@ -65,19 +100,25 @@ final class SessionModel: ObservableObject {
 
     func disconnect() {
         releaseSoftModifiers()
+        computerUseSession?.stop()
         transport?.disconnect(reason: "user")
         transport = nil
         state = .ended("Disconnected")
+        hasReceivedVideoFrame = false
     }
 
     func reset() {
         releaseSoftModifiers()
+        computerUseSession?.stop()
+        computerUseSession = nil
         transport?.disconnect(reason: "user")
         transport = nil
         state = .idle
         error = nil
         hostName = nil
         display = nil
+        hasReceivedVideoFrame = false
+        experience = .remoteControl
     }
 
     func toggleSoftModifier(_ modifier: SoftModifier) {
@@ -99,10 +140,16 @@ final class SessionModel: ObservableObject {
         t.onHostHello = { [weak self] h in
             self?.hostName = h.hostname
             self?.state = .connected
+            self?.computerUseSession?.start()
         }
         t.onDisplay = { [weak self] d in self?.display = d }
+        t.onFirstVideoFrame = { [weak self] in
+            self?.hasReceivedVideoFrame = true
+        }
         t.onDisconnect = { [weak self] r in
+            self?.computerUseSession?.stop()
             self?.transport = nil
+            self?.hasReceivedVideoFrame = false
             self?.state = .ended(r)
         }
     }

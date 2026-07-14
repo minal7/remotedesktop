@@ -22,6 +22,9 @@ final class HostPeerSession: NSObject {
     private let capture: ScreenCapture
     private let injector: InputInjector
     private let iceConfig: ICEConfig
+    private let audioEnabled: Bool
+    private let onUserInput: @Sendable () -> Void
+    private let onPeerAuthorizationChanged: @Sendable (Bool) -> Void
     private let onEnded: @Sendable (String) -> Void
     private let log = Logger(subsystem: "com.threadmark.remotedesktop.host", category: "webrtc")
     private let signalingStateQueue = DispatchQueue(label: "com.threadmark.remotedesktop.host.webrtc.signaling")
@@ -40,6 +43,7 @@ final class HostPeerSession: NSObject {
     private var audioRecordingStarted = false
     private var localMediaConfigured = false
     private var ended = false
+    private var helloAuthenticated = false
     private var captureRestartTask: Task<Void, Never>?
     private var hostSeq: UInt32 = 0
     private var answerSent = false
@@ -52,11 +56,30 @@ final class HostPeerSession: NSObject {
         .seconds(10),
     ]
 
+    /// Pointer and keyboard packets are privileged only after the peer has
+    /// completed the protocol hello. A WebRTC data channel opening is not, by
+    /// itself, authorization to control the Mac.
+    nonisolated static func acceptsDirectInput(
+        _ message: ControlMessage,
+        helloAuthenticated: Bool
+    ) -> Bool {
+        guard helloAuthenticated else { return false }
+        switch message {
+        case .pointer, .scroll, .key, .text:
+            return true
+        case .hello, .qos, .bye:
+            return false
+        }
+    }
+
     init(
         signaling: any SignalingChannel,
         capture: ScreenCapture,
         injector: InputInjector,
         iceConfig: ICEConfig,
+        audioEnabled: Bool,
+        onUserInput: @escaping @Sendable () -> Void,
+        onPeerAuthorizationChanged: @escaping @Sendable (Bool) -> Void,
         onEnded: @escaping @Sendable (String) -> Void
     ) {
         RTCInitializeSSL()
@@ -64,6 +87,9 @@ final class HostPeerSession: NSObject {
         self.capture = capture
         self.injector = injector
         self.iceConfig = iceConfig
+        self.audioEnabled = audioEnabled
+        self.onUserInput = onUserInput
+        self.onPeerAuthorizationChanged = onPeerAuthorizationChanged
         self.onEnded = onEnded
         self.factory = RTCPeerConnectionFactory(
             audioDeviceModuleType: .audioEngine,
@@ -74,7 +100,7 @@ final class HostPeerSession: NSObject {
         let voiceProcessingStatus = factory.audioDeviceModule.setVoiceProcessingEnabled(false)
         _ = factory.audioDeviceModule.setEngineAvailability(
             RTCAudioEngineAvailability(
-                isInputAvailable: ObjCBool(HostConfig.enableSystemAudio),
+                isInputAvailable: ObjCBool(audioEnabled),
                 isOutputAvailable: true))
         self.audioBridge = SystemAudioBridge()
         self.audioSource = factory.audioSource(with: nil)
@@ -84,7 +110,9 @@ final class HostPeerSession: NSObject {
         self.videoCapturer = RTCVideoCapturer(delegate: videoSource)
         super.init()
         log.info("host audio ADM voiceProcessingEnabled=false status=\(voiceProcessingStatus, privacy: .public)")
-        audioBridge.attach(to: factory.audioDeviceModule)
+        if audioEnabled {
+            audioBridge.attach(to: factory.audioDeviceModule)
+        }
         configureCaptureCallbacks()
     }
 
@@ -136,6 +164,8 @@ final class HostPeerSession: NSObject {
 
     func close(reason: String) {
         ended = true
+        helloAuthenticated = false
+        onPeerAuthorizationChanged(false)
         captureRestartTask?.cancel()
         captureRestartTask = nil
         resetBufferedLocalICE()
@@ -144,7 +174,9 @@ final class HostPeerSession: NSObject {
         dataChannel = nil
         peerConnection?.close()
         peerConnection = nil
-        audioBridge.detach(from: factory.audioDeviceModule)
+        if audioEnabled {
+            audioBridge.detach(from: factory.audioDeviceModule)
+        }
         stopAudioRecording()
         // Clear capture callbacks before stopping to prevent the
         // delegate's didStopWithError from re-firing onEnded.
@@ -190,7 +222,7 @@ final class HostPeerSession: NSObject {
         }
 
         try addOutboundVideoTrack(on: peerConnection)
-        if HostConfig.enableSystemAudio {
+        if audioEnabled {
             try bindAudioTrackToExistingTransceiver(on: peerConnection)
         }
         localMediaConfigured = true
@@ -242,7 +274,7 @@ final class HostPeerSession: NSObject {
         capture.onVideoSample = { [weak self] sampleBuffer in
             self?.pushVideoSample(sampleBuffer)
         }
-        if HostConfig.enableSystemAudio {
+        if audioEnabled {
             capture.onAudioSample = { [weak self] sampleBuffer in
                 self?.audioBridge.enqueue(sampleBuffer)
             }
@@ -256,7 +288,7 @@ final class HostPeerSession: NSObject {
     }
 
     private func startCapture() async throws {
-        try await capture.start()
+        try await capture.start(audioEnabled: audioEnabled)
         captureStarted = true
     }
 
@@ -318,7 +350,7 @@ final class HostPeerSession: NSObject {
         videoSource.adaptOutputFormat(
             toWidth: Int32(normalizedSize.width),
             height: Int32(normalizedSize.height),
-            fps: 60)
+            fps: CaptureSizing.targetFramesPerSecond)
 
         let rtcBuffer = RTCCVPixelBuffer(pixelBuffer: imageBuffer)
         let presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
@@ -362,7 +394,7 @@ final class HostPeerSession: NSObject {
             proto: HostConfig.protocolVersion,
             hostname: Host.current().localizedName ?? ProcessInfo.processInfo.hostName,
             os: ProcessInfo.processInfo.operatingSystemVersionString,
-            audio: HostConfig.enableSystemAudio,
+            audio: audioEnabled,
             monitors: NSScreen.screens.count,
             seq: hostSeq,
             ts: timestamp)
@@ -497,7 +529,7 @@ final class HostPeerSession: NSObject {
     }
 
     private func startAudioRecordingIfNeeded() {
-        guard HostConfig.enableSystemAudio, !audioRecordingStarted else {
+        guard audioEnabled, !audioRecordingStarted else {
             return
         }
         let audioDeviceModule = factory.audioDeviceModule
@@ -536,10 +568,14 @@ extension HostPeerSession: RTCPeerConnectionDelegate {
         log.info("peer connection state → \(String(describing: stateChanged), privacy: .public)")
         guard !ended else { return }
         switch stateChanged {
+        case .connected:
+            if helloAuthenticated { onPeerAuthorizationChanged(true) }
         case .disconnected:
             // Transient — ICE may recover on its own. Log but don't tear down.
+            onPeerAuthorizationChanged(false)
             log.warning("peer connection is disconnected (may recover)")
         case .failed, .closed:
+            onPeerAuthorizationChanged(false)
             onEnded("The peer connection closed.")
         default:
             break
@@ -553,7 +589,12 @@ extension HostPeerSession: RTCPeerConnectionDelegate {
 }
 
 extension HostPeerSession: RTCDataChannelDelegate {
-    func dataChannelDidChangeState(_ dataChannel: RTCDataChannel) {}
+    func dataChannelDidChangeState(_ dataChannel: RTCDataChannel) {
+        if dataChannel.readyState == .closed || dataChannel.readyState == .closing {
+            helloAuthenticated = false
+            onPeerAuthorizationChanged(false)
+        }
+    }
 
     func dataChannel(_ dataChannel: RTCDataChannel, didReceiveMessageWith buffer: RTCDataBuffer) {
         guard let message = ControlMessage.decode(buffer.data) else {
@@ -565,12 +606,23 @@ extension HostPeerSession: RTCDataChannelDelegate {
                 close(reason: "protocol")
                 return
             }
+            helloAuthenticated = true
+            onPeerAuthorizationChanged(true)
             sendHelloAckAndDisplay()
         case .bye(let reason):
             close(reason: reason)
             onEnded(reason)
-        default:
+        case .pointer, .scroll, .key, .text:
+            guard Self.acceptsDirectInput(
+                message,
+                helloAuthenticated: helloAuthenticated) else {
+                log.warning("dropping remote input received before authenticated hello")
+                return
+            }
+            onUserInput()
             injector.apply(message)
+        case .qos:
+            break
         }
     }
 }

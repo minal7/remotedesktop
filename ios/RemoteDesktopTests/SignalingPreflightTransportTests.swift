@@ -26,7 +26,7 @@ final class SignalingPreflightTransportTests: XCTestCase {
         let transport = SignalingPreflightTransport(
             deviceName: { "Test iPhone" },
             handshakeTimeout: .milliseconds(200),
-            signalingFactory: { _ in channel })
+            signalingFactory: { _, _ in channel })
 
         var hello: HostHello?
         var display: DisplayInfo?
@@ -50,7 +50,7 @@ final class SignalingPreflightTransportTests: XCTestCase {
         let transport = SignalingPreflightTransport(
             deviceName: { "Test iPhone" },
             handshakeTimeout: .milliseconds(20),
-            signalingFactory: { _ in channel })
+            signalingFactory: { _, _ in channel })
 
         do {
             try await transport.connect(pairingCode: "654321")

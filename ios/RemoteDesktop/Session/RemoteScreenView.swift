@@ -21,18 +21,111 @@ import LiveKitWebRTC
 struct RemoteScreenView: UIViewRepresentable {
     @EnvironmentObject private var session: SessionModel
     @ObservedObject var accessories: AccessoryMonitor
+    @ObservedObject var zoom: RemoteScreenZoomController
 
     func makeUIView(context: Context) -> RemoteScreenUIView {
         let v = RemoteScreenUIView()
         v.bindSession(session)
+        v.bindZoomController(zoom)
         v.accessories = accessories
         return v
     }
 
     func updateUIView(_ uiView: RemoteScreenUIView, context: Context) {
         uiView.bindSession(session)
+        uiView.bindZoomController(zoom)
         uiView.accessories = accessories
         uiView.applyDisplay(session.display)
+    }
+}
+
+@MainActor
+final class RemoteScreenZoomController: ObservableObject {
+    enum Command {
+        case increase
+        case decrease
+        case reset
+    }
+
+    @Published private(set) var scale: CGFloat = 1
+    @Published var moveScreenEnabled = false {
+        didSet {
+            guard oldValue != moveScreenEnabled else { return }
+            interactionModeHandler?(moveScreenEnabled)
+        }
+    }
+    fileprivate var commandHandler: ((Command) -> Void)?
+    fileprivate var interactionModeHandler: ((Bool) -> Void)?
+
+    var isZoomed: Bool { scale > 1.01 }
+
+    func zoomIn() { commandHandler?(.increase) }
+    func zoomOut() { commandHandler?(.decrease) }
+    func reset() { commandHandler?(.reset) }
+
+    fileprivate func report(scale: CGFloat) {
+        guard abs(self.scale - scale) > 0.005 else { return }
+        self.scale = scale
+    }
+}
+
+struct RemoteScreenZoomControls: View {
+    @ObservedObject var zoom: RemoteScreenZoomController
+
+    var body: some View {
+        HStack(spacing: 2) {
+            Button(action: zoom.zoomOut) {
+                Image(systemName: "minus.magnifyingglass")
+                    .frame(width: 44, height: 44)
+            }
+            .disabled(!zoom.isZoomed)
+            .accessibilityLabel("Zoom out")
+
+            Button(action: zoom.reset) {
+                Text(zoom.isZoomed ? "\(Int((zoom.scale * 100).rounded()))%" : "Fit")
+                    .font(.caption.monospacedDigit().weight(.semibold))
+                    .frame(minWidth: 44, minHeight: 44)
+            }
+            .disabled(!zoom.isZoomed)
+            .accessibilityLabel("Fit screen")
+            .accessibilityValue("\(Int((zoom.scale * 100).rounded())) percent")
+
+            Button(action: zoom.zoomIn) {
+                Image(systemName: "plus.magnifyingglass")
+                    .frame(width: 44, height: 44)
+            }
+            .disabled(zoom.scale >= RemoteZoomPolicy.maximumScale)
+            .accessibilityLabel("Zoom in")
+
+            Divider()
+                .frame(height: 24)
+                .padding(.horizontal, 3)
+
+            Toggle(isOn: $zoom.moveScreenEnabled) {
+                Label("Zoom & move", systemImage: "hand.draw")
+                .font(.caption.weight(.semibold))
+                .frame(minHeight: 44)
+                .padding(.horizontal, 6)
+            }
+            .toggleStyle(.button)
+            .foregroundStyle(zoom.moveScreenEnabled ? Color.white : Color.primary)
+            .background(
+                zoom.moveScreenEnabled ? Color.accentColor : Color.clear,
+                in: Capsule())
+            .accessibilityIdentifier("moveScreenToggle")
+            .accessibilityLabel("Zoom and move screen")
+            .accessibilityValue(zoom.moveScreenEnabled ? "On" : "Off")
+            .accessibilityHint(zoom.moveScreenEnabled
+                ? "Touches zoom and move the view without controlling the remote computer"
+                : "Dragging controls the remote computer and two fingers scroll it")
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.primary)
+        .padding(4)
+        .background(.regularMaterial, in: Capsule())
+        .overlay { Capsule().strokeBorder(Color.primary.opacity(0.1)) }
+        .shadow(color: .black.opacity(0.16), radius: 8, y: 3)
+        .accessibilityIdentifier("remoteScreenZoomControls")
     }
 }
 
@@ -40,45 +133,78 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
     weak var session: SessionModel?
     weak var accessories: AccessoryMonitor?
 
+    private let contentView = UIView(frame: .zero)
     private let videoView = RTCMTLVideoView(frame: .zero)
     private let cursorLayer = TouchCursorLayer()
     private var remoteDisplay: DisplayInfo?
     private weak var boundSession: SessionModel?
+    private weak var zoomController: RemoteScreenZoomController?
+    private let touchScroll = UIPanGestureRecognizer()
+    private let indirectScroll = UIPanGestureRecognizer()
+    private let hover = UIHoverGestureRecognizer()
+    private let zoomPan = UIPanGestureRecognizer()
+    private let pinch = UIPinchGestureRecognizer()
+    private let longPress = UILongPressGestureRecognizer()
+    private var zoomScale: CGFloat = 1
+    private var zoomOffset: CGPoint = .zero
+    private var pinchStartScale: CGFloat = 1
+    private var pinchAnchor: CGPoint = .zero
+    private var panStartOffset: CGPoint = .zero
+
+    var interactionState: RemoteScreenInteractionState {
+        RemoteScreenInteractionState(
+            remoteScrollEnabled: touchScroll.isEnabled,
+            remoteLongPressEnabled: longPress.isEnabled,
+            remoteIndirectInputEnabled: hover.isEnabled && indirectScroll.isEnabled,
+            viewportPinchEnabled: pinch.isEnabled,
+            viewportPanEnabled: zoomPan.isEnabled)
+    }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
         backgroundColor = .black
+        clipsToBounds = true
 
         videoView.videoContentMode = .scaleAspectFit
         videoView.backgroundColor = UIColor(white: 0.05, alpha: 1)
-        addSubview(videoView)
-        layer.addSublayer(cursorLayer)
+        contentView.addSubview(videoView)
+        contentView.layer.addSublayer(cursorLayer)
+        addSubview(contentView)
 
         // Indirect pointer (trackpad / Magic Mouse / Pencil hover).
         addInteraction(UIPointerInteraction(delegate: self))
-        let hover = UIHoverGestureRecognizer(target: self, action: #selector(onHover(_:)))
+        hover.addTarget(self, action: #selector(onHover(_:)))
         addGestureRecognizer(hover)
 
         // Indirect scroll only — excludes direct touches via
         // `maximumNumberOfTouches = 0`.
-        let indirectScroll = UIPanGestureRecognizer(
-            target: self, action: #selector(onIndirectScroll(_:)))
+        indirectScroll.addTarget(self, action: #selector(onIndirectScroll(_:)))
         indirectScroll.allowedScrollTypesMask = [.discrete, .continuous]
         indirectScroll.maximumNumberOfTouches = 0
         indirectScroll.delegate = self
         addGestureRecognizer(indirectScroll)
 
         // Two-finger touch scroll for touch-cursor mode.
-        let touchScroll = UIPanGestureRecognizer(
-            target: self, action: #selector(onTouchScroll(_:)))
+        touchScroll.addTarget(self, action: #selector(onTouchScroll(_:)))
         touchScroll.minimumNumberOfTouches = 2
         touchScroll.maximumNumberOfTouches = 2
         touchScroll.delegate = self
         addGestureRecognizer(touchScroll)
 
+        // Move Screen mode owns pinch and viewport panning. Control mode owns
+        // direct cursor input and two-finger remote scrolling.
+        pinch.addTarget(self, action: #selector(onPinch(_:)))
+        pinch.delegate = self
+        addGestureRecognizer(pinch)
+
+        zoomPan.addTarget(self, action: #selector(onZoomPan(_:)))
+        zoomPan.minimumNumberOfTouches = 1
+        zoomPan.maximumNumberOfTouches = 2
+        zoomPan.delegate = self
+        addGestureRecognizer(zoomPan)
+
         // Long-press = right click in touch-cursor mode.
-        let longPress = UILongPressGestureRecognizer(
-            target: self, action: #selector(onLongPress(_:)))
+        longPress.addTarget(self, action: #selector(onLongPress(_:)))
         longPress.minimumPressDuration = 0.45
         longPress.allowableMovement = 10
         longPress.delegate = self
@@ -90,8 +216,11 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        videoView.frame = bounds
-        cursorLayer.frame = bounds
+        contentView.bounds = CGRect(origin: .zero, size: bounds.size)
+        videoView.frame = contentView.bounds
+        cursorLayer.frame = contentView.bounds
+        clampZoomOffset()
+        applyZoomTransform()
         cursorLayer.clamp(to: geometry.interactiveRect)
     }
 
@@ -108,6 +237,21 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
     func bindSession(_ session: SessionModel?) {
         self.session = session
         rebindRendererIfNeeded()
+    }
+
+    func bindZoomController(_ controller: RemoteScreenZoomController) {
+        guard zoomController !== controller else { return }
+        zoomController?.commandHandler = nil
+        zoomController?.interactionModeHandler = nil
+        zoomController = controller
+        controller.commandHandler = { [weak self] command in
+            self?.handleZoomCommand(command)
+        }
+        controller.interactionModeHandler = { [weak self] enabled in
+            self?.applyInteractionMode(moveScreenEnabled: enabled)
+        }
+        controller.report(scale: zoomScale)
+        applyInteractionMode(moveScreenEnabled: controller.moveScreenEnabled)
     }
 
     private func rebindRendererIfNeeded() {
@@ -144,8 +288,13 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
             accessories?.noteIndirectPointer(active: true)
             cursorLayer.hide()
             let p = g.location(in: self)
-            lastPointerLocation = p
-            sendPointer(at: p, buttons: lastPointerButtons)
+            let point = contentPoint(from: p)
+            lastPointerLocation = point
+            guard RemoteTouchRoutingPolicy.routesTouchesToComputer(
+                moveScreenEnabled: zoomController?.moveScreenEnabled ?? false) else {
+                return
+            }
+            sendPointer(at: point, buttons: lastPointerButtons)
         case .ended, .cancelled, .failed:
             accessories?.noteIndirectPointer(active: false)
         default: break
@@ -155,6 +304,11 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
     // MARK: - Indirect scroll (trackpad / wheel)
 
     @objc private func onIndirectScroll(_ g: UIPanGestureRecognizer) {
+        guard RemoteTouchRoutingPolicy.routesTouchesToComputer(
+            moveScreenEnabled: zoomController?.moveScreenEnabled ?? false) else {
+            g.setTranslation(.zero, in: self)
+            return
+        }
         let t = g.translation(in: self)
         if t == .zero && g.state == .changed { return }
         g.setTranslation(.zero, in: self)
@@ -184,6 +338,8 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
         }
 
         guard accessories?.hasIndirectPointer != true,
+              RemoteTouchRoutingPolicy.routesTouchesToComputer(
+                moveScreenEnabled: zoomController?.moveScreenEnabled ?? false),
               touches.count == 1,
               let t = touches.first else {
             super.touchesBegan(touches, with: event)
@@ -212,7 +368,9 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
         let prev = t.previousLocation(in: self)
         let now = t.location(in: self)
         let delta = CGPoint(x: now.x - prev.x, y: now.y - prev.y)
-        cursorLayer.move(by: delta, within: geometry.interactiveRect)
+        cursorLayer.move(
+            by: CGPoint(x: delta.x / zoomScale, y: delta.y / zoomScale),
+            within: geometry.interactiveRect)
         let cursor = cursorLayer.cursorCenter
         sendPointer(at: cursor, buttons: isDragging ? 0b001 : 0)
     }
@@ -266,8 +424,15 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
         accessories?.noteIndirectPointer(active: true)
         cursorLayer.hide()
 
-        let location = touch.location(in: self)
+        let location = contentPoint(from: touch.location(in: self))
         lastPointerLocation = location
+
+        guard RemoteTouchRoutingPolicy.routesTouchesToComputer(
+            moveScreenEnabled: zoomController?.moveScreenEnabled ?? false) else {
+            isTrackingIndirectClick = false
+            lastPointerButtons = 0
+            return true
+        }
 
         let buttons = IndirectPointerClickPolicy.buttons(
             for: event?.buttonMask ?? UIEvent.ButtonMask(),
@@ -295,7 +460,11 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
     }
 
     @objc private func onLongPress(_ g: UILongPressGestureRecognizer) {
-        guard accessories?.hasIndirectPointer != true, g.state == .began, !isDragging else { return }
+        guard accessories?.hasIndirectPointer != true,
+              RemoteTouchRoutingPolicy.routesTouchesToComputer(
+                moveScreenEnabled: zoomController?.moveScreenEnabled ?? false),
+              g.state == .began,
+              !isDragging else { return }
         rightClickFired = true
         let cursor = cursorLayer.cursorCenter
         sendPointer(at: cursor, buttons: 0b010)
@@ -303,7 +472,9 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
     }
 
     @objc private func onTouchScroll(_ g: UIPanGestureRecognizer) {
-        guard accessories?.hasIndirectPointer != true else { return }
+        guard accessories?.hasIndirectPointer != true,
+              RemoteTouchRoutingPolicy.routesTouchesToComputer(
+                moveScreenEnabled: zoomController?.moveScreenEnabled ?? false) else { return }
         let t = g.translation(in: self)
         g.setTranslation(.zero, in: self)
         let phase: InputScrollPhase = {
@@ -319,10 +490,166 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
 
     // MARK: - UIGestureRecognizerDelegate
 
+    override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        if gestureRecognizer === zoomPan {
+            return RemoteTouchRoutingPolicy.movesViewport(
+                moveScreenEnabled: zoomController?.moveScreenEnabled ?? false,
+                scale: zoomScale)
+        }
+        if gestureRecognizer === touchScroll {
+            return accessories?.hasIndirectPointer != true
+                && RemoteTouchRoutingPolicy.routesTouchesToComputer(
+                    moveScreenEnabled: zoomController?.moveScreenEnabled ?? false)
+        }
+        if gestureRecognizer === indirectScroll || gestureRecognizer === hover {
+            return RemoteTouchRoutingPolicy.routesTouchesToComputer(
+                moveScreenEnabled: zoomController?.moveScreenEnabled ?? false)
+        }
+        if gestureRecognizer === pinch {
+            return RemoteTouchRoutingPolicy.allowsViewportZoom(
+                moveScreenEnabled: zoomController?.moveScreenEnabled ?? false)
+        }
+        return true
+    }
+
     func gestureRecognizer(_ g: UIGestureRecognizer,
                            shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
-        // Hover + scroll should not block each other.
+        // Viewport navigation and remote scrolling can never recognize the
+        // same drag.
+        if (g === zoomPan && other === touchScroll)
+            || (g === touchScroll && other === zoomPan) {
+            return false
+        }
+        // Pinch can still adjust scale while the selected pan gesture tracks.
         return true
+    }
+
+    // MARK: - Zoom
+
+    @objc private func onPinch(_ gesture: UIPinchGestureRecognizer) {
+        switch gesture.state {
+        case .began:
+            cancelActiveTouch()
+            pinchStartScale = zoomScale
+            pinchAnchor = contentPoint(from: gesture.location(in: self))
+        case .changed:
+            let newScale = RemoteZoomPolicy.clampedScale(pinchStartScale * gesture.scale)
+            let location = gesture.location(in: self)
+            let baseCenter = CGPoint(x: bounds.midX, y: bounds.midY)
+            zoomScale = newScale
+            zoomOffset = CGPoint(
+                x: location.x - baseCenter.x - (pinchAnchor.x - baseCenter.x) * newScale,
+                y: location.y - baseCenter.y - (pinchAnchor.y - baseCenter.y) * newScale)
+            clampZoomOffset()
+            applyZoomTransform()
+        case .ended, .cancelled, .failed:
+            if zoomScale < 1.04 { resetZoom(animated: true) }
+        default:
+            break
+        }
+    }
+
+    @objc private func onZoomPan(_ gesture: UIPanGestureRecognizer) {
+        switch gesture.state {
+        case .began:
+            cancelActiveTouch()
+            panStartOffset = zoomOffset
+        case .changed:
+            let translation = gesture.translation(in: self)
+            zoomOffset = CGPoint(
+                x: panStartOffset.x + translation.x,
+                y: panStartOffset.y + translation.y)
+            clampZoomOffset()
+            applyZoomTransform()
+        default:
+            break
+        }
+    }
+
+    private func handleZoomCommand(_ command: RemoteScreenZoomController.Command) {
+        switch command {
+        case .increase:
+            setZoom(RemoteZoomPolicy.nextScale(after: zoomScale), animated: true)
+        case .decrease:
+            setZoom(RemoteZoomPolicy.previousScale(before: zoomScale), animated: true)
+        case .reset:
+            resetZoom(animated: true)
+        }
+    }
+
+    private func applyInteractionMode(moveScreenEnabled: Bool) {
+        if moveScreenEnabled {
+            cancelActiveTouch()
+            if isTrackingIndirectClick || lastPointerButtons != 0 {
+                sendPointer(at: lastPointerLocation, buttons: 0)
+            }
+            isTrackingIndirectClick = false
+            lastPointerButtons = 0
+            if touchScroll.state == .began || touchScroll.state == .changed {
+                sendScroll(
+                    at: cursorLayer.cursorCenter,
+                    dx: 0,
+                    dy: 0,
+                    phase: .end)
+            }
+        }
+        touchScroll.isEnabled = !moveScreenEnabled
+        longPress.isEnabled = !moveScreenEnabled
+        hover.isEnabled = !moveScreenEnabled
+        indirectScroll.isEnabled = !moveScreenEnabled
+        pinch.isEnabled = moveScreenEnabled
+        zoomPan.isEnabled = moveScreenEnabled
+    }
+
+    private func setZoom(_ requestedScale: CGFloat, animated: Bool) {
+        zoomScale = RemoteZoomPolicy.clampedScale(requestedScale)
+        if !RemoteZoomPolicy.isZoomed(zoomScale) { zoomOffset = .zero }
+        clampZoomOffset()
+        let changes = { self.applyZoomTransform() }
+        if animated {
+            UIView.animate(
+                withDuration: 0.22,
+                delay: 0,
+                options: [.beginFromCurrentState, .curveEaseInOut],
+                animations: changes)
+        } else {
+            changes()
+        }
+    }
+
+    private func resetZoom(animated: Bool) {
+        zoomScale = 1
+        zoomOffset = .zero
+        setZoom(1, animated: animated)
+    }
+
+    private func clampZoomOffset() {
+        zoomOffset = RemoteZoomPolicy.clampedOffset(
+            zoomOffset,
+            scale: zoomScale,
+            viewport: bounds.size)
+    }
+
+    private func applyZoomTransform() {
+        contentView.transform = CGAffineTransform(scaleX: zoomScale, y: zoomScale)
+        contentView.center = CGPoint(
+            x: bounds.midX + zoomOffset.x,
+            y: bounds.midY + zoomOffset.y)
+        zoomController?.report(scale: zoomScale)
+    }
+
+    private func contentPoint(from viewPoint: CGPoint) -> CGPoint {
+        contentView.convert(viewPoint, from: self)
+    }
+
+    private func cancelActiveTouch() {
+        if isDragging {
+            sendPointer(at: cursorLayer.cursorCenter, buttons: 0)
+        }
+        activeTouch = nil
+        touchStart = nil
+        isDragging = false
+        rightClickFired = false
     }
 
     // MARK: - Coordinate mapping
@@ -348,6 +675,57 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
     private var geometry: RemoteScreenGeometry {
         RemoteScreenGeometry(bounds: bounds, display: remoteDisplay)
     }
+}
+
+enum RemoteZoomPolicy {
+    static let minimumScale: CGFloat = 1
+    static let maximumScale: CGFloat = 4
+    static let steps: [CGFloat] = [1, 1.5, 2, 3, 4]
+
+    static func isZoomed(_ scale: CGFloat) -> Bool { scale > 1.01 }
+
+    static func clampedScale(_ scale: CGFloat) -> CGFloat {
+        min(maximumScale, max(minimumScale, scale))
+    }
+
+    static func nextScale(after scale: CGFloat) -> CGFloat {
+        steps.first(where: { $0 > scale + 0.01 }) ?? maximumScale
+    }
+
+    static func previousScale(before scale: CGFloat) -> CGFloat {
+        steps.last(where: { $0 < scale - 0.01 }) ?? minimumScale
+    }
+
+    static func clampedOffset(_ offset: CGPoint, scale: CGFloat, viewport: CGSize) -> CGPoint {
+        guard isZoomed(scale), viewport.width > 0, viewport.height > 0 else { return .zero }
+        let maxX = viewport.width * (scale - 1) / 2
+        let maxY = viewport.height * (scale - 1) / 2
+        return CGPoint(
+            x: min(max(offset.x, -maxX), maxX),
+            y: min(max(offset.y, -maxY), maxY))
+    }
+}
+
+enum RemoteTouchRoutingPolicy {
+    static func routesTouchesToComputer(moveScreenEnabled: Bool) -> Bool {
+        !moveScreenEnabled
+    }
+
+    static func allowsViewportZoom(moveScreenEnabled: Bool) -> Bool {
+        moveScreenEnabled
+    }
+
+    static func movesViewport(moveScreenEnabled: Bool, scale: CGFloat) -> Bool {
+        moveScreenEnabled && RemoteZoomPolicy.isZoomed(scale)
+    }
+}
+
+struct RemoteScreenInteractionState: Equatable {
+    let remoteScrollEnabled: Bool
+    let remoteLongPressEnabled: Bool
+    let remoteIndirectInputEnabled: Bool
+    let viewportPinchEnabled: Bool
+    let viewportPanEnabled: Bool
 }
 
 struct RemoteScreenGeometry {

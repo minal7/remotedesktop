@@ -16,6 +16,18 @@ enum CloudKitEntitlements {
         }
         #else
         _ = containerIdentifier
+        #if targetEnvironment(simulator)
+        // CKContainer intentionally traps (rather than throwing) when a
+        // simulator app was installed with CODE_SIGNING_ALLOWED=NO. Keep local
+        // Bonjour discovery usable in diagnostics and surface a normal error
+        // for CloudKit-backed actions instead of crashing at app launch.
+        let codeResources = Bundle.main.bundleURL
+            .appendingPathComponent("_CodeSignature/CodeResources")
+        guard FileManager.default.fileExists(atPath: codeResources.path) else {
+            throw SignalingError.iCloudUnavailable(
+                "This Simulator copy can’t use iCloud because it was installed without code signing. In Xcode, select your Development Team and use Run to reinstall it.")
+        }
+        #endif
         #endif
     }
 
@@ -66,14 +78,22 @@ public struct CloudKitHostAdvertisement: Identifiable, Equatable, Sendable {
     public let hostName: String
     public let pairingCode: String
     public let updatedAt: Date
+    public let computerUseCapability: ComputerUseCapability
 
     public var id: String { senderID }
 
-    public init(senderID: String, hostName: String, pairingCode: String, updatedAt: Date) {
+    public init(
+        senderID: String,
+        hostName: String,
+        pairingCode: String,
+        updatedAt: Date,
+        computerUseCapability: ComputerUseCapability = .unavailable
+    ) {
         self.senderID = senderID
         self.hostName = hostName
         self.pairingCode = pairingCode
         self.updatedAt = updatedAt
+        self.computerUseCapability = computerUseCapability
     }
 }
 
@@ -118,6 +138,49 @@ public actor CloudKitSignalingClient: SignalingChannel {
         return "HostAdvertisement-\(suffix)"
     }
 
+    /// Capability metadata is also carried after a newline in the existing
+    /// `hostName` field. Production containers that predate the optional AI
+    /// columns can therefore advertise setup/readiness without a schema
+    /// deployment; older clients render only the first line as the host name.
+    nonisolated static func encodedHostName(
+        _ hostName: String,
+        capability: ComputerUseCapability
+    ) -> String {
+        let displayName = hostName
+            .components(separatedBy: .newlines)
+            .first?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let safeName = (displayName?.isEmpty == false ? displayName! : "Mac")
+        // Keep the backwards-compatible metadata comfortably below the size
+        // expected of a display-name field even when an underlying error is
+        // unusually verbose.
+        let boundedDetail = String(capability.detail.prefix(512))
+        let detail = Data(boundedDetail.utf8).base64EncodedString()
+        return "\(safeName)\(computerUseHostNameMarker)\(capability.state.rawValue):\(detail)"
+    }
+
+    nonisolated static func decodedHostName(
+        _ value: String
+    ) -> (name: String, capability: ComputerUseCapability?) {
+        guard let markerRange = value.range(of: computerUseHostNameMarker) else {
+            return (value, nil)
+        }
+        let name = String(value[..<markerRange.lowerBound])
+        let metadata = value[markerRange.upperBound...]
+        guard let separator = metadata.firstIndex(of: ":"),
+              let state = ComputerUseCapability.State(
+                rawValue: String(metadata[..<separator])),
+              let detailData = Data(
+                base64Encoded: String(metadata[metadata.index(after: separator)...])),
+              let detail = String(data: detailData, encoding: .utf8) else {
+            return (name, nil)
+        }
+        return (name, ComputerUseCapability(state: state, detail: detail))
+    }
+
+    private nonisolated static let computerUseHostNameMarker =
+        "\n#RemoteDesktopComputerUse:v1:"
+
     public nonisolated static func fetchAvailableHostAdvertisements(
         containerIdentifier: String,
         staleSeconds: TimeInterval = defaultStaleSeconds
@@ -144,11 +207,29 @@ public actor CloudKitSignalingClient: SignalingChannel {
             let response = try await database.records(
                 matching: query,
                 inZoneWith: nil,
-                desiredKeys: ["senderID", "pairingCode", "hostName", "createdAt"],
+                desiredKeys: [
+                    "senderID", "pairingCode", "hostName", "createdAt",
+                    "computerUseState", "computerUseDetail",
+                ],
                 resultsLimit: 100)
             matchResults = response.matchResults
-        } catch let error as CKError where error.code == .unknownItem {
-            return []
+        } catch {
+            guard Self.isAdvertisementSchemaCompatibilityError(error) else {
+                throw error
+            }
+            // Production containers created by an older release do not know
+            // the optional AI columns. Capability is still encoded in the
+            // existing hostName field, so retry with the deployed key set.
+            do {
+                let response = try await database.records(
+                    matching: query,
+                    inZoneWith: nil,
+                    desiredKeys: ["senderID", "pairingCode", "hostName", "createdAt"],
+                    resultsLimit: 100)
+                matchResults = response.matchResults
+            } catch let cloudKit as CKError where cloudKit.code == .unknownItem {
+                return []
+            }
         }
 
         var newestBySenderID: [String: CloudKitHostAdvertisement] = [:]
@@ -183,6 +264,8 @@ public actor CloudKitSignalingClient: SignalingChannel {
         code: String,
         role: SignalingEnvelope.Role,
         hostName: String? = nil,
+        computerUseCapability: ComputerUseCapability = .unavailable,
+        expectedTargetID: String? = nil,
         senderID: String = DeviceIdentity.get(),
         staleSeconds: TimeInterval = defaultStaleSeconds
     ) {
@@ -190,6 +273,8 @@ public actor CloudKitSignalingClient: SignalingChannel {
         self.code = code
         self.role = role
         self.hostName = hostName
+        self.computerUseCapability = computerUseCapability
+        self.expectedTargetID = expectedTargetID
         self.senderID = senderID
         self.staleSeconds = staleSeconds
     }
@@ -246,20 +331,15 @@ public actor CloudKitSignalingClient: SignalingChannel {
 
         let database = try cloudKitDatabase()
         let (matchResults, _) = try await queryRecords(query, in: database)
-        var envelopes: [SignalingEnvelope] = []
-        for (recordID, result) in matchResults {
-            guard !consumedRecordIDs.contains(recordID) else { continue }
-            consumedRecordIDs.insert(recordID)
-            switch result {
-            case .success(let record):
-                if let envelope = envelopeFrom(record) {
-                    envelopes.append(envelope)
-                }
-            case .failure:
-                continue
-            }
+        // A per-record CloudKit failure is not consumed: a later poll may be
+        // able to fetch it. Successful records are decoded together so a host
+        // can select the first valid offer sender and retain that sender's ICE
+        // from the same query, even when ICE sorts before the offer.
+        let records = matchResults.compactMap { _, result -> CKRecord? in
+            guard case .success(let record) = result else { return nil }
+            return record
         }
-        return envelopes
+        return consumePollRecords(records)
     }
 
     /// Host-only keepalive for the `HostAdvertisement` record. Clients
@@ -276,9 +356,10 @@ public actor CloudKitSignalingClient: SignalingChannel {
 
         let database = try cloudKitDatabase()
         do {
-            let saved = try await retryingCloudKit("refresh pairing advertisement") {
-                try await database.save(advertisementRecord)
-            }
+            let saved = try await saveAdvertisement(
+                advertisementRecord,
+                in: database,
+                operation: "refresh pairing advertisement")
             self.advertisementRecord = saved
             ownedRecordIDs.insert(saved.recordID)
         } catch let refreshError {
@@ -292,6 +373,12 @@ public actor CloudKitSignalingClient: SignalingChannel {
                     "Couldn't refresh the pairing advertisement: \(refreshError.localizedDescription); recreate failed: \(recreateError.localizedDescription)")
             }
         }
+    }
+
+    /// Updates the capability included in the next advertisement refresh.
+    /// HostSession calls this when model readiness changes.
+    public func setComputerUseCapability(_ capability: ComputerUseCapability) {
+        computerUseCapability = capability
     }
 
     /// Removes only the live `HostAdvertisement` record while keeping the
@@ -322,6 +409,8 @@ public actor CloudKitSignalingClient: SignalingChannel {
     private let code: String
     private let role: SignalingEnvelope.Role
     private let hostName: String?
+    private var computerUseCapability: ComputerUseCapability
+    private let expectedTargetID: String?
     private let senderID: String
     private let staleSeconds: TimeInterval
     private let startedAt = Date()
@@ -341,8 +430,8 @@ public actor CloudKitSignalingClient: SignalingChannel {
     private nonisolated static func hostAdvertisement(from record: CKRecord) -> CloudKitHostAdvertisement? {
         guard let senderID = record["senderID"] as? String,
               senderID.isEmpty == false,
-              let hostName = record["hostName"] as? String,
-              hostName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false,
+              let storedHostName = record["hostName"] as? String,
+              storedHostName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false,
               let pairingCode = record["pairingCode"] as? String,
               pairingCode.count == 6,
               pairingCode.allSatisfy(\.isNumber) else {
@@ -353,11 +442,22 @@ public actor CloudKitSignalingClient: SignalingChannel {
             ?? record.modificationDate
             ?? record.creationDate
             ?? .distantPast
+        let decoded = decodedHostName(storedHostName)
+        let explicitState = ComputerUseCapability.State(
+            rawValue: record["computerUseState"] as? String ?? "")
+        let capability = explicitState.map {
+            ComputerUseCapability(
+                state: $0,
+                detail: record["computerUseDetail"] as? String
+                    ?? decoded.capability?.detail
+                    ?? ComputerUseCapability.unavailable.detail)
+        } ?? decoded.capability ?? .unavailable
         return CloudKitHostAdvertisement(
             senderID: senderID,
-            hostName: hostName,
+            hostName: decoded.name,
             pairingCode: pairingCode,
-            updatedAt: updatedAt)
+            updatedAt: updatedAt,
+            computerUseCapability: capability)
     }
 
     private func ensureAccountAvailable() async throws {
@@ -376,7 +476,7 @@ public actor CloudKitSignalingClient: SignalingChannel {
             return
         case .noAccount:
             throw SignalingError.iCloudUnavailable(
-                "Sign into iCloud in Settings so Remote Desktop can talk to your computer. No iCloud storage is used, only the signaling handshake.")
+                "Sign into iCloud on this device using the same Apple Account as your Mac, then try again. Remote Desktop only uses your private CloudKit database for the connection handshake.")
         case .restricted:
             throw SignalingError.iCloudUnavailable(
                 "iCloud is restricted on this device (Screen Time or MDM). Remote Desktop can't set up the connection.")
@@ -409,9 +509,10 @@ public actor CloudKitSignalingClient: SignalingChannel {
 
         updateAdvertisementFields(on: record)
         do {
-            let saved = try await retryingCloudKit("publish pairing advertisement") {
-                try await database.save(record)
-            }
+            let saved = try await saveAdvertisement(
+                record,
+                in: database,
+                operation: "publish pairing advertisement")
             advertisementRecord = saved
             ownedRecordIDs.insert(saved.recordID)
         } catch {
@@ -423,8 +524,54 @@ public actor CloudKitSignalingClient: SignalingChannel {
     private func updateAdvertisementFields(on record: CKRecord) {
         record["senderID"] = senderID as CKRecordValue
         record["pairingCode"] = code as CKRecordValue
-        record["hostName"] = (hostName ?? "Mac") as CKRecordValue
+        record["hostName"] = Self.encodedHostName(
+            hostName ?? "Mac",
+            capability: computerUseCapability) as CKRecordValue
+        record["computerUseState"] = computerUseCapability.state.rawValue as CKRecordValue
+        record["computerUseDetail"] = computerUseCapability.detail as CKRecordValue
         record["createdAt"] = Date() as CKRecordValue
+    }
+
+    private func saveAdvertisement(
+        _ record: CKRecord,
+        in database: CKDatabase,
+        operation: String
+    ) async throws -> CKRecord {
+        do {
+            return try await retryingCloudKit(operation) {
+                try await database.save(record)
+            }
+        } catch {
+            guard Self.isAdvertisementSchemaCompatibilityError(error) else {
+                throw error
+            }
+
+            // A previously deployed Production schema may not yet contain
+            // the optional AI fields. Capability remains available through
+            // the encoded hostName fallback, so setup still works without a
+            // CloudKit schema deployment.
+            record["computerUseState"] = nil
+            record["computerUseDetail"] = nil
+            return try await retryingCloudKit("\(operation) without optional AI fields") {
+                try await database.save(record)
+            }
+        }
+    }
+
+    nonisolated static func isAdvertisementSchemaCompatibilityError(_ error: Error) -> Bool {
+        guard let cloudKit = error as? CKError else { return false }
+        if cloudKit.code == .serverRejectedRequest
+            || cloudKit.code == .invalidArguments
+            || cloudKit.code == .unknownItem {
+            return true
+        }
+        if cloudKit.code == .partialFailure,
+           let partials = cloudKit.userInfo[CKPartialErrorsByItemIDKey]
+                as? [AnyHashable: Error],
+           !partials.isEmpty {
+            return partials.values.allSatisfy(isAdvertisementSchemaCompatibilityError)
+        }
+        return false
     }
 
     private func resolveHostSenderID() async throws -> String {
@@ -437,13 +584,37 @@ public actor CloudKitSignalingClient: SignalingChannel {
 
         let database = try cloudKitDatabase()
         let (matchResults, _) = try await queryRecords(query, in: database)
-        for (_, result) in matchResults {
-            if case .success(let record) = result,
-               let id = record["senderID"] as? String {
-                return id
-            }
+        let records = matchResults.compactMap { _, result -> CKRecord? in
+            guard case .success(let record) = result else { return nil }
+            return record
+        }
+        if let id = Self.selectedHostSenderID(
+            from: records,
+            expectedTargetID: expectedTargetID) {
+            return id
         }
         throw SignalingError.hostUnavailable
+    }
+
+    /// Selects only the Mac the user actually tapped when discovery supplied
+    /// a stable CloudKit identity. Pairing codes are short and can collide;
+    /// pinning the sender prevents a same-account advertisement from silently
+    /// redirecting the session to a different Mac.
+    nonisolated static func selectedHostSenderID(
+        from records: [CKRecord],
+        expectedTargetID: String?
+    ) -> String? {
+        for record in records {
+            guard let senderID = record["senderID"] as? String,
+                  !senderID.isEmpty else {
+                continue
+            }
+            if let expectedTargetID, senderID != expectedTargetID {
+                continue
+            }
+            return senderID
+        }
+        return nil
     }
 
     private func resolveTargetID() async throws -> String? {
@@ -457,25 +628,101 @@ public actor CloudKitSignalingClient: SignalingChannel {
         self.targetID = id
     }
 
+    /// Atomically binds a host to the first offer sender it accepts. Repeated
+    /// offers from that sender are allowed; a second sender can never replace
+    /// the active peer, including when several records arrived in one poll.
+    public func acceptOfferSenderID(_ id: String) -> Bool {
+        guard role == .host, !id.isEmpty else { return false }
+        if let targetID { return targetID == id }
+        targetID = id
+        return true
+    }
+
+    /// The host uses this identity to bind privileged Computer Use messages
+    /// to the iOS peer that completed the active WebRTC pairing.
+    public func resolvedPeerSenderID() -> String? {
+        targetID
+    }
+
+    /// Applies peer selection to an already ordered CloudKit result batch.
+    /// This is internal so both host and iOS regression suites can exercise
+    /// the real record decoder without issuing a CloudKit query.
+    func consumePollRecords(_ records: [CKRecord]) -> [SignalingEnvelope] {
+        let pending = records.filter {
+            !consumedRecordIDs.contains($0.recordID)
+        }
+        let decoded = pending.map { record in
+            (record: record, envelope: envelopeFrom(record))
+        }
+
+        let selectedSenderID: String?
+        let selectedOfferIndex: Int?
+        if let targetID {
+            selectedSenderID = targetID
+            selectedOfferIndex = nil
+        } else if role == .host {
+            selectedOfferIndex = decoded.firstIndex(where: {
+                $0.envelope?.kind == .offer
+            })
+            selectedSenderID = selectedOfferIndex.flatMap {
+                decoded[$0].envelope?.senderID
+            }
+        } else {
+            selectedSenderID = nil
+            selectedOfferIndex = nil
+        }
+
+        var envelopes: [SignalingEnvelope] = []
+        for (index, item) in decoded.enumerated() {
+            guard let envelope = item.envelope else {
+                // Structurally invalid records can never become valid later.
+                consumedRecordIDs.insert(item.record.recordID)
+                continue
+            }
+            guard let selectedSenderID else {
+                // Before a host has received an offer, defer valid ICE/bye
+                // records so they can accompany that sender's later offer.
+                continue
+            }
+            consumedRecordIDs.insert(item.record.recordID)
+            guard envelope.senderID == selectedSenderID else {
+                // Once an offer sender is selected, records from any other
+                // sender are permanently outside this pairing session.
+                continue
+            }
+            if let selectedOfferIndex,
+               index < selectedOfferIndex,
+               envelope.kind != .ice {
+                // ICE may legitimately trickle ahead of the offer. No other
+                // unbound message is allowed to affect host session state.
+                continue
+            }
+            envelopes.append(envelope)
+        }
+        return envelopes
+    }
+
     private func envelopeFrom(_ record: CKRecord) -> SignalingEnvelope? {
-        guard let kindRaw = record["kind"] as? String,
+        guard let recordSenderID = record["senderID"] as? String,
+              !recordSenderID.isEmpty,
+              record["targetID"] as? String == senderID,
+              record["pairingCode"] as? String == code,
+              let kindRaw = record["kind"] as? String,
               let kind = SignalingEnvelope.Kind(rawValue: kindRaw),
               let payloadString = record["payload"] as? String,
               let payload = deserializePayload(payloadString) else {
             return nil
         }
-        // If the host hasn't memoized the client's senderID yet, do so
-        // now from the first inbound envelope. Safe: CloudKit query is
-        // scoped to `targetID == self.senderID`, so the record's senderID
-        // *is* our peer.
-        if targetID == nil, let senderID = record["senderID"] as? String {
-            targetID = senderID
-        }
         // `role` on the envelope is advisory; the sender knows its own
         // role. Reconstruct from record fields.
-        let role: SignalingEnvelope.Role = (record["senderID"] as? String) == senderID ? .host : .client
+        let role: SignalingEnvelope.Role = recordSenderID == senderID ? .host : .client
         let ts = (record["createdAt"] as? Date)?.timeIntervalSince1970 ?? Date().timeIntervalSince1970
-        return SignalingEnvelope(role: role, kind: kind, payload: payload, ts: ts)
+        return SignalingEnvelope(
+            role: role,
+            kind: kind,
+            payload: payload,
+            ts: ts,
+            senderID: recordSenderID)
     }
 
     private func deleteOwnRecords(forPairingCode code: String) async throws {

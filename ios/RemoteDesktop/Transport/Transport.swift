@@ -12,11 +12,22 @@ protocol Transport: AnyObject {
     // MainActor context.
     var onHostHello: (@MainActor (HostHello) -> Void)? { get set }
     var onDisplay: (@MainActor (DisplayInfo) -> Void)? { get set }
+    /// Fires once the transport has decoded an actual remote video frame.
+    /// A negotiated track or control-channel hello is not sufficient: the
+    /// macOS host can reach both while ScreenCaptureKit is still waiting for
+    /// the person to answer its secure recording-consent prompt.
+    var onFirstVideoFrame: (@MainActor () -> Void)? { get set }
     var onDisconnect: (@MainActor (String) -> Void)? { get set }
 
-    func connect(pairingCode: String) async throws
+    func connect(pairingCode: String, expectedHostID: String?) async throws
     func send(_ message: ControlMessage, seq: UInt32, ts: UInt64)
     func disconnect(reason: String)
+}
+
+extension Transport {
+    func connect(pairingCode: String) async throws {
+        try await connect(pairingCode: pairingCode, expectedHostID: nil)
+    }
 }
 
 @MainActor

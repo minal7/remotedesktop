@@ -13,8 +13,26 @@ struct LocalHostAdvertisement: Identifiable, Equatable {
     let code: String
     let source: Source
     let senderID: String?
+    let computerUseCapability: ComputerUseCapability
+    /// Bonjour TXT records improve nearby presentation, but they are not an
+    /// authenticated statement about which CloudKit environment the app can
+    /// reach. Computer Use remains gated until the same sender and pairing
+    /// code are present in the private CloudKit snapshot.
+    let hasAuthenticatedCloudMatch: Bool
 
-    var id: String { senderID ?? "\(source.rawValue)|\(hostname)|\(code)" }
+    var canOfferComputerUse: Bool {
+        hasAuthenticatedCloudMatch && senderID?.isEmpty == false
+    }
+
+    // A single Mac can briefly advertise more than one pairing code when an
+    // older host copy is still shutting down. Keep SwiftUI identity unique
+    // until CloudKit selects the authoritative code for that Mac.
+    var id: String {
+        if let senderID, !senderID.isEmpty {
+            return "\(senderID)|\(code)"
+        }
+        return "\(source.rawValue)|\(hostname.lowercased())|\(code)"
+    }
 
     static func serviceName(hostname: String, code: String) -> String {
         "\(hostname) [\(code)]"
@@ -24,12 +42,17 @@ struct LocalHostAdvertisement: Identifiable, Equatable {
         hostname: String,
         code: String,
         source: Source = .localNetwork,
-        senderID: String? = nil
+        senderID: String? = nil,
+        computerUseCapability: ComputerUseCapability = .unavailable,
+        hasAuthenticatedCloudMatch: Bool? = nil
     ) {
         self.hostname = hostname
         self.code = code
         self.source = source
         self.senderID = senderID
+        self.computerUseCapability = computerUseCapability
+        self.hasAuthenticatedCloudMatch = hasAuthenticatedCloudMatch
+            ?? (source == .cloudKit && senderID?.isEmpty == false)
     }
 
     static func parse(serviceName: String) -> LocalHostAdvertisement? {
@@ -47,6 +70,27 @@ struct LocalHostAdvertisement: Identifiable, Equatable {
         }
         return LocalHostAdvertisement(hostname: hostname, code: String(code))
     }
+
+    /// Preserves the legacy `Computer Name [123456]` contract while adding
+    /// validated identity and AI readiness when a current host publishes a
+    /// TXT record. Invalid or future metadata never hides a usable legacy row.
+    static func parse(
+        serviceName: String,
+        txtRecordData: Data?
+    ) -> LocalHostAdvertisement? {
+        guard let legacy = parse(serviceName: serviceName),
+              let txtRecordData,
+              let metadata = LocalHostBonjourMetadata.decode(
+                txtRecordData: txtRecordData) else {
+            return parse(serviceName: serviceName)
+        }
+        return LocalHostAdvertisement(
+            hostname: legacy.hostname,
+            code: legacy.code,
+            source: .localNetwork,
+            senderID: metadata.senderID,
+            computerUseCapability: metadata.computerUseCapability)
+    }
 }
 
 @MainActor
@@ -55,6 +99,7 @@ final class LocalHostDiscovery: NSObject, ObservableObject {
 
     private let browser = NetServiceBrowser()
     private var services: [String: LocalHostAdvertisement] = [:]
+    private var serviceInstances: [String: NetService] = [:]
     private var ckHosts: [LocalHostAdvertisement] = []
     private var ckTask: Task<Void, Never>?
 
@@ -64,6 +109,7 @@ final class LocalHostDiscovery: NSObject, ObservableObject {
     }
 
     func start() {
+        stopNearbyResolution()
         services.removeAll()
         ckHosts = []
         hosts = []
@@ -79,6 +125,7 @@ final class LocalHostDiscovery: NSObject, ObservableObject {
         browser.stop()
         ckTask?.cancel()
         ckTask = nil
+        stopNearbyResolution()
         services.removeAll()
         ckHosts = []
         hosts = []
@@ -108,7 +155,8 @@ final class LocalHostDiscovery: NSObject, ObservableObject {
                     hostname: $0.hostName,
                     code: $0.pairingCode,
                     source: .cloudKit,
-                    senderID: $0.senderID)
+                    senderID: $0.senderID,
+                    computerUseCapability: $0.computerUseCapability)
             }
             self.syncHosts()
         } catch let error as CKError {
@@ -126,24 +174,199 @@ final class LocalHostDiscovery: NSObject, ObservableObject {
     }
 
     private func syncHosts() {
-        var hostsByCode: [String: LocalHostAdvertisement] = [:]
+        hosts = Self.mergedHosts(
+            localHosts: Array(services.values),
+            cloudHosts: ckHosts)
+    }
 
-        for localHost in services.values {
-            hostsByCode[localHost.code] = localHost
+    /// Deterministic merge kept separate from the browser callbacks so the
+    /// legacy, matching-identity, and conflicting-identity cases stay tested.
+    nonisolated static func mergedHosts(
+        localHosts: [LocalHostAdvertisement],
+        cloudHosts: [LocalHostAdvertisement]
+    ) -> [LocalHostAdvertisement] {
+        struct AuthenticatedIdentity: Hashable {
+            let senderID: String
+            let code: String
         }
 
-        for cloudHost in ckHosts where hostsByCode[cloudHost.code] == nil {
-            hostsByCode[cloudHost.code] = cloudHost
+        func authenticatedIdentity(
+            for host: LocalHostAdvertisement
+        ) -> AuthenticatedIdentity? {
+            guard let senderID = host.senderID, !senderID.isEmpty else {
+                return nil
+            }
+            return AuthenticatedIdentity(senderID: senderID, code: host.code)
         }
 
-        let sorted = hostsByCode.values.sorted { lhs, rhs in
+        // Start with every authenticated Mac. Pairing codes are intentionally
+        // not dictionary keys: two Macs can independently choose the same
+        // six-digit code and must remain separate rows.
+        var mergedByIdentity: [String: LocalHostAdvertisement] = [:]
+        let authenticatedCloudHosts = cloudHosts.compactMap { host -> LocalHostAdvertisement? in
+            guard host.source == .cloudKit,
+                  host.senderID?.isEmpty == false else {
+                return nil
+            }
+            return LocalHostAdvertisement(
+                hostname: host.hostname,
+                code: host.code,
+                source: .cloudKit,
+                senderID: host.senderID,
+                computerUseCapability: host.computerUseCapability,
+                hasAuthenticatedCloudMatch: true)
+        }
+        for host in authenticatedCloudHosts {
+            mergedByIdentity[host.id] = host
+        }
+
+        // Keep malformed/legacy CloudKit rows visible for remote control, but
+        // never promote them to authenticated Computer Use rows.
+        for host in cloudHosts where host.senderID?.isEmpty != false {
+            let unauthenticated = LocalHostAdvertisement(
+                hostname: host.hostname,
+                code: host.code,
+                source: .cloudKit,
+                senderID: nil,
+                computerUseCapability: host.computerUseCapability,
+                hasAuthenticatedCloudMatch: false)
+            mergedByIdentity[unauthenticated.id] = unauthenticated
+        }
+
+        let cloudByIdentity = Dictionary(
+            authenticatedCloudHosts.compactMap { host -> (AuthenticatedIdentity, LocalHostAdvertisement)? in
+                guard let identity = authenticatedIdentity(for: host) else {
+                    return nil
+                }
+                return (identity, host)
+            },
+            uniquingKeysWith: { first, _ in first })
+        let cloudSenderIDs = Set(authenticatedCloudHosts.compactMap(\.senderID))
+        let cloudByCode = Dictionary(
+            grouping: authenticatedCloudHosts,
+            by: \.code)
+        let legacyLocalCountByCode = Dictionary(
+            grouping: localHosts.filter { $0.senderID?.isEmpty != false },
+            by: \.code).mapValues(\.count)
+
+        for localHost in localHosts {
+            if let localIdentity = authenticatedIdentity(for: localHost) {
+                if cloudByIdentity[localIdentity] != nil {
+                    // Exact private-CloudKit identity confirms the nearby
+                    // advertisement belongs to the reachable environment.
+                    // Prefer its monitored capability for prompt progress.
+                    let authenticatedNearby = LocalHostAdvertisement(
+                        hostname: localHost.hostname,
+                        code: localHost.code,
+                        source: .localNetwork,
+                        senderID: localHost.senderID,
+                        computerUseCapability: localHost.computerUseCapability,
+                        hasAuthenticatedCloudMatch: true)
+                    mergedByIdentity[authenticatedNearby.id] = authenticatedNearby
+                } else if cloudSenderIDs.contains(localIdentity.senderID) {
+                    // The same Mac is authenticated under another code in this
+                    // CloudKit environment. Hide the wrong-environment nearby
+                    // instance instead of presenting a connection that cannot
+                    // complete.
+                    continue
+                } else {
+                    // A signed-looking Bonjour TXT record is still only local
+                    // network input. Preserve remote control discovery while
+                    // keeping Computer Use unavailable until CloudKit agrees.
+                    let nearbyOnly = LocalHostAdvertisement(
+                        hostname: localHost.hostname,
+                        code: localHost.code,
+                        source: .localNetwork,
+                        senderID: localHost.senderID,
+                        computerUseCapability: localHost.computerUseCapability,
+                        hasAuthenticatedCloudMatch: false)
+                    mergedByIdentity[nearbyOnly.id] = nearbyOnly
+                }
+                continue
+            }
+
+            let cloudMatches = cloudByCode[localHost.code] ?? []
+            let hasUniqueLegacyPair = cloudMatches.count == 1
+                && legacyLocalCountByCode[localHost.code] == 1
+            if hasUniqueLegacyPair, let cloudHost = cloudMatches.first {
+                // Legacy Bonjour has no sender identity. Retain compatibility
+                // only when one local row maps to exactly one authenticated
+                // CloudKit row for this code.
+                let enrichedLegacy = LocalHostAdvertisement(
+                    hostname: localHost.hostname,
+                    code: localHost.code,
+                    source: .localNetwork,
+                    senderID: cloudHost.senderID,
+                    computerUseCapability: cloudHost.computerUseCapability,
+                    hasAuthenticatedCloudMatch: true)
+                mergedByIdentity[enrichedLegacy.id] = enrichedLegacy
+            } else {
+                let nearbyOnly = LocalHostAdvertisement(
+                    hostname: localHost.hostname,
+                    code: localHost.code,
+                    source: .localNetwork,
+                    senderID: nil,
+                    computerUseCapability: localHost.computerUseCapability,
+                    hasAuthenticatedCloudMatch: false)
+                mergedByIdentity[nearbyOnly.id] = nearbyOnly
+            }
+        }
+
+        return mergedByIdentity.values.sorted { lhs, rhs in
             if lhs.hostname == rhs.hostname {
+                if lhs.code == rhs.code {
+                    return lhs.id < rhs.id
+                }
                 return lhs.code < rhs.code
             }
             return lhs.hostname.localizedCaseInsensitiveCompare(rhs.hostname) == .orderedAscending
         }
+    }
 
-        self.hosts = sorted
+    private func addNearbyService(_ service: NetService, moreComing: Bool) {
+        let name = service.name
+        guard let advertisement = LocalHostAdvertisement.parse(
+            serviceName: name,
+            txtRecordData: service.txtRecordData()) else {
+            return
+        }
+
+        if let previous = serviceInstances.updateValue(service, forKey: name),
+           previous !== service {
+            previous.stopMonitoring()
+            previous.stop()
+            previous.delegate = nil
+        }
+        services[name] = advertisement
+        service.delegate = self
+        service.resolve(withTimeout: 5)
+        if !moreComing {
+            syncHosts()
+        }
+    }
+
+    private func resolvedNearbyService(
+        _ service: NetService,
+        txtRecordData: Data?
+    ) {
+        let name = service.name
+        guard serviceInstances[name] === service,
+              let advertisement = LocalHostAdvertisement.parse(
+                serviceName: name,
+                txtRecordData: txtRecordData) else {
+            return
+        }
+        services[name] = advertisement
+        syncHosts()
+    }
+
+    private func stopNearbyResolution() {
+        for service in serviceInstances.values {
+            service.stopMonitoring()
+            service.stop()
+            service.delegate = nil
+        }
+        serviceInstances.removeAll()
     }
 
     private static var isRunningUnitTests: Bool {
@@ -153,18 +376,19 @@ final class LocalHostDiscovery: NSObject, ObservableObject {
 
 extension LocalHostDiscovery: NetServiceBrowserDelegate {
     nonisolated func netServiceBrowser(_ browser: NetServiceBrowser, didFind service: NetService, moreComing: Bool) {
-        let name = service.name
         Task { @MainActor in
-            if let host = LocalHostAdvertisement.parse(serviceName: name) {
-                self.services[name] = host
-                if !moreComing { self.syncHosts() }
-            }
+            self.addNearbyService(service, moreComing: moreComing)
         }
     }
 
     nonisolated func netServiceBrowser(_ browser: NetServiceBrowser, didRemove service: NetService, moreComing: Bool) {
         let name = service.name
         Task { @MainActor in
+            if let retained = self.serviceInstances.removeValue(forKey: name) {
+                retained.stopMonitoring()
+                retained.stop()
+                retained.delegate = nil
+            }
             self.services.removeValue(forKey: name)
             if !moreComing { self.syncHosts() }
         }
@@ -173,6 +397,25 @@ extension LocalHostDiscovery: NetServiceBrowserDelegate {
     nonisolated func netServiceBrowserDidStopSearch(_ browser: NetServiceBrowser) {
         Task { @MainActor in
             self.syncHosts()
+        }
+    }
+}
+
+extension LocalHostDiscovery: NetServiceDelegate {
+    nonisolated func netServiceDidResolveAddress(_ sender: NetService) {
+        let txtRecordData = sender.txtRecordData()
+        Task { @MainActor in
+            sender.startMonitoring()
+            self.resolvedNearbyService(sender, txtRecordData: txtRecordData)
+        }
+    }
+
+    nonisolated func netService(
+        _ sender: NetService,
+        didUpdateTXTRecord data: Data
+    ) {
+        Task { @MainActor in
+            self.resolvedNearbyService(sender, txtRecordData: data)
         }
     }
 }

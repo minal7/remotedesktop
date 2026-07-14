@@ -136,7 +136,8 @@ records; keeps re-queries idempotent during the 2s poll loop.
 
 ## Remaining work (status mirrors TodoWrite)
 
-- [x] **Mic permission / crash fix** (iOS + Mac).
+- [x] **Audio permission / crash fix** — iOS is receive-only and playback-only;
+  the Mac requests Microphone only when optional host system audio is enabled.
 - [x] **`PROGRESS.md`** — this file.
 - [x] **Bundle ID rename** `com.example.*` → `com.threadmark.*`.
 - [x] **Entitlements & project.yml** — CloudKit container on iOS and Mac.

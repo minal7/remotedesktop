@@ -1,0 +1,12 @@
+OS-Atlas-Pro-4B model data
+Source: https://huggingface.co/OS-Copilot/OS-Atlas-Pro-4B
+Source revision: 06b790b907d82f29bb317ba889e6888805953036
+License: Apache License 2.0. A complete copy is bundled as OS-ATLAS-APACHE-2.0-LICENSE.txt.
+
+Remote Desktop distributes an unchanged-format conversion of that pinned model as split Q4_K_M GGUF text-model data plus an F16 GGUF vision projector. The conversion changes storage and numeric precision for local inference; it does not add executable code.
+
+Conversion tool: llama.cpp b9992
+Source revision: 6eddde06a4f25d55d538b5d15628dcc2b6882147
+License: MIT. A complete copy is bundled as LLAMA-CPP-MIT-LICENSE.txt.
+
+mac-control-mcp is licensed under the MIT License, Copyright (c) 2026 Adil El-Ouariachi. A complete copy is bundled as MAC-CONTROL-MCP-LICENSE.txt.

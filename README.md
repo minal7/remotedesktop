@@ -70,6 +70,45 @@ end-to-end across the iOS client and both hosts. Remaining v1 work is mostly
 out-of-band Apple Developer / CloudKit Dashboard setup and on-device pairing
 validation — tracked in `PROGRESS.md`.
 
+## AI Computer Use
+
+AI Computer Use is MCP-first and stays local to the macOS host. On supported
+Macs, Apple's on-device Foundation Models framework turns eligible chat requests
+into typed calls within the reviewed planner surface: seven read-only helper
+operations plus the host's embedded Mail operation for contact-resolution
+flows. Fully specified Mail sends are deterministically pre-routed to that
+embedded operation before any planner/model call. The host—not the model—applies
+the allowlist, validates arguments, pauses for exact one-action approval, and
+records mutation attempts before execution. No API key or paid AI service is
+used. The public, local OS-Atlas-Pro-4B model is reserved for
+GUI-only applications that do not expose an approved MCP tool. Its installed
+Q4 production profile permits only the 12 model-action variants verified for
+that checkpoint; unsupported model output is rejected before any effect from
+that model action.
+For delivery quotes, OS-Atlas navigates the page while local Vision OCR extracts
+and validates the visible itemized facts. V1 loads Pro only, never Base and Pro
+at the same time, and requires a Mac with at least 16 GiB memory.
+
+Mail requests use a separately reviewed MCP tool embedded in the signed host,
+not the downloaded helper's generic Mail tool. It can create a visible draft or
+send through Apple Mail's default account only after iOS states that the
+default account will be used and shows the exact To/CC/BCC, subject, and
+message for one-action approval. On the first approved Mail action, macOS may
+ask on the Mac whether Remote Desktop Host can automate Mail. Denying that
+prompt stops before an email is created or sent; enable
+**Remote Desktop Host → Mail** under **System Settings → Privacy & Security →
+Automation**, then make a new request.
+
+Setup is initiated from the iPhone or iPad; passive status checks never start a
+download. One progress bar reflects the real helper and visual-model bytes,
+verification, and runtime loading returned over the existing private CloudKit
+channel. Already verified components are reused. The live screen and direct
+intervention continue over WebRTC, while planning and tool execution stay on
+the Mac. The host bundles the third-party notices for all local components.
+The phone-triggered model setup downloads only checksum-pinned OS-Atlas Pro 4B
+GGUF data; executable inference code remains inside the signed host. The public
+upstream checkpoint is Apache-2.0 licensed and needs no API key or paid service.
+
 ## Getting started (developer)
 
 ### Prerequisites (CloudKit)
@@ -150,5 +189,12 @@ cargo run --release
   backgrounded and prompt the user to resume. This is within Apple's BGTask
   rules.
 - Privacy strings in `Info.plist`: `NSLocalNetworkUsageDescription`,
-  `NSBonjourServices` (for optional LAN fast-path in a later phase).
-- No mic / camera / location access required for v1.
+  `NSBonjourServices`, and a defensive `NSMicrophoneUsageDescription` because
+  the bundled WebRTC component is microphone-capable. The iOS client configures
+  receive-only media and a playback audio session; it does not request, record,
+  store, or transmit microphone audio.
+- The iOS client does not declare Camera or Location access. On the Mac,
+  Screen Recording and Accessibility are required for remote control;
+  Microphone is optional and used only to enable the system-audio bridge. A
+  separately declared Apple Events permission is requested only after the user
+  approves an Apple Mail action on iOS.

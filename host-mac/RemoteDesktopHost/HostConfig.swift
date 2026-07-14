@@ -8,6 +8,8 @@ enum HostConfig {
 
     static let protocolVersion = 1
     static let appVersion = "0.1.0"
+    /// The build contains the optional system-audio bridge. A session only
+    /// enables it after the user separately grants microphone access.
     static let enableSystemAudio = true
     /// Local fallback STUN list. The live list comes from the CloudKit
     /// `ICEConfig` record; this one is only used when that fetch fails.

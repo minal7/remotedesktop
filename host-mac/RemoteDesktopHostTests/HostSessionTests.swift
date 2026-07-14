@@ -61,7 +61,7 @@ final class HostSessionTests: XCTestCase {
     /// is a direct function of `permissions.ok`. This test locks in
     /// that contract: the published value flips to `true` the moment
     /// both checks come back positive.
-    func test_permissionsOk_flipsWhenBothGranted() {
+    func test_corePermissionsBecomeReadyWithoutMicrophoneAccess() {
         let provider = MockPermissionsProvider()
         let session = makeSession(provider)
 
@@ -74,11 +74,13 @@ final class HostSessionTests: XCTestCase {
 
         provider.accessibility = true
         session.refreshPermissions()
-        XCTAssertFalse(session.permissions.ok, "system audio also requires microphone access")
+        XCTAssertTrue(session.permissions.ok, "screen and control should not be blocked by optional audio")
+        XCTAssertFalse(session.permissions.audioEnabled)
 
         provider.microphone = true
         session.refreshPermissions()
-        XCTAssertTrue(session.permissions.ok, "all required permissions enable the Start button")
+        XCTAssertTrue(session.permissions.ok)
+        XCTAssertTrue(session.permissions.audioEnabled)
     }
 
     /// Calling `start()` while permissions are denied must leave the
@@ -123,6 +125,38 @@ final class HostSessionTests: XCTestCase {
         session.stop()
     }
 
+    func test_start_whenCorePermissionsGrantedAndMicrophoneDenied_stillLeavesIdle() {
+        let provider = MockPermissionsProvider()
+        provider.accessibility = true
+        provider.screenRecording = true
+        provider.microphone = false
+        let session = makeSession(provider)
+
+        session.start()
+
+        XCTAssertNotEqual(session.state, .idle)
+        if case .error(let message) = session.state {
+            XCTFail("optional audio must not block listening: \(message)")
+        }
+        XCTAssertFalse(session.permissions.audioEnabled)
+
+        session.stop()
+    }
+
+    func test_hostMetadataAdvertisesOnlyActuallyEnabledAudio() {
+        let provider = MockPermissionsProvider()
+        provider.accessibility = true
+        provider.screenRecording = true
+        let session = makeSession(provider)
+
+        session.refreshPermissions()
+        XCTAssertEqual(session.hostMetadata()["audio"], "false")
+
+        provider.microphone = true
+        session.refreshPermissions()
+        XCTAssertEqual(session.hostMetadata()["audio"], "true")
+    }
+
     func test_start_retriesFromErrorAfterPermissionsAreGranted() {
         let provider = MockPermissionsProvider()
         let session = makeSession(provider)
@@ -147,6 +181,136 @@ final class HostSessionTests: XCTestCase {
         session.stop()
     }
 
+    func test_shutdownWaitsForCanceledSignalingCleanup() async {
+        let provider = readyPermissionsProvider()
+        let started = AsyncLifecycleGate()
+        let cleanupStarted = AsyncLifecycleGate()
+        let releaseCleanup = AsyncLifecycleGate()
+        let cleanupFinished = AsyncLifecycleGate()
+        let session = makeSession(
+            provider,
+            signalingRunOverride: blockingSignalingRun(
+                started: started,
+                cleanupStarted: cleanupStarted,
+                releaseCleanup: releaseCleanup,
+                cleanupFinished: cleanupFinished))
+
+        session.start()
+        await started.wait()
+
+        var shutdownReturned = false
+        let shutdownTask = Task { @MainActor in
+            await session.shutdown()
+            shutdownReturned = true
+        }
+
+        await cleanupStarted.wait()
+        XCTAssertFalse(
+            shutdownReturned,
+            "shutdown must retain and await the canceled task's CloudKit cleanup")
+
+        await releaseCleanup.open()
+        await shutdownTask.value
+
+        XCTAssertTrue(shutdownReturned)
+        let didFinishCleanup = await cleanupFinished.isOpen
+        XCTAssertTrue(didFinishCleanup)
+    }
+
+    func test_terminationSequenceLaunchesReplacementOnlyAfterSignalingCleanup() async {
+        let provider = readyPermissionsProvider()
+        let started = AsyncLifecycleGate()
+        let cleanupStarted = AsyncLifecycleGate()
+        let releaseCleanup = AsyncLifecycleGate()
+        let cleanupFinished = AsyncLifecycleGate()
+        let session = makeSession(
+            provider,
+            signalingRunOverride: blockingSignalingRun(
+                started: started,
+                cleanupStarted: cleanupStarted,
+                releaseCleanup: releaseCleanup,
+                cleanupFinished: cleanupFinished))
+
+        session.start()
+        await started.wait()
+
+        var replacementLaunchCount = 0
+        let terminationTask = Task { @MainActor in
+            await HostTerminationSequence.finish(
+                session: session,
+                relaunchAfterShutdown: true,
+                launchReplacement: { replacementLaunchCount += 1 })
+        }
+
+        await cleanupStarted.wait()
+        XCTAssertEqual(
+            replacementLaunchCount,
+            0,
+            "the replacement must not overwrite the stable advertisement before old cleanup finishes")
+
+        await releaseCleanup.open()
+        await terminationTask.value
+
+        XCTAssertEqual(replacementLaunchCount, 1)
+        let didFinishCleanup = await cleanupFinished.isOpen
+        XCTAssertTrue(didFinishCleanup)
+    }
+
+    func test_stopThenImmediateStartWaitsForOldSignalingCleanup() async {
+        let provider = readyPermissionsProvider()
+        let invocationCounter = AsyncInvocationCounter()
+        let firstStarted = AsyncLifecycleGate()
+        let firstCleanupStarted = AsyncLifecycleGate()
+        let releaseFirstCleanup = AsyncLifecycleGate()
+        let firstCleanupFinished = AsyncLifecycleGate()
+        let secondStarted = AsyncLifecycleGate()
+        let session = makeSession(
+            provider,
+            signalingRunOverride: { _ in
+                let invocation = await invocationCounter.next()
+                if invocation == 1 {
+                    await firstStarted.open()
+                    do {
+                        try await Task.sleep(nanoseconds: 60_000_000_000)
+                    } catch {
+                        // Stop cancels the run and begins its bounded cleanup.
+                    }
+                    await firstCleanupStarted.open()
+                    await releaseFirstCleanup.wait()
+                    await firstCleanupFinished.open()
+                } else {
+                    await secondStarted.open()
+                    do {
+                        try await Task.sleep(nanoseconds: 60_000_000_000)
+                    } catch {
+                        // Test shutdown cancels the replacement run.
+                    }
+                }
+            })
+
+        session.start()
+        await firstStarted.wait()
+
+        session.stop()
+        session.start()
+
+        await firstCleanupStarted.wait()
+        let replacementStartedBeforeCleanup = await secondStarted.isOpen
+        XCTAssertFalse(
+            replacementStartedBeforeCleanup,
+            "an immediate restart must not publish before the old stable advertisement is cleaned up")
+
+        await releaseFirstCleanup.open()
+        await secondStarted.wait()
+
+        let didFinishFirstCleanup = await firstCleanupFinished.isOpen
+        XCTAssertTrue(didFinishFirstCleanup)
+        let invocationCount = await invocationCounter.current
+        XCTAssertEqual(invocationCount, 2)
+
+        await session.shutdown()
+    }
+
     func test_grantNextPermission_targetsScreenRecordingFirst() {
         let provider = MockPermissionsProvider()
         let session = makeSession(provider)
@@ -168,21 +332,22 @@ final class HostSessionTests: XCTestCase {
         XCTAssertEqual(provider.openedPermissions, [.accessibility])
     }
 
-    func test_grantNextPermission_targetsMicrophoneWhenOnlyAudioBridgePermissionMissing() async {
+    func test_optionalAudioPermission_targetsMicrophoneWithoutAffectingCoreReadiness() async {
         let provider = MockPermissionsProvider()
         provider.screenRecording = true
         provider.accessibility = true
         let session = makeSession(provider)
 
-        session.grantNextPermission()
+        session.requestOptionalAudioPermission()
         await Task.yield()
 
         XCTAssertEqual(provider.microphoneRequestCallCount, 1)
         XCTAssertEqual(provider.requestedPermissions, [])
         XCTAssertEqual(provider.openedPermissions, [.microphone])
+        XCTAssertTrue(session.permissions.ok)
     }
 
-    func test_grantNextPermission_refreshesAfterMicrophoneGrantWithoutReopeningSettings() async {
+    func test_optionalAudioPermission_refreshesAfterGrantWithoutReopeningSettings() async {
         let provider = MockPermissionsProvider()
         provider.screenRecording = true
         provider.accessibility = true
@@ -192,7 +357,7 @@ final class HostSessionTests: XCTestCase {
         }
         let session = makeSession(provider)
 
-        session.grantNextPermission()
+        session.requestOptionalAudioPermission()
         await Task.yield()
 
         XCTAssertEqual(provider.microphoneRequestCallCount, 1)
@@ -200,7 +365,7 @@ final class HostSessionTests: XCTestCase {
         XCTAssertEqual(provider.openedPermissions, [])
     }
 
-    func test_grantNextPermission_surfacesBuildErrorWhenAudioInputEntitlementMissing() {
+    func test_optionalAudioPermission_surfacesBuildErrorWithoutBreakingHostState() {
         let provider = MockPermissionsProvider()
         provider.screenRecording = true
         provider.accessibility = true
@@ -210,14 +375,22 @@ final class HostSessionTests: XCTestCase {
                 throw HostBuildValidationError.missingAudioInputEntitlement
             })
 
-        session.grantNextPermission()
+        session.requestOptionalAudioPermission()
 
         XCTAssertEqual(provider.microphoneRequestCallCount, 0)
-        if case .error(let message) = session.state {
-            XCTAssertTrue(message.contains("Audio Input"))
-        } else {
-            XCTFail("expected .error, got \(session.state)")
-        }
+        XCTAssertTrue(session.optionalAudioError?.contains("Audio Input") == true)
+        XCTAssertEqual(session.state, .idle)
+        XCTAssertTrue(session.permissions.ok)
+    }
+
+    func test_requestPermissions_onlyRequestsCorePermissions() {
+        let provider = MockPermissionsProvider()
+        let session = makeSession(provider)
+
+        session.requestPermissions()
+
+        XCTAssertEqual(provider.requestedPermissions, [.screenRecording, .accessibility])
+        XCTAssertEqual(provider.microphoneRequestCallCount, 0)
     }
 
     func test_audioInputEntitlements_requireAudioInputEntitlementWhenSystemAudioEnabled() {
@@ -271,6 +444,102 @@ final class HostSessionTests: XCTestCase {
             "HostAdvertisement-host_id_1")
     }
 
+    func test_bonjourMetadata_roundTripsOnlyBoundedDiscoveryFields() throws {
+        let senderID = "8A2269A1-A94C-4FA2-BD63-BEAEEA79A97A"
+        let metadata = try XCTUnwrap(LocalHostBonjourMetadata(
+            senderID: senderID,
+            computerUseCapability: ComputerUseCapability(
+                state: .installing,
+                detail: "Downloading AI\n42%")))
+        let data = metadata.txtRecordData()
+        let values = NetService.dictionary(fromTXTRecord: data)
+        let decoded = try XCTUnwrap(LocalHostBonjourMetadata.decode(
+            txtRecordData: data))
+
+        XCTAssertLessThanOrEqual(
+            data.count,
+            LocalHostBonjourMetadata.maximumTXTRecordBytes)
+        XCTAssertEqual(Set(values.keys), ["v", "sid", "cu", "cud"])
+        XCTAssertEqual(decoded.version, LocalHostBonjourMetadata.currentVersion)
+        XCTAssertEqual(decoded.senderID, senderID)
+        XCTAssertEqual(decoded.computerUseCapability.state, .installing)
+        XCTAssertEqual(decoded.computerUseCapability.detail, "Downloading AI 42%")
+    }
+
+    func test_bonjourMetadata_rejectsInvalidIdentityAndOversizedRecords() {
+        XCTAssertNil(LocalHostBonjourMetadata(
+            senderID: "not-a-device-identity",
+            computerUseCapability: .ready))
+        let lowercaseSenderID = "8A2269A1-A94C-4FA2-BD63-BEAEEA79A97A".lowercased()
+        XCTAssertEqual(
+            LocalHostBonjourMetadata(
+                senderID: lowercaseSenderID,
+                computerUseCapability: .ready)?.senderID,
+            lowercaseSenderID,
+            "the exact CloudKit senderID spelling must survive validation")
+
+        let values: [String: Data] = [
+            "v": Data("1".utf8),
+            "sid": Data("8A2269A1-A94C-4FA2-BD63-BEAEEA79A97A".utf8),
+            "cu": Data("ready".utf8),
+            "cud": Data("AI Computer Use is ready".utf8),
+            "padding-a": Data(repeating: 65, count: 240),
+            "padding-b": Data(repeating: 66, count: 240),
+        ]
+        let oversized = NetService.data(fromTXTRecord: values)
+
+        XCTAssertGreaterThan(
+            oversized.count,
+            LocalHostBonjourMetadata.maximumTXTRecordBytes)
+        XCTAssertNil(LocalHostBonjourMetadata.decode(txtRecordData: oversized))
+    }
+
+    func test_bonjourAdvertiserPublishesAndRefreshesComputerUseCapability() throws {
+        let senderID = "8A2269A1-A94C-4FA2-BD63-BEAEEA79A97A"
+        let advertiser = BonjourAdvertiser()
+        defer { advertiser.stop() }
+
+        advertiser.publish(
+            hostname: "Remote Desktop Host Tests",
+            code: "654321",
+            senderID: senderID,
+            computerUseCapability: .setupRequired)
+        XCTAssertEqual(
+            advertiser.publishedMetadata?.computerUseCapability,
+            .setupRequired)
+
+        let installing = ComputerUseCapability(
+            state: .installing,
+            detail: "Downloading AI — 42%")
+        XCTAssertTrue(advertiser.update(
+            senderID: senderID,
+            computerUseCapability: installing))
+        XCTAssertEqual(
+            advertiser.publishedMetadata?.computerUseCapability,
+            installing)
+    }
+
+    func test_hostNameCapabilityFallback_roundTripsWithoutNewCloudKitFields() {
+        let capability = ComputerUseCapability(
+            state: .installing,
+            detail: "Downloading AI — 42%")
+        let encoded = CloudKitSignalingClient.encodedHostName(
+            "Living Room Mac",
+            capability: capability)
+        let decoded = CloudKitSignalingClient.decodedHostName(encoded)
+
+        XCTAssertEqual(decoded.name, "Living Room Mac")
+        XCTAssertEqual(decoded.capability, capability)
+        XCTAssertTrue(encoded.hasPrefix("Living Room Mac\n"))
+    }
+
+    func test_hostNameCapabilityFallback_keepsLegacyPlainNamesReadable() {
+        let decoded = CloudKitSignalingClient.decodedHostName("Office Mac")
+
+        XCTAssertEqual(decoded.name, "Office Mac")
+        XCTAssertNil(decoded.capability)
+    }
+
     func test_startListeningOnLaunch_defaultsToTrue() {
         withTemporaryDefaults { defaults in
             XCTAssertTrue(HeadlessHostSettings.startListeningOnLaunch(
@@ -299,9 +568,178 @@ final class HostSessionTests: XCTestCase {
         }
     }
 
+    func test_runtimeContextDetectsEachXCTestInjectionEnvironment() {
+        for key in [
+            "XCTestConfigurationFilePath",
+            "XCTestBundlePath",
+            "XCTestSessionIdentifier",
+            "XCInjectBundle",
+            "XCInjectBundleInto",
+        ] {
+            XCTAssertTrue(
+                HostRuntimeContext.detectsUnitTests(
+                    environment: [key: "present"],
+                    arguments: ["RemoteDesktopHost"],
+                    loadedBundlePaths: [],
+                    xctestRuntimeAvailable: false),
+                "expected \(key) to identify an app-hosted test run")
+        }
+    }
+
+    func test_runtimeContextDetectsFallbackXCTestMarkers() {
+        XCTAssertTrue(HostRuntimeContext.detectsUnitTests(
+            environment: ["DYLD_INSERT_LIBRARIES": "/tmp/XCTestBundleInject.dylib"],
+            arguments: ["RemoteDesktopHost"],
+            loadedBundlePaths: [],
+            xctestRuntimeAvailable: false))
+        XCTAssertTrue(HostRuntimeContext.detectsUnitTests(
+            environment: [:],
+            arguments: ["RemoteDesktopHost", "/tmp/RemoteDesktopHostTests.xctest"],
+            loadedBundlePaths: [],
+            xctestRuntimeAvailable: false))
+        XCTAssertTrue(HostRuntimeContext.detectsUnitTests(
+            environment: [:],
+            arguments: ["RemoteDesktopHost"],
+            loadedBundlePaths: ["/tmp/RemoteDesktopHostTests.xctest"],
+            xctestRuntimeAvailable: false))
+        XCTAssertTrue(HostRuntimeContext.detectsUnitTests(
+            environment: [:],
+            arguments: ["RemoteDesktopHost"],
+            loadedBundlePaths: [],
+            xctestRuntimeAvailable: true))
+    }
+
+    func test_runtimeContextDoesNotClassifyOrdinaryHostLaunchAsTests() {
+        XCTAssertFalse(HostRuntimeContext.detectsUnitTests(
+            environment: ["PATH": "/usr/bin:/bin"],
+            arguments: ["/Applications/Remote Desktop Host.app/Contents/MacOS/RemoteDesktopHost"],
+            loadedBundlePaths: ["/Applications/Remote Desktop Host.app"],
+            xctestRuntimeAvailable: false))
+    }
+
+    func test_hostSessionDisablesExternalComputerUseServicesDuringXCTest() {
+        XCTAssertTrue(HostRuntimeContext.isRunningUnitTests)
+        XCTAssertFalse(
+            HostRuntimeContext.shouldInstallVisibleChrome,
+            "An app-hosted XCTest must not add a status item or any other visible host chrome")
+
+        let session = makeSession(MockPermissionsProvider())
+
+        XCTAssertFalse(session.computerUse.allowsExternalServices)
+    }
+
+    func test_appDelegateSkipsVisibleChromeAndServicesDuringXCTest() {
+        XCTAssertTrue(HostRuntimeContext.isRunningUnitTests)
+        let delegate = AppDelegate()
+
+        delegate.applicationDidFinishLaunching(Notification(
+            name: NSApplication.didFinishLaunchingNotification,
+            object: NSApp))
+
+        XCTAssertEqual(NSApp.activationPolicy(), .prohibited)
+        XCTAssertFalse(
+            delegate.didEnterProductionLaunchPath,
+            "XCTest must return before termination handlers or host services are configured")
+        XCTAssertFalse(
+            delegate.didInstallStatusItem,
+            "XCTest must not allocate the Control Center-hosted status item")
+    }
+
     func test_startAtLogin_defaultsToTrue() {
         withTemporaryDefaults { defaults in
             XCTAssertTrue(HeadlessHostSettings.startAtLogin(defaults: defaults))
+        }
+    }
+
+    func test_setupGuide_ordersRequiredPermissionsBeforeOptionalAudio() {
+        XCTAssertEqual(
+            HostSetupStep.current(
+                permissions: .init(
+                    screenRecording: false,
+                    accessibility: false,
+                    microphone: false),
+                optionalAudioSkipped: false),
+            .screenRecording)
+        XCTAssertEqual(
+            HostSetupStep.current(
+                permissions: .init(
+                    screenRecording: true,
+                    accessibility: false,
+                    microphone: false),
+                optionalAudioSkipped: false),
+            .accessibility)
+        XCTAssertEqual(
+            HostSetupStep.current(
+                permissions: .init(
+                    screenRecording: true,
+                    accessibility: true,
+                    microphone: false),
+                optionalAudioSkipped: false),
+            .optionalAudio)
+    }
+
+    func test_setupGuide_canFinishWhileOptionalAudioIsOff() {
+        let permissions = HostSession.Permissions(
+            screenRecording: true,
+            accessibility: true,
+            microphone: false)
+
+        XCTAssertEqual(
+            HostSetupStep.current(
+                permissions: permissions,
+                optionalAudioSkipped: true),
+            .ready)
+        XCTAssertTrue(permissions.coreReady)
+        XCTAssertFalse(permissions.audioEnabled)
+    }
+
+    func test_setupPreferences_reopenForMissingCorePermission() {
+        withTemporaryDefaults { defaults in
+            let ready = HostSession.Permissions(
+                screenRecording: true,
+                accessibility: true,
+                microphone: false)
+
+            XCTAssertTrue(HostSetupPreferences.shouldPresent(
+                permissions: ready,
+                defaults: defaults))
+
+            HostSetupPreferences.markCompleted(defaults: defaults)
+            XCTAssertFalse(HostSetupPreferences.shouldPresent(
+                permissions: ready,
+                defaults: defaults))
+
+            XCTAssertTrue(HostSetupPreferences.shouldPresent(
+                permissions: .init(
+                    screenRecording: false,
+                    accessibility: true,
+                    microphone: true),
+                defaults: defaults))
+        }
+    }
+
+    func test_setupPreferences_resumeGuideAfterRestartUntilSetupFinishes() {
+        withTemporaryDefaults { defaults in
+            let ready = HostSession.Permissions(
+                screenRecording: true,
+                accessibility: true,
+                microphone: false)
+            HostSetupPreferences.markCompleted(defaults: defaults)
+            XCTAssertFalse(HostSetupPreferences.shouldPresent(
+                permissions: ready,
+                defaults: defaults))
+
+            HostSetupPreferences.markRestartRequested(defaults: defaults)
+            XCTAssertTrue(HostSetupPreferences.shouldPresent(
+                permissions: ready,
+                defaults: defaults),
+                "a TCC relaunch must return the user to the setup guide")
+
+            HostSetupPreferences.markCompleted(defaults: defaults)
+            XCTAssertFalse(HostSetupPreferences.shouldPresent(
+                permissions: ready,
+                defaults: defaults),
+                "finishing setup clears the relaunch-resume marker")
         }
     }
 
@@ -355,10 +793,163 @@ final class HostSessionTests: XCTestCase {
         XCTAssertFalse(CloudKitSignalingClient.isTransientCloudKitError(unrelated))
     }
 
-    private func makeSession(_ provider: MockPermissionsProvider) -> HostSession {
+    func test_cloudKitHostDefersICEUntilOfferAndKeepsSameBatchSenderRecords() async throws {
+        let client = CloudKitSignalingClient(
+            containerIdentifier: HostConfig.cloudKitContainerIdentifier,
+            code: "123456",
+            role: .host,
+            senderID: "HOST-ID")
+        let earlyICE = try signalingRecord(
+            name: "ice-a",
+            senderID: "CLIENT-A",
+            kind: .ice,
+            payload: ["candidate": "candidate-a"])
+
+        let beforeOffer = await client.consumePollRecords([earlyICE])
+        XCTAssertTrue(beforeOffer.isEmpty)
+
+        let offer = try signalingRecord(
+            name: "offer-a",
+            senderID: "CLIENT-A",
+            kind: .offer,
+            payload: ["sdp": "offer-sdp"])
+        let otherSenderICE = try signalingRecord(
+            name: "ice-b",
+            senderID: "CLIENT-B",
+            kind: .ice,
+            payload: ["candidate": "candidate-b"])
+        let otherSenderOffer = try signalingRecord(
+            name: "offer-b",
+            senderID: "CLIENT-B",
+            kind: .offer,
+            payload: ["sdp": "other-offer"])
+        let earlyBye = try signalingRecord(
+            name: "bye-a",
+            senderID: "CLIENT-A",
+            kind: .bye,
+            payload: ["reason": "unbound"])
+
+        let accepted = await client.consumePollRecords([
+            earlyICE,
+            earlyBye,
+            offer,
+            otherSenderICE,
+            otherSenderOffer,
+        ])
+
+        XCTAssertEqual(accepted.map(\.kind), [.ice, .offer])
+        XCTAssertEqual(accepted.map(\.senderID), ["CLIENT-A", "CLIENT-A"])
+        XCTAssertEqual(accepted.first?.payload["candidate"], "candidate-a")
+        let replay = await client.consumePollRecords([
+            earlyICE,
+            earlyBye,
+            offer,
+            otherSenderICE,
+            otherSenderOffer,
+        ])
+        XCTAssertTrue(replay.isEmpty)
+    }
+
+    func test_cloudKitHostOfferBindingIsAtomicAndRejectsSecondSender() async {
+        let client = CloudKitSignalingClient(
+            containerIdentifier: HostConfig.cloudKitContainerIdentifier,
+            code: "123456",
+            role: .host,
+            senderID: "HOST-ID")
+
+        let acceptedFirst = await client.acceptOfferSenderID("CLIENT-A")
+        let acceptedRepeat = await client.acceptOfferSenderID("CLIENT-A")
+        let acceptedOther = await client.acceptOfferSenderID("CLIENT-B")
+        let resolved = await client.resolvedPeerSenderID()
+
+        XCTAssertTrue(acceptedFirst)
+        XCTAssertTrue(acceptedRepeat)
+        XCTAssertFalse(acceptedOther)
+        XCTAssertEqual(resolved, "CLIENT-A")
+    }
+
+    func test_cloudKitClientPinsTheSelectedHostIdentity() {
+        let first = CKRecord(
+            recordType: "HostAdvertisement",
+            recordID: CKRecord.ID(recordName: "host-a"))
+        first["senderID"] = "HOST-A" as CKRecordValue
+        let second = CKRecord(
+            recordType: "HostAdvertisement",
+            recordID: CKRecord.ID(recordName: "host-b"))
+        second["senderID"] = "HOST-B" as CKRecordValue
+
+        XCTAssertEqual(
+            CloudKitSignalingClient.selectedHostSenderID(
+                from: [first, second],
+                expectedTargetID: "HOST-B"),
+            "HOST-B")
+        XCTAssertNil(
+            CloudKitSignalingClient.selectedHostSenderID(
+                from: [first, second],
+                expectedTargetID: "HOST-C"))
+        XCTAssertEqual(
+            CloudKitSignalingClient.selectedHostSenderID(
+                from: [first, second],
+                expectedTargetID: nil),
+            "HOST-A")
+    }
+
+    private func makeSession(
+        _ provider: MockPermissionsProvider,
+        signalingRunOverride: (@MainActor @Sendable (String) async -> Void)? = nil
+    ) -> HostSession {
         HostSession(
             permissionsProvider: provider,
-            validateAudioInputEntitlements: {})
+            validateAudioInputEntitlements: {},
+            deviceIdentityProvider: { "test-device-id" },
+            signalingRunOverride: signalingRunOverride)
+    }
+
+    private func readyPermissionsProvider() -> MockPermissionsProvider {
+        let provider = MockPermissionsProvider()
+        provider.screenRecording = true
+        provider.accessibility = true
+        provider.microphone = true
+        return provider
+    }
+
+    private func blockingSignalingRun(
+        started: AsyncLifecycleGate,
+        cleanupStarted: AsyncLifecycleGate,
+        releaseCleanup: AsyncLifecycleGate,
+        cleanupFinished: AsyncLifecycleGate
+    ) -> @MainActor @Sendable (String) async -> Void {
+        { _ in
+            await started.open()
+            do {
+                try await Task.sleep(nanoseconds: 60_000_000_000)
+            } catch {
+                // Cancellation is the expected transition into cleanup.
+            }
+            await cleanupStarted.open()
+            await releaseCleanup.wait()
+            await cleanupFinished.open()
+        }
+    }
+
+    private func signalingRecord(
+        name: String,
+        senderID: String,
+        kind: SignalingEnvelope.Kind,
+        payload: [String: String]
+    ) throws -> CKRecord {
+        let record = CKRecord(
+            recordType: "WebRTCSignal",
+            recordID: CKRecord.ID(recordName: name))
+        let payloadData = try JSONSerialization.data(withJSONObject: payload)
+        record["senderID"] = senderID as CKRecordValue
+        record["targetID"] = "HOST-ID" as CKRecordValue
+        record["pairingCode"] = "123456" as CKRecordValue
+        record["kind"] = kind.rawValue as CKRecordValue
+        record["payload"] = try XCTUnwrap(
+            String(data: payloadData, encoding: .utf8)) as CKRecordValue
+        record["createdAt"] = Date() as CKRecordValue
+        return record
     }
 
     private func withTemporaryDefaults(_ body: (UserDefaults) -> Void) {
@@ -372,6 +963,35 @@ final class HostSessionTests: XCTestCase {
             defaults.removePersistentDomain(forName: suiteName)
         }
         body(defaults)
+    }
+}
+
+private actor AsyncLifecycleGate {
+    private(set) var isOpen = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        if isOpen { return }
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+    }
+
+    func open() {
+        guard !isOpen else { return }
+        isOpen = true
+        let pendingWaiters = waiters
+        waiters.removeAll()
+        pendingWaiters.forEach { $0.resume() }
+    }
+}
+
+private actor AsyncInvocationCounter {
+    private(set) var current = 0
+
+    func next() -> Int {
+        current += 1
+        return current
     }
 }
 
@@ -404,7 +1024,10 @@ final class MockPermissionsProvider: PermissionsProvider, @unchecked Sendable {
         }
     }
     func openSystemSettings(for permission: PermissionKind) { openedPermissions.append(permission) }
-    func requestPrompts() { requestPromptsCallCount += 1 }
+    func requestPrompts() {
+        requestPromptsCallCount += 1
+        requestedPermissions.append(contentsOf: [.screenRecording, .accessibility])
+    }
 }
 
 private func entitlementValue(
