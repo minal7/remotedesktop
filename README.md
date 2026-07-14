@@ -7,11 +7,11 @@ internet. No port forwarding, no self-hosted server.
 
 <!-- The release workflow updates the block below after each published host release. -->
 <!-- download-links:start -->
-Latest host release: [v0.1.6](https://github.com/minal7/remotedesktop/releases/tag/v0.1.6)
+Latest host release: [v0.2.0](https://github.com/minal7/remotedesktop/releases/tag/v0.2.0)
 
 - iPhone and iPad beta: [Join TestFlight](https://testflight.apple.com/join/tyHPrUny)
-- macOS host: [RemoteDesktopHost-macOS-0.1.6.zip](https://github.com/minal7/remotedesktop/releases/download/v0.1.6/RemoteDesktopHost-macOS-0.1.6.zip)
-- Windows host: [RemoteDesktopHost-Setup-0.1.6.exe](https://github.com/minal7/remotedesktop/releases/download/v0.1.6/RemoteDesktopHost-Setup-0.1.6.exe)
+- macOS host: [RemoteDesktopHost-macOS-0.2.0.zip](https://github.com/minal7/remotedesktop/releases/download/v0.2.0/RemoteDesktopHost-macOS-0.2.0.zip)
+- Windows host: [RemoteDesktopHost-Setup-0.2.0.exe](https://github.com/minal7/remotedesktop/releases/download/v0.2.0/RemoteDesktopHost-Setup-0.2.0.exe)
 <!-- download-links:end -->
 
 ## Architecture at a glance
