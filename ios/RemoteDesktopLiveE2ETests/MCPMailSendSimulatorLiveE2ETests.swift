@@ -8,6 +8,7 @@ final class MCPMailSendSimulatorLiveE2ETests: XCTestCase {
 
     private let toRecipient = "neighborhood-organizer@example.invalid"
     private let ccRecipient = "neighborhood-treasurer@example.invalid"
+    private let bccRecipient = "neighborhood-auditor@example.invalid"
     private let subject = "Saturday food drive follow-up"
     private let body = "Thanks for coordinating Saturday's food drive. We collected 42 boxes, and I will send the volunteer schedule tomorrow."
 
@@ -61,7 +62,7 @@ final class MCPMailSendSimulatorLiveE2ETests: XCTestCase {
             waitUntil(timeout: 45) { composer.exists && composer.isEnabled },
             "The connected Computer Use chat did not become ready for a request.")
 
-        let prompt = "Send an email to \(toRecipient), CC \(ccRecipient), with subject \(subject) and body \(body)"
+        let prompt = "Send an email to \(toRecipient), CC \(ccRecipient), BCC \(bccRecipient), with subject \(subject) and body \(body)"
         composer.tap()
         composer.typeText(prompt)
 
@@ -144,7 +145,7 @@ final class MCPMailSendSimulatorLiveE2ETests: XCTestCase {
 
         // These exact, host-validated fields are emitted by the MCP approval
         // presentation. A visual-model click approval cannot satisfy them.
-        let exactValues = [toRecipient, ccRecipient, subject, body]
+        let exactValues = [toRecipient, ccRecipient, bccRecipient, subject, body]
         for value in exactValues {
             let detail = app.descendants(matching: .any).matching(
                 NSPredicate(format: "label CONTAINS %@", value)).firstMatch
@@ -219,6 +220,183 @@ final class MCPMailSendSimulatorLiveE2ETests: XCTestCase {
             app.buttons["Create draft"].exists,
             "A draft action must not replace the explicitly confirmed send.")
         keepScreenshot(named: "MCP Mail send completion", from: app)
+
+        showMac.tap()
+        XCTAssertTrue(
+            waitUntil(timeout: 5) {
+                !privacyShield.exists && liveScreen.exists
+            },
+            "The explicit Show Mac action did not reveal the live desktop.")
+        XCTAssertFalse(
+            privacyShield.exists,
+            "The Mail privacy shield remained after the explicit reveal action.")
+    }
+
+    /// Exercises the shipped approval-denial channel without launching Mail
+    /// or performing any representational action. The host must preserve every
+    /// recipient field through the mobile card, consume the one-time denial,
+    /// cancel the prepared MCP operation, and return a terminal result.
+    func testSimulatorDeniesExactBCCMailApprovalWithoutExecution() throws {
+        let app = XCUIApplication()
+        var taskWasSent = false
+        var taskReachedTerminalResponse = false
+        var cleanupAssistantCount = 0
+        defer {
+            if taskWasSent, !taskReachedTerminalResponse {
+                XCTAssertTrue(
+                    ComputerUseLiveE2ECleanup.finishPendingTask(
+                        in: app,
+                        previousAssistantCount: cleanupAssistantCount),
+                    "Cleanup could not obtain a terminal host cancellation for the denied Mail task.")
+            }
+        }
+        addUIInterruptionMonitor(withDescription: "Local network access") { alert in
+            guard alert.buttons["Allow"].exists else { return false }
+            alert.buttons["Allow"].tap()
+            return true
+        }
+        app.launch()
+        XCTAssertTrue(
+            app.wait(for: .runningForeground, timeout: 10),
+            "The iOS client did not reach the foreground.")
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.01)).tap()
+
+        let readyButton = app.buttons.matching(
+            NSPredicate(
+                format: "label BEGINSWITH %@",
+                "Use AI Computer Use on ")).firstMatch
+        XCTAssertTrue(
+            readyButton.waitForExistence(timeout: 45),
+            "An AI-ready release host did not appear in the Simulator.")
+        XCTAssertTrue(readyButton.isHittable, "Use AI must be directly tappable.")
+        readyButton.tap()
+
+        let liveScreen = app.descendants(matching: .any).matching(
+            NSPredicate(
+                format: "label BEGINSWITH %@",
+                "Live interactive screen for ")).firstMatch
+        XCTAssertTrue(
+            liveScreen.waitForExistence(timeout: 45),
+            "The Simulator did not show the live Mac screen before the MCP task began.")
+
+        let composer = app.textFields.matching(
+            NSPredicate(
+                format: "placeholderValue == %@",
+                "Tell your Mac what to do")).firstMatch
+        XCTAssertTrue(
+            waitUntil(timeout: 45) { composer.exists && composer.isEnabled },
+            "The connected Computer Use chat did not become ready for a request.")
+
+        let prompt = "Send an email to \(toRecipient), CC \(ccRecipient), BCC \(bccRecipient), with subject \(subject) and body \(body)"
+        let assistantMessages = app.staticTexts.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "AI: "))
+        let priorAssistantMessageCount = assistantMessages.count
+        cleanupAssistantCount = priorAssistantMessageCount
+        let currentRequestAssistant = assistantMessages.element(
+            boundBy: priorAssistantMessageCount)
+        let currentRequestBubble = app.staticTexts.matching(
+            NSPredicate(format: "label == %@", "You: \(prompt)"))
+            .firstMatch
+        let privacyShield = app.descendants(matching: .any).matching(
+            identifier: "computer-use-approval-privacy-shield").firstMatch
+
+        composer.tap()
+        composer.typeText(prompt)
+        let sendRequest = app.buttons["Send request"]
+        XCTAssertTrue(
+            waitUntil(timeout: 10) { sendRequest.exists && sendRequest.isEnabled },
+            "The exact BCC Mail request did not enable Send.")
+        sendRequest.tap()
+        taskWasSent = true
+
+        XCTAssertTrue(
+            privacyShield.waitForExistence(timeout: 2),
+            "The live Mac screen was not hidden before the Mail approval was prepared.")
+
+        let sendQuestion = app.staticTexts[
+            "Send this email through Mail on your Mac?"]
+        let draftQuestion = app.staticTexts[
+            "Create this email draft in Mail on your Mac?"]
+        let reachedApprovalOrTerminal = waitUntil(timeout: 120) {
+            sendQuestion.exists
+                || draftQuestion.exists
+                || (assistantMessages.count > priorAssistantMessageCount
+                    && currentRequestBubble.exists
+                    && currentRequestAssistant.exists)
+        }
+        guard reachedApprovalOrTerminal, sendQuestion.exists else {
+            cancelPendingApproval(in: app)
+            let terminal = currentRequestAssistant.exists
+                ? currentRequestAssistant.label
+                : "none"
+            XCTFail(
+                "The current host did not produce the exact send approval. Terminal response: \(terminal)")
+            return
+        }
+        XCTAssertTrue(
+            app.staticTexts["Approve before AI continues"].exists,
+            "The exact MCP action was not shown in the approval card.")
+        XCTAssertTrue(
+            privacyShield.exists,
+            "The live desktop was exposed while the denial decision was pending.")
+
+        for value in [toRecipient, ccRecipient, bccRecipient, subject, body] {
+            let detail = app.descendants(matching: .any).matching(
+                NSPredicate(format: "label CONTAINS %@", value)).firstMatch
+            guard detail.exists else {
+                cancelPendingApproval(in: app)
+                XCTFail("The MCP approval omitted or changed this exact value: \(value)")
+                return
+            }
+        }
+
+        XCTAssertTrue(
+            app.buttons["Send email"].exists,
+            "The host did not identify the prepared operation as an email send.")
+        let cancel = app.buttons["Cancel"]
+        XCTAssertTrue(
+            cancel.exists && cancel.isHittable,
+            "The one-time Mail operation could not be denied.")
+        cancel.tap()
+
+        let showMac = app.buttons["Show Mac"]
+        XCTAssertTrue(
+            waitUntil(timeout: 10) {
+                !sendQuestion.exists
+                    && privacyShield.exists
+                    && showMac.exists
+                    && showMac.isHittable
+            },
+            "The approval card did not close into the protected canceled state.")
+
+        let expectedCancellation = "AI: Canceled. No action was taken."
+        XCTAssertTrue(
+            waitUntil(timeout: 60) {
+                assistantMessages.count > priorAssistantMessageCount
+                    && currentRequestBubble.exists
+                    && currentRequestAssistant.exists
+            },
+            "The host did not acknowledge the denied operation through Production CloudKit.")
+        if currentRequestAssistant.exists {
+            taskReachedTerminalResponse = true
+        }
+        XCTAssertEqual(
+            currentRequestAssistant.label,
+            expectedCancellation,
+            "The denied approval did not terminate as a no-action cancellation.")
+        XCTAssertFalse(
+            app.buttons["Send email"].exists,
+            "The denied send remained executable after its approval was consumed.")
+        XCTAssertTrue(
+            privacyShield.exists,
+            "Canceling Mail exposed unrelated desktop pixels without an explicit reveal.")
+
+        showMac.tap()
+        XCTAssertTrue(
+            waitUntil(timeout: 5) {
+                !privacyShield.exists && liveScreen.exists
+            },
+            "Show Mac did not reveal the live desktop after the canceled operation.")
     }
 
     private func cancelPendingApproval(in app: XCUIApplication) {

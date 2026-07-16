@@ -80,14 +80,24 @@ flows. Fully specified Mail sends are deterministically pre-routed to that
 embedded operation before any planner/model call. The host—not the model—applies
 the allowlist, validates arguments, pauses for exact one-action approval, and
 records mutation attempts before execution. No API key or paid AI service is
-used. The public, local OS-Atlas-Pro-4B model is reserved for
-GUI-only applications that do not expose an approved MCP tool. Its installed
-Q4 production profile permits only the 12 model-action variants verified for
-that checkpoint; unsupported model output is rejected before any effect from
-that model action.
-For delivery quotes, OS-Atlas navigates the page while local Vision OCR extracts
-and validates the visible itemized facts. V1 loads Pro only, never Base and Pro
-at the same time, and requires a Mac with at least 16 GiB memory.
+used. Windows AI Computer Use is not implemented; the Windows host remains a
+remote-desktop host only. GUI-only applications use a local hybrid. An AI-ready
+macOS host always installs the semantic router: it opens an explicitly named
+common app once before interacting, and can route bounded literal text and
+unambiguous current-app navigation without model inference. Remaining
+ordinary-language steps use Apple's on-device model to select one typed
+semantic action with bounded arguments. OS-Atlas-Pro-4B grounds visual pointer
+targets, and the host composes and validates the native Mac action. Non-pointer
+actions do not ask OS-Atlas to echo a verb, and a raw OS-Atlas verb can never
+override the typed plan. If a non-deterministic step finds Apple's model
+unavailable, that step falls back to the narrower 12-variant fail-closed
+OS-Atlas compatibility profile.
+For delivery quotes, the typed semantic route performs direct app, text, and
+scroll steps; OS-Atlas is used only when a visual pointer must be grounded or
+the narrower raw compatibility path is entered. Local Vision OCR extracts and
+validates itemized facts only inside the focused window. V1 loads Pro only,
+never Base and Pro at the same time, and requires a Mac with at least 16 GiB
+memory.
 
 Mail requests use a separately reviewed MCP tool embedded in the signed host,
 not the downloaded helper's generic Mail tool. It can create a visible draft or

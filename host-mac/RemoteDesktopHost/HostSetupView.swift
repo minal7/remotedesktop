@@ -53,9 +53,10 @@ enum HostSetupPreferences {
         permissions: HostSession.Permissions,
         defaults: UserDefaults = .standard
     ) -> Bool {
+        // TCC is authoritative. Completion preferences exist only to migrate
+        // older builds and resume a still-incomplete permission flow; neither
+        // may force onboarding after both required grants are already live.
         !permissions.coreReady
-            || !defaults.bool(forKey: completedKey)
-            || defaults.bool(forKey: resumeAfterRestartKey)
     }
 
     static func markCompleted(defaults: UserDefaults = .standard) {
@@ -66,6 +67,18 @@ enum HostSetupPreferences {
     static func markRestartRequested(defaults: UserDefaults = .standard) {
         defaults.set(true, forKey: resumeAfterRestartKey)
     }
+
+    /// Treat live TCC state as the source of truth at launch. Builds that
+    /// predate this setup guide have no completion preference, and a host can
+    /// also retain the restart marker after macOS has already applied every
+    /// required grant. In both cases reopening onboarding is redundant.
+    static func reconcileExistingGrants(
+        permissions: HostSession.Permissions,
+        defaults: UserDefaults = .standard
+    ) {
+        guard permissions.coreReady else { return }
+        markCompleted(defaults: defaults)
+    }
 }
 
 /// A real window for the deeper first-run workflow. The menu-bar popover stays
@@ -74,6 +87,7 @@ struct HostSetupView: View {
     @ObservedObject var session: HostSession
     let onFinish: () -> Void
     let onRestart: () -> Void
+    let onCorePermissionsReady: () -> Void
 
     @State private var optionalAudioSkipped = false
     @State private var restartHelpForStep: HostSetupStep?
@@ -124,6 +138,11 @@ struct HostSetupView: View {
             for: NSApplication.didBecomeActiveNotification)) { _ in
                 session.refreshPermissions()
             }
+        .onChange(of: session.permissions.coreReady) { _, coreReady in
+            if coreReady {
+                onCorePermissionsReady()
+            }
+        }
     }
 
     private var header: some View {
@@ -142,15 +161,16 @@ struct HostSetupView: View {
 
     private var screenRecordingStep: some View {
         permissionStep(
+            permission: .screenRecording,
             icon: "rectangle.inset.filled",
             title: "Allow Screen Recording",
             explanation: "This lets your iPhone or iPad see the Mac screen. The host only shares it while you are connected.",
             instructions: [
-                "Open Screen Recording settings.",
-                "Turn on Remote Desktop Host.",
+                "Request screen recording access.",
+                "Follow the macOS prompt to allow Remote Desktop Host.",
                 "Return here. We’ll check automatically.",
             ],
-            primaryTitle: "Open Screen Recording Settings",
+            primaryTitle: "Request Screen Recording…",
             primaryAction: {
                 restartHelpForStep = .screenRecording
                 session.requestCorePermission(.screenRecording)
@@ -159,15 +179,16 @@ struct HostSetupView: View {
 
     private var accessibilityStep: some View {
         permissionStep(
+            permission: .accessibility,
             icon: "cursorarrow.motionlines",
             title: "Allow Accessibility",
             explanation: "This lets the host perform the clicks and typing you send. It does not read passwords or keystrokes from other apps.",
             instructions: [
-                "Open Accessibility settings.",
-                "Turn on Remote Desktop Host.",
+                "Request accessibility access.",
+                "Follow the macOS prompt to allow Remote Desktop Host.",
                 "Return here. We’ll check automatically.",
             ],
-            primaryTitle: "Open Accessibility Settings",
+            primaryTitle: "Request Accessibility…",
             primaryAction: {
                 restartHelpForStep = .accessibility
                 session.requestCorePermission(.accessibility)
@@ -205,7 +226,13 @@ struct HostSetupView: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.large)
+            }
 
+            HStack(spacing: 12) {
+                Button("Open Microphone Settings") {
+                    session.openSystemSettings(for: .microphone)
+                }
+                .buttonStyle(.bordered)
                 Button("Check Again") {
                     session.refreshPermissions()
                 }
@@ -253,6 +280,7 @@ struct HostSetupView: View {
     }
 
     private func permissionStep(
+        permission: PermissionKind,
         icon: String,
         title: String,
         explanation: String,
@@ -281,11 +309,15 @@ struct HostSetupView: View {
                 Button(primaryTitle, action: primaryAction)
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
-                Button("Check Again") {
-                    session.refreshPermissions()
+                Button("Open Settings") {
+                    session.openSystemSettings(for: permission)
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.large)
+                Button("Check Again") {
+                    session.refreshPermissions()
+                }
+                .buttonStyle(.link)
             }
 
             if restartHelpForStep == step {

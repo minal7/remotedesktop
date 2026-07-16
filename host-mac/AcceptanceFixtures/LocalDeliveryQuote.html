@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta
+    http-equiv="Content-Security-Policy"
+    content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OS-Atlas Local Delivery Acceptance</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+      background: #f4f7fb;
+      color: #142033;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-width: 720px;
+      background:
+        radial-gradient(circle at top left, #dbeafe 0, transparent 34rem),
+        #f4f7fb;
+    }
+
+    .screen {
+      min-height: 100vh;
+      padding: clamp(32px, 6vh, 72px) clamp(42px, 8vw, 112px);
+    }
+
+    .card {
+      width: min(860px, 100%);
+      margin: 0 auto;
+      border: 1px solid #cbd7e8;
+      border-radius: 24px;
+      background: rgba(255, 255, 255, 0.96);
+      box-shadow: 0 24px 70px rgba(38, 62, 95, 0.14);
+      overflow: hidden;
+    }
+
+    .entry-card { padding: clamp(32px, 6vw, 64px); }
+
+    .badge {
+      display: inline-block;
+      margin-bottom: 20px;
+      border-radius: 999px;
+      padding: 8px 13px;
+      background: #e0e7ff;
+      color: #3730a3;
+      font-size: 15px;
+      font-weight: 800;
+      letter-spacing: 0.02em;
+    }
+
+    h1, h2, p { margin-top: 0; }
+    h1 { margin-bottom: 14px; font-size: clamp(34px, 4vw, 52px); }
+    h2 { margin-bottom: 8px; font-size: 34px; }
+
+    .lede {
+      max-width: 760px;
+      color: #506078;
+      font-size: 21px;
+      line-height: 1.5;
+    }
+
+    label {
+      display: block;
+      margin-top: 36px;
+      font-size: 18px;
+      font-weight: 800;
+    }
+
+    #start-setup {
+      display: block;
+      width: 100%;
+      margin-top: 30px;
+      border: 0;
+      border-radius: 16px;
+      padding: 18px 24px;
+      background: #1d4ed8;
+      color: white;
+      font: 850 23px/1.25 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+      cursor: pointer;
+      box-shadow: 0 12px 28px rgba(29, 78, 216, 0.22);
+    }
+
+    #start-setup:disabled {
+      background: #166534;
+      cursor: default;
+      opacity: 1;
+    }
+
+    input {
+      display: block;
+      width: 100%;
+      margin-top: 10px;
+      border: 3px solid #2563eb;
+      border-radius: 16px;
+      padding: 18px 20px;
+      background: white;
+      color: #142033;
+      font: 700 28px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+      outline: none;
+      box-shadow: 0 0 0 6px rgba(37, 99, 235, 0.12);
+    }
+
+    input[readonly] {
+      border-color: #15803d;
+      box-shadow: 0 0 0 6px rgba(21, 128, 61, 0.12);
+    }
+
+    input:disabled {
+      border-color: #94a3b8;
+      background: #e2e8f0;
+      box-shadow: none;
+      cursor: not-allowed;
+    }
+
+    #status {
+      min-height: 34px;
+      margin: 24px 0 0;
+      color: #1e40af;
+      font-size: 20px;
+      font-weight: 750;
+    }
+
+    body.unlocked #status { color: #166534; }
+
+    #manual-proof {
+      display: none;
+      margin-top: 20px;
+      border: 2px solid #15803d;
+      border-radius: 14px;
+      padding: 16px 18px;
+      background: #dcfce7;
+      color: #14532d;
+      font-size: 22px;
+      font-weight: 850;
+      text-align: center;
+    }
+
+    body.manual-confirmed #status { color: #166534; }
+    body.manual-confirmed #manual-proof { display: block; }
+
+    #quote-screen {
+      display: none;
+      align-items: center;
+    }
+
+    body.unlocked #quote-screen { display: flex; }
+
+    .proof-banner {
+      padding: 18px 28px;
+      background: #166534;
+      color: white;
+      font-size: 22px;
+      font-weight: 850;
+      letter-spacing: 0.025em;
+      text-align: center;
+    }
+
+    .quote-body { padding: 28px 42px 34px; }
+
+    .quote-subtitle {
+      margin-bottom: 24px;
+      color: #506078;
+      font-size: 19px;
+    }
+
+    .row {
+      display: flex;
+      justify-content: space-between;
+      gap: 28px;
+      border-top: 1px solid #d8e0eb;
+      padding: 12px 0;
+      font-size: 21px;
+    }
+
+    .row strong { font-weight: 800; }
+    .row.total { font-size: 25px; font-weight: 850; }
+
+    .read-only-note {
+      margin: 24px 0 0;
+      border-radius: 12px;
+      padding: 13px 16px;
+      background: #ecfdf5;
+      color: #166534;
+      font-size: 17px;
+      font-weight: 750;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <section class="screen" id="entry-screen">
+    <main class="card entry-card">
+      <span class="badge">LOCAL-ONLY ACCEPTANCE FIXTURE</span>
+      <h1>Delivery quote setup</h1>
+      <p class="lede">
+        This page is a no-network test surface. The fixture code field is
+        disabled until the local setup control is activated. Starting setup
+        enables and focuses that field so Safari's address bar cannot receive
+        the token. Entering the exact test token unlocks a read-only quote
+        below this viewport; nothing is submitted or sent anywhere.
+      </p>
+
+      <button id="start-setup" type="button">
+        Start local quote setup
+      </button>
+
+      <label for="fixture-code">Fixture code</label>
+      <input
+        id="fixture-code"
+        name="fixture-code"
+        type="text"
+        inputmode="text"
+        autocomplete="off"
+        autocapitalize="characters"
+        spellcheck="false"
+        aria-label="Fixture code"
+        disabled>
+
+      <p id="status" role="status" aria-live="polite">
+        Setup not started. Use the blue button first.
+      </p>
+      <p id="manual-proof" role="status">
+        MANUAL REMOTE INPUT CONFIRMED
+      </p>
+    </main>
+  </section>
+
+  <section class="screen" id="quote-screen" aria-label="Unlocked local delivery quote">
+    <article class="card">
+      <div class="proof-banner">LOCAL-ONLY — NATIVE INPUT CONFIRMED</div>
+      <div class="quote-body">
+        <h2>Pizzeria Uno</h2>
+        <p class="quote-subtitle">Large Pepperoni Pizza</p>
+
+        <div class="row"><span>Subtotal</span><strong>$24.99</strong></div>
+        <div class="row"><span>Delivery fee</span><strong>$2.99</strong></div>
+        <div class="row"><span>Service fee</span><strong>$3.75</strong></div>
+        <div class="row"><span>Tax</span><strong>$2.78</strong></div>
+        <div class="row total"><span>Total</span><strong>$34.51</strong></div>
+        <div class="row"><span>ETA</span><strong>28–38 min</strong></div>
+
+        <p class="read-only-note">
+          Acceptance complete locally. No order, account, payment, or network action exists on this page.
+        </p>
+      </div>
+    </article>
+  </section>
+
+  <script>
+    (() => {
+      "use strict";
+
+      const expected = "LOCAL-QUOTE-7421";
+      const manualExpected = "HUMAN-CONTROL-2468";
+      const startSetup = document.getElementById("start-setup");
+      const field = document.getElementById("fixture-code");
+      const status = document.getElementById("status");
+
+      const focusFixtureField = () => {
+        if (document.body.classList.contains("unlocked")
+            || document.body.classList.contains("manual-confirmed")
+            || !document.body.classList.contains("setup-started")) return;
+        field.focus({ preventScroll: true });
+        field.select();
+      };
+
+      startSetup.addEventListener("click", () => {
+        if (document.body.classList.contains("setup-started")) return;
+        document.body.classList.add("setup-started");
+        startSetup.disabled = true;
+        startSetup.textContent = "Local quote setup started";
+        field.disabled = false;
+        status.textContent =
+          "Local quote setup started. Fixture code field ready.";
+        focusFixtureField();
+      });
+
+      field.addEventListener("input", () => {
+        if (field.value === manualExpected) {
+          document.body.classList.add("manual-confirmed");
+          field.readOnly = true;
+          field.blur();
+          status.textContent =
+            "Direct remote keyboard input reached this local Mac fixture.";
+          return;
+        }
+
+        if (field.value === expected) {
+          document.body.classList.add("unlocked");
+          field.readOnly = true;
+          field.blur();
+          status.textContent =
+            "Native input confirmed. Scroll down to read the complete local quote.";
+          return;
+        }
+
+        status.textContent = field.value.length === 0
+          ? "Waiting for the local test token."
+          : "The local test token is not complete yet.";
+      });
+
+      window.addEventListener("load", focusFixtureField);
+      window.addEventListener("focus", focusFixtureField);
+      document.addEventListener("visibilitychange", () => {
+        if (!document.hidden) window.setTimeout(focusFixtureField, 50);
+      });
+    })();
+  </script>
+</body>
+</html>

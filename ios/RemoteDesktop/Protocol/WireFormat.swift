@@ -25,9 +25,10 @@ enum ControlMessage {
             obj["proto"] = p
             obj["client"] = [
                 "app": "RemoteDesktop-iOS",
-                "version": "0.1.0",
+                "version": Config.appVersion,
                 "device": UIDevice.current.model,
                 "osVersion": UIDevice.current.systemVersion,
+                "orderedComputerUseControls": Config.orderedComputerUseControlsVersion,
             ]
         case let .pointer(x, y, b):
             obj["t"] = "pointer"
@@ -62,6 +63,25 @@ struct HostHello: Equatable {
     let os: String
     let audio: Bool
     let monitors: Int
+    let orderedComputerUseControls: Int
+
+    init(
+        app: String,
+        version: String,
+        hostname: String,
+        os: String,
+        audio: Bool,
+        monitors: Int,
+        orderedComputerUseControls: Int = 0
+    ) {
+        self.app = app
+        self.version = version
+        self.hostname = hostname
+        self.os = os
+        self.audio = audio
+        self.monitors = monitors
+        self.orderedComputerUseControls = orderedComputerUseControls
+    }
 }
 
 struct DisplayInfo: Equatable {
@@ -84,6 +104,9 @@ enum HostMessage: Equatable {
 
         switch t {
         case "hello_ack":
+            guard int(obj["proto"], default: 1) == Config.protocolVersion else {
+                return .bye("protocol")
+            }
             let host = obj["host"] as? [String: Any]
             let caps = obj["caps"] as? [String: Any]
             return .helloAck(HostHello(
@@ -92,7 +115,9 @@ enum HostMessage: Equatable {
                 hostname: host?["hostname"] as? String ?? "Mac",
                 os: host?["os"] as? String ?? "macOS",
                 audio: caps?["audio"] as? Bool ?? false,
-                monitors: int(caps?["monitors"]) ))
+                monitors: int(caps?["monitors"]),
+                orderedComputerUseControls: int(
+                    caps?["orderedComputerUseControls"])))
         case "display":
             return .display(DisplayInfo(
                 w: int(obj["w"]),

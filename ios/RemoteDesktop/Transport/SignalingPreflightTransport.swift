@@ -145,7 +145,9 @@ final class SignalingPreflightTransport: Transport {
             hostname: payload["host"] ?? "Mac",
             os: payload["os"] ?? "macOS",
             audio: payload["audio"] == "true",
-            monitors: Int(payload["monitors"] ?? "") ?? 1)
+            monitors: Int(payload["monitors"] ?? "") ?? 1,
+            orderedComputerUseControls: Int(
+                payload["orderedComputerUseControls"] ?? "") ?? 0)
     }
 
     private func displayInfo(from payload: [String: String]) -> DisplayInfo? {

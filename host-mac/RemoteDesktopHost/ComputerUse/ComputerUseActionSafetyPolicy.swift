@@ -28,9 +28,13 @@ enum ComputerUseActionSafetyPolicy {
             if context.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 return "Click an unidentified item. The host could not verify its label, so your approval is required"
             }
-            if commitCapableRoles.contains(where: context.contains) {
+            // A role by itself is not enough evidence to act, but a clearly
+            // labelled neutral control should not turn ordinary navigation
+            // into an approval loop. Consequential labels are caught above;
+            // keep only genuinely unidentified controls gated here.
+            if isUnidentifiedCommitCapableContext(context) {
                 return described(
-                    "Click this control, which may make a change",
+                    "Click an unidentified control",
                     context: accessibilityContext)
             }
             return forceConfirmation
@@ -118,6 +122,19 @@ enum ComputerUseActionSafetyPolicy {
         "axpopupbutton", "axcombobox", "axincrementor", "axslider",
         "axswitch", "axcell",
     ]
+
+    private static func isUnidentifiedCommitCapableContext(
+        _ context: String
+    ) -> Bool {
+        let words = normalized(context).split(separator: " ").map(String.init)
+        guard words.contains(where: commitCapableRoles.contains) else {
+            return false
+        }
+        return words.allSatisfy { word in
+            commitCapableRoles.contains(word)
+                || ["role", "subrole"].contains(word)
+        }
+    }
 
     private static let riskyCommandUsages: Set<Int> = [
         0x14, // Q

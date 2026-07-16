@@ -63,6 +63,9 @@ targets:
           Remote Desktop includes a microphone-capable WebRTC component, but
           this app only plays audio from your Mac and never records, stores, or
           transmits audio from your microphone.
+        NSCameraUsageDescription: >
+          Remote Desktop includes a camera-capable WebRTC component, but this
+          app never captures, stores, or transmits video from your camera.
         NSBonjourServices:
           - _remotedesktop._tcp
         ITSAppUsesNonExemptEncryption: false
@@ -70,8 +73,8 @@ targets:
       base:
         CODE_SIGN_STYLE: Automatic
         DEVELOPMENT_TEAM: V9AX39SPJD
-        MARKETING_VERSION: "0.2.0"
-        CURRENT_PROJECT_VERSION: "2"
+        MARKETING_VERSION: "1.1"
+        CURRENT_PROJECT_VERSION: "4"
         PRODUCT_BUNDLE_IDENTIFIER: com.threadmark.remotedesktop.client
         TARGETED_DEVICE_FAMILY: "1,2"
         SUPPORTS_MACCATALYST: NO
@@ -139,6 +142,8 @@ schemes:
         # DoorDash/OS-Atlas is independently gated. Values are command-line
         # build settings expanded into the test process only for an explicit
         # run; an ordinary LiveE2E invocation sees empty values and skips it.
+        RUN_COMPUTER_USE_LOCAL_LIFECYCLE_SIMULATOR_E2E: "$(RUN_COMPUTER_USE_LOCAL_LIFECYCLE_SIMULATOR_E2E)"
+        RUN_OSATLAS_LOCAL_FIXTURE_SIMULATOR_E2E: "$(RUN_OSATLAS_LOCAL_FIXTURE_SIMULATOR_E2E)"
         RUN_OSATLAS_DOORDASH_SIMULATOR_E2E: "$(RUN_OSATLAS_DOORDASH_SIMULATOR_E2E)"
         RUN_OSATLAS_DOORDASH_GUEST_HANDOFF_SIMULATOR_E2E: "$(RUN_OSATLAS_DOORDASH_GUEST_HANDOFF_SIMULATOR_E2E)"
         RUN_OSATLAS_DOORDASH_TAKEOVER_RESUME_SIMULATOR_E2E: "$(RUN_OSATLAS_DOORDASH_TAKEOVER_RESUME_SIMULATOR_E2E)"

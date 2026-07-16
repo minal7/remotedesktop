@@ -112,7 +112,11 @@ final class HostSession: ObservableObject {
     func requestCorePermission(_ permission: PermissionKind) {
         guard permission != .microphone else { return }
         permissionsProvider.requestPrompt(for: permission)
-        permissionsProvider.openSystemSettings(for: permission)
+        // The native TCC prompt already offers the appropriate route into
+        // System Settings. Forcing Settings open here stacks two permission
+        // surfaces and even overrides a deliberate denial. Setup exposes a
+        // separate explicit Settings button for the retry/fallback case.
+        refreshPermissions()
     }
 
     func requestOptionalAudioPermission() {
@@ -129,8 +133,6 @@ final class HostSession: ObservableObject {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.refreshPermissions()
-                guard !self.permissions.microphone else { return }
-                self.permissionsProvider.openSystemSettings(for: .microphone)
             }
         }
     }
@@ -354,6 +356,7 @@ final class HostSession: ObservableObject {
                                 injector: injector,
                                 iceConfig: iceConfig,
                                 audioEnabled: permissions.audioEnabled,
+                                peerSenderID: offerSenderID,
                                 onUserInput: { [weak computerUse] in
                                     if computerUse?.blockActionsForUserIntervention() == true {
                                         Task { @MainActor [weak computerUse] in
@@ -361,19 +364,18 @@ final class HostSession: ObservableObject {
                                         }
                                     }
                                 },
-                                onPeerAuthorizationChanged: { [weak computerUse] authorized in
+                                onPeerAuthorizationChanged: { [weak self, weak computerUse] update in
                                     guard let computerUse else { return }
                                     let epoch = computerUse.nextPeerAuthorizationEpoch()
-                                    if !authorized {
+                                    if !update.authorized {
                                         // Close the injection gate before
                                         // crossing to MainActor; disconnect
                                         // callbacks and model actions can race.
                                         _ = computerUse.blockActionsForUserIntervention()
                                     }
-                                    Task { @MainActor [weak computerUse] in
-                                        computerUse?.applyPeerAuthorization(
-                                            senderID: offerSenderID,
-                                            authorized: authorized,
+                                    Task { @MainActor [weak self] in
+                                        self?.applyPeerAuthorization(
+                                            update,
                                             epoch: epoch)
                                     }
                                 },
@@ -434,10 +436,10 @@ final class HostSession: ObservableObject {
                 case .bye:
                     log.info("client said bye — will restart listening")
                     advertiser.stop()
+                    computerUse.stop()
                     peerSession?.close(reason: env.payload["reason"] ?? "user")
                     peerSession = nil
                     resetPendingRemoteICE()
-                    computerUse.stop()
                     await client.cleanup()
                     handleDisconnect(reason: env.payload["reason"] ?? "user")
                     return
@@ -467,12 +469,31 @@ final class HostSession: ObservableObject {
         }
         disconnecting = true
         log.info("connection ended (\(reason, privacy: .public)) — restarting listener")
+        // A terminal peer failure is not a resumable pause. Persist and send
+        // the terminal Computer Use result while the old task channel is still
+        // available, before replacing the pairing/signaling transport.
+        computerUse.stop()
         peerSession?.close(reason: reason)
         peerSession = nil
         resetPendingRemoteICE()
         advertiser.stop()
         disconnecting = false
         startListening()
+    }
+
+    /// MainActor bridge from the authenticated WebRTC hello into the
+    /// CloudKit-backed Computer Use control plane. Ordinary remote-control
+    /// authorization remains independent from the ordered-controls feature.
+    func applyPeerAuthorization(
+        _ update: HostPeerSession.PeerAuthorization,
+        epoch: UInt64
+    ) {
+        computerUse.applyPeerAuthorization(
+            senderID: update.senderID,
+            authorized: update.authorized,
+            supportsOrderedComputerUseControls:
+                update.supportsOrderedComputerUseControls,
+            epoch: epoch)
     }
 
     // MARK: -
@@ -488,13 +509,15 @@ final class HostSession: ObservableObject {
         return [
             "host": Host.current().localizedName ?? ProcessInfo.processInfo.hostName,
             "app": "RemoteDesktop-Host",
-            "version": "0.1.0",
+            "version": HostConfig.appVersion,
             "os": ProcessInfo.processInfo.operatingSystemVersionString,
             "audio": permissions.audioEnabled ? "true" : "false",
             "monitors": "\(NSScreen.screens.count)",
             "displayWidth": "\(Int(frame.width.rounded()))",
             "displayHeight": "\(Int(frame.height.rounded()))",
             "displayScale": String(format: "%.2f", scale),
+            "orderedComputerUseControls":
+                "\(HostConfig.orderedComputerUseControlsVersion)",
         ]
     }
 

@@ -16,6 +16,7 @@ DerivedData/
 .build/
 Packages/
 Package.resolved
+!host-mac/RemoteDesktopHost.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
 .swiftpm/
 *.profraw
 
@@ -30,6 +31,18 @@ Carthage/Build/
 
 # Generated Xcode projects (from XcodeGen) — regenerate with `xcodegen`
 ios/RemoteDesktop.xcodeproj/
+!ios/RemoteDesktop.xcodeproj/
+ios/RemoteDesktop.xcodeproj/*
+!ios/RemoteDesktop.xcodeproj/project.xcworkspace/
+ios/RemoteDesktop.xcodeproj/project.xcworkspace/*
+!ios/RemoteDesktop.xcodeproj/project.xcworkspace/xcshareddata/
+ios/RemoteDesktop.xcodeproj/project.xcworkspace/xcshareddata/*
+!ios/RemoteDesktop.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/
+ios/RemoteDesktop.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/*
+!ios/RemoteDesktop.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
+ios/Test.xcodeproj/
+ios/test.yml
+ios/test2.yml
 host-mac/RemoteDesktop.xcodeproj/
 
 # Node / Cloudflare Worker

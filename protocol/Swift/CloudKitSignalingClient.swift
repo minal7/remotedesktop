@@ -427,7 +427,7 @@ public actor CloudKitSignalingClient: SignalingChannel {
         CKRecord.ID(recordName: advertisementRecordName(senderID: senderID))
     }
 
-    private nonisolated static func hostAdvertisement(from record: CKRecord) -> CloudKitHostAdvertisement? {
+    nonisolated static func hostAdvertisement(from record: CKRecord) -> CloudKitHostAdvertisement? {
         guard let senderID = record["senderID"] as? String,
               senderID.isEmpty == false,
               let storedHostName = record["hostName"] as? String,
@@ -522,14 +522,31 @@ public actor CloudKitSignalingClient: SignalingChannel {
     }
 
     private func updateAdvertisementFields(on record: CKRecord) {
+        Self.updateAdvertisementFields(
+            on: record,
+            senderID: senderID,
+            pairingCode: code,
+            hostName: hostName ?? "Mac",
+            computerUseCapability: computerUseCapability)
+    }
+
+    /// Keep writes constrained to the fields deployed in the Production
+    /// CloudKit schema. Capability metadata lives in `hostName` so hosts can
+    /// advertise AI readiness without requiring a schema deployment.
+    nonisolated static func updateAdvertisementFields(
+        on record: CKRecord,
+        senderID: String,
+        pairingCode: String,
+        hostName: String,
+        computerUseCapability: ComputerUseCapability,
+        createdAt: Date = Date()
+    ) {
         record["senderID"] = senderID as CKRecordValue
-        record["pairingCode"] = code as CKRecordValue
+        record["pairingCode"] = pairingCode as CKRecordValue
         record["hostName"] = Self.encodedHostName(
-            hostName ?? "Mac",
+            hostName,
             capability: computerUseCapability) as CKRecordValue
-        record["computerUseState"] = computerUseCapability.state.rawValue as CKRecordValue
-        record["computerUseDetail"] = computerUseCapability.detail as CKRecordValue
-        record["createdAt"] = Date() as CKRecordValue
+        record["createdAt"] = createdAt as CKRecordValue
     }
 
     private func saveAdvertisement(
@@ -537,24 +554,8 @@ public actor CloudKitSignalingClient: SignalingChannel {
         in database: CKDatabase,
         operation: String
     ) async throws -> CKRecord {
-        do {
-            return try await retryingCloudKit(operation) {
-                try await database.save(record)
-            }
-        } catch {
-            guard Self.isAdvertisementSchemaCompatibilityError(error) else {
-                throw error
-            }
-
-            // A previously deployed Production schema may not yet contain
-            // the optional AI fields. Capability remains available through
-            // the encoded hostName fallback, so setup still works without a
-            // CloudKit schema deployment.
-            record["computerUseState"] = nil
-            record["computerUseDetail"] = nil
-            return try await retryingCloudKit("\(operation) without optional AI fields") {
-                try await database.save(record)
-            }
+        try await retryingCloudKit(operation) {
+            try await database.save(record)
         }
     }
 

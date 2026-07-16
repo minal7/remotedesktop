@@ -304,19 +304,24 @@ public struct ComputerUseApprovalRequest: Codable, Equatable, Sendable {
     /// calendar, message, and other consequential approvals unambiguous.
     public let details: [Detail]?
     public let confirmLabel: String?
+    /// Highest lifecycle control revision applied when the host created this
+    /// approval. `nil` keeps requests from pre-revision peers decodable.
+    public let appliedControlRevision: UInt64?
 
     public init(
         requestID: String = UUID().uuidString,
         taskID: String,
         message: String,
         details: [Detail]? = nil,
-        confirmLabel: String? = nil
+        confirmLabel: String? = nil,
+        appliedControlRevision: UInt64? = nil
     ) {
         self.requestID = requestID
         self.taskID = taskID
         self.message = String(message.prefix(500))
         self.details = details.map { Array($0.prefix(12)) }
         self.confirmLabel = confirmLabel.map { String($0.prefix(80)) }
+        self.appliedControlRevision = appliedControlRevision
     }
 
     public func encodedBody() throws -> String {
@@ -331,10 +336,60 @@ public struct ComputerUseApprovalRequest: Codable, Equatable, Sendable {
 public struct ComputerUseApprovalResponse: Codable, Equatable, Sendable {
     public let requestID: String
     public let approved: Bool
+    /// Current clients bind a choice to the exact task and lifecycle revision
+    /// shown in the approval card. Both fields remain optional so hosts can
+    /// accept responses from peers that predate ordered lifecycle controls.
+    public let taskID: String?
+    public let appliedControlRevision: UInt64?
 
-    public init(requestID: String, approved: Bool) {
+    public init(
+        requestID: String,
+        approved: Bool,
+        taskID: String? = nil,
+        appliedControlRevision: UInt64? = nil
+    ) {
         self.requestID = requestID
         self.approved = approved
+        self.taskID = taskID
+        self.appliedControlRevision = appliedControlRevision
+    }
+
+    public func encodedBody() throws -> String {
+        try encodeComputerUseBody(self)
+    }
+
+    public static func decodeBody(_ body: String) throws -> Self {
+        try decodeComputerUseBody(body, as: Self.self)
+    }
+}
+
+/// A causally ordered lifecycle intent for one stable privileged prompt.
+///
+/// Versioned clients persist and monotonically increase `revision` for the
+/// lifetime of `taskID`. Hosts reduce those revisions durably, so CloudKit may
+/// deliver Pause, Resume, Cancel, and the prompt itself in any order without a
+/// stale control reversing a newer user intent. Hosts still accept the empty
+/// control bodies emitted by older clients, but those legacy controls can only
+/// affect an already-active matching execution context.
+public struct ComputerUseControlRequest: Codable, Equatable, Sendable {
+    public static let currentVersion = 1
+    public static let maximumTaskIDLength = 128
+
+    public let version: Int
+    public let taskID: String
+    public let revision: UInt64
+
+    public init(taskID: String, revision: UInt64) {
+        version = Self.currentVersion
+        self.taskID = taskID
+        self.revision = revision
+    }
+
+    public var isValid: Bool {
+        version == Self.currentVersion
+            && !taskID.isEmpty
+            && taskID.count <= Self.maximumTaskIDLength
+            && revision > 0
     }
 
     public func encodedBody() throws -> String {
@@ -352,10 +407,19 @@ public struct ComputerUseApprovalResponse: Codable, Equatable, Sendable {
 public struct ComputerUseTaskUpdate: Codable, Equatable, Sendable {
     public let taskID: String
     public let text: String
+    /// Highest versioned lifecycle revision durably applied by the host when
+    /// this update was created. `nil` preserves decoding and behavior for
+    /// peers that predate ordered controls.
+    public let appliedControlRevision: UInt64?
 
-    public init(taskID: String, text: String) {
+    public init(
+        taskID: String,
+        text: String,
+        appliedControlRevision: UInt64? = nil
+    ) {
         self.taskID = taskID
         self.text = String(text.prefix(8_000))
+        self.appliedControlRevision = appliedControlRevision
     }
 
     public func encodedBody() throws -> String {

@@ -66,13 +66,16 @@ struct ComputerUseView: View {
         .background {
             if isTakingControl,
                remoteKeyboardOpen,
-               !accessories.hasHardwareKeyboard {
+               model.isConnected {
                 SoftKeyboardCapture(isOpen: $remoteKeyboardOpen)
                     .frame(width: 1, height: 1)
                     .opacity(0.001)
                     .allowsHitTesting(false)
             }
-            if isTakingControl, accessories.hasHardwareKeyboard {
+            if isTakingControl,
+               model.isConnected,
+               accessories.hasHardwareKeyboard,
+               !remoteKeyboardOpen {
                 KeyboardCapture()
                     .frame(width: 0, height: 0)
             }
@@ -95,6 +98,11 @@ struct ComputerUseView: View {
         }
         .onChange(of: accessories.hasHardwareKeyboard) { _, connected in
             if connected { remoteKeyboardOpen = false }
+        }
+        .onChange(of: model.isConnected) { _, connected in
+            guard !connected else { return }
+            remoteKeyboardOpen = false
+            session.releaseSoftModifiers()
         }
     }
 
@@ -132,7 +140,8 @@ struct ComputerUseView: View {
         ZStack(alignment: .topLeading) {
             RemoteScreenView(accessories: accessories, zoom: zoom)
                 .background(.black)
-                .allowsHitTesting(!model.isLiveScreenPrivacyShielded)
+                .allowsHitTesting(
+                    model.isConnected && !model.isLiveScreenPrivacyShielded)
                 .accessibilityHidden(model.isLiveScreenPrivacyShielded)
 
             if !session.hasReceivedVideoFrame {
@@ -225,7 +234,8 @@ struct ComputerUseView: View {
             statusLabel
             Spacer(minLength: 8)
 
-            if case .working = model.state {
+            if case .working = model.state,
+               !model.isCancellationPending {
                 Button {
                     didExplicitlyResumeAI = false
                     model.takeControl()
@@ -236,6 +246,7 @@ struct ComputerUseView: View {
                 .tint(.orange)
                 .accessibilityIdentifier("computer-use-take-control")
                 .accessibilityHint("Pauses AI so you can use the live screen yourself")
+                .disabled(!model.isConnected)
             } else if case .paused = model.state {
                 Button(role: .destructive) {
                     didExplicitlyResumeAI = false
@@ -245,6 +256,7 @@ struct ComputerUseView: View {
                 }
                 .buttonStyle(.bordered)
                 .accessibilityIdentifier("computer-use-stop-task")
+                .disabled(!model.isConnected)
 
                 Button {
                     // This marker is the UI-test's sole proof that the person,
@@ -258,6 +270,7 @@ struct ComputerUseView: View {
                 .buttonStyle(.borderedProminent)
                 .tint(.green)
                 .accessibilityIdentifier("computer-use-resume-ai")
+                .disabled(!model.isConnected)
             }
         }
         .font(.caption.weight(.medium))
@@ -274,7 +287,7 @@ struct ComputerUseView: View {
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.orange)
 
-                if !accessories.hasHardwareKeyboard {
+                if !accessories.hasHardwareKeyboard || remoteKeyboardOpen {
                     ModifierBar()
 
                     Button {
@@ -290,10 +303,25 @@ struct ComputerUseView: View {
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
                     .accessibilityHint("Types directly into the Mac, not into AI chat")
-                } else {
+                }
+
+                if accessories.hasHardwareKeyboard {
                     Label("Hardware keyboard active", systemImage: "keyboard")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+
+                    if !remoteKeyboardOpen {
+                        Button {
+                            composerFocused = false
+                            remoteKeyboardOpen = true
+                        } label: {
+                            Label("Keyboard", systemImage: "keyboard")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        .accessibilityHint(
+                            "Opens an on-screen keyboard that types directly into the Mac")
+                    }
                 }
             }
             .padding(.horizontal, 14)
@@ -325,7 +353,7 @@ struct ComputerUseView: View {
     }
 
     private var isTakingControl: Bool {
-        if case .paused = model.state { return true }
+        if model.isConnected, case .paused = model.state { return true }
         return false
     }
 
@@ -453,7 +481,9 @@ struct ComputerUseView: View {
         .accessibilityElement(children: .contain)
         .accessibilityAddTraits(.isModal)
         .accessibilityAction(.escape) {
-            model.respondToApproval(request, approved: false)
+            if model.isConnected {
+                model.respondToApproval(request, approved: false)
+            }
         }
     }
 
@@ -471,6 +501,7 @@ struct ComputerUseView: View {
             }
             .buttonStyle(.bordered)
             .accessibilityHint("Cancels this action without making the proposed change")
+            .disabled(!model.isConnected)
 
             Button {
                 model.respondToApproval(request, approved: true)
@@ -481,6 +512,7 @@ struct ComputerUseView: View {
             }
             .buttonStyle(.borderedProminent)
             .accessibilityHint("Approves only the exact action shown above")
+            .disabled(!model.isConnected)
         }
     }
 
@@ -552,9 +584,11 @@ struct ComputerUseView: View {
                         .font(.caption.weight(.semibold))
                 }
                 .buttonStyle(.bordered)
+                .disabled(!model.isConnected)
             }
 
-            if case .working = model.state {
+            if case .working = model.state,
+               !model.isCancellationPending {
                 Button(role: .destructive) {
                     model.stopCurrentTask()
                 } label: {
@@ -562,6 +596,7 @@ struct ComputerUseView: View {
                         .font(.caption.weight(.semibold))
                 }
                 .buttonStyle(.borderless)
+                .disabled(!model.isConnected)
             }
 
             HStack(alignment: .bottom, spacing: 10) {
@@ -582,6 +617,7 @@ struct ComputerUseView: View {
                         isTakingControl
                             || isAwaitingApproval
                             || model.hasActivePrompt
+                            || !model.isConnected
                             || !session.hasReceivedVideoFrame)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 11)
@@ -609,6 +645,7 @@ struct ComputerUseView: View {
 
     private var canSend: Bool {
         guard case .connected = session.state,
+              model.isConnected,
               session.hasReceivedVideoFrame else { return false }
         switch model.state {
         case .ready, .error:
@@ -624,6 +661,7 @@ struct ComputerUseView: View {
         guard canSend else { return }
         let prompt = draft
         draft = ""
+        composerFocused = false
         model.sendPrompt(prompt)
     }
 

@@ -5,47 +5,60 @@ import ScreenCaptureKit
 import os
 
 enum CaptureSizing {
-    /// Both H.264 profiles advertised by the bundled WebRTC framework use
-    /// level 3.1 (`profile-level-id` ending in `1f`). Level 3.1 permits at
-    /// most 3,600 16x16 macroblocks per frame. Feeding a Retina display's
-    /// output buffer (for example 1728x1116 on a Retina MacBook) directly to
-    /// VideoToolbox exceeds that limit and the hardware encoder rejects every
-    /// frame with `kVTParameterErr`.
-    static let maximumH264Level31MacroblocksPerFrame = 3_600
-    static let targetFramesPerSecond: Int32 = 30
+    static let targetFramesPerSecond = Int32(DesktopVideoQuality.targetFramesPerSecond)
 
     static func normalized(width: Int, height: Int) -> (width: Int, height: Int) {
         (normalize(width), normalize(height))
     }
 
+    static func backingPixelSize(
+        widthInPoints: Double,
+        heightInPoints: Double,
+        pointPixelScale: Double
+    ) -> (width: Int, height: Int) {
+        let scale = max(1, pointPixelScale)
+        return normalized(
+            width: Int((widthInPoints * scale).rounded()),
+            height: Int((heightInPoints * scale).rounded()))
+    }
+
     /// Returns the largest even-sized rectangle with the source aspect ratio
-    /// that fits H.264 level 3.1. Searching the small macroblock grid avoids
-    /// accidentally crossing the limit after 16-pixel alignment.
-    static func encoderSafe(width: Int, height: Int) -> (width: Int, height: Int) {
+    /// that fits the negotiated codec. Searching the small macroblock grid
+    /// avoids accidentally crossing an H.264 level limit after 16-pixel
+    /// alignment.
+    static func encoderSafe(
+        width: Int,
+        height: Int,
+        maximumMacroblocksPerFrame: Int
+    ) -> (width: Int, height: Int) {
         let source = normalized(width: width, height: height)
         guard macroblockCount(width: source.width, height: source.height)
-                > maximumH264Level31MacroblocksPerFrame else {
+                > maximumMacroblocksPerFrame
+                || source.width > DesktopVideoQuality.maximumEncodedDimension
+                || source.height > DesktopVideoQuality.maximumEncodedDimension else {
             return source
         }
 
         var best = (width: 2, height: 2)
         var bestArea = 4
 
-        for macroblockHeight in 1...maximumH264Level31MacroblocksPerFrame {
-            let macroblockWidth = maximumH264Level31MacroblocksPerFrame / macroblockHeight
+        for macroblockHeight in 1...maximumMacroblocksPerFrame {
+            let macroblockWidth = maximumMacroblocksPerFrame / macroblockHeight
             guard macroblockWidth > 0 else { continue }
 
             let scale = min(
                 1,
                 Double(macroblockWidth * 16) / Double(source.width),
-                Double(macroblockHeight * 16) / Double(source.height))
+                Double(macroblockHeight * 16) / Double(source.height),
+                Double(DesktopVideoQuality.maximumEncodedDimension) / Double(source.width),
+                Double(DesktopVideoQuality.maximumEncodedDimension) / Double(source.height))
             let candidate = normalized(
                 width: Int((Double(source.width) * scale).rounded(.down)),
                 height: Int((Double(source.height) * scale).rounded(.down)))
             let area = candidate.width * candidate.height
 
             guard macroblockCount(width: candidate.width, height: candidate.height)
-                    <= maximumH264Level31MacroblocksPerFrame,
+                    <= maximumMacroblocksPerFrame,
                   area > bestArea else {
                 continue
             }
@@ -98,29 +111,39 @@ final class ScreenCapture: NSObject, @unchecked Sendable {
     /// Picks the display containing the menu bar and starts capturing
     /// at up to 30 fps, adding system audio only when enabled. Throws if ScreenCaptureKit
     /// can't start (typically: missing TCC approval).
-    func start(audioEnabled: Bool) async throws {
+    func start(
+        audioEnabled: Bool,
+        maximumMacroblocksPerFrame: Int
+    ) async throws {
         guard stream == nil else { return }
         stopping = false
         loggedFirstVideoSample = false
         loggedFirstAudioSample = false
         let content = try await SCShareableContent.excludingDesktopWindows(
             false, onScreenWindowsOnly: false)
-        guard let display = content.displays.first else {
+        guard let display = content.displays.first(where: {
+            $0.displayID == CGMainDisplayID()
+        }) ?? content.displays.first else {
             throw CaptureError.noDisplay
         }
+        let filter = SCContentFilter(
+            display: display,
+            excludingApplications: [],
+            exceptingWindows: [])
+        let contentInfo = SCShareableContent.info(for: filter)
+        let sourceSize = CaptureSizing.backingPixelSize(
+            widthInPoints: Double(contentInfo.contentRect.width),
+            heightInPoints: Double(contentInfo.contentRect.height),
+            pointPixelScale: Double(contentInfo.pointPixelScale))
         let captureSize = CaptureSizing.encoderSafe(
-            width: display.width,
-            height: display.height)
+            width: sourceSize.width,
+            height: sourceSize.height,
+            maximumMacroblocksPerFrame: maximumMacroblocksPerFrame)
 
         let config = Self.streamConfiguration(
             width: captureSize.width,
             height: captureSize.height,
             audioEnabled: audioEnabled)
-
-        let filter = SCContentFilter(
-            display: display,
-            excludingApplications: [],
-            exceptingWindows: [])
 
         let s = SCStream(filter: filter, configuration: config, delegate: self)
         try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: videoQueue)
@@ -131,7 +154,7 @@ final class ScreenCapture: NSObject, @unchecked Sendable {
         try await s.startCapture()
         stream = s
         log.info(
-            "capture started source=\(display.width, privacy: .public)x\(display.height, privacy: .public) output=\(captureSize.width, privacy: .public)x\(captureSize.height, privacy: .public) fps=\(CaptureSizing.targetFramesPerSecond, privacy: .public) audio=\(audioEnabled, privacy: .public)")
+            "capture started points=\(display.width, privacy: .public)x\(display.height, privacy: .public) backing=\(sourceSize.width, privacy: .public)x\(sourceSize.height, privacy: .public) output=\(captureSize.width, privacy: .public)x\(captureSize.height, privacy: .public) macroblockLimit=\(maximumMacroblocksPerFrame, privacy: .public) fps=\(CaptureSizing.targetFramesPerSecond, privacy: .public) audio=\(audioEnabled, privacy: .public)")
     }
 
     func stop() async {
@@ -167,7 +190,7 @@ extension ScreenCapture {
         config.minimumFrameInterval = CMTime(
             value: 1,
             timescale: CaptureSizing.targetFramesPerSecond)
-        config.queueDepth = 6
+        config.queueDepth = DesktopVideoQuality.captureQueueDepth
         config.showsCursor = true
         config.capturesAudio = audioEnabled
         if audioEnabled {

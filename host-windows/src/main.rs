@@ -735,13 +735,7 @@ fn terminate_stale_host_siblings() {
     };
 
     let Ok(output) = Command::new("tasklist")
-        .args([
-            "/FO",
-            "CSV",
-            "/NH",
-            "/FI",
-            &format!("IMAGENAME eq {image}"),
-        ])
+        .args(["/FO", "CSV", "/NH", "/FI", &format!("IMAGENAME eq {image}")])
         .output()
     else {
         return;

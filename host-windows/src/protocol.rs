@@ -262,7 +262,7 @@ mod tests {
         );
         let value: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(value["t"], "hello_ack");
-        assert_eq!(value["proto"], 1);
+        assert_eq!(value["proto"], PROTOCOL_VERSION);
         assert_eq!(value["caps"]["audio"], true);
         assert_eq!(value["host"]["app"], "RemoteDesktop-Windows");
     }

@@ -166,7 +166,10 @@ mod tests {
 
     #[test]
     fn resolve_falls_back_to_compiled() {
-        assert_eq!(resolve(None, Some("compiled")), Some("compiled".to_string()));
+        assert_eq!(
+            resolve(None, Some("compiled")),
+            Some("compiled".to_string())
+        );
     }
 
     #[test]

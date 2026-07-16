@@ -6,8 +6,16 @@ enum HostConfig {
     /// listed in `RemoteDesktopHost.entitlements`.
     static let cloudKitContainerIdentifier = "iCloud.com.threadmark.remotedesktop"
 
+    // Base remote-control compatibility remains v1. Optional features such as
+    // causally ordered Computer Use controls negotiate their own capability
+    // inside the authenticated hello instead of disconnecting legacy peers.
     static let protocolVersion = 1
-    static let appVersion = "0.1.0"
+    static let orderedComputerUseControlsVersion = 1
+    static var appVersion: String {
+        Bundle.main.object(
+            forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+            ?? "unknown"
+    }
     /// The build contains the optional system-audio bridge. A session only
     /// enables it after the user separately grants microphone access.
     static let enableSystemAudio = true

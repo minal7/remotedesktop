@@ -1,6 +1,7 @@
 import SwiftUI
 import UIKit
 import LiveKitWebRTC
+import Metal
 
 /// The capture surface for the remote session: renders incoming video
 /// (placeholder for now) and routes every input channel back to the
@@ -134,7 +135,7 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
     weak var accessories: AccessoryMonitor?
 
     private let contentView = UIView(frame: .zero)
-    private let videoView = RTCMTLVideoView(frame: .zero)
+    private let videoView = MetalSafeRTCVideoView(frame: .zero)
     private let cursorLayer = TouchCursorLayer()
     private var remoteDisplay: DisplayInfo?
     private weak var boundSession: SessionModel?
@@ -674,6 +675,89 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
 
     private var geometry: RemoteScreenGeometry {
         RemoteScreenGeometry(bounds: bounds, display: remoteDisplay)
+    }
+}
+
+/// LiveKit's `RTCMTLVideoView` treats the pixel dimensions delivered to
+/// `RTCVideoRenderer.setSize(_:)` as points, then multiplies them by the iOS
+/// screen scale when sizing its `MTKView` drawable. A 3456-pixel Retina frame
+/// therefore requests a 10,368-pixel texture on an @3x iPhone, exceeding the
+/// 8192-pixel Metal limit exposed by Simulator.
+///
+/// Keep decoding the negotiated frame at full quality, but bound only the
+/// renderer's drawable request. The aspect ratio is retained, so LiveKit's
+/// aspect-fit layout and the separately signaled remote input geometry remain
+/// unchanged.
+private final class MetalSafeRTCVideoView: RTCMTLVideoView {
+    /// WebRTC invokes `setSize(_:)` on its renderer queue, so that callback
+    /// must not consult `UIView.window`, `UIWindow.screen`, or trait state.
+    /// Capture the immutable sizing inputs while UIKit constructs the view on
+    /// the main thread and use only those values from the renderer callback.
+    private let rendererDisplayScale: CGFloat
+    private let rendererMaximumTextureDimension: Int
+
+    override init(frame: CGRect) {
+        rendererDisplayScale = UIScreen.main.scale
+        rendererMaximumTextureDimension = MetalVideoRenderSizing
+            .maximumTextureDimension2D(for: MTLCreateSystemDefaultDevice())
+        super.init(frame: frame)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("MetalSafeRTCVideoView is created programmatically")
+    }
+
+    override func setSize(_ size: CGSize) {
+        super.setSize(MetalVideoRenderSizing.rendererFrameSize(
+            size,
+            displayScale: rendererDisplayScale,
+            maximumTextureDimension: rendererMaximumTextureDimension))
+    }
+}
+
+enum MetalVideoRenderSizing {
+    /// Metal does not expose a public `maxTextureDimension2D` property. The
+    /// limit is instead specified by GPU family. Apple3 and later permit a
+    /// 16K 2D texture; the portable fallback is 8K. Simulator needs the 8K
+    /// ceiling explicitly because its MTLSimDevice reports that validation
+    /// limit even when the host Mac belongs to a newer family.
+    static func maximumTextureDimension2D(for device: MTLDevice?) -> Int {
+#if targetEnvironment(simulator)
+        _ = device
+        return 8_192
+#else
+        guard let device else { return 8_192 }
+        return device.supportsFamily(.apple3) ? 16_384 : 8_192
+#endif
+    }
+
+    static func rendererFrameSize(
+        _ frameSize: CGSize,
+        displayScale: CGFloat,
+        maximumTextureDimension: Int
+    ) -> CGSize {
+        guard frameSize.width.isFinite,
+              frameSize.height.isFinite,
+              frameSize.width > 0,
+              frameSize.height > 0 else {
+            return frameSize
+        }
+
+        let safeDisplayScale = displayScale.isFinite && displayScale > 0
+            ? displayScale
+            : 1
+        let maximumPointDimension = floor(
+            CGFloat(max(1, maximumTextureDimension)) / safeDisplayScale)
+        let downscale = min(
+            1,
+            maximumPointDimension / frameSize.width,
+            maximumPointDimension / frameSize.height)
+
+        guard downscale < 1 else { return frameSize }
+        return CGSize(
+            width: max(1, floor(frameSize.width * downscale)),
+            height: max(1, floor(frameSize.height * downscale)))
     }
 }
 

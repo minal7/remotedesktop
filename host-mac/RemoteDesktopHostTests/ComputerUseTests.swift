@@ -47,6 +47,57 @@ final class ComputerUseTests: XCTestCase {
         XCTAssertEqual(CloudKitComputerUseChannel.recordType, "WebRTCSignal")
     }
 
+    func test_orderedControlAndApprovalPayloadsRemainWireCompatible() throws {
+        let request = ComputerUseControlRequest(
+            taskID: "stable-task-id",
+            revision: 42)
+
+        XCTAssertEqual(
+            try ComputerUseControlRequest.decodeBody(request.encodedBody()),
+            request)
+        XCTAssertEqual(request.version, ComputerUseControlRequest.currentVersion)
+        XCTAssertTrue(request.isValid)
+
+        let acknowledged = ComputerUseTaskUpdate(
+            taskID: request.taskID,
+            text: "paused",
+            appliedControlRevision: request.revision)
+        XCTAssertEqual(
+            try ComputerUseTaskUpdate.decodeBody(acknowledged.encodedBody()),
+            acknowledged)
+
+        let legacyBody = #"{"taskID":"stable-task-id","text":"working"}"#
+        let legacy = try ComputerUseTaskUpdate.decodeBody(legacyBody)
+        XCTAssertEqual(legacy.taskID, request.taskID)
+        XCTAssertEqual(legacy.text, "working")
+        XCTAssertNil(legacy.appliedControlRevision)
+
+        let approval = ComputerUseApprovalRequest(
+            requestID: "approval-42",
+            taskID: request.taskID,
+            message: "Perform the exact action?",
+            appliedControlRevision: request.revision)
+        XCTAssertEqual(
+            try ComputerUseApprovalRequest.decodeBody(approval.encodedBody()),
+            approval)
+        let legacyApproval = try ComputerUseApprovalRequest.decodeBody(
+            #"{"requestID":"legacy-approval","taskID":"stable-task-id","message":"Continue?"}"#)
+        XCTAssertNil(legacyApproval.appliedControlRevision)
+
+        let response = ComputerUseApprovalResponse(
+            requestID: approval.requestID,
+            approved: true,
+            taskID: approval.taskID,
+            appliedControlRevision: approval.appliedControlRevision)
+        XCTAssertEqual(
+            try ComputerUseApprovalResponse.decodeBody(response.encodedBody()),
+            response)
+        let legacyResponse = try ComputerUseApprovalResponse.decodeBody(
+            #"{"requestID":"legacy-approval","approved":false}"#)
+        XCTAssertNil(legacyResponse.taskID)
+        XCTAssertNil(legacyResponse.appliedControlRevision)
+    }
+
     func test_visualOpenAppUsesValidatedNativeApplicationOpener() async throws {
         var openedNames: [String] = []
         let tools = ComputerUseHostTools(
@@ -121,6 +172,41 @@ final class ComputerUseTests: XCTestCase {
         XCTAssertEqual(observation.displayBounds, expectedBounds)
         XCTAssertNil(tools.approvalReason(for: benignQuoteRead))
         XCTAssertEqual(inspectedActions, [benignQuoteRead])
+    }
+
+    func test_focusedWindowGeometryFailsClosedWhenCaptureIdentityChanges() {
+        let bounds = CGRect(x: 120, y: 80, width: 900, height: 700)
+        let stable = ComputerUseFrontmostWindowCaptureIdentity(
+            applicationProcessIdentifier: 42,
+            accessibilityWindowHash: 101,
+            bounds: bounds)
+        XCTAssertEqual(
+            ComputerUseHostTools.stableFrontmostWindowBounds(
+                before: stable,
+                after: stable),
+            bounds)
+
+        XCTAssertNil(ComputerUseHostTools.stableFrontmostWindowBounds(
+            before: stable,
+            after: .init(
+                applicationProcessIdentifier: 43,
+                accessibilityWindowHash: 101,
+                bounds: bounds)))
+        XCTAssertNil(ComputerUseHostTools.stableFrontmostWindowBounds(
+            before: stable,
+            after: .init(
+                applicationProcessIdentifier: 42,
+                accessibilityWindowHash: 202,
+                bounds: bounds)))
+        XCTAssertNil(ComputerUseHostTools.stableFrontmostWindowBounds(
+            before: stable,
+            after: .init(
+                applicationProcessIdentifier: 42,
+                accessibilityWindowHash: 101,
+                bounds: bounds.offsetBy(dx: 20, dy: 0))))
+        XCTAssertNil(ComputerUseHostTools.stableFrontmostWindowBounds(
+            before: nil,
+            after: stable))
     }
 
     func test_stableCloudKitRetryRefreshesPreStartRecordWithoutChangingMessage() throws {
@@ -341,9 +427,12 @@ final class ComputerUseTests: XCTestCase {
         XCTAssertNotNil(ComputerUseActionSafetyPolicy.approvalReason(
             for: .typeText("123456"),
             accessibilityContext: ""))
-        XCTAssertNotNil(ComputerUseActionSafetyPolicy.approvalReason(
+        XCTAssertNil(ComputerUseActionSafetyPolicy.approvalReason(
             for: .click(x: 10, y: 10, button: 1, count: 1),
             accessibilityContext: "AXButton • Next"))
+        XCTAssertNil(ComputerUseActionSafetyPolicy.approvalReason(
+            for: .click(x: 10, y: 10, button: 1, count: 1),
+            accessibilityContext: "AXButton • Start local quote setup"))
         XCTAssertNotNil(ComputerUseActionSafetyPolicy.approvalReason(
             for: .click(x: 10, y: 10, button: 1, count: 1),
             accessibilityContext: "AXButton • Place Order"))
@@ -527,6 +616,61 @@ final class ComputerUseTests: XCTestCase {
         .maskAlphaShift,
     ]
 
+    func test_hostHelloNegotiatesOrderedControlsWithoutBumpingBaseProtocol() throws {
+        let capableHello = try JSONSerialization.data(withJSONObject: [
+            "t": "hello",
+            "proto": HostConfig.protocolVersion,
+            "client": ["orderedComputerUseControls": 1],
+        ])
+        let legacyHello = try JSONSerialization.data(withJSONObject: [
+            "t": "hello",
+            "proto": HostConfig.protocolVersion,
+            "client": [:],
+        ])
+
+        XCTAssertEqual(
+            ControlMessage.decode(capableHello),
+            .hello(proto: 1, orderedComputerUseControls: 1))
+        XCTAssertEqual(
+            ControlMessage.decode(legacyHello),
+            .hello(proto: 1, orderedComputerUseControls: 0))
+
+        let acknowledgement = HostMessageEncoder.helloAck(
+            proto: HostConfig.protocolVersion,
+            hostname: "Studio Mac",
+            os: "macOS",
+            audio: true,
+            monitors: 1,
+            seq: 1,
+            ts: 1)
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: acknowledgement)
+                as? [String: Any])
+        let capabilities = try XCTUnwrap(object["caps"] as? [String: Any])
+        XCTAssertEqual(object["proto"] as? Int, 1)
+        XCTAssertEqual(
+            capabilities["orderedComputerUseControls"] as? Int,
+            HostConfig.orderedComputerUseControlsVersion)
+    }
+
+    func test_peerAuthorizationRequiresAuthenticatedOrderedCapability() {
+        XCTAssertTrue(HostPeerSession.PeerAuthorization(
+            senderID: "IOS-PEER",
+            authorized: true,
+            orderedComputerUseControls: 1)
+            .supportsOrderedComputerUseControls)
+        XCTAssertFalse(HostPeerSession.PeerAuthorization(
+            senderID: "IOS-PEER",
+            authorized: true,
+            orderedComputerUseControls: 0)
+            .supportsOrderedComputerUseControls)
+        XCTAssertFalse(HostPeerSession.PeerAuthorization(
+            senderID: "IOS-PEER",
+            authorized: false,
+            orderedComputerUseControls: 1)
+            .supportsOrderedComputerUseControls)
+    }
+
     func test_hostPeerRejectsEveryDirectInputBeforeAuthenticatedHello() {
         let inputs: [ControlMessage] = [
             .pointer(x: 10, y: 20, buttons: 1),
@@ -584,6 +728,51 @@ final class ComputerUseTests: XCTestCase {
         XCTAssertEqual(executor.callCount, 1, "same task ID must never execute twice")
     }
 
+    func test_legacyPeerKeepsRemoteAuthorizationButCannotStartComputerUse() async {
+        let executor = ImmediateComputerUseExecutor(results: [.completed("Done")])
+        let channel = FakeHostComputerUseChannel()
+        let ledgerURL = temporaryLedgerURL()
+        defer {
+            try? FileManager.default.removeItem(
+                at: ledgerURL.deletingLastPathComponent())
+        }
+        let manager = HostComputerUseManager(
+            injector: InputInjector(),
+            executor: executor,
+            taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
+            channelFactory: { _ in channel })
+        let prompt = makeEnvelope(kind: .prompt, body: "Open Notes")
+        manager.authorizePeer(
+            senderID: prompt.senderID,
+            supportsOrderedComputerUseControls: false)
+
+        XCTAssertTrue(manager.isPeerAuthorized(senderID: prompt.senderID))
+        XCTAssertFalse(manager.isPeerAuthorizedForComputerUse(
+            senderID: prompt.senderID))
+        XCTAssertTrue(manager.handle(prompt, channel: channel))
+
+        await waitUntil {
+            await channel.sentMessages().contains { message in
+                guard message.kind == .assistant,
+                      let update = try? ComputerUseTaskUpdate.decodeBody(
+                        message.body) else { return false }
+                return update.taskID == prompt.id
+                    && update.text.contains("Update Remote Desktop")
+            }
+        }
+        XCTAssertEqual(executor.callCount, 0)
+        XCTAssertEqual(manager.activity, .idle)
+
+        XCTAssertTrue(manager.handle(
+            makeEnvelope(kind: .pause),
+            channel: channel))
+        XCTAssertTrue(manager.handle(
+            makeEnvelope(kind: .approvalResponse, body: "{}"),
+            channel: channel))
+        await Task.yield()
+        XCTAssertEqual(executor.callCount, 0)
+    }
+
     func test_applicationShutdownAwaitsCancelledExecutionBeforeRuntimeDeactivation() async {
         let executor = ShutdownBlockingComputerUseExecutor()
         let visualLoader = ShutdownRecordingVisualLoader()
@@ -624,6 +813,229 @@ final class ComputerUseTests: XCTestCase {
         XCTAssertTrue(completion.finished)
         XCTAssertEqual(visualLoader.deactivationCount, 1)
         XCTAssertEqual(manager.activity, .idle)
+    }
+
+    func test_transportStopTerminalizesWorkingTaskBeforeLateExecutorCompletion() async throws {
+        let executor = ShutdownBlockingComputerUseExecutor()
+        let channel = FakeHostComputerUseChannel()
+        let ledgerURL = temporaryLedgerURL()
+        defer {
+            try? FileManager.default.removeItem(
+                at: ledgerURL.deletingLastPathComponent())
+        }
+        let manager = HostComputerUseManager(
+            injector: InputInjector(),
+            executor: executor,
+            taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
+            channelFactory: { _ in channel })
+        let prompt = makeEnvelope(
+            id: "disconnect-working-task",
+            kind: .prompt,
+            body: "Open Calculator")
+        manager.authorizePeer(senderID: prompt.senderID)
+
+        XCTAssertTrue(manager.handle(prompt, channel: channel))
+        await waitUntil { executor.started }
+
+        manager.stop()
+        XCTAssertEqual(manager.activity, .idle)
+        XCTAssertEqual(
+            try ComputerUseTaskLedger(fileURL: ledgerURL).claim(
+                taskID: prompt.id,
+                senderID: prompt.senderID,
+                sessionID: prompt.sessionID),
+            .completed(HostComputerUseManager.connectionEndedResponse))
+
+        // Simulate a runtime that observes cancellation but still returns a
+        // result while unwinding. The disconnect result must remain the only
+        // assistant terminal and the durable replay value.
+        executor.release()
+        await waitUntil {
+            await channel.sentMessages().contains { envelope in
+                guard envelope.kind == .assistant,
+                      let update = try? ComputerUseTaskUpdate.decodeBody(
+                        envelope.body) else { return false }
+                return update.taskID == prompt.id
+                    && update.text
+                        == HostComputerUseManager.connectionEndedResponse
+            }
+        }
+        try? await Task.sleep(for: .milliseconds(50))
+
+        let messages = await channel.sentMessages()
+        XCTAssertFalse(messages.contains { envelope in
+            guard envelope.kind == .assistant,
+                  let update = try? ComputerUseTaskUpdate.decodeBody(
+                    envelope.body) else { return false }
+            return update.text == "Done"
+        })
+        XCTAssertEqual(
+            try ComputerUseTaskLedger(fileURL: ledgerURL).claim(
+                taskID: prompt.id,
+                senderID: prompt.senderID,
+                sessionID: prompt.sessionID),
+            .completed(HostComputerUseManager.connectionEndedResponse))
+    }
+
+    func test_transportStopTerminalizesPausedTaskInsteadOfResumingAfterReconnect() async throws {
+        let executor = ImmediateComputerUseExecutor(results: [
+            .userInterventionRequired(
+                "Sign in yourself, then let the AI continue."),
+        ])
+        let channel = FakeHostComputerUseChannel()
+        let ledgerURL = temporaryLedgerURL()
+        defer {
+            try? FileManager.default.removeItem(
+                at: ledgerURL.deletingLastPathComponent())
+        }
+        let manager = HostComputerUseManager(
+            injector: InputInjector(),
+            executor: executor,
+            taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
+            channelFactory: { _ in channel })
+        let prompt = makeEnvelope(
+            id: "disconnect-paused-task",
+            kind: .prompt,
+            body: "Continue the visible task")
+        manager.authorizePeer(senderID: prompt.senderID)
+
+        XCTAssertTrue(manager.handle(prompt, channel: channel))
+        await waitUntil { manager.activity == .paused }
+        manager.stop()
+
+        XCTAssertEqual(manager.activity, .idle)
+        XCTAssertEqual(
+            try ComputerUseTaskLedger(fileURL: ledgerURL).claim(
+                taskID: prompt.id,
+                senderID: prompt.senderID,
+                sessionID: prompt.sessionID),
+            .completed(HostComputerUseManager.connectionEndedResponse))
+        manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(manager.handle(prompt, channel: channel))
+        await Task.yield()
+        XCTAssertEqual(
+            executor.callCount,
+            1,
+            "re-delivery after reconnect must replay the terminal result")
+    }
+
+    func test_transportStopTerminalizesPendingApprovalAndInvalidatesIt() async throws {
+        let proposedAction = ComputerUsePredictedAction.key(
+            usage: 0x4C,
+            modifiers: 0)
+        let executor = ImmediateComputerUseExecutor(results: [
+            .approvalRequired(
+                message: "Delete the selected item",
+                action: proposedAction),
+            .completed("Unexpected continuation"),
+        ])
+        var performedActions: [ComputerUsePredictedAction] = []
+        let channel = FakeHostComputerUseChannel()
+        let ledgerURL = temporaryLedgerURL()
+        defer {
+            try? FileManager.default.removeItem(
+                at: ledgerURL.deletingLastPathComponent())
+        }
+        let manager = HostComputerUseManager(
+            injector: InputInjector(),
+            executor: executor,
+            taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
+            approvalTargetProvider: { _ in
+                ComputerUseApprovalTargetSnapshot(
+                    context: "selected disconnect fixture item",
+                    applicationID: "com.threadmark.tests.fixture",
+                    accessibilityIdentity: "disconnect-approval-target")
+            },
+            actionPerformer: { performedActions.append($0) },
+            channelFactory: { _ in channel })
+        let prompt = makeEnvelope(
+            id: "disconnect-approval-task",
+            kind: .prompt,
+            body: "Delete the selected item")
+        manager.authorizePeer(senderID: prompt.senderID)
+
+        XCTAssertTrue(manager.handle(prompt, channel: channel))
+        await waitUntil {
+            if case .awaitingApproval = manager.activity { return true }
+            return false
+        }
+        await waitUntil {
+            await channel.sentMessages().contains { $0.kind == .approvalRequest }
+        }
+        let approvalMessages = await channel.sentMessages()
+        let approvalEnvelope = try XCTUnwrap(
+            approvalMessages.first { $0.kind == .approvalRequest })
+        let approval = try ComputerUseApprovalRequest.decodeBody(
+            approvalEnvelope.body)
+
+        manager.stop()
+        manager.authorizePeer(senderID: prompt.senderID)
+        let staleApproval = ComputerUseApprovalResponse(
+            requestID: approval.requestID,
+            approved: true,
+            taskID: approval.taskID,
+            appliedControlRevision: approval.appliedControlRevision)
+        XCTAssertTrue(manager.handle(
+            makeEnvelope(
+                kind: .approvalResponse,
+                body: try staleApproval.encodedBody()),
+            channel: channel))
+        await Task.yield()
+
+        XCTAssertTrue(performedActions.isEmpty)
+        XCTAssertEqual(executor.callCount, 1)
+        XCTAssertEqual(
+            try ComputerUseTaskLedger(fileURL: ledgerURL).claim(
+                taskID: prompt.id,
+                senderID: prompt.senderID,
+                sessionID: prompt.sessionID),
+            .completed(HostComputerUseManager.connectionEndedResponse))
+    }
+
+    func test_replacedTransportDropsLatePollFromCancellationIgnoringChannel() async {
+        let executor = ImmediateComputerUseExecutor(results: [.completed("Unexpected")])
+        let oldChannel = CancellationIgnoringPollComputerUseChannel()
+        let replacementChannel = FakeHostComputerUseChannel()
+        let ledgerURL = temporaryLedgerURL()
+        defer {
+            try? FileManager.default.removeItem(
+                at: ledgerURL.deletingLastPathComponent())
+        }
+        var channelCreationCount = 0
+        let manager = HostComputerUseManager(
+            injector: InputInjector(),
+            executor: executor,
+            taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
+            allowsExternalServices: true,
+            channelFactory: { _ in
+                channelCreationCount += 1
+                return channelCreationCount == 1
+                    ? oldChannel
+                    : replacementChannel
+            })
+        defer { manager.stop() }
+
+        manager.start(pairingCode: "111111")
+        await waitUntil { await oldChannel.pollDidStart() }
+        manager.start(pairingCode: "222222")
+        manager.authorizePeer(senderID: "IOS-PEER")
+
+        await oldChannel.releasePoll(with: [
+            makeEnvelope(
+                id: "stale-transport-prompt",
+                kind: .prompt,
+                body: "Open Calculator"),
+        ])
+        try? await Task.sleep(for: .milliseconds(100))
+
+        XCTAssertEqual(
+            executor.callCount,
+            0,
+            "a late poll from the replaced transport must never start work")
+        let acknowledged = await oldChannel.acknowledgedEnvelopeIDs()
+        XCTAssertTrue(
+            acknowledged.isEmpty,
+            "stale envelopes must not be acknowledged by the replacement generation")
     }
 
     func test_managerAsksForEmailDetailsBeforeModelOrScreenControl() async throws {
@@ -789,6 +1201,17 @@ final class ComputerUseTests: XCTestCase {
         manager.revokePeerAuthorization()
         XCTAssertEqual(manager.activity, .paused)
         XCTAssertFalse(manager.isPeerAuthorized(senderID: prompt.senderID))
+        await waitUntil {
+            await channel.sentMessages().contains { envelope in
+                guard envelope.kind == .status,
+                      let update = try? ComputerUseTaskUpdate.decodeBody(
+                        envelope.body) else { return false }
+                return update.taskID == prompt.id
+                    && ComputerUseStatusSignal.userInterventionMessage(
+                        from: update.text)
+                        == HostComputerUseManager.userInterventionGuidance
+            }
+        }
 
         manager.handle(makeEnvelope(kind: .resume), channel: channel)
         await Task.yield()
@@ -855,6 +1278,812 @@ final class ComputerUseTests: XCTestCase {
         XCTAssertTrue(executor.prompts.last?.contains("executed the one action") == true)
     }
 
+    func test_versionedPauseBeforePromptDefersExecutionUntilHigherResume() async throws {
+        let executor = SuspendingComputerUseExecutor()
+        let channel = FakeHostComputerUseChannel()
+        let ledgerURL = temporaryLedgerURL()
+        defer {
+            try? FileManager.default.removeItem(
+                at: ledgerURL.deletingLastPathComponent())
+        }
+        let manager = HostComputerUseManager(
+            injector: InputInjector(),
+            executor: executor,
+            taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
+            channelFactory: { _ in channel })
+        defer { manager.stop() }
+        let prompt = makeEnvelope(
+            id: "pause-before-prompt-task",
+            kind: .prompt,
+            body: "Organize the desktop")
+        manager.authorizePeer(senderID: prompt.senderID)
+
+        XCTAssertTrue(manager.handle(
+            try makeControlEnvelope(
+                kind: .pause,
+                taskID: prompt.id,
+                revision: 1),
+            channel: channel))
+        XCTAssertEqual(manager.activity, .idle)
+        await waitUntil {
+            await channel.sentMessages().contains { message in
+                guard message.kind == .status,
+                      let update = try? ComputerUseTaskUpdate.decodeBody(
+                        message.body) else { return false }
+                return update.taskID == prompt.id
+                    && update.text == "paused"
+                    && update.appliedControlRevision == 1
+            }
+        }
+
+        XCTAssertTrue(manager.handle(prompt, channel: channel))
+        XCTAssertEqual(manager.activity, .paused)
+        XCTAssertEqual(executor.callCount, 0)
+
+        // An equal revision is only a retry acknowledgement; it cannot reverse
+        // or re-run the already reduced Pause.
+        XCTAssertTrue(manager.handle(
+            try makeControlEnvelope(
+                kind: .resume,
+                taskID: prompt.id,
+                revision: 1),
+            channel: channel))
+        await Task.yield()
+        XCTAssertEqual(manager.activity, .paused)
+        XCTAssertEqual(executor.callCount, 0)
+
+        XCTAssertTrue(manager.handle(
+            try makeControlEnvelope(
+                kind: .resume,
+                taskID: prompt.id,
+                revision: 2),
+            channel: channel))
+        await waitUntil {
+            executor.callCount == 1
+                && manager.activity == .working("Starting…")
+        }
+        await waitUntil {
+            await channel.sentMessages().contains { message in
+                guard message.kind == .status,
+                      let update = try? ComputerUseTaskUpdate.decodeBody(
+                        message.body) else { return false }
+                return update.taskID == prompt.id
+                    && update.text == "working"
+                    && update.appliedControlRevision == 2
+            }
+        }
+    }
+
+    func test_versionedPauseBeforePromptThenHigherCancelNeverStarts() async throws {
+        let executor = ImmediateComputerUseExecutor(results: [
+            .completed("This must never execute"),
+        ])
+        let channel = FakeHostComputerUseChannel()
+        let ledgerURL = temporaryLedgerURL()
+        defer {
+            try? FileManager.default.removeItem(
+                at: ledgerURL.deletingLastPathComponent())
+        }
+        let manager = HostComputerUseManager(
+            injector: InputInjector(),
+            executor: executor,
+            taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
+            channelFactory: { _ in channel })
+        defer { manager.stop() }
+        let prompt = makeEnvelope(
+            id: "pause-then-cancel-task",
+            kind: .prompt,
+            body: "Open Calculator")
+        manager.authorizePeer(senderID: prompt.senderID)
+
+        XCTAssertTrue(manager.handle(
+            try makeControlEnvelope(
+                kind: .pause,
+                taskID: prompt.id,
+                revision: 1),
+            channel: channel))
+        XCTAssertTrue(manager.handle(prompt, channel: channel))
+        XCTAssertEqual(manager.activity, .paused)
+        XCTAssertEqual(executor.callCount, 0)
+
+        XCTAssertTrue(manager.handle(
+            try makeControlEnvelope(
+                kind: .cancel,
+                taskID: prompt.id,
+                revision: 2),
+            channel: channel))
+        await waitUntil {
+            await channel.sentMessages().contains { message in
+                guard message.kind == .assistant,
+                      let update = try? ComputerUseTaskUpdate.decodeBody(
+                        message.body) else { return false }
+                return update.taskID == prompt.id
+                    && update.text == ComputerUseTaskLedger.stoppedResponse
+                    && update.appliedControlRevision == 2
+            }
+        }
+
+        XCTAssertEqual(executor.callCount, 0)
+        XCTAssertEqual(manager.activity, .idle)
+    }
+
+    func test_versionedCancelBeforePromptIsTerminalAndAbsorbsLatePause() async throws {
+        let executor = ImmediateComputerUseExecutor(results: [
+            .completed("This must never execute"),
+        ])
+        let channel = FakeHostComputerUseChannel()
+        let ledgerURL = temporaryLedgerURL()
+        defer {
+            try? FileManager.default.removeItem(
+                at: ledgerURL.deletingLastPathComponent())
+        }
+        let manager = HostComputerUseManager(
+            injector: InputInjector(),
+            executor: executor,
+            taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
+            channelFactory: { _ in channel })
+        defer { manager.stop() }
+        let prompt = makeEnvelope(
+            id: "cancel-before-prompt-task",
+            kind: .prompt,
+            body: "Open Calculator")
+        manager.authorizePeer(senderID: prompt.senderID)
+
+        XCTAssertTrue(manager.handle(
+            try makeControlEnvelope(
+                kind: .cancel,
+                taskID: prompt.id,
+                revision: 1),
+            channel: channel))
+        await waitUntil {
+            await channel.sentMessages().contains { message in
+                guard message.kind == .assistant,
+                      let update = try? ComputerUseTaskUpdate.decodeBody(
+                        message.body) else { return false }
+                return update.taskID == prompt.id
+                    && update.text == ComputerUseTaskLedger.stoppedResponse
+                    && update.appliedControlRevision == 1
+            }
+        }
+
+        // Cancel remains terminal even when a newer Pause arrives late. The
+        // revision still advances so the client can discard older statuses.
+        XCTAssertTrue(manager.handle(
+            try makeControlEnvelope(
+                kind: .pause,
+                taskID: prompt.id,
+                revision: 2),
+            channel: channel))
+        XCTAssertTrue(manager.handle(prompt, channel: channel))
+        await waitUntil {
+            let messages = await channel.sentMessages()
+            return messages.contains { message in
+                guard message.kind == .assistant,
+                      let update = try? ComputerUseTaskUpdate.decodeBody(
+                        message.body) else { return false }
+                return update.taskID == prompt.id
+                    && update.text == ComputerUseTaskLedger.stoppedResponse
+                    && update.appliedControlRevision == 2
+            }
+        }
+
+        XCTAssertEqual(executor.callCount, 0)
+        XCTAssertEqual(manager.activity, .idle)
+        let messages = await channel.sentMessages()
+        let terminalUpdates = messages.compactMap { message -> ComputerUseTaskUpdate? in
+            guard message.kind == .assistant else { return nil }
+            return try? ComputerUseTaskUpdate.decodeBody(message.body)
+        }
+        XCTAssertFalse(terminalUpdates.isEmpty)
+        XCTAssertTrue(terminalUpdates.allSatisfy { $0.taskID == prompt.id })
+    }
+
+    func test_versionedControlIdentityMismatchCannotAffectBoundTask() async throws {
+        let executor = SuspendingComputerUseExecutor()
+        let channel = FakeHostComputerUseChannel()
+        let ledgerURL = temporaryLedgerURL()
+        defer {
+            try? FileManager.default.removeItem(
+                at: ledgerURL.deletingLastPathComponent())
+        }
+        let manager = HostComputerUseManager(
+            injector: InputInjector(),
+            executor: executor,
+            taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
+            channelFactory: { _ in channel })
+        defer { manager.stop() }
+        let prompt = makeEnvelope(
+            id: "identity-bound-task",
+            kind: .prompt,
+            body: "Organize the desktop")
+        manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(manager.handle(prompt, channel: channel))
+        await waitUntil { executor.callCount == 1 }
+
+        let mismatched = try makeControlEnvelope(
+            kind: .cancel,
+            taskID: prompt.id,
+            revision: 9,
+            sessionID: "DIFFERENT-SESSION")
+        XCTAssertTrue(manager.handle(mismatched, channel: channel))
+        await Task.yield()
+
+        XCTAssertEqual(executor.cancellationCount, 0)
+        XCTAssertEqual(manager.activity, .working("Starting…"))
+        XCTAssertTrue(manager.handle(
+            try makeControlEnvelope(
+                kind: .cancel,
+                taskID: prompt.id,
+                revision: 1),
+            channel: channel))
+        await waitUntil { executor.cancellationCount == 1 }
+        XCTAssertEqual(manager.activity, .idle)
+    }
+
+    func test_legacyEmptyControlsAreNoOpsWithoutMatchingActiveContext() async {
+        let executor = ImmediateComputerUseExecutor(results: [.completed("Done")])
+        let channel = FakeHostComputerUseChannel()
+        let ledgerURL = temporaryLedgerURL()
+        defer {
+            try? FileManager.default.removeItem(
+                at: ledgerURL.deletingLastPathComponent())
+        }
+        let manager = HostComputerUseManager(
+            injector: InputInjector(),
+            executor: executor,
+            taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
+            channelFactory: { _ in channel })
+        defer { manager.stop() }
+        manager.authorizePeer(senderID: "IOS-PEER")
+
+        for kind in [
+            ComputerUseEnvelope.Kind.pause,
+            .resume,
+            .cancel,
+        ] {
+            XCTAssertTrue(manager.handle(
+                makeEnvelope(kind: kind),
+                channel: channel))
+        }
+        await Task.yield()
+
+        XCTAssertEqual(manager.activity, .idle)
+        XCTAssertEqual(executor.callCount, 0)
+        let messagesBeforePrompt = await channel.sentMessages()
+        XCTAssertTrue(messagesBeforePrompt.isEmpty)
+
+        let prompt = makeEnvelope(kind: .prompt, body: "Open Notes")
+        XCTAssertTrue(manager.handle(prompt, channel: channel))
+        await waitUntil { executor.callCount == 1 && manager.activity == .idle }
+    }
+
+    func test_cancelControlStopsActiveTaskAndPublishesTerminalReadyState() async throws {
+        let executor = SuspendingComputerUseExecutor()
+        let channel = FakeHostComputerUseChannel()
+        let ledgerURL = temporaryLedgerURL()
+        defer {
+            try? FileManager.default.removeItem(
+                at: ledgerURL.deletingLastPathComponent())
+        }
+        let manager = HostComputerUseManager(
+            injector: InputInjector(),
+            executor: executor,
+            taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
+            channelFactory: { _ in channel })
+        defer { manager.stop() }
+        let prompt = makeEnvelope(
+            kind: .prompt,
+            body: "Organize the desktop")
+        manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(manager.handle(prompt, channel: channel))
+        await waitUntil {
+            executor.prompts.count == 1
+                && manager.activity == .working("Starting…")
+        }
+
+        XCTAssertTrue(manager.handle(
+            makeEnvelope(kind: .cancel),
+            channel: channel))
+
+        XCTAssertEqual(manager.activity, .idle)
+        await waitUntil {
+            guard executor.cancellationCount == 1 else { return false }
+            let messages = await channel.sentMessages()
+            let sentStopped = messages.contains { envelope in
+                guard envelope.kind == .assistant,
+                      let update = try? ComputerUseTaskUpdate.decodeBody(
+                        envelope.body) else {
+                    return false
+                }
+                return update.taskID == prompt.id
+                    && update.text == "Stopped. You're in control of the Mac."
+            }
+            let sentReady = messages.contains { envelope in
+                guard envelope.kind == .status,
+                      let update = try? ComputerUseTaskUpdate.decodeBody(
+                        envelope.body) else {
+                    return false
+                }
+                return update.taskID == prompt.id && update.text == "ready"
+            }
+            return sentStopped && sentReady
+        }
+
+        let messagesBeforeReplay = await channel.sentMessages()
+        let assistantCountBeforeReplay = messagesBeforeReplay.filter {
+            $0.kind == .assistant
+        }.count
+        XCTAssertTrue(manager.handle(prompt, channel: channel))
+        await waitUntil {
+            let messages = await channel.sentMessages()
+            return messages.filter {
+                $0.kind == .assistant
+            }.count == assistantCountBeforeReplay + 1
+        }
+        XCTAssertEqual(
+            executor.prompts.count,
+            1,
+            "A canceled task must replay its terminal result without running again")
+    }
+
+    func test_cancelKeepsGateClosedWhileCancellationIgnoringExecutorUnwinds() async throws {
+        let executor = CancellationIgnoringToolExecutor()
+        var performedActions: [ComputerUsePredictedAction] = []
+        let channel = FakeHostComputerUseChannel()
+        let ledgerURL = temporaryLedgerURL()
+        defer {
+            try? FileManager.default.removeItem(
+                at: ledgerURL.deletingLastPathComponent())
+        }
+        let manager = HostComputerUseManager(
+            injector: InputInjector(),
+            executor: executor,
+            taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
+            allowsExternalServices: false,
+            actionPerformer: { performedActions.append($0) },
+            channelFactory: { _ in channel })
+        let prompt = makeEnvelope(
+            id: "cancel-ignoring-executor",
+            kind: .prompt,
+            body: "Organize the desktop")
+        manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(manager.handle(prompt, channel: channel))
+        await waitUntil { executor.started }
+
+        XCTAssertTrue(manager.handle(
+            try makeControlEnvelope(
+                kind: .cancel,
+                taskID: prompt.id,
+                revision: 1),
+            channel: channel))
+        await waitUntil { executor.cancellationWasObserved }
+        XCTAssertEqual(manager.activity, .idle)
+
+        executor.releaseAndAttemptToolCall()
+        await waitUntil { executor.actionAttempted }
+
+        XCTAssertTrue(executor.actionWasBlocked)
+        XCTAssertTrue(performedActions.isEmpty)
+    }
+
+    func test_versionedPauseAndCancelPersistenceFailureStopAndRemainUnacknowledged() async throws {
+        for (index, kind) in [
+            ComputerUseEnvelope.Kind.pause,
+            .cancel,
+        ].enumerated() {
+            let executor = CancellationIgnoringToolExecutor()
+            var performedActions: [ComputerUsePredictedAction] = []
+            let channel = FakeHostComputerUseChannel()
+            let ledgerURL = temporaryLedgerURL()
+            let ledgerDirectory = ledgerURL.deletingLastPathComponent()
+            defer { try? FileManager.default.removeItem(at: ledgerDirectory) }
+            let manager = HostComputerUseManager(
+                injector: InputInjector(),
+                executor: executor,
+                taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
+                allowsExternalServices: false,
+                actionPerformer: { performedActions.append($0) },
+                channelFactory: { _ in channel })
+            let prompt = makeEnvelope(
+                id: "failed-control-persistence-\(index)",
+                kind: .prompt,
+                body: "Organize the desktop")
+            manager.authorizePeer(senderID: prompt.senderID)
+            XCTAssertTrue(manager.handle(prompt, channel: channel), "\(kind)")
+            await waitUntil { executor.started }
+
+            try FileManager.default.removeItem(at: ledgerDirectory)
+            try Data("not a directory".utf8).write(to: ledgerDirectory)
+
+            XCTAssertFalse(manager.handle(
+                try makeControlEnvelope(
+                    kind: kind,
+                    taskID: prompt.id,
+                    revision: 1),
+                channel: channel), "\(kind) must be retried, not acknowledged")
+            await waitUntil { executor.cancellationWasObserved }
+            XCTAssertEqual(manager.activity, .paused, "\(kind)")
+
+            executor.releaseAndAttemptToolCall()
+            await waitUntil { executor.actionAttempted }
+            XCTAssertTrue(executor.actionWasBlocked, "\(kind)")
+            XCTAssertTrue(performedActions.isEmpty, "\(kind)")
+            manager.stop()
+        }
+    }
+
+    func test_prePromptPauseAndCancelPersistenceFailurePoisonLedgerAfterStorageRecovers() async throws {
+        for (index, kind) in [
+            ComputerUseEnvelope.Kind.pause,
+            .cancel,
+        ].enumerated() {
+            let executor = ImmediateComputerUseExecutor(results: [
+                .completed("This must not execute"),
+            ])
+            let channel = FakeHostComputerUseChannel()
+            let ledgerURL = temporaryLedgerURL()
+            let ledgerDirectory = ledgerURL.deletingLastPathComponent()
+            defer { try? FileManager.default.removeItem(at: ledgerDirectory) }
+            let manager = HostComputerUseManager(
+                injector: InputInjector(),
+                executor: executor,
+                taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
+                allowsExternalServices: false,
+                channelFactory: { _ in channel })
+            let prompt = makeEnvelope(
+                id: "failed-pre-prompt-control-\(index)",
+                kind: .prompt,
+                body: "Open Notes")
+            manager.authorizePeer(senderID: prompt.senderID)
+
+            try Data("not a directory".utf8).write(to: ledgerDirectory)
+            XCTAssertFalse(manager.handle(
+                try makeControlEnvelope(
+                    kind: kind,
+                    taskID: prompt.id,
+                    revision: 1),
+                channel: channel), "\(kind) must remain unacknowledged")
+
+            // Simulate a transient filesystem failure. Recovery must not make
+            // the same in-process ledger forget the earlier safety control and
+            // permit a subsequently delivered Prompt to run.
+            try FileManager.default.removeItem(at: ledgerDirectory)
+            try FileManager.default.createDirectory(
+                at: ledgerDirectory,
+                withIntermediateDirectories: true)
+
+            XCTAssertTrue(manager.handle(prompt, channel: channel))
+            await Task.yield()
+
+            XCTAssertEqual(executor.callCount, 0, "\(kind)")
+            XCTAssertEqual(manager.activity, .idle, "\(kind)")
+            await waitUntil {
+                await channel.sentMessages().contains { envelope in
+                    guard envelope.kind == .assistant,
+                          let update = try? ComputerUseTaskUpdate.decodeBody(
+                            envelope.body) else {
+                        return false
+                    }
+                    return update.taskID == prompt.id
+                        && update.text.contains("could not safely record")
+                }
+            }
+            manager.stop()
+        }
+    }
+
+    func test_cancelControlFromDifferentSessionCannotStopActiveTask() async {
+        let executor = SuspendingComputerUseExecutor()
+        let channel = FakeHostComputerUseChannel()
+        let ledgerURL = temporaryLedgerURL()
+        defer {
+            try? FileManager.default.removeItem(
+                at: ledgerURL.deletingLastPathComponent())
+        }
+        let manager = HostComputerUseManager(
+            injector: InputInjector(),
+            executor: executor,
+            taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
+            allowsExternalServices: false,
+            channelFactory: { _ in channel })
+        let prompt = makeEnvelope(
+            kind: .prompt,
+            body: "Organize the desktop")
+        manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(manager.handle(prompt, channel: channel))
+        await waitUntil {
+            executor.prompts.count == 1
+                && manager.activity == .working("Starting…")
+        }
+
+        let crossSessionCancel = ComputerUseEnvelope(
+            senderID: prompt.senderID,
+            targetID: prompt.targetID,
+            pairingCode: prompt.pairingCode,
+            sessionID: "DIFFERENT-SESSION",
+            kind: .cancel,
+            body: "")
+        XCTAssertTrue(manager.handle(crossSessionCancel, channel: channel))
+        await Task.yield()
+
+        XCTAssertEqual(executor.cancellationCount, 0)
+        XCTAssertEqual(manager.activity, .working("Starting…"))
+        let messagesAfterRejectedCancel = await channel.sentMessages()
+        XCTAssertFalse(messagesAfterRejectedCancel.contains { envelope in
+            guard envelope.kind == .assistant,
+                  let update = try? ComputerUseTaskUpdate.decodeBody(
+                    envelope.body) else {
+                return false
+            }
+            return update.taskID == prompt.id
+                && update.text == "Stopped. You're in control of the Mac."
+        })
+
+        XCTAssertTrue(manager.handle(
+            makeEnvelope(kind: .cancel),
+            channel: channel))
+        await waitUntil { executor.cancellationCount == 1 }
+        XCTAssertEqual(manager.activity, .idle)
+    }
+
+    func test_approvalDenialPerformsNoActionAndPublishesCancellation() async throws {
+        let deniedAction = ComputerUsePredictedAction.key(
+            usage: 0x4C,
+            modifiers: 0)
+        let executor = ImmediateComputerUseExecutor(results: [
+            .approvalRequired(
+                message: "Delete the selected file",
+                action: deniedAction),
+            .completed("Unexpected continuation"),
+        ])
+        var performedActions: [ComputerUsePredictedAction] = []
+        let channel = FakeHostComputerUseChannel()
+        let ledgerURL = temporaryLedgerURL()
+        defer {
+            try? FileManager.default.removeItem(
+                at: ledgerURL.deletingLastPathComponent())
+        }
+        let manager = HostComputerUseManager(
+            injector: InputInjector(),
+            executor: executor,
+            taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
+            approvalTargetProvider: { _ in
+                ComputerUseApprovalTargetSnapshot(
+                    context: "selected test file",
+                    applicationID: "com.threadmark.tests.fixture",
+                    accessibilityIdentity: "fixture-delete-target")
+            },
+            actionPerformer: { performedActions.append($0) },
+            channelFactory: { _ in channel })
+        defer { manager.stop() }
+        let prompt = makeEnvelope(
+            kind: .prompt,
+            body: "Delete the selected file")
+        manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(manager.handle(prompt, channel: channel))
+        await waitUntil {
+            if case .awaitingApproval = manager.activity { return true }
+            return false
+        }
+        await waitUntil {
+            await channel.sentMessages().contains { $0.kind == .approvalRequest }
+        }
+        let approvalMessages = await channel.sentMessages()
+        let requestEnvelope = try XCTUnwrap(
+            approvalMessages.first { $0.kind == .approvalRequest })
+        let request = try ComputerUseApprovalRequest.decodeBody(
+            requestEnvelope.body)
+        let denial = ComputerUseApprovalResponse(
+            requestID: request.requestID,
+            approved: false)
+
+        XCTAssertTrue(manager.handle(
+            makeEnvelope(
+                kind: .approvalResponse,
+                body: try denial.encodedBody()),
+            channel: channel))
+
+        await waitUntil {
+            guard manager.activity == .idle else { return false }
+            return await channel.sentMessages().contains { envelope in
+                guard envelope.kind == .assistant,
+                      let update = try? ComputerUseTaskUpdate.decodeBody(
+                        envelope.body) else {
+                    return false
+                }
+                return update.taskID == prompt.id
+                    && update.text == "Canceled. No action was taken."
+            }
+        }
+        XCTAssertEqual(executor.callCount, 1)
+        XCTAssertTrue(performedActions.isEmpty)
+        let messages = await channel.sentMessages()
+        XCTAssertTrue(messages.contains { envelope in
+            guard envelope.kind == .status,
+                  let update = try? ComputerUseTaskUpdate.decodeBody(
+                    envelope.body) else {
+                return false
+            }
+            return update.taskID == prompt.id && update.text == "ready"
+        })
+    }
+
+    func test_approvalAcceptanceCannotReopenGateAfterSynchronousIntervention() async throws {
+        let approvedAction = ComputerUsePredictedAction.key(
+            usage: 0x28,
+            modifiers: 0)
+        let executor = ReadinessHookComputerUseExecutor(results: [
+            .approvalRequired(
+                message: "Send the message",
+                action: approvedAction),
+            .completed("Continued after intervention"),
+        ])
+        var performedActions: [ComputerUsePredictedAction] = []
+        var interventionClosedGate = false
+        let channel = FakeHostComputerUseChannel()
+        let ledgerURL = temporaryLedgerURL()
+        defer {
+            try? FileManager.default.removeItem(
+                at: ledgerURL.deletingLastPathComponent())
+        }
+        var manager: HostComputerUseManager!
+        manager = HostComputerUseManager(
+            injector: InputInjector(),
+            executor: executor,
+            taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
+            allowsExternalServices: false,
+            approvalTargetProvider: { _ in
+                ComputerUseApprovalTargetSnapshot(
+                    context: "fixture send button",
+                    applicationID: "com.threadmark.tests.fixture",
+                    accessibilityIdentity: "fixture-send-target")
+            },
+            actionPerformer: { performedActions.append($0) },
+            channelFactory: { _ in channel })
+        let prompt = makeEnvelope(
+            id: "approval-intervention-race",
+            kind: .prompt,
+            body: "Reply to the message")
+        manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(manager.handle(prompt, channel: channel))
+        await waitUntil {
+            if case .awaitingApproval = manager.activity { return true }
+            return false
+        }
+        await waitUntil {
+            await channel.sentMessages().contains { $0.kind == .approvalRequest }
+        }
+        let messages = await channel.sentMessages()
+        let requestEnvelope = try XCTUnwrap(
+            messages.first { $0.kind == .approvalRequest })
+        let request = try ComputerUseApprovalRequest.decodeBody(
+            requestEnvelope.body)
+        executor.runOnNextReadinessCheck {
+            interventionClosedGate = manager.blockActionsForUserIntervention()
+        }
+        let approval = ComputerUseApprovalResponse(
+            requestID: request.requestID,
+            approved: true)
+
+        XCTAssertTrue(manager.handle(
+            makeEnvelope(
+                kind: .approvalResponse,
+                body: try approval.encodedBody()),
+            channel: channel))
+        XCTAssertTrue(interventionClosedGate)
+        XCTAssertEqual(manager.activity, .paused)
+        XCTAssertEqual(executor.callCount, 1)
+        XCTAssertTrue(performedActions.isEmpty)
+
+        XCTAssertTrue(manager.handle(
+            makeEnvelope(kind: .resume),
+            channel: channel))
+        await waitUntil { executor.callCount == 2 && manager.activity == .idle }
+        XCTAssertTrue(performedActions.isEmpty)
+    }
+
+    func test_mcpApprovalDenialCancelsHelperWithoutPerformingApprovedAction() async throws {
+        let taskID = "mcp-approval-denial-task"
+        let mailTool = try MCPAllowedTool(
+            serverID: RemoteDesktopMailMCP.serverID,
+            processGeneration: 7,
+            toolName: RemoteDesktopMailMCP.toolName,
+            description: "Pinned local Mail tool",
+            inputSchema: .object(["type": .string("object")]),
+            risk: .approvalRequired,
+            approval: MCPApprovalDisplay(
+                summary: "Send this email?",
+                details: "Exact values are held for approval.",
+                confirmLabel: "Send email"))
+        let call = try mailTool.makeCall(
+            taskID: taskID,
+            arguments: [
+                "to": .string("computer-use-denial@example.invalid"),
+                "subject": .string("Approval denial fixture"),
+                "body": .string("This message must never be sent."),
+                "send_now": .bool(true),
+            ])
+        let prepared = MCPPreparedApproval(
+            call: call,
+            fingerprint: MCPApprovalFingerprint(call: call),
+            display: call.approvalDisplay)
+        let executor = ApprovalHoldingMCPComputerUseExecutor(prepared: prepared)
+        let channel = FakeHostComputerUseChannel()
+        let ledgerURL = temporaryLedgerURL()
+        defer {
+            try? FileManager.default.removeItem(
+                at: ledgerURL.deletingLastPathComponent())
+        }
+        let manager = HostComputerUseManager(
+            injector: InputInjector(),
+            executor: executor,
+            taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
+            allowsExternalServices: false,
+            channelFactory: { _ in channel })
+        let prompt = ComputerUseEnvelope(
+            id: taskID,
+            senderID: "IOS-PEER",
+            targetID: "HOST-ID",
+            pairingCode: "123456",
+            sessionID: "SESSION-1",
+            kind: .prompt,
+            body: "Send an email to computer-use-denial@example.invalid "
+                + "with subject Approval denial fixture and body "
+                + "This message must never be sent.",
+            createdAt: Date())
+        manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(manager.handle(prompt, channel: channel))
+        await waitUntil {
+            if case .awaitingApproval = manager.activity { return true }
+            return false
+        }
+        await waitUntil {
+            await channel.sentMessages().contains { $0.kind == .approvalRequest }
+        }
+        let approvalMessages = await channel.sentMessages()
+        let requestEnvelope = try XCTUnwrap(
+            approvalMessages.first { $0.kind == .approvalRequest })
+        let request = try ComputerUseApprovalRequest.decodeBody(
+            requestEnvelope.body)
+        let denial = ComputerUseApprovalResponse(
+            requestID: request.requestID,
+            approved: false)
+
+        XCTAssertTrue(manager.handle(
+            makeEnvelope(
+                kind: .approvalResponse,
+                body: try denial.encodedBody()),
+            channel: channel))
+        await waitUntil {
+            executor.cancelMCPWorkCount == 1 && manager.activity == .idle
+        }
+
+        XCTAssertEqual(executor.executeCount, 1)
+        XCTAssertEqual(executor.continueAfterApprovalCount, 0)
+        XCTAssertEqual(executor.approvedActionSideEffectCount, 0)
+        await waitUntil {
+            await channel.sentMessages().contains { envelope in
+                guard envelope.kind == .assistant,
+                      let update = try? ComputerUseTaskUpdate.decodeBody(
+                        envelope.body) else {
+                    return false
+                }
+                return update.taskID == taskID
+                    && update.text == "Canceled. No action was taken."
+            }
+        }
+        let messages = await channel.sentMessages()
+        XCTAssertTrue(messages.contains { envelope in
+            guard envelope.kind == .assistant,
+                  let update = try? ComputerUseTaskUpdate.decodeBody(
+                    envelope.body) else {
+                return false
+            }
+            return update.taskID == taskID
+                && update.text == "Canceled. No action was taken."
+        })
+    }
+
     func test_userInputInvalidatesPendingApproval() async throws {
         let executor = ImmediateComputerUseExecutor(results: [
             .approvalRequired(
@@ -887,6 +2116,17 @@ final class ComputerUseTests: XCTestCase {
         XCTAssertTrue(manager.blockActionsForUserIntervention())
         manager.userIntervened()
         XCTAssertEqual(manager.activity, .paused)
+        await waitUntil {
+            await channel.sentMessages().contains { envelope in
+                guard envelope.kind == .status,
+                      let update = try? ComputerUseTaskUpdate.decodeBody(
+                        envelope.body) else { return false }
+                return update.taskID == prompt.id
+                    && ComputerUseStatusSignal.userInterventionMessage(
+                        from: update.text)
+                        == HostComputerUseManager.userInterventionGuidance
+            }
+        }
 
         let response = ComputerUseApprovalResponse(
             requestID: approval.requestID,
@@ -950,16 +2190,585 @@ final class ComputerUseTests: XCTestCase {
         XCTAssertTrue(executor.prompts.last?.contains("do not repeat") == true)
     }
 
+    func test_versionedPauseInvalidatesEarlierApprovalRevision() async throws {
+        let proposedAction = ComputerUsePredictedAction.key(
+            usage: 0x28,
+            modifiers: 0)
+        let executor = ImmediateComputerUseExecutor(results: [
+            .approvalRequired(
+                message: "Send the message",
+                action: proposedAction),
+            .completed("Continued safely without the stale action"),
+        ])
+        var performedActions: [ComputerUsePredictedAction] = []
+        let channel = FakeHostComputerUseChannel()
+        let ledgerURL = temporaryLedgerURL()
+        defer {
+            try? FileManager.default.removeItem(
+                at: ledgerURL.deletingLastPathComponent())
+        }
+        let manager = HostComputerUseManager(
+            injector: InputInjector(),
+            executor: executor,
+            taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
+            approvalTargetProvider: { _ in
+                ComputerUseApprovalTargetSnapshot(
+                    context: "versioned approval target",
+                    applicationID: "com.threadmark.tests.fixture",
+                    accessibilityIdentity: "versioned-approval-target")
+            },
+            actionPerformer: { performedActions.append($0) },
+            channelFactory: { _ in channel })
+        defer { manager.stop() }
+        let prompt = makeEnvelope(
+            id: "versioned-stale-approval-task",
+            kind: .prompt,
+            body: "Reply to the message")
+        manager.authorizePeer(senderID: prompt.senderID)
+
+        XCTAssertTrue(manager.handle(
+            try makeControlEnvelope(
+                kind: .pause,
+                taskID: prompt.id,
+                revision: 1),
+            channel: channel))
+        XCTAssertTrue(manager.handle(prompt, channel: channel))
+        XCTAssertEqual(manager.activity, .paused)
+        XCTAssertEqual(executor.callCount, 0)
+
+        XCTAssertTrue(manager.handle(
+            try makeControlEnvelope(
+                kind: .resume,
+                taskID: prompt.id,
+                revision: 2),
+            channel: channel))
+        await waitUntil {
+            if case .awaitingApproval = manager.activity { return true }
+            return false
+        }
+        await waitUntil {
+            await channel.sentMessages().contains { $0.kind == .approvalRequest }
+        }
+        let messages = await channel.sentMessages()
+        let requestEnvelope = try XCTUnwrap(
+            messages.last { $0.kind == .approvalRequest })
+        let approval = try ComputerUseApprovalRequest.decodeBody(
+            requestEnvelope.body)
+        XCTAssertEqual(approval.taskID, prompt.id)
+        XCTAssertEqual(approval.appliedControlRevision, 2)
+
+        let wrongRevision = ComputerUseApprovalResponse(
+            requestID: approval.requestID,
+            approved: true,
+            taskID: prompt.id,
+            appliedControlRevision: 1)
+        XCTAssertTrue(manager.handle(
+            makeEnvelope(
+                kind: .approvalResponse,
+                body: try wrongRevision.encodedBody()),
+            channel: channel))
+        await Task.yield()
+        XCTAssertEqual(manager.activity, .awaitingApproval(approval.message))
+        XCTAssertEqual(executor.callCount, 1)
+        XCTAssertTrue(performedActions.isEmpty)
+
+        XCTAssertTrue(manager.handle(
+            try makeControlEnvelope(
+                kind: .pause,
+                taskID: prompt.id,
+                revision: 3),
+            channel: channel))
+        XCTAssertEqual(manager.activity, .paused)
+
+        let staleResponse = ComputerUseApprovalResponse(
+            requestID: approval.requestID,
+            approved: true,
+            taskID: approval.taskID,
+            appliedControlRevision: approval.appliedControlRevision)
+        XCTAssertTrue(manager.handle(
+            makeEnvelope(
+                kind: .approvalResponse,
+                body: try staleResponse.encodedBody()),
+            channel: channel))
+        await Task.yield()
+        XCTAssertEqual(
+            executor.callCount,
+            1,
+            "an approval from before Pause must never execute")
+        XCTAssertTrue(performedActions.isEmpty)
+
+        XCTAssertTrue(manager.handle(
+            try makeControlEnvelope(
+                kind: .resume,
+                taskID: prompt.id,
+                revision: 4),
+            channel: channel))
+        await waitUntil { executor.callCount == 2 && manager.activity == .idle }
+        XCTAssertTrue(performedActions.isEmpty)
+    }
+
+    func test_higherRevisionResumeReplansPendingApprovalWithFreshRevision() async throws {
+        let firstAction = ComputerUsePredictedAction.key(
+            usage: 0x28,
+            modifiers: 0)
+        let refreshedAction = ComputerUsePredictedAction.key(
+            usage: 0x4C,
+            modifiers: 0)
+        let executor = ImmediateComputerUseExecutor(results: [
+            .approvalRequired(
+                message: "First approval",
+                action: firstAction),
+            .approvalRequired(
+                message: "Refreshed approval",
+                action: refreshedAction),
+        ])
+        var performedActions: [ComputerUsePredictedAction] = []
+        let channel = FakeHostComputerUseChannel()
+        let ledgerURL = temporaryLedgerURL()
+        defer {
+            try? FileManager.default.removeItem(
+                at: ledgerURL.deletingLastPathComponent())
+        }
+        let manager = HostComputerUseManager(
+            injector: InputInjector(),
+            executor: executor,
+            taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
+            allowsExternalServices: false,
+            approvalTargetProvider: { action in
+                ComputerUseApprovalTargetSnapshot(
+                    context: "revision-current target \(action)",
+                    applicationID: "com.threadmark.tests.fixture",
+                    accessibilityIdentity: "revision-current-target")
+            },
+            actionPerformer: { performedActions.append($0) },
+            channelFactory: { _ in channel })
+        defer { manager.stop() }
+        let prompt = makeEnvelope(
+            id: "resume-refreshes-approval",
+            kind: .prompt,
+            body: "Reply to the message")
+        manager.authorizePeer(senderID: prompt.senderID)
+
+        XCTAssertTrue(manager.handle(
+            try makeControlEnvelope(
+                kind: .resume,
+                taskID: prompt.id,
+                revision: 1),
+            channel: channel))
+        XCTAssertTrue(manager.handle(prompt, channel: channel))
+        await waitUntil {
+            let messages = await channel.sentMessages()
+            return messages.contains { envelope in
+                guard envelope.kind == .approvalRequest,
+                      let request = try? ComputerUseApprovalRequest.decodeBody(
+                        envelope.body) else {
+                    return false
+                }
+                return request.taskID == prompt.id
+                    && request.appliedControlRevision == 1
+            }
+        }
+        let firstMessages = await channel.sentMessages()
+        let firstEnvelope = try XCTUnwrap(firstMessages.first { envelope in
+            guard envelope.kind == .approvalRequest,
+                  let request = try? ComputerUseApprovalRequest.decodeBody(
+                    envelope.body) else {
+                return false
+            }
+            return request.appliedControlRevision == 1
+        })
+        let firstApproval = try ComputerUseApprovalRequest.decodeBody(
+            firstEnvelope.body)
+
+        XCTAssertTrue(manager.handle(
+            try makeControlEnvelope(
+                kind: .resume,
+                taskID: prompt.id,
+                revision: 2),
+            channel: channel))
+        await waitUntil {
+            guard executor.callCount == 2 else { return false }
+            let messages = await channel.sentMessages()
+            return messages.contains { envelope in
+                guard envelope.kind == .approvalRequest,
+                      let request = try? ComputerUseApprovalRequest.decodeBody(
+                        envelope.body) else {
+                    return false
+                }
+                return request.taskID == prompt.id
+                    && request.appliedControlRevision == 2
+            }
+        }
+        let refreshedMessages = await channel.sentMessages()
+        let refreshedEnvelope = try XCTUnwrap(
+            refreshedMessages.last { envelope in
+                guard envelope.kind == .approvalRequest,
+                      let request = try? ComputerUseApprovalRequest.decodeBody(
+                        envelope.body) else {
+                    return false
+                }
+                return request.appliedControlRevision == 2
+            })
+        let refreshedApproval = try ComputerUseApprovalRequest.decodeBody(
+            refreshedEnvelope.body)
+        XCTAssertNotEqual(
+            refreshedApproval.requestID,
+            firstApproval.requestID)
+        XCTAssertEqual(
+            manager.activity,
+            .awaitingApproval(refreshedApproval.message))
+
+        let staleAcceptance = ComputerUseApprovalResponse(
+            requestID: firstApproval.requestID,
+            approved: true,
+            taskID: prompt.id,
+            appliedControlRevision: 1)
+        XCTAssertTrue(manager.handle(
+            makeEnvelope(
+                kind: .approvalResponse,
+                body: try staleAcceptance.encodedBody()),
+            channel: channel))
+        await Task.yield()
+        XCTAssertEqual(executor.callCount, 2)
+        XCTAssertEqual(
+            manager.activity,
+            .awaitingApproval(refreshedApproval.message))
+        XCTAssertTrue(performedActions.isEmpty)
+
+        let currentDenial = ComputerUseApprovalResponse(
+            requestID: refreshedApproval.requestID,
+            approved: false,
+            taskID: prompt.id,
+            appliedControlRevision: 2)
+        XCTAssertTrue(manager.handle(
+            makeEnvelope(
+                kind: .approvalResponse,
+                body: try currentDenial.encodedBody()),
+            channel: channel))
+        XCTAssertEqual(manager.activity, .idle)
+        XCTAssertTrue(performedActions.isEmpty)
+    }
+
     func test_taskLedgerPersistsAtMostOnceClaimAndTerminalReplay() throws {
         let url = temporaryLedgerURL()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
         let first = ComputerUseTaskLedger(fileURL: url)
-        XCTAssertEqual(try first.claim(taskID: "task-1"), .new)
-        XCTAssertEqual(try first.claim(taskID: "task-1"), .accepted)
+        XCTAssertEqual(
+            try first.claim(
+                taskID: "task-1",
+                senderID: "IOS-PEER",
+                sessionID: "SESSION-1"),
+            .new)
+        XCTAssertEqual(
+            try first.claim(
+                taskID: "task-1",
+                senderID: "IOS-PEER",
+                sessionID: "SESSION-1"),
+            .accepted)
         first.complete(taskID: "task-1", response: "Finished")
 
         let relaunched = ComputerUseTaskLedger(fileURL: url)
-        XCTAssertEqual(try relaunched.claim(taskID: "task-1"), .completed("Finished"))
+        XCTAssertEqual(
+            try relaunched.claim(
+                taskID: "task-1",
+                senderID: "IOS-PEER",
+                sessionID: "SESSION-1"),
+            .completed("Finished"))
+    }
+
+    func test_taskLedgerOnlyMissingFileStartsEmptyAndExistingInvalidStatePoisons() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "ComputerUseLedgerLoadTests-\(UUID().uuidString)",
+                isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let missingURL = root
+            .appendingPathComponent("missing", isDirectory: true)
+            .appendingPathComponent("ledger.json")
+        let missing = ComputerUseTaskLedger(fileURL: missingURL)
+        XCTAssertEqual(
+            try missing.claim(
+                taskID: "new-ledger-task",
+                senderID: "IOS-PEER",
+                sessionID: "SESSION-1"),
+            .new)
+
+        let corruptURL = root
+            .appendingPathComponent("corrupt", isDirectory: true)
+            .appendingPathComponent("ledger.json")
+        try FileManager.default.createDirectory(
+            at: corruptURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true)
+        try Data("{not valid json".utf8).write(to: corruptURL)
+
+        let unreadableURL = root.appendingPathComponent(
+            "ledger-is-a-directory",
+            isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: unreadableURL,
+            withIntermediateDirectories: true)
+
+        for (index, url) in [corruptURL, unreadableURL].enumerated() {
+            let ledger = ComputerUseTaskLedger(fileURL: url)
+            XCTAssertThrowsError(try ledger.claim(
+                taskID: "poisoned-claim-\(index)",
+                senderID: "IOS-PEER",
+                sessionID: "SESSION-1")) { error in
+                    XCTAssertEqual(
+                        error as? ComputerUseTaskLedger.LedgerError,
+                        .unavailable)
+                }
+            XCTAssertThrowsError(try ledger.applyControl(
+                .cancel,
+                taskID: "poisoned-control-\(index)",
+                revision: 1,
+                senderID: "IOS-PEER",
+                sessionID: "SESSION-1")) { error in
+                    XCTAssertEqual(
+                        error as? ComputerUseTaskLedger.LedgerError,
+                        .unavailable)
+                }
+        }
+    }
+
+    func test_managerNeverExecutesPromptWithCorruptExistingLedger() async throws {
+        let ledgerURL = temporaryLedgerURL()
+        defer {
+            try? FileManager.default.removeItem(
+                at: ledgerURL.deletingLastPathComponent())
+        }
+        try FileManager.default.createDirectory(
+            at: ledgerURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true)
+        try Data("[]".utf8).write(to: ledgerURL)
+        let executor = ImmediateComputerUseExecutor(results: [
+            .completed("This must not execute"),
+        ])
+        let channel = FakeHostComputerUseChannel()
+        let manager = HostComputerUseManager(
+            injector: InputInjector(),
+            executor: executor,
+            taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
+            allowsExternalServices: false,
+            channelFactory: { _ in channel })
+        let prompt = makeEnvelope(
+            id: "corrupt-ledger-prompt",
+            kind: .prompt,
+            body: "Open Notes")
+        manager.authorizePeer(senderID: prompt.senderID)
+
+        XCTAssertTrue(manager.handle(prompt, channel: channel))
+        await waitUntil {
+            await channel.sentMessages().contains { envelope in
+                guard envelope.kind == .assistant,
+                      let update = try? ComputerUseTaskUpdate.decodeBody(
+                        envelope.body) else {
+                    return false
+                }
+                return update.taskID == prompt.id
+                    && update.text.contains("could not safely record")
+            }
+        }
+        XCTAssertEqual(executor.callCount, 0)
+        XCTAssertEqual(manager.activity, .idle)
+    }
+
+    func test_taskLedgerReducesPauseResumeDeliveryPermutations() throws {
+        typealias Event = (ComputerUseTaskLedger.Control, UInt64)
+        let cases: [(events: [Event], state: ComputerUseTaskLedger.ControlState)] = [
+            ([(.pause, 1), (.resume, 2)], .running),
+            ([(.resume, 2), (.pause, 1)], .running),
+            ([(.resume, 1), (.pause, 2)], .paused),
+            ([(.pause, 2), (.resume, 1)], .paused),
+        ]
+
+        for (index, testCase) in cases.enumerated() {
+            let url = temporaryLedgerURL()
+            defer {
+                try? FileManager.default.removeItem(
+                    at: url.deletingLastPathComponent())
+            }
+            let taskID = "permutation-\(index)"
+            let ledger = ComputerUseTaskLedger(fileURL: url)
+            var latest: ComputerUseTaskLedger.ControlResolution?
+            for event in testCase.events {
+                latest = try ledger.applyControl(
+                    event.0,
+                    taskID: taskID,
+                    revision: event.1,
+                    senderID: "IOS-PEER",
+                    sessionID: "SESSION-1")
+            }
+
+            XCTAssertEqual(latest?.state, testCase.state, taskID)
+            XCTAssertEqual(latest?.appliedRevision, 2, taskID)
+            switch testCase.state {
+            case .running:
+                XCTAssertEqual(
+                    try ledger.claim(
+                        taskID: taskID,
+                        senderID: "IOS-PEER",
+                        sessionID: "SESSION-1"),
+                    .new,
+                    taskID)
+                XCTAssertEqual(
+                    try ledger.claim(
+                        taskID: taskID,
+                        senderID: "IOS-PEER",
+                        sessionID: "SESSION-1"),
+                    .accepted,
+                    taskID)
+            case .paused:
+                XCTAssertEqual(
+                    try ledger.claim(
+                        taskID: taskID,
+                        senderID: "IOS-PEER",
+                        sessionID: "SESSION-1"),
+                    .paused(appliedControlRevision: 2),
+                    taskID)
+                XCTAssertEqual(
+                    try ledger.claim(
+                        taskID: taskID,
+                        senderID: "IOS-PEER",
+                        sessionID: "SESSION-1"),
+                    .paused(appliedControlRevision: 2),
+                    "A paused, never-started Prompt must be reconstructible")
+            case .cancelled:
+                XCTFail("Cancel is covered by its absorbing-state test")
+            }
+        }
+    }
+
+    func test_taskLedgerCancelIsAbsorbingPersistentAndFirstTerminalWins() throws {
+        let url = temporaryLedgerURL()
+        defer {
+            try? FileManager.default.removeItem(
+                at: url.deletingLastPathComponent())
+        }
+        let taskID = "absorbing-cancel-task"
+        let first = ComputerUseTaskLedger(fileURL: url)
+        _ = try first.applyControl(
+            .cancel,
+            taskID: taskID,
+            revision: 3,
+            senderID: "IOS-PEER",
+            sessionID: "SESSION-1")
+        _ = try first.applyControl(
+            .pause,
+            taskID: taskID,
+            revision: 4,
+            senderID: "IOS-PEER",
+            sessionID: "SESSION-1")
+        let latest = try first.applyControl(
+            .resume,
+            taskID: taskID,
+            revision: 5,
+            senderID: "IOS-PEER",
+            sessionID: "SESSION-1")
+
+        XCTAssertEqual(latest.state, .cancelled)
+        XCTAssertEqual(latest.appliedRevision, 5)
+        XCTAssertEqual(
+            latest.terminalResponse,
+            ComputerUseTaskLedger.stoppedResponse)
+        first.complete(taskID: taskID, response: "Late executor completion")
+
+        let relaunched = ComputerUseTaskLedger(fileURL: url)
+        XCTAssertEqual(relaunched.appliedControlRevision(taskID: taskID), 5)
+        XCTAssertEqual(
+            try relaunched.claim(
+                taskID: taskID,
+                senderID: "IOS-PEER",
+                sessionID: "SESSION-1"),
+            .completed(ComputerUseTaskLedger.stoppedResponse))
+    }
+
+    func test_taskLedgerPersistsPrePromptPauseThenStartsOnceAfterResume() throws {
+        let url = temporaryLedgerURL()
+        defer {
+            try? FileManager.default.removeItem(
+                at: url.deletingLastPathComponent())
+        }
+        let taskID = "persistent-pre-prompt-pause"
+        let first = ComputerUseTaskLedger(fileURL: url)
+        _ = try first.applyControl(
+            .pause,
+            taskID: taskID,
+            revision: 7,
+            senderID: "IOS-PEER",
+            sessionID: "SESSION-1")
+
+        let afterPauseRestart = ComputerUseTaskLedger(fileURL: url)
+        XCTAssertEqual(
+            try afterPauseRestart.claim(
+                taskID: taskID,
+                senderID: "IOS-PEER",
+                sessionID: "SESSION-1"),
+            .paused(appliedControlRevision: 7))
+        _ = try afterPauseRestart.applyControl(
+            .resume,
+            taskID: taskID,
+            revision: 8,
+            senderID: "IOS-PEER",
+            sessionID: "SESSION-1")
+        XCTAssertEqual(
+            try afterPauseRestart.claim(
+                taskID: taskID,
+                senderID: "IOS-PEER",
+                sessionID: "SESSION-1"),
+            .new)
+
+        let afterStartRestart = ComputerUseTaskLedger(fileURL: url)
+        XCTAssertEqual(
+            try afterStartRestart.claim(
+                taskID: taskID,
+                senderID: "IOS-PEER",
+                sessionID: "SESSION-1"),
+            .accepted)
+    }
+
+    func test_taskLedgerBindsControlAndPromptToSenderAndSession() throws {
+        let url = temporaryLedgerURL()
+        defer {
+            try? FileManager.default.removeItem(
+                at: url.deletingLastPathComponent())
+        }
+        let taskID = "identity-bound-pre-prompt"
+        let ledger = ComputerUseTaskLedger(fileURL: url)
+        _ = try ledger.applyControl(
+            .pause,
+            taskID: taskID,
+            revision: 1,
+            senderID: "IOS-PEER",
+            sessionID: "SESSION-1")
+
+        XCTAssertEqual(
+            try ledger.claim(
+                taskID: taskID,
+                senderID: "OTHER-PEER",
+                sessionID: "SESSION-1"),
+            .identityMismatch)
+        XCTAssertEqual(
+            try ledger.claim(
+                taskID: taskID,
+                senderID: "IOS-PEER",
+                sessionID: "OTHER-SESSION"),
+            .identityMismatch)
+        let rejected = try ledger.applyControl(
+            .cancel,
+            taskID: taskID,
+            revision: 2,
+            senderID: "IOS-PEER",
+            sessionID: "OTHER-SESSION")
+        XCTAssertEqual(rejected.disposition, .identityMismatch)
+        XCTAssertNil(rejected.appliedRevision)
+        XCTAssertEqual(
+            try ledger.claim(
+                taskID: taskID,
+                senderID: "IOS-PEER",
+                sessionID: "SESSION-1"),
+            .paused(appliedControlRevision: 1))
     }
 
     func test_installerRecognizesOnlyReceiptInsideManagedRoot() async throws {
@@ -1246,16 +3055,36 @@ final class ComputerUseTests: XCTestCase {
     }
 
     private func makeEnvelope(
+        id: String = UUID().uuidString,
         kind: ComputerUseEnvelope.Kind,
         body: String = ""
     ) -> ComputerUseEnvelope {
         ComputerUseEnvelope(
+            id: id,
             senderID: "IOS-PEER",
             targetID: "HOST-ID",
             pairingCode: "123456",
             sessionID: "SESSION-1",
             kind: kind,
             body: body)
+    }
+
+    private func makeControlEnvelope(
+        kind: ComputerUseEnvelope.Kind,
+        taskID: String,
+        revision: UInt64,
+        sessionID: String = "SESSION-1"
+    ) throws -> ComputerUseEnvelope {
+        let request = ComputerUseControlRequest(
+            taskID: taskID,
+            revision: revision)
+        return ComputerUseEnvelope(
+            senderID: "IOS-PEER",
+            targetID: "HOST-ID",
+            pairingCode: "123456",
+            sessionID: sessionID,
+            kind: kind,
+            body: try request.encodedBody())
     }
 
     private func temporaryLedgerURL() -> URL {
@@ -1394,10 +3223,27 @@ private final class ImmediateComputerUseExecutor: ComputerUseExecuting {
 }
 
 @MainActor
-private final class SuspendingComputerUseExecutor: ComputerUseExecuting {
-    let isReady = true
-    let runtimeName = "Suspending test runtime"
+private final class ReadinessHookComputerUseExecutor: ComputerUseExecuting {
+    let runtimeName = "Readiness-hook test runtime"
+    private var results: [ComputerUseExecutionResult]
+    private var readinessHook: (() -> Void)?
     private(set) var prompts: [String] = []
+    var callCount: Int { prompts.count }
+
+    var isReady: Bool {
+        let hook = readinessHook
+        readinessHook = nil
+        hook?()
+        return true
+    }
+
+    init(results: [ComputerUseExecutionResult]) {
+        self.results = results
+    }
+
+    func runOnNextReadinessCheck(_ hook: @escaping () -> Void) {
+        readinessHook = hook
+    }
 
     func execute(
         prompt: String,
@@ -1405,7 +3251,114 @@ private final class SuspendingComputerUseExecutor: ComputerUseExecuting {
         progress: @escaping (String) -> Void
     ) async throws -> ComputerUseExecutionResult {
         prompts.append(prompt)
-        try await Task.sleep(for: .seconds(60))
+        return results.isEmpty ? .completed("Done") : results.removeFirst()
+    }
+}
+
+@MainActor
+private final class CancellationIgnoringToolExecutor: ComputerUseExecuting {
+    let isReady = true
+    let runtimeName = "Cancellation-ignoring test runtime"
+    private let cancellationProbe = ShutdownCancellationProbe()
+    private var releaseContinuation: CheckedContinuation<Void, Never>?
+    private(set) var started = false
+    private(set) var actionAttempted = false
+    private(set) var actionWasBlocked = false
+
+    nonisolated var cancellationWasObserved: Bool {
+        cancellationProbe.value()
+    }
+
+    func execute(
+        prompt: String,
+        tools: ComputerUseHostTools,
+        progress: @escaping (String) -> Void
+    ) async throws -> ComputerUseExecutionResult {
+        started = true
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                releaseContinuation = continuation
+            }
+        } onCancel: { [cancellationProbe] in
+            cancellationProbe.markObserved()
+        }
+
+        actionAttempted = true
+        do {
+            try tools.perform(.typeText("must-not-be-injected"))
+        } catch ComputerUseHostTools.ToolError.paused {
+            actionWasBlocked = true
+        }
+        return .completed("Cancellation was ignored")
+    }
+
+    func releaseAndAttemptToolCall() {
+        releaseContinuation?.resume()
+        releaseContinuation = nil
+    }
+}
+
+@MainActor
+private final class ApprovalHoldingMCPComputerUseExecutor:
+    ComputerUseExecuting,
+    MCPApprovalContinuing
+{
+    let isReady = true
+    let runtimeName = "Approval-holding MCP test runtime"
+    private let prepared: MCPPreparedApproval
+    private(set) var executeCount = 0
+    private(set) var continueAfterApprovalCount = 0
+    private(set) var cancelMCPWorkCount = 0
+    private(set) var approvedActionSideEffectCount = 0
+
+    init(prepared: MCPPreparedApproval) {
+        self.prepared = prepared
+    }
+
+    func execute(
+        prompt: String,
+        tools: ComputerUseHostTools,
+        progress: @escaping (String) -> Void
+    ) async throws -> ComputerUseExecutionResult {
+        executeCount += 1
+        return .mcpApprovalRequired(prepared)
+    }
+
+    func continueAfterApproval(
+        _ prepared: MCPPreparedApproval,
+        tools: ComputerUseHostTools,
+        progress: @escaping (String) -> Void
+    ) async throws -> ComputerUseExecutionResult {
+        continueAfterApprovalCount += 1
+        approvedActionSideEffectCount += 1
+        return .completed("Unexpected approved MCP action")
+    }
+
+    func cancelMCPWork() {
+        cancelMCPWorkCount += 1
+    }
+}
+
+@MainActor
+private final class SuspendingComputerUseExecutor: ComputerUseExecuting {
+    let isReady = true
+    let runtimeName = "Suspending test runtime"
+    private(set) var prompts: [String] = []
+    private(set) var cancellationCount = 0
+    var callCount: Int { prompts.count }
+
+    func execute(
+        prompt: String,
+        tools: ComputerUseHostTools,
+        progress: @escaping (String) -> Void
+    ) async throws -> ComputerUseExecutionResult {
+        prompts.append(prompt)
+        do {
+            try await Task.sleep(for: .seconds(60))
+        } catch is CancellationError {
+            cancellationCount += 1
+            throw CancellationError()
+        }
         return .completed("Done")
     }
 }
@@ -1552,4 +3505,50 @@ private actor FakeHostComputerUseChannel: HostComputerUseChannel {
     func acknowledge(_ envelopes: [ComputerUseEnvelope]) async throws {}
 
     func sentMessages() -> [ComputerUseEnvelope] { sent }
+}
+
+private actor CancellationIgnoringPollComputerUseChannel:
+    HostComputerUseChannel
+{
+    private var pollStarted = false
+    private var pollContinuation:
+        CheckedContinuation<[ComputerUseEnvelope], Never>?
+    private var acknowledgedIDs: [String] = []
+
+    func send(
+        kind: ComputerUseEnvelope.Kind,
+        body: String,
+        to explicitTargetID: String?,
+        sessionID explicitSessionID: String?,
+        messageID explicitMessageID: String?
+    ) async throws -> ComputerUseEnvelope {
+        ComputerUseEnvelope(
+            id: explicitMessageID ?? UUID().uuidString,
+            senderID: "HOST-ID",
+            targetID: explicitTargetID ?? "IOS-PEER",
+            pairingCode: "111111",
+            sessionID: explicitSessionID ?? "SESSION-1",
+            kind: kind,
+            body: body)
+    }
+
+    func poll() async throws -> [ComputerUseEnvelope] {
+        pollStarted = true
+        return await withCheckedContinuation { continuation in
+            pollContinuation = continuation
+        }
+    }
+
+    func acknowledge(_ envelopes: [ComputerUseEnvelope]) async throws {
+        acknowledgedIDs.append(contentsOf: envelopes.map(\.id))
+    }
+
+    func pollDidStart() -> Bool { pollStarted }
+
+    func releasePoll(with envelopes: [ComputerUseEnvelope]) {
+        pollContinuation?.resume(returning: envelopes)
+        pollContinuation = nil
+    }
+
+    func acknowledgedEnvelopeIDs() -> [String] { acknowledgedIDs }
 }

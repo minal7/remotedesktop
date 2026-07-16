@@ -30,6 +30,12 @@ final class WebRTCTransportTests: XCTestCase {
         XCTAssertTrue(mediaSection("audio", in: sdp).contains("a=recvonly"))
         XCTAssertFalse(mediaSection("video", in: sdp).contains("a=sendrecv"))
         XCTAssertFalse(mediaSection("audio", in: sdp).contains("a=sendrecv"))
+        XCTAssertTrue(
+            mediaSection("video", in: sdp).contains("profile-level-id=640c33"),
+            "expected the client to offer hardware H.264 level 5.1 for a Retina desktop stream")
+        XCTAssertTrue(
+            mediaSection("video", in: sdp).contains("profile-level-id=42e01f"),
+            "expected the client to retain its level-3.1 interoperability fallback")
     }
 
     func test_audioSessionPolicy_isPlaybackOnly() {
@@ -106,6 +112,13 @@ final class WebRTCTransportTests: XCTestCase {
             audio: true,
             monitors: 1))
         XCTAssertEqual(model.state, .connected)
+        guard case let .qos(targetFps, maxBitrateKbps, prefer)? =
+                transport.sentMessages.last?.message else {
+            return XCTFail("expected the client to request the desktop quality policy")
+        }
+        XCTAssertEqual(targetFps, DesktopVideoQuality.targetFramesPerSecond)
+        XCTAssertEqual(maxBitrateKbps, DesktopVideoQuality.maximumBitrateKbps)
+        XCTAssertEqual(prefer, "sharpness")
         XCTAssertFalse(
             model.hasReceivedVideoFrame,
             "A control-channel hello must not disguise a pending macOS capture-consent prompt as a live screen.")
@@ -115,6 +128,71 @@ final class WebRTCTransportTests: XCTestCase {
 
         model.reset()
         XCTAssertFalse(model.hasReceivedVideoFrame)
+    }
+
+    func test_sessionModelBlocksComputerUseWithoutOrderedHostControls() async {
+        let connected = expectation(description: "transport connect called")
+        let transport = RecordingTargetTransport(connected: connected)
+        let model = SessionModel(transportFactory: { transport })
+
+        model.connect(
+            code: "123456",
+            experience: .computerUse,
+            computerUseHostID: "HOST-B",
+            hostName: "Studio Mac")
+        await fulfillment(of: [connected], timeout: 1)
+        XCTAssertNotNil(model.computerUseSession)
+
+        transport.onHostHello?(HostHello(
+            app: "RemoteDesktop-Mac",
+            version: "0.1.0",
+            hostname: "Studio Mac",
+            os: "macOS",
+            audio: true,
+            monitors: 1,
+            orderedComputerUseControls: 0))
+
+        XCTAssertEqual(model.state, .idle)
+        XCTAssertNil(model.computerUseSession)
+        XCTAssertTrue(model.error?.contains("Update Remote Desktop Host") == true)
+        XCTAssertTrue(transport.sentMessages.isEmpty)
+    }
+
+    func test_wireHelloNegotiatesOrderedComputerUseControlsSeparately() throws {
+        let data = ControlMessage.hello(proto: Config.protocolVersion).encoded(
+            seq: 0,
+            ts: 1)
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let client = try XCTUnwrap(object["client"] as? [String: Any])
+
+        XCTAssertEqual(object["proto"] as? Int, 1)
+        XCTAssertEqual(
+            client["orderedComputerUseControls"] as? Int,
+            Config.orderedComputerUseControlsVersion)
+    }
+
+    func test_hostHelloDecodesOrderedComputerUseControlsCapability() throws {
+        let data = try JSONSerialization.data(withJSONObject: [
+            "t": "hello_ack",
+            "proto": Config.protocolVersion,
+            "host": [
+                "app": "RemoteDesktop-Mac",
+                "version": "0.2.0",
+                "hostname": "Studio Mac",
+                "os": "macOS",
+            ],
+            "caps": [
+                "audio": true,
+                "monitors": 1,
+                "orderedComputerUseControls": 1,
+            ],
+        ])
+
+        guard case .helloAck(let hello) = HostMessage.decode(data) else {
+            return XCTFail("Expected a compatible host hello")
+        }
+        XCTAssertEqual(hello.orderedComputerUseControls, 1)
     }
 
     private func mediaSection(_ kind: String, in sdp: String) -> String {
@@ -130,6 +208,12 @@ final class WebRTCTransportTests: XCTestCase {
 
 @MainActor
 private final class RecordingTargetTransport: Transport {
+    struct SentMessage {
+        let message: ControlMessage
+        let seq: UInt32
+        let ts: UInt64
+    }
+
     var onHostHello: (@MainActor (HostHello) -> Void)?
     var onDisplay: (@MainActor (DisplayInfo) -> Void)?
     var onFirstVideoFrame: (@MainActor () -> Void)?
@@ -138,6 +222,7 @@ private final class RecordingTargetTransport: Transport {
     private let connected: XCTestExpectation
     private(set) var pairingCode: String?
     private(set) var expectedHostID: String?
+    private(set) var sentMessages: [SentMessage] = []
 
     init(connected: XCTestExpectation) {
         self.connected = connected
@@ -149,7 +234,9 @@ private final class RecordingTargetTransport: Transport {
         connected.fulfill()
     }
 
-    func send(_ message: ControlMessage, seq: UInt32, ts: UInt64) {}
+    func send(_ message: ControlMessage, seq: UInt32, ts: UInt64) {
+        sentMessages.append(SentMessage(message: message, seq: seq, ts: ts))
+    }
     func disconnect(reason: String) {}
 }
 

@@ -407,12 +407,44 @@ impl WebRtcHost {
                 };
                 let mut raw = 0u64;
                 let mut encoded = 0u64;
-                while let Some(frame) = frames.recv() {
-                    raw += 1;
-                    if raw == 1 {
-                        info!("video: first raw frame {}x{}", frame.width, frame.height);
-                    }
-                    if keyframe_request.swap(false, Ordering::SeqCst) {
+                // The most recent captured frame, re-encoded as an IDR when a
+                // receiver asks for a keyframe but the screen is static (dirty-
+                // region capture delivers nothing). Without this, a client that
+                // joins or resizes mid-session stays black until the next pixel
+                // changes.
+                let mut last_frame: Option<capture::ScreenFrame> = None;
+                loop {
+                    let want_keyframe: bool;
+                    let frame: &capture::ScreenFrame = match frames
+                        .recv_timeout(Duration::from_millis(250))
+                    {
+                        capture::FrameRecv::Frame(fresh) => {
+                            raw += 1;
+                            if raw == 1 {
+                                info!("video: first raw frame {}x{}", fresh.width, fresh.height);
+                            }
+                            last_frame = Some(fresh);
+                            want_keyframe = keyframe_request.swap(false, Ordering::SeqCst);
+                            last_frame.as_ref().unwrap()
+                        }
+                        capture::FrameRecv::Timeout => {
+                            // Static screen: only spend bandwidth when a
+                            // receiver is actually waiting for a keyframe.
+                            if !take_keyframe_replay_request(
+                                &keyframe_request,
+                                last_frame.is_some(),
+                            ) {
+                                continue;
+                            }
+                            want_keyframe = true;
+                            last_frame
+                                .as_ref()
+                                .expect("replay request requires a cached frame")
+                        }
+                        capture::FrameRecv::Closed => break,
+                    };
+
+                    if want_keyframe {
                         encoder.force_intra_frame();
                         info!("video: forcing IDR (receiver PLI/FIR)");
                     }
@@ -624,6 +656,7 @@ fn serve_control_channel(
     host_info: HostInfo,
 ) {
     let seq = Arc::new(AtomicU32::new(0));
+    let hello_authenticated = Arc::new(AtomicBool::new(false));
     let dc_for_msg = Arc::clone(&dc);
     dc.on_message(Box::new(move |msg: DataChannelMessage| {
         let injector = injector.clone();
@@ -631,6 +664,7 @@ fn serve_control_channel(
         let closed = closed.clone();
         let host_info = host_info.clone();
         let seq = seq.clone();
+        let hello_authenticated = hello_authenticated.clone();
         let dc = Arc::clone(&dc_for_msg);
         Box::pin(async move {
             let Some(message) = ClientMessage::decode(&msg.data) else {
@@ -639,12 +673,17 @@ fn serve_control_channel(
             match message {
                 ClientMessage::Hello { proto } => {
                     if proto != PROTOCOL_VERSION {
+                        hello_authenticated.store(false, Ordering::SeqCst);
                         send_dc(&dc, protocol::encode_bye(next(&seq), now_us(), "protocol")).await;
                         if !closed.swap(true, Ordering::SeqCst) {
                             ended.notify_one();
                         }
                         return;
                     }
+                    // Authenticate before the first await so a subsequent
+                    // ordered control packet can never race ahead of this
+                    // state transition.
+                    hello_authenticated.store(true, Ordering::SeqCst);
                     send_dc(
                         &dc,
                         protocol::encode_hello_ack(
@@ -673,14 +712,57 @@ fn serve_control_channel(
                     .await;
                 }
                 ClientMessage::Bye { .. } => {
+                    hello_authenticated.store(false, Ordering::SeqCst);
                     if !closed.swap(true, Ordering::SeqCst) {
                         ended.notify_one();
                     }
                 }
-                other => injector.apply(other),
+                message @ (ClientMessage::Pointer { .. }
+                | ClientMessage::Scroll { .. }
+                | ClientMessage::Key { .. }
+                | ClientMessage::Text(_)) => {
+                    if accepts_direct_input(&message, hello_authenticated.load(Ordering::SeqCst))
+                        && !closed.load(Ordering::SeqCst)
+                    {
+                        injector.apply(message);
+                    } else {
+                        warn!("dropping remote input received before authenticated hello");
+                    }
+                }
+                ClientMessage::Qos { .. } => {
+                    if !hello_authenticated.load(Ordering::SeqCst) || closed.load(Ordering::SeqCst)
+                    {
+                        warn!("dropping video quality request received before authenticated hello");
+                    }
+                    // The current Windows encoder uses a fixed production
+                    // policy. Authenticated QoS remains an explicit no-op
+                    // until dynamic encoder reconfiguration is supported.
+                }
             }
         })
     }));
+}
+
+/// Pointer and keyboard packets are privileged only after the peer has
+/// completed the protocol hello. A WebRTC data channel opening is not, by
+/// itself, authorization to control the PC.
+fn accepts_direct_input(message: &ClientMessage, hello_authenticated: bool) -> bool {
+    hello_authenticated
+        && matches!(
+            message,
+            ClientMessage::Pointer { .. }
+                | ClientMessage::Scroll { .. }
+                | ClientMessage::Key { .. }
+                | ClientMessage::Text(_)
+        )
+}
+
+/// Consume a pending PLI/FIR only when a cached frame can be re-encoded. If
+/// capture has not produced its first frame yet, leave the request set so that
+/// fresh frame is forced to IDR instead of silently losing the receiver's
+/// recovery request.
+fn take_keyframe_replay_request(request: &AtomicBool, has_cached_frame: bool) -> bool {
+    has_cached_frame && request.swap(false, Ordering::SeqCst)
 }
 
 async fn send_dc(dc: &Arc<RTCDataChannel>, bytes: Vec<u8>) {
@@ -738,5 +820,78 @@ fn ice_envelope(init: &RTCIceCandidateInit) -> SignalingEnvelope {
         kind: Kind::Ice,
         payload,
         ts: now_s(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::ScrollPhase;
+
+    #[test]
+    fn direct_input_requires_an_authenticated_hello_for_every_variant() {
+        let messages = [
+            ClientMessage::Pointer {
+                x: 1,
+                y: 2,
+                buttons: 1,
+            },
+            ClientMessage::Scroll {
+                dx: 3,
+                dy: 4,
+                phase: ScrollPhase::Changed,
+            },
+            ClientMessage::Key {
+                usage: 5,
+                down: true,
+                modifiers: 0,
+            },
+            ClientMessage::Text("safe input".to_string()),
+        ];
+
+        for message in &messages {
+            assert!(!accepts_direct_input(message, false));
+            assert!(accepts_direct_input(message, true));
+        }
+    }
+
+    #[test]
+    fn protocol_messages_are_never_treated_as_direct_input() {
+        let messages = [
+            ClientMessage::Hello {
+                proto: PROTOCOL_VERSION,
+            },
+            ClientMessage::Qos {
+                target_fps: 60,
+                max_bitrate_kbps: 8_000,
+                prefer: "auto".to_string(),
+            },
+            ClientMessage::Bye {
+                reason: "user".to_string(),
+            },
+        ];
+
+        for message in &messages {
+            assert!(!accepts_direct_input(message, false));
+            assert!(!accepts_direct_input(message, true));
+        }
+    }
+
+    #[test]
+    fn keyframe_request_waits_for_the_first_captured_frame() {
+        let request = AtomicBool::new(true);
+
+        assert!(!take_keyframe_replay_request(&request, false));
+        assert!(request.load(Ordering::SeqCst));
+        assert!(request.swap(false, Ordering::SeqCst));
+    }
+
+    #[test]
+    fn keyframe_request_replays_once_when_a_cached_frame_exists() {
+        let request = AtomicBool::new(true);
+
+        assert!(take_keyframe_replay_request(&request, true));
+        assert!(!request.load(Ordering::SeqCst));
+        assert!(!take_keyframe_replay_request(&request, true));
     }
 }

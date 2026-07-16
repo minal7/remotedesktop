@@ -20,7 +20,7 @@ final class ComputerUseSetupLiveE2ETests: XCTestCase {
         }
     }
 
-    func testPhoneCanStartSetupOrRecognizeAnAlreadyReadyHost() throws {
+    func testPhoneCanReachTerminalReadyStateForComputerUseSetup() throws {
         let app = XCUIApplication()
         addUIInterruptionMonitor(withDescription: "Local network access") { alert in
             guard alert.buttons["Allow"].exists else { return false }
@@ -68,6 +68,7 @@ final class ComputerUseSetupLiveE2ETests: XCTestCase {
 
         case .progress(let progressElement):
             assertProgress(progressElement)
+            assertSetupReachesReady(readyButtons.firstMatch)
             return
 
         case .setup(let setupButton):
@@ -85,6 +86,7 @@ final class ComputerUseSetupLiveE2ETests: XCTestCase {
                     assertReady(readyButton)
                 case .progress(let progressElement):
                     assertProgress(progressElement)
+                    assertSetupReachesReady(readyButtons.firstMatch)
                 case .setup:
                     XCTFail("The setup-settling helper returned an invalid state.")
                 }
@@ -101,6 +103,7 @@ final class ComputerUseSetupLiveE2ETests: XCTestCase {
             "The phone did not receive queued/download progress from the Mac through CloudKit.")
 
         assertProgress(progressElements.firstMatch)
+        assertSetupReachesReady(readyButtons.firstMatch)
     }
 
     private func waitForHostState(
@@ -148,6 +151,13 @@ final class ComputerUseSetupLiveE2ETests: XCTestCase {
     private func assertProgress(_ progressElement: XCUIElement) {
         let progressValue = progressElement.value as? String ?? ""
         XCTAssertFalse(progressValue.isEmpty, "Setup progress should include a user-facing phase or percentage.")
+    }
+
+    private func assertSetupReachesReady(_ readyButton: XCUIElement) {
+        XCTAssertTrue(
+            readyButton.waitForExistence(timeout: 30 * 60),
+            "AI setup never reached the terminal ready state on the phone.")
+        assertReady(readyButton)
     }
 }
 

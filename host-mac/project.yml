@@ -21,6 +21,31 @@ packages:
     url: https://github.com/apple/swift-system.git
     exactVersion: 1.7.4
 
+schemes:
+  RemoteDesktopHost:
+    build:
+      targets:
+        RemoteDesktopHost: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - RemoteDesktopHostTests
+      # This is an app-hosted unit-test bundle, not a UI-test target. Leaving
+      # Xcode's automatic capture enabled makes XCTest start a screen recording
+      # in the Debug host process and can surface a misleading macOS TCC alert.
+      captureScreenshotsAutomatically: false
+      # Keep the non-recording format explicit as a second boundary if Xcode
+      # ever ignores the attachment lifetime for this app-hosted unit bundle.
+      preferredScreenCaptureFormat: screenshots
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release
+
 targets:
   RemoteDesktopHost:
     type: application

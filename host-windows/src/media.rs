@@ -100,9 +100,7 @@ pub fn bgra_to_i420(bgra: &[u8], width: usize, height: usize) -> Vec<u8> {
         let top_row = block_y * 2;
         let src_top = &bgra[top_row * row_bytes..top_row * row_bytes + row_bytes];
         let src_bot = &bgra[(top_row + 1) * row_bytes..(top_row + 1) * row_bytes + row_bytes];
-        let (y_top, y_bot) = y_plane
-            [top_row * width..(top_row + 2) * width]
-            .split_at_mut(width);
+        let (y_top, y_bot) = y_plane[top_row * width..(top_row + 2) * width].split_at_mut(width);
         let u_row = &mut u_plane[block_y * half_width..(block_y + 1) * half_width];
         let v_row = &mut v_plane[block_y * half_width..(block_y + 1) * half_width];
 

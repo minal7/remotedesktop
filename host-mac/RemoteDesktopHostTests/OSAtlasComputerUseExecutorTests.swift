@@ -403,6 +403,182 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
             "A blank or incomplete screen must not become a delivery quote")
     }
 
+    func testDeliveryQuoteBrowserAndVisibleFactsMustMatchTheRequest() {
+        XCTAssertEqual(
+            OSAtlasComputerUseExecutor.deliveryQuoteBrowserToForeground(
+                "Open Chrome and get the DoorDash delivery quote and ETA.",
+                frontmostApplication: "Safari"),
+            "Google Chrome")
+        XCTAssertNil(
+            OSAtlasComputerUseExecutor.deliveryQuoteBrowserToForeground(
+                "Open Chrome and get the DoorDash delivery quote and ETA.",
+                frontmostApplication: "Google Chrome"))
+
+        let visible = "Visible delivery quote — Restaurant: Pizzeria Uno; Item: Large Pepperoni Pizza; Subtotal: $24.99; Delivery fee: $2.99; Tax: $2.78; Total: $30.76; ETA: 28–38 min"
+        XCTAssertTrue(OSAtlasComputerUseExecutor.visibleDeliveryQuote(
+            visible,
+            matchesRequest: "Get a delivered quote for one large pepperoni pizza from Pizzeria Uno to 200 Market Street."))
+        XCTAssertFalse(OSAtlasComputerUseExecutor.visibleDeliveryQuote(
+            visible,
+            matchesRequest: "Get a delivered quote for pad thai from Thai Garden to 200 Market Street."))
+        XCTAssertTrue(OSAtlasComputerUseExecutor.visibleDeliveryQuote(
+            visible,
+            matchesRequest: "Read the current visible delivery quote and ETA."))
+    }
+
+    func testVisibleQuoteExtractorDoesNotMergeSameLineBackgroundWindowText() throws {
+        let quoteRegions: [(text: String, bounds: CGRect)] = [
+            ("Pizzeria Uno", CGRect(x: 0.24, y: 0.80, width: 0.14, height: 0.03)),
+            ("Large Pepperoni Pizza", CGRect(x: 0.24, y: 0.75, width: 0.20, height: 0.03)),
+            ("Subtotal", CGRect(x: 0.24, y: 0.65, width: 0.08, height: 0.03)),
+            ("$24.99", CGRect(x: 0.58, y: 0.65, width: 0.07, height: 0.03)),
+            ("Delivery fee", CGRect(x: 0.24, y: 0.60, width: 0.12, height: 0.03)),
+            ("$2.99", CGRect(x: 0.59, y: 0.60, width: 0.06, height: 0.03)),
+            ("Service fee", CGRect(x: 0.24, y: 0.55, width: 0.11, height: 0.03)),
+            ("$3.75", CGRect(x: 0.59, y: 0.55, width: 0.06, height: 0.03)),
+            ("Tax", CGRect(x: 0.24, y: 0.50, width: 0.04, height: 0.03)),
+            ("$2.78", CGRect(x: 0.59, y: 0.50, width: 0.06, height: 0.03)),
+            ("Total", CGRect(x: 0.24, y: 0.45, width: 0.06, height: 0.03)),
+            ("$34.51", CGRect(x: 0.58, y: 0.45, width: 0.07, height: 0.03)),
+            ("ETA", CGRect(x: 0.24, y: 0.40, width: 0.04, height: 0.03)),
+            ("28–38 min", CGRect(x: 0.55, y: 0.40, width: 0.10, height: 0.03)),
+
+            // These fragments recreate the full-desktop failure: unrelated
+            // windows happened to expose text at the same Y coordinates as
+            // Safari's quote. None belongs to the coherent quote column.
+            ("ncsm", CGRect(x: 0.02, y: 0.80, width: 0.05, height: 0.03)),
+            ("8 working 31 done", CGRect(x: 0.72, y: 0.80, width: 0.18, height: 0.03)),
+            ("rugavel realtime", CGRect(x: 0.02, y: 0.75, width: 0.15, height: 0.03)),
+            ("Computer Use Picture in Picture", CGRect(x: 0.68, y: 0.75, width: 0.28, height: 0.03)),
+            ("m3u pl", CGRect(x: 0.10, y: 0.60, width: 0.07, height: 0.03)),
+            ("remote", CGRect(x: 0.12, y: 0.55, width: 0.07, height: 0.03)),
+        ]
+
+        XCTAssertEqual(
+            ComputerUseVisibleQuoteExtractor.summary(
+                fromRecognizedRegions: quoteRegions),
+            "Visible delivery quote — Restaurant: Pizzeria Uno; "
+                + "Item: Large Pepperoni Pizza; Subtotal: $24.99; "
+                + "Delivery fee: $2.99; Service fee: $3.75; Tax: $2.78; "
+                + "Total: $34.51; ETA: 28–38 min")
+    }
+
+    func testVisibleQuoteExtractorRejectsCoherentQuoteOutsideFocusedWindow() {
+        func quoteColumn(
+            restaurant: String,
+            item: String,
+            labelX: CGFloat,
+            valueX: CGFloat
+        ) -> [(text: String, bounds: CGRect)] {
+            [
+                (restaurant, CGRect(x: labelX, y: 0.84, width: 0.16, height: 0.03)),
+                (item, CGRect(x: labelX, y: 0.79, width: 0.18, height: 0.03)),
+                ("Subtotal", CGRect(x: labelX, y: 0.69, width: 0.08, height: 0.03)),
+                ("$18.00", CGRect(x: valueX, y: 0.69, width: 0.07, height: 0.03)),
+                ("Delivery fee", CGRect(x: labelX, y: 0.63, width: 0.12, height: 0.03)),
+                ("$2.00", CGRect(x: valueX, y: 0.63, width: 0.06, height: 0.03)),
+                ("Tax", CGRect(x: labelX, y: 0.57, width: 0.04, height: 0.03)),
+                ("$1.80", CGRect(x: valueX, y: 0.57, width: 0.06, height: 0.03)),
+                ("Total", CGRect(x: labelX, y: 0.51, width: 0.06, height: 0.03)),
+                ("$21.80", CGRect(x: valueX, y: 0.51, width: 0.07, height: 0.03)),
+                ("ETA", CGRect(x: labelX, y: 0.45, width: 0.04, height: 0.03)),
+                ("20–30 min", CGRect(x: valueX, y: 0.45, width: 0.10, height: 0.03)),
+            ]
+        }
+
+        let background = quoteColumn(
+            restaurant: "Pizzeria Uno",
+            item: "Large Pepperoni Pizza",
+            labelX: 0.04,
+            valueX: 0.29)
+        let focused = quoteColumn(
+            restaurant: "Chipotle",
+            item: "Pad Thai",
+            labelX: 0.55,
+            valueX: 0.82)
+        let summary = ComputerUseVisibleQuoteExtractor.summary(
+            fromRecognizedRegions: background + focused,
+            withinNormalizedBounds: CGRect(
+                x: 0.48,
+                y: 0.30,
+                width: 0.49,
+                height: 0.62))
+
+        XCTAssertNotNil(summary)
+        XCTAssertTrue(summary?.contains("Restaurant: Chipotle") == true)
+        XCTAssertTrue(summary?.contains("Item: Pad Thai") == true)
+        XCTAssertFalse(summary?.contains("Pizzeria Uno") == true)
+        XCTAssertFalse(summary?.contains("Pepperoni") == true)
+    }
+
+    func testVisibleQuoteExtractorUsesDistinctGeometryNotCuisineKeywords() {
+        let regions: [(text: String, bounds: CGRect)] = [
+            ("Pizza Kitchen", CGRect(x: 0.24, y: 0.84, width: 0.15, height: 0.03)),
+            ("Margherita Pizza", CGRect(x: 0.24, y: 0.79, width: 0.18, height: 0.03)),
+            ("Subtotal", CGRect(x: 0.24, y: 0.69, width: 0.08, height: 0.03)),
+            ("$20.00", CGRect(x: 0.58, y: 0.69, width: 0.07, height: 0.03)),
+            ("Delivery fee", CGRect(x: 0.24, y: 0.63, width: 0.12, height: 0.03)),
+            ("$2.00", CGRect(x: 0.59, y: 0.63, width: 0.06, height: 0.03)),
+            ("Tax", CGRect(x: 0.24, y: 0.57, width: 0.04, height: 0.03)),
+            ("$2.00", CGRect(x: 0.59, y: 0.57, width: 0.06, height: 0.03)),
+            ("Total", CGRect(x: 0.24, y: 0.51, width: 0.06, height: 0.03)),
+            ("$24.00", CGRect(x: 0.58, y: 0.51, width: 0.07, height: 0.03)),
+            ("ETA", CGRect(x: 0.24, y: 0.45, width: 0.04, height: 0.03)),
+            ("25–35 min", CGRect(x: 0.55, y: 0.45, width: 0.10, height: 0.03)),
+        ]
+
+        let summary = ComputerUseVisibleQuoteExtractor.summary(
+            fromRecognizedRegions: regions)
+        XCTAssertTrue(summary?.contains("Restaurant: Pizza Kitchen") == true)
+        XCTAssertTrue(summary?.contains("Item: Margherita Pizza") == true)
+    }
+
+    func testVisibleQuoteExtractorPrefersCandidateWithEveryCoherentFee() {
+        let regions: [(text: String, bounds: CGRect)] = [
+            ("Chipotle", CGRect(x: 0.24, y: 0.93, width: 0.12, height: 0.03)),
+            ("Pad Thai", CGRect(x: 0.24, y: 0.88, width: 0.12, height: 0.03)),
+            ("Subtotal", CGRect(x: 0.24, y: 0.82, width: 0.08, height: 0.03)),
+            ("$18.00", CGRect(x: 0.58, y: 0.82, width: 0.07, height: 0.03)),
+            ("Delivery fee", CGRect(x: 0.24, y: 0.76, width: 0.12, height: 0.03)),
+            ("$2.00", CGRect(x: 0.59, y: 0.76, width: 0.06, height: 0.03)),
+            // This alternate OCR tax row yields a coherent but partial
+            // candidate containing only the first fee.
+            ("Tax", CGRect(x: 0.24, y: 0.70, width: 0.04, height: 0.03)),
+            ("$1.80", CGRect(x: 0.59, y: 0.70, width: 0.06, height: 0.03)),
+            ("Service fee", CGRect(x: 0.24, y: 0.64, width: 0.11, height: 0.03)),
+            ("$3.00", CGRect(x: 0.59, y: 0.64, width: 0.06, height: 0.03)),
+            ("Tax", CGRect(x: 0.24, y: 0.58, width: 0.04, height: 0.03)),
+            ("$1.80", CGRect(x: 0.59, y: 0.58, width: 0.06, height: 0.03)),
+            ("Total", CGRect(x: 0.24, y: 0.52, width: 0.06, height: 0.03)),
+            ("$24.80", CGRect(x: 0.58, y: 0.52, width: 0.07, height: 0.03)),
+            ("ETA", CGRect(x: 0.24, y: 0.46, width: 0.04, height: 0.03)),
+            ("25–35 min", CGRect(x: 0.55, y: 0.46, width: 0.10, height: 0.03)),
+        ]
+
+        let summary = ComputerUseVisibleQuoteExtractor.summary(
+            fromRecognizedRegions: regions)
+        XCTAssertTrue(summary?.contains("Delivery fee: $2.00") == true)
+        XCTAssertTrue(summary?.contains("Service fee: $3.00") == true)
+    }
+
+    func testScreenObservationMapsFocusedWindowIntoVisionCoordinates() throws {
+        let observation = ComputerUseScreenObservation(
+            image: CIImage(color: .white).cropped(
+                to: CGRect(x: 0, y: 0, width: 1_000, height: 800)),
+            displayBounds: CGRect(x: -100, y: 50, width: 1_000, height: 800),
+            frontmostWindowBounds: CGRect(
+                x: 100,
+                y: 150,
+                width: 500,
+                height: 400))
+        let normalized = try XCTUnwrap(
+            observation.normalizedFrontmostWindowBounds)
+        XCTAssertEqual(normalized.minX, 0.2, accuracy: 0.0001)
+        XCTAssertEqual(normalized.minY, 0.375, accuracy: 0.0001)
+        XCTAssertEqual(normalized.width, 0.5, accuracy: 0.0001)
+        XCTAssertEqual(normalized.height, 0.5, accuracy: 0.0001)
+    }
+
     func testScreenCaptureConsentDetectorRecognizesExactObservedSystemPrompt() {
         let exactObservedPrompt = """
         “RemoteDesktopHost” is requesting to bypass the system private window picker and directly access your screen and audio.
@@ -938,7 +1114,13 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
                 consentAXQueries += 1
                 return doorDashAX
             },
-            frontmostApplicationProvider: { "Simulator" })
+            frontmostApplicationProvider: {
+                // While the system sheet is up, the synthetic foreground is
+                // unrelated. Once the person clears it, the supplied
+                // DoorDash pixels/AX belong to the now-frontmost Safari
+                // window; keep the mock identity consistent with that frame.
+                consentVisible ? "Simulator" : "Safari"
+            })
 
         do {
             let initialResult = try await executor.execute(
@@ -1120,7 +1302,7 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
         await runtime.shutdown()
     }
 
-    func testVisibleDoorDashSignInPausesBeforeForegroundingSafariWhenFrontmostAppIsUnrelated() async throws {
+    func testDoorDashForegroundsSafariBeforeEvaluatingVisibleBackgroundSignInWall() async throws {
         let events = RuntimeEventLog()
         let runtime = OSAtlasLlamaRuntime(
             launcher: FakeLlamaLauncher(events: events),
@@ -1159,7 +1341,6 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
             applicationOpener: { name in
                 openedApplications.append(name)
                 frontmostApplication = name
-                XCTFail("A visible DoorDash sign-in wall must win before Safari activation")
             },
             actionPerformer: { _ in
                 XCTFail("The model must not receive a chance to act before sign-in handoff")
@@ -1182,11 +1363,13 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
                 result,
                 .userInterventionRequired(
                     OSAtlasComputerUseExecutor.deliverySignInGuidance))
-            XCTAssertTrue(openedApplications.isEmpty)
-            XCTAssertEqual(frontmostApplication, "ChatGPT")
-            XCTAssertEqual(screenCaptures, 1)
+            XCTAssertEqual(openedApplications, ["Safari"])
+            XCTAssertEqual(frontmostApplication, "Safari")
+            XCTAssertEqual(screenCaptures, 2)
             XCTAssertEqual(progress, [
                 "Step 1: looking at the screen…",
+                "Step 1: opening Safari for the DoorDash quote…",
+                "Step 2: looking at the screen…",
                 OSAtlasComputerUseExecutor.deliverySignInGuidance,
             ])
             let recordedEvents = await events.values()
@@ -1441,6 +1624,70 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
         await runtime.shutdown()
     }
 
+    func testMismatchedFocusedQuoteContinuesIntoRoutingInsteadOfTerminating() async throws {
+        let events = RuntimeEventLog()
+        let runtime = OSAtlasLlamaRuntime(
+            launcher: FakeLlamaLauncher(events: events),
+            transportMaker: FakeTransportMaker(
+                events: events,
+                completionResponses: [response("CLICK [[500,500]]")]),
+            portProvider: FixedPortProvider(port: 43145),
+            tokenProvider: FixedTokenProvider(token: "unit-test-token"),
+            readinessAttempts: 1,
+            readinessDelay: .zero,
+            resourceInspector: FixedResourceInspector.sufficient)
+        let inputs = OSAtlasLlamaRuntimeInputs(
+            variant: .pro4B,
+            modelFirstSplitURL: URL(
+                fileURLWithPath: "/models/pro-Q4_K_M-00001-of-00002.gguf"),
+            multimodalProjectorURL: URL(
+                fileURLWithPath: "/models/pro-mmproj-model-f16.gguf"),
+            llamaServerURL: URL(fileURLWithPath: "/runtime/llama-server"),
+            runtimeDirectoryURL: URL(fileURLWithPath: "/runtime"))
+        let requests = SemanticRoutingRequestLog()
+        let router = StubSemanticActionRouter { request in
+            await requests.record(request)
+            return .init(directive: .complete)
+        }
+        let executor = OSAtlasComputerUseExecutor.makeForTesting(
+            inputs: inputs,
+            runtime: runtime,
+            semanticRouter: router,
+            maxSteps: 1)
+        let observation = try OSAtlasAcceptanceFixtureRenderer.deliveryQuote()
+        var progress: [String] = []
+        let tools = ComputerUseHostTools(
+            injector: InputInjector(eventPoster: { _ in
+                XCTFail("A stale quote must not post native input")
+            }),
+            mayAct: { true },
+            actionPerformer: { _ in
+                XCTFail("The terminal routing fixture must not perform input")
+            },
+            screenProvider: { observation },
+            frontmostApplicationProvider: { "Safari" })
+
+        do {
+            let result = try await executor.execute(
+                prompt: "Get a DoorDash delivered quote for pad thai from Thai Garden to 200 Market Street, including the total and ETA.",
+                tools: tools,
+                progress: { progress.append($0) })
+            XCTAssertEqual(
+                result,
+                .completed("Done. The task was already complete."))
+        } catch {
+            await runtime.shutdown()
+            throw error
+        }
+        await runtime.shutdown()
+
+        let routedRequests = await requests.values()
+        XCTAssertEqual(routedRequests.count, 1)
+        XCTAssertFalse(progress.contains(where: {
+            $0.contains("reading the complete delivery quote")
+        }))
+    }
+
     func testScriptedExecutorLoopCoversEveryNonterminalActionThroughHiddenHostSeams() async throws {
         let events = RuntimeEventLog()
         let scriptedActions = [
@@ -1670,6 +1917,44 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
         XCTAssertEqual(observation.displayBounds.width, 6_016)
     }
 
+    func testUniqueVisibleTextGroundingAlignsPointerCarriersToExactFixtureLabels()
+        throws {
+        let rows: [(
+            operation: OSAtlasAcceptanceFixtureRenderer.EverydayOperation,
+            hint: String,
+            target: CGRect
+        )] = [
+            (.calendar, "next week",
+             OSAtlasAcceptanceFixtureRenderer.calendarNextWeekTarget),
+            (.photoAlbum, "Summer Picnic folder",
+             OSAtlasAcceptanceFixtureRenderer.summerPicnicFolderTarget),
+            (.finderFile, "Tax receipts.pdf file",
+             OSAtlasAcceptanceFixtureRenderer.taxReceiptsRowTarget),
+            (.errandBoard, "Buy groceries card",
+             OSAtlasAcceptanceFixtureRenderer.buyGroceriesCardTarget),
+            (.errandBoard, "Weekend column",
+             OSAtlasAcceptanceFixtureRenderer.weekendColumnTarget),
+        ]
+
+        for row in rows {
+            let observation = try OSAtlasAcceptanceFixtureRenderer
+                .everydayOperation(row.operation)
+            let normalized = try XCTUnwrap(
+                OSAtlasComputerUseExecutor.uniqueVisibleTextGrounding(
+                    targetHint: row.hint,
+                    image: observation.image),
+                row.hint)
+            let bounds = OSAtlasAcceptanceFixtureRenderer.hiddenDisplayBounds
+            let grounded = CGPoint(
+                x: bounds.minX + CGFloat(normalized.0) / 1_000 * bounds.width,
+                y: bounds.minY + CGFloat(normalized.1) / 1_000 * bounds.height)
+            XCTAssertTrue(
+                OSAtlasAcceptanceFixtureRenderer.desktopTargetRect(
+                    for: row.target).contains(grounded),
+                "OCR point for \(row.hint) was \(normalized)")
+        }
+    }
+
     func testPromptBoundsRetainedActionHistoryForEightKContext() {
         let history = (1 ... 20).map { index in
             "TYPE [\(String(repeating: "x", count: 1_000))\(index)]"
@@ -1813,6 +2098,13 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
             No host action was performed because the prior response did not follow the trusted task. Retry once. The Actions line must use the declared HOTKEY variant, not CLICK or another action, and must follow its declared format exactly.
             Original task: Copy the selected packing list. Use HOTKEY [COMMAND+C] as the single next action.
             """)
+        XCTAssertEqual(
+            OSAtlasComputerUseExecutor.explicitActionCorrectionInstruction(
+                originalTask: """
+                Prepare the local fixture. As the single next action, use TYPE [alice@example.com; ready] exactly. After it changes, SCROLL [DOWN]. Stop when the result is visible.
+                """,
+                directive: .type),
+            "Prepare the local fixture. As the single next action, use TYPE [alice@example.com; ready] exactly.")
 
         for directive in [
             OSAtlasExplicitActionDirective.click,
@@ -1872,6 +2164,8 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
             "Never operate sign-in, credential, checkout"))
         XCTAssertTrue(scopedPrompt.contains(
             "authentication requires user takeover"))
+        XCTAssertTrue(scopedPrompt.contains(
+            "Trusted next-action instruction: Copy the selected packing list. Use HOTKEY [COMMAND+C] as the single next action. Use HOTKEY now as the single next action."))
         XCTAssertTrue(scopedPrompt.hasSuffix(
             "History:\n1. OPEN_APP [Notes]"))
         XCTAssertTrue(OSAtlasExplicitActionDirective.answer.matches(
@@ -1888,6 +2182,110 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
             OSAtlasComputerUseExecutor.privacySafeActionToken(
                 from: "Thoughts: private reasoning only"),
             "UNRECOGNIZED")
+    }
+
+    func testExplicitActionCorrectionPromptRetainsFocusedPrerequisitesForTypeAndEnter() {
+        let rows: [(
+            directive: OSAtlasExplicitActionDirective,
+            originalTask: String,
+            expectedInstruction: String,
+            excludedWorkflow: String
+        )] = [
+            (
+                .type,
+                "The caret is already active in my errands note. Add one line by using TYPE [Pick up oat milk at 6 PM] now as the single next action. After the note changes, stop when the added line is visible.",
+                "The caret is already active in my errands note. Add one line by using TYPE [Pick up oat milk at 6 PM] now as the single next action.",
+                "After the note changes"),
+            (
+                .enter,
+                "The library hours query is already typed in the focused search field. Use ENTER now as the single next action to run the search. After the results load, read the opening hours and stop.",
+                "The library hours query is already typed in the focused search field. Use ENTER now as the single next action to run the search.",
+                "After the results load"),
+        ]
+
+        for row in rows {
+            let prompt = OSAtlasComputerUseExecutor
+                .explicitActionCorrectionPrompt(
+                    originalTask: row.originalTask,
+                    directive: row.directive,
+                    formattedHistory: [])
+
+            XCTAssertTrue(prompt.contains(
+                "Trusted next-action instruction: \(row.expectedInstruction) Use \(row.directive.rawValue) now as the single next action."))
+            XCTAssertFalse(prompt.contains(row.excludedWorkflow))
+            XCTAssertEqual(
+                prompt.components(separatedBy: .newlines).filter {
+                    $0.hasPrefix("Action: ")
+                },
+                ["Action: \(row.directive.rawValue)"])
+        }
+    }
+
+    func testSemanticGroundingTaskPreservesNaturalRequestAndAppendsExactRoute() {
+        XCTAssertEqual(
+            OSAtlasComputerUseExecutor.semanticGroundingTask(
+                originalTask: "  Copy the selected packing list.  ",
+                route: OSAtlasSemanticActionRoute(directive: .hotkey)),
+            "Copy the selected packing list. Use HOTKEY now as the single next action. Do not substitute CLICK or another action.")
+        XCTAssertEqual(
+            OSAtlasComputerUseExecutor.semanticGroundingTask(
+                originalTask: "Reveal the later photos.",
+                route: OSAtlasSemanticActionRoute(
+                    directive: .scroll,
+                    scrollDirection: .right)),
+            "Reveal the later photos. Use SCROLL [RIGHT] now as the single next action. Do not substitute CLICK or another action.")
+        XCTAssertEqual(
+            OSAtlasComputerUseExecutor.semanticGroundingTask(
+                originalTask: "Go to next week.",
+                route: OSAtlasSemanticActionRoute(directive: .click)),
+            "Go to next week. Use CLICK now as the single next action. Do not substitute another action.")
+    }
+
+    func testSemanticRoutingHistoryRetainsOneShotMarkersBeyondRecentSuffix() {
+        let history = [
+            "TYPE [private fixture token]",
+            "CLICK [[742,118]]",
+            "SCROLL [DOWN]",
+        ] + (1 ... 12).map { "WAIT [\($0)]" }
+
+        let routed = OSAtlasComputerUseExecutor.semanticRoutingHistory(history)
+        XCTAssertEqual(
+            routed.count,
+            OSAtlasSemanticRoutingRequest.maximumHistoryEntries)
+        XCTAssertTrue(routed.contains("TYPE"))
+        XCTAssertTrue(routed.contains("CLICK"))
+        XCTAssertTrue(routed.contains("SCROLL [DOWN]"))
+        XCTAssertFalse(routed.contains(where: {
+            $0.contains("private fixture token") || $0.contains("742")
+        }))
+        XCTAssertEqual(Array(routed.suffix(3)), [
+            "WAIT [10]", "WAIT [11]", "WAIT [12]",
+        ])
+    }
+
+    func testSemanticRoutingHistoryRetainsLatestRepeatedScrollOrder() {
+        let history = [
+            "TYPE [private fixture token]",
+            "CLICK [[742,118]]",
+            "SCROLL [DOWN]",
+        ] + (1 ... 8).map { "WAIT [\($0)]" } + [
+            "SCROLL [UP]",
+            "SCROLL [DOWN]",
+        ]
+
+        let routed = OSAtlasComputerUseExecutor.semanticRoutingHistory(history)
+        XCTAssertEqual(
+            routed.count,
+            OSAtlasSemanticRoutingRequest.maximumHistoryEntries)
+        XCTAssertEqual(Array(routed.suffix(2)), [
+            "SCROLL [UP]", "SCROLL [DOWN]",
+        ])
+        XCTAssertEqual(routed.filter { $0 == "SCROLL [DOWN]" }.count, 1)
+        XCTAssertTrue(routed.contains("TYPE"))
+        XCTAssertTrue(routed.contains("CLICK"))
+        XCTAssertFalse(routed.contains(where: {
+            $0.contains("private fixture token") || $0.contains("742")
+        }))
     }
 
     func testExplicitActionCorrectionRetriesOnceBeforeAnyHostSideEffect() async throws {
@@ -2129,6 +2527,552 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
             "The unused third response proves no later correction occurred")
     }
 
+    func testNaturalLanguageRouterExecutesTypedHotkeyWithoutVisualInference() async throws {
+        let fixture = makeCorrectionRuntime(
+            completionResponses: [response("CLICK [[500,500]]")],
+            port: 43140)
+        let routingRequests = SemanticRoutingRequestLog()
+        let router = StubSemanticActionRouter { request in
+            await routingRequests.record(request)
+            return OSAtlasSemanticActionRoute(
+                directive: .hotkey,
+                argument: .hotkey("COMMAND+C"))
+        }
+        var parsedActions: [OSAtlasGUIAction] = []
+        var performedActions: [ComputerUsePredictedAction] = []
+        var progress: [String] = []
+        let executor = OSAtlasComputerUseExecutor.makeForTesting(
+            inputs: fixture.inputs,
+            runtime: fixture.runtime,
+            semanticRouter: router,
+            maxSteps: 1,
+            parsedActionObserver: { parsedActions.append($0) })
+
+        do {
+            _ = try await executor.execute(
+                prompt: "Copy the selected packing list with the usual keyboard shortcut.",
+                tools: correctionTestTools(
+                    actionPerformer: { performedActions.append($0) }),
+                progress: { progress.append($0) })
+            XCTFail("The one-step fixture should stop after the corrected action")
+        } catch OSAtlasComputerUseExecutor.RuntimeError.stepLimit {
+            // Expected after the one host-owned corrected action.
+        } catch {
+            await fixture.runtime.shutdown()
+            throw error
+        }
+        await fixture.runtime.shutdown()
+
+        XCTAssertEqual(parsedActions, [
+            .hotkey(usage: 0x06, modifiers: 1 << 3, displayName: "COMMAND+C"),
+        ])
+        XCTAssertEqual(performedActions, [
+            .key(usage: 0x06, modifiers: 1 << 3),
+        ], "The typed semantic shortcut must execute without a model-selected verb")
+        XCTAssertTrue(progress.contains(where: {
+            $0.contains("understanding the requested action")
+        }))
+        XCTAssertEqual(
+            progress.filter { $0.contains("correcting action selection") }.count,
+            0)
+
+        let requests = await routingRequests.values()
+        let request = try XCTUnwrap(requests.first)
+        XCTAssertEqual(requests.count, 1)
+        XCTAssertEqual(
+            request.task,
+            "Copy the selected packing list with the usual keyboard shortcut.")
+        XCTAssertEqual(request.frontmostApplication, "Hidden correction fixture")
+        XCTAssertTrue(request.history.isEmpty)
+        XCTAssertTrue(request.availableDirectives.contains(.hotkey))
+
+        let completionCount = await fixture.events.values()
+            .filter { $0 == "complete" }.count
+        XCTAssertEqual(
+            completionCount,
+            0,
+            "A typed direct semantic action must not invoke OS-Atlas")
+    }
+
+    func testNaturalLanguageRouterOpensSelectedRelevantApplication() async throws {
+        let fixture = makeCorrectionRuntime(
+            completionResponses: [response("CLICK [[500,500]]")],
+            port: 43141)
+        let routingRequests = SemanticRoutingRequestLog()
+        let router = StubSemanticActionRouter { request in
+            await routingRequests.record(request)
+            return OSAtlasSemanticActionRoute(
+                directive: .openApplication,
+                argument: .applicationName("Notes"))
+        }
+        var openedApplications: [String] = []
+        var performedActions: [ComputerUsePredictedAction] = []
+        let executor = OSAtlasComputerUseExecutor.makeForTesting(
+            inputs: fixture.inputs,
+            runtime: fixture.runtime,
+            semanticRouter: router,
+            maxSteps: 1)
+
+        let result: ComputerUseExecutionResult
+        do {
+            result = try await executor.execute(
+                prompt: "Open Notes.",
+                tools: correctionTestTools(
+                    applicationOpener: { openedApplications.append($0) },
+                    actionPerformer: { performedActions.append($0) }),
+                progress: { _ in })
+        } catch {
+            await fixture.runtime.shutdown()
+            throw error
+        }
+        await fixture.runtime.shutdown()
+
+        guard case .completed(let summary) = result else {
+            return XCTFail("A pure app-open request should finish after opening the selected app")
+        }
+        XCTAssertEqual(summary, "Done. I opened the requested app.")
+        XCTAssertEqual(openedApplications, ["Notes"])
+        XCTAssertTrue(
+            performedActions.isEmpty,
+            "The rejected CLICK must not execute before the selected app opens")
+        let requests = await routingRequests.values()
+        XCTAssertEqual(requests.count, 1)
+        XCTAssertTrue(try XCTUnwrap(requests.first).availableDirectives.contains(
+            .openApplication))
+        let completionCount = await fixture.events.values()
+            .filter { $0 == "complete" }.count
+        XCTAssertEqual(
+            completionCount,
+            0,
+            "Opening the app selected by the typed plan needs no visual inference")
+    }
+
+    func testSemanticPointerVerbIsHostOwnedWhenOSAtlasReturnsClickCarrier() async throws {
+        let fixture = makeCorrectionRuntime(
+            completionResponses: [response("CLICK [[250,750]]")],
+            port: 43143)
+        let router = StubSemanticActionRouter { _ in
+            OSAtlasSemanticActionRoute(
+                directive: .rightClick,
+                argument: .targetHint("the selected document"))
+        }
+        var parsedActions: [OSAtlasGUIAction] = []
+        var performedActions: [ComputerUsePredictedAction] = []
+        let executor = OSAtlasComputerUseExecutor.makeForTesting(
+            inputs: fixture.inputs,
+            runtime: fixture.runtime,
+            semanticRouter: router,
+            maxSteps: 1,
+            parsedActionObserver: { parsedActions.append($0) })
+
+        do {
+            _ = try await executor.execute(
+                prompt: "Show me the contextual options for the selected document.",
+                tools: correctionTestTools(
+                    actionPerformer: { performedActions.append($0) }),
+                progress: { _ in })
+            XCTFail("The one-step fixture should stop after the composed action")
+        } catch OSAtlasComputerUseExecutor.RuntimeError.stepLimit {
+            // Expected after one host-composed action.
+        } catch {
+            await fixture.runtime.shutdown()
+            throw error
+        }
+        await fixture.runtime.shutdown()
+
+        XCTAssertEqual(parsedActions, [
+            .click(x: 250, y: 750),
+            .rightClick(x: 250, y: 750),
+        ])
+        XCTAssertEqual(performedActions.count, 1)
+        guard performedActions.count == 1,
+              case .click(_, _, 2, 1) = performedActions[0] else {
+            return XCTFail(
+                "The raw CLICK carrier must be wrapped as the routed secondary click")
+        }
+        let completionCount = await fixture.events.values()
+            .filter { $0 == "complete" }.count
+        XCTAssertEqual(completionCount, 1)
+    }
+
+    func testSemanticDirectTypeUsesTypedArgumentWithoutVisualCompletion() async throws {
+        let fixture = makeCorrectionRuntime(
+            completionResponses: [response("CLICK [[500,500]]")],
+            port: 43144)
+        let router = StubSemanticActionRouter { _ in
+            OSAtlasSemanticActionRoute(
+                directive: .type,
+                argument: .text("Pick up oat milk at 6 PM"))
+        }
+        var parsedActions: [OSAtlasGUIAction] = []
+        var performedActions: [ComputerUsePredictedAction] = []
+        let executor = OSAtlasComputerUseExecutor.makeForTesting(
+            inputs: fixture.inputs,
+            runtime: fixture.runtime,
+            semanticRouter: router,
+            maxSteps: 1,
+            parsedActionObserver: { parsedActions.append($0) })
+
+        do {
+            _ = try await executor.execute(
+                prompt: "Add my oat milk reminder to the focused note.",
+                tools: correctionTestTools(
+                    actionPerformer: { performedActions.append($0) }),
+                progress: { _ in })
+            XCTFail("The one-step fixture should stop after typing")
+        } catch OSAtlasComputerUseExecutor.RuntimeError.stepLimit {
+            // Expected.
+        } catch {
+            await fixture.runtime.shutdown()
+            throw error
+        }
+        await fixture.runtime.shutdown()
+
+        XCTAssertEqual(parsedActions, [
+            .typeText("Pick up oat milk at 6 PM"),
+        ])
+        XCTAssertEqual(performedActions, [
+            .typeText("Pick up oat milk at 6 PM"),
+        ])
+        let completionCount = await fixture.events.values()
+            .filter { $0 == "complete" }.count
+        XCTAssertEqual(
+            completionCount,
+            0,
+            "Direct semantic actions must not spend a visual-model completion")
+    }
+
+    func testSemanticDragRequiresTwoValidClickCarriersBeforeAnyEffect() async throws {
+        let malformed = "Thoughts:\nMalformed action.\nActions:\nCLICK [500,500]"
+        let cases: [[String]] = [
+            [malformed, response("CLICK [[800,800]]")],
+            [response("CLICK [[200,200]]"), malformed],
+        ]
+
+        for (index, completionResponses) in cases.enumerated() {
+            let fixture = makeCorrectionRuntime(
+                completionResponses: completionResponses,
+                port: UInt16(43_145 + index))
+            let router = StubSemanticActionRouter { _ in
+                OSAtlasSemanticActionRoute(
+                    directive: .drag,
+                    argument: .dragHints(
+                        source: "the selected document",
+                        destination: "the Archive folder"))
+            }
+            var parsedActions: [OSAtlasGUIAction] = []
+            var performedActions: [ComputerUsePredictedAction] = []
+            let executor = OSAtlasComputerUseExecutor.makeForTesting(
+                inputs: fixture.inputs,
+                runtime: fixture.runtime,
+                semanticRouter: router,
+                maxSteps: 1,
+                parsedActionObserver: { parsedActions.append($0) })
+            var capturedError: Error?
+
+            do {
+                _ = try await executor.execute(
+                    prompt: "Move the selected document into Archive.",
+                    tools: correctionTestTools(
+                        actionPerformer: { performedActions.append($0) }),
+                    progress: { _ in })
+                XCTFail("A malformed drag endpoint must fail closed")
+            } catch {
+                capturedError = error
+            }
+            await fixture.runtime.shutdown()
+
+            XCTAssertEqual(
+                capturedError as? OSAtlasComputerUseExecutor.RuntimeError,
+                .unsupportedAction("unknown"),
+                "case \(index)")
+            XCTAssertTrue(performedActions.isEmpty, "case \(index)")
+            XCTAssertEqual(
+                parsedActions,
+                index == 0 ? [] : [.click(x: 200, y: 200)],
+                "Only a valid first carrier may be observed")
+            let completionCount = await fixture.events.values()
+                .filter { $0 == "complete" }.count
+            XCTAssertEqual(
+                completionCount,
+                index + 1,
+                "No later carrier may run after malformed grounding")
+        }
+    }
+
+    func testSemanticDragComposesExactlyTwoClickCarriersIntoOnePolicyCheckedAction() async throws {
+        let fixture = makeCorrectionRuntime(
+            completionResponses: [
+                response("CLICK [[200,200]]"),
+                response("CLICK [[800,800]]"),
+            ],
+            port: 43150)
+        let router = StubSemanticActionRouter { _ in
+            OSAtlasSemanticActionRoute(
+                directive: .drag,
+                argument: .dragHints(
+                    source: "the selected document",
+                    destination: "the Archive folder"))
+        }
+        var parsedActions: [OSAtlasGUIAction] = []
+        var performedActions: [ComputerUsePredictedAction] = []
+        let executor = OSAtlasComputerUseExecutor.makeForTesting(
+            inputs: fixture.inputs,
+            runtime: fixture.runtime,
+            semanticRouter: router,
+            maxSteps: 1,
+            parsedActionObserver: { parsedActions.append($0) })
+
+        let result: ComputerUseExecutionResult
+        do {
+            result = try await executor.execute(
+                prompt: "Move the selected document into Archive.",
+                tools: correctionTestTools(
+                    actionPerformer: { performedActions.append($0) }),
+                progress: { _ in })
+        } catch {
+            await fixture.runtime.shutdown()
+            throw error
+        }
+        await fixture.runtime.shutdown()
+
+        XCTAssertEqual(parsedActions, [
+            .click(x: 200, y: 200),
+            .click(x: 800, y: 800),
+            .drag(fromX: 200, fromY: 200, toX: 800, toY: 800),
+        ])
+        XCTAssertTrue(performedActions.isEmpty)
+        guard case .approvalRequired(_, let proposedAction) = result,
+              case .drag = proposedAction else {
+            return XCTFail(
+                "Two valid carriers must produce one host-policy-checked drag")
+        }
+        let completionCount = await fixture.events.values()
+            .filter { $0 == "complete" }.count
+        XCTAssertEqual(completionCount, 2)
+    }
+
+    func testInvalidSemanticArgumentsFailBeforeVisualInferenceOrEffects() async throws {
+        let fixture = makeCorrectionRuntime(
+            completionResponses: [response("CLICK [[500,500]]")],
+            port: 43147)
+        let router = StubSemanticActionRouter { _ in
+            OSAtlasSemanticActionRoute(directive: .click)
+        }
+        var openedApplications: [String] = []
+        var performedActions: [ComputerUsePredictedAction] = []
+        var parsedActions: [OSAtlasGUIAction] = []
+        let executor = OSAtlasComputerUseExecutor.makeForTesting(
+            inputs: fixture.inputs,
+            runtime: fixture.runtime,
+            semanticRouter: router,
+            maxSteps: 1,
+            parsedActionObserver: { parsedActions.append($0) })
+        var capturedError: Error?
+
+        do {
+            _ = try await executor.execute(
+                prompt: "Choose the relevant control.",
+                tools: correctionTestTools(
+                    applicationOpener: { openedApplications.append($0) },
+                    actionPerformer: { performedActions.append($0) }),
+                progress: { _ in })
+            XCTFail("A pointer plan without a target must fail closed")
+        } catch {
+            capturedError = error
+        }
+        await fixture.runtime.shutdown()
+
+        XCTAssertEqual(
+            capturedError as? OSAtlasComputerUseExecutor.RuntimeError,
+            .unsupportedAction("semantic-plan-arguments"))
+        XCTAssertTrue(openedApplications.isEmpty)
+        XCTAssertTrue(performedActions.isEmpty)
+        XCTAssertTrue(parsedActions.isEmpty)
+        let completionCount = await fixture.events.values()
+            .filter { $0 == "complete" }.count
+        XCTAssertEqual(completionCount, 0)
+    }
+
+    func testUnverifiedSemanticAnswerEvidenceFailsBeforeEffects() async throws {
+        let fixture = makeCorrectionRuntime(
+            completionResponses: [response("CLICK [[500,500]]")],
+            port: 43148)
+        let observation = try OSAtlasAcceptanceFixtureRenderer.deliveryQuote()
+        let router = StubSemanticActionRouter { _ in
+            OSAtlasSemanticActionRoute(
+                directive: .answer,
+                argument: .visibleAnswer(
+                    summary: "The imaginary total is $99.99.",
+                    evidence: ["imaginary total $99.99"]))
+        }
+        var openedApplications: [String] = []
+        var performedActions: [ComputerUsePredictedAction] = []
+        var parsedActions: [OSAtlasGUIAction] = []
+        let executor = OSAtlasComputerUseExecutor.makeForTesting(
+            inputs: fixture.inputs,
+            runtime: fixture.runtime,
+            semanticRouter: router,
+            maxSteps: 1,
+            parsedActionObserver: { parsedActions.append($0) })
+        var capturedError: Error?
+
+        do {
+            _ = try await executor.execute(
+                prompt: "Tell me the visible facts on this page.",
+                tools: correctionTestTools(
+                    observation: observation,
+                    applicationOpener: { openedApplications.append($0) },
+                    actionPerformer: { performedActions.append($0) }),
+                progress: { _ in })
+            XCTFail("Evidence absent from local OCR must fail closed")
+        } catch {
+            capturedError = error
+        }
+        await fixture.runtime.shutdown()
+
+        XCTAssertEqual(
+            capturedError as? OSAtlasComputerUseExecutor.RuntimeError,
+            .unsupportedAction("unverified-visible-answer"))
+        XCTAssertTrue(openedApplications.isEmpty)
+        XCTAssertTrue(performedActions.isEmpty)
+        XCTAssertTrue(parsedActions.isEmpty)
+        let completionCount = await fixture.events.values()
+            .filter { $0 == "complete" }.count
+        XCTAssertEqual(completionCount, 0)
+    }
+
+    func testProductionLoadAlwaysInstallsDeterministicAppFirstRouterBeforeRawInference()
+        async throws {
+        let fixture = makeCorrectionRuntime(
+            completionResponses: [response("WAIT")],
+            port: 43152)
+        var openedApplications: [String] = []
+        var capturedError: Error?
+
+        do {
+            let executor = try await OSAtlasComputerUseExecutor.load(
+                inputs: fixture.inputs,
+                runtime: fixture.runtime,
+                progress: { _ in })
+            _ = try await executor.execute(
+                prompt: "Please open Safari and use the local page that's already loaded there.",
+                tools: correctionTestTools(
+                    frontmostApplication: "Safari",
+                    applicationOpener: { applicationName in
+                        openedApplications.append(applicationName)
+                        throw StubSemanticActionRouterError.rejected
+                    },
+                    actionPerformer: { _ in
+                        XCTFail("App-first routing must not perform input")
+                    }),
+                progress: { _ in })
+            XCTFail("The fixture application opener must stop the executor")
+        } catch {
+            capturedError = error
+        }
+        await fixture.runtime.shutdown()
+
+        XCTAssertEqual(
+            capturedError as? StubSemanticActionRouterError,
+            .rejected)
+        XCTAssertEqual(openedApplications, ["Safari"])
+        let completionCount = await fixture.events.values()
+            .filter { $0 == "complete" }.count
+        XCTAssertEqual(
+            completionCount,
+            0,
+            "A production-loaded executor must route a named app before raw OS-Atlas inference")
+    }
+
+    func testSemanticRouterRuntimeUnavailableFallsBackToLegacyRawPath() async throws {
+        let fixture = makeCorrectionRuntime(
+            completionResponses: [response("TYPE [legacy fallback]")],
+            port: 43149)
+        let router = StubSemanticActionRouter { _ in
+            throw AppleFoundationVisualActionRouterError.unavailable(
+                .modelNotReady)
+        }
+        var parsedActions: [OSAtlasGUIAction] = []
+        var performedActions: [ComputerUsePredictedAction] = []
+        let executor = OSAtlasComputerUseExecutor.makeForTesting(
+            inputs: fixture.inputs,
+            runtime: fixture.runtime,
+            checkpointActionProfile: .installedPro4BQ4KMLegacy,
+            semanticRouter: router,
+            maxSteps: 1,
+            parsedActionObserver: { parsedActions.append($0) })
+
+        do {
+            _ = try await executor.execute(
+                prompt: "Add the fallback text to the focused field.",
+                tools: correctionTestTools(
+                    actionPerformer: { performedActions.append($0) }),
+                progress: { _ in })
+            XCTFail("The one-step fixture should stop after legacy fallback")
+        } catch OSAtlasComputerUseExecutor.RuntimeError.stepLimit {
+            // Expected after the one legacy checkpoint action.
+        } catch {
+            await fixture.runtime.shutdown()
+            throw error
+        }
+        await fixture.runtime.shutdown()
+
+        XCTAssertEqual(parsedActions, [.typeText("legacy fallback")])
+        XCTAssertEqual(performedActions, [.typeText("legacy fallback")])
+        let completionCount = await fixture.events.values()
+            .filter { $0 == "complete" }.count
+        XCTAssertEqual(completionCount, 1)
+    }
+
+    func testSemanticRouterFailureStopsBeforeInferenceOrHostSideEffects() async throws {
+        let fixture = makeCorrectionRuntime(
+            completionResponses: [response("CLICK [[500,500]]")],
+            port: 43142)
+        let routingRequests = SemanticRoutingRequestLog()
+        let router = StubSemanticActionRouter { request in
+            await routingRequests.record(request)
+            throw StubSemanticActionRouterError.rejected
+        }
+        var openedApplications: [String] = []
+        var performedActions: [ComputerUsePredictedAction] = []
+        var parsedActions: [OSAtlasGUIAction] = []
+        let executor = OSAtlasComputerUseExecutor.makeForTesting(
+            inputs: fixture.inputs,
+            runtime: fixture.runtime,
+            semanticRouter: router,
+            maxSteps: 1,
+            parsedActionObserver: { parsedActions.append($0) })
+
+        do {
+            _ = try await executor.execute(
+                prompt: "Copy the selected packing list.",
+                tools: correctionTestTools(
+                    applicationOpener: { openedApplications.append($0) },
+                    actionPerformer: { performedActions.append($0) }),
+                progress: { _ in })
+            XCTFail("A semantic-routing failure must stop the task")
+        } catch let error as StubSemanticActionRouterError {
+            XCTAssertEqual(error, .rejected)
+        } catch {
+            await fixture.runtime.shutdown()
+            throw error
+        }
+        await fixture.runtime.shutdown()
+
+        let requests = await routingRequests.values()
+        XCTAssertEqual(requests.count, 1)
+        XCTAssertTrue(openedApplications.isEmpty)
+        XCTAssertTrue(performedActions.isEmpty)
+        XCTAssertTrue(parsedActions.isEmpty)
+        let completionCount = await fixture.events.values()
+            .filter { $0 == "complete" }.count
+        XCTAssertEqual(
+            completionCount,
+            0,
+            "A failed semantic route must stop before asking OS-Atlas for an action")
+    }
+
     func testAccessibilityCorrectionSnapsOnlyOneNearbyEnabledActionableElement() {
         let predicted = CGPoint(x: 100, y: 100)
         let container = OSAtlasAccessibilityClickCandidate(
@@ -2261,9 +3205,12 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
     }
 
     private func correctionTestTools(
+        observation providedObservation: ComputerUseScreenObservation? = nil,
+        frontmostApplication: String = "Hidden correction fixture",
+        applicationOpener: ((String) async throws -> Void)? = nil,
         actionPerformer: @escaping (ComputerUsePredictedAction) throws -> Void
     ) -> ComputerUseHostTools {
-        let observation = ComputerUseScreenObservation(
+        let observation = providedObservation ?? ComputerUseScreenObservation(
             image: CIImage(color: CIColor(red: 0.92, green: 0.94, blue: 0.97))
                 .cropped(to: CGRect(x: 0, y: 0, width: 448, height: 320)),
             displayBounds: CGRect(x: 0, y: 0, width: 1_440, height: 900))
@@ -2272,7 +3219,7 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
                 XCTFail("Correction tests must never post native input")
             }),
             mayAct: { true },
-            applicationOpener: { _ in
+            applicationOpener: applicationOpener ?? { _ in
                 XCTFail("Correction tests must not open an application")
             },
             actionPerformer: actionPerformer,
@@ -2280,7 +3227,7 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
             accessibilityContextProvider: { _ in
                 "AXStaticText • selected correction fixture"
             },
-            frontmostApplicationProvider: { "Hidden correction fixture" })
+            frontmostApplicationProvider: { frontmostApplication })
     }
 
     private func parse(_ action: String) throws -> OSAtlasGUIAction {
@@ -2289,6 +3236,46 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
 
     private func response(_ action: String) -> String {
         "Thoughts:\nUse the visible control.\nActions:\n\(action)"
+    }
+}
+
+private actor SemanticRoutingRequestLog {
+    private var requests: [OSAtlasSemanticRoutingRequest] = []
+
+    func record(_ request: OSAtlasSemanticRoutingRequest) {
+        requests.append(request)
+    }
+
+    func values() -> [OSAtlasSemanticRoutingRequest] {
+        requests
+    }
+}
+
+private enum StubSemanticActionRouterError: Error, Equatable {
+    case rejected
+}
+
+private struct StubSemanticActionRouter: OSAtlasSemanticActionRouting {
+    let routeHandler: @Sendable (
+        OSAtlasSemanticRoutingRequest
+    ) async throws -> OSAtlasSemanticActionRoute
+
+    init(
+        routeHandler: @escaping @Sendable (
+            OSAtlasSemanticRoutingRequest
+        ) async throws -> OSAtlasSemanticActionRoute
+    ) {
+        self.routeHandler = routeHandler
+    }
+
+    func availability() -> AppleFoundationMCPPlannerAvailability {
+        .available
+    }
+
+    func route(
+        _ request: OSAtlasSemanticRoutingRequest
+    ) async throws -> OSAtlasSemanticActionRoute {
+        try await routeHandler(request)
     }
 }
 
@@ -2764,6 +3751,40 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
         XCTAssertNil(activeVariant)
     }
 
+    func testActivationAcceptsBoundedPostLoadInferenceHeadroom() async throws {
+        let events = RuntimeEventLog()
+        let resources = SequenceResourceInspector(snapshots: [
+            OSAtlasLlamaResourceSnapshot(
+                physicalMemoryBytes: OSAtlasLlamaRuntime.minimumPhysicalMemoryBytes,
+                reclaimableMemoryBytes: OSAtlasLlamaRuntime.minimumLaunchMemoryBytes),
+            OSAtlasLlamaResourceSnapshot(
+                physicalMemoryBytes: OSAtlasLlamaRuntime.minimumPhysicalMemoryBytes,
+                reclaimableMemoryBytes: OSAtlasLlamaRuntime.minimumInferenceMemoryBytes),
+        ])
+        let runtime = OSAtlasLlamaRuntime(
+            launcher: FakeLlamaLauncher(events: events),
+            transportMaker: FakeTransportMaker(events: events),
+            portProvider: FixedPortProvider(port: 43123),
+            tokenProvider: FixedTokenProvider(token: "token"),
+            readinessAttempts: 1,
+            readinessDelay: .zero,
+            resourceInspector: resources)
+
+        let endpoint = try await runtime.activate(
+            inputs(variant: .pro4B, name: "pro"))
+        let activeVariant = await runtime.activeVariant()
+
+        XCTAssertEqual(endpoint.variant, .pro4B)
+        XCTAssertEqual(activeVariant, .pro4B)
+        XCTAssertEqual(
+            OSAtlasLlamaRuntime.minimumInferenceMemoryBytes,
+            2 * 1_024 * 1_024 * 1_024)
+        await runtime.shutdown()
+        let values = await events.values()
+        XCTAssertTrue(values.contains("health"))
+        XCTAssertTrue(values.contains("terminate:pro-Q4_K_M-00001-of-00002.gguf"))
+    }
+
     func testInferenceMemoryPressureStopsResidentModelBeforeHTTP() async throws {
         let events = RuntimeEventLog()
         let resources = SequenceResourceInspector(snapshots: [
@@ -3152,14 +4173,15 @@ private func makeTestJPEG(width: Int, height: Int) throws -> Data {
 
 // MARK: - Opt-in actual-model acceptance
 
-/// These tests use the installed OS-Atlas Pro 4B checkpoint and the signed
-/// llama.cpp runtime. They are intentionally separate from the mocked runtime
-/// tests above and are opt-in because loading the model is a multi-gigabyte,
-/// single-owner operation. The local fixtures are rendered directly into
-/// memory, so this suite never opens a window or reads the user's desktop.
+/// These tests use Apple's installed on-device language model together with
+/// the installed OS-Atlas Pro 4B checkpoint and signed llama.cpp runtime. They
+/// are intentionally separate from the mocked runtime tests above and are
+/// opt-in because loading OS-Atlas is a multi-gigabyte, single-owner operation.
+/// The local fixtures are rendered directly into memory, so this suite never
+/// opens a window or reads the user's desktop.
 @MainActor
 final class OSAtlasActualModelAcceptanceTests: XCTestCase {
-    func testInstalledQ4CheckpointEmitsTwelveVerifiedRawVariantsWithoutVisibleUI() async throws {
+    func testInstalledHybridUnderstandsNaturalLanguageAcrossFullActionSurfaceWithoutVisibleUI() async throws {
         try XCTSkipUnless(
             OSAtlasAcceptanceOptIn.modelE2EIsEnabled,
             "Run host-mac/scripts/run_osatlas_acceptance.sh --actual-model to load the installed OS-Atlas Pro model.")
@@ -3167,24 +4189,25 @@ final class OSAtlasActualModelAcceptanceTests: XCTestCase {
         let inputs = try OSAtlasInstalledAcceptanceRuntime.resolveInputs()
         let runtime = OSAtlasLlamaRuntime()
         var evidence = [
-            "PARSER/HOST CONTRACT: 16 semantic actions / 17 raw variants; ANSWER and REPORT are exact-token aliases for the same visible-facts result.",
-            "INSTALLED Q4 CHECKPOINT CONTRACT: 12 verified raw variants. CLICK, DOUBLE_CLICK, DRAG, HOTKEY, and the redundant REPORT raw alias are rejected by the production profile.",
+            "HOST CONTRACT: 16 semantic actions; ANSWER and REPORT are aliases for one evidence-checked visible-facts result.",
+            "HYBRID CONTRACT: ordinary language is converted to a typed semantic plan. OS-Atlas is invoked only for one or two CLICK point carriers; the host owns the final verb and all direct-action arguments.",
         ]
         var recordedRows = 0
         func record(
             _ capture: ActualActionCapture,
             expected: String,
+            expectedVisualGroundings: Int = 0,
             passed: Bool,
             file: StaticString = #filePath,
             line: UInt = #line
         ) {
             recordedRows += 1
-            let sequenceIsBounded = (1 ... 2).contains(
-                capture.rawModelResponses.count)
+            let sequenceIsBounded = capture.rawModelResponses.count
+                    == expectedVisualGroundings
                 && capture.rawActionTokens.count
                     == capture.rawModelResponses.count
-                && capture.correctionCount
-                    == capture.rawModelResponses.count - 1
+                && capture.rawActionTokens.allSatisfy { $0 == "CLICK" }
+                && capture.correctionCount == 0
             let effectivePass = passed && sequenceIsBounded
             evidence.append(capture.evidence(
                 status: effectivePass ? "PASS_SUPPORTED" : "FAIL_SUPPORTED"))
@@ -3195,12 +4218,61 @@ final class OSAtlasActualModelAcceptanceTests: XCTestCase {
                 line: line)
         }
         do {
+            let click = try await observeActualAction(
+                named: "CLICK",
+                prompt: "Go to next week on my family calendar.",
+                observation: try OSAtlasAcceptanceFixtureRenderer.everydayOperation(.calendar),
+                inputs: inputs,
+                runtime: runtime,
+                frontmostApplication: "Calendar")
+            let clickPassed: Bool
+            if case .click? = click.parsedAction,
+               click.performedActions.count == 1,
+               case .click(let x, let y, 1, 1) = click.performedActions[0],
+               OSAtlasAcceptanceFixtureRenderer.desktopTargetRect(
+                    for: OSAtlasAcceptanceFixtureRenderer.calendarNextWeekTarget)
+                .contains(CGPoint(x: x, y: y)) {
+                clickPassed = true
+            } else {
+                clickPassed = false
+            }
+            record(
+                click,
+                expected: "CLICK the visible Next week control",
+                expectedVisualGroundings: 1,
+                passed: clickPassed)
+
+            let doubleClick = try await observeActualAction(
+                named: "DOUBLE_CLICK",
+                prompt: "Open the Summer Picnic folder.",
+                observation: try OSAtlasAcceptanceFixtureRenderer.everydayOperation(.photoAlbum),
+                inputs: inputs,
+                runtime: runtime,
+                frontmostApplication: "Finder")
+            let doubleClickPassed: Bool
+            if case .doubleClick? = doubleClick.parsedAction,
+               doubleClick.performedActions.count == 1,
+               case .click(let x, let y, 1, 2) = doubleClick.performedActions[0],
+               OSAtlasAcceptanceFixtureRenderer.desktopTargetRect(
+                    for: OSAtlasAcceptanceFixtureRenderer.summerPicnicFolderTarget)
+                .contains(CGPoint(x: x, y: y)) {
+                doubleClickPassed = true
+            } else {
+                doubleClickPassed = false
+            }
+            record(
+                doubleClick,
+                expected: "DOUBLE_CLICK the visible Summer Picnic folder",
+                expectedVisualGroundings: 1,
+                passed: doubleClickPassed)
+
             let rightClick = try await observeActualAction(
                 named: "RIGHT_CLICK",
-                prompt: "Open the context menu for the visible Tax receipts.pdf file so I can choose what to do with it. Use RIGHT_CLICK on Tax receipts.pdf now as the single next action.",
+                prompt: "Open the context menu for Tax receipts.pdf so I can choose what to do with it.",
                 observation: try OSAtlasAcceptanceFixtureRenderer.everydayOperation(.finderFile),
                 inputs: inputs,
-                runtime: runtime)
+                runtime: runtime,
+                frontmostApplication: "Finder")
             let rightClickPassed: Bool
             if case .rightClick? = rightClick.parsedAction,
                rightClick.performedActions.count == 1,
@@ -3215,15 +4287,48 @@ final class OSAtlasActualModelAcceptanceTests: XCTestCase {
             record(
                 rightClick,
                 expected: "RIGHT_CLICK",
+                expectedVisualGroundings: 1,
                 passed: rightClickPassed)
+
+            let drag = try await observeActualAction(
+                named: "DRAG",
+                prompt: "Move the Buy groceries card from Today to Weekend.",
+                observation: try OSAtlasAcceptanceFixtureRenderer.everydayOperation(.errandBoard),
+                inputs: inputs,
+                runtime: runtime,
+                frontmostApplication: "Task Board")
+            let dragPassed: Bool
+            if case .drag? = drag.parsedAction,
+               drag.performedActions.isEmpty,
+               case .approvalRequired(
+                    _,
+                    let proposedAction
+               )? = drag.result,
+               case .drag(let fromX, let fromY, let toX, let toY) = proposedAction,
+               OSAtlasAcceptanceFixtureRenderer.desktopTargetRect(
+                    for: OSAtlasAcceptanceFixtureRenderer.buyGroceriesCardTarget)
+                .contains(CGPoint(x: fromX, y: fromY)),
+               OSAtlasAcceptanceFixtureRenderer.desktopTargetRect(
+                    for: OSAtlasAcceptanceFixtureRenderer.weekendColumnTarget)
+                .contains(CGPoint(x: toX, y: toY)) {
+                dragPassed = true
+            } else {
+                dragPassed = false
+            }
+            record(
+                drag,
+                expected: "DRAG the card into Weekend and stop at approval",
+                expectedVisualGroundings: 2,
+                passed: dragPassed)
 
             let typedText = "Pick up oat milk at 6 PM"
             let type = try await observeActualAction(
                 named: "TYPE",
-                prompt: "The caret is already active in my errands note. Add one line by using TYPE [\(typedText)] now as the single next action.",
+                prompt: "The caret is already active in my errands note. Add a line with exactly \"\(typedText)\".",
                 observation: try OSAtlasAcceptanceFixtureRenderer.everydayOperation(.focusedNote),
                 inputs: inputs,
                 runtime: runtime,
+                frontmostApplication: "Notes",
                 accessibilityContext: "AXTextArea • focused errands note")
             let typePassed: Bool
             if case .typeText(let modelText)? = type.parsedAction,
@@ -3235,22 +4340,28 @@ final class OSAtlasActualModelAcceptanceTests: XCTestCase {
             }
             record(type, expected: "TYPE", passed: typePassed)
 
-            for (direction, fixture, expectedDelta) in [
-                ("UP", OSAtlasAcceptanceFixtureRenderer.EverydayOperation.feedEarlier,
-                 ComputerUsePredictedAction.scroll(x: 20_224, y: 20_224, dx: 0, dy: 360)),
-                ("DOWN", .feedLater,
-                 .scroll(x: 20_224, y: 20_224, dx: 0, dy: -360)),
-                ("LEFT", .galleryLeft,
-                 .scroll(x: 20_224, y: 20_224, dx: 360, dy: 0)),
-                ("RIGHT", .galleryRight,
-                 .scroll(x: 20_224, y: 20_224, dx: -360, dy: 0)),
+            for (direction, task, fixture, expectedDelta, frontmostApplication) in [
+                ("UP", "Show me the earlier family activity updates above this view.",
+                 OSAtlasAcceptanceFixtureRenderer.EverydayOperation.feedEarlier,
+                 ComputerUsePredictedAction.scroll(x: 20_224, y: 20_224, dx: 0, dy: 360),
+                 "Family Activity"),
+                ("DOWN", "Show me the newer family activity updates below this view.", .feedLater,
+                 .scroll(x: 20_224, y: 20_224, dx: 0, dy: -360),
+                 "Family Activity"),
+                ("LEFT", "Reveal the earlier photos clipped off the left side of this gallery.", .galleryLeft,
+                 .scroll(x: 20_224, y: 20_224, dx: 360, dy: 0),
+                 "Trip Photos"),
+                ("RIGHT", "Reveal the later photos clipped off the right side of this gallery.", .galleryRight,
+                 .scroll(x: 20_224, y: 20_224, dx: -360, dy: 0),
+                 "Trip Photos"),
             ] {
                 let scroll = try await observeActualAction(
                     named: "SCROLL_\(direction)",
-                    prompt: "Browse my family activity \(direction == "UP" || direction == "DOWN" ? "feed" : "horizontally clipped photo gallery"). Use SCROLL [\(direction)] now as the single next action.",
+                    prompt: task,
                     observation: try OSAtlasAcceptanceFixtureRenderer.everydayOperation(fixture),
                     inputs: inputs,
-                    runtime: runtime)
+                    runtime: runtime,
+                    frontmostApplication: frontmostApplication)
                 let scrollPassed: Bool
                 if case .scroll(let emittedDirection)? = scroll.parsedAction,
                    emittedDirection.rawValue == direction,
@@ -3267,10 +4378,11 @@ final class OSAtlasActualModelAcceptanceTests: XCTestCase {
 
             let openApp = try await observeActualAction(
                 named: "OPEN_APP",
-                prompt: "I am looking at an unrelated meal plan in Safari, but my grocery list is in Notes and Notes has no visible control here. Use OPEN_APP [Notes] now as the single next action.",
+                prompt: "Add oat milk to my grocery list in Notes.",
                 observation: try OSAtlasAcceptanceFixtureRenderer.everydayOperation(.notesSuggestion),
                 inputs: inputs,
-                runtime: runtime)
+                runtime: runtime,
+                frontmostApplication: "Safari")
             let openAppPassed: Bool
             if case .openApplication(let emittedApp)? = openApp.parsedAction,
                emittedApp == "Notes",
@@ -3287,10 +4399,11 @@ final class OSAtlasActualModelAcceptanceTests: XCTestCase {
 
             let enter = try await observeActualAction(
                 named: "ENTER",
-                prompt: "The library hours query is already typed in the focused search field. Use ENTER now as the single next action to run the search.",
+                prompt: "Run the library hours search that's already typed in the focused field.",
                 observation: try OSAtlasAcceptanceFixtureRenderer.everydayOperation(.librarySearch),
                 inputs: inputs,
                 runtime: runtime,
+                frontmostApplication: "Safari",
                 accessibilityContext: "AXSearchField • library hours")
             let enterPassed: Bool
             if case .enter? = enter.parsedAction,
@@ -3301,12 +4414,32 @@ final class OSAtlasActualModelAcceptanceTests: XCTestCase {
             }
             record(enter, expected: "ENTER", passed: enterPassed)
 
+            let hotkey = try await observeActualAction(
+                named: "HOTKEY",
+                prompt: "Copy the selected packing list.",
+                observation: try OSAtlasAcceptanceFixtureRenderer.everydayOperation(.selectedPackingList),
+                inputs: inputs,
+                runtime: runtime,
+                frontmostApplication: "Notes",
+                accessibilityContext: "AXTextArea • focused selected packing list")
+            let hotkeyPassed: Bool
+            if case .hotkey(let usage, let modifiers, _)? = hotkey.parsedAction,
+               usage == 0x06,
+               modifiers == 1 << 3,
+               hotkey.performedActions == [.key(usage: 0x06, modifiers: 1 << 3)] {
+                hotkeyPassed = true
+            } else {
+                hotkeyPassed = false
+            }
+            record(hotkey, expected: "HOTKEY [COMMAND+C]", passed: hotkeyPassed)
+
             let wait = try await observeActualAction(
                 named: "WAIT",
-                prompt: "The grocery delivery price is visibly still updating. Use WAIT now as the single next action.",
+                prompt: "Wait for the latest grocery delivery price to finish updating.",
                 observation: try OSAtlasAcceptanceFixtureRenderer.everydayOperation(.updatingPrice),
                 inputs: inputs,
-                runtime: runtime)
+                runtime: runtime,
+                frontmostApplication: "Safari")
             let waitPassed: Bool
             if case .wait? = wait.parsedAction,
                wait.reachedStepLimit,
@@ -3318,17 +4451,18 @@ final class OSAtlasActualModelAcceptanceTests: XCTestCase {
             }
             record(wait, expected: "WAIT", passed: waitPassed)
 
-            let askQuestion = "Which departure city should I use?"
             let ask = try await observeActualAction(
                 named: "ASK",
-                prompt: "Plan my ordinary train trip, but the required departure city is not provided anywhere. Use ASK [\(askQuestion)] now as the single next action.",
+                prompt: "Plan this Saturday train trip to Monterey.",
                 observation: try OSAtlasAcceptanceFixtureRenderer.everydayOperation(.missingDepartureCity),
                 inputs: inputs,
-                runtime: runtime)
+                runtime: runtime,
+                frontmostApplication: "Trip Planner")
             let askPassed: Bool
             if case .ask(let emittedQuestion)? = ask.parsedAction,
-               emittedQuestion == askQuestion,
-               ask.result == .completed(askQuestion),
+               emittedQuestion.localizedCaseInsensitiveContains("departure"),
+               emittedQuestion.localizedCaseInsensitiveContains("city"),
+               ask.result == .completed(emittedQuestion),
                ask.performedActions.isEmpty {
                 askPassed = true
             } else {
@@ -3336,22 +4470,21 @@ final class OSAtlasActualModelAcceptanceTests: XCTestCase {
             }
             record(ask, expected: "ASK", passed: askPassed)
 
-            let answerText = "Dentist appointment is Tuesday at 3:30 PM."
             let answer = try await observeActualAction(
                 named: "ANSWER",
-                prompt: "This is a read-only request: read my visible appointment details. Use ANSWER [\(answerText)] now as the single next action and preserve the visible day and time exactly.",
+                prompt: "When is my dentist appointment?",
                 observation: try OSAtlasAcceptanceFixtureRenderer.everydayOperation(.appointmentSummary),
                 inputs: inputs,
-                runtime: runtime)
+                runtime: runtime,
+                frontmostApplication: "Calendar")
             let answerPassed: Bool
             if case .report(let emittedAnswer)? = answer.parsedAction,
                ["dentist appointment", "tuesday", "3:30", "pm"]
-                .allSatisfy({ fact in
+               .allSatisfy({ fact in
                     emittedAnswer.range(
                         of: fact,
                         options: [.caseInsensitive, .literal]) != nil
                 }),
-               answer.acceptedRawActionToken == "ANSWER",
                answer.result == .completed(emittedAnswer),
                answer.performedActions.isEmpty {
                 answerPassed = true
@@ -3365,10 +4498,11 @@ final class OSAtlasActualModelAcceptanceTests: XCTestCase {
 
             let complete = try await observeActualAction(
                 named: "COMPLETE",
-                prompt: "My household checklist visibly shows every requested chore already finished. Use COMPLETE now as the single next action; the checked rows and status are static, so do not click or change anything.",
+                prompt: "Make sure all of my Saturday chores are complete.",
                 observation: try OSAtlasAcceptanceFixtureRenderer.everydayOperation(.finishedChecklist),
                 inputs: inputs,
-                runtime: runtime)
+                runtime: runtime,
+                frontmostApplication: "Reminders")
             let completePassed: Bool
             if case .complete? = complete.parsedAction,
                complete.result == .completed("Done. The task was already complete."),
@@ -3385,8 +4519,8 @@ final class OSAtlasActualModelAcceptanceTests: XCTestCase {
         await runtime.shutdown()
         XCTAssertEqual(
             recordedRows,
-            12,
-            "Every raw variant advertised for the installed Q4 checkpoint is strict")
+            16,
+            "Every host-composed semantic action is covered")
 
         let attachment = XCTAttachment(
             string: evidence.joined(separator: "\n"))
@@ -3869,6 +5003,7 @@ final class OSAtlasActualModelAcceptanceTests: XCTestCase {
         observation: ComputerUseScreenObservation,
         inputs: OSAtlasLlamaRuntimeInputs,
         runtime: OSAtlasLlamaRuntime,
+        frontmostApplication: String = "Remote Desktop hidden fixture",
         accessibilityContext: String = "AXStaticText • hidden ordinary-person fixture",
         maxSteps: Int = 1
     ) async throws -> ActualActionCapture {
@@ -3885,6 +5020,7 @@ final class OSAtlasActualModelAcceptanceTests: XCTestCase {
             inputs: inputs,
             runtime: runtime,
             checkpointActionProfile: .installedPro4BQ4KM,
+            semanticRouter: AppleFoundationVisualActionRouter(),
             maxSteps: maxSteps,
             parsedActionObserver: { parsedActions.append($0) },
             actionTokenObserver: { rawActionTokens.append($0) },
@@ -3898,7 +5034,7 @@ final class OSAtlasActualModelAcceptanceTests: XCTestCase {
             actionPerformer: { performedActions.append($0) },
             screenProvider: { hiddenObservation },
             accessibilityContextProvider: { _ in accessibilityContext },
-            frontmostApplicationProvider: { "Remote Desktop hidden fixture" })
+            frontmostApplicationProvider: { frontmostApplication })
 
         var result: ComputerUseExecutionResult?
         var reachedStepLimit = false
@@ -4405,7 +5541,7 @@ private enum OSAtlasAcceptanceFixtureRenderer {
                 header("Train Planner", "Weekend visit")
                 text(canvas, "TRIP DETAILS", x: 148, top: 146,
                      size: 14, color: color(0.38, 0.40, 0.44), bold: true)
-                text(canvas, "Departure: Not provided", x: 76, top: 194,
+                text(canvas, "Departure city: Not provided", x: 76, top: 194,
                      size: 18, color: color(0.68, 0.12, 0.14), bold: true)
                 text(canvas, "Destination: Monterey", x: 76, top: 240,
                      size: 17, color: color(0.16, 0.18, 0.22))
@@ -4693,7 +5829,12 @@ private enum OSAtlasAcceptanceFixtureRenderer {
         }
         return ComputerUseScreenObservation(
             image: CIImage(cgImage: image),
-            displayBounds: CGRect(x: 0, y: 0, width: width, height: height))
+            displayBounds: CGRect(x: 0, y: 0, width: width, height: height),
+            frontmostWindowBounds: CGRect(
+                x: 0,
+                y: 0,
+                width: width,
+                height: height))
     }
 
     private static func rect(

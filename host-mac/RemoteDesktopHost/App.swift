@@ -125,6 +125,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var setupWindowController: NSWindowController?
     private var settingsWindowController: NSWindowController?
     private var activationObserver: NSObjectProtocol?
+    private var launchPermissionTask: Task<Void, Never>?
+    private var permissionRefreshTask: Task<Void, Never>?
     private var stateObserver: AnyCancellable?
     private var terminationSignalSource: DispatchSourceSignal?
     private var terminationTask: Task<Void, Never>?
@@ -176,20 +178,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             object: nil,
             queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated {
-                    self?.session.refreshPermissions()
+                    self?.refreshPermissionsAfterActivation()
                 }
             }
 
         // Refresh permissions on first show so the UI reflects reality.
         session.refreshPermissions()
         configureStartAtLogin()
-        configureHeadlessMode()
-        if !HostRuntimeContext.isRunningUnitTests,
-           HostSetupPreferences.shouldPresent(permissions: session.permissions) {
-            DispatchQueue.main.async { [weak self] in
-                self?.showSetupWindow()
-            }
-        }
+        resolveLaunchPermissionState()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -200,6 +196,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if let obs = activationObserver {
             NotificationCenter.default.removeObserver(obs)
         }
+        cancelPermissionTasks()
         stateObserver?.cancel()
         clearPairingCodeFile()
         session.stop()
@@ -226,6 +223,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // so `terminate(_:)` unwinds, complete bounded async teardown, then
         // issue a second request that returns `.terminateNow`.
         terminationState = .shuttingDown
+        cancelPermissionTasks()
         terminationTask = Task { @MainActor in
             await HostTerminationSequence.finish(
                 session: self.session,
@@ -242,10 +240,82 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if popover.isShown {
             popover.performClose(sender)
         } else {
-            session.refreshPermissions()
+            refreshPermissionsAndApplyState(presentSetupIfMissing: false)
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             popover.contentViewController?.view.window?.makeKey()
         }
+    }
+
+    private func refreshPermissionsAfterActivation() {
+        guard terminationState == .idle else { return }
+        refreshPermissionsAndApplyState(presentSetupIfMissing: false)
+        permissionRefreshTask?.cancel()
+        permissionRefreshTask = Task { @MainActor [weak self] in
+            // TCC occasionally publishes a just-changed grant shortly after
+            // System Settings returns focus. One bounded recheck avoids making
+            // the user press Check Again or restart for that propagation lag.
+            do {
+                try await Task.sleep(for: .milliseconds(750))
+            } catch {
+                return
+            }
+            guard let self, self.terminationState == .idle else { return }
+            self.refreshPermissionsAndApplyState(presentSetupIfMissing: false)
+        }
+    }
+
+    private func resolveLaunchPermissionState() {
+        launchPermissionTask?.cancel()
+        launchPermissionTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            if !self.session.permissions.coreReady {
+                // A new GUI process can briefly observe the pre-relaunch TCC
+                // snapshot even when the same signed host already owns both
+                // grants. Recheck once before deciding to show onboarding.
+                do {
+                    try await Task.sleep(for: .milliseconds(750))
+                } catch {
+                    return
+                }
+                self.session.refreshPermissions()
+            }
+
+            guard self.terminationState == .idle else { return }
+            self.applyPermissionState(presentSetupIfMissing: true)
+        }
+    }
+
+    private func refreshPermissionsAndApplyState(presentSetupIfMissing: Bool) {
+        guard terminationState == .idle else { return }
+        session.refreshPermissions()
+        applyPermissionState(presentSetupIfMissing: presentSetupIfMissing)
+    }
+
+    private func applyPermissionState(presentSetupIfMissing: Bool) {
+        guard terminationState == .idle else { return }
+        HostSetupPreferences.reconcileExistingGrants(
+            permissions: session.permissions)
+        configureHeadlessMode()
+
+        if session.permissions.coreReady {
+            // Existing grants are resolved before a setup window is created.
+            // If the window is already visible, the person is actively moving
+            // through setup; leave it open so SwiftUI can advance to optional
+            // audio and the final Ready guidance instead of disappearing.
+            return
+        }
+
+        if presentSetupIfMissing,
+           HostSetupPreferences.shouldPresent(permissions: session.permissions) {
+            showSetupWindow()
+        }
+    }
+
+    private func cancelPermissionTasks() {
+        launchPermissionTask?.cancel()
+        launchPermissionTask = nil
+        permissionRefreshTask?.cancel()
+        permissionRefreshTask = nil
     }
 
     private func showSetupWindow() {
@@ -259,7 +329,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let rootView = HostSetupView(
             session: session,
             onFinish: { [weak self] in self?.finishSetup() },
-            onRestart: { [weak self] in self?.restartHost() })
+            onRestart: { [weak self] in self?.restartHost() },
+            onCorePermissionsReady: { [weak self] in
+                self?.applyPermissionState(presentSetupIfMissing: false)
+            })
         let hostingController = NSHostingController(rootView: rootView)
         let window = NSWindow(contentViewController: hostingController)
         window.title = "Remote Desktop Host Setup"
@@ -361,8 +434,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func configureHeadlessMode() {
-        stateObserver = session.$state.sink { [weak self] state in
-            self?.syncPairingCodeFile(for: state)
+        if stateObserver == nil {
+            stateObserver = session.$state.sink { [weak self] state in
+                self?.syncPairingCodeFile(for: state)
+            }
         }
 
         guard !HostRuntimeContext.isRunningUnitTests else { return }

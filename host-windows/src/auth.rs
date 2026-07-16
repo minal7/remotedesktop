@@ -95,7 +95,8 @@ impl AppleIdAuthenticator {
         webbrowser::open(&redirect_url)
             .with_context(|| format!("couldn't open Apple ID sign-in URL: {redirect_url}"))?;
 
-        let token = wait_for_callback(listener, acceptor, &self.callback_path, AUTH_TIMEOUT).await?;
+        let token =
+            wait_for_callback(listener, acceptor, &self.callback_path, AUTH_TIMEOUT).await?;
         self.cloudkit_credentials_set_web_auth_token(&token)?;
         Ok(())
     }
@@ -172,13 +173,12 @@ impl AppleIdAuthenticator {
 /// production; the cert is untrusted, so the browser shows a one-time warning
 /// the user clicks through to deliver the `ckWebAuthToken` to the host.
 fn build_tls_acceptor() -> Result<TlsAcceptor> {
-    let certified = rcgen::generate_simple_self_signed(vec![
-        "127.0.0.1".to_string(),
-        "localhost".to_string(),
-    ])
-    .context("couldn't generate a self-signed certificate for the callback listener")?;
+    let certified =
+        rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_string(), "localhost".to_string()])
+            .context("couldn't generate a self-signed certificate for the callback listener")?;
     let cert_der = certified.cert.der().clone();
-    let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(certified.key_pair.serialize_der()));
+    let key_der =
+        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(certified.key_pair.serialize_der()));
 
     let config = ServerConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
         .with_safe_default_protocol_versions()

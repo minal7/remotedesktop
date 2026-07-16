@@ -7,6 +7,8 @@ final class MCPApprovalPresentationTests: XCTestCase {
             toolName: RemoteDesktopMailMCP.toolName,
             arguments: [
                 "to": .string("codex-acceptance@example.invalid"),
+                "cc": .string("copy@example.invalid"),
+                "bcc": .string("audit@example.invalid"),
                 "subject": .string("Remote Desktop acceptance test"),
                 "body": .string("This is a safe local acceptance test."),
                 "send_now": .bool(true),
@@ -17,7 +19,7 @@ final class MCPApprovalPresentationTests: XCTestCase {
         XCTAssertEqual(presentation.message, "Send this email through Mail on your Mac?")
         XCTAssertEqual(presentation.confirmLabel, "Send email")
         XCTAssertEqual(presentation.details.map(\.label), [
-            "From", "To", "Subject", "Message", "First use",
+            "From", "To", "CC", "BCC", "Subject", "Message", "First use",
         ])
         XCTAssertEqual(
             presentation.details.first(where: { $0.label == "From" })?.value,
@@ -25,6 +27,12 @@ final class MCPApprovalPresentationTests: XCTestCase {
         XCTAssertEqual(
             presentation.details.first(where: { $0.label == "To" })?.value,
             "codex-acceptance@example.invalid")
+        XCTAssertEqual(
+            presentation.details.first(where: { $0.label == "CC" })?.value,
+            "copy@example.invalid")
+        XCTAssertEqual(
+            presentation.details.first(where: { $0.label == "BCC" })?.value,
+            "audit@example.invalid")
         XCTAssertEqual(
             presentation.details.first(where: { $0.label == "Message" })?.value,
             "This is a safe local acceptance test.")

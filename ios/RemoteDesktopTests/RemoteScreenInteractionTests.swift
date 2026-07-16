@@ -125,6 +125,40 @@ final class RemoteScreenInteractionTests: XCTestCase {
             .zero)
     }
 
+    func test_metalRendererSizing_capsRetinaFrameForTripleScaleViewer() {
+        let frameSize = CGSize(width: 3_456, height: 2_234)
+
+        let safe = MetalVideoRenderSizing.rendererFrameSize(
+            frameSize,
+            displayScale: 3,
+            maximumTextureDimension: 8_192)
+
+        XCTAssertEqual(safe.width, 2_730)
+        XCTAssertEqual(safe.height, 1_764)
+        XCTAssertLessThanOrEqual(safe.width * 3, 8_192)
+        XCTAssertLessThanOrEqual(safe.height * 3, 8_192)
+        XCTAssertEqual(
+            safe.width / safe.height,
+            frameSize.width / frameSize.height,
+            accuracy: 0.001)
+    }
+
+    func test_metalRendererSizing_keepsCompliantFramesAndHandlesPortrait() {
+        XCTAssertEqual(
+            MetalVideoRenderSizing.rendererFrameSize(
+                CGSize(width: 1_920, height: 1_080),
+                displayScale: 3,
+                maximumTextureDimension: 8_192),
+            CGSize(width: 1_920, height: 1_080))
+
+        let portrait = MetalVideoRenderSizing.rendererFrameSize(
+            CGSize(width: 2_160, height: 3_840),
+            displayScale: 3,
+            maximumTextureDimension: 8_192)
+        XCTAssertEqual(portrait, CGSize(width: 1_535, height: 2_730))
+        XCTAssertLessThanOrEqual(portrait.height * 3, 8_192)
+    }
+
     func test_remoteTouchRoutingPolicy_separatesMoveScreenFromComputerControl() {
         XCTAssertTrue(RemoteTouchRoutingPolicy.routesTouchesToComputer(
             moveScreenEnabled: false))

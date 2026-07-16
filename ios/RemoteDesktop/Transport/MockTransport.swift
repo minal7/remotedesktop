@@ -23,7 +23,8 @@ final class MockTransport: Transport {
             hostname: "studio.local",
             os: "macOS 15.1",
             audio: true,
-            monitors: 1))
+            monitors: 1,
+            orderedComputerUseControls: Config.orderedComputerUseControlsVersion))
 
         onDisplay?(DisplayInfo(w: 2560, h: 1440, scale: 2.0))
         onFirstVideoFrame?()

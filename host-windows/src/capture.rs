@@ -14,6 +14,7 @@
 
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 /// One captured screen frame: tightly packed BGRA8888, top-down.
 pub struct ScreenFrame {
@@ -60,12 +61,9 @@ impl LatestFrameSender {
         self.0.cv.notify_one();
     }
 
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub fn is_closed(&self) -> bool {
-        self.0
-            .state
-            .lock()
-            .map(|s| s.closed)
-            .unwrap_or(true)
+        self.0.state.lock().map(|s| s.closed).unwrap_or(true)
     }
 }
 
@@ -78,19 +76,51 @@ impl Drop for LatestFrameSender {
     }
 }
 
+/// Outcome of a bounded wait on the frame slot.
+pub enum FrameRecv {
+    /// A fresh frame was produced.
+    Frame(ScreenFrame),
+    /// No new frame arrived within the timeout (e.g. a static screen that
+    /// produced no dirty regions). The caller may re-use the last frame.
+    Timeout,
+    /// The sender was dropped; the capture has ended.
+    Closed,
+}
+
 impl LatestFrameReceiver {
-    /// Block until a frame is available or the sender is dropped.
-    /// Returns `None` only after the sender side has gone away.
-    pub fn recv(&self) -> Option<ScreenFrame> {
+    /// Block until a frame is available, the sender is dropped, or `timeout`
+    /// elapses. The timeout lets the encoder re-send the last frame when a
+    /// receiver asks for a keyframe on a static screen (which produces no new
+    /// frames of its own).
+    pub fn recv_timeout(&self, timeout: Duration) -> FrameRecv {
+        let deadline = Instant::now().checked_add(timeout);
         let mut state = self.0.state.lock().expect("frame slot poisoned");
         loop {
             if let Some(frame) = state.frame.take() {
-                return Some(frame);
+                return FrameRecv::Frame(frame);
             }
             if state.closed {
-                return None;
+                return FrameRecv::Closed;
             }
-            state = self.0.cv.wait(state).expect("frame slot poisoned");
+            let remaining = deadline
+                .and_then(|deadline| deadline.checked_duration_since(Instant::now()))
+                .unwrap_or(Duration::ZERO);
+            if remaining.is_zero() {
+                return FrameRecv::Timeout;
+            }
+            let (next, wait) = self
+                .0
+                .cv
+                .wait_timeout(state, remaining)
+                .expect("frame slot poisoned");
+            state = next;
+            if wait.timed_out() {
+                return match state.frame.take() {
+                    Some(frame) => FrameRecv::Frame(frame),
+                    None if state.closed => FrameRecv::Closed,
+                    None => FrameRecv::Timeout,
+                };
+            }
         }
     }
 }
@@ -103,7 +133,10 @@ pub fn latest_frame_channel() -> (LatestFrameSender, LatestFrameReceiver) {
         }),
         cv: Condvar::new(),
     });
-    (LatestFrameSender(Arc::clone(&slot)), LatestFrameReceiver(slot))
+    (
+        LatestFrameSender(Arc::clone(&slot)),
+        LatestFrameReceiver(slot),
+    )
 }
 
 #[cfg(windows)]
@@ -366,3 +399,48 @@ mod platform {
 pub use platform::display_info;
 pub use platform::start;
 pub use platform::StopHandle;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame(value: u8) -> ScreenFrame {
+        ScreenFrame {
+            data: vec![value; 4],
+            width: 1,
+            height: 1,
+        }
+    }
+
+    #[test]
+    fn latest_frame_channel_returns_the_freshest_frame() {
+        let (sender, receiver) = latest_frame_channel();
+        sender.send(frame(1));
+        sender.send(frame(2));
+
+        match receiver.recv_timeout(Duration::from_secs(1)) {
+            FrameRecv::Frame(received) => assert_eq!(received.data, vec![2; 4]),
+            FrameRecv::Timeout => panic!("fresh frame timed out"),
+            FrameRecv::Closed => panic!("channel closed with a pending frame"),
+        }
+    }
+
+    #[test]
+    fn latest_frame_channel_reports_timeout_without_a_frame() {
+        let (_sender, receiver) = latest_frame_channel();
+        assert!(matches!(
+            receiver.recv_timeout(Duration::from_millis(1)),
+            FrameRecv::Timeout
+        ));
+    }
+
+    #[test]
+    fn latest_frame_channel_reports_closed_after_sender_drops() {
+        let (sender, receiver) = latest_frame_channel();
+        drop(sender);
+        assert!(matches!(
+            receiver.recv_timeout(Duration::from_secs(1)),
+            FrameRecv::Closed
+        ));
+    }
+}

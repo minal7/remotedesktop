@@ -39,6 +39,15 @@ struct ComputerUseAuthenticationContextSnapshot: Equatable {
     let boundedWindowContext: String
 }
 
+/// Identity sampled immediately before and after a display capture. Quote and
+/// sign-in OCR may use the focused-window rectangle only when both samples
+/// still describe the same Accessibility window at the same location.
+struct ComputerUseFrontmostWindowCaptureIdentity: Equatable {
+    let applicationProcessIdentifier: pid_t
+    let accessibilityWindowHash: CFHashCode
+    let bounds: CGRect
+}
+
 @MainActor
 final class ComputerUseHostTools {
     enum ToolError: Error, LocalizedError {
@@ -217,10 +226,19 @@ final class ComputerUseHostTools {
         if let screenProvider {
             return try screenProvider()
         }
+        // Read the focused-window geometry next to the display capture. The
+        // screenshot remains a full-display input for visual control, while
+        // fact extractors can fail closed to this one active window instead
+        // of accepting a coherent stale result from another visible app.
+        let windowBeforeCapture = liveFrontmostWindowSnapshot()
         let displayID = CGMainDisplayID()
         guard let image = CGDisplayCreateImage(displayID) else {
             throw ToolError.screenshotUnavailable
         }
+        let windowAfterCapture = liveFrontmostWindowSnapshot()
+        let frontmostWindowBounds = Self.stableFrontmostWindowBounds(
+            before: windowBeforeCapture,
+            after: windowAfterCapture)
         let displayBounds = CGDisplayBounds(displayID)
         let bounds = displayBounds.width > 0 && displayBounds.height > 0
             ? displayBounds
@@ -231,7 +249,55 @@ final class ComputerUseHostTools {
                 height: CGDisplayPixelsHigh(displayID))
         return ComputerUseScreenObservation(
             image: CIImage(cgImage: image),
-            displayBounds: bounds)
+            displayBounds: bounds,
+            frontmostWindowBounds: frontmostWindowBounds)
+    }
+
+    static func stableFrontmostWindowBounds(
+        before: ComputerUseFrontmostWindowCaptureIdentity?,
+        after: ComputerUseFrontmostWindowCaptureIdentity?
+    ) -> CGRect? {
+        guard let before, let after, before == after else { return nil }
+        return after.bounds
+    }
+
+    private func liveFrontmostWindowSnapshot()
+        -> ComputerUseFrontmostWindowCaptureIdentity? {
+        guard let application = NSWorkspace.shared.frontmostApplication,
+              !application.isTerminated else {
+            return nil
+        }
+        let root = AXUIElementCreateApplication(application.processIdentifier)
+        var focusedWindowValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            root,
+            kAXFocusedWindowAttribute as CFString,
+            &focusedWindowValue) == .success,
+              let focusedWindowValue,
+              CFGetTypeID(focusedWindowValue) == AXUIElementGetTypeID() else {
+            return nil
+        }
+        let focusedWindow = unsafeBitCast(
+            focusedWindowValue,
+            to: AXUIElement.self)
+        guard let origin = pointAttribute(
+                kAXPositionAttribute as CFString,
+                from: focusedWindow),
+              let size = sizeAttribute(
+                kAXSizeAttribute as CFString,
+                from: focusedWindow),
+              origin.x.isFinite,
+              origin.y.isFinite,
+              size.width.isFinite,
+              size.height.isFinite,
+              size.width > 0,
+              size.height > 0 else {
+            return nil
+        }
+        return ComputerUseFrontmostWindowCaptureIdentity(
+            applicationProcessIdentifier: application.processIdentifier,
+            accessibilityWindowHash: CFHash(focusedWindow),
+            bounds: CGRect(origin: origin, size: size))
     }
 
     func currentScreenJPEG(quality: CGFloat = 0.78) throws -> Data {
@@ -1088,11 +1154,36 @@ private final class ComputerUseActionGate: @unchecked Sendable {
         }
     }
 
-    func endAutomation(allowsActions: Bool) {
+    /// Moves directly from the held approval state into the one approved
+    /// operation. A synchronous user-intervention close clears
+    /// `approvalPending`, so a delayed approval response cannot reopen the
+    /// gate after the person has already taken control.
+    func beginApprovedAutomation() -> Bool {
         lock.withLock {
-            value = allowsActions
+            guard approvalPending else { return false }
+            value = true
+            automationActive = true
+            approvalPending = false
+            return true
+        }
+    }
+
+    /// Finishing normal work may reopen the idle gate only while this caller
+    /// still owns an active automation or approval transition. Intervention
+    /// clears both ownership flags synchronously and therefore wins over a
+    /// later completion callback.
+    @discardableResult
+    func endAutomation(allowsActions: Bool) -> Bool {
+        lock.withLock {
+            let ownsTransition = automationActive || approvalPending
+            if !allowsActions {
+                value = false
+            } else if ownsTransition {
+                value = true
+            }
             automationActive = false
             approvalPending = false
+            return value
         }
     }
 
@@ -1213,6 +1304,13 @@ typealias ComputerUseExecutorComposer = @MainActor @Sendable (
 
 @MainActor
 final class HostComputerUseManager: ObservableObject {
+    static let orderedControlsRequiredResponse =
+        "AI Computer Use requires an updated iPhone app with ordered task controls. Update Remote Desktop before trying again. No action was taken."
+    static let userInterventionGuidance =
+        "AI paused because control of the Mac changed. Check the screen, then tap Let AI continue."
+    static let connectionEndedResponse =
+        "The connection ended before this task finished. It will not resume automatically."
+
     enum ModelState: Equatable {
         case downloadRequired
         case packageFound(fileName: String)
@@ -1295,6 +1393,20 @@ final class HostComputerUseManager: ObservableObject {
     private struct ExecutionContext {
         let envelope: ComputerUseEnvelope
         let channel: any HostComputerUseChannel
+        /// False only when a versioned Pause reached the durable ledger before
+        /// its Prompt. Resume can then claim and start that Prompt exactly once
+        /// instead of treating it as work that needs a continuation replan.
+        let hasStarted: Bool
+
+        init(
+            envelope: ComputerUseEnvelope,
+            channel: any HostComputerUseChannel,
+            hasStarted: Bool = true
+        ) {
+            self.envelope = envelope
+            self.channel = channel
+            self.hasStarted = hasStarted
+        }
 
         func belongs(to control: ComputerUseEnvelope) -> Bool {
             envelope.senderID == control.senderID
@@ -1332,6 +1444,10 @@ final class HostComputerUseManager: ObservableObject {
     private let channelFactory: @MainActor (String) -> any HostComputerUseChannel
     private var channel: (any HostComputerUseChannel)?
     private var pollingTask: Task<Void, Never>?
+    /// Invalidates a poll result that arrives after its transport was stopped.
+    /// Some channel implementations cannot promptly cancel an in-flight
+    /// network request, so Task cancellation alone is not a sufficient fence.
+    private var transportGeneration: UInt64 = 0
     private var executionTask: Task<Void, Never>?
     private var currentExecution: ExecutionContext?
     private var pausedExecution: ExecutionContext?
@@ -1345,6 +1461,7 @@ final class HostComputerUseManager: ObservableObject {
     private var currentSetupProgress: ComputerUseSetupProgress?
     private var macControlReceipt: MacControlMCPInstallationReceipt?
     private var authorizedPeerID: String?
+    private var authorizedPeerSupportsOrderedComputerUseControls = false
     private var appliedPeerAuthorizationEpoch: UInt64 = 0
     private var localInputMonitors: [Any] = []
     private var lastInstallerProgressPhase: ComputerUseSetupProgress.Phase?
@@ -1466,19 +1583,37 @@ final class HostComputerUseManager: ObservableObject {
         actionGate.setAllowsActions(true)
         refreshModelState()
         let channel = channelFactory(pairingCode)
+        let generation = transportGeneration
         self.channel = channel
         pollingTask = Task { [weak self] in
-            await self?.pollLoop(channel: channel)
+            await self?.pollLoop(
+                channel: channel,
+                generation: generation)
         }
     }
 
-    func authorizePeer(senderID: String) {
+    func authorizePeer(
+        senderID: String,
+        supportsOrderedComputerUseControls: Bool = true
+    ) {
         guard !senderID.isEmpty else { return }
         authorizedPeerID = senderID
+        authorizedPeerSupportsOrderedComputerUseControls =
+            supportsOrderedComputerUseControls
+
+        guard !supportsOrderedComputerUseControls else { return }
+        _ = blockActionsForUserIntervention()
+        switch activity {
+        case .working, .awaitingApproval:
+            userIntervened()
+        case .idle, .paused:
+            actionGate.setAllowsActions(false)
+        }
     }
 
     func revokePeerAuthorization() {
         authorizedPeerID = nil
+        authorizedPeerSupportsOrderedComputerUseControls = false
         _ = blockActionsForUserIntervention()
         switch activity {
         case .working, .awaitingApproval:
@@ -1495,6 +1630,7 @@ final class HostComputerUseManager: ObservableObject {
     func applyPeerAuthorization(
         senderID: String,
         authorized: Bool,
+        supportsOrderedComputerUseControls: Bool,
         epoch: UInt64
     ) {
         guard epoch > appliedPeerAuthorizationEpoch else { return }
@@ -1511,7 +1647,10 @@ final class HostComputerUseManager: ObservableObject {
                     break
                 }
             }
-            authorizePeer(senderID: senderID)
+            authorizePeer(
+                senderID: senderID,
+                supportsOrderedComputerUseControls:
+                    supportsOrderedComputerUseControls)
         } else {
             revokePeerAuthorization()
         }
@@ -1519,6 +1658,11 @@ final class HostComputerUseManager: ObservableObject {
 
     func isPeerAuthorized(senderID: String) -> Bool {
         authorizedPeerID == senderID
+    }
+
+    func isPeerAuthorizedForComputerUse(senderID: String) -> Bool {
+        authorizedPeerID == senderID
+            && authorizedPeerSupportsOrderedComputerUseControls
     }
 
     func stop() {
@@ -1579,7 +1723,8 @@ final class HostComputerUseManager: ObservableObject {
             activity = .paused
             if let interrupted {
                 sendStatus(
-                    "paused",
+                    ComputerUseStatusSignal.userIntervention(
+                        Self.userInterventionGuidance),
                     replyingTo: interrupted.envelope,
                     channel: interrupted.channel)
             }
@@ -1594,7 +1739,8 @@ final class HostComputerUseManager: ObservableObject {
             activity = .paused
             if let invalidated {
                 sendStatus(
-                    "paused",
+                    ComputerUseStatusSignal.userIntervention(
+                        Self.userInterventionGuidance),
                     replyingTo: invalidated.context.envelope,
                     channel: invalidated.context.channel)
             }
@@ -1616,6 +1762,35 @@ final class HostComputerUseManager: ObservableObject {
     }
 
     private func stopTransport() {
+        // Fence an in-flight poll before doing anything that can yield. A
+        // cancellation-ignoring channel may still return, but its generation
+        // can no longer enter `handle` or acknowledge stale envelopes.
+        transportGeneration &+= 1
+
+        // Close native injection first, then durably terminalize the one live
+        // task while its original envelope and channel are still available.
+        // This applies equally to executing, user-paused, and approval-pending
+        // work. A reconnect must never silently resume any of those states.
+        actionGate.endAutomation(allowsActions: false)
+        let invalidatedApproval = pendingApproval
+        let terminalContext = currentExecution
+            ?? pausedExecution
+            ?? invalidatedApproval?.context
+        if let terminalContext {
+            taskLedger.complete(
+                taskID: terminalContext.envelope.id,
+                response: Self.connectionEndedResponse)
+            send(
+                kind: .assistant,
+                body: Self.connectionEndedResponse,
+                replyingTo: terminalContext.envelope,
+                channel: terminalContext.channel)
+            sendStatus(
+                "ready",
+                replyingTo: terminalContext.envelope,
+                channel: terminalContext.channel)
+        }
+
         if let continuation = executor as? any MCPApprovalContinuing {
             continuation.cancelMCPWork()
         }
@@ -1631,22 +1806,31 @@ final class HostComputerUseManager: ObservableObject {
         setupProgressDeliveryTask?.cancel()
         setupProgressDeliveryTask = nil
         currentExecutionToken = nil
-        actionGate.endAutomation(allowsActions: false)
         channel = nil
         authorizedPeerID = nil
+        authorizedPeerSupportsOrderedComputerUseControls = false
         setupRecipients.removeAll()
     }
 
-    private func pollLoop(channel: any HostComputerUseChannel) async {
-        while !Task.isCancelled {
+    private func pollLoop(
+        channel: any HostComputerUseChannel,
+        generation: UInt64
+    ) async {
+        while !Task.isCancelled, generation == transportGeneration {
             do {
                 let envelopes = try await channel.poll()
+                guard !Task.isCancelled,
+                      generation == transportGeneration else { return }
                 var acknowledged: [ComputerUseEnvelope] = []
                 for envelope in envelopes {
+                    guard !Task.isCancelled,
+                          generation == transportGeneration else { return }
                     if handle(envelope, channel: channel) {
                         acknowledged.append(envelope)
                     }
                 }
+                guard !Task.isCancelled,
+                      generation == transportGeneration else { return }
                 try await channel.acknowledge(acknowledged)
             } catch is CancellationError {
                 return
@@ -1679,128 +1863,389 @@ final class HostComputerUseManager: ObservableObject {
         case .approvalResponse:
             guard let authorizedPeerID else { return false }
             guard authorizedPeerID == envelope.senderID else { return true }
+            guard authorizedPeerSupportsOrderedComputerUseControls else {
+                return true
+            }
             handleApprovalResponse(envelope)
             return true
         case .prompt:
             guard let authorizedPeerID else { return false }
             guard authorizedPeerID == envelope.senderID else { return true }
-            startExecution(for: envelope, channel: channel)
-            return true
-        case .pause:
-            guard let authorizedPeerID else { return false }
-            guard authorizedPeerID == envelope.senderID else { return true }
-            let context = currentExecution
-                ?? pausedExecution
-                ?? pendingApproval?.context
-            if let context, !context.belongs(to: envelope) {
+            guard authorizedPeerSupportsOrderedComputerUseControls else {
+                send(
+                    kind: .assistant,
+                    body: "Update Remote Desktop on this iPhone or iPad before using AI Computer Use. Ordinary remote control is still available.",
+                    replyingTo: envelope,
+                    channel: channel)
+                sendStatus("ready", replyingTo: envelope, channel: channel)
                 return true
             }
-            let invalidatedApproval = pendingApproval
-            pausedExecution = context
-            currentExecution = nil
-            pendingApproval = nil
-            cancelMCPApprovalIfNeeded(invalidatedApproval)
-            approvalDeliveryTask?.cancel()
-            approvalDeliveryTask = nil
-            currentExecutionToken = nil
-            cancelActiveMCPWork()
-            executionTask?.cancel()
-            executionTask = nil
+            startExecution(for: envelope, channel: channel)
+            return true
+        case .pause, .resume, .cancel:
+            guard let authorizedPeerID else { return false }
+            guard authorizedPeerID == envelope.senderID else { return true }
+            guard authorizedPeerSupportsOrderedComputerUseControls else {
+                return true
+            }
+            return handleControl(envelope, channel: channel)
+        case .assistant, .status:
+            return true
+        }
+    }
+
+    private func handleControl(
+        _ envelope: ComputerUseEnvelope,
+        channel: any HostComputerUseChannel
+    ) -> Bool {
+        guard let control = ledgerControl(for: envelope.kind) else { return true }
+
+        if envelope.body.isEmpty {
+            handleLegacyControl(
+                control,
+                envelope: envelope,
+                channel: channel)
+            return true
+        }
+
+        guard let request = try? ComputerUseControlRequest.decodeBody(
+            envelope.body),
+              request.isValid else {
+            // A nonempty malformed body is not treated as legacy. That would
+            // let a corrupted task ID accidentally control whichever task is
+            // currently active.
+            return true
+        }
+
+        let context = executionContext(
+            taskID: request.taskID,
+            matching: envelope)
+
+        let resolution: ComputerUseTaskLedger.ControlResolution
+        do {
+            resolution = try taskLedger.applyControl(
+                control,
+                taskID: request.taskID,
+                revision: request.revision,
+                senderID: envelope.senderID,
+                sessionID: envelope.sessionID)
+        } catch {
+            // Control is fail-closed unless its causal state was durably
+            // recorded. Pause and Cancel also stop the live executor before
+            // returning the envelope for retry; otherwise a disk failure
+            // could be acknowledged while automation kept acting.
+            if control == .pause || control == .cancel,
+               let context {
+                pauseExecution(context)
+            }
+            return false
+        }
+        guard resolution.disposition != .identityMismatch else { return true }
+
+        let replyEnvelope = context?.envelope
+            ?? controlReplyEnvelope(
+                taskID: request.taskID,
+                basedOn: envelope)
+        let replyChannel = context?.channel ?? channel
+
+        if let terminalResponse = resolution.terminalResponse {
+            if resolution.state == .cancelled, let context {
+                stopExecution(context)
+            }
+            send(
+                kind: .assistant,
+                body: terminalResponse,
+                replyingTo: replyEnvelope,
+                channel: replyChannel)
+            sendStatus(
+                "ready",
+                replyingTo: replyEnvelope,
+                channel: replyChannel)
+            return true
+        }
+
+        switch resolution.state {
+        case .paused:
+            if let context {
+                pauseExecution(context)
+            } else {
+                // The Prompt may still be in flight. Its stable ID is used for
+                // correlation even though no execution context exists yet.
+                sendStatus(
+                    "paused",
+                    replyingTo: replyEnvelope,
+                    channel: replyChannel)
+            }
+
+        case .running:
+            if resolution.disposition == .advanced,
+               let context {
+                if pendingApproval?.context.envelope.id
+                    == context.envelope.id {
+                    // A newer Resume revision supersedes the causal state
+                    // stamped onto the outstanding approval. Tear down its
+                    // delivery loop and held MCP generation, then replan from
+                    // the current screen so only a revision-current approval
+                    // can be presented or accepted.
+                    pauseExecution(context)
+                    resumeExecution(context, controlEnvelope: envelope)
+                } else if pausedExecution?.envelope.id
+                    == context.envelope.id {
+                    resumeExecution(context, controlEnvelope: envelope)
+                } else {
+                    sendCurrentStatus(
+                        for: context,
+                        fallback: "ready",
+                        replyingTo: replyEnvelope,
+                        channel: replyChannel)
+                }
+            } else {
+                sendCurrentStatus(
+                    for: context,
+                    fallback: "ready",
+                    replyingTo: replyEnvelope,
+                    channel: replyChannel)
+            }
+
+        case .cancelled:
+            // Cancel always creates a terminal response in the ledger.
+            assertionFailure("Cancelled control missing terminal response")
+        case nil:
+            break
+        }
+        return true
+    }
+
+    private func handleLegacyControl(
+        _ control: ComputerUseTaskLedger.Control,
+        envelope: ComputerUseEnvelope,
+        channel: any HostComputerUseChannel
+    ) {
+        // Empty bodies are the compatibility path for shipped clients. With no
+        // task ID or revision, they may only touch the one live context owned
+        // by the same sender and session. In particular, nil-context Pause is
+        // a no-op instead of placing the whole host in a phantom paused state.
+        guard let context = legacyExecutionContext(matching: envelope) else {
+            return
+        }
+
+        switch control {
+        case .pause:
+            pauseExecution(context)
+        case .resume:
+            guard pausedExecution?.envelope.id == context.envelope.id else {
+                return
+            }
+            resumeExecution(context, controlEnvelope: envelope)
+        case .cancel:
+            taskLedger.complete(
+                taskID: context.envelope.id,
+                response: ComputerUseTaskLedger.stoppedResponse)
+            stopExecution(context)
+            send(
+                kind: .assistant,
+                body: ComputerUseTaskLedger.stoppedResponse,
+                replyingTo: context.envelope,
+                channel: context.channel)
+            sendStatus(
+                "ready",
+                replyingTo: context.envelope,
+                channel: context.channel)
+        }
+    }
+
+    private func ledgerControl(
+        for kind: ComputerUseEnvelope.Kind
+    ) -> ComputerUseTaskLedger.Control? {
+        switch kind {
+        case .pause: return .pause
+        case .resume: return .resume
+        case .cancel: return .cancel
+        default: return nil
+        }
+    }
+
+    private func legacyExecutionContext(
+        matching envelope: ComputerUseEnvelope
+    ) -> ExecutionContext? {
+        let context = currentExecution
+            ?? pausedExecution
+            ?? pendingApproval?.context
+        guard let context, context.belongs(to: envelope) else { return nil }
+        return context
+    }
+
+    private func executionContext(
+        taskID: String,
+        matching envelope: ComputerUseEnvelope
+    ) -> ExecutionContext? {
+        let candidates = [
+            currentExecution,
+            pausedExecution,
+            pendingApproval?.context,
+        ]
+        return candidates.compactMap { $0 }.first {
+            $0.envelope.id == taskID && $0.belongs(to: envelope)
+        }
+    }
+
+    private func pauseExecution(_ context: ExecutionContext) {
+        if pausedExecution?.envelope.id == context.envelope.id {
+            sendStatus(
+                "paused",
+                replyingTo: context.envelope,
+                channel: context.channel)
+            return
+        }
+
+        // Close injection before cancellation. Executors are untrusted to
+        // observe Task cancellation promptly and may still unwind through a
+        // final tool call.
+        actionGate.endAutomation(allowsActions: false)
+        let invalidatedApproval = pendingApproval
+        pausedExecution = context
+        currentExecution = nil
+        pendingApproval = nil
+        cancelMCPApprovalIfNeeded(invalidatedApproval)
+        approvalDeliveryTask?.cancel()
+        approvalDeliveryTask = nil
+        currentExecutionToken = nil
+        cancelActiveMCPWork()
+        executionTask?.cancel()
+        executionTask = nil
+        activity = .paused
+        sendStatus(
+            "paused",
+            replyingTo: context.envelope,
+            channel: context.channel)
+    }
+
+    private func resumeExecution(
+        _ context: ExecutionContext,
+        controlEnvelope: ComputerUseEnvelope
+    ) {
+        guard case .paused = activity,
+              let pausedExecution,
+              pausedExecution.envelope.id == context.envelope.id,
+              pausedExecution.belongs(to: controlEnvelope) else {
+            sendCurrentStatus(
+                for: context,
+                fallback: "ready",
+                replyingTo: context.envelope,
+                channel: context.channel)
+            return
+        }
+
+        self.pausedExecution = nil
+        actionGate.setAllowsActions(true)
+        actionGate.endAutomation(allowsActions: true)
+        activity = .idle
+
+        if !pausedExecution.hasStarted {
+            // This Prompt was durably claimed while a pre-delivered Pause was
+            // in force. Re-enter the normal claim path: the ledger atomically
+            // marks executionStarted and returns `.new` exactly once.
+            startExecution(
+                for: pausedExecution.envelope,
+                channel: pausedExecution.channel)
+            return
+        }
+
+        guard let executor, executor.isReady else {
+            self.pausedExecution = pausedExecution
             actionGate.setAllowsActions(false)
             actionGate.endAutomation(allowsActions: false)
             activity = .paused
             sendStatus(
                 "paused",
-                replyingTo: context?.envelope ?? envelope,
-                channel: context?.channel ?? channel)
-            return true
-        case .resume:
-            guard let authorizedPeerID else { return false }
-            guard authorizedPeerID == envelope.senderID else { return true }
-            guard case .paused = activity else {
-                sendStatus("ready", replyingTo: envelope, channel: channel)
-                return true
-            }
-            if let pausedExecution {
-                guard pausedExecution.belongs(to: envelope),
-                      let executor,
-                      executor.isReady else {
-                    sendStatus("paused", replyingTo: envelope, channel: channel)
-                    return true
-                }
-                self.pausedExecution = nil
-                activity = .idle
-                let original = pausedExecution.envelope
-                let resumed = ComputerUseEnvelope(
-                    id: original.id,
-                    senderID: original.senderID,
-                    targetID: original.targetID,
-                    pairingCode: original.pairingCode,
-                    sessionID: original.sessionID,
-                    kind: .prompt,
-                    body: original.body
-                        + "\n\nContinue from the current screen after the user intervened. Some actions may already be complete; observe carefully and do not repeat them.",
-                    createdAt: original.createdAt)
-                beginExecution(
-                    executor,
-                    for: resumed,
-                    channel: pausedExecution.channel,
-                    isResuming: true)
-            } else {
-                actionGate.setAllowsActions(true)
-                actionGate.endAutomation(allowsActions: true)
-                activity = .idle
-                sendStatus("ready", replyingTo: envelope, channel: channel)
-            }
-            return true
-        case .cancel:
-            guard let authorizedPeerID else { return false }
-            guard authorizedPeerID == envelope.senderID else { return true }
-            let stoppedContext = currentExecution
-                ?? pausedExecution
-                ?? pendingApproval?.context
-            if let context = stoppedContext,
-               !context.belongs(to: envelope) {
-                return true
-            }
-            let invalidatedApproval = pendingApproval
-            cancelActiveMCPWork()
-            executionTask?.cancel()
-            executionTask = nil
-            currentExecution = nil
-            pausedExecution = nil
-            pendingApproval = nil
-            cancelMCPApprovalIfNeeded(invalidatedApproval)
-            approvalDeliveryTask?.cancel()
-            approvalDeliveryTask = nil
-            currentExecutionToken = nil
-            actionGate.setAllowsActions(true)
-            actionGate.endAutomation(allowsActions: true)
-            activity = .idle
-            if let stoppedContext {
-                taskLedger.complete(
-                    taskID: stoppedContext.envelope.id,
-                    response: "Stopped. You're in control of the Mac.")
-            }
-            let replyEnvelope = stoppedContext?.envelope ?? envelope
-            let replyChannel = stoppedContext?.channel ?? channel
-            send(
-                kind: .assistant,
-                body: "Stopped. You're in control of the Mac.",
-                replyingTo: replyEnvelope,
-                channel: replyChannel)
-            sendStatus("ready", replyingTo: replyEnvelope, channel: replyChannel)
-            return true
-        case .assistant, .status:
-            return true
+                replyingTo: pausedExecution.envelope,
+                channel: pausedExecution.channel)
+            return
         }
+
+        let original = pausedExecution.envelope
+        let resumed = ComputerUseEnvelope(
+            id: original.id,
+            senderID: original.senderID,
+            targetID: original.targetID,
+            pairingCode: original.pairingCode,
+            sessionID: original.sessionID,
+            kind: .prompt,
+            body: original.body
+                + "\n\nContinue from the current screen after the user intervened. Some actions may already be complete; observe carefully and do not repeat them.",
+            createdAt: original.createdAt)
+        beginExecution(
+            executor,
+            for: resumed,
+            channel: pausedExecution.channel,
+            isResuming: true)
+    }
+
+    private func stopExecution(_ context: ExecutionContext) {
+        let activeTaskID = currentExecution?.envelope.id
+            ?? pausedExecution?.envelope.id
+            ?? pendingApproval?.context.envelope.id
+        guard activeTaskID == context.envelope.id else { return }
+        // Cancel is terminal for this execution. Keep the automation gate
+        // closed until a later, separately claimed Prompt explicitly begins;
+        // never let cancellation-ignoring work inject during unwind.
+        actionGate.endAutomation(allowsActions: false)
+        let invalidatedApproval = pendingApproval
+        cancelActiveMCPWork()
+        executionTask?.cancel()
+        executionTask = nil
+        currentExecution = nil
+        pausedExecution = nil
+        pendingApproval = nil
+        cancelMCPApprovalIfNeeded(invalidatedApproval)
+        approvalDeliveryTask?.cancel()
+        approvalDeliveryTask = nil
+        currentExecutionToken = nil
+        activity = .idle
+    }
+
+    private func sendCurrentStatus(
+        for context: ExecutionContext?,
+        fallback: String,
+        replyingTo envelope: ComputerUseEnvelope,
+        channel: any HostComputerUseChannel
+    ) {
+        let status: String
+        if context != nil {
+            switch activity {
+            case .working: status = "working"
+            case .paused: status = "paused"
+            case .awaitingApproval:
+                status = "Waiting for your approval before continuing…"
+            case .idle: status = fallback
+            }
+        } else {
+            status = fallback
+        }
+        sendStatus(status, replyingTo: envelope, channel: channel)
+    }
+
+    private func controlReplyEnvelope(
+        taskID: String,
+        basedOn control: ComputerUseEnvelope
+    ) -> ComputerUseEnvelope {
+        ComputerUseEnvelope(
+            id: taskID,
+            senderID: control.senderID,
+            targetID: control.targetID,
+            pairingCode: control.pairingCode,
+            sessionID: control.sessionID,
+            kind: .prompt,
+            body: "",
+            createdAt: control.createdAt)
     }
 
     private func handleApprovalResponse(_ envelope: ComputerUseEnvelope) {
         guard let pendingApproval,
               pendingApproval.context.belongs(to: envelope),
               let response = try? ComputerUseApprovalResponse.decodeBody(envelope.body),
-              response.requestID == pendingApproval.request.requestID else {
+              response.requestID == pendingApproval.request.requestID,
+              approvalResponse(response, matches: pendingApproval) else {
             return
         }
         self.pendingApproval = nil
@@ -1828,6 +2273,16 @@ final class HostComputerUseManager: ObservableObject {
             return
         }
 
+        guard actionGate.beginApprovedAutomation() else {
+            // Direct input can close the gate synchronously before its
+            // MainActor lifecycle callback arrives. That close owns the race:
+            // keep the held task resumable and never execute the approval.
+            cancelMCPApprovalIfNeeded(pendingApproval)
+            pauseAfterApprovedOperationWasBlocked(
+                context: pendingApproval.context)
+            return
+        }
+
         switch pendingApproval.operation {
         case .mcp(let prepared):
             continueApprovedMCP(
@@ -1837,11 +2292,14 @@ final class HostComputerUseManager: ObservableObject {
 
         case .visual(let action, let fingerprint):
             activity = .working("Executing the one approved action…")
-            actionGate.beginAutomation()
             do {
                 try tools.performApproved(action, fingerprint: fingerprint)
             } catch ComputerUseHostTools.ToolError.approvalTargetChanged {
-                actionGate.endAutomation(allowsActions: true)
+                guard actionGate.endAutomation(allowsActions: true) else {
+                    pauseAfterApprovedOperationWasBlocked(
+                        context: pendingApproval.context)
+                    return
+                }
                 activity = .idle
                 let original = pendingApproval.context.envelope
                 let replanned = ComputerUseEnvelope(
@@ -1864,11 +2322,19 @@ final class HostComputerUseManager: ObservableObject {
                     channel: pendingApproval.context.channel,
                     isResuming: true)
                 return
+            } catch ComputerUseHostTools.ToolError.paused {
+                pauseAfterApprovedOperationWasBlocked(
+                    context: pendingApproval.context)
+                return
             } catch {
                 finishApprovedActionFailure(error, context: pendingApproval.context)
                 return
             }
-            actionGate.endAutomation(allowsActions: true)
+            guard actionGate.endAutomation(allowsActions: true) else {
+                pauseAfterApprovedOperationWasBlocked(
+                    context: pendingApproval.context)
+                return
+            }
 
             let original = pendingApproval.context.envelope
             let approvedPrompt = ComputerUseEnvelope(
@@ -1889,6 +2355,48 @@ final class HostComputerUseManager: ObservableObject {
                 channel: pendingApproval.context.channel,
                 isResuming: true)
         }
+    }
+
+    private func pauseAfterApprovedOperationWasBlocked(
+        context: ExecutionContext
+    ) {
+        actionGate.endAutomation(allowsActions: false)
+        currentExecution = nil
+        currentExecutionToken = nil
+        executionTask = nil
+        pausedExecution = context
+        activity = .paused
+        sendStatus(
+            "paused",
+            replyingTo: context.envelope,
+            channel: context.channel)
+    }
+
+    private func approvalResponse(
+        _ response: ComputerUseApprovalResponse,
+        matches approval: PendingApproval
+    ) -> Bool {
+        let taskID = approval.context.envelope.id
+        let expectedRevision = approval.request.appliedControlRevision
+        guard approval.request.taskID == taskID,
+              taskLedger.appliedControlRevision(taskID: taskID)
+                == expectedRevision else {
+            // A lifecycle control advanced after the card was created. The
+            // approved fingerprint and its decision are no longer causal for
+            // the current task state.
+            return false
+        }
+
+        if response.taskID == nil,
+           response.appliedControlRevision == nil {
+            // Pre-revision clients did not echo task metadata. They remain
+            // compatible only while the task itself has never received a
+            // versioned lifecycle control.
+            return expectedRevision == nil
+        }
+
+        return response.taskID == taskID
+            && response.appliedControlRevision == expectedRevision
     }
 
     private func cancelMCPApprovalIfNeeded(_ approval: PendingApproval?) {
@@ -2319,9 +2827,29 @@ final class HostComputerUseManager: ObservableObject {
             return
         }
         do {
-            switch try taskLedger.claim(taskID: envelope.id) {
+            switch try taskLedger.claim(
+                taskID: envelope.id,
+                senderID: envelope.senderID,
+                sessionID: envelope.sessionID) {
             case .new:
                 break
+            case .paused:
+                let context = ExecutionContext(
+                    envelope: envelope,
+                    channel: channel,
+                    hasStarted: false)
+                pausedExecution = context
+                currentExecution = nil
+                pendingApproval = nil
+                currentExecutionToken = nil
+                actionGate.setAllowsActions(false)
+                actionGate.endAutomation(allowsActions: false)
+                activity = .paused
+                sendStatus(
+                    "paused",
+                    replyingTo: envelope,
+                    channel: channel)
+                return
             case .completed(let response):
                 send(
                     kind: .assistant,
@@ -2354,6 +2882,8 @@ final class HostComputerUseManager: ObservableObject {
                         channel: channel)
                     sendStatus("ready", replyingTo: envelope, channel: channel)
                 }
+                return
+            case .identityMismatch:
                 return
             }
         } catch {
@@ -2514,7 +3044,6 @@ final class HostComputerUseManager: ObservableObject {
         let token = UUID()
         currentExecution = context
         currentExecutionToken = token
-        actionGate.beginAutomation()
         activity = .working("Performing the one approved Mac action…")
         sendStatus(
             "Performing the one approved Mac action…",
@@ -2523,6 +3052,10 @@ final class HostComputerUseManager: ObservableObject {
 
         executionTask = Task { [weak self] in
             guard let self else { return }
+            guard actionGate.allowsActions else {
+                pauseAfterApprovedOperationWasBlocked(context: context)
+                return
+            }
             do {
                 let result = try await continuation.continueAfterApproval(
                     prepared,
@@ -2652,17 +3185,29 @@ final class HostComputerUseManager: ObservableObject {
     }
 
     private func enterApproval(_ approval: PendingApproval) {
-        pendingApproval = approval
+        let request = ComputerUseApprovalRequest(
+            requestID: approval.request.requestID,
+            taskID: approval.context.envelope.id,
+            message: approval.request.message,
+            details: approval.request.details,
+            confirmLabel: approval.request.confirmLabel,
+            appliedControlRevision: taskLedger.appliedControlRevision(
+                taskID: approval.context.envelope.id))
+        let stampedApproval = PendingApproval(
+            request: request,
+            context: approval.context,
+            operation: approval.operation)
+        pendingApproval = stampedApproval
         currentExecution = nil
         currentExecutionToken = nil
         executionTask = nil
         actionGate.beginApprovalWait()
-        activity = .awaitingApproval(approval.request.message)
-        startApprovalDelivery(approval)
+        activity = .awaitingApproval(request.message)
+        startApprovalDelivery(stampedApproval)
         sendStatus(
             "Waiting for your approval before continuing…",
-            replyingTo: approval.context.envelope,
-            channel: approval.context.channel)
+            replyingTo: stampedApproval.context.envelope,
+            channel: stampedApproval.context.channel)
     }
 
     private func sendStatus(
@@ -2701,16 +3246,18 @@ final class HostComputerUseManager: ObservableObject {
         replyingTo envelope: ComputerUseEnvelope,
         channel: any HostComputerUseChannel
     ) {
+        let wireBody: String
+        switch kind {
+        case .assistant, .status:
+            wireBody = (try? ComputerUseTaskUpdate(
+                taskID: envelope.id,
+                text: body,
+                appliedControlRevision: taskLedger.appliedControlRevision(
+                    taskID: envelope.id)).encodedBody()) ?? body
+        default:
+            wireBody = body
+        }
         Task {
-            let wireBody: String
-            switch kind {
-            case .assistant, .status:
-                wireBody = (try? ComputerUseTaskUpdate(
-                    taskID: envelope.id,
-                    text: body).encodedBody()) ?? body
-            default:
-                wireBody = body
-            }
             _ = try? await channel.send(
                 kind: kind,
                 body: wireBody,

@@ -172,7 +172,10 @@ impl CloudKitClient {
     ) -> Result<Value, CloudKitError> {
         let mut attempt = 0;
         loop {
-            match self.post_authenticated(database, operation_path, body).await {
+            match self
+                .post_authenticated(database, operation_path, body)
+                .await
+            {
                 Ok(value) => return Ok(value),
                 Err(error) if error.is_transient() && attempt < CLOUDKIT_RETRY_BACKOFF_MS.len() => {
                     let delay = CLOUDKIT_RETRY_BACKOFF_MS[attempt];

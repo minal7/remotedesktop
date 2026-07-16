@@ -311,17 +311,17 @@ final class HostSessionTests: XCTestCase {
         await session.shutdown()
     }
 
-    func test_grantNextPermission_targetsScreenRecordingFirst() {
+    func test_grantNextPermission_requestsScreenRecordingWithoutForcingSettings() {
         let provider = MockPermissionsProvider()
         let session = makeSession(provider)
 
         session.grantNextPermission()
 
         XCTAssertEqual(provider.requestedPermissions, [.screenRecording])
-        XCTAssertEqual(provider.openedPermissions, [.screenRecording])
+        XCTAssertEqual(provider.openedPermissions, [])
     }
 
-    func test_grantNextPermission_targetsAccessibilityAfterScreenRecording() {
+    func test_grantNextPermission_requestsAccessibilityWithoutForcingSettings() {
         let provider = MockPermissionsProvider()
         provider.screenRecording = true
         let session = makeSession(provider)
@@ -329,7 +329,41 @@ final class HostSessionTests: XCTestCase {
         session.grantNextPermission()
 
         XCTAssertEqual(provider.requestedPermissions, [.accessibility])
-        XCTAssertEqual(provider.openedPermissions, [.accessibility])
+        XCTAssertEqual(provider.openedPermissions, [])
+    }
+
+    func test_systemAccessibilityRequiresInspectionAndPostEventAccess() {
+        let existingGrant = SystemPermissionsProvider(
+            accessibilityTrustCheck: { true },
+            postEventAccessCheck: { true })
+        let missingEventSynthesis = SystemPermissionsProvider(
+            accessibilityTrustCheck: { true },
+            postEventAccessCheck: { false })
+        let missingInspection = SystemPermissionsProvider(
+            accessibilityTrustCheck: { false },
+            postEventAccessCheck: { true })
+
+        XCTAssertTrue(
+            existingGrant.accessibilityGranted(),
+            "an older installation with both live TCC grants should be adopted immediately")
+        XCTAssertFalse(
+            missingEventSynthesis.accessibilityGranted(),
+            "onboarding must not claim remote control is ready when CGEvent synthesis is unavailable")
+        XCTAssertFalse(missingInspection.accessibilityGranted())
+    }
+
+    func test_systemAccessibilityPromptRequestsInspectionAndPostEventAccess() {
+        let recorder = PermissionAccessRecorder()
+        let provider = SystemPermissionsProvider(
+            accessibilityTrustCheck: { true },
+            postEventAccessCheck: { true },
+            accessibilityTrustRequest: { recorder.recordInspectionRequest() },
+            postEventAccessRequest: { recorder.recordPostEventRequest() })
+
+        provider.requestPrompt(for: .accessibility)
+
+        XCTAssertEqual(recorder.inspectionRequestCount, 1)
+        XCTAssertEqual(recorder.postEventRequestCount, 1)
     }
 
     func test_optionalAudioPermission_targetsMicrophoneWithoutAffectingCoreReadiness() async {
@@ -343,8 +377,21 @@ final class HostSessionTests: XCTestCase {
 
         XCTAssertEqual(provider.microphoneRequestCallCount, 1)
         XCTAssertEqual(provider.requestedPermissions, [])
-        XCTAssertEqual(provider.openedPermissions, [.microphone])
+        XCTAssertEqual(provider.openedPermissions, [])
         XCTAssertTrue(session.permissions.ok)
+    }
+
+    func test_openSystemSettings_isAnExplicitFallback() {
+        let provider = MockPermissionsProvider()
+        let session = makeSession(provider)
+
+        session.openSystemSettings(for: .screenRecording)
+        session.openSystemSettings(for: .accessibility)
+        session.openSystemSettings(for: .microphone)
+
+        XCTAssertEqual(
+            provider.openedPermissions,
+            [.screenRecording, .accessibility, .microphone])
     }
 
     func test_optionalAudioPermission_refreshesAfterGrantWithoutReopeningSettings() async {
@@ -533,6 +580,37 @@ final class HostSessionTests: XCTestCase {
         XCTAssertTrue(encoded.hasPrefix("Living Room Mac\n"))
     }
 
+    func test_advertisementWrite_usesProductionSchemaAndFetchFallback() {
+        let capability = ComputerUseCapability(
+            state: .ready,
+            detail: "AI Computer Use is ready")
+        let updatedAt = Date(timeIntervalSince1970: 1_752_500_000)
+        let record = CKRecord(
+            recordType: "HostAdvertisement",
+            recordID: CKRecord.ID(recordName: "HostAdvertisement-HOST-ID"))
+
+        CloudKitSignalingClient.updateAdvertisementFields(
+            on: record,
+            senderID: "HOST-ID",
+            pairingCode: "654321",
+            hostName: "Living Room Mac",
+            computerUseCapability: capability,
+            createdAt: updatedAt)
+
+        XCTAssertEqual(
+            Set(record.changedKeys()),
+            Set(["senderID", "pairingCode", "hostName", "createdAt"]))
+        XCTAssertNil(record["computerUseState"])
+        XCTAssertNil(record["computerUseDetail"])
+
+        let advertisement = CloudKitSignalingClient.hostAdvertisement(from: record)
+        XCTAssertEqual(advertisement?.senderID, "HOST-ID")
+        XCTAssertEqual(advertisement?.hostName, "Living Room Mac")
+        XCTAssertEqual(advertisement?.pairingCode, "654321")
+        XCTAssertEqual(advertisement?.updatedAt, updatedAt)
+        XCTAssertEqual(advertisement?.computerUseCapability, capability)
+    }
+
     func test_hostNameCapabilityFallback_keepsLegacyPlainNamesReadable() {
         let decoded = CloudKitSignalingClient.decodedHostName("Office Mac")
 
@@ -700,9 +778,10 @@ final class HostSessionTests: XCTestCase {
                 accessibility: true,
                 microphone: false)
 
-            XCTAssertTrue(HostSetupPreferences.shouldPresent(
+            XCTAssertFalse(HostSetupPreferences.shouldPresent(
                 permissions: ready,
-                defaults: defaults))
+                defaults: defaults),
+                "existing TCC grants must skip onboarding even without a completion preference")
 
             HostSetupPreferences.markCompleted(defaults: defaults)
             XCTAssertFalse(HostSetupPreferences.shouldPresent(
@@ -718,7 +797,37 @@ final class HostSessionTests: XCTestCase {
         }
     }
 
-    func test_setupPreferences_resumeGuideAfterRestartUntilSetupFinishes() {
+    func test_setupPreferences_adoptExistingGrantsFromOlderVersion() {
+        withTemporaryDefaults { defaults in
+            let ready = HostSession.Permissions(
+                screenRecording: true,
+                accessibility: true,
+                microphone: false)
+
+            HostSetupPreferences.markRestartRequested(defaults: defaults)
+            XCTAssertNil(defaults.object(
+                forKey: HostSetupPreferences.completedKey))
+            XCTAssertTrue(defaults.bool(
+                forKey: HostSetupPreferences.resumeAfterRestartKey))
+            XCTAssertFalse(HostSetupPreferences.shouldPresent(
+                permissions: ready,
+                defaults: defaults))
+
+            HostSetupPreferences.reconcileExistingGrants(
+                permissions: ready,
+                defaults: defaults)
+
+            XCTAssertTrue(defaults.bool(
+                forKey: HostSetupPreferences.completedKey))
+            XCTAssertNil(defaults.object(
+                forKey: HostSetupPreferences.resumeAfterRestartKey))
+            XCTAssertFalse(HostSetupPreferences.shouldPresent(
+                permissions: ready,
+                defaults: defaults))
+        }
+    }
+
+    func test_setupPreferences_restartMarkerClearsWhenRequiredGrantsAreReady() {
         withTemporaryDefaults { defaults in
             let ready = HostSession.Permissions(
                 screenRecording: true,
@@ -730,16 +839,40 @@ final class HostSessionTests: XCTestCase {
                 defaults: defaults))
 
             HostSetupPreferences.markRestartRequested(defaults: defaults)
-            XCTAssertTrue(HostSetupPreferences.shouldPresent(
-                permissions: ready,
-                defaults: defaults),
-                "a TCC relaunch must return the user to the setup guide")
-
-            HostSetupPreferences.markCompleted(defaults: defaults)
             XCTAssertFalse(HostSetupPreferences.shouldPresent(
                 permissions: ready,
                 defaults: defaults),
-                "finishing setup clears the relaunch-resume marker")
+                "a stale restart marker must not override live TCC grants")
+
+            HostSetupPreferences.reconcileExistingGrants(
+                permissions: ready,
+                defaults: defaults)
+            XCTAssertFalse(HostSetupPreferences.shouldPresent(
+                permissions: ready,
+                defaults: defaults),
+                "live TCC grants must clear a stale relaunch-resume marker")
+            XCTAssertNil(defaults.object(
+                forKey: HostSetupPreferences.resumeAfterRestartKey))
+        }
+    }
+
+    func test_setupPreferences_restartMarkerStaysWhileCoreGrantIsMissing() {
+        withTemporaryDefaults { defaults in
+            let missingAccessibility = HostSession.Permissions(
+                screenRecording: true,
+                accessibility: false,
+                microphone: true)
+            HostSetupPreferences.markRestartRequested(defaults: defaults)
+
+            HostSetupPreferences.reconcileExistingGrants(
+                permissions: missingAccessibility,
+                defaults: defaults)
+
+            XCTAssertTrue(HostSetupPreferences.shouldPresent(
+                permissions: missingAccessibility,
+                defaults: defaults))
+            XCTAssertTrue(defaults.bool(
+                forKey: HostSetupPreferences.resumeAfterRestartKey))
         }
     }
 
@@ -992,6 +1125,28 @@ private actor AsyncInvocationCounter {
     func next() -> Int {
         current += 1
         return current
+    }
+}
+
+private final class PermissionAccessRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var inspectionRequests = 0
+    private var postEventRequests = 0
+
+    var inspectionRequestCount: Int {
+        lock.withLock { inspectionRequests }
+    }
+
+    var postEventRequestCount: Int {
+        lock.withLock { postEventRequests }
+    }
+
+    func recordInspectionRequest() {
+        lock.withLock { inspectionRequests += 1 }
+    }
+
+    func recordPostEventRequest() {
+        lock.withLock { postEventRequests += 1 }
     }
 }
 

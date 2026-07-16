@@ -70,8 +70,8 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         self.factory = RTCPeerConnectionFactory(
             audioDeviceModuleType: .platformDefault,
             bypassVoiceProcessing: true,
-            encoderFactory: RTCDefaultVideoEncoderFactory(),
-            decoderFactory: RTCDefaultVideoDecoderFactory(),
+            encoderFactory: DesktopVideoEncoderFactory(),
+            decoderFactory: DesktopVideoDecoderFactory(),
             audioProcessingModule: nil)
         self.signalingFactory = signalingFactory ?? { code, expectedHostID in
             CloudKitSignalingClient(

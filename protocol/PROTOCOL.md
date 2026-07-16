@@ -37,7 +37,11 @@ client                              host
 ```
 
 A `hello_ack` with `proto` different from the client's `proto` in `hello`
-terminates the session; both sides send `bye`.
+terminates the session; both sides send `bye`. AI Computer Use additionally
+requires both peers to advertise `orderedComputerUseControls: 1` in their
+respective hello capability dictionaries. This scoped negotiation keeps
+ordinary protocol-v1 remote control compatible with Windows, Android, and
+staggered iOS/macOS upgrades while preventing mixed-generation automation.
 
 ## Message types
 
@@ -47,7 +51,8 @@ terminates the session; both sides send `bye`.
 { "t": "hello", "s": 0, "ts": …,
   "proto": 1,
   "client": { "app": "RemoteDesktop-iOS", "version": "0.1.0",
-              "device": "iPad13,8", "osVersion": "18.0" } }
+              "device": "iPad13,8", "osVersion": "18.0",
+              "orderedComputerUseControls": 1 } }
 ```
 
 ### `hello_ack` (host → client)
@@ -58,7 +63,8 @@ terminates the session; both sides send `bye`.
   "host": { "app": "RemoteDesktop-Mac", "version": "0.1.0",
             "os": "macOS 15.1", "hostname": "studio.local" },
   "caps": { "audio": true, "clipboard": false, "fileTransfer": false,
-            "monitors": 1, "maxFps": 60 } }
+            "monitors": 1, "maxFps": 60,
+            "orderedComputerUseControls": 1 } }
 ```
 
 ### `display` (host → client)
@@ -169,18 +175,26 @@ each side removes its own records after connection or teardown.
 
 # AI Computer Use control plane
 
+This AI control plane is currently implemented only by the macOS host. The
+Windows host remains an ordinary remote-desktop host and does not advertise or
+execute AI Computer Use.
+
 AI Computer Use deliberately separates the high-bandwidth live screen from
 the low-bandwidth command lifecycle:
 
 - WebRTC continues to carry live video, audio, and direct user input.
 - The user's private CloudKit database carries prompts, assistant responses,
   progress, pause, resume, and cancel messages.
-- The host plans and executes locally. On supported systems, Apple's on-device
-  Foundation Model proposes typed calls to a pinned local MCP helper. A pinned,
-  quantized OS-Atlas Pro 4B model is loaded only for GUI-only visual fallback;
-  the Base and Pro models are never resident together. A host only advertises
-  AI availability when the notarized helper, signed inference runtime, and
-  exact-hash visual-model artifacts are all verified and ready.
+- The macOS host plans and executes locally. Its always-installed semantic GUI
+  router handles bounded app-first, literal-entry, and unambiguous navigation
+  routes before checking Apple's on-device Foundation Model for the remaining
+  typed GUI actions. The Foundation Model also proposes typed calls to reviewed
+  MCP tools. For GUI-only work, a pinned, quantized OS-Atlas Pro 4B model grounds
+  visual pointer targets; the host owns the final verb, validation, approval,
+  and execution. The Base and Pro models are never resident together. A host
+  only advertises AI availability when the
+  notarized helper, signed inference runtime, and exact-hash visual-model
+  artifacts are all verified and ready.
 - Pausing cancels the current execution task and gates host-side input tools;
   the user can immediately operate the same live screen from iOS.
 

@@ -269,7 +269,14 @@ actor OSAtlasLlamaRuntime {
 
     static let minimumPhysicalMemoryBytes: UInt64 = 16 * 1_024 * 1_024 * 1_024
     static let minimumLaunchMemoryBytes: UInt64 = 6 * 1_024 * 1_024 * 1_024
-    static let minimumInferenceMemoryBytes: UInt64 = 4 * 1_024 * 1_024 * 1_024
+    // The launch check reserves enough reclaimable memory to make the model
+    // resident. Once it is loaded, the independent 8 GiB process guard bounds
+    // any further growth. Keeping another 4 GiB reclaimable at that point made
+    // the verified Q4 runtime reject inference on otherwise healthy 16/32 GiB
+    // Macs, including while the system still reported normal memory pressure.
+    // Two GiB covers the remaining bounded growth without making the
+    // advertised 16 GiB minimum impossible under an ordinary app workload.
+    static let minimumInferenceMemoryBytes: UInt64 = 2 * 1_024 * 1_024 * 1_024
 
     private struct ActiveServer {
         let inputs: OSAtlasLlamaRuntimeInputs

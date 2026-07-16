@@ -1,6 +1,14 @@
 import Foundation
 import Security
 
+struct ComputerUsePendingApprovalDecision: Codable, Equatable, Sendable {
+    let request: ComputerUseApprovalRequest
+    let approved: Bool
+    /// The exact response bytes are persisted before transmission so an
+    /// ambiguous CloudKit error or app relaunch can only retry the same choice.
+    let responseBody: String
+}
+
 /// Write-ahead recovery record for one in-flight privileged prompt. Prompt
 /// text stays in the device Keychain rather than UserDefaults, and the same
 /// message/session IDs are reused after an app restart so the host's durable
@@ -16,6 +24,16 @@ struct ComputerUsePendingPrompt: Codable, Equatable, Sendable {
     /// conversation context that may have changed in memory.
     let wireBody: String?
     let createdAt: Date
+    /// Highest lifecycle control revision issued for this task. Optional keeps
+    /// Keychain records written by pre-revision clients decodable.
+    let controlRevision: UInt64?
+    /// The lifecycle kind paired with `controlRevision`. Recovery replays this
+    /// exact pair instead of allocating a newer intent or accidentally
+    /// refreshing a paused/cancelled Prompt first.
+    let lastControlKind: ComputerUseEnvelope.Kind?
+    /// A locked, durable approval choice. It is removed only by a terminal task
+    /// result or a genuinely new approval request ID.
+    let approvalDecision: ComputerUsePendingApprovalDecision?
 
     init(
         hostID: String,
@@ -24,7 +42,10 @@ struct ComputerUsePendingPrompt: Codable, Equatable, Sendable {
         messageID: String,
         prompt: String,
         wireBody: String? = nil,
-        createdAt: Date
+        createdAt: Date,
+        controlRevision: UInt64? = nil,
+        lastControlKind: ComputerUseEnvelope.Kind? = nil,
+        approvalDecision: ComputerUsePendingApprovalDecision? = nil
     ) {
         self.hostID = hostID
         self.pairingCode = pairingCode
@@ -33,12 +54,25 @@ struct ComputerUsePendingPrompt: Codable, Equatable, Sendable {
         self.prompt = prompt
         self.wireBody = wireBody
         self.createdAt = createdAt
+        self.controlRevision = controlRevision
+        self.lastControlKind = lastControlKind
+        self.approvalDecision = approvalDecision
     }
 
     var exactWireBody: String { wireBody ?? prompt }
 }
 
-final class ComputerUsePendingPromptStore: @unchecked Sendable {
+protocol ComputerUsePendingPromptStoring: Sendable {
+    func load(hostID: String, pairingCode: String) -> ComputerUsePendingPrompt?
+    @discardableResult
+    func save(_ pending: ComputerUsePendingPrompt) -> Bool
+    func remove(hostID: String)
+}
+
+final class ComputerUsePendingPromptStore:
+    ComputerUsePendingPromptStoring,
+    @unchecked Sendable
+{
     static let shared = ComputerUsePendingPromptStore()
 
     private let service = "com.threadmark.remotedesktop.computer-use.pending-prompt"
@@ -63,14 +97,22 @@ final class ComputerUsePendingPromptStore: @unchecked Sendable {
         return pending
     }
 
-    func save(_ pending: ComputerUsePendingPrompt) {
-        guard let data = try? JSONEncoder().encode(pending) else { return }
-        remove(hostID: pending.hostID)
-        var attributes = baseQuery(hostID: pending.hostID)
+    @discardableResult
+    func save(_ pending: ComputerUsePendingPrompt) -> Bool {
+        guard let data = try? JSONEncoder().encode(pending) else { return false }
+        let query = baseQuery(hostID: pending.hostID)
+        let updates: [String: Any] = [kSecValueData as String: data]
+        let updateStatus = SecItemUpdate(
+            query as CFDictionary,
+            updates as CFDictionary)
+        if updateStatus == errSecSuccess { return true }
+        guard updateStatus == errSecItemNotFound else { return false }
+
+        var attributes = query
         attributes[kSecValueData as String] = data
         attributes[kSecAttrAccessible as String] =
             kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        _ = SecItemAdd(attributes as CFDictionary, nil)
+        return SecItemAdd(attributes as CFDictionary, nil) == errSecSuccess
     }
 
     func remove(hostID: String) {

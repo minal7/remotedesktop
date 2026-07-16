@@ -47,18 +47,47 @@ protocol PermissionsProvider: Sendable {
 
 /// Production implementation that talks to the real APIs.
 struct SystemPermissionsProvider: PermissionsProvider {
+    private let accessibilityTrustCheck: @Sendable () -> Bool
+    private let postEventAccessCheck: @Sendable () -> Bool
+    private let accessibilityTrustRequest: @Sendable () -> Void
+    private let postEventAccessRequest: @Sendable () -> Void
+
+    init(
+        accessibilityTrustCheck: @escaping @Sendable () -> Bool = {
+            AXIsProcessTrusted()
+        },
+        postEventAccessCheck: @escaping @Sendable () -> Bool = {
+            CGPreflightPostEventAccess()
+        },
+        accessibilityTrustRequest: @escaping @Sendable () -> Void = {
+            let opts = [
+                kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true,
+            ]
+            _ = AXIsProcessTrustedWithOptions(opts as CFDictionary)
+        },
+        postEventAccessRequest: @escaping @Sendable () -> Void = {
+            _ = CGRequestPostEventAccess()
+        }
+    ) {
+        self.accessibilityTrustCheck = accessibilityTrustCheck
+        self.postEventAccessCheck = postEventAccessCheck
+        self.accessibilityTrustRequest = accessibilityTrustRequest
+        self.postEventAccessRequest = postEventAccessRequest
+    }
+
     func screenRecordingGranted() -> Bool {
         CGPreflightScreenCaptureAccess()
     }
 
     func accessibilityGranted() -> Bool {
-        // `AXIsProcessTrusted()` reads the current TCC state each
-        // call — it is *not* cached. What users hit instead is TCC
-        // failing to propagate the grant to an already-running
-        // process in some cases; the reliable fix is to re-read on
-        // `NSApplication.didBecomeActiveNotification`, which
-        // AppDelegate wires up.
-        AXIsProcessTrusted()
+        // Remote control needs both Accessibility inspection and event
+        // synthesis. In particular, preflight PostEvent here instead of
+        // waiting for the first CGEvent: on a newly launched or upgraded app,
+        // WindowServer can otherwise begin its TCC lookup only when that first
+        // event arrives and silently discard a short burst of keystrokes while
+        // the lookup is still in flight. Both checks re-read live TCC state,
+        // so an older installation's existing grants are adopted immediately.
+        accessibilityTrustCheck() && postEventAccessCheck()
     }
 
     func microphoneGranted() -> Bool {
@@ -70,8 +99,8 @@ struct SystemPermissionsProvider: PermissionsProvider {
         case .screenRecording:
             _ = CGRequestScreenCaptureAccess()
         case .accessibility:
-            let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
-            _ = AXIsProcessTrustedWithOptions(opts as CFDictionary)
+            accessibilityTrustRequest()
+            postEventAccessRequest()
         case .microphone:
             requestMicrophoneAccess { _ in }
         }

@@ -1,7 +1,7 @@
 import Foundation
 
 /// Wire protocol shared between the iOS client and the Mac host,
-/// as specified in `protocol/PROTOCOL.md` (v1).
+/// as specified in `protocol/PROTOCOL.md` (v1 plus negotiated capabilities).
 ///
 /// The host primarily *decodes* client → host messages; encoding of
 /// host → client messages (`hello_ack`, `display`) is a Phase 3 task
@@ -12,7 +12,7 @@ enum InputScrollPhase: String, Codable {
 }
 
 enum ControlMessage: Equatable {
-    case hello(proto: Int)
+    case hello(proto: Int, orderedComputerUseControls: Int)
     case pointer(x: Int, y: Int, buttons: UInt8)
     case scroll(x: Int, y: Int, dx: Int, dy: Int, phase: InputScrollPhase)
     case key(usage: Int, down: Bool, modifiers: UInt16)
@@ -28,7 +28,16 @@ enum ControlMessage: Equatable {
         }
         switch t {
         case "hello":
-            return .hello(proto: obj["proto"] as? Int ?? 1)
+            let client = obj["client"] as? [String: Any]
+            let caps = obj["caps"] as? [String: Any]
+            return .hello(
+                proto: int(obj["proto"], default: 1),
+                orderedComputerUseControls: max(
+                    0,
+                    int(
+                        client?["orderedComputerUseControls"]
+                            ?? caps?["orderedComputerUseControls"],
+                        default: 0)))
         case "pointer":
             return .pointer(
                 x: int(obj["x"]), y: int(obj["y"]),
@@ -59,6 +68,7 @@ enum ControlMessage: Equatable {
     }
 
     private static func int(_ v: Any?, default d: Int = 0) -> Int {
+        if let b = v as? Bool { return b ? 1 : 0 }
         if let i = v as? Int { return i }
         if let d = v as? Double { return Int(d) }
         if let s = v as? String, let i = Int(s) { return i }
@@ -92,7 +102,9 @@ enum HostMessageEncoder {
                 "clipboard": false,
                 "fileTransfer": false,
                 "monitors": monitors,
-                "maxFps": 60,
+                "maxFps": DesktopVideoQuality.targetFramesPerSecond,
+                "orderedComputerUseControls":
+                    HostConfig.orderedComputerUseControlsVersion,
             ],
         ]
         return (try? JSONSerialization.data(withJSONObject: obj)) ?? Data()

@@ -121,24 +121,34 @@ who enable it must approve Microphone themselves.
   automatic signatures so the approved body stays exact, and sends only after
   iOS shows the complete recipients, subject, and body for one-action approval.
   The downloaded helper's generic `mail_send` tool remains blocked.
-- OS-Atlas-Pro-4B is the visual fallback for apps without a suitable
-  structured tool. iOS sends one idempotent setup request over the existing
-  private CloudKit signaling record; the host streams the helper download,
-  model download, verification, and runtime-loading progress back to the
-  device row.
+- GUI-only apps use a local hybrid when no suitable structured tool exists.
+  Its always-installed semantic router opens an explicitly named common app
+  once before interacting and handles bounded literal text and unambiguous
+  current-app navigation deterministically. Remaining ordinary-language steps
+  use Apple's on-device model to select one typed semantic action and bounded
+  arguments. OS-Atlas-Pro-4B grounds pointer targets, and the host composes,
+  validates, approves, and executes the native action.
+  iOS sends one idempotent setup request over the existing private CloudKit
+  signaling record; the host streams the helper download, model download,
+  verification, and runtime-loading progress back to the device row.
 - Versioned model installation in Application Support with Apple-silicon,
   16 GiB memory, free-space, byte-size, and streaming SHA-256 checks before an
   atomic receipt is activated. Resumable progress is calculated from durable
   bytes across every artifact, and chat is exposed only after the complete
   model package loads successfully.
-- The deterministic host parser and native-action grammar cover 16 semantic
-  operations across 17 raw variants. The installed Q4 production profile is a
-  narrower, checkpoint-verified contract: `RIGHT_CLICK`, `TYPE`, `SCROLL UP`,
-  `SCROLL DOWN`, `SCROLL LEFT`, `SCROLL RIGHT`, `OPEN_APP`, `ENTER`, `WAIT`,
-  `ASK`, `ANSWER`, and `COMPLETE`. It rejects `CLICK`, `DOUBLE_CLICK`, `DRAG`,
-  `HOTKEY`, and `REPORT` before any effect from that model action. Direct user
-  input immediately pauses automation, and malformed or out-of-range actions
-  are also rejected.
+- The host-composed surface covers 16 semantic operations. `ANSWER` and
+  `REPORT` are aliases for the same evidence-checked visible-facts behavior.
+  Click, double-click, secondary-click, and drag use harmless OS-Atlas primary
+  click carriers only for visual points; the typed plan owns the final verb.
+  Text, four-direction scroll, app opening, Return, hotkeys, wait, completion,
+  clarification, and visible answers are composed directly from validated
+  arguments without visual-model verb selection. The router remains installed
+  regardless of Apple's startup availability and re-checks availability for
+  every non-deterministic step. If that per-step check is unavailable, only
+  that step falls back to the legacy raw checkpoint profile: `RIGHT_CLICK`,
+  `TYPE`, four-direction `SCROLL`, `OPEN_APP`, `ENTER`, `WAIT`, `ASK`,
+  `ANSWER`, and `COMPLETE`. Direct user input immediately pauses automation,
+  and malformed or out-of-range actions are rejected before any effect.
 
 ## Computer Use local component distribution
 
@@ -235,13 +245,14 @@ product behavior:
   parser/executor/safety/native-input matrix by default. That matrix covers the
   full host grammar: 16 semantic operations across 17 raw variants.
 - `host-mac/scripts/run_osatlas_acceptance.sh --actual-model` additionally
-  loads the installed OS-Atlas Pro checkpoint against hidden, in-memory
-  screens. Its gate exercises only the Q4 production profile's 12 supported
-  raw variants. The stateful delivery workflow requires actual OS-Atlas to
-  navigate by typing the exact address, then local Vision OCR requires the
-  restaurant, item, subtotal, every recognized fee row, tax, total, and ETA
-  before returning the exact quote without requesting a second model response.
-  It does not capture the desktop, post system input, or advance checkout.
+  loads the installed Apple language model and OS-Atlas Pro checkpoint against
+  hidden, in-memory screens. Its semantic matrix covers all 16 host actions:
+  direct actions use the typed plan, while pointer actions require one or two
+  real OS-Atlas point-grounding inferences. The separate stateful delivery
+  workflows retain the legacy raw compatibility path and require real
+  OS-Atlas navigation before local Vision OCR returns the exact itemized quote.
+  These tests do not capture the desktop, post system input, or advance
+  checkout.
 - Live DoorDash quote reading requires `--live-doordash`,
   `--allow-visible-ui`, and exact `DOORDASH_EXPECTED_ITEM`,
   `DOORDASH_EXPECTED_TOTAL`, and `DOORDASH_EXPECTED_ETA` values. It reads a

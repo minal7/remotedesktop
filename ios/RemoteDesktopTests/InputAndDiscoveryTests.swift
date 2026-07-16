@@ -1,4 +1,5 @@
 import XCTest
+import UIKit
 @testable import RemoteDesktop
 
 final class InputAndDiscoveryTests: XCTestCase {
@@ -275,4 +276,65 @@ final class InputAndDiscoveryTests: XCTestCase {
         XCTAssertEqual(mapped?.usage, 0x04)
         XCTAssertEqual(mapped?.modifiers, SoftModifier.shift.mask)
     }
+
+    @MainActor
+    func test_softKeyboardCapture_forwardsExactTextThroughSessionTransport() throws {
+        let transport = RecordingSoftKeyboardTransport()
+        let session = SessionModel(transportFactory: { transport })
+        session.connect(code: "123456")
+
+        let field = SoftKeyboardCapture.CaptureField(frame: .zero)
+        field.session = session
+
+        XCTAssertFalse(field.textField(
+            field,
+            shouldChangeCharactersIn: NSRange(location: 0, length: 1),
+            replacementString: "HUMAN-CONTROL-2468"))
+
+        let payload = try XCTUnwrap(transport.sentPayloads.last)
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: payload) as? [String: Any])
+        XCTAssertEqual(object["t"] as? String, "text")
+        XCTAssertEqual(object["s2"] as? String, "HUMAN-CONTROL-2468")
+        XCTAssertEqual(object["s"] as? Int, 1)
+        XCTAssertEqual(field.text, " ")
+    }
+
+    @MainActor
+    func test_softKeyboardCapture_exposesHittableDismissAccessory() throws {
+        let field = SoftKeyboardCapture.CaptureField(frame: .zero)
+        var didDismiss = false
+        field.onKeyboardDismiss = { didDismiss = true }
+
+        let toolbar = try XCTUnwrap(field.inputAccessoryView as? UIToolbar)
+        let dismissButton = try XCTUnwrap(
+            toolbar.items?.compactMap { $0.customView as? UIButton }.first)
+
+        XCTAssertEqual(
+            dismissButton.accessibilityIdentifier,
+            "computer-use-hide-remote-keyboard")
+        XCTAssertEqual(dismissButton.accessibilityLabel, "Hide remote keyboard")
+        XCTAssertGreaterThan(dismissButton.intrinsicContentSize.width, 0)
+        XCTAssertGreaterThan(toolbar.intrinsicContentSize.height, 0)
+
+        dismissButton.sendActions(for: .touchUpInside)
+        XCTAssertTrue(didDismiss)
+    }
+}
+
+@MainActor
+private final class RecordingSoftKeyboardTransport: Transport {
+    var onHostHello: (@MainActor (HostHello) -> Void)?
+    var onDisplay: (@MainActor (DisplayInfo) -> Void)?
+    var onFirstVideoFrame: (@MainActor () -> Void)?
+    var onDisconnect: (@MainActor (String) -> Void)?
+    private(set) var sentPayloads: [Data] = []
+
+    func connect(pairingCode: String, expectedHostID: String?) async throws {}
+
+    func send(_ message: ControlMessage, seq: UInt32, ts: UInt64) {
+        sentPayloads.append(message.encoded(seq: seq, ts: ts))
+    }
+
+    func disconnect(reason: String) {}
 }

@@ -138,9 +138,25 @@ final class SessionModel: ObservableObject {
 
     private func bind(_ t: Transport) {
         t.onHostHello = { [weak self] h in
-            self?.hostName = h.hostname
-            self?.state = .connected
-            self?.computerUseSession?.start()
+            guard let self else { return }
+            self.hostName = h.hostname
+            if self.experience == .computerUse,
+               h.orderedComputerUseControls
+                    < Config.orderedComputerUseControlsVersion {
+                self.computerUseSession?.stop()
+                self.computerUseSession = nil
+                t.disconnect(reason: "protocol")
+                self.transport = nil
+                self.error = "Update Remote Desktop Host on this Mac before using AI Computer Use. Ordinary remote control is still available."
+                self.state = .idle
+                return
+            }
+            self.state = .connected
+            self.computerUseSession?.start()
+            self.send(.qos(
+                targetFps: DesktopVideoQuality.targetFramesPerSecond,
+                maxBitrateKbps: DesktopVideoQuality.maximumBitrateKbps,
+                prefer: "sharpness"))
         }
         t.onDisplay = { [weak self] d in self?.display = d }
         t.onFirstVideoFrame = { [weak self] in

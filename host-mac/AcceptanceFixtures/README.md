@@ -99,9 +99,11 @@ host-mac/scripts/run_osatlas_acceptance.sh
 The default command exercises the full deterministic host parser grammar: 16
 semantic operations across 17 raw variants, including validated app opening,
 left/double/right click, drag, text, four-direction scroll, Return, and hotkey
-translation against in-memory event and screen providers. A separate native
-input-layer assertion covers middle click; middle click is not an OS-Atlas
-parser action.
+translation against in-memory event and screen providers. It also verifies the
+hybrid boundary: a typed semantic plan owns the operation, OS-Atlas output is a
+non-executable point carrier for pointer actions, and direct actions require no
+visual-model completion. A separate native input-layer assertion covers middle
+click; middle click is not an OS-Atlas parser action.
 It does not load the multi-gigabyte checkpoint, open a fixture window, capture
 the user's desktop, or post real input.
 
@@ -113,13 +115,17 @@ host-mac/scripts/run_osatlas_acceptance.sh --actual-model
 ```
 
 This mode does not download or install a model. It resolves the verified active
-installation and gates the 12 raw variants in the Q4 production profile:
-`RIGHT_CLICK`, `TYPE`, `SCROLL UP`, `SCROLL DOWN`, `SCROLL LEFT`,
-`SCROLL RIGHT`, `OPEN_APP`, `ENTER`, `WAIT`, `ASK`, `ANSWER`, and `COMPLETE`.
-The profile rejects `CLICK`, `DOUBLE_CLICK`, `DRAG`, `HOTKEY`, and `REPORT`
-before any effect from that model action; those variants remain covered by the
-deterministic host grammar instead of being claimed as installed-checkpoint
-capabilities.
+OS-Atlas installation and invokes Apple's installed on-device language model.
+The ordinary-language matrix covers all 16 host-composed semantic actions.
+Click, double-click, secondary-click, and drag require real OS-Atlas point
+grounding; other actions are produced directly from the typed semantic plan.
+`ANSWER` and `REPORT` share one visible-evidence behavior. Production always
+installs the semantic router, including when Apple's model is warming up or
+unavailable at startup. Deterministic app-first, literal-entry, and unambiguous
+navigation routes run before the per-step model check; an unavailable
+non-deterministic step falls back to the parser-validated legacy 12-variant raw
+compatibility profile. That profile is a constrained fallback allowlist, not a
+claim that the checkpoint reliably infers every variant from ordinary language.
 
 The same actual-model mode runs stateful delivery-address-to-itemized-quote
 workflows against screens rendered directly in memory. The shorter guard
@@ -134,6 +140,112 @@ read the desktop, and intercept model actions before any system input is
 posted. Login always pauses for user takeover, and no path advances checkout.
 The XCTest cases are skipped with a clear reason if the installed checkpoint or
 bundled runtime is unavailable.
+
+### Shipped-path local hybrid fixture
+
+The safest visible shipped-path acceptance is the repository-owned
+`LocalDeliveryQuote.html` page. It has a restrictive Content Security Policy,
+no external resources, no form action, and no control that can send, buy,
+authenticate, or mutate data outside the page. The exact harmless token
+`LOCAL-QUOTE-7421` is required to create the quote DOM; the complete quote is
+then below the initial viewport. Its one **Start local quote setup** button
+only enables and focuses the local token field; this gives the installed
+OS-Atlas checkpoint a harmless visible target with an observable local effect.
+
+First open the fixture in Safari, make the Safari content area at least
+900 x 650 points, and leave **Start local quote setup** unclicked. Leave that
+tab loaded in the background, then foreground Calculator so the fixture and
+Safari are not visible in the streamed starting frame:
+
+```sh
+cd /path/to/remotedesktop
+open -a Safari "$PWD/host-mac/AcceptanceFixtures/LocalDeliveryQuote.html"
+```
+
+Do not pre-focus the token field. It remains disabled until the AI clicks the
+setup button, whose local handler enables and focuses it without a network,
+form, account, or external mutation.
+
+With an AI-ready Production host running from the exact build under test,
+Screen Recording and Accessibility already granted to that signed host, and a
+booted signed-in iOS Simulator, run only the local-fixture scenario:
+
+```sh
+# Use the exact UDID of the booted, signed-in simulator.
+# Obtain it from: xcrun simctl list devices available
+SIMULATOR_UDID='<exact signed-in simulator UDID>'
+cd ios
+xcodebuild test \
+  -project RemoteDesktop.xcodeproj \
+  -scheme RemoteDesktopLiveE2E \
+  -configuration Release \
+  -destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" \
+  -only-testing:RemoteDesktopLiveE2ETests/OSAtlasLocalFixtureSimulatorLiveE2ETests/testLocalFixtureUsesShippedHybridAppFirstNativeTypeAndScrollBeforeVisibleQuote \
+  RUN_OSATLAS_LOCAL_FIXTURE_SIMULATOR_E2E=1
+```
+
+This is the end-to-end product route: the Release iOS UI waits for a decoded
+Mac frame, sends an ordinary request through Production CloudKit, and the
+signed host first opens Safari from the unrelated app. The always-installed
+local semantic router preserves the exact fixture token and explicit scroll
+direction, but it will not let deterministic TYPE or navigation skip an
+earlier pending pointer instruction. After Safari opens, the semantic router
+selects the visible setup control and the installed OS-Atlas checkpoint must
+return its screen-grounded click point. That click changes the button to **Local quote
+setup started**, enables and focuses the field, and only then can native exact
+typing succeed. Each deterministic navigation route runs once, then the
+updated screen and bounded history are evaluated before another action. The
+host scrolls natively until the complete quote is visible; only then can the
+focused-window OCR validator return the fixed itemized result. The test OCRs a
+Calculator-only starting frame with Safari/fixture markers absent, observes the
+requested-app open and OS-Atlas click progress, proves the click's visible
+local effect before native typing, and finally OCRs distinctive unlocked quote
+content. A model-authored answer, an in-memory intercepted action, a direct-only
+flow, or transport-only pass cannot satisfy it.
+
+### Shipped takeover, direct-input, resume, and stop lifecycle
+
+`ComputerUseLocalLifecycleSimulatorLiveE2ETests` uses the same default local
+fixture and a second fixed token, `HUMAN-CONTROL-2468`, to validate lifecycle
+controls without an external site. The token only reveals **MANUAL REMOTE INPUT
+CONFIRMED** inside the page. There is no form submission, network request,
+account, message, purchase, or other external effect.
+
+Reload `LocalDeliveryQuote.html`, manually click **Start local quote setup**,
+leave its empty blue **Fixture code** field focused in a Safari content area at
+least 900 x 650 points, and turn off Simulator **I/O > Keyboard > Connect
+Hardware Keyboard**. The test deliberately requires the shipped takeover
+strip's software-keyboard path; it fails rather than silently substituting a
+different input channel.
+
+Run only the lifecycle scenario:
+
+```sh
+# Use the exact UDID of the booted, signed-in simulator.
+# Obtain it from: xcrun simctl list devices available
+SIMULATOR_UDID='<exact signed-in simulator UDID>'
+cd ios
+xcodebuild test \
+  -project RemoteDesktop.xcodeproj \
+  -scheme RemoteDesktopLiveE2E \
+  -configuration Release \
+  -destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" \
+  -only-testing:RemoteDesktopLiveE2ETests/ComputerUseLocalLifecycleSimulatorLiveE2ETests/testTakeControlManualInputResumeTakeControlAndStopThroughCurrentHost \
+  RUN_COMPUTER_USE_LOCAL_LIFECYCLE_SIMULATOR_E2E=1
+```
+
+The test requires live host visual-observation progress before the first **Take control**,
+types the fixed token through the iOS software keyboard and WebRTC, OCRs the
+Mac-side proof, holds a three-second paused dwell, taps **Let AI continue**, and
+requires fresh host observation for the same task. It then takes control again,
+checks that the prior resume marker cleared, taps **Stop task**, and accepts only
+`Stopped. You're in control of the Mac.` as the terminal host response. Every
+post-send failure runs fail-closed cleanup: deny any approval, or take control
+and stop, then wait up to 60 seconds for the corresponding terminal response.
+
+The live UI currently selects the first visible **Use AI Computer Use on ...**
+button; it does not expose a code-hash assertion. Operationally isolate this
+run by leaving only the exact signed host build under test advertising Ready.
 
 The live DoorDash smoke test is a separate, manual, visible-screen opt-in. Open
 and prepare the DoorDash delivery review yourself, keep the quote visible and
@@ -168,22 +280,27 @@ experience through the Release iOS Simulator instead of entering credentials in
 automation. Keep that DoorDash wall frontmost in Safari, then run:
 
 ```sh
+# Use the exact UDID of the booted, signed-in simulator.
+# Obtain it from: xcrun simctl list devices available
+SIMULATOR_UDID='<exact signed-in simulator UDID>'
 cd ios
 RUN_OSATLAS_DOORDASH_GUEST_HANDOFF_SIMULATOR_E2E=1 \
 xcodebuild test \
   -project RemoteDesktop.xcodeproj \
   -scheme RemoteDesktopLiveE2E \
   -configuration Release \
-  -destination 'platform=iOS Simulator,name=iPhone Air' \
+  -destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" \
   -only-testing:RemoteDesktopLiveE2ETests/OSAtlasDoorDashGuestSignInSimulatorLiveE2ETests/testGuestDoorDashQuotePausesForPrivateSignInAndExplainsResume
 ```
 
 The test makes an ordinary quote-only request from the Simulator, requires the
 live screen to remain visible, and proves that the host pauses before model
 inference or input. The app shows the complete sign-in guidance in a dedicated
-callout and offers **Stop task** and **Let AI continue**. Automation never signs
-in or resumes; a person enters credentials on the live screen and taps
-**Let AI continue** when ready.
+callout and offers **Stop task** and **Let AI continue**. This guest-handoff test
+never signs in or resumes: after verifying the safe person-control boundary, it
+taps **Stop task** and requires the exact terminal cancellation. Use the
+separate takeover-resume scenario below when a person will enter credentials,
+prepare the quote, and explicitly tap **Let AI continue**.
 
 To validate takeover and the eventual price result as one continuous shipped-UI
 task, use the separate interactive opt-in while a person is ready to complete
@@ -201,13 +318,16 @@ test uses that same first-frame signal, so a pending consent prompt fails with
 the exact prerequisite instead of timing out later inside the DoorDash task.
 
 ```sh
+# Use the exact UDID of the booted, signed-in simulator.
+# Obtain it from: xcrun simctl list devices available
+SIMULATOR_UDID='<exact signed-in simulator UDID>'
 cd ios
 RUN_OSATLAS_DOORDASH_TAKEOVER_RESUME_SIMULATOR_E2E=1 \
 xcodebuild test \
   -project RemoteDesktop.xcodeproj \
   -scheme RemoteDesktopLiveE2E \
   -configuration Release \
-  -destination 'platform=iOS Simulator,name=iPhone Air' \
+  -destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" \
   -only-testing:RemoteDesktopLiveE2ETests/OSAtlasDoorDashTakeoverResumeSimulatorLiveE2ETests/testRealDoorDashSignInTakeoverResumesToLocallyValidatedQuote
 ```
 

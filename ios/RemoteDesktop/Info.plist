@@ -31,6 +31,9 @@
 	<array>
 		<string>_remotedesktop._tcp</string>
 	</array>
+	<key>NSCameraUsageDescription</key>
+	<string>Remote Desktop includes a camera-capable WebRTC component, but this app never captures, stores, or transmits video from your camera.
+</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Remote Desktop uses your local network for faster, direct connections to your computer when both devices are on the same Wi-Fi.
 </string>

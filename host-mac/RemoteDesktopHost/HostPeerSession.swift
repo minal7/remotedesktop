@@ -18,13 +18,27 @@ extension ICEConfig {
 }
 
 final class HostPeerSession: NSObject {
+    struct PeerAuthorization: Equatable, Sendable {
+        let senderID: String
+        let authorized: Bool
+        let orderedComputerUseControls: Int
+
+        var supportsOrderedComputerUseControls: Bool {
+            authorized
+                && orderedComputerUseControls
+                    >= HostConfig.orderedComputerUseControlsVersion
+        }
+    }
+
     private let signaling: any SignalingChannel
     private let capture: ScreenCapture
     private let injector: InputInjector
     private let iceConfig: ICEConfig
     private let audioEnabled: Bool
+    private let peerSenderID: String
     private let onUserInput: @Sendable () -> Void
-    private let onPeerAuthorizationChanged: @Sendable (Bool) -> Void
+    private let onPeerAuthorizationChanged:
+        @Sendable (PeerAuthorization) -> Void
     private let onEnded: @Sendable (String) -> Void
     private let log = Logger(subsystem: "com.threadmark.remotedesktop.host", category: "webrtc")
     private let signalingStateQueue = DispatchQueue(label: "com.threadmark.remotedesktop.host.webrtc.signaling")
@@ -39,11 +53,17 @@ final class HostPeerSession: NSObject {
 
     private var peerConnection: RTCPeerConnection?
     private var dataChannel: RTCDataChannel?
+    private var videoSender: RTCRtpSender?
+    private var adaptedVideoWidth: Int?
+    private var adaptedVideoHeight: Int?
+    private var captureMaximumMacroblocksPerFrame =
+        DesktopVideoQuality.fallbackH264MaximumMacroblocksPerFrame
     private var captureStarted = false
     private var audioRecordingStarted = false
     private var localMediaConfigured = false
     private var ended = false
     private var helloAuthenticated = false
+    private var orderedComputerUseControls = 0
     private var captureRestartTask: Task<Void, Never>?
     private var hostSeq: UInt32 = 0
     private var answerSent = false
@@ -78,8 +98,10 @@ final class HostPeerSession: NSObject {
         injector: InputInjector,
         iceConfig: ICEConfig,
         audioEnabled: Bool,
+        peerSenderID: String,
         onUserInput: @escaping @Sendable () -> Void,
-        onPeerAuthorizationChanged: @escaping @Sendable (Bool) -> Void,
+        onPeerAuthorizationChanged:
+            @escaping @Sendable (PeerAuthorization) -> Void,
         onEnded: @escaping @Sendable (String) -> Void
     ) {
         RTCInitializeSSL()
@@ -88,14 +110,15 @@ final class HostPeerSession: NSObject {
         self.injector = injector
         self.iceConfig = iceConfig
         self.audioEnabled = audioEnabled
+        self.peerSenderID = peerSenderID
         self.onUserInput = onUserInput
         self.onPeerAuthorizationChanged = onPeerAuthorizationChanged
         self.onEnded = onEnded
         self.factory = RTCPeerConnectionFactory(
             audioDeviceModuleType: .audioEngine,
             bypassVoiceProcessing: true,
-            encoderFactory: RTCDefaultVideoEncoderFactory(),
-            decoderFactory: RTCDefaultVideoDecoderFactory(),
+            encoderFactory: DesktopVideoEncoderFactory(),
+            decoderFactory: DesktopVideoDecoderFactory(),
             audioProcessingModule: nil)
         let voiceProcessingStatus = factory.audioDeviceModule.setVoiceProcessingEnabled(false)
         _ = factory.audioDeviceModule.setEngineAvailability(
@@ -134,6 +157,10 @@ final class HostPeerSession: NSObject {
         try configureLocalMedia(on: peerConnection)
         let answer = try await createAnswer(on: peerConnection)
         try await setLocalDescription(answer, on: peerConnection)
+        captureMaximumMacroblocksPerFrame = DesktopVideoQuality
+            .maximumMacroblocksPerFrame(
+                negotiatedCodecs: videoSender?.parameters.codecs ?? [])
+        applyVideoSenderPolicy(DesktopVideoQuality.sharpnessPolicy)
         startAudioRecordingIfNeeded()
         try await signaling.send(SignalingEnvelope(
             role: .host,
@@ -165,7 +192,8 @@ final class HostPeerSession: NSObject {
     func close(reason: String) {
         ended = true
         helloAuthenticated = false
-        onPeerAuthorizationChanged(false)
+        notifyPeerAuthorization(authorized: false)
+        orderedComputerUseControls = 0
         captureRestartTask?.cancel()
         captureRestartTask = nil
         resetBufferedLocalICE()
@@ -174,6 +202,9 @@ final class HostPeerSession: NSObject {
         dataChannel = nil
         peerConnection?.close()
         peerConnection = nil
+        videoSender = nil
+        adaptedVideoWidth = nil
+        adaptedVideoHeight = nil
         if audioEnabled {
             audioBridge.detach(from: factory.audioDeviceModule)
         }
@@ -210,6 +241,15 @@ final class HostPeerSession: NSObject {
         return peerConnection
     }
 
+    private func notifyPeerAuthorization(authorized: Bool) {
+        onPeerAuthorizationChanged(PeerAuthorization(
+            senderID: peerSenderID,
+            authorized: authorized,
+            orderedComputerUseControls: authorized
+                ? orderedComputerUseControls
+                : 0))
+    }
+
     private func configureLocalMedia(on peerConnection: RTCPeerConnection?) throws {
         guard let peerConnection else {
             throw NSError(
@@ -235,6 +275,7 @@ final class HostPeerSession: NSObject {
                 code: -5,
                 userInfo: [NSLocalizedDescriptionKey: "Couldn't attach the video track to the peer connection."])
         }
+        videoSender = sender
         let transceiverMid = peerConnection.transceivers.first(where: { $0.sender.senderId == sender.senderId })?.mid ?? "nil"
         log.info("bound video sender to negotiated transceiver mid=\(transceiverMid, privacy: .public)")
     }
@@ -288,8 +329,41 @@ final class HostPeerSession: NSObject {
     }
 
     private func startCapture() async throws {
-        try await capture.start(audioEnabled: audioEnabled)
+        try await capture.start(
+            audioEnabled: audioEnabled,
+            maximumMacroblocksPerFrame: captureMaximumMacroblocksPerFrame)
         captureStarted = true
+    }
+
+    private func applyVideoSenderPolicy(
+        _ policy: DesktopVideoQuality.SenderPolicy
+    ) {
+        guard let videoSender else {
+            log.warning("couldn't apply desktop video quality policy: missing sender")
+            return
+        }
+        let parameters = videoSender.parameters
+        let encodings = parameters.encodings
+        guard !encodings.isEmpty else {
+            log.warning("couldn't apply desktop video quality policy: missing encoding")
+            return
+        }
+        for encoding in encodings {
+            encoding.maxBitrateBps = NSNumber(value: policy.maximumBitrateBps)
+            encoding.maxFramerate = NSNumber(value: policy.maximumFramesPerSecond)
+            encoding.scaleResolutionDownBy = 1
+        }
+        parameters.encodings = encodings
+        parameters.degradationPreference = NSNumber(
+            value: policy.degradationPreference.rawValue)
+        videoSender.parameters = parameters
+
+        let bweUpdated = peerConnection?.setBweMinBitrateBps(
+            nil,
+            currentBitrateBps: nil,
+            maxBitrateBps: NSNumber(value: policy.maximumBitrateBps)) ?? false
+        log.info(
+            "desktop video quality captureMacroblocks=\(self.captureMaximumMacroblocksPerFrame, privacy: .public) maxBitrate=\(policy.maximumBitrateBps, privacy: .public) maxFps=\(policy.maximumFramesPerSecond, privacy: .public) degradation=\(policy.degradationPreference.rawValue, privacy: .public) bweUpdated=\(bweUpdated, privacy: .public)")
     }
 
     private func handleCaptureStopped(_ error: Error?) {
@@ -347,10 +421,15 @@ final class HostPeerSession: NSObject {
         let normalizedSize = CaptureSizing.normalized(
             width: CVPixelBufferGetWidth(imageBuffer),
             height: CVPixelBufferGetHeight(imageBuffer))
-        videoSource.adaptOutputFormat(
-            toWidth: Int32(normalizedSize.width),
-            height: Int32(normalizedSize.height),
-            fps: CaptureSizing.targetFramesPerSecond)
+        if normalizedSize.width != adaptedVideoWidth
+            || normalizedSize.height != adaptedVideoHeight {
+            videoSource.adaptOutputFormat(
+                toWidth: Int32(normalizedSize.width),
+                height: Int32(normalizedSize.height),
+                fps: CaptureSizing.targetFramesPerSecond)
+            adaptedVideoWidth = normalizedSize.width
+            adaptedVideoHeight = normalizedSize.height
+        }
 
         let rtcBuffer = RTCCVPixelBuffer(pixelBuffer: imageBuffer)
         let presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
@@ -569,13 +648,15 @@ extension HostPeerSession: RTCPeerConnectionDelegate {
         guard !ended else { return }
         switch stateChanged {
         case .connected:
-            if helloAuthenticated { onPeerAuthorizationChanged(true) }
+            if helloAuthenticated {
+                notifyPeerAuthorization(authorized: true)
+            }
         case .disconnected:
             // Transient — ICE may recover on its own. Log but don't tear down.
-            onPeerAuthorizationChanged(false)
+            notifyPeerAuthorization(authorized: false)
             log.warning("peer connection is disconnected (may recover)")
         case .failed, .closed:
-            onPeerAuthorizationChanged(false)
+            notifyPeerAuthorization(authorized: false)
             onEnded("The peer connection closed.")
         default:
             break
@@ -592,7 +673,8 @@ extension HostPeerSession: RTCDataChannelDelegate {
     func dataChannelDidChangeState(_ dataChannel: RTCDataChannel) {
         if dataChannel.readyState == .closed || dataChannel.readyState == .closing {
             helloAuthenticated = false
-            onPeerAuthorizationChanged(false)
+            notifyPeerAuthorization(authorized: false)
+            orderedComputerUseControls = 0
         }
     }
 
@@ -601,13 +683,14 @@ extension HostPeerSession: RTCDataChannelDelegate {
             return
         }
         switch message {
-        case .hello(let proto):
+        case .hello(let proto, let orderedComputerUseControls):
             guard proto == HostConfig.protocolVersion else {
                 close(reason: "protocol")
                 return
             }
+            self.orderedComputerUseControls = orderedComputerUseControls
             helloAuthenticated = true
-            onPeerAuthorizationChanged(true)
+            notifyPeerAuthorization(authorized: true)
             sendHelloAckAndDisplay()
         case .bye(let reason):
             close(reason: reason)
@@ -621,8 +704,15 @@ extension HostPeerSession: RTCDataChannelDelegate {
             }
             onUserInput()
             injector.apply(message)
-        case .qos:
-            break
+        case let .qos(targetFps, maxBitrateKbps, prefer):
+            guard helloAuthenticated else {
+                log.warning("dropping video quality request received before authenticated hello")
+                return
+            }
+            applyVideoSenderPolicy(DesktopVideoQuality.senderPolicy(
+                targetFramesPerSecond: targetFps,
+                maximumBitrateKbps: maxBitrateKbps,
+                preference: prefer))
         }
     }
 }
