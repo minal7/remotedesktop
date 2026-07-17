@@ -426,6 +426,25 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
         history: [String],
         availableDirectives: [OSAtlasExplicitActionDirective]
     ) -> OSAtlasSemanticActionRoute? {
+        if let route = deterministicVisibleObstacleRoute(
+            for: task,
+            visibleText: visibleText,
+            availableDirectives: availableDirectives) {
+            return route
+        }
+        if let route = deterministicFinalPurchaseConfirmationRoute(
+            for: task,
+            visibleText: visibleText,
+            availableDirectives: availableDirectives) {
+            return route
+        }
+        if let route = deterministicVerifiedPostActionRoute(
+            for: task,
+            visibleText: visibleText,
+            history: history,
+            availableDirectives: availableDirectives) {
+            return route
+        }
         let entryVerbs: Set<String> = [
             "add", "enter", "insert", "paste", "put", "type", "write",
         ]
@@ -456,6 +475,737 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
             for: task,
             history: history,
             availableDirectives: availableDirectives)
+    }
+
+    /// Returns an evidence-backed answer for a persistent obstacle that is
+    /// explicitly visible and tied to the requested item. The exact OCR line
+    /// is both the summary and verification evidence; task text alone can
+    /// never manufacture an unavailable or platform-incompatible state.
+    private static func deterministicVisibleObstacleRoute(
+        for task: String,
+        visibleText: String,
+        availableDirectives: [OSAtlasExplicitActionDirective]
+    ) -> OSAtlasSemanticActionRoute? {
+        guard availableDirectives.contains(.answer) else { return nil }
+        let taskWords = normalizedWords(task)
+        let visibleWords = normalizedWords(visibleText)
+        let requestedApplicationWords = explicitlyRequestedApplicationWords(
+            in: taskWords)
+
+        for rawLine in visibleText.split(separator: "\n") {
+            let evidence = rawLine.trimmingCharacters(
+                in: .whitespacesAndNewlines)
+            guard (2 ... 240).contains(evidence.count) else { continue }
+            let words = normalizedWords(evidence)
+
+            let saysRemoved = firstUnnegatedIndex(
+                of: ["removed"],
+                in: words) != nil
+            let saysNoLongerAvailable = firstUnnegatedIndex(
+                of: ["no", "longer", "available"],
+                in: words) != nil
+            if words.contains("report"),
+               visibleTextMatchesRequestedReport(
+                   taskWords: taskWords,
+                   visibleWords: visibleWords,
+                   obstacleWords: words),
+               saysRemoved || saysNoLongerAvailable {
+                return .init(
+                    directive: .answer,
+                    argument: .visibleAnswer(
+                        summary: evidence,
+                        evidence: [evidence]))
+            }
+
+            let saysWindowsOnly = firstUnnegatedIndex(
+                of: ["only", "for", "windows"],
+                in: words) != nil
+                || firstUnnegatedIndex(
+                    of: ["requires", "windows"],
+                    in: words) != nil
+            guard saysWindowsOnly,
+                  let requestedApplicationWords,
+                  firstIndex(
+                      of: requestedApplicationWords,
+                      in: words) != nil else {
+                continue
+            }
+            return .init(
+                directive: .answer,
+                argument: .visibleAnswer(
+                    summary: evidence,
+                    evidence: [evidence]))
+        }
+        return nil
+    }
+
+    /// Returns the first exact phrase occurrence that is not denied by a
+    /// nearby explicit negation. This deliberately treats status prose such
+    /// as "has not been removed" and "not only for Windows" as non-obstacles.
+    private static func firstUnnegatedIndex(
+        of phrase: [String],
+        in words: [String]
+    ) -> Int? {
+        guard !phrase.isEmpty, phrase.count <= words.count else { return nil }
+        for index in 0 ... (words.count - phrase.count)
+        where Array(words[index ..< index + phrase.count]) == phrase {
+            let precedingStart = max(words.startIndex, index - 4)
+            let preceding = Array(words[precedingStart ..< index])
+            if !containsExplicitNegation(in: preceding) {
+                return index
+            }
+        }
+        return nil
+    }
+
+    private static func containsExplicitNegation(
+        in words: [String]
+    ) -> Bool {
+        let directNegations: Set<String> = [
+            "arent", "cannot", "couldnt", "didnt", "doesnt", "dont",
+            "hasnt", "havent", "isnt", "never", "no", "not", "shouldnt",
+            "wasnt", "werent", "wont", "wouldnt",
+        ]
+        if words.contains(where: directNegations.contains) {
+            return true
+        }
+        let contractionStems: Set<String> = [
+            "aren", "can", "couldn", "didn", "doesn", "don", "hadn",
+            "hasn", "haven", "isn", "shouldn", "wasn", "weren", "won",
+            "wouldn",
+        ]
+        return words.indices.contains { offset in
+            offset > words.startIndex
+                && words[offset] == "t"
+                && contractionStems.contains(words[offset - 1])
+        }
+    }
+
+    /// A named report warning is accepted only when the visible screen also
+    /// contains the qualifier immediately identifying the report in the task.
+    /// Generic requests for "the report" remain supported.
+    private static func visibleTextMatchesRequestedReport(
+        taskWords: [String],
+        visibleWords: [String],
+        obstacleWords: [String]
+    ) -> Bool {
+        guard let reportIndex = taskWords.firstIndex(of: "report") else {
+            return false
+        }
+        let ignoredWords: Set<String> = [
+            "a", "an", "and", "here", "my", "open", "our", "please",
+            "shown", "summarize", "the", "this", "view",
+        ]
+        let qualifier = taskWords[..<reportIndex].reversed().first(where: {
+            !ignoredWords.contains($0)
+        })
+        guard let qualifier else { return true }
+
+        let genericReportModifiers: Set<String> = [
+            "a", "an", "my", "our", "that", "the", "this", "your",
+        ]
+        let lineReportIndices = obstacleWords.indices.filter {
+            obstacleWords[$0] == "report"
+        }
+        func modifier(before index: Int) -> String? {
+            guard index > obstacleWords.startIndex else { return nil }
+            let candidate = obstacleWords[index - 1]
+            return genericReportModifiers.contains(candidate) ? nil : candidate
+        }
+        func hasObstacleStatus(after index: Int) -> Bool {
+            let nextReportIndex = lineReportIndices.first(where: { $0 > index })
+                ?? obstacleWords.endIndex
+            let statusWords = Array(obstacleWords[index ..< nextReportIndex])
+            return firstUnnegatedIndex(
+                of: ["removed"],
+                in: statusWords) != nil
+                || firstUnnegatedIndex(
+                    of: ["no", "longer", "available"],
+                    in: statusWords) != nil
+        }
+
+        if lineReportIndices.contains(where: {
+            modifier(before: $0) == qualifier && hasObstacleStatus(after: $0)
+        }) {
+            return true
+        }
+        if lineReportIndices.contains(where: {
+            guard let lineQualifier = modifier(before: $0) else {
+                return false
+            }
+            return lineQualifier != qualifier && hasObstacleStatus(after: $0)
+        }) {
+            return false
+        }
+        let hasGenericReportObstacle = lineReportIndices.contains(where: {
+            modifier(before: $0) == nil && hasObstacleStatus(after: $0)
+        })
+        return hasGenericReportObstacle
+            && firstIndex(
+                of: [qualifier, "report"],
+                in: visibleWords) != nil
+    }
+
+    /// Extracts the exact application phrase following an explicit activation
+    /// command. Requiring that whole phrase on the warning line prevents an
+    /// unrelated Windows-only notice from matching one shared task word.
+    private static func explicitlyRequestedApplicationWords(
+        in taskWords: [String]
+    ) -> [String]? {
+        let activationVerbs: Set<String> = [
+            "launch", "open", "run", "start",
+        ]
+        let clauseBoundaries: Set<String> = [
+            "and", "before", "create", "edit", "make", "please", "show",
+            "then", "to", "using", "with",
+        ]
+        let ignoredLeadingWords: Set<String> = [
+            "a", "an", "my", "our", "the", "this", "that",
+        ]
+        for verbIndex in taskWords.indices.reversed()
+        where activationVerbs.contains(taskWords[verbIndex]) {
+            var target = Array(taskWords[taskWords.index(after: verbIndex)...])
+            while let first = target.first,
+                  ignoredLeadingWords.contains(first) {
+                target.removeFirst()
+            }
+            if let boundary = target.firstIndex(where: clauseBoundaries.contains) {
+                target = Array(target[..<boundary])
+            }
+            guard (1 ... 8).contains(target.count) else { continue }
+            return target
+        }
+        return nil
+    }
+
+    /// A final purchase control must become a click proposal so the host's
+    /// existing accessibility safety policy can hold it for approval. This
+    /// route neither approves nor executes the click. It is deliberately
+    /// limited to affirmative purchase intent and an exact OCR line matching
+    /// a known final confirmation label.
+    private static func deterministicFinalPurchaseConfirmationRoute(
+        for task: String,
+        visibleText: String,
+        availableDirectives: [OSAtlasExplicitActionDirective]
+    ) -> OSAtlasSemanticActionRoute? {
+        guard availableDirectives.contains(.click),
+              taskAffirmativelyRequestsPurchase(task),
+              let exactLabel = exactVisibleFinalPurchaseLabel(
+                  in: visibleText) else {
+            return nil
+        }
+        return .init(
+            directive: .click,
+            argument: .targetHint(exactLabel))
+    }
+
+    private static func taskAffirmativelyRequestsPurchase(
+        _ task: String
+    ) -> Bool {
+        let words = normalizedWords(task)
+        let purchaseWords: Set<String> = [
+            "buy", "order", "place", "purchase",
+        ]
+        guard words.contains(where: purchaseWords.contains) else {
+            return false
+        }
+
+        // Any explicit negative or quote-only boundary wins over an earlier
+        // purchase noun. This covers "do not place", "don't purchase",
+        // "never order", and "stop before checkout/order confirmation".
+        let negativePhrases = [
+            ["do", "not"],
+            ["don", "t"],
+            ["stop", "before"],
+        ]
+        if words.contains("never") || words.contains("without")
+            || negativePhrases.contains(where: {
+                firstIndex(of: $0, in: words) != nil
+            }) {
+            return false
+        }
+
+        func isCommandPosition(_ index: Int) -> Bool {
+            if index == words.startIndex { return true }
+            let directPrefixes: Set<String> = [
+                "and", "now", "please", "then",
+            ]
+            if directPrefixes.contains(words[index - 1]) { return true }
+            guard index >= 2 else { return false }
+            let twoWordPrefix = Array(words[index - 2 ..< index])
+            return twoWordPrefix == ["can", "you"]
+                || twoWordPrefix == ["could", "you"]
+        }
+
+        let nounFollowups: Set<String> = [
+            "button", "confirmation", "date", "details", "history",
+            "information", "number", "status", "summary", "total",
+            "tracking",
+        ]
+        for index in words.indices
+        where ["buy", "order", "purchase"].contains(words[index]) {
+            let nextIndex = words.index(after: index)
+            if ["order", "purchase"].contains(words[index]),
+               nextIndex < words.endIndex,
+               nounFollowups.contains(words[nextIndex]) {
+                continue
+            }
+            if isCommandPosition(index) {
+                return true
+            }
+        }
+        for index in words.indices where words[index] == "place" {
+            guard isCommandPosition(index) else { continue }
+            let suffixEnd = min(words.endIndex, index + 3)
+            guard let orderIndex = words[index + 1 ..< suffixEnd]
+                .firstIndex(of: "order") else {
+                continue
+            }
+            let followupIndex = words.index(after: orderIndex)
+            if followupIndex < words.endIndex,
+               nounFollowups.contains(words[followupIndex]) {
+                continue
+            }
+            return true
+        }
+        return false
+    }
+
+    private static func exactVisibleFinalPurchaseLabel(
+        in visibleText: String
+    ) -> String? {
+        let labels: [(canonical: String, words: [String])] = [
+            ("Place Order", ["place", "order"]),
+        ]
+        let visibleLines = visibleText.split(separator: "\n")
+        for label in labels where visibleLines.contains(where: {
+            normalizedWords(String($0)) == label.words
+        }) {
+            return label.canonical
+        }
+        return nil
+    }
+
+    /// Converts only strongly verified, no-input post-action states into a
+    /// terminal route. Each branch requires the immediately preceding action,
+    /// trusted intent from the user task, and bounded evidence in updated OCR.
+    /// Ambiguous, stale, loading, or explicitly negative states continue to
+    /// the on-device semantic model.
+    private static func deterministicVerifiedPostActionRoute(
+        for task: String,
+        visibleText: String,
+        history: [String],
+        availableDirectives: [OSAtlasExplicitActionDirective]
+    ) -> OSAtlasSemanticActionRoute? {
+        guard let lastAction = history.last,
+              !visibleTextHasPendingOrNegativePostActionState(
+                  visibleText) else {
+            return nil
+        }
+
+        if lastAction == "ENTER",
+           availableDirectives.contains(.complete),
+           taskExplicitlyRequestsSearchExecution(task),
+           visibleTextHasStrongSearchResultState(
+               visibleText,
+               task: task) {
+            return .init(directive: .complete)
+        }
+
+        if (lastAction == "TYPE" || lastAction.hasPrefix("TYPE [")),
+           availableDirectives.contains(.complete),
+           let quotedText = exactDoubleQuotedText(in: task),
+           visibleTextContainsExactLiteral(
+               quotedText,
+               visibleText: visibleText) {
+            return .init(directive: .complete)
+        }
+
+        if (lastAction == "DOUBLE_CLICK"
+                || lastAction.hasPrefix("DOUBLE_CLICK [[")),
+           availableDirectives.contains(.complete),
+           let targetWords = explicitlyRequestedFolderNameWords(in: task),
+           visibleTextConfirmsFolderOpened(
+               visibleText,
+               targetWords: targetWords) {
+            return .init(directive: .complete)
+        }
+
+        if lastAction == "WAIT",
+           availableDirectives.contains(.answer) {
+            let taskWords = normalizedWords(task)
+            let requestedValue: String?
+            if taskWords.contains("total") {
+                requestedValue = "total"
+            } else if taskWords.contains("price") {
+                requestedValue = "price"
+            } else {
+                requestedValue = nil
+            }
+            if let requestedValue,
+               let amount = visibleCurrencyAmount(
+                   labeled: requestedValue,
+                   in: visibleText) {
+                return .init(
+                    directive: .answer,
+                    argument: .visibleAnswer(
+                        summary: "The visible \(requestedValue) is \(amount).",
+                        evidence: [amount]))
+            }
+        }
+        return nil
+    }
+
+    private static func explicitlyRequestedFolderNameWords(
+        in task: String
+    ) -> [String]? {
+        let words = normalizedWords(task)
+        let ignoredLeadingWords: Set<String> = [
+            "a", "an", "my", "our", "the", "this", "that",
+        ]
+        let clauseBoundaries: Set<String> = [
+            "and", "after", "before", "in", "on", "please", "then",
+            "using", "with", "without",
+        ]
+
+        func boundedTarget(_ rawWords: [String]) -> [String]? {
+            var targetWords = rawWords
+            while let first = targetWords.first,
+                  ignoredLeadingWords.contains(first) {
+                targetWords.removeFirst()
+            }
+            if let boundary = targetWords.firstIndex(
+                where: clauseBoundaries.contains) {
+                targetWords = Array(targetWords[..<boundary])
+            }
+            guard (1 ... 12).contains(targetWords.count) else { return nil }
+            return targetWords
+        }
+
+        for folderIndex in words.indices.reversed() {
+            guard words[folderIndex] == "folder" else { continue }
+            let afterFolder = words.index(after: folderIndex)
+            if afterFolder < words.endIndex,
+               ["called", "named"].contains(words[afterFolder]) {
+                let targetStart = words.index(after: afterFolder)
+                if targetStart < words.endIndex,
+                   let target = boundedTarget(Array(words[targetStart...])) {
+                    return target
+                }
+            }
+
+            guard let openIndex = words[..<folderIndex].lastIndex(of: "open"),
+                  folderIndex > openIndex + 1,
+                  let target = boundedTarget(
+                      Array(words[(openIndex + 1) ..< folderIndex])) else {
+                continue
+            }
+            return target
+        }
+        return nil
+    }
+
+    private static func visibleTextConfirmsFolderOpened(
+        _ visibleText: String,
+        targetWords: [String]
+    ) -> Bool {
+        let lines = visibleText.split(separator: "\n").map {
+            normalizedWords(String($0))
+        }
+        let negativePhrases = [
+            targetWords + ["folder", "is", "not", "open"],
+            targetWords + ["did", "not", "open"],
+            targetWords + ["failed", "to", "open"],
+        ]
+        guard !lines.contains(where: { line in
+            negativePhrases.contains(where: {
+                firstIndex(of: $0, in: line) != nil
+            })
+        }) else {
+            return false
+        }
+
+        // Finder-style destinations normally expose the target in both the
+        // title/breadcrumb and the content title. The source view exposes only
+        // the icon label, so requiring two short exact-context lines avoids an
+        // artificial "folder is open" sentinel and stale-screen completion.
+        let matchingDestinationLines = lines.filter { line in
+            guard let index = firstIndex(of: targetWords, in: line) else {
+                return false
+            }
+            return line.count <= targetWords.count + 2
+                && index <= 1
+        }
+        return matchingDestinationLines.count >= 2
+    }
+
+    /// Requires a positive run/submit verb near "search", or "search" in a
+    /// command position. Merely mentioning existing search results does not
+    /// authorize treating an ENTER action as the requested operation.
+    private static func taskExplicitlyRequestsSearchExecution(
+        _ task: String
+    ) -> Bool {
+        let words = normalizedWords(task)
+        let searchIndices = words.indices.filter { words[$0] == "search" }
+        guard !searchIndices.isEmpty else { return false }
+
+        func isNegated(at index: Int) -> Bool {
+            let start = max(words.startIndex, index - 2)
+            let preceding = words[start ..< index]
+            return preceding.contains(where: {
+                $0 == "dont" || $0 == "never" || $0 == "not"
+                    || $0 == "without"
+            })
+        }
+
+        let executionVerbs: Set<String> = ["execute", "run", "submit"]
+        for verbIndex in words.indices
+        where executionVerbs.contains(words[verbIndex])
+                && !isNegated(at: verbIndex) {
+            if searchIndices.contains(where: {
+                $0 > verbIndex && $0 - verbIndex <= 8
+            }) {
+                return true
+            }
+        }
+
+        let commandPrefixes: Set<String> = ["and", "please", "then", "to"]
+        return searchIndices.contains(where: { index in
+            guard !isNegated(at: index) else { return false }
+            return index == words.startIndex
+                || commandPrefixes.contains(words[index - 1])
+        })
+    }
+
+    private static func visibleTextHasStrongSearchResultState(
+        _ visibleText: String,
+        task: String
+    ) -> Bool {
+        let words = normalizedWords(visibleText)
+        let prospectivePhrases = [
+            ["results", "will", "appear"],
+            ["search", "results", "will"],
+            ["will", "show", "results"],
+        ]
+        guard !prospectivePhrases.contains(where: {
+            firstIndex(of: $0, in: words) != nil
+        }) else {
+            return false
+        }
+        let hasResultsHeading = firstUnnegatedIndex(
+            of: ["search", "results"],
+            in: words) != nil
+        let hasExplicitCompletion = firstUnnegatedIndex(
+            of: ["search", "complete"],
+            in: words) != nil
+            && firstIndex(of: ["results", "shown"], in: words) != nil
+        guard hasResultsHeading || hasExplicitCompletion else { return false }
+
+        if let queryTerms = explicitlyRequestedSearchTerms(in: task) {
+            return firstIndex(of: queryTerms, in: words) != nil
+        }
+        return hasExplicitCompletion
+    }
+
+    private static func explicitlyRequestedSearchTerms(
+        in task: String
+    ) -> [String]? {
+        let words = normalizedWords(task)
+        guard let searchIndex = words.firstIndex(of: "search") else {
+            return nil
+        }
+        let executionVerbs: Set<String> = ["execute", "run", "submit"]
+        let ignoredWords: Set<String> = [
+            "a", "an", "already", "my", "our", "the", "this", "typed",
+        ]
+        if let verbIndex = words[..<searchIndex].lastIndex(where: {
+            executionVerbs.contains($0)
+        }) {
+            let candidates = words[(verbIndex + 1) ..< searchIndex].filter {
+                !ignoredWords.contains($0)
+            }
+            if (1 ... 8).contains(candidates.count) {
+                return Array(candidates)
+            }
+        }
+        let afterSearch = words.index(after: searchIndex)
+        if afterSearch < words.endIndex,
+           words[afterSearch] == "for" {
+            let targetStart = words.index(after: afterSearch)
+            let clauseBoundaries: Set<String> = [
+                "and", "please", "then", "using", "with",
+            ]
+            var candidates = Array(words[targetStart...])
+            if let boundary = candidates.firstIndex(
+                where: clauseBoundaries.contains) {
+                candidates = Array(candidates[..<boundary])
+            }
+            candidates.removeAll(where: ignoredWords.contains)
+            if (1 ... 8).contains(candidates.count) {
+                return candidates
+            }
+        }
+        return nil
+    }
+
+    private static func visibleTextContainsExactLiteral(
+        _ literal: String,
+        visibleText: String
+    ) -> Bool {
+        func foldedInline(_ value: String) -> String {
+            value.folding(
+                options: [.caseInsensitive, .diacriticInsensitive],
+                locale: Locale(identifier: "en_US_POSIX"))
+                .split(whereSeparator: \.isWhitespace)
+                .joined(separator: " ")
+        }
+
+        let expected = foldedInline(literal)
+        let observed = foldedInline(visibleText)
+        guard !expected.isEmpty else { return false }
+        return " \(observed) ".contains(" \(expected) ")
+    }
+
+    private static func visibleTextHasPendingOrNegativePostActionState(
+        _ visibleText: String
+    ) -> Bool {
+        let words = normalizedWords(visibleText)
+        let pendingOrFailureWords: Set<String> = [
+            "error", "failed", "failure", "loading", "processing", "saving",
+            "searching", "unavailable", "updating", "working",
+        ]
+        if words.contains(where: pendingOrFailureWords.contains) {
+            return true
+        }
+        let pendingOrNegativePhrases = [
+            ["could", "not"],
+            ["in", "progress"],
+            ["no", "results"],
+            ["no", "search", "results"],
+            ["not", "available"],
+            ["not", "complete"],
+            ["not", "final"],
+            ["not", "saved"],
+            ["not", "shown"],
+            ["not", "updated"],
+            ["please", "wait"],
+            ["unable", "to"],
+        ]
+        return pendingOrNegativePhrases.contains(where: {
+            firstIndex(of: $0, in: words) != nil
+        })
+    }
+
+    private static func visibleCurrencyAmounts(
+        in visibleText: String
+    ) -> [String] {
+        let number = #"(?:\d{1,3}(?:,\d{3})+(?:\.\d{2})?|\d+(?:\.\d{2})?)"#
+        let codes = #"(?:USD|EUR|GBP|JPY|CAD|AUD)"#
+        let pattern = #"(?i)(?<![\p{L}\p{N}])(?:"#
+            + codes + #"\s*[$€£¥]?\s*"# + number
+            + #"|[$€£¥]\s*"# + number
+            + #"|"# + number + #"\s*"# + codes
+            + #")(?![\p{L}\p{N}.,])"#
+        guard let expression = try? NSRegularExpression(pattern: pattern) else {
+            return []
+        }
+        let fullRange = NSRange(
+            visibleText.startIndex ..< visibleText.endIndex,
+            in: visibleText)
+        return expression.matches(
+            in: visibleText,
+            options: [],
+            range: fullRange).compactMap { match in
+                guard let range = Range(match.range, in: visibleText) else {
+                    return nil
+                }
+                return visibleText[range]
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+    }
+
+    private static func visibleCurrencyAmount(
+        labeled requestedLabel: String,
+        in visibleText: String
+    ) -> String? {
+        let lines = visibleText.split(separator: "\n").map(String.init)
+        var labeledAmounts: [String] = []
+        for (index, line) in lines.enumerated() {
+            let lineWords = normalizedWords(line)
+            guard lineWords.contains(requestedLabel) else {
+                continue
+            }
+            let inlineAmounts = visibleCurrencyAmounts(in: line)
+            if !inlineAmounts.isEmpty {
+                if let amount = structurallyBoundInlineCurrencyAmount(
+                    labeled: requestedLabel,
+                    in: line,
+                    amounts: inlineAmounts) {
+                    labeledAmounts.append(amount)
+                }
+                continue
+            }
+            guard lineWords.last == requestedLabel,
+                  !containsExplicitNegation(
+                      in: Array(lineWords.dropLast().suffix(4))) else {
+                continue
+            }
+            let nextIndex = index + 1
+            guard nextIndex < lines.count else { continue }
+            let adjacentLine = lines[nextIndex]
+            let adjacentAmounts = visibleCurrencyAmounts(in: adjacentLine)
+            if adjacentAmounts.count == 1,
+               adjacentLine.trimmingCharacters(
+                   in: .whitespacesAndNewlines
+               ).caseInsensitiveCompare(adjacentAmounts[0]) == .orderedSame {
+                labeledAmounts.append(contentsOf: adjacentAmounts)
+            }
+        }
+        guard labeledAmounts.count == 1 else { return nil }
+        return labeledAmounts[0]
+    }
+
+    private static func structurallyBoundInlineCurrencyAmount(
+        labeled requestedLabel: String,
+        in line: String,
+        amounts: [String]
+    ) -> String? {
+        guard amounts.count == 1,
+              let amountRange = line.range(
+                  of: amounts[0],
+                  options: [.caseInsensitive]) else {
+            return nil
+        }
+        let escapedLabel = NSRegularExpression.escapedPattern(
+            for: requestedLabel)
+        let pattern = #"(?i)(?<![\p{L}\p{N}])"#
+            + escapedLabel
+            + #"(?![\p{L}\p{N}])"#
+        guard let expression = try? NSRegularExpression(pattern: pattern) else {
+            return nil
+        }
+        let fullRange = NSRange(line.startIndex ..< line.endIndex, in: line)
+        let matches = expression.matches(
+            in: line,
+            options: [],
+            range: fullRange)
+        guard matches.count == 1,
+              let labelRange = Range(matches[0].range, in: line),
+              labelRange.upperBound <= amountRange.lowerBound else {
+            return nil
+        }
+        let connectorWords = normalizedWords(
+            String(line[labelRange.upperBound ..< amountRange.lowerBound]))
+        guard connectorWords.isEmpty || connectorWords == ["is"] else {
+            return nil
+        }
+        let precedingWords = normalizedWords(
+            String(line[..<labelRange.lowerBound]))
+        guard !containsExplicitNegation(
+            in: Array(precedingWords.suffix(4))) else {
+            return nil
+        }
+        return amounts[0]
     }
 
     static func deterministicCurrentAppRoute(
@@ -549,9 +1299,11 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
 
     /// Finishes a bounded navigation request when both the executed-action
     /// history and the updated screen independently confirm that its visible
-    /// target was reached. This keeps the model from issuing the same scroll
-    /// again after an explicit "now visible"/"page reached" state, without
-    /// preventing repeated scrolling while the requested content is absent.
+    /// target was reached. An explicit "until X is visible" target is matched
+    /// against OCR directly; other navigation requests retain the narrow
+    /// "now visible"/"page reached" confirmation phrases. This keeps the
+    /// model from issuing the same scroll again without allowing an unrelated
+    /// visible-status message to satisfy a named target.
     static func deterministicSatisfiedNavigationRoute(
         for task: String,
         visibleText: String,
@@ -565,11 +1317,102 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
                   availableDirectives: availableDirectives),
               deterministicNavigationRouteWasExecuted(
                   requestedRoute,
-                  in: history),
-              visibleTextConfirmsNavigationCompletion(visibleText) else {
+                  in: history) else {
             return nil
         }
+        let visibleTargetReached: Bool
+        if let targetWords = explicitlyRequestedVisibleTarget(in: task) {
+            visibleTargetReached = visibleTextContainsUnnegatedTarget(
+                visibleText,
+                targetWords: targetWords)
+        } else {
+            visibleTargetReached = visibleTextConfirmsNavigationCompletion(
+                visibleText)
+        }
+        guard visibleTargetReached else { return nil }
         return .init(directive: .complete)
+    }
+
+    /// Extracts only the bounded target in an explicit
+    /// "until <target> is/are visible" clause. Structural nouns alone are not
+    /// targets: OCR containing merely "section" or "content" must not finish
+    /// a navigation task that lacks a more specific requested label.
+    private static func explicitlyRequestedVisibleTarget(
+        in task: String
+    ) -> [String]? {
+        let words = normalizedWords(task)
+        let endings = [
+            ["is", "visible"],
+            ["are", "visible"],
+            ["is", "now", "visible"],
+            ["are", "now", "visible"],
+            ["becomes", "visible"],
+            ["become", "visible"],
+            ["is", "shown"],
+            ["are", "shown"],
+        ]
+        let ignoredLeadingWords: Set<String> = [
+            "a", "an", "my", "our", "the", "this", "that",
+        ]
+        let structuralWords: Set<String> = [
+            "area", "content", "details", "information", "item", "items",
+            "page", "part", "portion", "result", "results", "screen",
+            "section", "thing", "things", "view", "viewport", "whole",
+        ]
+
+        for untilIndex in words.indices where words[untilIndex] == "until" {
+            let targetStart = words.index(after: untilIndex)
+            guard targetStart < words.endIndex else { continue }
+            let suffix = Array(words[targetStart...])
+            let endingIndex = endings.compactMap { ending in
+                firstIndex(of: ending, in: suffix)
+            }.min()
+            guard let endingIndex, endingIndex > 0 else { continue }
+
+            var targetWords = Array(suffix[..<endingIndex])
+            while let first = targetWords.first,
+                  ignoredLeadingWords.contains(first) {
+                targetWords.removeFirst()
+            }
+            guard (1 ... 12).contains(targetWords.count),
+                  targetWords.contains(where: {
+                      !structuralWords.contains($0)
+                  }) else {
+                continue
+            }
+            return targetWords
+        }
+        return nil
+    }
+
+    private static func visibleTextContainsUnnegatedTarget(
+        _ visibleText: String,
+        targetWords: [String]
+    ) -> Bool {
+        let words = normalizedWords(visibleText)
+        guard !targetWords.isEmpty, targetWords.count <= words.count else {
+            return false
+        }
+        for index in 0 ... (words.count - targetWords.count)
+        where Array(words[index ..< index + targetWords.count]) == targetWords {
+            let precedingStart = max(words.startIndex, index - 4)
+            let precedingWords = Array(words[precedingStart ..< index])
+            if containsExplicitNegation(in: precedingWords) {
+                continue
+            }
+            let trailingStart = index + targetWords.count
+            let trailingEnd = min(words.count, trailingStart + 5)
+            let trailingWords = Array(words[trailingStart ..< trailingEnd])
+            let deniesVisibility = trailingWords.contains("unavailable")
+                || (containsExplicitNegation(in: trailingWords)
+                    && trailingWords.contains(where: {
+                        $0 == "visible" || $0 == "shown"
+                    }))
+            if !deniesVisibility {
+                return true
+            }
+        }
+        return false
     }
 
     private static func visibleTextConfirmsNavigationCompletion(
@@ -777,23 +1620,66 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
         let missingValues: Set<String> = [
             "not provided", "missing", "required", "empty", "not set",
         ]
-        for line in visibleText.split(separator: "\n") {
+        let lines = visibleText.split(separator: "\n")
+        for (index, line) in lines.enumerated() {
             let parts = line.split(separator: ":", maxSplits: 1)
-            guard parts.count == 2 else { continue }
-            let value = parts[1]
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .lowercased()
-            guard missingValues.contains(value) else { continue }
-            let label = String(parts[0].unicodeScalars.map { scalar -> Character in
-                CharacterSet.alphanumerics.contains(scalar)
-                    || CharacterSet.whitespaces.contains(scalar)
-                    || scalar == "-"
-                    ? Character(String(scalar)) : " "
-            }).split(whereSeparator: \.isWhitespace).joined(separator: " ")
-            guard (2 ... 80).contains(label.count) else { continue }
+            if parts.count == 2 {
+                let value = parts[1]
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .lowercased()
+                if missingValues.contains(value),
+                   let label = specificMissingFieldLabel(from: parts[0]) {
+                    return label
+                }
+            }
+
+            let adjacentValue = normalizedWords(String(line))
+                .joined(separator: " ")
+            guard missingValues.contains(adjacentValue), index > 0 else {
+                continue
+            }
+            let precedingLine = lines[index - 1]
+            guard !precedingLine.contains(":"),
+                  let label = specificMissingFieldLabel(
+                      from: precedingLine) else {
+                continue
+            }
             return label
         }
         return nil
+    }
+
+    /// Adjacent OCR lines do not provide punctuation that distinguishes a
+    /// field label from a form or section heading. Reject generic containers
+    /// while retaining concise labels such as "Departure city" or "Email".
+    private static func specificMissingFieldLabel(
+        from rawLabel: Substring
+    ) -> String? {
+        let label = String(rawLabel.unicodeScalars.map { scalar -> Character in
+            CharacterSet.alphanumerics.contains(scalar)
+                || CharacterSet.whitespaces.contains(scalar)
+                || scalar == "-"
+                ? Character(String(scalar)) : " "
+        }).split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        guard (2 ... 80).contains(label.count) else { return nil }
+
+        let words = normalizedWords(label)
+        guard (1 ... 8).contains(words.count) else { return nil }
+        let genericLabels: Set<String> = [
+            "details", "field", "fields", "form", "form details",
+            "information", "input", "missing information",
+            "required field", "required fields", "required information",
+            "section", "trip details", "value",
+        ]
+        let genericEndingWords: Set<String> = [
+            "details", "information", "section",
+        ]
+        guard !genericLabels.contains(words.joined(separator: " ")),
+              let finalWord = words.last,
+              !genericEndingWords.contains(finalWord) else {
+            return nil
+        }
+        return label
     }
 }
 

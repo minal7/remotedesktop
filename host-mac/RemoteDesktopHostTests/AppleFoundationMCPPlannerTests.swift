@@ -249,6 +249,337 @@ final class AppleFoundationMCPPlannerTests: XCTestCase {
             .init(directive: .scroll, scrollDirection: .down))
     }
 
+    func testVerifiedPostActionRoutesRequireUpdatedScreenEvidence() {
+        let searchTask = "Run the library hours search that's already typed in the focused field."
+        XCTAssertEqual(
+            AppleFoundationVisualActionRouter.deterministicFollowupRoute(
+                for: searchTask,
+                visibleText: "Library catalog\nlibrary hours\nSEARCH COMPLETE — RESULTS SHOWN",
+                history: ["ENTER"],
+                availableDirectives: [.enter, .complete]),
+            .init(directive: .complete))
+        XCTAssertNil(
+            AppleFoundationVisualActionRouter.deterministicFollowupRoute(
+                for: searchTask,
+                visibleText: "Library hours search\nQuery ready — press Return",
+                history: ["ENTER"],
+                availableDirectives: [.enter, .complete]),
+            "The unchanged pre-submit screen is not completion evidence")
+        XCTAssertNil(
+            AppleFoundationVisualActionRouter.deterministicFollowupRoute(
+                for: searchTask,
+                visibleText: "Search results loading\nPlease wait",
+                history: ["ENTER"],
+                availableDirectives: [.enter, .complete]),
+            "A loading result heading must not complete the task")
+        XCTAssertNil(
+            AppleFoundationVisualActionRouter.deterministicFollowupRoute(
+                for: searchTask,
+                visibleText: "SEARCH NOT COMPLETE — RESULTS NOT SHOWN",
+                history: ["ENTER"],
+                availableDirectives: [.enter, .complete]),
+            "Negated result evidence must not complete the task")
+        XCTAssertNil(
+            AppleFoundationVisualActionRouter.deterministicFollowupRoute(
+                for: searchTask,
+                visibleText: "Library hours\nSearch results will appear below",
+                history: ["ENTER"],
+                availableDirectives: [.enter, .complete]),
+            "Prospective results text is not completion evidence")
+        XCTAssertNil(
+            AppleFoundationVisualActionRouter.deterministicFollowupRoute(
+                for: searchTask,
+                visibleText: "Book renewals\nSEARCH COMPLETE — RESULTS SHOWN",
+                history: ["ENTER"],
+                availableDirectives: [.enter, .complete]),
+            "Completion evidence must remain tied to the requested query")
+
+        let noteTask = "Add exactly \"Pick up oat milk at 6 PM\" to the focused note."
+        XCTAssertEqual(
+            AppleFoundationVisualActionRouter.deterministicFollowupRoute(
+                for: noteTask,
+                visibleText: "Errands\nPick up oat milk at 6 PM",
+                history: ["TYPE"],
+                availableDirectives: [.type, .complete]),
+            .init(directive: .complete))
+        XCTAssertNil(
+            AppleFoundationVisualActionRouter.deterministicFollowupRoute(
+                for: noteTask,
+                visibleText: "Errands\nFocused insertion point",
+                history: ["TYPE"],
+                availableDirectives: [.type, .complete]),
+            "TYPE history without the exact visible literal is insufficient")
+        XCTAssertNil(
+            AppleFoundationVisualActionRouter.deterministicFollowupRoute(
+                for: noteTask,
+                visibleText: "Pick up oat milk at 6 PM\nSaving…",
+                history: ["TYPE"],
+                availableDirectives: [.type, .complete]),
+            "Visible text that is still saving must not complete")
+        XCTAssertNil(
+            AppleFoundationVisualActionRouter.deterministicFollowupRoute(
+                for: noteTask,
+                visibleText: "Pick up oat milk at 6 PM\nNot saved",
+                history: ["TYPE"],
+                availableDirectives: [.type, .complete]),
+            "Visible but explicitly unsaved text must not complete")
+
+        let priceTask = "Wait for the latest delivery price to finish updating."
+        XCTAssertEqual(
+            AppleFoundationVisualActionRouter.deterministicFollowupRoute(
+                for: priceTask,
+                visibleText: "Weekly groceries\nLatest delivery price\n$42.18\nUpdated just now",
+                history: ["WAIT"],
+                availableDirectives: [.wait, .answer]),
+            .init(
+                directive: .answer,
+                argument: .visibleAnswer(
+                    summary: "The visible price is $42.18.",
+                    evidence: ["$42.18"])))
+        XCTAssertNil(
+            AppleFoundationVisualActionRouter.deterministicFollowupRoute(
+                for: priceTask,
+                visibleText: "Updating latest delivery price…\n$42.18",
+                history: ["WAIT"],
+                availableDirectives: [.wait, .answer]),
+            "A visible stale amount while updating must not be answered")
+        XCTAssertNil(
+            AppleFoundationVisualActionRouter.deterministicFollowupRoute(
+                for: priceTask,
+                visibleText: "Previous price $40.00\nLatest price $42.18",
+                history: ["WAIT"],
+                availableDirectives: [.wait, .answer]),
+            "Multiple visible amounts are ambiguous")
+        XCTAssertNil(
+            AppleFoundationVisualActionRouter.deterministicFollowupRoute(
+                for: priceTask,
+                visibleText: "Price unavailable\nLast observed $42.18",
+                history: ["WAIT"],
+                availableDirectives: [.wait, .answer]),
+            "An unavailable price must not be reported")
+        XCTAssertNil(
+            AppleFoundationVisualActionRouter.deterministicFollowupRoute(
+                for: "Wait for the total, then tell me the total.",
+                visibleText: "Weekly groceries\nDiscount $5.00\nUpdated just now",
+                history: ["WAIT"],
+                availableDirectives: [.wait, .answer]),
+            "An unlabeled currency amount must not be relabeled as the total")
+        XCTAssertNil(
+            AppleFoundationVisualActionRouter.deterministicFollowupRoute(
+                for: "Wait for the total, then tell me the total.",
+                visibleText: "Weekly groceries\nTotal\nDiscount $5.00",
+                history: ["WAIT"],
+                availableDirectives: [.wait, .answer]),
+            "An adjacent labeled amount must not be bound to the total")
+        for misleadingLine in [
+            "Discount $5.00 is not the total",
+            "Total savings $5.00",
+        ] {
+            XCTAssertNil(
+                AppleFoundationVisualActionRouter.deterministicFollowupRoute(
+                    for: "Wait for the total, then tell me the total.",
+                    visibleText: misleadingLine,
+                    history: ["WAIT"],
+                    availableDirectives: [.wait, .answer]),
+                "A currency amount must be structurally bound to its label")
+        }
+    }
+
+    func testFinalPurchaseConfirmationRoutesToApprovalBoundClickOnlyForAffirmativeIntent() {
+        let finalConfirmationScreen = """
+        Grocery delivery
+        Order total $42.18
+        Place Order
+        Final purchase confirmation
+        """
+        XCTAssertEqual(
+            AppleFoundationVisualActionRouter.deterministicFollowupRoute(
+                for: "Order these groceries for delivery.",
+                visibleText: finalConfirmationScreen,
+                history: [],
+                availableDirectives: [.click, .complete]),
+            .init(
+                directive: .click,
+                argument: .targetHint("Place Order")),
+            "The consequential control must reach the existing approval policy as a click")
+
+        let rejectedTasks = [
+            "Get the delivery total. Do not place the order.",
+            "Get a quote, then stop before checkout.",
+            "Never order these groceries.",
+            "Order details are shown; tell me the total.",
+            "Place Order details are shown; tell me the total.",
+            "Tell me what the Place Order button does.",
+        ]
+        for task in rejectedTasks {
+            XCTAssertNil(
+                AppleFoundationVisualActionRouter.deterministicFollowupRoute(
+                    for: task,
+                    visibleText: finalConfirmationScreen,
+                    history: [],
+                    availableDirectives: [.click, .complete]),
+                task)
+        }
+
+        XCTAssertNil(
+            AppleFoundationVisualActionRouter.deterministicFollowupRoute(
+                for: "Order these groceries for delivery.",
+                visibleText: "Place Order details\nFinal purchase confirmation",
+                history: [],
+                availableDirectives: [.click, .complete]),
+            "A partial or extended OCR line is not the exact final control label")
+        XCTAssertNil(
+            AppleFoundationVisualActionRouter.deterministicFollowupRoute(
+                for: "Order these groceries for delivery.",
+                visibleText: finalConfirmationScreen,
+                history: [],
+                availableDirectives: [.complete]),
+            "The route cannot bypass the approval boundary when CLICK is unavailable")
+    }
+
+    func testVisibleObstaclesReturnOnlyExactTaskRelatedEvidence() {
+        XCTAssertEqual(
+            AppleFoundationVisualActionRouter.deterministicFollowupRoute(
+                for: "Open and summarize the quarterly report shown here.",
+                visibleText: "Quarterly Report\nREPORT REMOVED\nThis report is no longer available.",
+                history: [],
+                availableDirectives: [.answer, .complete]),
+            .init(
+                directive: .answer,
+                argument: .visibleAnswer(
+                    summary: "REPORT REMOVED",
+                    evidence: ["REPORT REMOVED"])))
+        XCTAssertEqual(
+            AppleFoundationVisualActionRouter.deterministicFollowupRoute(
+                for: "Open Contoso CAD and create a new drawing.",
+                visibleText: "Contoso CAD is available only for Windows.\nThis Mac cannot run it.",
+                history: [],
+                availableDirectives: [.answer, .complete]),
+            .init(
+                directive: .answer,
+                argument: .visibleAnswer(
+                    summary: "Contoso CAD is available only for Windows.",
+                    evidence: ["Contoso CAD is available only for Windows."])))
+
+        XCTAssertNil(
+            AppleFoundationVisualActionRouter.deterministicFollowupRoute(
+                for: "Open the quarterly report.",
+                visibleText: "Quarterly Report\nThe report has not been removed.",
+                history: [],
+                availableDirectives: [.answer, .complete]),
+            "A negated obstacle is not failure evidence")
+        XCTAssertNil(
+            AppleFoundationVisualActionRouter.deterministicFollowupRoute(
+                for: "Open the quarterly report.",
+                visibleText: "Annual Report\nREPORT REMOVED",
+                history: [],
+                availableDirectives: [.answer, .complete]),
+            "An unrelated report warning must not stop the requested report")
+        XCTAssertNil(
+            AppleFoundationVisualActionRouter.deterministicFollowupRoute(
+                for: "Open the quarterly report.",
+                visibleText: "Quarterly Report\nAnnual report removed",
+                history: [],
+                availableDirectives: [.answer, .complete]),
+            "A matching heading cannot make another report's warning relevant")
+        XCTAssertNil(
+            AppleFoundationVisualActionRouter.deterministicFollowupRoute(
+                for: "Open the quarterly report.",
+                visibleText: "Quarterly report is available; annual report removed",
+                history: [],
+                availableDirectives: [.answer, .complete]),
+            "A status must remain bound to its report on a shared OCR line")
+        XCTAssertNil(
+            AppleFoundationVisualActionRouter.deterministicFollowupRoute(
+                for: "Open Contoso CAD and create a new drawing.",
+                visibleText: "Legacy Paint is available only for Windows.",
+                history: [],
+                availableDirectives: [.answer, .complete]),
+            "An unrelated app's platform warning must not stop the task")
+        XCTAssertNil(
+            AppleFoundationVisualActionRouter.deterministicFollowupRoute(
+                for: "Open Contoso CAD and create a new drawing.",
+                visibleText: "Contoso CAD is not only for Windows.",
+                history: [],
+                availableDirectives: [.answer, .complete]),
+            "A negated platform restriction is not failure evidence")
+        XCTAssertNil(
+            AppleFoundationVisualActionRouter.deterministicFollowupRoute(
+                for: "Open Contoso CAD and create a new drawing.",
+                visibleText: "Contoso Viewer is available only for Windows.",
+                history: [],
+                availableDirectives: [.answer, .complete]),
+            "One shared product word is not enough to identify the warning")
+        XCTAssertNil(
+            AppleFoundationVisualActionRouter.deterministicFollowupRoute(
+                for: "Open and summarize the quarterly report shown here.",
+                visibleText: "REPORT REMOVED",
+                history: [],
+                availableDirectives: [.complete]),
+            "Obstacle text cannot bypass the visible-evidence answer contract")
+    }
+
+    func testCompletedFolderOpenRequiresExactTargetAndDoubleClickHistory() {
+        let task = "Open the Summer Picnic folder."
+        let openedFolder = "Finder\nSummer Picnic\nPhoto 1\nSummer Picnic"
+        XCTAssertEqual(
+            AppleFoundationVisualActionRouter.deterministicFollowupRoute(
+                for: task,
+                visibleText: openedFolder,
+                history: ["DOUBLE_CLICK [[250,300]]"],
+                availableDirectives: [.doubleClick, .complete]),
+            .init(directive: .complete))
+        XCTAssertEqual(
+            AppleFoundationVisualActionRouter.deterministicFollowupRoute(
+                for: "Open Finder, then open the Summer Picnic folder.",
+                visibleText: openedFolder,
+                history: ["DOUBLE_CLICK [[250,300]]"],
+                availableDirectives: [.doubleClick, .complete]),
+            .init(directive: .complete))
+        XCTAssertEqual(
+            AppleFoundationVisualActionRouter.deterministicFollowupRoute(
+                for: "Open the folder named Summer Picnic.",
+                visibleText: openedFolder,
+                history: ["DOUBLE_CLICK [[250,300]]"],
+                availableDirectives: [.doubleClick, .complete]),
+            .init(directive: .complete))
+        XCTAssertNil(
+            AppleFoundationVisualActionRouter.deterministicFollowupRoute(
+                for: task,
+                visibleText: openedFolder,
+                history: [],
+                availableDirectives: [.doubleClick, .complete]),
+            "Visible state without an executed double-click is insufficient")
+        XCTAssertNil(
+            AppleFoundationVisualActionRouter.deterministicFollowupRoute(
+                for: task,
+                visibleText: "Finder\nArchive\nPhoto 1\nArchive",
+                history: ["DOUBLE_CLICK [[250,300]]"],
+                availableDirectives: [.doubleClick, .complete]),
+            "Another open folder must not satisfy the requested target")
+        XCTAssertNil(
+            AppleFoundationVisualActionRouter.deterministicFollowupRoute(
+                for: task,
+                visibleText: "SUMMER PICNIC FOLDER IS NOT OPEN",
+                history: ["DOUBLE_CLICK [[250,300]]"],
+                availableDirectives: [.doubleClick, .complete]),
+            "Negated open-state text must not complete")
+        XCTAssertNil(
+            AppleFoundationVisualActionRouter.deterministicFollowupRoute(
+                for: task,
+                visibleText: openedFolder + "\nLoading photos",
+                history: ["DOUBLE_CLICK [[250,300]]"],
+                availableDirectives: [.doubleClick, .complete]),
+            "A still-loading destination must remain pending")
+        XCTAssertNil(
+            AppleFoundationVisualActionRouter.deterministicFollowupRoute(
+                for: task,
+                visibleText: "Finder\nDesktop\nSummer Picnic\nDouble-click a folder to open it",
+                history: ["DOUBLE_CLICK [[250,300]]"],
+                availableDirectives: [.doubleClick, .complete]),
+            "One source-view icon label is not destination confirmation")
+    }
+
     func testVisualActionRouterDeterministicallyPreservesUnambiguousViewportNavigation()
         async throws {
         let cases: [(task: String, expected: OSAtlasSemanticActionRoute)] = [
@@ -337,6 +668,41 @@ final class AppleFoundationMCPPlannerTests: XCTestCase {
         XCTAssertNil(
             stillPending,
             "History alone must not prematurely complete multi-scroll navigation")
+
+        let namedTarget = AppleFoundationVisualActionRouter
+            .deterministicSatisfiedNavigationRoute(
+                for: "Scroll down until the Privacy section is visible.",
+                visibleText: "Account\nPrivacy section\nManage data sharing",
+                history: ["SCROLL [DOWN]"],
+                availableDirectives: [.scroll, .complete])
+        XCTAssertEqual(
+            namedTarget,
+            .init(directive: .complete),
+            "OCR of the explicitly requested target is sufficient after the scroll")
+
+        let unrelatedVisibleStatus = AppleFoundationVisualActionRouter
+            .deterministicSatisfiedNavigationRoute(
+                for: "Scroll down until the Privacy section is visible.",
+                visibleText: "Account section is visible\nSecurity controls",
+                history: ["SCROLL [DOWN]"],
+                availableDirectives: [.scroll, .complete])
+        XCTAssertNil(
+            unrelatedVisibleStatus,
+            "A generic visible-status phrase must not substitute for the named target")
+
+        for negativeText in [
+            "No Privacy section is visible",
+            "Privacy section isn't visible",
+        ] {
+            XCTAssertNil(
+                AppleFoundationVisualActionRouter
+                    .deterministicSatisfiedNavigationRoute(
+                        for: "Scroll down until the Privacy section is visible.",
+                        visibleText: negativeText,
+                        history: ["SCROLL [DOWN]"],
+                        availableDirectives: [.scroll, .complete]),
+                "Negated target OCR must not complete: \(negativeText)")
+        }
     }
 
     func testDeterministicCurrentAppClickNavigationRoutesOnlyBeforeACompletedClick() {
@@ -391,6 +757,38 @@ final class AppleFoundationMCPPlannerTests: XCTestCase {
             .init(
                 directive: .ask,
                 argument: .question("What departure city should I use?")))
+
+        let adjacentLabelRequest = OSAtlasSemanticRoutingRequest(
+            task: "Plan this Saturday train trip to Monterey.",
+            frontmostApplication: "Trip Planner",
+            visibleText: "TRIP DETAILS\nDeparture city\nRequired\nDestination\nMonterey",
+            history: [],
+            availableDirectives: [.ask])
+        XCTAssertEqual(
+            AppleFoundationVisualActionRouter.validatedSemanticRoute(
+                .init(
+                    directive: .ask,
+                    argument: .question("What time would you like to leave?")),
+                request: adjacentLabelRequest),
+            .init(
+                directive: .ask,
+                argument: .question("What departure city should I use?")))
+
+        let genericHeadingRequest = OSAtlasSemanticRoutingRequest(
+            task: "Plan this Saturday train trip to Monterey.",
+            frontmostApplication: "Trip Planner",
+            visibleText: "TRIP DETAILS\nRequired\nDestination\nMonterey",
+            history: [],
+            availableDirectives: [.ask])
+        let originalQuestion = OSAtlasSemanticActionRoute(
+            directive: .ask,
+            argument: .question("What time would you like to leave?"))
+        XCTAssertEqual(
+            AppleFoundationVisualActionRouter.validatedSemanticRoute(
+                originalQuestion,
+                request: genericHeadingRequest),
+            originalQuestion,
+            "A section heading next to Required is not a missing field label")
     }
 
 #if canImport(FoundationModels)

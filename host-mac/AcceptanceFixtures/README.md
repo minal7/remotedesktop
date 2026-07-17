@@ -127,6 +127,15 @@ non-deterministic step falls back to the parser-validated legacy 12-variant raw
 compatibility profile. That profile is a constrained fallback allowlist, not a
 claim that the checkpoint reliably infers every variant from ordinary language.
 
+The opt-in mode also runs a consolidated 14-scenario regular-user matrix. Its
+terminal result is asserted as exactly one of `task completed`,
+`user intervention required`, or `unable to complete`. The matrix includes app
+opening, Return submission, exact text entry, scrolling to a named section,
+visible-fact answers, an already-finished task, wait-then-answer, missing input,
+authentication takeover, purchase approval, persistent unavailable content, a
+platform-incompatible app, and two real OS-Atlas pointer-grounding tasks. Every
+screen is rendered in memory and every proposed host action is intercepted.
+
 The same actual-model mode runs stateful delivery-address-to-itemized-quote
 workflows against screens rendered directly in memory. The shorter guard
 requires actual OS-Atlas to emit `TYPE` with the exact address before local

@@ -251,6 +251,10 @@ product behavior:
   real OS-Atlas point-grounding inferences. The separate stateful delivery
   workflows retain the legacy raw compatibility path and require real
   OS-Atlas navigation before local Vision OCR returns the exact itemized quote.
+  A separate 14-scenario regular-user matrix classifies each terminal state as
+  `task completed`, `user intervention required`, or `unable to complete`,
+  including authentication, purchase approval, persistent-error, and
+  platform-incompatibility boundaries.
   These tests do not capture the desktop, post system input, or advance
   checkout.
 - Live DoorDash quote reading requires `--live-doordash`,

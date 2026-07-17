@@ -4529,6 +4529,438 @@ final class OSAtlasActualModelAcceptanceTests: XCTestCase {
         add(attachment)
     }
 
+    func testInstalledHybridCompletesExactRegularUserScenarioMatrixWithoutVisibleUI()
+        async throws {
+        try XCTSkipUnless(
+            OSAtlasAcceptanceOptIn.modelE2EIsEnabled,
+            "Run host-mac/scripts/run_osatlas_acceptance.sh --actual-model to load the installed OS-Atlas Pro model.")
+
+        let inputs = try OSAtlasInstalledAcceptanceRuntime.resolveInputs()
+        let runtime = OSAtlasLlamaRuntime()
+        var evidence: [String] = []
+        var scenarioCount = 0
+
+        func record(
+            _ capture: ActualScenarioCapture,
+            expectedOutcome: RegularUserScenarioOutcome,
+            file: StaticString = #filePath,
+            line: UInt = #line
+        ) {
+            scenarioCount += 1
+            evidence.append(capture.evidence)
+            XCTAssertNil(
+                capture.executionFailure,
+                "\(capture.name) ended with \(capture.executionFailure ?? "an unknown failure")",
+                file: file,
+                line: line)
+            XCTAssertEqual(
+                capture.outcome(),
+                expectedOutcome,
+                "\(capture.name) returned the wrong regular-user outcome",
+                file: file,
+                line: line)
+        }
+
+        do {
+            let openNotes = await observeActualScenario(
+                named: "open_notes",
+                prompt: "Open Notes.",
+                observations: [
+                    try OSAtlasAcceptanceFixtureRenderer
+                        .everydayOperation(.notesSuggestion),
+                ],
+                inputs: inputs,
+                runtime: runtime,
+                frontmostApplication: "Safari")
+            record(openNotes, expectedOutcome: .taskCompleted)
+            XCTAssertEqual(openNotes.openedApplications, ["Notes"])
+            XCTAssertTrue(openNotes.performedActions.isEmpty)
+            XCTAssertTrue(openNotes.rawModelResponses.isEmpty)
+            guard case .openApplication(let application)? =
+                    openNotes.parsedActions.last else {
+                XCTFail("open_notes did not produce the host-owned OPEN_APP")
+                throw ActualScenarioAssertionFailure.unexpectedAction
+            }
+            XCTAssertEqual(application, "Notes")
+
+            let librarySearch = await observeActualScenario(
+                named: "submit_library_search",
+                prompt: "Run the public library hours search that's already typed in the focused field.",
+                observations: [
+                    try OSAtlasAcceptanceFixtureRenderer
+                        .everydayOperation(.librarySearch),
+                    try OSAtlasAcceptanceFixtureRenderer
+                        .everydayOperation(.librarySearchResults),
+                ],
+                inputs: inputs,
+                runtime: runtime,
+                frontmostApplication: "Safari",
+                accessibilityContext: { _ in
+                    "AXSearchField • focused • public library hours"
+                })
+            record(librarySearch, expectedOutcome: .taskCompleted)
+            XCTAssertEqual(librarySearch.parsedActions, [.enter, .complete])
+            XCTAssertEqual(
+                librarySearch.performedActions,
+                [.key(usage: 0x28, modifiers: 0)])
+            XCTAssertTrue(librarySearch.rawModelResponses.isEmpty)
+
+            let typedText = "Pick up oat milk at 6 PM"
+            let typeErrandNote = await observeActualScenario(
+                named: "type_errand_note",
+                prompt: "The caret is already active in my errands note. Add a line with exactly \"\(typedText)\".",
+                observations: [
+                    try OSAtlasAcceptanceFixtureRenderer
+                        .everydayOperation(.focusedNote),
+                    try OSAtlasAcceptanceFixtureRenderer
+                        .everydayOperation(.focusedNoteUpdated),
+                ],
+                inputs: inputs,
+                runtime: runtime,
+                frontmostApplication: "Notes",
+                accessibilityContext: { _ in
+                    "AXTextArea • focused errands note"
+                })
+            record(typeErrandNote, expectedOutcome: .taskCompleted)
+            XCTAssertEqual(
+                typeErrandNote.parsedActions,
+                [.typeText(typedText), .complete])
+            XCTAssertEqual(
+                typeErrandNote.performedActions,
+                [.typeText(typedText)])
+            XCTAssertTrue(typeErrandNote.rawModelResponses.isEmpty)
+
+            let scrollToPrivacy = await observeActualScenario(
+                named: "scroll_to_privacy",
+                prompt: "Scroll down until the Privacy section is visible.",
+                observations: [
+                    try OSAtlasAcceptanceFixtureRenderer
+                        .everydayOperation(.privacyArticleTop),
+                    try OSAtlasAcceptanceFixtureRenderer
+                        .everydayOperation(.privacySection),
+                ],
+                inputs: inputs,
+                runtime: runtime,
+                frontmostApplication: "Safari")
+            record(scrollToPrivacy, expectedOutcome: .taskCompleted)
+            XCTAssertEqual(
+                scrollToPrivacy.parsedActions,
+                [.scroll(.down), .complete])
+            XCTAssertEqual(
+                scrollToPrivacy.performedActions,
+                [.scroll(x: 20_224, y: 20_224, dx: 0, dy: -360)])
+            XCTAssertTrue(scrollToPrivacy.rawModelResponses.isEmpty)
+
+            let dentistAppointment = await observeActualScenario(
+                named: "answer_dentist_appointment",
+                prompt: "When is my dentist appointment?",
+                observations: [
+                    try OSAtlasAcceptanceFixtureRenderer
+                        .everydayOperation(.appointmentSummary),
+                ],
+                inputs: inputs,
+                runtime: runtime,
+                frontmostApplication: "Calendar")
+            record(dentistAppointment, expectedOutcome: .taskCompleted)
+            XCTAssertTrue(dentistAppointment.performedActions.isEmpty)
+            XCTAssertTrue(dentistAppointment.rawModelResponses.isEmpty)
+            guard case .report(let appointmentAnswer)? =
+                    dentistAppointment.parsedActions.last else {
+                XCTFail("answer_dentist_appointment did not return visible facts")
+                throw ActualScenarioAssertionFailure.unexpectedAction
+            }
+            for term in ["dentist", "Tuesday", "3:30"] {
+                XCTAssertTrue(
+                    appointmentAnswer.localizedCaseInsensitiveContains(term),
+                    "The appointment answer omitted \(term)")
+            }
+
+            let finishedChores = await observeActualScenario(
+                named: "recognize_finished_chores",
+                prompt: "Make sure all of my Saturday chores are complete.",
+                observations: [
+                    try OSAtlasAcceptanceFixtureRenderer
+                        .everydayOperation(.finishedChecklist),
+                ],
+                inputs: inputs,
+                runtime: runtime,
+                frontmostApplication: "Reminders")
+            record(finishedChores, expectedOutcome: .taskCompleted)
+            XCTAssertEqual(finishedChores.parsedActions, [.complete])
+            XCTAssertTrue(finishedChores.performedActions.isEmpty)
+            XCTAssertTrue(finishedChores.rawModelResponses.isEmpty)
+
+            let deliveryPrice = await observeActualScenario(
+                named: "wait_for_delivery_price",
+                prompt: "Wait for the latest grocery delivery price to finish updating, then tell me the total.",
+                observations: [
+                    try OSAtlasAcceptanceFixtureRenderer
+                        .everydayOperation(.updatingPrice),
+                    try OSAtlasAcceptanceFixtureRenderer
+                        .everydayOperation(.deliveryPriceReady),
+                ],
+                inputs: inputs,
+                runtime: runtime,
+                frontmostApplication: "Safari")
+            record(deliveryPrice, expectedOutcome: .taskCompleted)
+            XCTAssertTrue(deliveryPrice.performedActions.isEmpty)
+            XCTAssertTrue(deliveryPrice.rawModelResponses.isEmpty)
+            XCTAssertEqual(deliveryPrice.parsedActions.first, .wait)
+            guard case .report(let priceAnswer)? =
+                    deliveryPrice.parsedActions.last else {
+                XCTFail("wait_for_delivery_price did not answer from the ready screen")
+                throw ActualScenarioAssertionFailure.unexpectedAction
+            }
+            XCTAssertTrue(priceAnswer.contains("24.18"))
+
+            let missingDeparture = await observeActualScenario(
+                named: "ask_for_departure_city",
+                prompt: "Plan this Saturday train trip to Monterey.",
+                observations: [
+                    try OSAtlasAcceptanceFixtureRenderer
+                        .everydayOperation(.missingDepartureCity),
+                ],
+                inputs: inputs,
+                runtime: runtime,
+                frontmostApplication: "Trip Planner")
+            record(
+                missingDeparture,
+                expectedOutcome: .userInterventionRequired)
+            XCTAssertTrue(missingDeparture.performedActions.isEmpty)
+            XCTAssertTrue(missingDeparture.rawModelResponses.isEmpty)
+            guard case .ask(let departureQuestion)? =
+                    missingDeparture.parsedActions.last else {
+                XCTFail("ask_for_departure_city did not ask for the missing field")
+                throw ActualScenarioAssertionFailure.unexpectedAction
+            }
+            XCTAssertTrue(
+                departureQuestion.localizedCaseInsensitiveContains("departure"))
+            XCTAssertTrue(
+                departureQuestion.localizedCaseInsensitiveContains("city"))
+
+            let authenticationSnapshot =
+                ComputerUseAuthenticationContextSnapshot(
+                    focusedElement: "AXTextField • Email Address",
+                    boundedWindowContext: """
+                    AXHeading • Account Sign In
+                    AXTextField • Email or username
+                    AXSecureTextField • Password
+                    AXButton • Sign In
+                    """)
+            let accountLogin = await observeActualScenario(
+                named: "account_login_takeover",
+                prompt: "Open my account dashboard and show my current balance.",
+                observations: [
+                    try OSAtlasAcceptanceFixtureRenderer
+                        .everydayOperation(.accountSignIn),
+                ],
+                inputs: inputs,
+                runtime: runtime,
+                frontmostApplication: "Safari",
+                authenticationContext: authenticationSnapshot)
+            record(
+                accountLogin,
+                expectedOutcome: .userInterventionRequired)
+            XCTAssertEqual(
+                accountLogin.result,
+                .userInterventionRequired(
+                    OSAtlasComputerUseExecutor.authenticationGuidance))
+            XCTAssertTrue(accountLogin.performedActions.isEmpty)
+            XCTAssertTrue(accountLogin.openedApplications.isEmpty)
+
+            let purchase = await observeActualScenario(
+                named: "purchase_takeover",
+                prompt: "Order these groceries for delivery.",
+                observations: [
+                    try OSAtlasAcceptanceFixtureRenderer
+                        .everydayOperation(.groceryCheckout),
+                ],
+                inputs: inputs,
+                runtime: runtime,
+                frontmostApplication: "Safari",
+                accessibilityContext: { _ in
+                    "AXButton • Place Order • final purchase confirmation"
+                })
+            record(purchase, expectedOutcome: .userInterventionRequired)
+            XCTAssertTrue(purchase.performedActions.isEmpty)
+            XCTAssertTrue(purchase.openedApplications.isEmpty)
+            XCTAssertEqual(purchase.rawActionTokens, ["CLICK"])
+            XCTAssertEqual(purchase.rawModelResponses.count, 1)
+            guard case .approvalRequired(_, let proposedPurchase)? =
+                    purchase.result,
+                  case .click(
+                    let purchaseX,
+                    let purchaseY,
+                    1,
+                    1) = proposedPurchase else {
+                XCTFail("purchase_takeover did not stop at the exact Place Order approval")
+                throw ActualScenarioAssertionFailure.unexpectedAction
+            }
+            let purchaseTarget = OSAtlasAcceptanceFixtureRenderer
+                .desktopTargetRect(
+                    for: OSAtlasAcceptanceFixtureRenderer
+                        .groceryPlaceOrderTarget)
+            XCTAssertTrue(
+                purchaseTarget.contains(
+                    CGPoint(x: purchaseX, y: purchaseY)),
+                "The proposed purchase click was not the visible Place Order control")
+
+            let removedReport = await observeActualScenario(
+                named: "removed_quarterly_report",
+                prompt: "Open and summarize the quarterly report shown here.",
+                observations: [
+                    try OSAtlasAcceptanceFixtureRenderer
+                        .everydayOperation(.reportRemoved),
+                ],
+                inputs: inputs,
+                runtime: runtime,
+                frontmostApplication: "Documents")
+            record(
+                removedReport,
+                expectedOutcome: .unableToComplete)
+            XCTAssertTrue(removedReport.performedActions.isEmpty)
+            XCTAssertTrue(removedReport.openedApplications.isEmpty)
+            XCTAssertTrue(removedReport.rawModelResponses.isEmpty)
+            guard case .completed(let removedExplanation)? =
+                    removedReport.result else {
+                XCTFail("removed_quarterly_report did not explain the visible obstacle")
+                throw ActualScenarioAssertionFailure.unexpectedAction
+            }
+            XCTAssertTrue(
+                removedExplanation.localizedCaseInsensitiveContains("report"))
+            XCTAssertTrue(
+                removedExplanation.localizedCaseInsensitiveContains("removed")
+                    || removedExplanation.localizedCaseInsensitiveContains(
+                        "no longer available"))
+            XCTAssertTrue(removedReport.parsedActions.contains { action in
+                if case .ask = action { return true }
+                if case .report = action { return true }
+                return false
+            })
+
+            let windowsOnly = await observeActualScenario(
+                named: "windows_only_application",
+                prompt: "Open Contoso CAD and create a new drawing.",
+                observations: [
+                    try OSAtlasAcceptanceFixtureRenderer
+                        .everydayOperation(.windowsOnlyApplication),
+                ],
+                inputs: inputs,
+                runtime: runtime,
+                frontmostApplication: "macOS")
+            record(
+                windowsOnly,
+                expectedOutcome: .unableToComplete)
+            XCTAssertTrue(windowsOnly.performedActions.isEmpty)
+            XCTAssertTrue(windowsOnly.openedApplications.isEmpty)
+            XCTAssertTrue(windowsOnly.rawModelResponses.isEmpty)
+            guard case .completed(let platformExplanation)? =
+                    windowsOnly.result else {
+                XCTFail("windows_only_application did not explain the platform boundary")
+                throw ActualScenarioAssertionFailure.unexpectedAction
+            }
+            XCTAssertTrue(
+                platformExplanation.localizedCaseInsensitiveContains("Windows"))
+            XCTAssertTrue(windowsOnly.parsedActions.contains { action in
+                if case .ask = action { return true }
+                if case .report = action { return true }
+                return false
+            })
+
+            let calendar = await observeActualScenario(
+                named: "calendar_next_week_grounding",
+                prompt: "Go to next week on my family calendar.",
+                observations: [
+                    try OSAtlasAcceptanceFixtureRenderer
+                        .everydayOperation(.calendar),
+                    try OSAtlasAcceptanceFixtureRenderer
+                        .everydayOperation(.calendarNextWeekReached),
+                ],
+                inputs: inputs,
+                runtime: runtime,
+                frontmostApplication: "Calendar")
+            record(calendar, expectedOutcome: .taskCompleted)
+            XCTAssertEqual(calendar.rawActionTokens, ["CLICK"])
+            XCTAssertEqual(calendar.rawModelResponses.count, 1)
+            XCTAssertEqual(calendar.performedActions.count, 1)
+            guard case .click(let rawCalendarX, let rawCalendarY)? =
+                    calendar.parsedActions.first,
+                  case .click(
+                    let effectiveCalendarX,
+                    let effectiveCalendarY,
+                    1,
+                    1)? = calendar.performedActions.first else {
+                XCTFail("calendar grounding did not expose raw and effective click evidence")
+                throw ActualScenarioAssertionFailure.unexpectedAction
+            }
+            let calendarTarget = OSAtlasAcceptanceFixtureRenderer
+                .desktopTargetRect(
+                    for: OSAtlasAcceptanceFixtureRenderer
+                        .calendarNextWeekTarget)
+            let effectiveCalendarPoint = CGPoint(
+                x: effectiveCalendarX,
+                y: effectiveCalendarY)
+            XCTAssertTrue(calendarTarget.contains(effectiveCalendarPoint))
+            let rawCalendarPoint = CGPoint(
+                x: rawCalendarX,
+                y: rawCalendarY)
+            let rawCalendarInside = OSAtlasAcceptanceFixtureRenderer
+                .calendarNextWeekTarget.contains(rawCalendarPoint)
+            evidence.append(
+                "calendar_next_week_grounding pointer: raw=\(rawCalendarPoint), rawInside=\(rawCalendarInside), effective=\(effectiveCalendarPoint), effectiveInside=true")
+
+            let picnicFolder = await observeActualScenario(
+                named: "open_picnic_folder_grounding",
+                prompt: "Open the Summer Picnic folder.",
+                observations: [
+                    try OSAtlasAcceptanceFixtureRenderer
+                        .everydayOperation(.photoAlbum),
+                    try OSAtlasAcceptanceFixtureRenderer
+                        .everydayOperation(.photoAlbumOpened),
+                ],
+                inputs: inputs,
+                runtime: runtime,
+                frontmostApplication: "Finder")
+            record(picnicFolder, expectedOutcome: .taskCompleted)
+            XCTAssertEqual(picnicFolder.rawActionTokens, ["CLICK"])
+            XCTAssertEqual(picnicFolder.rawModelResponses.count, 1)
+            XCTAssertEqual(picnicFolder.performedActions.count, 1)
+            guard case .click(let rawFolderX, let rawFolderY)? =
+                    picnicFolder.parsedActions.first,
+                  case .click(
+                    let effectiveFolderX,
+                    let effectiveFolderY,
+                    1,
+                    2)? = picnicFolder.performedActions.first else {
+                XCTFail("folder grounding did not expose raw carrier and effective double-click")
+                throw ActualScenarioAssertionFailure.unexpectedAction
+            }
+            let folderTarget = OSAtlasAcceptanceFixtureRenderer
+                .desktopTargetRect(
+                    for: OSAtlasAcceptanceFixtureRenderer
+                        .summerPicnicFolderTarget)
+            let effectiveFolderPoint = CGPoint(
+                x: effectiveFolderX,
+                y: effectiveFolderY)
+            XCTAssertTrue(folderTarget.contains(effectiveFolderPoint))
+            let rawFolderPoint = CGPoint(x: rawFolderX, y: rawFolderY)
+            let rawFolderInside = OSAtlasAcceptanceFixtureRenderer
+                .summerPicnicFolderTarget.contains(rawFolderPoint)
+            evidence.append(
+                "open_picnic_folder_grounding pointer: raw=\(rawFolderPoint), rawInside=\(rawFolderInside), effective=\(effectiveFolderPoint), effectiveInside=true")
+        } catch {
+            await runtime.shutdown()
+            throw error
+        }
+        await runtime.shutdown()
+
+        XCTAssertEqual(scenarioCount, 14)
+        let attachment = XCTAttachment(string: evidence.joined(separator: "\n"))
+        attachment.name = "Installed hybrid exact regular-user scenario evidence"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
     func testActualModelNavigatesDeliveryQuoteAndValidatedLocalOCRReturnsExactFactsWithoutVisibleUI() async throws {
         try XCTSkipUnless(
             OSAtlasAcceptanceOptIn.modelE2EIsEnabled,
@@ -4545,10 +4977,14 @@ final class OSAtlasActualModelAcceptanceTests: XCTestCase {
                 from: renderedQuoteReady.image))
         let addressEntry = ComputerUseScreenObservation(
             image: renderedAddressEntry.image,
-            displayBounds: OSAtlasAcceptanceFixtureRenderer.hiddenDisplayBounds)
+            displayBounds: OSAtlasAcceptanceFixtureRenderer.hiddenDisplayBounds,
+            frontmostWindowBounds:
+                OSAtlasAcceptanceFixtureRenderer.hiddenDisplayBounds)
         let quoteReady = ComputerUseScreenObservation(
             image: renderedQuoteReady.image,
-            displayBounds: OSAtlasAcceptanceFixtureRenderer.hiddenDisplayBounds)
+            displayBounds: OSAtlasAcceptanceFixtureRenderer.hiddenDisplayBounds,
+            frontmostWindowBounds:
+                OSAtlasAcceptanceFixtureRenderer.hiddenDisplayBounds)
         enum WorkflowState {
             case addressEntry
             case quoteReady
@@ -4708,7 +5144,9 @@ final class OSAtlasActualModelAcceptanceTests: XCTestCase {
         ) -> ComputerUseScreenObservation {
             ComputerUseScreenObservation(
                 image: observation.image,
-                displayBounds: OSAtlasAcceptanceFixtureRenderer.hiddenDisplayBounds)
+                displayBounds: OSAtlasAcceptanceFixtureRenderer.hiddenDisplayBounds,
+                frontmostWindowBounds:
+                    OSAtlasAcceptanceFixtureRenderer.hiddenDisplayBounds)
         }
 
         enum WorkflowState: String {
@@ -5009,7 +5447,9 @@ final class OSAtlasActualModelAcceptanceTests: XCTestCase {
     ) async throws -> ActualActionCapture {
         let hiddenObservation = ComputerUseScreenObservation(
             image: observation.image,
-            displayBounds: OSAtlasAcceptanceFixtureRenderer.hiddenDisplayBounds)
+            displayBounds: OSAtlasAcceptanceFixtureRenderer.hiddenDisplayBounds,
+            frontmostWindowBounds:
+                OSAtlasAcceptanceFixtureRenderer.hiddenDisplayBounds)
         var parsedActions: [OSAtlasGUIAction] = []
         var rawActionTokens: [String] = []
         var rawModelResponses: [String] = []
@@ -5069,6 +5509,188 @@ final class OSAtlasActualModelAcceptanceTests: XCTestCase {
             elapsedMilliseconds: elapsedMilliseconds,
             tools: tools,
             recordedActions: { performedActions })
+    }
+
+    private enum ActualScenarioAssertionFailure: Error {
+        case unexpectedAction
+    }
+
+    private enum RegularUserScenarioOutcome: String, Equatable {
+        case taskCompleted = "task completed"
+        case userInterventionRequired = "user intervention required"
+        case unableToComplete = "unable to complete"
+    }
+
+    private struct ActualScenarioCapture {
+        let name: String
+        let parsedActions: [OSAtlasGUIAction]
+        let rawActionTokens: [String]
+        let rawModelResponses: [String]
+        let performedActions: [ComputerUsePredictedAction]
+        let openedApplications: [String]
+        let progress: [String]
+        let result: ComputerUseExecutionResult?
+        let executionFailure: String?
+        let screenCaptureCount: Int
+
+        func outcome() -> RegularUserScenarioOutcome {
+            guard executionFailure == nil, let result else {
+                return .unableToComplete
+            }
+            switch result {
+            case .userInterventionRequired, .approvalRequired,
+                    .mcpApprovalRequired:
+                return .userInterventionRequired
+            case .completed(let summary):
+                let askedForUserInput = parsedActions.contains { action in
+                    if case .ask = action { return true }
+                    return false
+                }
+                if askedForUserInput {
+                    return .userInterventionRequired
+                }
+                let returnedVisibleAnswer = parsedActions.contains { action in
+                    if case .report = action { return true }
+                    return false
+                }
+                let normalizedSummary = summary.folding(
+                    options: [.caseInsensitive, .diacriticInsensitive],
+                    locale: Locale(identifier: "en_US_POSIX"))
+                let inabilityEvidence = [
+                    "removed", "no longer available", "only for windows",
+                    "requires windows", "cannot run", "can't run",
+                    "unable to",
+                ].contains(where: normalizedSummary.contains)
+                if returnedVisibleAnswer,
+                   performedActions.isEmpty,
+                   openedApplications.isEmpty,
+                   inabilityEvidence {
+                    return .unableToComplete
+                }
+                return .taskCompleted
+            }
+        }
+
+        var actionTokenSequence: String {
+            parsedActions.map { action in
+                switch action {
+                case .click: return "CLICK"
+                case .doubleClick: return "DOUBLE_CLICK"
+                case .rightClick: return "RIGHT_CLICK"
+                case .drag: return "DRAG"
+                case .typeText: return "TYPE"
+                case .scroll(let direction):
+                    return "SCROLL_\(direction.rawValue)"
+                case .openApplication: return "OPEN_APP"
+                case .enter: return "ENTER"
+                case .hotkey: return "HOTKEY"
+                case .wait: return "WAIT"
+                case .complete: return "COMPLETE"
+                case .ask: return "ASK"
+                case .report: return "ANSWER"
+                }
+            }.joined(separator: " → ")
+        }
+
+        var evidence: String {
+            let effective = performedActions.isEmpty
+                ? "none" : "\(performedActions)"
+            let raw = rawActionTokens.isEmpty
+                ? "none" : rawActionTokens.joined(separator: " → ")
+            let failure = executionFailure.map { "; failure=\($0)" } ?? ""
+            return "\(name): parsed=\(actionTokenSequence), raw=\(raw), effective=\(effective), screens=\(screenCaptureCount)\(failure)"
+        }
+    }
+
+    /// Runs one complete ordinary-language scenario against a bounded sequence
+    /// of hidden screens. Every executable host action is recorded by the
+    /// injected seam, so this helper can exercise the production hybrid without
+    /// posting a native event, opening a real application, or reading the
+    /// person's desktop. Screen state advances only when the executor begins a
+    /// new step, matching the observation-after-action contract of the live
+    /// loop, including WAIT which deliberately performs no input action.
+    private func observeActualScenario(
+        named name: String,
+        prompt: String,
+        observations: [ComputerUseScreenObservation],
+        inputs: OSAtlasLlamaRuntimeInputs,
+        runtime: OSAtlasLlamaRuntime,
+        frontmostApplication initialApplication: String,
+        accessibilityContext: @escaping (ComputerUsePredictedAction) -> String = {
+            _ in "AXStaticText • hidden ordinary-person scenario"
+        },
+        authenticationContext: ComputerUseAuthenticationContextSnapshot? = nil,
+        maxSteps explicitMaxSteps: Int? = nil
+    ) async -> ActualScenarioCapture {
+        precondition(!observations.isEmpty)
+        let hiddenObservations = observations.map { observation in
+            ComputerUseScreenObservation(
+                image: observation.image,
+                displayBounds:
+                    OSAtlasAcceptanceFixtureRenderer.hiddenDisplayBounds,
+                frontmostWindowBounds:
+                    OSAtlasAcceptanceFixtureRenderer.hiddenDisplayBounds)
+        }
+        var parsedActions: [OSAtlasGUIAction] = []
+        var rawActionTokens: [String] = []
+        var rawModelResponses: [String] = []
+        var performedActions: [ComputerUsePredictedAction] = []
+        var openedApplications: [String] = []
+        var progress: [String] = []
+        var screenCaptureCount = 0
+        var frontmostApplication = initialApplication
+        let executor = OSAtlasComputerUseExecutor.makeForTesting(
+            inputs: inputs,
+            runtime: runtime,
+            checkpointActionProfile: .installedPro4BQ4KM,
+            semanticRouter: AppleFoundationVisualActionRouter(),
+            maxSteps: explicitMaxSteps ?? hiddenObservations.count,
+            parsedActionObserver: { parsedActions.append($0) },
+            actionTokenObserver: { rawActionTokens.append($0) },
+            modelResponseObserver: { rawModelResponses.append($0) })
+        let tools = ComputerUseHostTools(
+            injector: InputInjector(eventPoster: { _ in
+                XCTFail(
+                    "The exact installed-hybrid scenario matrix must never post a system event")
+            }),
+            mayAct: { true },
+            applicationOpener: { applicationName in
+                openedApplications.append(applicationName)
+                frontmostApplication = applicationName
+            },
+            actionPerformer: { performedActions.append($0) },
+            screenProvider: {
+                let index = min(
+                    screenCaptureCount,
+                    hiddenObservations.count - 1)
+                screenCaptureCount += 1
+                return hiddenObservations[index]
+            },
+            accessibilityContextProvider: accessibilityContext,
+            authenticationContextProvider: { authenticationContext },
+            frontmostApplicationProvider: { frontmostApplication })
+
+        var result: ComputerUseExecutionResult?
+        var executionFailure: String?
+        do {
+            result = try await executor.execute(
+                prompt: prompt,
+                tools: tools,
+                progress: { progress.append($0) })
+        } catch {
+            executionFailure = String(describing: error)
+        }
+        return ActualScenarioCapture(
+            name: name,
+            parsedActions: parsedActions,
+            rawActionTokens: rawActionTokens,
+            rawModelResponses: rawModelResponses,
+            performedActions: performedActions,
+            openedApplications: openedApplications,
+            progress: progress,
+            result: result,
+            executionFailure: executionFailure,
+            screenCaptureCount: screenCaptureCount)
     }
 
 }
@@ -5265,6 +5887,8 @@ private enum OSAtlasAcceptanceFixtureRenderer {
         x: 276, top: 126, width: 128, height: 42)
     static let summerPicnicFolderTarget = normalizedTopRect(
         x: 60, top: 130, width: 160, height: 160)
+    static let groceryPlaceOrderTarget = normalizedTopRect(
+        x: 80, top: 320, width: 288, height: 52)
     static let taxReceiptsRowTarget = normalizedTopRect(
         x: 34, top: 174, width: 380, height: 58)
     static let buyGroceriesCardTarget = normalizedTopRect(
@@ -5304,18 +5928,29 @@ private enum OSAtlasAcceptanceFixtureRenderer {
         case finderFile
         case errandBoard
         case focusedNote
+        case focusedNoteUpdated
         case feedEarlier
         case feedLater
         case galleryLeft
         case galleryRight
         case notesSuggestion
         case librarySearch
+        case librarySearchResults
         case selectedPackingList
         case updatingPrice
+        case deliveryPriceReady
         case missingDepartureCity
         case appointmentSummary
         case classSummary
         case finishedChecklist
+        case privacyArticleTop
+        case privacySection
+        case accountSignIn
+        case groceryCheckout
+        case reportRemoved
+        case windowsOnlyApplication
+        case calendarNextWeekReached
+        case photoAlbumOpened
     }
 
     static func everydayOperation(
@@ -5446,6 +6081,21 @@ private enum OSAtlasAcceptanceFixtureRenderer {
                 text(canvas, "Focused note editor", x: 78, top: 299,
                      size: 15, color: color(0.48, 0.50, 0.54))
 
+            case .focusedNoteUpdated:
+                header("Notes", "Errands")
+                card(x: 24, top: 112, width: 400, height: 278,
+                     fillColor: color(1.0, 0.995, 0.90))
+                text(canvas, "Weekend errands", x: 46, top: 136,
+                     size: 19, color: color(0.12, 0.13, 0.16), bold: true)
+                text(canvas, "• Return library books", x: 48, top: 190,
+                     size: 17, color: color(0.20, 0.21, 0.24))
+                text(canvas, "• Pick up dry cleaning", x: 48, top: 232,
+                     size: 17, color: color(0.20, 0.21, 0.24))
+                text(canvas, "Pick up oat milk at 6 PM", x: 48, top: 286,
+                     size: 17, color: color(0.10, 0.12, 0.16), bold: true)
+                text(canvas, "REQUESTED LINE ADDED", x: 116, top: 344,
+                     size: 14, color: color(0.10, 0.42, 0.20), bold: true)
+
             case .feedEarlier, .feedLater:
                 let earlier = operation == .feedEarlier
                 header("Family Activity", earlier ? "See earlier updates" : "See newer updates")
@@ -5512,6 +6162,21 @@ private enum OSAtlasAcceptanceFixtureRenderer {
                 text(canvas, "Query ready — press Return to search", x: 82, top: 260,
                      size: 15, color: color(0.40, 0.42, 0.46))
 
+            case .librarySearchResults:
+                header("Library", "Search results")
+                text(canvas, "public library hours", x: 48, top: 122,
+                     size: 16, color: color(0.38, 0.40, 0.44))
+                card(x: 32, top: 158, width: 384, height: 176,
+                     fillColor: color(0.94, 0.98, 0.95))
+                text(canvas, "Public Library Hours", x: 58, top: 184,
+                     size: 21, color: color(0.08, 0.26, 0.50), bold: true)
+                text(canvas, "Open today", x: 58, top: 230,
+                     size: 18, color: color(0.10, 0.42, 0.20), bold: true)
+                text(canvas, "9:00 AM – 6:00 PM", x: 58, top: 270,
+                     size: 18, color: color(0.12, 0.14, 0.18), bold: true)
+                text(canvas, "SEARCH COMPLETE — RESULTS SHOWN", x: 82, top: 372,
+                     size: 14, color: color(0.10, 0.42, 0.20), bold: true)
+
             case .selectedPackingList:
                 header("Notes", "Packing list")
                 card(x: 28, top: 116, width: 392, height: 240,
@@ -5536,6 +6201,21 @@ private enum OSAtlasAcceptanceFixtureRenderer {
                      size: 17, color: color(0.18, 0.42, 0.72), bold: true)
                 text(canvas, "Please wait", x: 170, top: 272,
                      size: 17, color: color(0.46, 0.48, 0.52))
+
+            case .deliveryPriceReady:
+                header("Grocery Delivery", "Price check")
+                card(x: 48, top: 134, width: 352, height: 210,
+                     fillColor: color(0.94, 0.98, 0.95))
+                text(canvas, "Weekly groceries", x: 118, top: 168,
+                     size: 20, color: color(0.12, 0.14, 0.18), bold: true)
+                text(canvas, "LATEST PRICE READY", x: 124, top: 218,
+                     size: 15, color: color(0.10, 0.42, 0.20), bold: true)
+                text(canvas, "Order total", x: 84, top: 266,
+                     size: 18, color: color(0.18, 0.20, 0.24))
+                text(canvas, "$24.18", x: 270, top: 258,
+                     size: 25, color: color(0.10, 0.42, 0.20), bold: true)
+                text(canvas, "Delivery in 25–35 minutes", x: 104, top: 312,
+                     size: 16, color: color(0.30, 0.32, 0.36))
 
             case .missingDepartureCity:
                 header("Train Planner", "Weekend visit")
@@ -5583,6 +6263,125 @@ private enum OSAtlasAcceptanceFixtureRenderer {
                 }
                 text(canvas, "ALL ITEMS COMPLETE", x: 126, top: 331,
                      size: 15, color: color(0.10, 0.38, 0.18), bold: true)
+
+            case .privacyArticleTop:
+                header("Family Portal Help", "Account guide")
+                text(canvas, "Manage your family profile", x: 48, top: 132,
+                     size: 22, color: color(0.10, 0.12, 0.16), bold: true)
+                text(canvas, "Sharing", x: 48, top: 198,
+                     size: 18, color: color(0.18, 0.20, 0.24), bold: true)
+                text(canvas, "Notifications", x: 48, top: 250,
+                     size: 18, color: color(0.18, 0.20, 0.24), bold: true)
+                text(canvas, "More sections are below this viewport", x: 48, top: 332,
+                     size: 15, color: color(0.38, 0.40, 0.44))
+                text(canvas, "Scroll down to continue", x: 126, top: 378,
+                     size: 15, color: color(0.10, 0.42, 0.82), bold: true)
+
+            case .privacySection:
+                header("Family Portal Help", "Privacy")
+                text(canvas, "Privacy", x: 48, top: 132,
+                     size: 28, color: color(0.10, 0.12, 0.16), bold: true)
+                card(x: 40, top: 186, width: 368, height: 156,
+                     fillColor: color(0.94, 0.97, 1.0))
+                text(canvas, "Control who can see family activity", x: 62, top: 214,
+                     size: 16, color: color(0.18, 0.20, 0.24), bold: true)
+                text(canvas, "Choose how your information is shared", x: 62, top: 258,
+                     size: 16, color: color(0.18, 0.20, 0.24))
+                text(canvas, "PRIVACY SECTION IS NOW VISIBLE", x: 86, top: 374,
+                     size: 14, color: color(0.10, 0.42, 0.20), bold: true)
+
+            case .accountSignIn:
+                header("Account", "Sign In")
+                text(canvas, "Account Sign In", x: 134, top: 110,
+                     size: 23, color: color(0.10, 0.12, 0.16), bold: true)
+                text(canvas, "Email or username", x: 74, top: 168,
+                     size: 15, color: color(0.30, 0.32, 0.36))
+                card(x: 70, top: 194, width: 308, height: 42)
+                text(canvas, "Password", x: 74, top: 256,
+                     size: 15, color: color(0.30, 0.32, 0.36))
+                card(x: 70, top: 282, width: 308, height: 42)
+                fill(canvas, rect: rect(x: 80, top: 346, width: 288, height: 48),
+                     color: color(0.10, 0.42, 0.88))
+                text(canvas, "Sign In", x: 190, top: 360,
+                     size: 17, color: color(1, 1, 1), bold: true)
+
+            case .groceryCheckout:
+                header("Grocery Delivery", "Review order")
+                text(canvas, "Weekly groceries", x: 46, top: 116,
+                     size: 21, color: color(0.10, 0.12, 0.16), bold: true)
+                card(x: 36, top: 158, width: 376, height: 132)
+                text(canvas, "Milk, bread, and apples", x: 58, top: 184,
+                     size: 17, color: color(0.18, 0.20, 0.24), bold: true)
+                text(canvas, "Delivery to saved address", x: 58, top: 226,
+                     size: 15, color: color(0.34, 0.36, 0.40))
+                text(canvas, "Total  $24.18", x: 58, top: 258,
+                     size: 17, color: color(0.12, 0.14, 0.18), bold: true)
+                fill(canvas, rect: rect(x: 80, top: 320, width: 288, height: 52),
+                     color: color(0.08, 0.58, 0.28))
+                text(canvas, "Place Order", x: 168, top: 336,
+                     size: 18, color: color(1, 1, 1), bold: true)
+                text(canvas, "Final purchase confirmation", x: 124, top: 396,
+                     size: 14, color: color(0.46, 0.48, 0.52))
+
+            case .reportRemoved:
+                header("Documents", "Quarterly report")
+                text(canvas, "Quarterly Report", x: 116, top: 126,
+                     size: 24, color: color(0.10, 0.12, 0.16), bold: true)
+                card(x: 42, top: 188, width: 364, height: 144,
+                     fillColor: color(1.0, 0.94, 0.94))
+                text(canvas, "REPORT REMOVED", x: 132, top: 214,
+                     size: 19, color: color(0.68, 0.10, 0.12), bold: true)
+                text(canvas, "This report is no longer available.", x: 76, top: 260,
+                     size: 17, color: color(0.24, 0.26, 0.30), bold: true)
+                text(canvas, "Ask the owner for a new copy.", x: 96, top: 298,
+                     size: 16, color: color(0.34, 0.36, 0.40))
+
+            case .windowsOnlyApplication:
+                header("macOS", "Application unavailable")
+                card(x: 48, top: 122, width: 352, height: 236,
+                     fillColor: color(0.97, 0.97, 0.98))
+                text(canvas, "Contoso CAD", x: 148, top: 154,
+                     size: 23, color: color(0.10, 0.12, 0.16), bold: true)
+                text(canvas, "CAN'T OPEN THIS APPLICATION", x: 88, top: 208,
+                     size: 16, color: color(0.68, 0.10, 0.12), bold: true)
+                text(canvas, "Contoso CAD is available only for Windows.", x: 64, top: 254,
+                     size: 15, color: color(0.22, 0.24, 0.28), bold: true)
+                text(canvas, "This Mac cannot run it.", x: 126, top: 292,
+                     size: 16, color: color(0.34, 0.36, 0.40))
+                fill(canvas, rect: rect(x: 170, top: 374, width: 108, height: 40),
+                     color: color(0.88, 0.89, 0.91))
+                text(canvas, "OK", x: 212, top: 386,
+                     size: 16, color: color(0.12, 0.14, 0.18), bold: true)
+
+            case .calendarNextWeekReached:
+                header("Family Calendar", "Household schedule")
+                card(x: 20, top: 110, width: 408, height: 250)
+                text(canvas, "August 17–23", x: 40, top: 134,
+                     size: 18, color: color(0.12, 0.14, 0.18), bold: true)
+                text(canvas, "NEXT WEEK IS NOW VISIBLE", x: 104, top: 194,
+                     size: 16, color: color(0.10, 0.42, 0.20), bold: true)
+                text(canvas, "Wed   School orientation", x: 40, top: 246,
+                     size: 16, color: color(0.18, 0.20, 0.24))
+                text(canvas, "Sat   Family picnic", x: 40, top: 292,
+                     size: 16, color: color(0.18, 0.20, 0.24))
+
+            case .photoAlbumOpened:
+                header("Finder", "Summer Picnic")
+                text(canvas, "Summer Picnic", x: 138, top: 104,
+                     size: 23, color: color(0.10, 0.12, 0.16), bold: true)
+                for index in 0 ..< 3 {
+                    let x = CGFloat(34 + index * 136)
+                    card(x: x, top: 160, width: 110, height: 132,
+                         fillColor: [
+                            color(0.76, 0.88, 0.96),
+                            color(0.84, 0.93, 0.76),
+                            color(0.96, 0.84, 0.72),
+                         ][index])
+                    text(canvas, "Photo \(index + 1)", x: x + 24, top: 260,
+                         size: 14, color: color(0.12, 0.14, 0.18), bold: true)
+                }
+                text(canvas, "3 photos", x: 188, top: 350,
+                     size: 15, color: color(0.34, 0.36, 0.40), bold: true)
             }
         }
     }
