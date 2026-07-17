@@ -26,6 +26,14 @@ enum OSAtlasRuntimeInstallationError: Error, LocalizedError, Equatable {
     }
 }
 
+/// Fully resolved inputs for the two-model local package. Both paths are
+/// derived from one verified receipt and its pinned manifest; callers cannot
+/// inject a semantic model path independently from the visual package.
+struct OSAtlasResolvedRuntimeInstallation: Equatable, Sendable {
+    let visualInputs: OSAtlasLlamaRuntimeInputs
+    let semanticRouterModelURL: URL
+}
+
 /// Converts a verified, data-only model receipt into the exact local inputs
 /// accepted by OSAtlasLlamaRuntime. The model may live in Application Support,
 /// but executable code must resolve inside the signed host application bundle.
@@ -83,7 +91,7 @@ struct OSAtlasRuntimeInputResolver {
             fileURLWithPath: receipt.modelDirectory,
             isDirectory: true).standardizedFileURL
         guard (receipt.modelDirectory as NSString).isAbsolutePath,
-              isDirectory(modelDirectoryURL) else {
+              isStrictDirectory(modelDirectoryURL) else {
             throw OSAtlasRuntimeInstallationError.invalidReceipt
         }
 
@@ -115,6 +123,7 @@ struct OSAtlasRuntimeInputResolver {
             do {
                 values = try url.resourceValues(forKeys: [
                     .isRegularFileKey,
+                    .isSymbolicLinkKey,
                     .fileSizeKey,
                 ])
             } catch {
@@ -122,6 +131,7 @@ struct OSAtlasRuntimeInputResolver {
                     artifact.fileName)
             }
             guard values.isRegularFile == true,
+                  values.isSymbolicLink != true,
                   Int64(values.fileSize ?? -1) == artifact.byteCount else {
                 throw OSAtlasRuntimeInstallationError.invalidModelArtifact(
                     artifact.fileName)
@@ -157,8 +167,60 @@ struct OSAtlasRuntimeInputResolver {
             llamaServerURL: llamaServerURL)
     }
 
+    func resolvePackage(
+        receipt: ComputerUseInstallationReceipt,
+        runtimeDirectoryURL: URL,
+        enclosingBundleURL: URL
+    ) throws -> OSAtlasResolvedRuntimeInstallation {
+        let textArtifacts = manifest.modelArtifacts.filter {
+            $0.kind == .textModelShard
+        }
+        let projectors = manifest.modelArtifacts.filter {
+            $0.kind == .visionProjector
+        }
+        let semanticArtifacts = manifest.modelArtifacts.filter {
+            $0.kind == .semanticRouterModel
+        }
+        guard !textArtifacts.isEmpty,
+              projectors.count == 1,
+              semanticArtifacts.count == 1,
+              let semanticArtifact = semanticArtifacts.first else {
+            throw OSAtlasRuntimeInstallationError.invalidReceipt
+        }
+
+        // `resolve` validates every manifest artifact (not just the visual
+        // inputs) as a contained, non-symlink regular file with exact size.
+        let visualInputs = try resolve(
+            receipt: receipt,
+            runtimeDirectoryURL: runtimeDirectoryURL,
+            enclosingBundleURL: enclosingBundleURL)
+        let modelDirectoryURL = URL(
+            fileURLWithPath: receipt.modelDirectory,
+            isDirectory: true).standardizedFileURL
+        let semanticURL = modelDirectoryURL.appendingPathComponent(
+            semanticArtifact.fileName,
+            isDirectory: false)
+        guard contains(modelDirectoryURL, semanticURL) else {
+            throw OSAtlasRuntimeInstallationError.invalidModelArtifact(
+                semanticArtifact.fileName)
+        }
+        return OSAtlasResolvedRuntimeInstallation(
+            visualInputs: visualInputs,
+            semanticRouterModelURL: semanticURL)
+    }
+
     private func isDirectory(_ url: URL) -> Bool {
         (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true
+    }
+
+    private func isStrictDirectory(_ url: URL) -> Bool {
+        guard let values = try? url.resourceValues(forKeys: [
+            .isDirectoryKey,
+            .isSymbolicLinkKey,
+        ]) else {
+            return false
+        }
+        return values.isDirectory == true && values.isSymbolicLink != true
     }
 
     /// llama.cpp ships versioned dylibs plus compatibility symlinks. Resolve
@@ -219,12 +281,12 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
         progress: @escaping @MainActor (String) -> Void
     ) async throws -> any ComputerUseExecuting {
         let runtimeDirectoryURL = try bundledRuntimeDirectoryURL()
-        let inputs = try resolver.resolve(
+        let installation = try resolver.resolvePackage(
             receipt: receipt,
             runtimeDirectoryURL: runtimeDirectoryURL,
             enclosingBundleURL: bundle.bundleURL)
         return try await OSAtlasComputerUseExecutor.load(
-            inputs: inputs,
+            installation: installation,
             runtime: runtime,
             progress: progress)
     }

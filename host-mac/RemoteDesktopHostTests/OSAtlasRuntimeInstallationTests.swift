@@ -29,6 +29,103 @@ final class OSAtlasRuntimeInstallationTests: XCTestCase {
             fixture.bundleDirectory.path + "/"))
     }
 
+    func testMultiModelPackageResolvesVisualAndSemanticInputsFromManifest() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        let package = try OSAtlasRuntimeInputResolver(
+            manifest: fixture.manifest).resolvePackage(
+                receipt: fixture.receipt,
+                runtimeDirectoryURL: fixture.runtimeDirectory,
+                enclosingBundleURL: fixture.bundleDirectory)
+
+        XCTAssertEqual(
+            package.visualInputs.modelFirstSplitURL,
+            fixture.modelDirectory.appendingPathComponent(
+                fixture.manifest.modelArtifacts[0].fileName))
+        XCTAssertEqual(
+            package.semanticRouterModelURL,
+            fixture.modelDirectory.appendingPathComponent(
+                fixture.manifest.modelArtifacts[3].fileName))
+    }
+
+    func testMultiModelPackageRequiresExactlyOneSemanticArtifact() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        let missingManifest = manifest(
+            from: fixture.manifest,
+            artifacts: Array(fixture.manifest.modelArtifacts.dropLast()))
+        XCTAssertThrowsError(try OSAtlasRuntimeInputResolver(
+            manifest: missingManifest).resolvePackage(
+                receipt: fixture.receipt,
+                runtimeDirectoryURL: fixture.runtimeDirectory,
+                enclosingBundleURL: fixture.bundleDirectory)) { error in
+            XCTAssertEqual(
+                error as? OSAtlasRuntimeInstallationError,
+                .invalidReceipt)
+        }
+
+        let duplicate = ComputerUseArtifactManifest.DownloadableArtifact(
+            kind: .semanticRouterModel,
+            fileName: "semantic-router-copy.gguf",
+            byteCount: 6,
+            sha256: String(repeating: "e", count: 64),
+            downloadURL: URL(string:
+                "https://example.invalid/semantic-router-copy.gguf")!)
+        try Data(repeating: 5, count: 6).write(to:
+            fixture.modelDirectory.appendingPathComponent(duplicate.fileName))
+        let duplicateManifest = manifest(
+            from: fixture.manifest,
+            artifacts: fixture.manifest.modelArtifacts + [duplicate])
+        XCTAssertThrowsError(try OSAtlasRuntimeInputResolver(
+            manifest: duplicateManifest).resolvePackage(
+                receipt: fixture.receipt,
+                runtimeDirectoryURL: fixture.runtimeDirectory,
+                enclosingBundleURL: fixture.bundleDirectory)) { error in
+            XCTAssertEqual(
+                error as? OSAtlasRuntimeInstallationError,
+                .invalidReceipt)
+        }
+    }
+
+    func testMultiModelPackageFailsWhenPinnedSemanticFileIsMissing() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let semantic = try XCTUnwrap(fixture.manifest.modelArtifacts.last)
+        try FileManager.default.removeItem(at:
+            fixture.modelDirectory.appendingPathComponent(semantic.fileName))
+
+        XCTAssertThrowsError(try OSAtlasRuntimeInputResolver(
+            manifest: fixture.manifest).resolvePackage(
+                receipt: fixture.receipt,
+                runtimeDirectoryURL: fixture.runtimeDirectory,
+                enclosingBundleURL: fixture.bundleDirectory)) { error in
+            XCTAssertEqual(
+                error as? OSAtlasRuntimeInstallationError,
+                .missingModelArtifact(semantic.fileName))
+        }
+    }
+
+    func testLegacyVisualOnlyResolveAPIStaysCompatible() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let visualManifest = manifest(
+            from: fixture.manifest,
+            artifacts: Array(fixture.manifest.modelArtifacts.dropLast()))
+
+        let inputs = try OSAtlasRuntimeInputResolver(
+            manifest: visualManifest).resolve(
+                receipt: fixture.receipt,
+                runtimeDirectoryURL: fixture.runtimeDirectory,
+                enclosingBundleURL: fixture.bundleDirectory)
+
+        XCTAssertEqual(inputs.variant, .pro4B)
+        XCTAssertEqual(
+            inputs.multimodalProjectorURL.lastPathComponent,
+            "mmproj-os-atlas-pro-4b-f16.gguf")
+    }
+
     func testBaseReceiptIsRejectedBeforeRuntimeLaunch() throws {
         let fixture = try makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
@@ -216,8 +313,15 @@ final class OSAtlasRuntimeInstallationTests: XCTestCase {
                 byteCount: 5,
                 sha256: String(repeating: "c", count: 64),
                 downloadURL: URL(string: "https://example.invalid/mmproj.gguf")!),
+            .init(
+                kind: .semanticRouterModel,
+                fileName: "semantic-router-q4_k_m.gguf",
+                byteCount: 6,
+                sha256: String(repeating: "d", count: 64),
+                downloadURL: URL(string:
+                    "https://example.invalid/semantic-router-q4_k_m.gguf")!),
         ]
-        for (artifact, byte) in zip(artifacts, [UInt8(1), 2, 3]) {
+        for (artifact, byte) in zip(artifacts, [UInt8(1), 2, 3, 4]) {
             try Data(repeating: byte, count: Int(artifact.byteCount)).write(
                 to: modelDirectory.appendingPathComponent(artifact.fileName))
         }
@@ -249,5 +353,18 @@ final class OSAtlasRuntimeInstallationTests: XCTestCase {
             modelDirectory: modelDirectory,
             manifest: manifest,
             receipt: receipt)
+    }
+
+    private func manifest(
+        from source: ComputerUseArtifactManifest,
+        artifacts: [ComputerUseArtifactManifest.DownloadableArtifact]
+    ) -> ComputerUseArtifactManifest {
+        ComputerUseArtifactManifest(
+            installationVersion: source.installationVersion,
+            modelVariant: source.modelVariant,
+            modelRepository: source.modelRepository,
+            modelRevision: source.modelRevision,
+            modelArtifacts: artifacts,
+            minimumMemoryBytes: source.minimumMemoryBytes)
     }
 }

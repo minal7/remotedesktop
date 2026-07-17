@@ -318,6 +318,58 @@ final class MCPFirstComputerUseExecutor: ComputerUseTaskAwareExecuting, MCPAppro
         tools: ComputerUseHostTools,
         progress: @escaping (String) -> Void
     ) async throws -> ComputerUseExecutionResult {
+        try await executeResolved(
+            taskID: taskID,
+            prompt: prompt,
+            trustedUserPrompt: trustedUserPrompt,
+            conversation: nil,
+            tools: tools,
+            progress: progress)
+    }
+
+    func execute(
+        taskID: String,
+        modelPrompt: String,
+        currentUserPrompt: String,
+        conversation: [ComputerUseConversationTurn],
+        tools: ComputerUseHostTools,
+        progress: @escaping (String) -> Void
+    ) async throws -> ComputerUseExecutionResult {
+        try await executeResolved(
+            taskID: taskID,
+            prompt: modelPrompt,
+            trustedUserPrompt: currentUserPrompt,
+            conversation: conversation,
+            tools: tools,
+            progress: progress)
+    }
+
+    private func executeResolved(
+        taskID: String,
+        prompt: String,
+        trustedUserPrompt: String,
+        conversation: [ComputerUseConversationTurn]?,
+        tools: ComputerUseHostTools,
+        progress: @escaping (String) -> Void
+    ) async throws -> ComputerUseExecutionResult {
+        func executeVisualFallback() async throws
+            -> ComputerUseExecutionResult {
+            if let conversation {
+                return try await visualFallback.execute(
+                    taskID: taskID,
+                    modelPrompt: prompt,
+                    currentUserPrompt: trustedUserPrompt,
+                    conversation: conversation,
+                    tools: tools,
+                    progress: progress)
+            }
+            return try await visualFallback.execute(
+                taskID: taskID,
+                prompt: prompt,
+                trustedUserPrompt: trustedUserPrompt,
+                tools: tools,
+                progress: progress)
+        }
         pendingApprovalState = nil
         pendingApprovalDigest = nil
 
@@ -369,12 +421,7 @@ final class MCPFirstComputerUseExecutor: ComputerUseTaskAwareExecuting, MCPAppro
             Self.log.info(
                 "Routed delivery quote directly to local visual computer use")
             progress("Using visual control for this delivery quote…")
-            return try await visualFallback.execute(
-                taskID: taskID,
-                prompt: prompt,
-                trustedUserPrompt: trustedUserPrompt,
-                tools: tools,
-                progress: progress)
+            return try await executeVisualFallback()
         }
 
         guard planner.availability() == .available else {
@@ -386,12 +433,7 @@ final class MCPFirstComputerUseExecutor: ComputerUseTaskAwareExecuting, MCPAppro
                 return mailResult
             }
             progress("Using visual control on this Mac…")
-            return try await visualFallback.execute(
-                taskID: taskID,
-                prompt: prompt,
-                trustedUserPrompt: trustedUserPrompt,
-                tools: tools,
-                progress: progress)
+            return try await executeVisualFallback()
         }
 
         let state = PlanningState(
@@ -417,12 +459,7 @@ final class MCPFirstComputerUseExecutor: ComputerUseTaskAwareExecuting, MCPAppro
             }
             guard Self.canFallBackAfterPlannerError(error) else { throw error }
             progress("This app needs visual control — switching locally…")
-            return try await visualFallback.execute(
-                taskID: taskID,
-                prompt: prompt,
-                trustedUserPrompt: trustedUserPrompt,
-                tools: tools,
-                progress: progress)
+            return try await executeVisualFallback()
         } catch let error as ExecutorError {
             guard error == .tooManySteps else { throw error }
 
@@ -443,12 +480,7 @@ final class MCPFirstComputerUseExecutor: ComputerUseTaskAwareExecuting, MCPAppro
             Self.log.info(
                 "Structured planner stalled on non-approved steps; switching to local visual control")
             progress("Structured tools can’t finish this task — switching locally…")
-            return try await visualFallback.execute(
-                taskID: taskID,
-                prompt: prompt,
-                trustedUserPrompt: trustedUserPrompt,
-                tools: tools,
-                progress: progress)
+            return try await executeVisualFallback()
         } catch {
             // A helper/read step can fail outside the planner's typed error
             // surface. Explicit Mail still must not spill into GUI control.

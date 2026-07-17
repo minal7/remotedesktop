@@ -141,6 +141,11 @@ struct HostSettingsView: View {
                         destination: ComputerUseArtifactManifest.displayedOSAtlasLicenseURL)
                     Divider().padding(.vertical, 10)
                     licenseRow(
+                        name: "Granite 4.0 1B semantic router",
+                        license: "Apache License 2.0",
+                        destination: ComputerUseArtifactManifest.displayedGraniteLicenseURL)
+                    Divider().padding(.vertical, 10)
+                    licenseRow(
                         name: "llama.cpp",
                         license: "MIT License",
                         destination: ComputerUseArtifactManifest.bundledLegalDocumentURL(

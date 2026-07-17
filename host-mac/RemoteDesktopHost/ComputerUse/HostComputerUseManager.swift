@@ -4,6 +4,665 @@ import CoreGraphics
 import CoreImage
 import CryptoKit
 import Foundation
+import Security
+
+/// Flattens host context that is interpolated into a model prompt. Application
+/// labels and action history are context, never prompt structure: line/control
+/// characters become one ordinary space and output is bounded by UTF-8 bytes.
+enum ComputerUsePromptSanitizer {
+    static func inline(
+        _ value: String,
+        maximumUTF8Bytes: Int
+    ) -> String {
+        guard maximumUTF8Bytes > 0 else { return "" }
+        var output = ""
+        var byteCount = 0
+        var pendingSpace = false
+        for scalar in value.unicodeScalars {
+            if CharacterSet.controlCharacters.contains(scalar)
+                || CharacterSet.newlines.contains(scalar)
+                || CharacterSet.whitespaces.contains(scalar) {
+                pendingSpace = !output.isEmpty
+                continue
+            }
+            let fragment = String(scalar)
+            let fragmentBytes = fragment.utf8.count
+            let spaceBytes = pendingSpace ? 1 : 0
+            guard byteCount + spaceBytes + fragmentBytes
+                    <= maximumUTF8Bytes else {
+                break
+            }
+            if pendingSpace {
+                output.append(" ")
+                byteCount += 1
+                pendingSpace = false
+            }
+            output.append(fragment)
+            byteCount += fragmentBytes
+        }
+        return output
+    }
+}
+
+/// Proof that a bundle path and live PID describe the same valid signed code.
+/// Reviewed applications additionally carry a pinned Apple/team authority;
+/// other applications use the generic code-proven bundle grammar. These
+/// value-only fields can cross actor boundaries; Security objects never do.
+struct ComputerUseApplicationCodeIdentity:
+    Equatable, Hashable, Sendable {
+    enum Authority: String, Equatable, Hashable, Sendable {
+        case runningCode
+        case reviewedPinned
+    }
+
+    let authority: Authority
+    let bundleIdentifier: String
+    let canonicalBundlePath: String
+    let canonicalExecutablePath: String
+    let designatedRequirement: String
+    let teamIdentifier: String?
+    let platformIdentifier: UInt32?
+}
+
+/// Canonical identity sampled from Launch Services and, for the reviewed app
+/// allowlist, rebound to a signed-code proof. The localized application name
+/// is deliberately excluded: an app controls that label and can call itself
+/// "Notes" or inject prompt delimiters. PID plus launch generation
+/// distinguishes a later process that reused the same bundle identifier for
+/// host fingerprints and ledgers, but those process-local values never enter
+/// model context.
+struct ComputerUseApplicationIdentity: Equatable, Hashable, Sendable {
+    static let maximumBundleIdentifierBytes = 255
+
+    let bundleIdentifier: String
+    let processIdentifier: pid_t
+    let launchGeneration: UInt64?
+    let codeIdentity: ComputerUseApplicationCodeIdentity?
+
+    init?(
+        bundleIdentifier: String?,
+        processIdentifier: pid_t,
+        launchGeneration: UInt64? = nil,
+        codeIdentity: ComputerUseApplicationCodeIdentity? = nil
+    ) {
+        guard let bundleIdentifier,
+              !bundleIdentifier.isEmpty,
+              bundleIdentifier.utf8.count
+                <= Self.maximumBundleIdentifierBytes,
+              processIdentifier > 0,
+              bundleIdentifier.utf8.allSatisfy({ byte in
+                  (byte >= 0x41 && byte <= 0x5A)
+                    || (byte >= 0x61 && byte <= 0x7A)
+                    || (byte >= 0x30 && byte <= 0x39)
+                    || byte == 0x2E || byte == 0x2D
+              }),
+              codeIdentity?.bundleIdentifier == bundleIdentifier
+                || codeIdentity == nil else {
+            return nil
+        }
+        self.bundleIdentifier = bundleIdentifier
+        self.processIdentifier = processIdentifier
+        self.launchGeneration = launchGeneration
+        self.codeIdentity = codeIdentity
+    }
+
+    init?(
+        runningApplication: NSRunningApplication,
+        codeIdentity suppliedCodeIdentity:
+            ComputerUseApplicationCodeIdentity? = nil
+    ) {
+        let launchGeneration: UInt64?
+        if let date = runningApplication.launchDate {
+            let milliseconds = date.timeIntervalSince1970 * 1_000
+            launchGeneration = milliseconds.isFinite && milliseconds >= 0
+                ? UInt64(milliseconds.rounded(.down))
+                : nil
+        } else {
+            launchGeneration = nil
+        }
+        let codeIdentity = suppliedCodeIdentity
+            ?? ComputerUseReviewedApplicationCodeVerifier
+                .proofForRunningApplication(
+                    runningApplication: runningApplication)
+        self.init(
+            bundleIdentifier: runningApplication.bundleIdentifier,
+            processIdentifier: runningApplication.processIdentifier,
+            launchGeneration: launchGeneration,
+            codeIdentity: codeIdentity)
+    }
+
+    var stableSortKey: String {
+        "\(bundleIdentifier.lowercased())\u{0}\(processIdentifier)\u{0}\(launchGeneration ?? 0)"
+    }
+
+    var promptDescription: String {
+        guard let codeIdentity else { return "unknown" }
+        let displayName = codeIdentity.authority == .reviewedPinned
+            ? Self.reviewedApplicationName(
+                forBundleIdentifier: bundleIdentifier)
+            : nil
+        let prefix = displayName.map { "\($0) • " } ?? ""
+        return "\(prefix)bundle=\(bundleIdentifier.lowercased())"
+    }
+
+    func matchesReviewedApplication(named applicationName: String) -> Bool {
+        guard let identifiers = Self.reviewedBundleIdentifiers(
+            forApplicationNamed: applicationName),
+              identifiers.contains(bundleIdentifier),
+              let codeIdentity,
+              codeIdentity.authority == .reviewedPinned,
+              codeIdentity.bundleIdentifier == bundleIdentifier else {
+            return false
+        }
+        return true
+    }
+
+    static func reviewedBundleIdentifiers(
+        forApplicationNamed rawName: String
+    ) -> Set<String>? {
+        switch normalizedApplicationName(rawName) {
+        case "notes", "apple notes": return ["com.apple.Notes"]
+        case "mail", "apple mail": return ["com.apple.mail"]
+        case "calendar", "apple calendar": return ["com.apple.iCal"]
+        case "finder": return ["com.apple.finder"]
+        case "safari": return ["com.apple.Safari"]
+        case "google chrome", "chrome": return ["com.google.Chrome"]
+        case "reminders", "apple reminders": return ["com.apple.reminders"]
+        case "calculator": return ["com.apple.calculator"]
+        default: return nil
+        }
+    }
+
+    static func reviewedApplicationName(
+        forBundleIdentifier bundleIdentifier: String
+    ) -> String? {
+        switch bundleIdentifier.lowercased() {
+        case "com.apple.notes": return "Notes"
+        case "com.apple.mail": return "Mail"
+        case "com.apple.ical": return "Calendar"
+        case "com.apple.finder": return "Finder"
+        case "com.apple.safari": return "Safari"
+        case "com.google.chrome": return "Google Chrome"
+        case "com.apple.reminders": return "Reminders"
+        case "com.apple.calculator": return "Calculator"
+        default: return nil
+        }
+    }
+
+    static let allReviewedBundleIdentifiers: Set<String> = [
+        "com.apple.Notes",
+        "com.apple.mail",
+        "com.apple.iCal",
+        "com.apple.finder",
+        "com.apple.Safari",
+        "com.google.Chrome",
+        "com.apple.reminders",
+        "com.apple.calculator",
+    ]
+
+    private static func normalizedApplicationName(_ value: String) -> String {
+        String(value.lowercased().unicodeScalars.map { scalar -> Character in
+            CharacterSet.alphanumerics.contains(scalar)
+                ? Character(String(scalar)) : " "
+        }).split(whereSeparator: \.isWhitespace).joined(separator: " ")
+    }
+}
+
+/// Security.framework boundary for reviewed applications. Launch Services is
+/// used only to locate a candidate. The candidate bundle is checked against a
+/// pinned requirement, then the launched PID is checked against that exact
+/// requirement and rebound to the same canonical bundle/executable paths.
+enum ComputerUseReviewedApplicationCodeVerifier {
+    enum VerificationError: Error {
+        case invalidCandidate
+        case invalidSignature
+        case runningCodeMismatch
+    }
+
+    struct StaticIdentity {
+        let proof: ComputerUseApplicationCodeIdentity
+        let designatedRequirement: SecRequirement
+    }
+
+    private final class StaticIdentityCache: @unchecked Sendable {
+        private let lock = NSLock()
+        private var values: [String: StaticIdentity] = [:]
+
+        func value(for key: String) -> StaticIdentity? {
+            lock.withLock { values[key] }
+        }
+
+        func insert(_ value: StaticIdentity, for key: String) {
+            lock.withLock { values[key] = value }
+        }
+    }
+
+    private final class RunningIdentityCache: @unchecked Sendable {
+        private let lock = NSLock()
+        private var values: [String: ComputerUseApplicationCodeIdentity] = [:]
+
+        func value(for key: String) -> ComputerUseApplicationCodeIdentity? {
+            lock.withLock { values[key] }
+        }
+
+        func insert(
+            _ value: ComputerUseApplicationCodeIdentity,
+            for key: String
+        ) {
+            lock.withLock { values[key] = value }
+        }
+    }
+
+    private static let staticIdentityCache = StaticIdentityCache()
+    private static let runningIdentityCache = RunningIdentityCache()
+
+    static func proofForRunningApplication(
+        runningApplication: NSRunningApplication
+    ) -> ComputerUseApplicationCodeIdentity? {
+        guard let identifier = runningApplication.bundleIdentifier else {
+            return nil
+        }
+        let cacheKey = runningCacheKey(
+            runningApplication,
+            bundleIdentifier: identifier)
+        if let cacheKey,
+           let cached = runningIdentityCache.value(for: cacheKey) {
+            return cached
+        }
+        let proof: ComputerUseApplicationCodeIdentity?
+        if ComputerUseApplicationIdentity.allReviewedBundleIdentifiers
+            .contains(identifier) {
+            guard let bundleURL = runningApplication.bundleURL,
+                  let staticIdentity = try? cachedStaticIdentity(
+                applicationURL: bundleURL,
+                bundleIdentifier: identifier),
+                  let verifiedProof = try? verifyRunning(
+                runningApplication,
+                against: staticIdentity) else {
+                // A reviewed identifier that fails its pinned proof must not
+                // downgrade into the generic code-proven bundle grammar.
+                return nil
+            }
+            proof = verifiedProof
+        } else {
+            proof = try? verifyUnreviewedRunning(runningApplication)
+        }
+        if let cacheKey, let proof {
+            runningIdentityCache.insert(proof, for: cacheKey)
+        }
+        return proof
+    }
+
+    private static func runningCacheKey(
+        _ runningApplication: NSRunningApplication,
+        bundleIdentifier: String
+    ) -> String? {
+        guard runningApplication.processIdentifier > 0,
+              let launchDate = runningApplication.launchDate,
+              let bundlePath = runningApplication.bundleURL?
+                .resolvingSymlinksInPath().standardizedFileURL.path,
+              let executablePath = runningApplication.executableURL?
+                .resolvingSymlinksInPath().standardizedFileURL.path else {
+            return nil
+        }
+        return [
+            bundleIdentifier,
+            String(runningApplication.processIdentifier),
+            String(launchDate.timeIntervalSince1970.bitPattern),
+            bundlePath,
+            executablePath,
+        ].joined(separator: "\u{0}")
+    }
+
+    private static func cachedStaticIdentity(
+        applicationURL: URL,
+        bundleIdentifier: String
+    ) throws -> StaticIdentity {
+        let canonicalPath = applicationURL
+            .resolvingSymlinksInPath()
+            .standardizedFileURL.path
+        let key = "\(bundleIdentifier)\u{0}\(canonicalPath)"
+        if let cached = staticIdentityCache.value(for: key) {
+            return cached
+        }
+        let verified = try verifyStatic(
+            applicationURL: applicationURL,
+            expectedBundleIdentifiers: [bundleIdentifier])
+        staticIdentityCache.insert(verified, for: key)
+        return verified
+    }
+
+    static func verifyStatic(
+        applicationURL suppliedURL: URL,
+        expectedBundleIdentifiers: Set<String>
+    ) throws -> StaticIdentity {
+        guard suppliedURL.isFileURL,
+              !expectedBundleIdentifiers.isEmpty,
+              expectedBundleIdentifiers.isSubset(
+                of: ComputerUseApplicationIdentity
+                    .allReviewedBundleIdentifiers) else {
+            throw VerificationError.invalidCandidate
+        }
+        let applicationURL = suppliedURL
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
+        guard applicationURL.pathExtension == "app",
+              let bundle = Bundle(url: applicationURL),
+              let bundleIdentifier = bundle.bundleIdentifier,
+              expectedBundleIdentifiers.contains(bundleIdentifier),
+              let suppliedExecutableURL = bundle.executableURL else {
+            throw VerificationError.invalidCandidate
+        }
+        let executableURL = suppliedExecutableURL
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
+
+        var staticCode: SecStaticCode?
+        guard SecStaticCodeCreateWithPath(
+            applicationURL as CFURL,
+            SecCSFlags(),
+            &staticCode) == errSecSuccess,
+              let staticCode else {
+            throw VerificationError.invalidSignature
+        }
+        let strictFlags = SecCSFlags(
+            rawValue: kSecCSStrictValidate | kSecCSCheckAllArchitectures)
+        guard SecStaticCodeCheckValidity(
+            staticCode,
+            strictFlags,
+            nil) == errSecSuccess else {
+            throw VerificationError.invalidSignature
+        }
+        let information = try signingInformation(for: staticCode)
+        guard information.identifier == bundleIdentifier,
+              let embeddedRequirement = information.designatedRequirement,
+              let embeddedRequirementText = requirementText(
+                embeddedRequirement) else {
+            throw VerificationError.invalidSignature
+        }
+
+        let pinnedRequirement: SecRequirement
+        if bundleIdentifier.hasPrefix("com.apple.") {
+            var requirement: SecRequirement?
+            let requirementText =
+                "anchor apple and identifier \"\(bundleIdentifier)\""
+            guard SecRequirementCreateWithString(
+                requirementText as CFString,
+                SecCSFlags(),
+                &requirement) == errSecSuccess,
+                  let requirement,
+                  let platformIdentifier = information.platformIdentifier,
+                  platformIdentifier > 0 else {
+                throw VerificationError.invalidSignature
+            }
+            pinnedRequirement = requirement
+        } else {
+            let expectedTeamIdentifier: String
+            switch bundleIdentifier {
+            case "com.google.Chrome":
+                expectedTeamIdentifier = "EQHXZ8M8AV"
+            default:
+                throw VerificationError.invalidSignature
+            }
+            guard information.teamIdentifier == expectedTeamIdentifier else {
+                throw VerificationError.invalidSignature
+            }
+            var requirement: SecRequirement?
+            let requirementText = "anchor apple generic"
+                + " and identifier \"\(bundleIdentifier)\""
+                + " and certificate leaf[subject.OU]"
+                + " = \"\(expectedTeamIdentifier)\""
+            guard SecRequirementCreateWithString(
+                requirementText as CFString,
+                SecCSFlags(),
+                &requirement) == errSecSuccess,
+                  let requirement else {
+                throw VerificationError.invalidSignature
+            }
+            pinnedRequirement = requirement
+        }
+        guard SecStaticCodeCheckValidity(
+            staticCode,
+            strictFlags,
+            pinnedRequirement) == errSecSuccess else {
+            throw VerificationError.invalidSignature
+        }
+
+        return StaticIdentity(
+            proof: ComputerUseApplicationCodeIdentity(
+                authority: .reviewedPinned,
+                bundleIdentifier: bundleIdentifier,
+                canonicalBundlePath: applicationURL.path,
+                canonicalExecutablePath: executableURL.path,
+                designatedRequirement: embeddedRequirementText,
+                teamIdentifier: information.teamIdentifier,
+                platformIdentifier: information.platformIdentifier),
+            designatedRequirement: pinnedRequirement)
+    }
+
+    static func verifyRunning(
+        _ runningApplication: NSRunningApplication,
+        against staticIdentity: StaticIdentity
+    ) throws -> ComputerUseApplicationCodeIdentity {
+        let proof = staticIdentity.proof
+        guard !runningApplication.isTerminated,
+              runningApplication.processIdentifier > 0,
+              runningApplication.bundleIdentifier == proof.bundleIdentifier,
+              runningApplication.bundleURL?
+                .resolvingSymlinksInPath()
+                .standardizedFileURL.path == proof.canonicalBundlePath,
+              runningApplication.executableURL?
+                .resolvingSymlinksInPath()
+                .standardizedFileURL.path == proof.canonicalExecutablePath else {
+            throw VerificationError.runningCodeMismatch
+        }
+        let attributes = [
+            kSecGuestAttributePid as String:
+                NSNumber(value: runningApplication.processIdentifier),
+        ] as CFDictionary
+        var runningCode: SecCode?
+        guard SecCodeCopyGuestWithAttributes(
+            nil,
+            attributes,
+            SecCSFlags(),
+            &runningCode) == errSecSuccess,
+              let runningCode,
+              SecCodeCheckValidity(
+                runningCode,
+                SecCSFlags(rawValue: kSecCSStrictValidate),
+                staticIdentity.designatedRequirement) == errSecSuccess else {
+            throw VerificationError.runningCodeMismatch
+        }
+
+        var runningStaticCode: SecStaticCode?
+        guard SecCodeCopyStaticCode(
+            runningCode,
+            SecCSFlags(),
+            &runningStaticCode) == errSecSuccess,
+              let runningStaticCode else {
+            throw VerificationError.runningCodeMismatch
+        }
+        let information = try signingInformation(for: runningStaticCode)
+        guard information.identifier == proof.bundleIdentifier,
+              information.teamIdentifier == proof.teamIdentifier,
+              information.platformIdentifier == proof.platformIdentifier,
+              let runningRequirement = information.designatedRequirement,
+              requirementText(runningRequirement)
+                == proof.designatedRequirement else {
+            throw VerificationError.runningCodeMismatch
+        }
+        var runningPath: CFURL?
+        guard SecCodeCopyPath(
+            runningStaticCode,
+            SecCSFlags(),
+            &runningPath) == errSecSuccess,
+              let runningPath else {
+            throw VerificationError.runningCodeMismatch
+        }
+        let canonicalRunningPath = (runningPath as URL)
+            .resolvingSymlinksInPath()
+            .standardizedFileURL.path
+        guard canonicalRunningPath == proof.canonicalExecutablePath
+                || canonicalRunningPath == proof.canonicalBundlePath else {
+            throw VerificationError.runningCodeMismatch
+        }
+        return proof
+    }
+
+    private static func verifyUnreviewedRunning(
+        _ runningApplication: NSRunningApplication
+    ) throws -> ComputerUseApplicationCodeIdentity {
+        guard !runningApplication.isTerminated,
+              runningApplication.processIdentifier > 0,
+              let bundleIdentifier = runningApplication.bundleIdentifier,
+              !ComputerUseApplicationIdentity.allReviewedBundleIdentifiers
+                .contains(bundleIdentifier),
+              let suppliedBundleURL = runningApplication.bundleURL,
+              let suppliedExecutableURL = runningApplication.executableURL else {
+            throw VerificationError.runningCodeMismatch
+        }
+        let bundleURL = suppliedBundleURL
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
+        let executableURL = suppliedExecutableURL
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
+        let attributes = [
+            kSecGuestAttributePid as String:
+                NSNumber(value: runningApplication.processIdentifier),
+        ] as CFDictionary
+        var runningCode: SecCode?
+        guard SecCodeCopyGuestWithAttributes(
+            nil,
+            attributes,
+            SecCSFlags(),
+            &runningCode) == errSecSuccess,
+              let runningCode,
+              SecCodeCheckValidity(
+                runningCode,
+                SecCSFlags(rawValue: kSecCSStrictValidate),
+                nil) == errSecSuccess else {
+            throw VerificationError.runningCodeMismatch
+        }
+        var runningStaticCode: SecStaticCode?
+        guard SecCodeCopyStaticCode(
+            runningCode,
+            SecCSFlags(),
+            &runningStaticCode) == errSecSuccess,
+              let runningStaticCode,
+              SecStaticCodeCheckValidity(
+                runningStaticCode,
+                SecCSFlags(rawValue: kSecCSStrictValidate),
+                nil) == errSecSuccess else {
+            throw VerificationError.runningCodeMismatch
+        }
+        let information = try signingInformation(for: runningStaticCode)
+        guard information.identifier == bundleIdentifier,
+              let designatedRequirement = information.designatedRequirement,
+              let designatedRequirementText = requirementText(
+                designatedRequirement) else {
+            throw VerificationError.runningCodeMismatch
+        }
+        var runningPath: CFURL?
+        guard SecCodeCopyPath(
+            runningStaticCode,
+            SecCSFlags(),
+            &runningPath) == errSecSuccess,
+              let runningPath else {
+            throw VerificationError.runningCodeMismatch
+        }
+        let canonicalRunningPath = (runningPath as URL)
+            .resolvingSymlinksInPath()
+            .standardizedFileURL.path
+        guard canonicalRunningPath == executableURL.path
+                || canonicalRunningPath == bundleURL.path else {
+            throw VerificationError.runningCodeMismatch
+        }
+        return ComputerUseApplicationCodeIdentity(
+            authority: .runningCode,
+            bundleIdentifier: bundleIdentifier,
+            canonicalBundlePath: bundleURL.path,
+            canonicalExecutablePath: executableURL.path,
+            designatedRequirement: designatedRequirementText,
+            teamIdentifier: information.teamIdentifier,
+            platformIdentifier: information.platformIdentifier)
+    }
+
+    private struct SigningInformation {
+        let identifier: String?
+        let designatedRequirement: SecRequirement?
+        let teamIdentifier: String?
+        let platformIdentifier: UInt32?
+    }
+
+    private static func signingInformation(
+        for code: SecStaticCode
+    ) throws -> SigningInformation {
+        var rawInformation: CFDictionary?
+        let flags = SecCSFlags(
+            rawValue: kSecCSSigningInformation
+                | kSecCSRequirementInformation)
+        guard SecCodeCopySigningInformation(
+            code,
+            flags,
+            &rawInformation) == errSecSuccess,
+              let information = rawInformation as? [CFString: Any] else {
+            throw VerificationError.invalidSignature
+        }
+        let designatedRequirement: SecRequirement?
+        if let rawRequirement = information[
+            kSecCodeInfoDesignatedRequirement],
+           CFGetTypeID(rawRequirement as CFTypeRef)
+                == SecRequirementGetTypeID() {
+            designatedRequirement = unsafeBitCast(
+                rawRequirement as CFTypeRef,
+                to: SecRequirement.self)
+        } else {
+            designatedRequirement = nil
+        }
+        return SigningInformation(
+            identifier: information[kSecCodeInfoIdentifier] as? String,
+            designatedRequirement: designatedRequirement,
+            teamIdentifier:
+                information[kSecCodeInfoTeamIdentifier] as? String,
+            platformIdentifier:
+                (information[kSecCodeInfoPlatformIdentifier] as? NSNumber)?
+                    .uint32Value)
+    }
+
+    private static func requirementText(
+        _ requirement: SecRequirement
+    ) -> String? {
+        var text: CFString?
+        guard SecRequirementCopyString(
+            requirement,
+            SecCSFlags(),
+            &text) == errSecSuccess else {
+            return nil
+        }
+        return text as String?
+    }
+}
+
+struct ComputerUseFrontmostApplicationSnapshot: Equatable, Sendable {
+    let localizedName: String?
+    let identity: ComputerUseApplicationIdentity?
+    let identityIsAuthoritative: Bool
+
+    var policyName: String? {
+        if identityIsAuthoritative {
+            guard let identity else { return nil }
+            return ComputerUseApplicationIdentity.reviewedApplicationName(
+                forBundleIdentifier: identity.bundleIdentifier)
+                ?? identity.bundleIdentifier
+        }
+        guard let localizedName else { return nil }
+        let sanitized = ComputerUsePromptSanitizer.inline(
+            localizedName,
+            maximumUTF8Bytes: 256)
+        return sanitized.isEmpty ? nil : sanitized
+    }
+}
 
 fileprivate struct ComputerUseApprovalFingerprint: Equatable {
     let action: ComputerUsePredictedAction
@@ -48,6 +707,20 @@ struct ComputerUseFrontmostWindowCaptureIdentity: Equatable {
     let bounds: CGRect
 }
 
+/// Value-free identity of the UI state a semantic route was selected from.
+/// The executor compares this fingerprint across every asynchronous planning
+/// and grounding boundary and immediately before effects. Pixel hashing is
+/// focused to the active window when its capture geometry is authoritative so
+/// an unrelated menu-bar animation cannot continuously invalidate a task.
+struct ComputerUsePlanningStateFingerprint: Equatable {
+    let screenDigest: String
+    let displayBounds: CGRect
+    let frontmostWindowBounds: CGRect?
+    let frontmostApplication: String?
+    let frontmostApplicationIdentity: ComputerUseApplicationIdentity?
+    let focusedAccessibilityIdentity: String?
+}
+
 @MainActor
 final class ComputerUseHostTools {
     enum ToolError: Error, LocalizedError {
@@ -73,7 +746,9 @@ final class ComputerUseHostTools {
 
     private let injector: InputInjector
     private let mayAct: () -> Bool
-    private let applicationOpener: (String) async throws -> Void
+    private let applicationOpener:
+        (String) async throws -> ComputerUseApplicationIdentity?
+    private let applicationOpenerProvidesCanonicalIdentity: Bool
     private let approvalTargetProvider:
         ((ComputerUsePredictedAction) throws -> ComputerUseApprovalTargetSnapshot)?
     private let actionPerformer: ((ComputerUsePredictedAction) throws -> Void)?
@@ -89,14 +764,18 @@ final class ComputerUseHostTools {
         (() -> ComputerUseAuthenticationContextSnapshot?)?
     private let screenCaptureConsentContextProvider:
         (() -> ComputerUseAuthenticationContextSnapshot?)?
+    private let planningAccessibilityIdentityProvider: (() -> String?)?
     private let frontmostApplicationProvider: () -> String?
+    private let frontmostApplicationIdentityProvider:
+        (() -> ComputerUseApplicationIdentity?)?
+    private let usesLiveFrontmostApplicationIdentity: Bool
 
     init(
         injector: InputInjector,
         mayAct: @escaping () -> Bool,
-        applicationOpener: @escaping (String) async throws -> Void = {
-            try await ComputerUseHostTools.openInstalledApplication(named: $0)
-        },
+        applicationOpener: ((String) async throws -> Void)? = nil,
+        applicationIdentityOpener:
+            ((String) async throws -> ComputerUseApplicationIdentity?)? = nil,
         approvalTargetProvider:
             ((ComputerUsePredictedAction) throws -> ComputerUseApprovalTargetSnapshot)? = nil,
         actionPerformer: ((ComputerUsePredictedAction) throws -> Void)? = nil,
@@ -112,13 +791,28 @@ final class ComputerUseHostTools {
             (() -> ComputerUseAuthenticationContextSnapshot?)? = nil,
         screenCaptureConsentContextProvider:
             (() -> ComputerUseAuthenticationContextSnapshot?)? = nil,
-        frontmostApplicationProvider: @escaping () -> String? = {
-            NSWorkspace.shared.frontmostApplication?.localizedName
-        }
+        planningAccessibilityIdentityProvider: (() -> String?)? = nil,
+        frontmostApplicationIdentityProvider:
+            (() -> ComputerUseApplicationIdentity?)? = nil,
+        frontmostApplicationProvider: (() -> String?)? = nil
     ) {
         self.injector = injector
         self.mayAct = mayAct
-        self.applicationOpener = applicationOpener
+        if let applicationIdentityOpener {
+            self.applicationOpener = applicationIdentityOpener
+            self.applicationOpenerProvidesCanonicalIdentity = true
+        } else if let applicationOpener {
+            self.applicationOpener = { name in
+                try await applicationOpener(name)
+                return nil
+            }
+            self.applicationOpenerProvidesCanonicalIdentity = false
+        } else {
+            self.applicationOpener = {
+                try await ComputerUseHostTools.openInstalledApplication(named: $0)
+            }
+            self.applicationOpenerProvidesCanonicalIdentity = true
+        }
         self.approvalTargetProvider = approvalTargetProvider
         self.actionPerformer = actionPerformer
         self.screenProvider = screenProvider
@@ -164,11 +858,44 @@ final class ComputerUseHostTools {
         } else {
             self.screenCaptureConsentContextProvider = nil
         }
-        self.frontmostApplicationProvider = frontmostApplicationProvider
+        self.planningAccessibilityIdentityProvider =
+            planningAccessibilityIdentityProvider
+        self.frontmostApplicationProvider = frontmostApplicationProvider ?? {
+            NSWorkspace.shared.frontmostApplication?.localizedName
+        }
+        self.frontmostApplicationIdentityProvider =
+            frontmostApplicationIdentityProvider
+        self.usesLiveFrontmostApplicationIdentity =
+            frontmostApplicationIdentityProvider == nil
+                && frontmostApplicationProvider == nil
+                && screenProvider == nil
     }
 
     func frontmostApplicationName() -> String? {
-        frontmostApplicationProvider()
+        frontmostApplicationSnapshot().policyName
+    }
+
+    func frontmostApplicationSnapshot()
+        -> ComputerUseFrontmostApplicationSnapshot {
+        if usesLiveFrontmostApplicationIdentity {
+            guard let application = NSWorkspace.shared.frontmostApplication else {
+                return ComputerUseFrontmostApplicationSnapshot(
+                    localizedName: nil,
+                    identity: nil,
+                    identityIsAuthoritative: false)
+            }
+            let identity = ComputerUseApplicationIdentity(
+                runningApplication: application)
+            return ComputerUseFrontmostApplicationSnapshot(
+                localizedName: application.localizedName,
+                identity: identity,
+                identityIsAuthoritative: identity?.codeIdentity != nil)
+        }
+        let identity = frontmostApplicationIdentityProvider?()
+        return ComputerUseFrontmostApplicationSnapshot(
+            localizedName: frontmostApplicationProvider(),
+            identity: identity,
+            identityIsAuthoritative: identity?.codeIdentity != nil)
     }
 
     /// Checks whether a transient macOS notification owns the exact pointer
@@ -272,7 +999,10 @@ final class ComputerUseHostTools {
     /// model. Native Launch Services is substantially more reliable than
     /// racing synthetic text against Spotlight, while the model still decides
     /// the action from the current screenshot and the user's prompt.
-    func openApplication(named rawName: String) async throws {
+    @discardableResult
+    func openApplication(
+        named rawName: String
+    ) async throws -> ComputerUseApplicationIdentity? {
         guard mayAct() else { throw ToolError.paused }
         let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty,
@@ -281,41 +1011,110 @@ final class ComputerUseHostTools {
               !name.contains("\\"),
               !name.contains("\0"),
               !name.contains("\n"),
-              !name.contains("\r") else {
+              !name.contains("\r"),
+              name.rangeOfCharacter(from: .controlCharacters) == nil else {
             throw ToolError.applicationUnavailable
         }
-        try await applicationOpener(name)
+        let identity = try await applicationOpener(name)
+        if applicationOpenerProvidesCanonicalIdentity {
+            guard let identity, identity.codeIdentity != nil else {
+                throw ToolError.applicationUnavailable
+            }
+            if ComputerUseApplicationIdentity.reviewedBundleIdentifiers(
+                forApplicationNamed: name) != nil,
+               !identity.matchesReviewedApplication(named: name) {
+                throw ToolError.applicationUnavailable
+            }
+        }
+        return identity
     }
 
-    private static func openInstalledApplication(named name: String) async throws {
-        // Launch Services' name resolver remains the only system API that maps
-        // a user-facing application name (rather than a bundle identifier) to
-        // an installed bundle. Revalidate the returned URL before opening it.
-        guard let path = NSWorkspace.shared.fullPath(forApplication: name) else {
-            throw ToolError.applicationUnavailable
+    private static func openInstalledApplication(
+        named name: String
+    ) async throws -> ComputerUseApplicationIdentity {
+        // Common applications have a reviewed bundle identity, so bypass the
+        // attacker-controlled localized-name namespace entirely. Unreviewed
+        // names retain Launch Services' resolver but are still rebound to the
+        // returned bundle/process identity before entering the task ledger.
+        let reviewedIdentifiers = ComputerUseApplicationIdentity
+            .reviewedBundleIdentifiers(forApplicationNamed: name)
+        let unresolvedURL: URL
+        if let reviewedIdentifiers {
+            guard let reviewedURL = reviewedIdentifiers.sorted().lazy
+                .compactMap({ identifier in
+                    NSWorkspace.shared.urlForApplication(
+                        withBundleIdentifier: identifier)
+                }).first else {
+                throw ToolError.applicationUnavailable
+            }
+            unresolvedURL = reviewedURL
+        } else {
+            guard let path = NSWorkspace.shared.fullPath(
+                forApplication: name) else {
+                throw ToolError.applicationUnavailable
+            }
+            unresolvedURL = URL(fileURLWithPath: path)
         }
-        let applicationURL = URL(fileURLWithPath: path)
+        let applicationURL = unresolvedURL
             .resolvingSymlinksInPath()
             .standardizedFileURL
         guard applicationURL.pathExtension.caseInsensitiveCompare("app") == .orderedSame,
-              Bundle(url: applicationURL)?.bundleIdentifier != nil else {
+              let resolvedBundleIdentifier = Bundle(url: applicationURL)?
+                .bundleIdentifier else {
             throw ToolError.applicationUnavailable
+        }
+        if let reviewedIdentifiers,
+           !reviewedIdentifiers.contains(resolvedBundleIdentifier) {
+            throw ToolError.applicationUnavailable
+        }
+        let reviewedStaticIdentity: ComputerUseReviewedApplicationCodeVerifier
+            .StaticIdentity?
+        if let reviewedIdentifiers {
+            do {
+                reviewedStaticIdentity = try
+                    ComputerUseReviewedApplicationCodeVerifier.verifyStatic(
+                        applicationURL: applicationURL,
+                        expectedBundleIdentifiers: reviewedIdentifiers)
+            } catch {
+                throw ToolError.applicationUnavailable
+            }
+        } else {
+            reviewedStaticIdentity = nil
         }
 
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = true
-        try await withCheckedThrowingContinuation {
-            (continuation: CheckedContinuation<Void, Error>) in
+        return try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<ComputerUseApplicationIdentity, Error>) in
             NSWorkspace.shared.openApplication(
                 at: applicationURL,
                 configuration: configuration
             ) { application, error in
                 if let error {
                     continuation.resume(throwing: error)
-                } else if application == nil {
-                    continuation.resume(throwing: ToolError.applicationUnavailable)
+                } else if let application {
+                    do {
+                        let proof = try reviewedStaticIdentity.map {
+                            try ComputerUseReviewedApplicationCodeVerifier
+                                .verifyRunning(application, against: $0)
+                        }
+                        guard let identity = ComputerUseApplicationIdentity(
+                            runningApplication: application,
+                            codeIdentity: proof),
+                              identity.bundleIdentifier
+                                == resolvedBundleIdentifier,
+                              reviewedStaticIdentity == nil
+                                || identity.matchesReviewedApplication(
+                                    named: name) else {
+                            throw ToolError.applicationUnavailable
+                        }
+                        continuation.resume(returning: identity)
+                    } catch {
+                        continuation.resume(
+                            throwing: ToolError.applicationUnavailable)
+                    }
                 } else {
-                    continuation.resume()
+                    continuation.resume(throwing: ToolError.applicationUnavailable)
                 }
             }
         }
@@ -351,6 +1150,113 @@ final class ComputerUseHostTools {
             image: CIImage(cgImage: image),
             displayBounds: bounds,
             frontmostWindowBounds: frontmostWindowBounds)
+    }
+
+    func planningStateFingerprint(
+        for observation: ComputerUseScreenObservation,
+        frontmostApplication: String?,
+        frontmostApplicationIdentity: ComputerUseApplicationIdentity? = nil
+    ) throws -> ComputerUsePlanningStateFingerprint {
+        guard mayAct() else { throw ToolError.paused }
+        let focusedIdentity: String?
+        if let planningAccessibilityIdentityProvider {
+            focusedIdentity = planningAccessibilityIdentityProvider()
+        } else if screenProvider != nil {
+            // Synthetic pixels must never be mixed with the person's live AX
+            // focus. Tests that exercise AX changes inject the explicit seam.
+            focusedIdentity = nil
+        } else {
+            focusedIdentity = focusedElementSnapshot()?.identity
+        }
+        return ComputerUsePlanningStateFingerprint(
+            screenDigest: try planningScreenDigest(observation),
+            displayBounds: observation.displayBounds,
+            frontmostWindowBounds: observation.frontmostWindowBounds,
+            frontmostApplication: frontmostApplication,
+            frontmostApplicationIdentity: frontmostApplicationIdentity,
+            focusedAccessibilityIdentity: focusedIdentity)
+    }
+
+    private func planningScreenDigest(
+        _ observation: ComputerUseScreenObservation
+    ) throws -> String {
+        let image = observation.image
+        let fullExtent = image.extent.integral
+        let extent = planningImageExtent(
+            observation: observation,
+            fullImageExtent: fullExtent)
+        guard !extent.isNull,
+              !extent.isEmpty,
+              extent.width.isFinite,
+              extent.height.isFinite,
+              extent.width > 0,
+              extent.height > 0,
+              let cgImage = CIContext(options: [.cacheIntermediates: false])
+                .createCGImage(image, from: extent) else {
+            throw ToolError.screenshotUnavailable
+        }
+        let side = 256
+        var pixels = [UInt8](repeating: 0, count: side * side * 4)
+        let rendered = pixels.withUnsafeMutableBytes { buffer -> Bool in
+            guard let context = CGContext(
+                data: buffer.baseAddress,
+                width: side,
+                height: side,
+                bitsPerComponent: 8,
+                bytesPerRow: side * 4,
+                space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+            ) else {
+                return false
+            }
+            context.interpolationQuality = .high
+            context.draw(
+                cgImage,
+                in: CGRect(x: 0, y: 0, width: side, height: side))
+            return true
+        }
+        guard rendered else { throw ToolError.screenshotUnavailable }
+        return SHA256.hash(data: Data(pixels))
+            .map { String(format: "%02x", $0) }
+            .joined()
+    }
+
+    private func planningImageExtent(
+        observation: ComputerUseScreenObservation,
+        fullImageExtent: CGRect
+    ) -> CGRect {
+        guard let windowBounds = observation.frontmostWindowBounds,
+              !windowBounds.isNull,
+              !windowBounds.isEmpty,
+              !observation.displayBounds.isNull,
+              !observation.displayBounds.isEmpty,
+              observation.displayBounds.width > 0,
+              observation.displayBounds.height > 0 else {
+            return fullImageExtent
+        }
+        let focusedDisplayBounds = windowBounds.intersection(
+            observation.displayBounds)
+        guard !focusedDisplayBounds.isNull,
+              !focusedDisplayBounds.isEmpty else {
+            return fullImageExtent
+        }
+        let scaleX = fullImageExtent.width / observation.displayBounds.width
+        let scaleY = fullImageExtent.height / observation.displayBounds.height
+        let pixelBounds = CGRect(
+            x: fullImageExtent.minX
+                + (focusedDisplayBounds.minX
+                    - observation.displayBounds.minX) * scaleX,
+            y: fullImageExtent.maxY
+                - (focusedDisplayBounds.maxY
+                    - observation.displayBounds.minY) * scaleY,
+            width: focusedDisplayBounds.width * scaleX,
+            height: focusedDisplayBounds.height * scaleY)
+            .integral
+            .intersection(fullImageExtent)
+        guard !pixelBounds.isNull, !pixelBounds.isEmpty else {
+            return fullImageExtent
+        }
+        return pixelBounds
     }
 
     static func stableFrontmostWindowBounds(
@@ -1238,6 +2144,7 @@ final class ComputerUseHostTools {
 private final class ComputerUseActionGate: @unchecked Sendable {
     private let lock = NSLock()
     private var value = true
+    private var automationPending = false
     private var automationActive = false
     private var approvalPending = false
 
@@ -1249,11 +2156,28 @@ private final class ComputerUseActionGate: @unchecked Sendable {
         lock.withLock { value = allowed }
     }
 
-    func beginAutomation() {
+    /// Claims one automation while it waits for a cancelled predecessor to
+    /// join. Actions stay closed, but direct input still owns an intervention
+    /// race and can invalidate this pending claim synchronously off-main.
+    func beginAutomationPending() {
         lock.withLock {
+            value = false
+            automationPending = true
+            automationActive = false
+            approvalPending = false
+        }
+    }
+
+    /// Opens the pending claim only if no intervention, stop, or newer state
+    /// transition took ownership while the predecessor was unwinding.
+    func activatePendingAutomation() -> Bool {
+        lock.withLock {
+            guard automationPending else { return false }
             value = true
+            automationPending = false
             automationActive = true
             approvalPending = false
+            return true
         }
     }
 
@@ -1265,6 +2189,7 @@ private final class ComputerUseActionGate: @unchecked Sendable {
         lock.withLock {
             guard approvalPending else { return false }
             value = true
+            automationPending = false
             automationActive = true
             approvalPending = false
             return true
@@ -1278,12 +2203,15 @@ private final class ComputerUseActionGate: @unchecked Sendable {
     @discardableResult
     func endAutomation(allowsActions: Bool) -> Bool {
         lock.withLock {
-            let ownsTransition = automationActive || approvalPending
+            let ownsTransition = automationPending
+                || automationActive
+                || approvalPending
             if !allowsActions {
                 value = false
             } else if ownsTransition {
                 value = true
             }
+            automationPending = false
             automationActive = false
             approvalPending = false
             return value
@@ -1293,6 +2221,7 @@ private final class ComputerUseActionGate: @unchecked Sendable {
     func beginApprovalWait() {
         lock.withLock {
             value = false
+            automationPending = false
             automationActive = false
             approvalPending = true
         }
@@ -1300,8 +2229,11 @@ private final class ComputerUseActionGate: @unchecked Sendable {
 
     func blockForIntervention() -> Bool {
         lock.withLock {
-            guard automationActive || approvalPending else { return false }
+            guard automationPending
+                    || automationActive
+                    || approvalPending else { return false }
             value = false
+            automationPending = false
             automationActive = false
             approvalPending = false
             return true
@@ -1417,9 +2349,38 @@ protocol ComputerUseExecuting: AnyObject {
         tools: ComputerUseHostTools,
         progress: @escaping (String) -> Void
     ) async throws -> ComputerUseExecutionResult
+
+    /// Structured production entrypoint. Keeping prior turns typed through
+    /// the executor boundary prevents assistant prose from being recovered by
+    /// parsing a display-oriented labeled prompt and accidentally promoted to
+    /// current-user authority.
+    func execute(
+        taskID: String,
+        modelPrompt: String,
+        currentUserPrompt: String,
+        conversation: [ComputerUseConversationTurn],
+        tools: ComputerUseHostTools,
+        progress: @escaping (String) -> Void
+    ) async throws -> ComputerUseExecutionResult
 }
 
 extension ComputerUseExecuting {
+    func execute(
+        taskID: String,
+        modelPrompt: String,
+        currentUserPrompt: String,
+        conversation: [ComputerUseConversationTurn],
+        tools: ComputerUseHostTools,
+        progress: @escaping (String) -> Void
+    ) async throws -> ComputerUseExecutionResult {
+        return try await execute(
+            taskID: taskID,
+            prompt: modelPrompt,
+            trustedUserPrompt: currentUserPrompt,
+            tools: tools,
+            progress: progress)
+    }
+
     func execute(
         taskID: String,
         prompt: String,
@@ -1541,6 +2502,9 @@ final class HostComputerUseManager: ObservableObject {
         /// Current user-authored request, retained separately from the model
         /// prompt so assistant conversation can never become host evidence.
         let trustedUserPrompt: String
+        /// Typed prior chat supplied by the signed prompt payload. Host-authored
+        /// resume/replan prose is deliberately not inserted into these turns.
+        let conversation: [ComputerUseConversationTurn]
         /// False only when a versioned Pause reached the durable ledger before
         /// its Prompt. Resume can then claim and start that Prompt exactly once
         /// instead of treating it as work that needs a continuation replan.
@@ -1550,6 +2514,7 @@ final class HostComputerUseManager: ObservableObject {
             envelope: ComputerUseEnvelope,
             channel: any HostComputerUseChannel,
             trustedUserPrompt: String? = nil,
+            conversation: [ComputerUseConversationTurn]? = nil,
             hasStarted: Bool = true
         ) {
             self.envelope = envelope
@@ -1557,6 +2522,9 @@ final class HostComputerUseManager: ObservableObject {
             self.trustedUserPrompt = trustedUserPrompt
                 ?? ComputerUsePromptRequest.decodeCompatibleBody(
                     envelope.body).prompt
+            self.conversation = conversation
+                ?? ComputerUsePromptRequest.decodeCompatibleBody(
+                    envelope.body).conversation
             self.hasStarted = hasStarted
         }
 
@@ -1876,7 +2844,6 @@ final class HostComputerUseManager: ObservableObject {
             currentExecutionToken = nil
             cancelActiveMCPWork()
             executionTask?.cancel()
-            executionTask = nil
             activity = .paused
             if let interrupted {
                 sendUserInterventionStatus(
@@ -1949,7 +2916,6 @@ final class HostComputerUseManager: ObservableObject {
         pollingTask?.cancel()
         pollingTask = nil
         executionTask?.cancel()
-        executionTask = nil
         currentExecution = nil
         pausedExecution = nil
         pendingApproval = nil
@@ -2263,7 +3229,6 @@ final class HostComputerUseManager: ObservableObject {
         currentExecutionToken = nil
         cancelActiveMCPWork()
         executionTask?.cancel()
-        executionTask = nil
         activity = .paused
         sendUserInterventionStatus(
             Self.userInterventionGuidance,
@@ -2329,6 +3294,7 @@ final class HostComputerUseManager: ObservableObject {
             executor,
             for: resumed,
             trustedUserPrompt: pausedExecution.trustedUserPrompt,
+            conversation: pausedExecution.conversation,
             channel: pausedExecution.channel,
             isResuming: true)
     }
@@ -2345,7 +3311,6 @@ final class HostComputerUseManager: ObservableObject {
         let invalidatedApproval = pendingApproval
         cancelActiveMCPWork()
         executionTask?.cancel()
-        executionTask = nil
         currentExecution = nil
         pausedExecution = nil
         pendingApproval = nil
@@ -2470,6 +3435,7 @@ final class HostComputerUseManager: ObservableObject {
                     for: replanned,
                     trustedUserPrompt:
                         pendingApproval.context.trustedUserPrompt,
+                    conversation: pendingApproval.context.conversation,
                     channel: pendingApproval.context.channel,
                     isResuming: true)
                 return
@@ -2505,6 +3471,7 @@ final class HostComputerUseManager: ObservableObject {
                 for: approvedPrompt,
                 trustedUserPrompt:
                     pendingApproval.context.trustedUserPrompt,
+                conversation: pendingApproval.context.conversation,
                 channel: pendingApproval.context.channel,
                 isResuming: true)
         }
@@ -3124,6 +4091,7 @@ final class HostComputerUseManager: ObservableObject {
             executor,
             for: executionEnvelope,
             trustedUserPrompt: request.prompt,
+            conversation: request.conversation,
             channel: channel)
     }
 
@@ -3131,15 +4099,21 @@ final class HostComputerUseManager: ObservableObject {
         _ executor: any ComputerUseExecuting,
         for envelope: ComputerUseEnvelope,
         trustedUserPrompt: String,
+        conversation: [ComputerUseConversationTurn],
         channel: any HostComputerUseChannel,
         isResuming: Bool = false
     ) {
-        executionTask?.cancel()
-        actionGate.beginAutomation()
+        let precedingExecution = executionTask
+        precedingExecution?.cancel()
+        // Keep native injection closed while retaining intervention ownership.
+        // A person's input during this join must invalidate the successor even
+        // though its executor has not started yet.
+        actionGate.beginAutomationPending()
         let context = ExecutionContext(
             envelope: envelope,
             channel: channel,
-            trustedUserPrompt: trustedUserPrompt)
+            trustedUserPrompt: trustedUserPrompt,
+            conversation: conversation)
         let token = UUID()
         currentExecution = context
         currentExecutionToken = token
@@ -3147,6 +4121,18 @@ final class HostComputerUseManager: ObservableObject {
         sendStatus("working", replyingTo: envelope, channel: channel)
         executionTask = Task { [weak self] in
             guard let self else { return }
+            // Cancellation is a lifecycle barrier, not merely a signal. The
+            // previous executor joins its runtime-cancel child before this
+            // separately claimed prompt is allowed to activate/reuse a model.
+            await precedingExecution?.value
+            guard !Task.isCancelled,
+                  currentExecutionToken == token else { return }
+            guard actionGate.activatePendingAutomation() else {
+                pauseAfterPendingAutomationWasBlocked(
+                    context: context,
+                    token: token)
+                return
+            }
             do {
                 let progress: (String) -> Void = { [weak self] value in
                     guard self?.currentExecutionToken == token else { return }
@@ -3155,8 +4141,9 @@ final class HostComputerUseManager: ObservableObject {
                 }
                 let result = try await executor.execute(
                     taskID: envelope.id,
-                    prompt: envelope.body,
-                    trustedUserPrompt: trustedUserPrompt,
+                    modelPrompt: envelope.body,
+                    currentUserPrompt: trustedUserPrompt,
+                    conversation: conversation,
                     tools: tools,
                     progress: progress)
                 guard !Task.isCancelled,
@@ -3211,6 +4198,23 @@ final class HostComputerUseManager: ObservableObject {
         }
     }
 
+    private func pauseAfterPendingAutomationWasBlocked(
+        context: ExecutionContext,
+        token: UUID
+    ) {
+        guard currentExecutionToken == token else { return }
+        actionGate.endAutomation(allowsActions: false)
+        currentExecution = nil
+        currentExecutionToken = nil
+        executionTask = nil
+        pausedExecution = context
+        activity = .paused
+        sendUserInterventionStatus(
+            Self.userInterventionGuidance,
+            replyingTo: context.envelope,
+            channel: context.channel)
+    }
+
     private func continueApprovedMCP(
         _ prepared: MCPPreparedApproval,
         executor: any ComputerUseExecuting,
@@ -3223,7 +4227,8 @@ final class HostComputerUseManager: ObservableObject {
             return
         }
 
-        executionTask?.cancel()
+        let precedingExecution = executionTask
+        precedingExecution?.cancel()
         let token = UUID()
         currentExecution = context
         currentExecutionToken = token
@@ -3235,6 +4240,9 @@ final class HostComputerUseManager: ObservableObject {
 
         executionTask = Task { [weak self] in
             guard let self else { return }
+            await precedingExecution?.value
+            guard !Task.isCancelled,
+                  currentExecutionToken == token else { return }
             guard actionGate.allowsActions else {
                 pauseAfterApprovedOperationWasBlocked(context: context)
                 return

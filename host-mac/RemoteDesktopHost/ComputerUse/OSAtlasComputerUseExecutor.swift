@@ -449,6 +449,32 @@ enum OSAtlasAccessibilityClickCorrection {
     }
 }
 
+private final class OSAtlasEndpointCancellationJoin: @unchecked Sendable {
+    private let lock = NSLock()
+    private let runtime: OSAtlasLlamaRuntime
+    private let endpoint: OSAtlasLlamaEndpoint
+    private var task: Task<Void, Never>?
+
+    init(runtime: OSAtlasLlamaRuntime, endpoint: OSAtlasLlamaEndpoint) {
+        self.runtime = runtime
+        self.endpoint = endpoint
+    }
+
+    /// `onCancel` is synchronous, so it must bridge to the runtime actor with
+    /// one child task. Returning the same handle lets the cancelled execution
+    /// join that child before it can be replaced by another same-endpoint job.
+    func start() -> Task<Void, Never> {
+        lock.withLock {
+            if let task { return task }
+            let task = Task { [runtime, endpoint] in
+                await runtime.cancel(endpoint: endpoint)
+            }
+            self.task = task
+            return task
+        }
+    }
+}
+
 /// OS-Atlas-Pro visual fallback served by a bundled, loopback-only
 /// llama-server. Structured applications still route through MCP first.
 @MainActor
@@ -509,7 +535,12 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
     private let runtime: OSAtlasLlamaRuntime
     private let actionContract: OSAtlasActionContract
     private let checkpointActionProfile: OSAtlasCheckpointActionProfile
+    /// Test-only or legacy single-model router. Verified package loading uses
+    /// `semanticRouterModelURL` and creates an endpoint-bound local router for
+    /// every execution instead of retaining a stale generation.
     private let semanticRouter: (any OSAtlasSemanticActionRouting)?
+    private let semanticRouterModelURL: URL?
+    private let appleSemanticRouter: (any OSAtlasSemanticActionRouting)?
     private let allowsExplicitActionCompatibility: Bool
     private let maxSteps: Int
     private let actionDelay: Duration
@@ -524,6 +555,8 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
         actionContract: OSAtlasActionContract,
         checkpointActionProfile: OSAtlasCheckpointActionProfile,
         semanticRouter: (any OSAtlasSemanticActionRouting)?,
+        semanticRouterModelURL: URL? = nil,
+        appleSemanticRouter: (any OSAtlasSemanticActionRouting)? = nil,
         allowsExplicitActionCompatibility: Bool,
         maxSteps: Int,
         actionDelay: Duration,
@@ -537,6 +570,8 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
         self.actionContract = actionContract
         self.checkpointActionProfile = checkpointActionProfile
         self.semanticRouter = semanticRouter
+        self.semanticRouterModelURL = semanticRouterModelURL
+        self.appleSemanticRouter = appleSemanticRouter
         self.allowsExplicitActionCompatibility =
             allowsExplicitActionCompatibility
         self.maxSteps = maxSteps
@@ -572,6 +607,40 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
             // non-deterministic step. Transient startup availability must not
             // permanently downgrade the executor to raw checkpoint actions.
             semanticRouter: candidateRouter,
+            allowsExplicitActionCompatibility: false,
+            maxSteps: maximumSteps,
+            actionDelay: .milliseconds(700),
+            waitDelay: .seconds(1))
+    }
+
+    /// Production entry point for the verified visual + semantic package.
+    /// Both model paths originate in one resolved receipt. Loading verifies
+    /// that llama.cpp can activate the complete package, while execution
+    /// revalidates the current endpoint before constructing its local router.
+    static func load(
+        installation: OSAtlasResolvedRuntimeInstallation,
+        runtime: OSAtlasLlamaRuntime = .shared,
+        actionContract: OSAtlasActionContract = .macOS,
+        appleSemanticRouter: any OSAtlasSemanticActionRouting =
+            AppleFoundationVisualActionRouter(),
+        progress: @escaping @MainActor (String) -> Void
+    ) async throws -> OSAtlasComputerUseExecutor {
+        guard installation.visualInputs.variant == .pro4B else {
+            throw RuntimeError.proModelRequired
+        }
+        progress("Starting the local visual and action-planning models…")
+        _ = try await runtime.activateMultiModel(
+            visualInputs: installation.visualInputs,
+            semanticModelURL: installation.semanticRouterModelURL)
+        progress("AI Computer Use is ready")
+        return OSAtlasComputerUseExecutor(
+            inputs: installation.visualInputs,
+            runtime: runtime,
+            actionContract: actionContract,
+            checkpointActionProfile: .installedPro4BQ4KMLegacy,
+            semanticRouter: nil,
+            semanticRouterModelURL: installation.semanticRouterModelURL,
+            appleSemanticRouter: appleSemanticRouter,
             allowsExplicitActionCompatibility: false,
             maxSteps: maximumSteps,
             actionDelay: .milliseconds(700),
@@ -628,6 +697,37 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
         tools: ComputerUseHostTools,
         progress: @escaping (String) -> Void
     ) async throws -> ComputerUseExecutionResult {
+        try await executeResolved(
+            prompt: prompt,
+            trustedUserPrompt: trustedUserPrompt,
+            conversation: [],
+            tools: tools,
+            progress: progress)
+    }
+
+    func execute(
+        taskID _: String,
+        modelPrompt: String,
+        currentUserPrompt: String,
+        conversation: [ComputerUseConversationTurn],
+        tools: ComputerUseHostTools,
+        progress: @escaping (String) -> Void
+    ) async throws -> ComputerUseExecutionResult {
+        try await executeResolved(
+            prompt: modelPrompt,
+            trustedUserPrompt: currentUserPrompt,
+            conversation: conversation,
+            tools: tools,
+            progress: progress)
+    }
+
+    private func executeResolved(
+        prompt: String,
+        trustedUserPrompt: String,
+        conversation: [ComputerUseConversationTurn],
+        tools: ComputerUseHostTools,
+        progress: @escaping (String) -> Void
+    ) async throws -> ComputerUseExecutionResult {
         if allowsExplicitActionCompatibility,
            let explicitDirective = Self.explicitlyRequiredAction(
             in: trustedUserPrompt,
@@ -636,29 +736,85 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
             throw RuntimeError.unverifiedCheckpointAction(
                 explicitDirective.rawValue)
         }
-        let endpoint = try await runtime.activate(inputs)
+        let endpoint: OSAtlasLlamaEndpoint
+        let executionSemanticRouter: (any OSAtlasSemanticActionRouting)?
+        if let semanticRouterModelURL {
+            endpoint = try await runtime.activateMultiModel(
+                visualInputs: inputs,
+                semanticModelURL: semanticRouterModelURL)
+            let fallbackRouter = LlamaSemanticActionRouter(
+                runtime: runtime,
+                endpoint: endpoint)
+            executionSemanticRouter = AppleFirstSemanticActionRouter(
+                fallbackRouter: fallbackRouter,
+                appleRouter: appleSemanticRouter
+                    ?? AppleFoundationVisualActionRouter())
+        } else {
+            endpoint = try await runtime.activate(inputs)
+            executionSemanticRouter = semanticRouter
+        }
         let ownedRuntime = runtime
-        return try await withTaskCancellationHandler {
-            try await executeLoop(
-                prompt: prompt,
-                trustedUserPrompt: trustedUserPrompt,
-                endpoint: endpoint,
-                tools: tools,
-                progress: progress)
-        } onCancel: {
-            Task { await ownedRuntime.cancel(endpoint: endpoint) }
+        let cancellationJoin = OSAtlasEndpointCancellationJoin(
+            runtime: ownedRuntime,
+            endpoint: endpoint)
+        do {
+            let result = try await withTaskCancellationHandler {
+                let result = try await executeLoop(
+                    prompt: prompt,
+                    trustedUserPrompt: trustedUserPrompt,
+                    conversation: conversation,
+                    endpoint: endpoint,
+                    semanticRouter: executionSemanticRouter,
+                    tools: tools,
+                    progress: progress)
+                try Task.checkCancellation()
+                return result
+            } onCancel: {
+                _ = cancellationJoin.start()
+            }
+            try Task.checkCancellation()
+            return result
+        } catch {
+            if error is CancellationError || Task.isCancelled {
+                // `start()` is idempotent. Calling it here closes the
+                // concurrent-handler registration race and structurally joins
+                // runtime cancellation before this execution can finish.
+                await cancellationJoin.start().value
+                throw CancellationError()
+            }
+            throw error
         }
     }
 
     private func executeLoop(
         prompt: String,
         trustedUserPrompt: String,
+        conversation: [ComputerUseConversationTurn],
         endpoint: OSAtlasLlamaEndpoint,
+        semanticRouter: (any OSAtlasSemanticActionRouting)?,
         tools: ComputerUseHostTools,
         progress: @escaping (String) -> Void
     ) async throws -> ComputerUseExecutionResult {
         var history: [String] = []
         var openedApplications = Set<String>()
+        var openedApplicationIdentities = Set<ComputerUseApplicationIdentity>()
+        func recordOpenedApplication(
+            named rawName: String,
+            identity: ComputerUseApplicationIdentity?
+        ) {
+            let name = ComputerUsePromptSanitizer.inline(
+                rawName,
+                maximumUTF8Bytes:
+                    OSAtlasSemanticRoutingRequest.maximumApplicationNameBytes)
+            if !name.isEmpty { openedApplications.insert(name) }
+            if let identity { openedApplicationIdentities.insert(identity) }
+        }
+        func sortedOpenedApplicationIdentities()
+            -> [ComputerUseApplicationIdentity] {
+            openedApplicationIdentities.sorted {
+                $0.stableSortKey < $1.stableSortKey
+            }
+        }
         var didForegroundDeliveryQuoteBrowser = false
         var didAttemptAuthenticationEscape = false
         var didAttemptModelAction = false
@@ -671,11 +827,38 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
         let completesAfterOpeningApplication =
             MCPFirstComputerUseExecutor.isPureOpenApplicationRequest(
                 trustedUserPrompt)
+        func capturePlanningState() throws -> (
+            observation: ComputerUseScreenObservation,
+            frontmostApplication: ComputerUseFrontmostApplicationSnapshot,
+            fingerprint: ComputerUsePlanningStateFingerprint
+        ) {
+            let observation = try tools.currentScreen()
+            let frontmostApplication = tools.frontmostApplicationSnapshot()
+            return (
+                observation,
+                frontmostApplication,
+                try tools.planningStateFingerprint(
+                    for: observation,
+                    frontmostApplication: frontmostApplication.policyName,
+                    frontmostApplicationIdentity:
+                        frontmostApplication.identity))
+        }
+        func revalidatedPlanningState(
+            expected: ComputerUsePlanningStateFingerprint
+        ) throws -> (
+            observation: ComputerUseScreenObservation,
+            frontmostApplication: ComputerUseFrontmostApplicationSnapshot,
+            fingerprint: ComputerUsePlanningStateFingerprint
+        )? {
+            let fresh = try capturePlanningState()
+            return fresh.fingerprint == expected ? fresh : nil
+        }
 
         for step in 1 ... maxSteps {
             try Task.checkCancellation()
             progress("Step \(step): looking at the screen…")
-            let observation = try tools.currentScreen()
+            var planningCapture = try capturePlanningState()
+            var observation = planningCapture.observation
             // The macOS screen-and-audio consent sheet is a system-owned
             // security boundary. Prefer bounded, value-redacted AX when the
             // sheet exposes it, then fall back to local OCR of the pixels that
@@ -706,7 +889,6 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                let browser = Self.deliveryQuoteBrowserToForeground(
                     trustedUserPrompt,
                     frontmostApplication: tools.frontmostApplicationName()) {
-                didForegroundDeliveryQuoteBrowser = true
                 let isDoorDash = trustedUserPrompt
                     .localizedCaseInsensitiveContains("doordash")
                     || trustedUserPrompt.localizedCaseInsensitiveContains(
@@ -714,8 +896,24 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                 let quoteName = isDoorDash
                     ? "DoorDash quote" : "delivery quote"
                 progress("Step \(step): opening \(browser) for the \(quoteName)…")
-                try await tools.openApplication(named: browser)
-                openedApplications.insert(browser)
+                guard let freshCapture = try revalidatedPlanningState(
+                    expected: planningCapture.fingerprint) else {
+                    progress(
+                        "Step \(step): the focused screen changed before opening the app; checking again…")
+                    continue
+                }
+                planningCapture = freshCapture
+                observation = freshCapture.observation
+                let openedIdentity = try await tools.openApplication(
+                    named: browser)
+                // Mark the one-shot preflight only after the verified effect.
+                // A stale-state restart above must retry the foregrounding
+                // decision instead of inspecting authentication UI in the
+                // unrelated app that is still frontmost.
+                didForegroundDeliveryQuoteBrowser = true
+                recordOpenedApplication(
+                    named: browser,
+                    identity: openedIdentity)
                 history.append("OPEN_APP [\(browser)]")
                 try await Task.sleep(for: actionDelay)
                 continue
@@ -763,14 +961,23 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                 // never asked for an executable verb at an authentication
                 // boundary.
                 if !didAttemptAuthenticationEscape,
-                   let currentApplication = tools.frontmostApplicationName(),
+                   let currentApplicationSnapshot = Optional(
+                    tools.frontmostApplicationSnapshot()),
+                   let currentApplication =
+                    currentApplicationSnapshot.policyName,
                    let semanticRouter {
                     didAttemptAuthenticationEscape = true
                     do {
                         let escapeRoute = try await semanticRouter.route(
                             OSAtlasSemanticRoutingRequest(
                                 task: trustedUserPrompt,
+                                conversation: conversation,
                                 frontmostApplication: currentApplication,
+                                frontmostApplicationIdentity:
+                                    currentApplicationSnapshot.identity,
+                                applicationIdentityIsAuthoritative:
+                                    currentApplicationSnapshot
+                                        .identityIsAuthoritative,
                                 // Authentication-screen OCR is not needed to
                                 // choose a task-relevant application and is
                                 // deliberately withheld from this route.
@@ -778,8 +985,18 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                                 history: Self.semanticRoutingHistory(history),
                                 availableDirectives: [.openApplication],
                                 openedApplications:
-                                    openedApplications.sorted()))
+                                    openedApplications.sorted(),
+                                openedApplicationIdentities:
+                                    sortedOpenedApplicationIdentities()))
                         try Task.checkCancellation()
+                        guard let postRouteCapture = try revalidatedPlanningState(
+                            expected: planningCapture.fingerprint) else {
+                            progress(
+                                "Step \(step): the focused screen changed while planning; checking again…")
+                            continue
+                        }
+                        planningCapture = postRouteCapture
+                        observation = postRouteCapture.observation
                         if escapeRoute.directive == .openApplication,
                            case .applicationName(let destination) =
                                 escapeRoute.argument,
@@ -789,9 +1006,21 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                             currentApplication: currentApplication,
                             task: trustedUserPrompt) {
                             do {
-                                try await tools.openApplication(
+                                guard let preEffectCapture = try
+                                    revalidatedPlanningState(
+                                        expected:
+                                            planningCapture.fingerprint) else {
+                                    progress(
+                                        "Step \(step): the focused screen changed before opening the app; checking again…")
+                                    continue
+                                }
+                                planningCapture = preEffectCapture
+                                observation = preEffectCapture.observation
+                                let openedIdentity = try await tools.openApplication(
                                     named: destination)
-                                openedApplications.insert(destination)
+                                recordOpenedApplication(
+                                    named: destination,
+                                    identity: openedIdentity)
                                 parsedActionObserver?(
                                     .openApplication(destination))
                                 progress(
@@ -835,21 +1064,48 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                 progress("Step \(step): understanding the requested action…")
                 visibleText = try Self.boundedVisibleText(
                     from: observation.image)
+                let routeFrontmostApplication =
+                    planningCapture.frontmostApplication
+                let preRoutePlanningState = planningCapture.fingerprint
                 do {
                     let selectedRoute = try await semanticRouter.route(
                         OSAtlasSemanticRoutingRequest(
-                            // Preserve host-authored continuation/history for
-                            // planning, while every effect and terminal gate
-                            // below remains bound to `activeTask`, the current
-                            // trusted user request.
-                            task: prompt,
-                            frontmostApplication: tools.frontmostApplicationName(),
+                            // Prior chat remains typed context and the current
+                            // user request remains a separate authority field;
+                            // host policy/effect/terminal gates below are bound
+                            // only to `activeTask`.
+                            task: trustedUserPrompt,
+                            conversation: conversation,
+                            frontmostApplication:
+                                routeFrontmostApplication.policyName,
+                            frontmostApplicationIdentity:
+                                routeFrontmostApplication.identity,
+                            applicationIdentityIsAuthoritative:
+                                routeFrontmostApplication
+                                    .identityIsAuthoritative,
                             visibleText: visibleText,
                             history: Self.semanticRoutingHistory(history),
                             availableDirectives: Self.semanticRoutingDirectives(
                                 actionContract: actionContract),
-                            openedApplications: openedApplications.sorted()))
+                            openedApplications: openedApplications.sorted(),
+                            openedApplicationIdentities:
+                                sortedOpenedApplicationIdentities()))
                     try Task.checkCancellation()
+                    let postRouteCapture = try capturePlanningState()
+                    guard postRouteCapture.fingerprint
+                            == preRoutePlanningState else {
+                        // Every router is asynchronous, including the standard
+                        // two-resident-worker and Apple Foundation paths. Rebind
+                        // all policy/evidence gates instead of executing a route
+                        // selected from pixels that changed during the await.
+                        progress(
+                            "Step \(step): the focused screen changed while planning; checking again…")
+                        continue
+                    }
+                    planningCapture = postRouteCapture
+                    observation = postRouteCapture.observation
+                    visibleText = try Self.boundedVisibleText(
+                        from: observation.image)
                     guard Self.semanticRouteHasValidArguments(selectedRoute) else {
                         throw RuntimeError.unsupportedAction(
                             "semantic-plan-arguments")
@@ -890,13 +1146,22 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                 // The local language router owns the operation family and its
                 // bounded arguments. OS-Atlas is invoked only when a visual
                 // point must be grounded; its raw verb is never executable.
-                action = try await composedSemanticAction(
+                let composedAction = try await composedSemanticAction(
                     route: semanticRoute,
                     trustedTask: activeTask,
                     visibleText: visibleText,
                     observation: observation,
                     endpoint: endpoint,
                     formattedHistory: history)
+                guard let postGroundingCapture = try revalidatedPlanningState(
+                    expected: planningCapture.fingerprint) else {
+                    progress(
+                        "Step \(step): the focused screen changed during visual grounding; checking again…")
+                    continue
+                }
+                planningCapture = postGroundingCapture
+                observation = postGroundingCapture.observation
+                action = composedAction
                 didAttemptModelAction = true
                 parsedActionObserver?(action)
             } else {
@@ -911,6 +1176,14 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                     prompt: modelPrompt,
                     jpegData: jpegData)
                 try Task.checkCancellation()
+                guard let postInferenceCapture = try revalidatedPlanningState(
+                    expected: planningCapture.fingerprint) else {
+                    progress(
+                        "Step \(step): the focused screen changed during visual grounding; checking again…")
+                    continue
+                }
+                planningCapture = postInferenceCapture
+                observation = postInferenceCapture.observation
                 modelResponseObserver?(response)
                 actionTokenObserver?(Self.privacySafeActionToken(from: response))
                 didAttemptModelAction = true
@@ -950,6 +1223,15 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                         prompt: correctionPrompt,
                         jpegData: jpegData)
                     try Task.checkCancellation()
+                    guard let postCorrectionCapture = try
+                        revalidatedPlanningState(
+                            expected: planningCapture.fingerprint) else {
+                        progress(
+                            "Step \(step): the focused screen changed during visual grounding; checking again…")
+                        continue
+                    }
+                    planningCapture = postCorrectionCapture
+                    observation = postCorrectionCapture.observation
                     modelResponseObserver?(correctionResponse)
                     let correctionToken = Self.privacySafeActionToken(
                         from: correctionResponse)
@@ -1062,8 +1344,19 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                 try await Task.sleep(for: waitDelay)
             case .openApplication(let applicationName):
                 progress("Step \(step): opening an app")
-                try await tools.openApplication(named: applicationName)
-                openedApplications.insert(applicationName)
+                guard let preEffectCapture = try revalidatedPlanningState(
+                    expected: planningCapture.fingerprint) else {
+                    progress(
+                        "Step \(step): the focused screen changed before opening the app; checking again…")
+                    continue
+                }
+                planningCapture = preEffectCapture
+                observation = preEffectCapture.observation
+                let openedIdentity = try await tools.openApplication(
+                    named: applicationName)
+                recordOpenedApplication(
+                    named: applicationName,
+                    identity: openedIdentity)
                 if completesAfterOpeningApplication {
                     return .completed("Done. I opened the requested app.")
                 }
@@ -1121,9 +1414,25 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                     continue
                 }
                 transientSystemOverlayObservations = 0
+                guard let preApprovalCapture = try revalidatedPlanningState(
+                    expected: planningCapture.fingerprint) else {
+                    progress(
+                        "Step \(step): the focused screen changed before input; checking again…")
+                    continue
+                }
+                planningCapture = preApprovalCapture
+                observation = preApprovalCapture.observation
                 if let reason = tools.approvalReason(for: predicted) {
                     return .approvalRequired(message: reason, action: predicted)
                 }
+                guard let preEffectCapture = try revalidatedPlanningState(
+                    expected: planningCapture.fingerprint) else {
+                    progress(
+                        "Step \(step): the focused screen changed before input; checking again…")
+                    continue
+                }
+                planningCapture = preEffectCapture
+                observation = preEffectCapture.observation
                 progress("Step \(step): \(Self.progressSummary(action))")
                 try tools.perform(predicted)
                 history.append(action.historyEntry)
@@ -1187,7 +1496,8 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                 toX: to.0,
                 toY: to.1)
         case (.type, .text(let text)):
-            guard !text.isEmpty, text.count <= 10_000 else {
+            guard SemanticNativeToolWireContract
+                .isValidModelGeneratedText(text) else {
                 throw RuntimeError.malformedAction
             }
             return .typeText(text)
@@ -1207,7 +1517,8 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
         case (.complete, .none):
             return .complete
         case (.ask, .question(let question)):
-            guard !question.isEmpty, question.count <= 500 else {
+            guard SemanticNativeToolWireContract
+                .isValidModelGeneratedText(question) else {
                 throw RuntimeError.malformedAction
             }
             return .ask(question)
@@ -1668,16 +1979,19 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                     && !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             }
         case (.type, .text(let value)):
-            return (1 ... 10_000).contains(value.count)
+            return SemanticNativeToolWireContract
+                .isValidModelGeneratedText(value)
         case (.openApplication, .applicationName(let value)):
             return (1 ... 200).contains(value.count)
                 && !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                && value.rangeOfCharacter(from: .controlCharacters) == nil
+                && value.rangeOfCharacter(from: .newlines) == nil
         case (.hotkey, .hotkey(let value)):
             return (1 ... 100).contains(value.count)
                 && !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         case (.ask, .question(let value)):
-            return (1 ... 500).contains(value.count)
-                && !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            return SemanticNativeToolWireContract
+                .isValidModelGeneratedText(value)
         case (.answer, .visibleAnswer), (.answer, .visibleObstacle),
              (.report, .visibleAnswer), (.report, .visibleObstacle):
             return true
@@ -1882,7 +2196,8 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
         let boundedQuestion = question.trimmingCharacters(
             in: .whitespacesAndNewlines)
         guard !boundedQuestion.isEmpty,
-              boundedQuestion.count <= 500,
+              SemanticNativeToolWireContract
+                .isValidModelGeneratedText(boundedQuestion),
               AppleFoundationVisualActionRouter
                 .clarificationQuestionIsTaskRelevant(
                     boundedQuestion,
@@ -2267,7 +2582,8 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
         _ payload: String,
         in trustedTask: String
     ) -> Bool {
-        guard !payload.isEmpty, payload.count <= 10_000 else { return false }
+        guard SemanticNativeToolWireContract
+            .isValidModelGeneratedText(payload) else { return false }
         let separatorPattern =
             #"(?i)(?:[.!?;\n]+|,\s*(?:but|however|instead|then)\b|\b(?:but|however|instead|then)\b)"#
         guard let separators = try? NSRegularExpression(
@@ -3088,9 +3404,9 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
             let boundedHistory = formattedHistory
                 .suffix(maximumHistoryEntries)
                 .map { entry in
-                    entry.count > maximumHistoryEntryCharacters
-                        ? String(entry.prefix(maximumHistoryEntryCharacters))
-                        : entry
+                    ComputerUsePromptSanitizer.inline(
+                        entry,
+                        maximumUTF8Bytes: maximumHistoryEntryCharacters)
                 }
             let firstIndex = max(
                 1,
@@ -3102,13 +3418,12 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
 
         let currentApplicationLine: String
         if let frontmostApplication {
-            let bounded = frontmostApplication
-                .replacingOccurrences(of: "\r", with: " ")
-                .replacingOccurrences(of: "\n", with: " ")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let bounded = ComputerUsePromptSanitizer.inline(
+                frontmostApplication,
+                maximumUTF8Bytes: 120)
             currentApplicationLine = bounded.isEmpty
                 ? "Current frontmost application: unknown"
-                : "Current frontmost application: \(String(bounded.prefix(120)))"
+                : "Current frontmost application: \(bounded)"
         } else {
             currentApplicationLine = "Current frontmost application: unknown"
         }
@@ -3177,16 +3492,20 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
             $0.isDeclared(in: actionContract)
                 && checkpointActionProfile.declares($0)
         }.map(\.rawValue).joined(separator: ", ")
-        let currentApplication = frontmostApplication?
-            .replacingOccurrences(of: "\r", with: " ")
-            .replacingOccurrences(of: "\n", with: " ")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let boundedApplication = String(
-            (currentApplication?.isEmpty == false ? currentApplication! : "unknown")
-                .prefix(120))
+        let currentApplication = frontmostApplication.map {
+            ComputerUsePromptSanitizer.inline(
+                $0,
+                maximumUTF8Bytes: 120)
+        }
+        let boundedApplication = currentApplication?.isEmpty == false
+            ? currentApplication! : "unknown"
         let history = formattedHistory.isEmpty
             ? "none"
-            : formattedHistory.suffix(maximumHistoryEntries).joined(separator: " | ")
+            : formattedHistory.suffix(maximumHistoryEntries).map {
+                ComputerUsePromptSanitizer.inline(
+                    $0,
+                    maximumUTF8Bytes: maximumHistoryEntryCharacters)
+            }.joined(separator: " | ")
 
         return """
         You are the semantic action router for a macOS visual-control agent. Choose the operation family for exactly the next step; do not perform the operation and do not output coordinates, text arguments, app names, or answers.
@@ -3525,7 +3844,8 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
         }
         if let captures = captures(#"^TYPE\s+\[(.*)\]$"#, in: actionLine) {
             let text = captures[0]
-            guard !text.isEmpty, text.count <= 10_000 else {
+            guard SemanticNativeToolWireContract
+                .isValidModelGeneratedText(text) else {
                 throw RuntimeError.malformedAction
             }
             return .typeText(text)
@@ -3553,7 +3873,8 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
         if let captures = captures(#"^ASK\s+\[([^\[\]]+)\]$"#, in: actionLine) {
             try require(.ask, in: actionContract)
             let question = captures[0].trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !question.isEmpty, question.count <= 500 else {
+            guard SemanticNativeToolWireContract
+                .isValidModelGeneratedText(question) else {
                 throw RuntimeError.malformedAction
             }
             return .ask(question)
@@ -3755,9 +4076,9 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
             let boundedHistory = formattedHistory
                 .suffix(maximumHistoryEntries)
                 .map { entry in
-                    entry.count > maximumHistoryEntryCharacters
-                        ? String(entry.prefix(maximumHistoryEntryCharacters))
-                        : entry
+                    ComputerUsePromptSanitizer.inline(
+                        entry,
+                        maximumUTF8Bytes: maximumHistoryEntryCharacters)
                 }
             history = boundedHistory.enumerated().map {
                 "\($0.offset + max(1, formattedHistory.count - maximumHistoryEntries + 1)). \($0.element)"
@@ -4109,8 +4430,14 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
     /// most the existing six-entry routing budget.
     static func semanticRoutingHistory(_ history: [String]) -> [String] {
         let limit = OSAtlasSemanticRoutingRequest.maximumHistoryEntries
+        func promptSafeEntry(_ entry: String) -> String {
+            ComputerUsePromptSanitizer.inline(
+                routingHistoryMarker(for: entry) ?? entry,
+                maximumUTF8Bytes:
+                    OSAtlasSemanticRoutingRequest.maximumHistoryEntryBytes)
+        }
         guard history.count > limit else {
-            return history.map { routingHistoryMarker(for: $0) ?? $0 }
+            return history.map(promptSafeEntry)
         }
 
         var persistent: [String: (index: Int, value: String)] = [:]
@@ -4144,6 +4471,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
             index -= 1
         }
         return selected.keys.sorted().compactMap { selected[$0] }
+            .map(promptSafeEntry)
     }
 
     private static func routingHistoryMarker(for entry: String) -> String? {
@@ -4182,27 +4510,23 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
             }
             return left.boundingBox.minX < right.boundingBox.minX
         }
-        var remaining = OSAtlasSemanticRoutingRequest.maximumVisibleTextCharacters
-        var lines: [String] = []
+        var sourceLines: [String] = []
+        var scannedScalars = 0
         for observation in observations {
-            guard remaining > 0,
+            guard sourceLines.count < SemanticVisibleEvidence.maximumLines,
+                  scannedScalars
+                    < SemanticVisibleEvidence.maximumScannedUnicodeScalars,
                   let candidate = observation.topCandidates(1).first else {
                 break
             }
-            let sanitized = candidate.string.unicodeScalars.map {
-                CharacterSet.controlCharacters.contains($0)
-                    ? " "
-                    : Character(String($0))
-            }
-            let line = String(sanitized)
-                .split(whereSeparator: \.isWhitespace)
-                .joined(separator: " ")
-            guard !line.isEmpty else { continue }
-            let bounded = String(line.prefix(remaining))
-            lines.append(bounded)
-            remaining -= bounded.count
+            let remaining = SemanticVisibleEvidence
+                .maximumScannedUnicodeScalars - scannedScalars
+            let scalars = candidate.string.unicodeScalars.prefix(remaining)
+            scannedScalars += scalars.count
+            sourceLines.append(String(String.UnicodeScalarView(scalars)))
         }
-        return lines.joined(separator: "\n")
+        return SemanticVisibleEvidence.canonicalText(
+            from: sourceLines.joined(separator: "\n"))
     }
 
     static func boundedFocusedVisibleText(

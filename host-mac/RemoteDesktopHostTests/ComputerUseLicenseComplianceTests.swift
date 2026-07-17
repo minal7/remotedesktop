@@ -5,10 +5,16 @@ import XCTest
 
 @MainActor
 final class ComputerUseLicenseComplianceTests: XCTestCase {
-    func testBundledOSAtlasAndLlamaCPPDocumentsMatchPinnedManifest() throws {
+    func testBundledModelAndLlamaCPPDocumentsMatchPinnedManifest() throws {
         XCTAssertEqual(
             ComputerUseArtifactManifest.osAtlasLicenseURL.absoluteString,
             "https://github.com/OS-Copilot/OS-Atlas/blob/bad08407ab54b5bf6c17a69fe1ced476b9494926/LICENSE")
+        XCTAssertEqual(
+            ComputerUseArtifactManifest.granite4OneBRevision,
+            "6a7381ba1f54d684ff508d991aeb7dc580157103")
+        XCTAssertEqual(
+            ComputerUseArtifactManifest.graniteLicenseURL.absoluteString,
+            "https://github.com/ibm-granite/granite-4.0-nano-language-models/blob/1c66d6a87aaa251ef88a3154393d3dddba497bfa/LICENSE")
         XCTAssertEqual(ComputerUseArtifactManifest.llamaCPPTag, "b9992")
         XCTAssertEqual(
             ComputerUseArtifactManifest.llamaCPPLicenseURL.absoluteString,
@@ -26,6 +32,12 @@ final class ComputerUseLicenseComplianceTests: XCTestCase {
             encoding: .utf8)
         XCTAssertTrue(osAtlasLicense.contains("Apache License"))
         XCTAssertTrue(osAtlasLicense.contains("Version 2.0, January 2004"))
+
+        let graniteLicense = try String(
+            contentsOf: bundledURL(for: ComputerUseArtifactManifest.graniteLicense),
+            encoding: .utf8)
+        XCTAssertTrue(graniteLicense.contains("Apache License"))
+        XCTAssertTrue(graniteLicense.contains("Version 2.0, January 2004"))
 
         let llamaLicense = try String(
             contentsOf: bundledURL(for: ComputerUseArtifactManifest.llamaCPPLicense),
@@ -59,7 +71,7 @@ final class ComputerUseLicenseComplianceTests: XCTestCase {
             "mac-control-mcp is licensed under the MIT License"))
     }
 
-    func testExistingReceiptRepairsMissingAndTamperedLegalDocuments() async throws {
+    func testUserRequestedInstallRepairsMissingAndTamperedLegalDocuments() async throws {
         let fixture = try makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         let installer = ComputerUseInstaller(
@@ -67,7 +79,13 @@ final class ComputerUseLicenseComplianceTests: XCTestCase {
             rootDirectory: fixture.root,
             legalResourceDirectory: fixture.legalSource)
 
-        let repairedReceipt = await installer.currentInstallation()
+        let passiveReceipt = await installer.currentInstallation()
+        XCTAssertEqual(passiveReceipt, fixture.receipt)
+        XCTAssertFalse(FileManager.default.fileExists(atPath:
+            fixture.modelDirectory.appendingPathComponent(
+                ComputerUseArtifactManifest.modelNotice.fileName).path))
+
+        let repairedReceipt = try await installer.install { _ in }
         XCTAssertEqual(repairedReceipt, fixture.receipt)
         try assertInstalledDocumentsMatchSource(fixture)
 
@@ -78,12 +96,12 @@ final class ComputerUseLicenseComplianceTests: XCTestCase {
             count: Int(ComputerUseArtifactManifest.modelNotice.byteCount))
             .write(to: installedNotice, options: .atomic)
 
-        let repairedTamperedReceipt = await installer.currentInstallation()
+        let repairedTamperedReceipt = try await installer.install { _ in }
         XCTAssertEqual(repairedTamperedReceipt, fixture.receipt)
         try assertInstalledDocumentsMatchSource(fixture)
     }
 
-    func testExistingReceiptFailsClosedWhenBundledNoticeIsInvalid() async throws {
+    func testUserRequestedRepairFailsClosedWhenBundledNoticeIsInvalid() async throws {
         let fixture = try makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         let notice = fixture.legalSource.appendingPathComponent(
@@ -97,8 +115,16 @@ final class ComputerUseLicenseComplianceTests: XCTestCase {
             manifest: fixture.manifest,
             rootDirectory: fixture.root,
             legalResourceDirectory: fixture.legalSource)
-        let invalidReceipt = await installer.currentInstallation()
-        XCTAssertNil(invalidReceipt)
+        let passiveReceipt = await installer.currentInstallation()
+        XCTAssertEqual(passiveReceipt, fixture.receipt)
+        do {
+            _ = try await installer.install { _ in }
+            XCTFail("Expected invalid bundled notice")
+        } catch let error as ComputerUseInstaller.InstallError {
+            XCTAssertEqual(
+                error,
+                .checksumMismatch(ComputerUseArtifactManifest.modelNotice.fileName))
+        }
     }
 
     func testModelPackageHasNoPrivateAdapterOrExecutableDownloadPath() throws {

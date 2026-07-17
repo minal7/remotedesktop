@@ -2,6 +2,7 @@ import CoreGraphics
 import CloudKit
 import CryptoKit
 import CoreImage
+import Darwin
 import Foundation
 import XCTest
 @testable import RemoteDesktopHost
@@ -11,6 +12,7 @@ final class ComputerUseTests: XCTestCase {
     func test_manifestPinsAuditedRepositoriesRevisionsAndHashes() {
         let manifest = ComputerUseArtifactManifest.current
 
+        XCTAssertEqual(manifest, ComputerUseArtifactManifest.legacyVisualOnly)
         XCTAssertEqual(manifest.installationVersion, "os-atlas-pro-4b-q4-k-m-b9992")
         XCTAssertEqual(manifest.modelVariant, .pro4B)
         XCTAssertEqual(
@@ -24,6 +26,10 @@ final class ComputerUseTests: XCTestCase {
         XCTAssertEqual(
             manifest.modelArtifacts.map(\.kind),
             [.textModelShard, .textModelShard, .visionProjector])
+        XCTAssertEqual(
+            ComputerUseArtifactManifest.DownloadableArtifact.Kind
+                .semanticRouterModel.rawValue,
+            "semanticRouterModel")
         XCTAssertEqual(
             manifest.modelArtifacts.map(\.fileName),
             [
@@ -2240,6 +2246,123 @@ final class ComputerUseTests: XCTestCase {
         XCTAssertTrue(performedActions.isEmpty)
     }
 
+    func testStopThenImmediatePromptJoinsCancelledExecutionBeforeRuntimeReuse()
+        async throws {
+        let executor = StopJoinProbeExecutor()
+        let channel = FakeHostComputerUseChannel()
+        let ledgerURL = temporaryLedgerURL()
+        var performedActions: [ComputerUsePredictedAction] = []
+        defer {
+            executor.releaseFirstExecution()
+            try? FileManager.default.removeItem(
+                at: ledgerURL.deletingLastPathComponent())
+        }
+        let manager = HostComputerUseManager(
+            injector: InputInjector(),
+            executor: executor,
+            taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
+            allowsExternalServices: false,
+            actionPerformer: { performedActions.append($0) },
+            channelFactory: { _ in channel })
+        defer { manager.stop() }
+        let firstPrompt = makeEnvelope(
+            id: "stop-join-first",
+            kind: .prompt,
+            body: "Open Calculator")
+        let replacementPrompt = makeEnvelope(
+            id: "stop-join-replacement",
+            kind: .prompt,
+            body: "Open Notes")
+        manager.authorizePeer(senderID: firstPrompt.senderID)
+
+        XCTAssertTrue(manager.handle(firstPrompt, channel: channel))
+        await waitUntil { executor.firstExecutionStarted }
+        XCTAssertTrue(manager.handle(
+            try makeControlEnvelope(
+                kind: .cancel,
+                taskID: firstPrompt.id,
+                revision: 1),
+            channel: channel))
+        await waitUntil { executor.cancellationWasObserved }
+
+        // Stop makes the manager idle immediately, so a separately claimed
+        // prompt can arrive before the cancellation-ignoring predecessor has
+        // unwound. It must be queued behind that predecessor rather than
+        // entering the same cached runtime generation concurrently.
+        XCTAssertTrue(manager.handle(replacementPrompt, channel: channel))
+        for _ in 0 ..< 20 { await Task.yield() }
+        XCTAssertEqual(executor.callCount, 1)
+        XCTAssertFalse(executor.replacementExecutionStarted)
+
+        executor.releaseFirstExecution()
+        await waitUntil {
+            executor.replacementExecutionStarted
+                && executor.callCount == 2
+                && manager.activity == .idle
+        }
+        XCTAssertTrue(executor.staleActionAttempted)
+        XCTAssertTrue(executor.staleActionWasBlocked)
+        XCTAssertTrue(performedActions.isEmpty)
+        XCTAssertEqual(
+            executor.prompts,
+            ["Open Calculator", "Open Notes"])
+    }
+
+    func testInterventionDuringPredecessorJoinInvalidatesPendingAutomation()
+        async throws {
+        let executor = StopJoinProbeExecutor()
+        let channel = FakeHostComputerUseChannel()
+        let ledgerURL = temporaryLedgerURL()
+        var performedActions: [ComputerUsePredictedAction] = []
+        defer {
+            executor.releaseFirstExecution()
+            try? FileManager.default.removeItem(
+                at: ledgerURL.deletingLastPathComponent())
+        }
+        let manager = HostComputerUseManager(
+            injector: InputInjector(),
+            executor: executor,
+            taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
+            allowsExternalServices: false,
+            actionPerformer: { performedActions.append($0) },
+            channelFactory: { _ in channel })
+        defer { manager.stop() }
+        let firstPrompt = makeEnvelope(
+            id: "pending-intervention-first",
+            kind: .prompt,
+            body: "Open Calculator")
+        let replacementPrompt = makeEnvelope(
+            id: "pending-intervention-replacement",
+            kind: .prompt,
+            body: "Open Notes")
+        manager.authorizePeer(senderID: firstPrompt.senderID)
+
+        XCTAssertTrue(manager.handle(firstPrompt, channel: channel))
+        await waitUntil { executor.firstExecutionStarted }
+        XCTAssertTrue(manager.handle(
+            try makeControlEnvelope(
+                kind: .cancel,
+                taskID: firstPrompt.id,
+                revision: 1),
+            channel: channel))
+        await waitUntil { executor.cancellationWasObserved }
+        XCTAssertTrue(manager.handle(replacementPrompt, channel: channel))
+
+        // Model the synchronous off-main input callback without delivering its
+        // MainActor follow-up yet. The pending successor owns this race even
+        // though it is still joining the cancellation-ignoring predecessor.
+        XCTAssertTrue(manager.blockActionsForUserIntervention())
+        executor.releaseFirstExecution()
+        await waitUntil {
+            executor.staleActionAttempted && manager.activity == .paused
+        }
+
+        XCTAssertTrue(executor.staleActionWasBlocked)
+        XCTAssertFalse(executor.replacementExecutionStarted)
+        XCTAssertEqual(executor.callCount, 1)
+        XCTAssertTrue(performedActions.isEmpty)
+    }
+
     func test_versionedPauseAndCancelPersistenceFailureStopAndRemainUnacknowledged() async throws {
         for (index, kind) in [
             ComputerUseEnvelope.Kind.pause,
@@ -3866,15 +3989,1442 @@ final class ComputerUseTests: XCTestCase {
     }
 }
 
+@MainActor
+final class ComputerUseInstallerMigrationTests: XCTestCase {
+    func testExactLegacyPackageIsHardLinkedAndOnlySemanticModelDownloads() async throws {
+        let fixture = try makeMigrationFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        RangeServingURLProtocol.configure(payload: fixture.payload)
+        defer { RangeServingURLProtocol.reset() }
+        let session = makeSession()
+        defer { session.invalidateAndCancel() }
+
+        let legacyInodes = try Dictionary(uniqueKeysWithValues:
+            fixture.legacyManifest.modelArtifacts.map { artifact in
+                let attributes = try FileManager.default.attributesOfItem(
+                    atPath: fixture.legacyDirectory
+                        .appendingPathComponent(artifact.fileName).path)
+                return (artifact.fileName, try XCTUnwrap(
+                    attributes[.systemFileNumber] as? NSNumber))
+            })
+        let observation = MigrationReceiptObservation()
+        let installer = ComputerUseInstaller(
+            manifest: fixture.targetManifest,
+            rootDirectory: fixture.root,
+            legalResourceDirectory: fixture.legalDirectory,
+            downloadSession: session,
+            downloadChunkByteCount: Int64(fixture.payload.count),
+            legacyManifest: fixture.legacyManifest,
+            operations: operations(writeReceipt: { data, url in
+                let previous = try Data(contentsOf: url)
+                let previousReceipt = try JSONDecoder().decode(
+                    ComputerUseInstallationReceipt.self,
+                    from: previous)
+                observation.record(
+                    version: previousReceipt.installationVersion,
+                    legacyDirectoryExists: FileManager.default.fileExists(
+                        atPath: fixture.legacyDirectory.path))
+            }),
+            launchIdentifier: "migration-launch-1")
+        var updates: [ComputerUseInstaller.Update] = []
+
+        let receipt = try await installer.install { updates.append($0) }
+
+        XCTAssertEqual(
+            observation.snapshot().version,
+            fixture.legacyManifest.installationVersion)
+        XCTAssertTrue(observation.snapshot().legacyDirectoryExists)
+        XCTAssertEqual(receipt.installationVersion, fixture.targetManifest.installationVersion)
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: fixture.legacyDirectory.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.root
+            .appendingPathComponent(
+                ComputerUseInstaller.deferredLegacyCleanupMarkerName).path))
+        XCTAssertEqual(
+            RangeServingURLProtocol.requestedURLs().map(\.lastPathComponent),
+            ["semantic-router.gguf"])
+
+        let targetDirectory = fixture.root
+            .appendingPathComponent("Models", isDirectory: true)
+            .appendingPathComponent(
+                fixture.targetManifest.installationVersion,
+                isDirectory: true)
+        for artifact in fixture.legacyManifest.modelArtifacts {
+            let attributes = try FileManager.default.attributesOfItem(
+                atPath: targetDirectory.appendingPathComponent(artifact.fileName).path)
+            XCTAssertEqual(
+                attributes[.systemFileNumber] as? NSNumber,
+                legacyInodes[artifact.fileName],
+                artifact.fileName)
+            XCTAssertEqual(
+                ((attributes[.posixPermissions] as? NSNumber)?.intValue ?? -1)
+                    & 0o777,
+                0o600,
+                artifact.fileName)
+        }
+        let initialDownload = try XCTUnwrap(updates.first(where: {
+            $0.phase == .downloadingModel
+        }))
+        XCTAssertEqual(
+            initialDownload.fraction ?? -1,
+            ComputerUseInstaller.installerFractionForModel(
+                downloadedByteCount: Int64(fixture.payload.count * 3),
+                totalByteCount: Int64(fixture.payload.count * 4)),
+            accuracy: 0.000_001)
+        XCTAssertTrue(updates.filter { $0.phase == .downloadingModel }
+            .allSatisfy { $0.detail.contains("local AI models") })
+
+        let sameLaunchInstaller = ComputerUseInstaller(
+            manifest: fixture.targetManifest,
+            rootDirectory: fixture.root,
+            legalResourceDirectory: fixture.legalDirectory,
+            legacyManifest: fixture.legacyManifest,
+            launchIdentifier: "migration-launch-1")
+        _ = try await sameLaunchInstaller.install { _ in }
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: fixture.legacyDirectory.path),
+            "A receipt visible in its creating process is not yet power-loss proof")
+
+        let nextLaunchInstaller = ComputerUseInstaller(
+            manifest: fixture.targetManifest,
+            rootDirectory: fixture.root,
+            legalResourceDirectory: fixture.legalDirectory,
+            legacyManifest: fixture.legacyManifest,
+            launchIdentifier: "migration-launch-2")
+        let nextLaunchStatus = await nextLaunchInstaller.currentInstallation()
+
+        XCTAssertEqual(nextLaunchStatus?.installationVersion,
+            fixture.targetManifest.installationVersion)
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: fixture.legacyDirectory.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.root
+            .appendingPathComponent(
+                ComputerUseInstaller.deferredLegacyCleanupMarkerName).path))
+    }
+
+    func testLegacyHashAndSizeDriftDisableReuseWithoutMutatingSource() async throws {
+        for useSizeDrift in [false, true] {
+            let fixture = try makeMigrationFixture()
+            let source = fixture.legacyDirectory.appendingPathComponent(
+                fixture.legacyManifest.modelArtifacts[0].fileName)
+            let drifted = useSizeDrift
+                ? fixture.payload + Data([0xff])
+                : Data(repeating: 0xee, count: fixture.payload.count)
+            try drifted.write(to: source, options: .atomic)
+            RangeServingURLProtocol.configure(payload: fixture.payload)
+            let session = makeSession()
+            let installer = ComputerUseInstaller(
+                manifest: fixture.targetManifest,
+                rootDirectory: fixture.root,
+                downloadSession: session,
+                downloadChunkByteCount: Int64(fixture.payload.count),
+                legacyManifest: fixture.legacyManifest)
+
+            _ = try await installer.installModel { _ in }
+
+            XCTAssertEqual(RangeServingURLProtocol.requestedURLs().count, 4)
+            XCTAssertEqual(try Data(contentsOf: source), drifted)
+            session.invalidateAndCancel()
+            RangeServingURLProtocol.reset()
+            try? FileManager.default.removeItem(at: fixture.root)
+        }
+    }
+
+    func testWrongLegacyReceiptVersionAndPathNeverEnableReuse() async throws {
+        for wrongVersion in [true, false] {
+            let fixture = try makeMigrationFixture()
+            let receipt = ComputerUseInstallationReceipt(
+                installationVersion: wrongVersion
+                    ? "different-legacy-version"
+                    : fixture.legacyManifest.installationVersion,
+                modelVariant: fixture.legacyManifest.modelVariant,
+                modelDirectory: wrongVersion
+                    ? fixture.legacyDirectory.path
+                    : fixture.root.appendingPathComponent(
+                        "Models/not-the-managed-legacy-path").path,
+                installedAt: Date(timeIntervalSince1970: 1))
+            try JSONEncoder().encode(receipt).write(
+                to: fixture.receiptURL,
+                options: .atomic)
+            RangeServingURLProtocol.configure(payload: fixture.payload)
+            let session = makeSession()
+            let installer = ComputerUseInstaller(
+                manifest: fixture.targetManifest,
+                rootDirectory: fixture.root,
+                downloadSession: session,
+                downloadChunkByteCount: Int64(fixture.payload.count),
+                legacyManifest: fixture.legacyManifest)
+
+            _ = try await installer.installModel { _ in }
+
+            XCTAssertEqual(RangeServingURLProtocol.requestedURLs().count, 4)
+            XCTAssertTrue(FileManager.default.fileExists(
+                atPath: fixture.legacyDirectory.path))
+            session.invalidateAndCancel()
+            RangeServingURLProtocol.reset()
+            try? FileManager.default.removeItem(at: fixture.root)
+        }
+    }
+
+    func testSymlinkedLegacyArtifactCannotEscapeOrEnableReuse() async throws {
+        let fixture = try makeMigrationFixture()
+        let outside = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "ComputerUseMigrationOutside-\(UUID().uuidString).gguf")
+        defer {
+            try? FileManager.default.removeItem(at: outside)
+            try? FileManager.default.removeItem(at: fixture.root)
+        }
+        try fixture.payload.write(to: outside)
+        let source = fixture.legacyDirectory.appendingPathComponent(
+            fixture.legacyManifest.modelArtifacts[0].fileName)
+        try FileManager.default.removeItem(at: source)
+        try FileManager.default.createSymbolicLink(
+            at: source,
+            withDestinationURL: outside)
+        RangeServingURLProtocol.configure(payload: fixture.payload)
+        defer { RangeServingURLProtocol.reset() }
+        let session = makeSession()
+        defer { session.invalidateAndCancel() }
+        let installer = ComputerUseInstaller(
+            manifest: fixture.targetManifest,
+            rootDirectory: fixture.root,
+            downloadSession: session,
+            downloadChunkByteCount: Int64(fixture.payload.count),
+            legacyManifest: fixture.legacyManifest)
+
+        _ = try await installer.installModel { _ in }
+
+        XCTAssertEqual(RangeServingURLProtocol.requestedURLs().count, 4)
+        XCTAssertEqual(try Data(contentsOf: outside), fixture.payload)
+        XCTAssertTrue((try source.resourceValues(forKeys: [.isSymbolicLinkKey]))
+            .isSymbolicLink == true)
+    }
+
+    func testSymlinkedStagingPartialIsReplacedWithoutTouchingItsTarget() async throws {
+        let fixture = try makeMigrationFixture()
+        let outside = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "ComputerUseStagingOutside-\(UUID().uuidString).gguf")
+        defer {
+            try? FileManager.default.removeItem(at: outside)
+            try? FileManager.default.removeItem(at: fixture.root)
+        }
+        let outsideData = Data([0xaa, 0xbb])
+        try outsideData.write(to: outside)
+        let staging = fixture.root
+            .appendingPathComponent("Models", isDirectory: true)
+            .appendingPathComponent(
+                ".\(fixture.targetManifest.installationVersion)-staging",
+                isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: staging,
+            withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(
+            at: staging.appendingPathComponent("semantic-router.gguf"),
+            withDestinationURL: outside)
+        RangeServingURLProtocol.configure(payload: fixture.payload)
+        defer { RangeServingURLProtocol.reset() }
+        let session = makeSession()
+        defer { session.invalidateAndCancel() }
+        let installer = ComputerUseInstaller(
+            manifest: fixture.targetManifest,
+            rootDirectory: fixture.root,
+            downloadSession: session,
+            downloadChunkByteCount: Int64(fixture.payload.count),
+            legacyManifest: fixture.legacyManifest)
+
+        let installed = try await installer.installModel { _ in }
+
+        XCTAssertEqual(
+            RangeServingURLProtocol.requestedURLs().map(\.lastPathComponent),
+            ["semantic-router.gguf"])
+        XCTAssertEqual(try Data(contentsOf: outside), outsideData)
+        XCTAssertEqual(
+            try Data(contentsOf:
+                installed.appendingPathComponent("semantic-router.gguf")),
+            fixture.payload)
+        XCTAssertFalse((try installed.appendingPathComponent(
+            "semantic-router.gguf").resourceValues(forKeys: [.isSymbolicLinkKey]))
+            .isSymbolicLink == true)
+    }
+
+    func testHardLinkFailureRecalculatesDiskThenFallsBackToFullDownload() async throws {
+        let constrained = try makeMigrationFixture()
+        defer { try? FileManager.default.removeItem(at: constrained.root) }
+        let semanticBytes = try XCTUnwrap(constrained.targetManifest.modelArtifacts.last)
+            .byteCount
+        let initiallyRequired = ComputerUseInstaller.requiredDiskBytes(
+            forModelBytes: semanticBytes)
+        let fullyRequired = ComputerUseInstaller.requiredDiskBytes(
+            forModelBytes: constrained.targetManifest.modelArtifacts.reduce(0) {
+                $0 + $1.byteCount
+            })
+        let constrainedInstaller = ComputerUseInstaller(
+            manifest: constrained.targetManifest,
+            rootDirectory: constrained.root,
+            legalResourceDirectory: constrained.legalDirectory,
+            legacyManifest: constrained.legacyManifest,
+            operations: operations(
+                availableCapacity: initiallyRequired,
+                failHardLinks: true))
+
+        do {
+            _ = try await constrainedInstaller.install { _ in }
+            XCTFail("Expected fallback disk preflight failure")
+        } catch let error as ComputerUseInstaller.InstallError {
+            XCTAssertEqual(
+                error,
+                .insufficientDisk(
+                    required: fullyRequired,
+                    available: initiallyRequired))
+        }
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: constrained.legacyDirectory.path))
+        let constrainedReceipt = try JSONDecoder().decode(
+            ComputerUseInstallationReceipt.self,
+            from: Data(contentsOf: constrained.receiptURL))
+        XCTAssertEqual(
+            constrainedReceipt.installationVersion,
+            constrained.legacyManifest.installationVersion)
+
+        let fallback = try makeMigrationFixture()
+        defer { try? FileManager.default.removeItem(at: fallback.root) }
+        RangeServingURLProtocol.configure(payload: fallback.payload)
+        defer { RangeServingURLProtocol.reset() }
+        let session = makeSession()
+        defer { session.invalidateAndCancel() }
+        let fallbackInstaller = ComputerUseInstaller(
+            manifest: fallback.targetManifest,
+            rootDirectory: fallback.root,
+            downloadSession: session,
+            downloadChunkByteCount: Int64(fallback.payload.count),
+            legacyManifest: fallback.legacyManifest,
+            operations: operations(failHardLinks: true))
+
+        _ = try await fallbackInstaller.installModel { _ in }
+
+        XCTAssertEqual(RangeServingURLProtocol.requestedURLs().count, 4)
+    }
+
+    func testReceiptWriteFailureRollsBackTargetAndRetainsLegacyReceipt() async throws {
+        let fixture = try makeMigrationFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let originalReceiptData = try Data(contentsOf: fixture.receiptURL)
+        RangeServingURLProtocol.configure(payload: fixture.payload)
+        defer { RangeServingURLProtocol.reset() }
+        let session = makeSession()
+        defer { session.invalidateAndCancel() }
+        let installer = ComputerUseInstaller(
+            manifest: fixture.targetManifest,
+            rootDirectory: fixture.root,
+            legalResourceDirectory: fixture.legalDirectory,
+            downloadSession: session,
+            downloadChunkByteCount: Int64(fixture.payload.count),
+            legacyManifest: fixture.legacyManifest,
+            operations: operations(writeReceipt: { _, _ in
+                throw CocoaError(.fileWriteNoPermission)
+            }))
+
+        do {
+            _ = try await installer.install { _ in }
+            XCTFail("Expected receipt failure")
+        } catch {
+            XCTAssertEqual((error as? CocoaError)?.code, .fileWriteNoPermission)
+        }
+
+        XCTAssertEqual(try Data(contentsOf: fixture.receiptURL), originalReceiptData)
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: fixture.legacyDirectory.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.root
+            .appendingPathComponent("Models")
+            .appendingPathComponent(fixture.targetManifest.installationVersion).path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.root
+            .appendingPathComponent(
+                ComputerUseInstaller.interruptedInstallationMarkerName).path))
+    }
+
+    func testCancellationDuringSemanticDownloadRetainsLegacyPackageAndReceipt() async throws {
+        let fixture = try makeMigrationFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let originalReceiptData = try Data(contentsOf: fixture.receiptURL)
+        RangeServingURLProtocol.configure(
+            payload: fixture.payload,
+            blockResponses: true)
+        defer { RangeServingURLProtocol.reset() }
+        let session = makeSession()
+        defer { session.invalidateAndCancel() }
+        let installer = ComputerUseInstaller(
+            manifest: fixture.targetManifest,
+            rootDirectory: fixture.root,
+            legalResourceDirectory: fixture.legalDirectory,
+            downloadSession: session,
+            downloadChunkByteCount: Int64(fixture.payload.count),
+            legacyManifest: fixture.legacyManifest)
+        let task = Task {
+            try await installer.install { _ in }
+        }
+
+        for _ in 0 ..< 200 where RangeServingURLProtocol.requestedURLs().isEmpty {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertEqual(
+            RangeServingURLProtocol.requestedURLs().first?.lastPathComponent,
+            "semantic-router.gguf")
+        task.cancel()
+        do {
+            _ = try await task.value
+            XCTFail("Expected cancellation")
+        } catch {
+            // URLSession may surface CancellationError or URLError.cancelled.
+        }
+
+        XCTAssertEqual(try Data(contentsOf: fixture.receiptURL), originalReceiptData)
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: fixture.legacyDirectory.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.root
+            .appendingPathComponent("Models")
+            .appendingPathComponent(fixture.targetManifest.installationVersion).path))
+    }
+
+    func testInstallLockSerializesActorsAndPreventsStaleRollbackOverWinner() async throws {
+        let fixture = try makeMigrationFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        RangeServingURLProtocol.configure(payload: fixture.payload)
+        defer { RangeServingURLProtocol.reset() }
+        let firstSession = makeSession()
+        let secondSession = makeSession()
+        defer {
+            firstSession.invalidateAndCancel()
+            secondSession.invalidateAndCancel()
+        }
+        let commitGate = InstallerCommitGate()
+        defer { commitGate.release() }
+        let losingCommitWasReached = LockedFlag()
+        let first = ComputerUseInstaller(
+            manifest: fixture.targetManifest,
+            rootDirectory: fixture.root,
+            legalResourceDirectory: fixture.legalDirectory,
+            downloadSession: firstSession,
+            downloadChunkByteCount: Int64(fixture.payload.count),
+            legacyManifest: fixture.legacyManifest,
+            operations: operations(writeReceipt: { _, _ in
+                commitGate.enterAndWait()
+            }),
+            launchIdentifier: "concurrent-launch")
+        let second = ComputerUseInstaller(
+            manifest: fixture.targetManifest,
+            rootDirectory: fixture.root,
+            legalResourceDirectory: fixture.legalDirectory,
+            downloadSession: secondSession,
+            downloadChunkByteCount: Int64(fixture.payload.count),
+            legacyManifest: fixture.legacyManifest,
+            operations: operations(writeReceipt: { _, _ in
+                losingCommitWasReached.set()
+                throw CocoaError(.fileWriteNoPermission)
+            }),
+            launchIdentifier: "concurrent-launch")
+
+        let winner = Task { try await first.install { _ in } }
+        for _ in 0 ..< 200 where !commitGate.hasEntered {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertTrue(commitGate.hasEntered)
+        let contender = Task { try await second.install { _ in } }
+        try await Task.sleep(for: .milliseconds(75))
+        XCTAssertFalse(losingCommitWasReached.value)
+
+        commitGate.release()
+        let winningReceipt = try await winner.value
+        let contenderReceipt = try await contender.value
+
+        XCTAssertEqual(winningReceipt.installationVersion,
+            fixture.targetManifest.installationVersion)
+        XCTAssertEqual(contenderReceipt.installationVersion,
+            fixture.targetManifest.installationVersion)
+        XCTAssertFalse(losingCommitWasReached.value,
+            "The serialized contender must observe the winner, not restore stale receipt data")
+        let durableReceipt = try JSONDecoder().decode(
+            ComputerUseInstallationReceipt.self,
+            from: Data(contentsOf: fixture.receiptURL))
+        XCTAssertEqual(durableReceipt.installationVersion,
+            fixture.targetManifest.installationVersion)
+        XCTAssertEqual(RangeServingURLProtocol.requestedURLs()
+            .map(\.lastPathComponent), ["semantic-router.gguf"])
+
+        let lockAttributes = try FileManager.default.attributesOfItem(
+            atPath: ComputerUseInstaller.installationLockURL(
+                forRootDirectory: fixture.root).path)
+        XCTAssertEqual(
+            ((lockAttributes[.posixPermissions] as? NSNumber)?.intValue ?? -1)
+                & 0o777,
+            0o600)
+        XCTAssertEqual(
+            (lockAttributes[.ownerAccountID] as? NSNumber)?.uint32Value,
+            getuid())
+    }
+
+    func testCancelledInstallLockWaiterDoesNotDisturbLockOwner() async throws {
+        let fixture = try makeMigrationFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        RangeServingURLProtocol.configure(payload: fixture.payload)
+        defer { RangeServingURLProtocol.reset() }
+        let firstSession = makeSession()
+        let secondSession = makeSession()
+        defer {
+            firstSession.invalidateAndCancel()
+            secondSession.invalidateAndCancel()
+        }
+        let commitGate = InstallerCommitGate()
+        defer { commitGate.release() }
+        let first = ComputerUseInstaller(
+            manifest: fixture.targetManifest,
+            rootDirectory: fixture.root,
+            legalResourceDirectory: fixture.legalDirectory,
+            downloadSession: firstSession,
+            downloadChunkByteCount: Int64(fixture.payload.count),
+            legacyManifest: fixture.legacyManifest,
+            operations: operations(writeReceipt: { _, _ in
+                commitGate.enterAndWait()
+            }))
+        let waiter = ComputerUseInstaller(
+            manifest: fixture.targetManifest,
+            rootDirectory: fixture.root,
+            legalResourceDirectory: fixture.legalDirectory,
+            downloadSession: secondSession,
+            downloadChunkByteCount: Int64(fixture.payload.count),
+            legacyManifest: fixture.legacyManifest)
+
+        let ownerTask = Task { try await first.install { _ in } }
+        for _ in 0 ..< 200 where !commitGate.hasEntered {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertTrue(commitGate.hasEntered)
+        let waitingTask = Task { try await waiter.install { _ in } }
+        try await Task.sleep(for: .milliseconds(50))
+        waitingTask.cancel()
+        do {
+            _ = try await waitingTask.value
+            XCTFail("Expected cancellation while waiting for install lock")
+        } catch is CancellationError {
+            // Expected: polling lock acquisition checks task cancellation.
+        } catch {
+            XCTFail("Unexpected lock-wait cancellation error: \(error)")
+        }
+
+        commitGate.release()
+        let receipt = try await ownerTask.value
+        XCTAssertEqual(receipt.installationVersion,
+            fixture.targetManifest.installationVersion)
+        XCTAssertEqual(RangeServingURLProtocol.requestedURLs()
+            .map(\.lastPathComponent), ["semantic-router.gguf"])
+    }
+
+    func testStableSiblingLockSerializesAfterManagedRootReplacement() async throws {
+        let fixture = try makeMigrationFixture()
+        let parkedRoot = fixture.root.deletingLastPathComponent()
+            .appendingPathComponent("ComputerUseStableLockParked-\(UUID().uuidString)")
+        let lockURL = ComputerUseInstaller.installationLockURL(
+            forRootDirectory: fixture.root)
+        defer {
+            try? FileManager.default.removeItem(at: fixture.root)
+            try? FileManager.default.removeItem(at: parkedRoot)
+            try? FileManager.default.removeItem(at: lockURL)
+        }
+        RangeServingURLProtocol.configure(payload: fixture.payload)
+        defer { RangeServingURLProtocol.reset() }
+        let session = makeSession()
+        defer { session.invalidateAndCancel() }
+        let gate = InstallerCommitGate()
+        defer { gate.release() }
+        let owner = ComputerUseInstaller(
+            manifest: fixture.targetManifest,
+            rootDirectory: fixture.root,
+            legalResourceDirectory: fixture.legalDirectory,
+            downloadSession: session,
+            downloadChunkByteCount: Int64(fixture.payload.count),
+            legacyManifest: fixture.legacyManifest,
+            operations: operations(writeReceipt: { _, _ in gate.enterAndWait() }))
+        let ownerTask = Task { try await owner.install { _ in } }
+        for _ in 0 ..< 200 where !gate.hasEntered {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertTrue(gate.hasEntered)
+
+        try FileManager.default.moveItem(at: fixture.root, to: parkedRoot)
+        try FileManager.default.createDirectory(
+            at: fixture.root,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700])
+        let replacementFinished = LockedFlag()
+        let replacement = ComputerUseInstaller(
+            manifest: fixture.targetManifest,
+            rootDirectory: fixture.root,
+            legacyManifest: fixture.legacyManifest)
+        let replacementTask = Task {
+            try await replacement.preflight()
+            replacementFinished.set()
+        }
+        try await Task.sleep(for: .milliseconds(75))
+        XCTAssertFalse(replacementFinished.value,
+            "Replacing the managed root must not create an independent lock")
+
+        gate.release()
+        do {
+            _ = try await ownerTask.value
+            XCTFail("The original transaction must reject its replaced root")
+        } catch let error as ComputerUseInstaller.InstallError {
+            XCTAssertEqual(error, .unsafeManagedRoot)
+        }
+        try await replacementTask.value
+        XCTAssertTrue(replacementFinished.value)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: lockURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.root
+            .appendingPathComponent(".installation.lock").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: parkedRoot
+            .appendingPathComponent(".installation.lock").path))
+    }
+
+    func testStagingComponentSwapCannotRedirectHardLinkMutation() async throws {
+        let fixture = try makeMigrationFixture()
+        let parkedStaging = fixture.root.deletingLastPathComponent()
+            .appendingPathComponent("ComputerUseParkedStaging-\(UUID().uuidString)")
+        let outside = fixture.root.deletingLastPathComponent()
+            .appendingPathComponent("ComputerUseStagingSwapOutside-\(UUID().uuidString)")
+        let swapped = LockedFlag()
+        defer {
+            try? FileManager.default.removeItem(at: fixture.root)
+            try? FileManager.default.removeItem(at: parkedStaging)
+            try? FileManager.default.removeItem(at: outside)
+            try? FileManager.default.removeItem(at:
+                ComputerUseInstaller.installationLockURL(
+                    forRootDirectory: fixture.root))
+        }
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        let sentinel = outside.appendingPathComponent("sentinel")
+        try Data("untouched".utf8).write(to: sentinel)
+        RangeServingURLProtocol.configure(payload: fixture.payload)
+        defer { RangeServingURLProtocol.reset() }
+        let session = makeSession()
+        defer { session.invalidateAndCancel() }
+        let installer = ComputerUseInstaller(
+            manifest: fixture.targetManifest,
+            rootDirectory: fixture.root,
+            legalResourceDirectory: fixture.legalDirectory,
+            downloadSession: session,
+            downloadChunkByteCount: Int64(fixture.payload.count),
+            legacyManifest: fixture.legacyManifest,
+            operations: operations(prepareHardLink: { _, destination in
+                guard !swapped.value else { return }
+                swapped.set()
+                let staging = destination.deletingLastPathComponent()
+                try FileManager.default.moveItem(at: staging, to: parkedStaging)
+                try FileManager.default.createSymbolicLink(
+                    at: staging,
+                    withDestinationURL: outside)
+            }))
+
+        do {
+            _ = try await installer.install { _ in }
+            XCTFail("A swapped staging component must abort installation")
+        } catch {
+            // The exact fail-closed error may be the unsafe-root wrapper or the
+            // descriptor-relative openat failure from the swapped component.
+        }
+        XCTAssertTrue(swapped.value)
+        XCTAssertEqual(try Data(contentsOf: sentinel), Data("untouched".utf8))
+        XCTAssertEqual(
+            try FileManager.default.contentsOfDirectory(atPath: outside.path),
+            ["sentinel"])
+    }
+
+    func testDescriptorRelativeDownloaderRejectsDestinationNameSwap() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "ComputerUseSecureDownload-\(UUID().uuidString)",
+            isDirectory: true)
+        let outside = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "ComputerUseSecureDownloadOutside-\(UUID().uuidString)")
+        defer {
+            RangeServingURLProtocol.reset()
+            try? FileManager.default.removeItem(at: root)
+            try? FileManager.default.removeItem(at: outside)
+        }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try Data("untouched".utf8).write(to: outside)
+        let destination = root.appendingPathComponent("model.gguf")
+        let payload = Data((0 ..< 19).map(UInt8.init))
+        RangeServingURLProtocol.configure(payload: payload, requestHook: {
+            try? FileManager.default.removeItem(at: destination)
+            try? FileManager.default.createSymbolicLink(
+                at: destination,
+                withDestinationURL: outside)
+        })
+        let session = makeSession()
+        defer { session.invalidateAndCancel() }
+        let directoryDescriptor = root.path.withCString {
+            Darwin.open($0, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        }
+        XCTAssertGreaterThanOrEqual(directoryDescriptor, 0)
+        defer { if directoryDescriptor >= 0 { Darwin.close(directoryDescriptor) } }
+        let downloader = try ComputerUseHTTPDownloader(
+            destinationDirectoryDescriptor: directoryDescriptor,
+            destinationFileName: destination.lastPathComponent,
+            expectedByteCount: Int64(payload.count),
+            chunkByteCount: Int64(payload.count),
+            session: session,
+            progress: { _ in })
+
+        do {
+            try await downloader.download(URLRequest(
+                url: URL(string: "https://model.test/model.gguf")!))
+            XCTFail("The downloader must reject a swapped destination name")
+        } catch let error as ComputerUseHTTPDownloader.DownloadError {
+            XCTAssertEqual(error, .invalidResponse)
+        }
+        XCTAssertEqual(try Data(contentsOf: outside), Data("untouched".utf8))
+        XCTAssertEqual(
+            try destination.resourceValues(forKeys: [.isSymbolicLinkKey])
+                .isSymbolicLink,
+            true)
+    }
+
+    func testDescriptorRelativeDownloaderRejectsHardLinkedDestinationWithoutMutatingTarget() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "ComputerUseSecureDownloadHardLink-\(UUID().uuidString)",
+            isDirectory: true)
+        let outside = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "ComputerUseSecureDownloadHardLinkOutside-\(UUID().uuidString)")
+        defer {
+            RangeServingURLProtocol.reset()
+            try? FileManager.default.removeItem(at: root)
+            try? FileManager.default.removeItem(at: outside)
+        }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let original = Data("untouched".utf8)
+        try original.write(to: outside)
+        let destination = root.appendingPathComponent("model.gguf")
+        try FileManager.default.linkItem(at: outside, to: destination)
+        let payload = Data((0 ..< 19).map(UInt8.init))
+        RangeServingURLProtocol.configure(payload: payload)
+        let session = makeSession()
+        defer { session.invalidateAndCancel() }
+        let directoryDescriptor = root.path.withCString {
+            Darwin.open($0, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        }
+        XCTAssertGreaterThanOrEqual(directoryDescriptor, 0)
+        defer { if directoryDescriptor >= 0 { Darwin.close(directoryDescriptor) } }
+        let downloader = try ComputerUseHTTPDownloader(
+            destinationDirectoryDescriptor: directoryDescriptor,
+            destinationFileName: destination.lastPathComponent,
+            expectedByteCount: Int64(payload.count),
+            chunkByteCount: Int64(payload.count),
+            session: session,
+            progress: { _ in })
+
+        do {
+            try await downloader.download(URLRequest(
+                url: URL(string: "https://model.test/model.gguf")!))
+            XCTFail("The downloader must reject a hard-linked destination")
+        } catch let error as ComputerUseHTTPDownloader.DownloadError {
+            XCTAssertEqual(error, .invalidResponse)
+        }
+        XCTAssertEqual(try Data(contentsOf: outside), original,
+            "Rejecting the staging link must not mutate its external inode")
+        XCTAssertEqual(try Data(contentsOf: destination), original)
+        XCTAssertTrue(RangeServingURLProtocol.requestedURLs().isEmpty,
+            "A hard-linked sink must be rejected before any download starts")
+    }
+
+    func testExistingInstallationRepairPreservesMultiplyLinkedArtifactMode() async throws {
+        let fixture = try makeMigrationFixture()
+        let alias = fixture.root.deletingLastPathComponent().appendingPathComponent(
+            "ComputerUseRepairAlias-\(UUID().uuidString).gguf")
+        defer {
+            RangeServingURLProtocol.reset()
+            try? FileManager.default.removeItem(at: fixture.root)
+            try? FileManager.default.removeItem(at: alias)
+            try? FileManager.default.removeItem(at:
+                ComputerUseInstaller.installationLockURL(
+                    forRootDirectory: fixture.root))
+        }
+        RangeServingURLProtocol.configure(payload: fixture.payload)
+        let session = makeSession()
+        defer { session.invalidateAndCancel() }
+        let launchIdentifier = "multiply-linked-repair"
+        let installer = ComputerUseInstaller(
+            manifest: fixture.targetManifest,
+            rootDirectory: fixture.root,
+            legalResourceDirectory: fixture.legalDirectory,
+            downloadSession: session,
+            downloadChunkByteCount: Int64(fixture.payload.count),
+            legacyManifest: fixture.legacyManifest,
+            launchIdentifier: launchIdentifier)
+        _ = try await installer.install { _ in }
+
+        let targetDirectory = fixture.root
+            .appendingPathComponent("Models", isDirectory: true)
+            .appendingPathComponent(
+                fixture.targetManifest.installationVersion,
+                isDirectory: true)
+        let semanticArtifact = try XCTUnwrap(
+            fixture.targetManifest.modelArtifacts.first(where: {
+                $0.kind == .semanticRouterModel
+            }))
+        let managedArtifact = targetDirectory.appendingPathComponent(
+            semanticArtifact.fileName)
+        try FileManager.default.linkItem(at: managedArtifact, to: alias)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o644],
+            ofItemAtPath: alias.path)
+        let originalBytes = try Data(contentsOf: alias)
+        XCTAssertEqual(try permissions(at: alias), 0o644)
+        XCTAssertEqual(try permissions(at: managedArtifact), 0o644)
+
+        RangeServingURLProtocol.configure(payload: fixture.payload)
+        let repair = ComputerUseInstaller(
+            manifest: fixture.targetManifest,
+            rootDirectory: fixture.root,
+            legalResourceDirectory: fixture.legalDirectory,
+            downloadSession: session,
+            downloadChunkByteCount: Int64(fixture.payload.count),
+            legacyManifest: fixture.legacyManifest,
+            launchIdentifier: launchIdentifier)
+        _ = try await repair.install { _ in }
+
+        XCTAssertEqual(try Data(contentsOf: alias), originalBytes)
+        XCTAssertEqual(try Data(contentsOf: managedArtifact), originalBytes)
+        XCTAssertEqual(try permissions(at: alias), 0o644,
+            "Repair must not chmod a second name for the shared inode")
+        XCTAssertEqual(try permissions(at: managedArtifact), 0o644)
+        XCTAssertTrue(RangeServingURLProtocol.requestedURLs().isEmpty)
+    }
+
+    func testExistingInstallationRepairRejectsMultiplyLinkedExecutableArtifact() async throws {
+        let fixture = try makeMigrationFixture()
+        let alias = fixture.root.deletingLastPathComponent().appendingPathComponent(
+            "ComputerUseExecutableAlias-\(UUID().uuidString).gguf")
+        defer {
+            RangeServingURLProtocol.reset()
+            try? FileManager.default.removeItem(at: fixture.root)
+            try? FileManager.default.removeItem(at: alias)
+            try? FileManager.default.removeItem(at:
+                ComputerUseInstaller.installationLockURL(
+                    forRootDirectory: fixture.root))
+        }
+        RangeServingURLProtocol.configure(payload: fixture.payload)
+        let session = makeSession()
+        defer { session.invalidateAndCancel() }
+        let launchIdentifier = "multiply-linked-executable-repair"
+        let installer = ComputerUseInstaller(
+            manifest: fixture.targetManifest,
+            rootDirectory: fixture.root,
+            legalResourceDirectory: fixture.legalDirectory,
+            downloadSession: session,
+            downloadChunkByteCount: Int64(fixture.payload.count),
+            legacyManifest: fixture.legacyManifest,
+            launchIdentifier: launchIdentifier)
+        _ = try await installer.install { _ in }
+
+        let targetDirectory = fixture.root
+            .appendingPathComponent("Models", isDirectory: true)
+            .appendingPathComponent(
+                fixture.targetManifest.installationVersion,
+                isDirectory: true)
+        let semanticArtifact = try XCTUnwrap(
+            fixture.targetManifest.modelArtifacts.first(where: {
+                $0.kind == .semanticRouterModel
+            }))
+        let managedArtifact = targetDirectory.appendingPathComponent(
+            semanticArtifact.fileName)
+        try FileManager.default.linkItem(at: managedArtifact, to: alias)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o744],
+            ofItemAtPath: alias.path)
+        let originalBytes = try Data(contentsOf: alias)
+
+        RangeServingURLProtocol.configure(payload: fixture.payload)
+        let repair = ComputerUseInstaller(
+            manifest: fixture.targetManifest,
+            rootDirectory: fixture.root,
+            legalResourceDirectory: fixture.legalDirectory,
+            downloadSession: session,
+            downloadChunkByteCount: Int64(fixture.payload.count),
+            legacyManifest: fixture.legacyManifest,
+            launchIdentifier: launchIdentifier)
+        do {
+            _ = try await repair.install { _ in }
+            XCTFail("Repair must reject a multiply-linked executable artifact")
+        } catch let error as ComputerUseInstaller.InstallError {
+            XCTAssertEqual(error, .unsafeManagedRoot)
+        }
+
+        XCTAssertEqual(try Data(contentsOf: alias), originalBytes)
+        XCTAssertEqual(try Data(contentsOf: managedArtifact), originalBytes)
+        XCTAssertEqual(try permissions(at: alias), 0o744)
+        XCTAssertEqual(try permissions(at: managedArtifact), 0o744)
+        XCTAssertTrue(RangeServingURLProtocol.requestedURLs().isEmpty)
+    }
+
+    func testRecursiveRemovalRejectsSymlinkWithoutTouchingTarget() async throws {
+        let fixture = try makeMigrationFixture()
+        let outside = fixture.root.deletingLastPathComponent()
+            .appendingPathComponent("ComputerUseRecursiveDeleteOutside-\(UUID().uuidString)")
+        defer {
+            try? FileManager.default.removeItem(at: fixture.root)
+            try? FileManager.default.removeItem(at: outside)
+            try? FileManager.default.removeItem(at:
+                ComputerUseInstaller.installationLockURL(
+                    forRootDirectory: fixture.root))
+        }
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        let sentinel = outside.appendingPathComponent("sentinel")
+        try Data("untouched".utf8).write(to: sentinel)
+        let hostileLink = fixture.legacyDirectory.appendingPathComponent("hostile-link")
+        try FileManager.default.createSymbolicLink(
+            at: hostileLink,
+            withDestinationURL: outside)
+        let installer = ComputerUseInstaller(
+            manifest: fixture.targetManifest,
+            rootDirectory: fixture.root,
+            legacyManifest: fixture.legacyManifest)
+
+        do {
+            try await installer.removeInstallation()
+            XCTFail("Recursive managed-tree removal must reject symlinks")
+        } catch let error as ComputerUseInstaller.InstallError {
+            XCTAssertEqual(error, .unsafeManagedRoot)
+        }
+        XCTAssertEqual(try Data(contentsOf: sentinel), Data("untouched".utf8))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: hostileLink.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.receiptURL.path),
+            "Tree validation must fail before the receipt or any tree entry is removed")
+    }
+
+    func testDurabilityBarriersPrecedeReceiptAndCleanupEligibility() async throws {
+        let fixture = try makeMigrationFixture()
+        defer {
+            try? FileManager.default.removeItem(at: fixture.root)
+            try? FileManager.default.removeItem(at:
+                ComputerUseInstaller.installationLockURL(
+                    forRootDirectory: fixture.root))
+        }
+        RangeServingURLProtocol.configure(payload: fixture.payload)
+        defer { RangeServingURLProtocol.reset() }
+        let session = makeSession()
+        defer { session.invalidateAndCancel() }
+        let events = LockedStringRecorder()
+        let installer = ComputerUseInstaller(
+            manifest: fixture.targetManifest,
+            rootDirectory: fixture.root,
+            legalResourceDirectory: fixture.legalDirectory,
+            downloadSession: session,
+            downloadChunkByteCount: Int64(fixture.payload.count),
+            legacyManifest: fixture.legacyManifest,
+            operations: operations(
+                writeReceipt: { _, _ in events.append("prepare-receipt") },
+                durabilityBarrier: { events.append($0) }),
+            launchIdentifier: "durability-launch")
+
+        _ = try await installer.install { _ in }
+        let observed = events.snapshot()
+        func index(_ event: String) throws -> Int {
+            try XCTUnwrap(observed.firstIndex(of: event), event)
+        }
+        let stagingIndex = try index("staging-directory")
+        let renameIndex = try index("model-rename")
+        let modelIndex = try index("model-directory")
+        let prepareReceiptIndex = try index("prepare-receipt")
+        let receiptIndex = try index("receipt")
+        let cleanupMarkerIndex = try index("deferred-cleanup-marker")
+        let markerRemovalIndex = try index("installation-marker-removed")
+        XCTAssertLessThan(try index("installation-marker"), stagingIndex)
+        for artifact in fixture.targetManifest.modelArtifacts {
+            XCTAssertLessThan(try index("artifact:\(artifact.fileName)"), stagingIndex)
+        }
+        XCTAssertLessThan(stagingIndex, renameIndex)
+        XCTAssertLessThan(renameIndex, modelIndex)
+        for legal in ComputerUseArtifactManifest.modelLegalArtifacts {
+            XCTAssertLessThan(try index("legal:\(legal.fileName)"), modelIndex)
+        }
+        XCTAssertLessThan(modelIndex, prepareReceiptIndex)
+        XCTAssertLessThan(prepareReceiptIndex, receiptIndex)
+        XCTAssertLessThan(receiptIndex, cleanupMarkerIndex)
+        XCTAssertLessThan(cleanupMarkerIndex, markerRemovalIndex)
+    }
+
+    func testSymlinkedManagedRootLeafIsRejectedBeforeLockOrMutation() async throws {
+        let fixture = try makeMigrationFixture()
+        let outside = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "ComputerUseRootSymlinkOutside-\(UUID().uuidString)",
+            isDirectory: true)
+        defer {
+            try? FileManager.default.removeItem(at: fixture.root)
+            try? FileManager.default.removeItem(at: outside)
+        }
+        try FileManager.default.removeItem(at: fixture.root)
+        try FileManager.default.createDirectory(
+            at: outside,
+            withIntermediateDirectories: true)
+        let sentinel = outside.appendingPathComponent("sentinel")
+        try Data("untouched".utf8).write(to: sentinel)
+        try FileManager.default.createSymbolicLink(
+            at: fixture.root,
+            withDestinationURL: outside)
+        let installer = ComputerUseInstaller(
+            manifest: fixture.targetManifest,
+            rootDirectory: fixture.root,
+            legacyManifest: fixture.legacyManifest)
+
+        do {
+            try await installer.preflight()
+            XCTFail("Expected a symlinked app-managed root to be rejected")
+        } catch let error as ComputerUseInstaller.InstallError {
+            XCTAssertEqual(error, .unsafeManagedRoot)
+        }
+
+        XCTAssertEqual(try Data(contentsOf: sentinel), Data("untouched".utf8))
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: ComputerUseInstaller.installationLockURL(
+                forRootDirectory: fixture.root).path))
+    }
+
+    func testRootSwapDuringReceiptCommitAbortsWithoutRedirectedRollback() async throws {
+        let fixture = try makeMigrationFixture()
+        let parkedRoot = fixture.root.deletingLastPathComponent()
+            .appendingPathComponent("ComputerUseParkedRoot-\(UUID().uuidString)")
+        let outside = fixture.root.deletingLastPathComponent()
+            .appendingPathComponent("ComputerUseSwappedRoot-\(UUID().uuidString)")
+        defer {
+            try? FileManager.default.removeItem(at: fixture.root)
+            try? FileManager.default.removeItem(at: parkedRoot)
+            try? FileManager.default.removeItem(at: outside)
+        }
+        try FileManager.default.createDirectory(
+            at: outside,
+            withIntermediateDirectories: true)
+        let sentinel = outside.appendingPathComponent("sentinel")
+        try Data("untouched".utf8).write(to: sentinel)
+        RangeServingURLProtocol.configure(payload: fixture.payload)
+        defer { RangeServingURLProtocol.reset() }
+        let session = makeSession()
+        defer { session.invalidateAndCancel() }
+        let installer = ComputerUseInstaller(
+            manifest: fixture.targetManifest,
+            rootDirectory: fixture.root,
+            legalResourceDirectory: fixture.legalDirectory,
+            downloadSession: session,
+            downloadChunkByteCount: Int64(fixture.payload.count),
+            legacyManifest: fixture.legacyManifest,
+            operations: operations(writeReceipt: { _, _ in
+                try FileManager.default.moveItem(
+                    at: fixture.root,
+                    to: parkedRoot)
+                try FileManager.default.createSymbolicLink(
+                    at: fixture.root,
+                    withDestinationURL: outside)
+            }))
+
+        do {
+            _ = try await installer.install { _ in }
+            XCTFail("Expected root replacement to abort receipt commit")
+        } catch let error as ComputerUseInstaller.InstallError {
+            XCTAssertEqual(error, .unsafeManagedRoot)
+        }
+
+        XCTAssertEqual(try Data(contentsOf: sentinel), Data("untouched".utf8))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: outside
+            .appendingPathComponent("active-installation.json").path))
+        let retainedReceipt = try JSONDecoder().decode(
+            ComputerUseInstallationReceipt.self,
+            from: Data(contentsOf: parkedRoot
+                .appendingPathComponent("active-installation.json")))
+        XCTAssertEqual(retainedReceipt.installationVersion,
+            fixture.legacyManifest.installationVersion)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: parkedRoot
+            .appendingPathComponent("Models")
+            .appendingPathComponent(fixture.legacyManifest.installationVersion).path))
+    }
+
+    func testRootSwapDuringLongDownloadIsDetectedAndCancelsTransaction() async throws {
+        let fixture = try makeMigrationFixture()
+        let parkedRoot = fixture.root.deletingLastPathComponent()
+            .appendingPathComponent("ComputerUseParkedDownload-\(UUID().uuidString)")
+        let outside = fixture.root.deletingLastPathComponent()
+            .appendingPathComponent("ComputerUseSwappedDownload-\(UUID().uuidString)")
+        defer {
+            try? FileManager.default.removeItem(at: fixture.root)
+            try? FileManager.default.removeItem(at: parkedRoot)
+            try? FileManager.default.removeItem(at: outside)
+        }
+        try FileManager.default.createDirectory(
+            at: outside,
+            withIntermediateDirectories: true)
+        let sentinel = outside.appendingPathComponent("sentinel")
+        try Data("untouched".utf8).write(to: sentinel)
+        RangeServingURLProtocol.configure(
+            payload: fixture.payload,
+            blockResponses: true)
+        defer { RangeServingURLProtocol.reset() }
+        let session = makeSession()
+        defer { session.invalidateAndCancel() }
+        let installer = ComputerUseInstaller(
+            manifest: fixture.targetManifest,
+            rootDirectory: fixture.root,
+            legalResourceDirectory: fixture.legalDirectory,
+            downloadSession: session,
+            downloadChunkByteCount: Int64(fixture.payload.count),
+            legacyManifest: fixture.legacyManifest)
+        let task = Task { try await installer.install { _ in } }
+        for _ in 0 ..< 200 where RangeServingURLProtocol.requestedURLs().isEmpty {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertEqual(RangeServingURLProtocol.requestedURLs().first?
+            .lastPathComponent, "semantic-router.gguf")
+
+        try FileManager.default.moveItem(at: fixture.root, to: parkedRoot)
+        try FileManager.default.createSymbolicLink(
+            at: fixture.root,
+            withDestinationURL: outside)
+        do {
+            _ = try await task.value
+            XCTFail("Expected root monitor to cancel the in-flight install")
+        } catch {
+            // The root monitor normally wins with unsafeManagedRoot; URLSession
+            // cancellation may race it and surface URLError.cancelled instead.
+        }
+
+        XCTAssertEqual(try Data(contentsOf: sentinel), Data("untouched".utf8))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: outside
+            .appendingPathComponent("Models").path))
+        let retainedReceipt = try JSONDecoder().decode(
+            ComputerUseInstallationReceipt.self,
+            from: Data(contentsOf: parkedRoot
+                .appendingPathComponent("active-installation.json")))
+        XCTAssertEqual(retainedReceipt.installationVersion,
+            fixture.legacyManifest.installationVersion)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: parkedRoot
+            .appendingPathComponent("Models")
+            .appendingPathComponent(fixture.legacyManifest.installationVersion).path))
+    }
+
+    func testRootSwapBeforeDeferredCleanupCannotRedirectLegacyDeletion() async throws {
+        let fixture = try makeMigrationFixture()
+        let parkedRoot = fixture.root.deletingLastPathComponent()
+            .appendingPathComponent("ComputerUseParkedCleanup-\(UUID().uuidString)")
+        let outside = fixture.root.deletingLastPathComponent()
+            .appendingPathComponent("ComputerUseSwappedCleanup-\(UUID().uuidString)")
+        defer {
+            try? FileManager.default.removeItem(at: fixture.root)
+            try? FileManager.default.removeItem(at: parkedRoot)
+            try? FileManager.default.removeItem(at: outside)
+        }
+        RangeServingURLProtocol.configure(payload: fixture.payload)
+        defer { RangeServingURLProtocol.reset() }
+        let session = makeSession()
+        defer { session.invalidateAndCancel() }
+        let firstLaunch = ComputerUseInstaller(
+            manifest: fixture.targetManifest,
+            rootDirectory: fixture.root,
+            legalResourceDirectory: fixture.legalDirectory,
+            downloadSession: session,
+            downloadChunkByteCount: Int64(fixture.payload.count),
+            legacyManifest: fixture.legacyManifest,
+            launchIdentifier: "cleanup-launch-1")
+        _ = try await firstLaunch.install { _ in }
+        try FileManager.default.createDirectory(
+            at: outside,
+            withIntermediateDirectories: true)
+        let sentinel = outside.appendingPathComponent("sentinel")
+        try Data("untouched".utf8).write(to: sentinel)
+
+        let nextLaunch = ComputerUseInstaller(
+            manifest: fixture.targetManifest,
+            rootDirectory: fixture.root,
+            legalResourceDirectory: fixture.legalDirectory,
+            legacyManifest: fixture.legacyManifest,
+            operations: operations(prepareCleanup: {
+                try FileManager.default.moveItem(
+                    at: fixture.root,
+                    to: parkedRoot)
+                try FileManager.default.createSymbolicLink(
+                    at: fixture.root,
+                    withDestinationURL: outside)
+            }),
+            launchIdentifier: "cleanup-launch-2")
+        do {
+            _ = try await nextLaunch.install { _ in }
+            XCTFail("Expected root replacement to abort deferred cleanup")
+        } catch let error as ComputerUseInstaller.InstallError {
+            XCTAssertEqual(error, .unsafeManagedRoot)
+        }
+
+        XCTAssertEqual(try Data(contentsOf: sentinel), Data("untouched".utf8))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: parkedRoot
+            .appendingPathComponent("Models")
+            .appendingPathComponent(fixture.legacyManifest.installationVersion).path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: parkedRoot
+            .appendingPathComponent(
+                ComputerUseInstaller.deferredLegacyCleanupMarkerName).path))
+    }
+
+    func testPassiveStatusDoesNotRepairPermissionsLegalFilesOrMarkers() async throws {
+        let fixture = try makeMigrationFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let marker = fixture.root.appendingPathComponent(
+            ComputerUseInstaller.interruptedInstallationMarkerName)
+        try Data("installing\n".utf8).write(to: marker)
+        let firstArtifact = fixture.legacyDirectory.appendingPathComponent(
+            fixture.legacyManifest.modelArtifacts[0].fileName)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o644],
+            ofItemAtPath: firstArtifact.path)
+        let originalReceiptData = try Data(contentsOf: fixture.receiptURL)
+        let installer = ComputerUseInstaller(
+            manifest: fixture.legacyManifest,
+            rootDirectory: fixture.root,
+            legalResourceDirectory: fixture.legalDirectory,
+            legacyManifest: nil)
+
+        let status = await installer.currentInstallation()
+
+        XCTAssertEqual(status?.installationVersion,
+            fixture.legacyManifest.installationVersion)
+        XCTAssertEqual(try Data(contentsOf: fixture.receiptURL), originalReceiptData)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
+        XCTAssertEqual(
+            (((try FileManager.default.attributesOfItem(atPath: firstArtifact.path))[
+                .posixPermissions] as? NSNumber)?.intValue ?? -1) & 0o777,
+            0o644)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.legacyDirectory
+            .appendingPathComponent(
+                ComputerUseArtifactManifest.modelNotice.fileName).path))
+    }
+
+    private struct MigrationFixture {
+        let root: URL
+        let legalDirectory: URL
+        let legacyDirectory: URL
+        let receiptURL: URL
+        let payload: Data
+        let legacyManifest: ComputerUseArtifactManifest
+        let targetManifest: ComputerUseArtifactManifest
+    }
+
+    private func permissions(at url: URL) throws -> Int {
+        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+        return (try XCTUnwrap(attributes[.posixPermissions] as? NSNumber)).intValue
+            & 0o777
+    }
+
+    private func makeMigrationFixture() throws -> MigrationFixture {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "ComputerUseMigrationTests-\(UUID().uuidString)",
+            isDirectory: true)
+        let legalDirectory = root.appendingPathComponent(
+            "BundledLegal",
+            isDirectory: true)
+        let legacyVersion = "legacy-visual-v1"
+        let targetVersion = "visual-semantic-v2"
+        let legacyDirectory = root
+            .appendingPathComponent("Models", isDirectory: true)
+            .appendingPathComponent(legacyVersion, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: legacyDirectory,
+            withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(
+            at: legalDirectory,
+            withIntermediateDirectories: true)
+
+        let payload = Data([0x10, 0x21, 0x32, 0x43, 0x54, 0x65, 0x76, 0x87])
+        let digest = Self.sha256Hex(payload)
+        func artifact(
+            _ kind: ComputerUseArtifactManifest.DownloadableArtifact.Kind,
+            _ fileName: String
+        ) -> ComputerUseArtifactManifest.DownloadableArtifact {
+            .init(
+                kind: kind,
+                fileName: fileName,
+                byteCount: Int64(payload.count),
+                sha256: digest,
+                downloadURL: URL(string: "https://model.test/\(fileName)")!)
+        }
+        let visualArtifacts = [
+            artifact(.textModelShard, "visual-1.gguf"),
+            artifact(.textModelShard, "visual-2.gguf"),
+            artifact(.visionProjector, "vision-projector.gguf"),
+        ]
+        let semanticArtifact = artifact(
+            .semanticRouterModel,
+            "semantic-router.gguf")
+        let legacyManifest = ComputerUseArtifactManifest(
+            installationVersion: legacyVersion,
+            modelVariant: .pro4B,
+            modelRepository: "test/visual-model",
+            modelRevision: "legacy-pinned-revision",
+            modelArtifacts: visualArtifacts,
+            minimumMemoryBytes: 0)
+        let targetManifest = ComputerUseArtifactManifest(
+            installationVersion: targetVersion,
+            modelVariant: .pro4B,
+            modelRepository: "test/multi-model",
+            modelRevision: "target-pinned-revision",
+            modelArtifacts: visualArtifacts + [semanticArtifact],
+            minimumMemoryBytes: 0)
+        for artifact in visualArtifacts {
+            try payload.write(to:
+                legacyDirectory.appendingPathComponent(artifact.fileName))
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o600],
+                ofItemAtPath: legacyDirectory
+                    .appendingPathComponent(artifact.fileName).path)
+        }
+
+        let receiptURL = root.appendingPathComponent("active-installation.json")
+        let receipt = ComputerUseInstallationReceipt(
+            installationVersion: legacyVersion,
+            modelVariant: .pro4B,
+            modelDirectory: legacyDirectory.path,
+            installedAt: Date(timeIntervalSince1970: 1))
+        try JSONEncoder().encode(receipt).write(to: receiptURL, options: .atomic)
+        let bundles = [
+            Bundle.main,
+            Bundle(for: ComputerUseInstallerMigrationTests.self),
+        ] + Bundle.allBundles + Bundle.allFrameworks
+        for artifact in ComputerUseArtifactManifest.modelLegalArtifacts {
+            let source = try XCTUnwrap(
+                ComputerUseArtifactManifest.bundledLegalDocumentURL(
+                    artifact,
+                    bundles: bundles))
+            try FileManager.default.copyItem(
+                at: source,
+                to: legalDirectory.appendingPathComponent(artifact.fileName))
+        }
+        return MigrationFixture(
+            root: root,
+            legalDirectory: legalDirectory,
+            legacyDirectory: legacyDirectory,
+            receiptURL: receiptURL,
+            payload: payload,
+            legacyManifest: legacyManifest,
+            targetManifest: targetManifest)
+    }
+
+    private func makeSession() -> URLSession {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [RangeServingURLProtocol.self]
+        return URLSession(configuration: configuration)
+    }
+
+    private func operations(
+        availableCapacity: Int64 = .max,
+        failHardLinks: Bool = false,
+        prepareHardLink: (@Sendable (URL, URL) throws -> Void)? = nil,
+        writeReceipt: (@Sendable (Data, URL) throws -> Void)? = nil,
+        prepareCleanup: (@Sendable () throws -> Void)? = nil,
+        durabilityBarrier: (@Sendable (String) -> Void)? = nil
+    ) -> ComputerUseInstaller.Operations {
+        ComputerUseInstaller.Operations(
+            createHardLink: { source, destination in
+                if failHardLinks { throw CocoaError(.fileWriteUnknown) }
+                try prepareHardLink?(source, destination)
+            },
+            availableCapacity: { _ in availableCapacity },
+            prepareReceiptCommit: writeReceipt ?? { _, _ in },
+            prepareDeferredCleanup: prepareCleanup ?? {},
+            durabilityBarrier: durabilityBarrier ?? { _ in })
+    }
+
+    private static func sha256Hex(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+private final class MigrationReceiptObservation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var version: String?
+    private var legacyDirectoryExists = false
+
+    func record(version: String, legacyDirectoryExists: Bool) {
+        lock.withLock {
+            self.version = version
+            self.legacyDirectoryExists = legacyDirectoryExists
+        }
+    }
+
+    func snapshot() -> (version: String?, legacyDirectoryExists: Bool) {
+        lock.withLock { (version, legacyDirectoryExists) }
+    }
+}
+
+private final class InstallerCommitGate: @unchecked Sendable {
+    private let stateLock = NSLock()
+    private let semaphore = DispatchSemaphore(value: 0)
+    private var entered = false
+    private var released = false
+
+    var hasEntered: Bool {
+        stateLock.withLock { entered }
+    }
+
+    func enterAndWait() {
+        let shouldWait = stateLock.withLock { () -> Bool in
+            entered = true
+            return !released
+        }
+        if shouldWait { semaphore.wait() }
+    }
+
+    func release() {
+        let shouldSignal = stateLock.withLock { () -> Bool in
+            guard !released else { return false }
+            released = true
+            return entered
+        }
+        if shouldSignal { semaphore.signal() }
+    }
+}
+
+private final class LockedFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage = false
+
+    var value: Bool { lock.withLock { storage } }
+
+    func set() {
+        lock.withLock { storage = true }
+    }
+}
+
+private final class LockedStringRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [String] = []
+
+    func append(_ value: String) {
+        lock.withLock { values.append(value) }
+    }
+
+    func snapshot() -> [String] {
+        lock.withLock { values }
+    }
+}
+
 private final class RangeServingURLProtocol: URLProtocol, @unchecked Sendable {
     private static let lock = NSLock()
     private static var payload = Data()
     private static var ranges: [String] = []
+    private static var urls: [URL] = []
+    private static var blockResponses = false
+    private static var requestHook: (@Sendable () -> Void)?
 
-    static func configure(payload: Data) {
+    static func configure(
+        payload: Data,
+        blockResponses: Bool = false,
+        requestHook: (@Sendable () -> Void)? = nil
+    ) {
         lock.withLock {
             self.payload = payload
             ranges = []
+            urls = []
+            self.blockResponses = blockResponses
+            self.requestHook = requestHook
         }
     }
 
@@ -3882,11 +5432,18 @@ private final class RangeServingURLProtocol: URLProtocol, @unchecked Sendable {
         lock.withLock {
             payload = Data()
             ranges = []
+            urls = []
+            blockResponses = false
+            requestHook = nil
         }
     }
 
     static func requestedRanges() -> [String] {
         lock.withLock { ranges }
+    }
+
+    static func requestedURLs() -> [URL] {
+        lock.withLock { urls }
     }
 
     override class func canInit(with request: URLRequest) -> Bool { true }
@@ -3903,10 +5460,14 @@ private final class RangeServingURLProtocol: URLProtocol, @unchecked Sendable {
                 ComputerUseHTTPDownloader.DownloadError.invalidRangeResponse)
             return
         }
-        let data = Self.lock.withLock { () -> Data in
+        let (data, shouldBlock, hook) = Self.lock.withLock {
+            () -> (Data, Bool, (@Sendable () -> Void)?) in
             Self.ranges.append(range)
-            return Self.payload
+            Self.urls.append(url)
+            return (Self.payload, Self.blockResponses, Self.requestHook)
         }
+        hook?()
+        if shouldBlock { return }
         guard byteRange.lowerBound >= 0,
               byteRange.upperBound < data.count,
               byteRange.lowerBound <= byteRange.upperBound else {
@@ -4086,6 +5647,56 @@ private final class CancellationIgnoringToolExecutor: ComputerUseExecuting {
     func releaseAndAttemptToolCall() {
         releaseContinuation?.resume()
         releaseContinuation = nil
+    }
+}
+
+@MainActor
+private final class StopJoinProbeExecutor: ComputerUseExecuting {
+    let isReady = true
+    let runtimeName = "Stop/join probe runtime"
+    private let cancellationProbe = ShutdownCancellationProbe()
+    private var firstReleaseContinuation: CheckedContinuation<Void, Never>?
+    private(set) var prompts: [String] = []
+    private(set) var firstExecutionStarted = false
+    private(set) var replacementExecutionStarted = false
+    private(set) var staleActionAttempted = false
+    private(set) var staleActionWasBlocked = false
+    var callCount: Int { prompts.count }
+
+    nonisolated var cancellationWasObserved: Bool {
+        cancellationProbe.value()
+    }
+
+    func execute(
+        prompt: String,
+        tools: ComputerUseHostTools,
+        progress: @escaping (String) -> Void
+    ) async throws -> ComputerUseExecutionResult {
+        prompts.append(prompt)
+        if prompts.count == 1 {
+            firstExecutionStarted = true
+            await withTaskCancellationHandler {
+                await withCheckedContinuation { continuation in
+                    firstReleaseContinuation = continuation
+                }
+            } onCancel: { [cancellationProbe] in
+                cancellationProbe.markObserved()
+            }
+            staleActionAttempted = true
+            do {
+                try tools.perform(.typeText("must-not-be-injected"))
+            } catch ComputerUseHostTools.ToolError.paused {
+                staleActionWasBlocked = true
+            }
+            return .completed("The stopped execution unwound")
+        }
+        replacementExecutionStarted = true
+        return .completed("Replacement completed")
+    }
+
+    func releaseFirstExecution() {
+        firstReleaseContinuation?.resume()
+        firstReleaseContinuation = nil
     }
 }
 

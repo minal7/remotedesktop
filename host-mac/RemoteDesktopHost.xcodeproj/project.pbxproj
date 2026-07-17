@@ -34,6 +34,7 @@
 		4C9693292EA211546C26D75B /* OSAtlasLlamaRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5FCB3255850270CBF08A86D0 /* OSAtlasLlamaRuntime.swift */; };
 		511514C02A183941333B0803 /* MacControlMCPArchiveExtractor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7DEB12F1337DC8272D20BD2A /* MacControlMCPArchiveExtractor.swift */; };
 		538B1C81F0766A5A01A59C66 /* OSAtlasComputerUseExecutorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3349CC549DF18D316358D45F /* OSAtlasComputerUseExecutorTests.swift */; };
+		54D17A53E353BCEC918766FD /* LlamaSemanticActionRouterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F4A87471C34A3E1B559DB90 /* LlamaSemanticActionRouterTests.swift */; };
 		5904006F8408628325366659 /* BonjourAdvertiser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4770C8CE9BED4CC5EFB3A726 /* BonjourAdvertiser.swift */; };
 		5BEA124BF32042E307D79208 /* ScreenCapture.swift in Sources */ = {isa = PBXBuildFile; fileRef = 138F44F93B9F279F9495A485 /* ScreenCapture.swift */; };
 		5EA25BB8F67C3AD701724649 /* AppleFoundationMCPPlannerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD18C4E425AE91D459520417 /* AppleFoundationMCPPlannerTests.swift */; };
@@ -69,13 +70,17 @@
 		B719FEA1E23F3779D4083566 /* ComputerUseRuntimeTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1011F8B532D93C2004CCFA98 /* ComputerUseRuntimeTypes.swift */; };
 		B9E3A137D7B18F63AE4AC4E2 /* OSAtlasRuntimeInstallation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 16CB73E4E41BE0E7586E4129 /* OSAtlasRuntimeInstallation.swift */; };
 		BC393D0286409F0A6B367D79 /* ComputerUseMobileInitiationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC7C60E90BCD41A69C849F4B /* ComputerUseMobileInitiationTests.swift */; };
+		C15C5EDE7DBC24A7B612B196 /* GRANITE-APACHE-2.0-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = E1FDF008ED7A77CB2274A8CD /* GRANITE-APACHE-2.0-LICENSE.txt */; };
 		C7AE7D151153F5457AF1A27B /* MCPClientSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6CDAD78ED761DA2254F0F6BC /* MCPClientSession.swift */; };
 		C90476214B9BEF6C1D0D53FA /* HostSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 63433D0B8027A723A9C0090E /* HostSettingsView.swift */; };
 		C9C3A5C0046F855F65A0D8EE /* CloudKitComputerUseChannel.swift in Sources */ = {isa = PBXBuildFile; fileRef = BE05E1F678802C54EF3D44AD /* CloudKitComputerUseChannel.swift */; };
 		CA5095CA26D04D0DA3336222 /* MCPTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D2FEC98D1A8EA9C7CAE9D27 /* MCPTypes.swift */; };
+		D0D9C86CC3FB8ED75F653DCE /* LlamaSemanticActionRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B3881C50F6D42EF67BBC8FD /* LlamaSemanticActionRouter.swift */; };
 		D184F2F3A70A20D0AE2C6A95 /* ComputerUseArtifactManifest.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7196F80FEC0A28B03B3D49A /* ComputerUseArtifactManifest.swift */; };
+		D22E96536F20DF25230499D9 /* SemanticNativeToolWireContract.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE19039ABF07FF04D9C8B835 /* SemanticNativeToolWireContract.swift */; };
 		D69461347BA90EA816D813C4 /* ComputerUseProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 48A968CEDB6DC8E31EAD80B9 /* ComputerUseProtocol.swift */; };
 		DFE68A099F0C07CA6598E619 /* AppleFoundationMCPPlanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01D4A4CBD5E28C53D7C11C24 /* AppleFoundationMCPPlanner.swift */; };
+		E2D0353B10542596A31022ED /* SemanticNativeToolWireContractTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4386734ED5C4565BC0F3E3B5 /* SemanticNativeToolWireContractTests.swift */; };
 		E47AD513E1617BE306A6B446 /* NOTICE.txt in Resources */ = {isa = PBXBuildFile; fileRef = 11941D3F38B1D9FBA3206FF2 /* NOTICE.txt */; };
 		E952758808FD11ACD6373819 /* DesktopVideoQuality.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4BBFCF4671A048F18B490D57 /* DesktopVideoQuality.swift */; };
 		ED079874829511ED2203A189 /* ScreenCaptureSizingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 037B0683983EF3DD797F9355 /* ScreenCaptureSizingTests.swift */; };
@@ -96,6 +101,7 @@
 		01D4A4CBD5E28C53D7C11C24 /* AppleFoundationMCPPlanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleFoundationMCPPlanner.swift; sourceTree = "<group>"; };
 		037B0683983EF3DD797F9355 /* ScreenCaptureSizingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenCaptureSizingTests.swift; sourceTree = "<group>"; };
 		07BE29E09643E04555FE686A /* LLAMA-CPP-MIT-LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "LLAMA-CPP-MIT-LICENSE.txt"; sourceTree = "<group>"; };
+		0F4A87471C34A3E1B559DB90 /* LlamaSemanticActionRouterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LlamaSemanticActionRouterTests.swift; sourceTree = "<group>"; };
 		1011F8B532D93C2004CCFA98 /* ComputerUseRuntimeTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseRuntimeTypes.swift; sourceTree = "<group>"; };
 		10A95BA0C09D6E6B9620E977 /* RemoteDesktopHost.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = RemoteDesktopHost.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		11941D3F38B1D9FBA3206FF2 /* NOTICE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = NOTICE.txt; sourceTree = "<group>"; };
@@ -109,6 +115,7 @@
 		2C10787D47D68714896956E4 /* SystemAudioBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemAudioBridge.swift; sourceTree = "<group>"; };
 		3349CC549DF18D316358D45F /* OSAtlasComputerUseExecutorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OSAtlasComputerUseExecutorTests.swift; sourceTree = "<group>"; };
 		37BA471798CCE46AB3ED62F5 /* ComputerUseLicenseComplianceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseLicenseComplianceTests.swift; sourceTree = "<group>"; };
+		4386734ED5C4565BC0F3E3B5 /* SemanticNativeToolWireContractTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SemanticNativeToolWireContractTests.swift; sourceTree = "<group>"; };
 		4770C8CE9BED4CC5EFB3A726 /* BonjourAdvertiser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BonjourAdvertiser.swift; sourceTree = "<group>"; };
 		48A968CEDB6DC8E31EAD80B9 /* ComputerUseProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseProtocol.swift; sourceTree = "<group>"; };
 		49CF19459819E5602DB03150 /* MCPFirstComputerUseExecutorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPFirstComputerUseExecutorTests.swift; sourceTree = "<group>"; };
@@ -126,6 +133,7 @@
 		66E1A3BCCCB20F05C6898FCF /* ComputerUseTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseTests.swift; sourceTree = "<group>"; };
 		6704F4EF5979DBED1CBB31D5 /* MenuContent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuContent.swift; sourceTree = "<group>"; };
 		67C543A6C4E8B98B5C1BA245 /* ComputerUseTaskLedger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseTaskLedger.swift; sourceTree = "<group>"; };
+		6B3881C50F6D42EF67BBC8FD /* LlamaSemanticActionRouter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LlamaSemanticActionRouter.swift; sourceTree = "<group>"; };
 		6CDAD78ED761DA2254F0F6BC /* MCPClientSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPClientSession.swift; sourceTree = "<group>"; };
 		72EC39F2E8D1A2EF246C1CB7 /* HostSetupView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostSetupView.swift; sourceTree = "<group>"; };
 		75EE7C6868D1A93B054508AE /* App.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App.swift; sourceTree = "<group>"; };
@@ -154,8 +162,10 @@
 		C8A7FBD347C34995D3AEC37F /* MCPFoundationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPFoundationTests.swift; sourceTree = "<group>"; };
 		C9BE58B6666FC5BBCD6E2DBE /* RemoteDesktopMailMCP.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteDesktopMailMCP.swift; sourceTree = "<group>"; };
 		CB753FA95C04BD2BE084E213 /* HostComputerUseManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostComputerUseManager.swift; sourceTree = "<group>"; };
+		DE19039ABF07FF04D9C8B835 /* SemanticNativeToolWireContract.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SemanticNativeToolWireContract.swift; sourceTree = "<group>"; };
 		DFFCDBD869B91E3FA729B1B9 /* ComputerUseInstaller.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseInstaller.swift; sourceTree = "<group>"; };
 		E08F96816C348D00A1C3EC18 /* RemoteDesktopMailMCPTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteDesktopMailMCPTests.swift; sourceTree = "<group>"; };
+		E1FDF008ED7A77CB2274A8CD /* GRANITE-APACHE-2.0-LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "GRANITE-APACHE-2.0-LICENSE.txt"; sourceTree = "<group>"; };
 		E71D4CCB8CB0475455583D09 /* ComputerUseActionSafetyPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseActionSafetyPolicy.swift; sourceTree = "<group>"; };
 		E92C4B9CB81E1F8B6CBE22DA /* AudioInputEntitlements.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioInputEntitlements.swift; sourceTree = "<group>"; };
 		E985DBBFDBA3E8C04A0C63D2 /* ComputerUseClarificationPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseClarificationPolicy.swift; sourceTree = "<group>"; };
@@ -186,6 +196,7 @@
 		024558D97D74B61BE62C9D17 /* ThirdPartyNotices */ = {
 			isa = PBXGroup;
 			children = (
+				E1FDF008ED7A77CB2274A8CD /* GRANITE-APACHE-2.0-LICENSE.txt */,
 				07BE29E09643E04555FE686A /* LLAMA-CPP-MIT-LICENSE.txt */,
 				277FCD68C34B9D5FA45E2B0D /* MAC-CONTROL-MCP-LICENSE.txt */,
 				11941D3F38B1D9FBA3206FF2 /* NOTICE.txt */,
@@ -252,6 +263,7 @@
 				BC7C60E90BCD41A69C849F4B /* ComputerUseMobileInitiationTests.swift */,
 				66E1A3BCCCB20F05C6898FCF /* ComputerUseTests.swift */,
 				9B1DAF90A32ED728B525762F /* HostSessionTests.swift */,
+				0F4A87471C34A3E1B559DB90 /* LlamaSemanticActionRouterTests.swift */,
 				EF30648C9B8BB3F139DCD4CA /* MacControlMCPInstallerTests.swift */,
 				9EE79F7708D562EA715453FD /* MCPApprovalPresentationTests.swift */,
 				49CF19459819E5602DB03150 /* MCPFirstComputerUseExecutorTests.swift */,
@@ -261,6 +273,7 @@
 				BAD30262E2C7207F3FCF5E54 /* OSAtlasRuntimeInstallationTests.swift */,
 				E08F96816C348D00A1C3EC18 /* RemoteDesktopMailMCPTests.swift */,
 				037B0683983EF3DD797F9355 /* ScreenCaptureSizingTests.swift */,
+				4386734ED5C4565BC0F3E3B5 /* SemanticNativeToolWireContractTests.swift */,
 			);
 			path = RemoteDesktopHostTests;
 			sourceTree = "<group>";
@@ -278,6 +291,7 @@
 				67C543A6C4E8B98B5C1BA245 /* ComputerUseTaskLedger.swift */,
 				87DBA79B150564718516A5FE /* FoundationMCPJSONSchemaBridge.swift */,
 				CB753FA95C04BD2BE084E213 /* HostComputerUseManager.swift */,
+				6B3881C50F6D42EF67BBC8FD /* LlamaSemanticActionRouter.swift */,
 				7DEB12F1337DC8272D20BD2A /* MacControlMCPArchiveExtractor.swift */,
 				F91AC2C48158859F12AB043A /* MacControlMCPArtifact.swift */,
 				A0EED9EA8BD57F31F7C87F4C /* MacControlMCPInstaller.swift */,
@@ -293,6 +307,7 @@
 				16CB73E4E41BE0E7586E4129 /* OSAtlasRuntimeInstallation.swift */,
 				A548774FD133C86136F2D8CA /* RemoteDesktopMailAutomationPreflight.swift */,
 				C9BE58B6666FC5BBCD6E2DBE /* RemoteDesktopMailMCP.swift */,
+				DE19039ABF07FF04D9C8B835 /* SemanticNativeToolWireContract.swift */,
 			);
 			path = ComputerUse;
 			sourceTree = "<group>";
@@ -422,6 +437,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				630D66E302FADD1EC9C7608B /* Assets.xcassets in Resources */,
+				C15C5EDE7DBC24A7B612B196 /* GRANITE-APACHE-2.0-LICENSE.txt in Resources */,
 				8A37A3B49D4108FD8664CB63 /* LLAMA-CPP-MIT-LICENSE.txt in Resources */,
 				90EB1522061B6B7656D2F5A7 /* MAC-CONTROL-MCP-LICENSE.txt in Resources */,
 				E47AD513E1617BE306A6B446 /* NOTICE.txt in Resources */,
@@ -488,6 +504,7 @@
 				BC393D0286409F0A6B367D79 /* ComputerUseMobileInitiationTests.swift in Sources */,
 				B2DFFB922AEFC361EC219915 /* ComputerUseTests.swift in Sources */,
 				18A1BC70ECAA283CF2368B53 /* HostSessionTests.swift in Sources */,
+				54D17A53E353BCEC918766FD /* LlamaSemanticActionRouterTests.swift in Sources */,
 				9B16F67C2F12C6B2EC4E993E /* MCPApprovalPresentationTests.swift in Sources */,
 				2E117598F13A014329CD22FE /* MCPFirstComputerUseExecutorTests.swift in Sources */,
 				37F053BBB872177DD6DC7615 /* MCPFoundationTests.swift in Sources */,
@@ -497,6 +514,7 @@
 				A1AD1DF5F32B1BFE7CBE7FC1 /* OSAtlasRuntimeInstallationTests.swift in Sources */,
 				9D81BB015279178B6603C67D /* RemoteDesktopMailMCPTests.swift in Sources */,
 				ED079874829511ED2203A189 /* ScreenCaptureSizingTests.swift in Sources */,
+				E2D0353B10542596A31022ED /* SemanticNativeToolWireContractTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -533,6 +551,7 @@
 				FCA720672E14ABB217211ED5 /* HostSetupView.swift in Sources */,
 				82F7EB7D6C73B7C48D1E09B5 /* ICEConfigFetcher.swift in Sources */,
 				63A185B24B8A07ABEC2DD9FC /* InputInjector.swift in Sources */,
+				D0D9C86CC3FB8ED75F653DCE /* LlamaSemanticActionRouter.swift in Sources */,
 				8592737ECDD81494512864E3 /* MCPApprovalPresentation.swift in Sources */,
 				708DF3BE5C4A24255B9E8F58 /* MCPClientPool.swift in Sources */,
 				C7AE7D151153F5457AF1A27B /* MCPClientSession.swift in Sources */,
@@ -551,6 +570,7 @@
 				3D7BE1972BA0547D0B21E541 /* RemoteDesktopMailAutomationPreflight.swift in Sources */,
 				13010C7EF366983504391D6E /* RemoteDesktopMailMCP.swift in Sources */,
 				5BEA124BF32042E307D79208 /* ScreenCapture.swift in Sources */,
+				D22E96536F20DF25230499D9 /* SemanticNativeToolWireContract.swift in Sources */,
 				8A75048F122E44B655F410CF /* SignalingEnvelope.swift in Sources */,
 				9774C8DAD590EBB177FB4BAA /* SystemAudioBridge.swift in Sources */,
 				963F2EF70B3726CF3EF3D44A /* WebRTCAliases.swift in Sources */,

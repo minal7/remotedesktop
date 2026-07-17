@@ -18,6 +18,7 @@ struct ComputerUseArtifactManifest: Codable, Equatable, Sendable {
         enum Kind: String, Codable, Sendable {
             case textModelShard
             case visionProjector
+            case semanticRouterModel
         }
 
         let kind: Kind
@@ -49,7 +50,11 @@ struct ComputerUseArtifactManifest: Codable, Equatable, Sendable {
     static let osAtlasPro4BRevision =
         "06b790b907d82f29bb317ba889e6888805953036"
 
-    static let current = ComputerUseArtifactManifest(
+    /// Exact package shipped before the semantic router was added. This
+    /// snapshot is intentionally independent from `current`: it is the sole
+    /// package whose verified visual artifacts may be reused during the
+    /// one-time multi-model migration.
+    static let legacyVisualOnly = ComputerUseArtifactManifest(
         installationVersion: "os-atlas-pro-4b-q4-k-m-b9992",
         modelVariant: .pro4B,
         modelRepository: "OS-Copilot/OS-Atlas-Pro-4B",
@@ -79,12 +84,27 @@ struct ComputerUseArtifactManifest: Codable, Equatable, Sendable {
         ],
         minimumMemoryBytes: 8 * 1_024 * 1_024 * 1_024)
 
+    // Keep the production package unchanged until the fine-tuned semantic
+    // GGUF's immutable URL, byte count, and digest are available.
+    static let current = legacyVisualOnly
+
     static let osAtlasLicenseRevision =
         "bad08407ab54b5bf6c17a69fe1ced476b9494926"
     static let osAtlasLicenseURL = URL(string:
         "https://github.com/OS-Copilot/OS-Atlas/blob/\(osAtlasLicenseRevision)/LICENSE")!
     static let osAtlasLicense = BundledArtifact(
         fileName: "OS-ATLAS-APACHE-2.0-LICENSE.txt",
+        byteCount: 11_357,
+        sha256: "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4")
+
+    static let granite4OneBRevision =
+        "6a7381ba1f54d684ff508d991aeb7dc580157103"
+    static let graniteLicenseRevision =
+        "1c66d6a87aaa251ef88a3154393d3dddba497bfa"
+    static let graniteLicenseURL = URL(string:
+        "https://github.com/ibm-granite/granite-4.0-nano-language-models/blob/\(graniteLicenseRevision)/LICENSE")!
+    static let graniteLicense = BundledArtifact(
+        fileName: "GRANITE-APACHE-2.0-LICENSE.txt",
         byteCount: 11_357,
         sha256: "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4")
 
@@ -107,12 +127,17 @@ struct ComputerUseArtifactManifest: Codable, Equatable, Sendable {
 
     static let modelLegalArtifacts = [
         osAtlasLicense,
+        graniteLicense,
         llamaCPPLicense,
         modelNotice,
     ]
 
     static var displayedOSAtlasLicenseURL: URL {
         bundledLegalDocumentURL(osAtlasLicense) ?? osAtlasLicenseURL
+    }
+
+    static var displayedGraniteLicenseURL: URL {
+        bundledLegalDocumentURL(graniteLicense) ?? graniteLicenseURL
     }
 
     static func bundledLegalDocumentURL(

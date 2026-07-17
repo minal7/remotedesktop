@@ -177,31 +177,107 @@ struct AppleFoundationMCPPlanner: MCPProposalPlanning {
 
 struct OSAtlasSemanticRoutingRequest: Equatable, Sendable {
     static let maximumTaskBytes = 32 * 1_024
-    static let maximumVisibleTextCharacters = 6_000
+    static let maximumConversationEntries =
+        ComputerUsePromptRequest.maximumConversationTurns
+    static let maximumConversationEntryBytes = 16 * 1_024
+    static let maximumConversationBytes = 32 * 1_024
+    static let maximumVisibleTextCharacters =
+        SemanticVisibleEvidence.maximumTotalUnicodeScalars
+    static let maximumVisibleTextBytes =
+        SemanticVisibleEvidence.maximumTotalUTF8Bytes
     static let maximumHistoryEntries = 6
+    static let maximumHistoryEntryBytes = 512
     static let maximumOpenedApplicationEntries = 25
+    static let maximumApplicationNameBytes = 256
 
     let task: String
+    /// Prior chat is retained as typed context. It is never concatenated with
+    /// the current request upstream or parsed back out of a labeled string.
+    let conversation: [ComputerUseConversationTurn]
     let frontmostApplication: String?
+    let frontmostApplicationIdentity: ComputerUseApplicationIdentity?
+    let applicationIdentityIsAuthoritative: Bool
     let visibleText: String
     let history: [String]
     let availableDirectives: [OSAtlasExplicitActionDirective]
     let openedApplications: [String]
+    let openedApplicationIdentities: [ComputerUseApplicationIdentity]
 
     init(
         task: String,
+        conversation: [ComputerUseConversationTurn] = [],
         frontmostApplication: String?,
+        frontmostApplicationIdentity: ComputerUseApplicationIdentity? = nil,
+        applicationIdentityIsAuthoritative: Bool = false,
         visibleText: String,
         history: [String],
         availableDirectives: [OSAtlasExplicitActionDirective],
-        openedApplications: [String] = []
+        openedApplications: [String] = [],
+        openedApplicationIdentities: [ComputerUseApplicationIdentity] = []
     ) {
         self.task = task
-        self.frontmostApplication = frontmostApplication
-        self.visibleText = visibleText
-        self.history = history
+        self.conversation = Array(
+            conversation.suffix(Self.maximumConversationEntries))
+        self.frontmostApplication = frontmostApplication.flatMap { value in
+            let sanitized = ComputerUsePromptSanitizer.inline(
+                value,
+                maximumUTF8Bytes: Self.maximumApplicationNameBytes)
+            return sanitized.isEmpty ? nil : sanitized
+        }
+        self.frontmostApplicationIdentity = frontmostApplicationIdentity
+        self.applicationIdentityIsAuthoritative =
+            applicationIdentityIsAuthoritative
+        self.visibleText = SemanticVisibleEvidence.canonicalText(
+            from: visibleText)
+        self.history = history.map {
+            ComputerUsePromptSanitizer.inline(
+                $0,
+                maximumUTF8Bytes: Self.maximumHistoryEntryBytes)
+        }
         self.availableDirectives = availableDirectives
-        self.openedApplications = openedApplications
+        self.openedApplications = openedApplications.map {
+            ComputerUsePromptSanitizer.inline(
+                $0,
+                maximumUTF8Bytes: Self.maximumApplicationNameBytes)
+        }
+        self.openedApplicationIdentities = openedApplicationIdentities
+    }
+
+    var frontmostApplicationPromptValue: String {
+        if applicationIdentityIsAuthoritative {
+            return frontmostApplicationIdentity?.promptDescription ?? "unknown"
+        }
+        return frontmostApplication.map { "fallback-name=\($0)" } ?? "unknown"
+    }
+
+    func reviewedApplicationIsFrontmost(_ applicationName: String) -> Bool {
+        if ComputerUseApplicationIdentity.reviewedBundleIdentifiers(
+            forApplicationNamed: applicationName) != nil {
+            guard applicationIdentityIsAuthoritative else { return false }
+            return frontmostApplicationIdentity?
+                .matchesReviewedApplication(named: applicationName) == true
+        } else {
+            return AppleFoundationVisualActionRouter.frontmostApplication(
+                frontmostApplication,
+                matches: applicationName)
+        }
+    }
+
+    func reviewedApplicationWasOpened(_ applicationName: String) -> Bool {
+        if ComputerUseApplicationIdentity.reviewedBundleIdentifiers(
+            forApplicationNamed: applicationName) == nil {
+            return openedApplications.contains {
+                AppleFoundationVisualActionRouter.frontmostApplication(
+                    $0,
+                    matches: applicationName)
+            }
+        }
+        guard applicationIdentityIsAuthoritative else { return false }
+        guard let current = frontmostApplicationIdentity,
+              current.matchesReviewedApplication(named: applicationName) else {
+            return false
+        }
+        return openedApplicationIdentities.contains(current)
     }
 }
 
@@ -270,18 +346,53 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
         let task = request.task.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !task.isEmpty,
               task.utf8.count <= OSAtlasSemanticRoutingRequest.maximumTaskBytes,
-              request.visibleText.count
+              request.conversation.count
+                <= OSAtlasSemanticRoutingRequest.maximumConversationEntries,
+              request.conversation.allSatisfy({ turn in
+                  !turn.text.isEmpty
+                    && turn.text.utf8.count
+                        <= OSAtlasSemanticRoutingRequest
+                            .maximumConversationEntryBytes
+              }),
+              request.conversation.reduce(0, {
+                  $0 + $1.text.utf8.count
+              }) <= OSAtlasSemanticRoutingRequest.maximumConversationBytes,
+              request.visibleText.unicodeScalars.count
                 <= OSAtlasSemanticRoutingRequest.maximumVisibleTextCharacters,
+              request.visibleText.utf8.count
+                <= OSAtlasSemanticRoutingRequest.maximumVisibleTextBytes,
               request.history.count
                 <= OSAtlasSemanticRoutingRequest.maximumHistoryEntries,
+              request.history.allSatisfy({
+                  $0.utf8.count
+                    <= OSAtlasSemanticRoutingRequest.maximumHistoryEntryBytes
+                    && $0.rangeOfCharacter(from: .controlCharacters) == nil
+                    && $0.rangeOfCharacter(from: .newlines) == nil
+              }),
+              request.frontmostApplication.map({
+                  $0.utf8.count
+                    <= OSAtlasSemanticRoutingRequest.maximumApplicationNameBytes
+                    && $0.rangeOfCharacter(from: .controlCharacters) == nil
+                    && $0.rangeOfCharacter(from: .newlines) == nil
+              }) ?? true,
               request.openedApplications.count
                 <= OSAtlasSemanticRoutingRequest
                     .maximumOpenedApplicationEntries,
               request.openedApplications.allSatisfy({
                   let name = $0.trimmingCharacters(
                       in: .whitespacesAndNewlines)
-                  return !name.isEmpty && name.utf8.count <= 256
+                  return !name.isEmpty
+                    && name.utf8.count
+                        <= OSAtlasSemanticRoutingRequest
+                            .maximumApplicationNameBytes
+                    && name.rangeOfCharacter(from: .controlCharacters) == nil
+                    && name.rangeOfCharacter(from: .newlines) == nil
               }),
+              request.openedApplicationIdentities.count
+                <= OSAtlasSemanticRoutingRequest
+                    .maximumOpenedApplicationEntries,
+              Set(request.openedApplicationIdentities).count
+                == request.openedApplicationIdentities.count,
               !request.availableDirectives.isEmpty,
               Set(request.availableDirectives).count
                 == request.availableDirectives.count else {
@@ -294,12 +405,10 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
         if request.availableDirectives.contains(.openApplication),
            let applicationName = Self.affirmativelyRequestedApplication(
                in: task) {
-            let wasOpenedByThisTask = request.openedApplications.contains {
-                Self.frontmostApplication($0, matches: applicationName)
-            }
-            let isNominallyFrontmost = Self.frontmostApplication(
-                request.frontmostApplication,
-                matches: applicationName)
+            let wasOpenedByThisTask = request.reviewedApplicationWasOpened(
+                applicationName)
+            let isNominallyFrontmost = request
+                .reviewedApplicationIsFrontmost(applicationName)
             if !wasOpenedByThisTask,
                (!isNominallyFrontmost
                     || Self.explicitlyRequestsApplicationActivation(in: task)) {
@@ -551,7 +660,7 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
             })
     }
 
-    private static func frontmostApplication(
+    fileprivate static func frontmostApplication(
         _ frontmostApplication: String?,
         matches canonicalName: String
     ) -> Bool {
@@ -3005,7 +3114,8 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
             }
             let value = task[opening.upperBound ..< closing.lowerBound]
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            if !value.isEmpty, value.count <= 10_000 {
+            if SemanticNativeToolWireContract
+                .isValidModelGeneratedText(value) {
                 return value
             }
         }
@@ -3467,8 +3577,8 @@ private extension AppleFoundationVisualActionRouter {
         Do not return free text and do not call a second routing tool.
         """
         let application = Self.boundedInline(
-            request.frontmostApplication ?? "unknown",
-            limit: 120)
+            request.frontmostApplicationPromptValue,
+            limit: 384)
         let visibleText = Self.boundedVisibleScreenLines(
             request.visibleText.isEmpty ? "none" : request.visibleText,
             limit: OSAtlasSemanticRoutingRequest.maximumVisibleTextCharacters)
@@ -3564,9 +3674,7 @@ private extension AppleFoundationVisualActionRouter {
            }),
            selected.directive == .openApplication,
            case .applicationName(let applicationName) = selected.argument,
-           Self.frontmostApplication(
-               request.frontmostApplication,
-               matches: applicationName) {
+           request.reviewedApplicationIsFrontmost(applicationName) {
             // A generated request to open the app that is already frontmost
             // cannot advance the task. Retry once without that one routing
             // tool; neither pass has any external effect.
@@ -3718,7 +3826,8 @@ private struct FoundationVisualActionRouteTool: Tool {
             return closedObject(
                 properties: [
                     "text": boundedStringSchema(
-                        maximumLength: 4_096,
+                        maximumLength: SemanticNativeToolWireContract
+                            .maximumModelGeneratedTextCharacters,
                         description: "The exact text requested by the user, without commentary or quotation marks."),
                 ],
                 required: ["text"])
@@ -3742,7 +3851,8 @@ private struct FoundationVisualActionRouteTool: Tool {
             return closedObject(
                 properties: [
                     "question": boundedStringSchema(
-                        maximumLength: 512,
+                        maximumLength: SemanticNativeToolWireContract
+                            .maximumModelGeneratedTextCharacters,
                         description: "One concise question asking only for the information required to proceed."),
                 ],
                 required: ["question"])
@@ -3793,7 +3903,7 @@ private struct FoundationVisualActionRouteTool: Tool {
         ])
     }
 
-    private static func typedArgument(
+    fileprivate static func typedArgument(
         from value: MCPJSONValue,
         for route: OSAtlasSemanticActionRoute
     ) throws -> OSAtlasSemanticActionArgument {
@@ -3823,8 +3933,10 @@ private struct FoundationVisualActionRouteTool: Tool {
             return .text(try boundedString(
                 named: "text",
                 in: object,
-                maximumCharacters: 4_096,
-                maximumBytes: 16_384,
+                maximumCharacters: SemanticNativeToolWireContract
+                    .maximumModelGeneratedTextCharacters,
+                maximumBytes: SemanticNativeToolWireContract
+                    .maximumModelGeneratedTextUTF8Bytes,
                 preserveWhitespace: true))
         case .openApplication:
             return .applicationName(try boundedString(
@@ -3843,8 +3955,10 @@ private struct FoundationVisualActionRouteTool: Tool {
             return .question(try boundedString(
                 named: "question",
                 in: object,
-                maximumCharacters: 512,
-                maximumBytes: 2_048))
+                maximumCharacters: SemanticNativeToolWireContract
+                    .maximumModelGeneratedTextCharacters,
+                maximumBytes: SemanticNativeToolWireContract
+                    .maximumModelGeneratedTextUTF8Bytes))
         case .answer, .report:
             let summary = try boundedString(
                 named: "summary",
@@ -3987,6 +4101,26 @@ private struct FoundationVisualActionRouteTool: Tool {
         case .answer, .report:
             return "Use only for a direct factual question such as who, what, when, where, status, price, or total when its answer is already visible. Never use for a request beginning with show or reveal, or for go, move, open, copy, scrolling, or any other UI-navigation request."
         }
+    }
+}
+
+/// Narrow internal surface for byte/character boundary regression tests. The
+/// production Foundation Models tool remains private and effect-free.
+@available(macOS 26.0, *)
+enum FoundationVisualActionRouteBoundary {
+    static func argumentSchema(
+        for route: OSAtlasSemanticActionRoute
+    ) -> MCPJSONValue {
+        FoundationVisualActionRouteTool.argumentSchema(for: route)
+    }
+
+    static func typedArgument(
+        _ value: MCPJSONValue,
+        for route: OSAtlasSemanticActionRoute
+    ) throws -> OSAtlasSemanticActionArgument {
+        try FoundationVisualActionRouteTool.typedArgument(
+            from: value,
+            for: route)
     }
 }
 

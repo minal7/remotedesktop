@@ -43,12 +43,11 @@ final class AppleFoundationMCPPlannerTests: XCTestCase {
                 history: [],
                 availableDirectives: [.hotkey, .hotkey]),
             OSAtlasSemanticRoutingRequest(
-                task: "Copy the selected packing list.",
-                frontmostApplication: "Finder",
-                visibleText: String(
+                task: String(
                     repeating: "x",
-                    count: OSAtlasSemanticRoutingRequest
-                        .maximumVisibleTextCharacters + 1),
+                    count: OSAtlasSemanticRoutingRequest.maximumTaskBytes + 1),
+                frontmostApplication: "Finder",
+                visibleText: "Packing list",
                 history: [],
                 availableDirectives: [.hotkey]),
             OSAtlasSemanticRoutingRequest(
@@ -79,6 +78,104 @@ final class AppleFoundationMCPPlannerTests: XCTestCase {
             }
         }
     }
+
+    func testSemanticRoutingRequestCanonicalizesOversizedVisibleTextWithinEveryBound() {
+        let oversizedLine = String(
+            repeating: "😀",
+            count: SemanticVisibleEvidence.maximumLineUnicodeScalars + 50)
+        let source = Array(
+            repeating: oversizedLine,
+            count: SemanticVisibleEvidence.maximumLines + 10)
+            .joined(separator: "\n")
+        let request = OSAtlasSemanticRoutingRequest(
+            task: "Copy the selected packing list.",
+            frontmostApplication: "Finder",
+            visibleText: source,
+            history: [],
+            availableDirectives: [.hotkey])
+        let lines = request.visibleText.split(
+            separator: "\n",
+            omittingEmptySubsequences: false)
+
+        XCTAssertNotEqual(request.visibleText, source)
+        XCTAssertLessThanOrEqual(
+            lines.count,
+            SemanticVisibleEvidence.maximumLines)
+        XCTAssertLessThanOrEqual(
+            request.visibleText.unicodeScalars.count,
+            OSAtlasSemanticRoutingRequest.maximumVisibleTextCharacters)
+        XCTAssertLessThanOrEqual(
+            request.visibleText.utf8.count,
+            OSAtlasSemanticRoutingRequest.maximumVisibleTextBytes)
+        for line in lines {
+            XCTAssertLessThanOrEqual(
+                line.unicodeScalars.count,
+                SemanticVisibleEvidence.maximumLineUnicodeScalars)
+            XCTAssertLessThanOrEqual(
+                line.utf8.count,
+                SemanticVisibleEvidence.maximumLineUTF8Bytes)
+        }
+    }
+
+#if canImport(FoundationModels)
+    @available(macOS 26.0, *)
+    func testFoundationVisualTypeAndAskUseSharedTextBoundaries() throws {
+        let typeRoute = OSAtlasSemanticActionRoute(directive: .type)
+        let askRoute = OSAtlasSemanticActionRoute(directive: .ask)
+        for route in [typeRoute, askRoute] {
+            guard case .object(let root) = FoundationVisualActionRouteBoundary
+                    .argumentSchema(for: route),
+                  case .object(let properties)? = root["properties"],
+                  case .object(let field)? = properties[
+                    route.directive == .type ? "text" : "question"] else {
+                return XCTFail("Foundation visual schema is malformed")
+            }
+            XCTAssertEqual(
+                field["maxLength"],
+                .integer(SemanticNativeToolWireContract
+                    .maximumModelGeneratedTextCharacters))
+        }
+
+        let ascii512 = String(repeating: "x", count: 512)
+        let ascii513 = String(repeating: "x", count: 513)
+        let exact2048Bytes = String(repeating: "😀", count: 512)
+        let over2048Bytes = String(repeating: "😀", count: 511)
+            + "👨‍👩‍👧‍👦"
+        XCTAssertEqual(exact2048Bytes.utf8.count, 2_048)
+        XCTAssertEqual(over2048Bytes.count, 512)
+        XCTAssertGreaterThan(over2048Bytes.utf8.count, 2_048)
+
+        for value in [ascii512, exact2048Bytes] {
+            XCTAssertEqual(
+                try FoundationVisualActionRouteBoundary.typedArgument(
+                    .object(["text": .string(value)]),
+                    for: typeRoute),
+                .text(value))
+        }
+        for length in [500, 501, 512] {
+            let question = String(repeating: "q", count: length)
+            XCTAssertEqual(
+                try FoundationVisualActionRouteBoundary.typedArgument(
+                    .object(["question": .string(question)]),
+                    for: askRoute),
+                .question(question))
+        }
+        XCTAssertEqual(
+            try FoundationVisualActionRouteBoundary.typedArgument(
+                .object(["question": .string(exact2048Bytes)]),
+                for: askRoute),
+            .question(exact2048Bytes))
+
+        for (route, key) in [(typeRoute, "text"), (askRoute, "question")] {
+            for value in [ascii513, over2048Bytes] {
+                XCTAssertThrowsError(
+                    try FoundationVisualActionRouteBoundary.typedArgument(
+                        .object([key: .string(value)]),
+                        for: route))
+            }
+        }
+    }
+#endif
 
     func testVisualActionRouterDeterministicallyOpensExplicitCommonApplicationBeforeReadingOCR()
         async throws {
@@ -687,6 +784,20 @@ final class AppleFoundationMCPPlannerTests: XCTestCase {
         let directives: [OSAtlasExplicitActionDirective] = [
             .openApplication, .type, .scroll, .wait,
         ]
+        let safariIdentity = try XCTUnwrap(ComputerUseApplicationIdentity(
+            bundleIdentifier: "com.apple.Safari",
+            processIdentifier: 7_421,
+            launchGeneration: 1,
+            codeIdentity: ComputerUseApplicationCodeIdentity(
+                authority: .reviewedPinned,
+                bundleIdentifier: "com.apple.Safari",
+                canonicalBundlePath: "/Applications/Safari.app",
+                canonicalExecutablePath:
+                    "/Applications/Safari.app/Contents/MacOS/Safari",
+                designatedRequirement:
+                    #"identifier "com.apple.Safari" and anchor apple"#,
+                teamIdentifier: nil,
+                platformIdentifier: 1)))
 
         let appRoute = try await router.route(
             OSAtlasSemanticRoutingRequest(
@@ -694,6 +805,8 @@ final class AppleFoundationMCPPlannerTests: XCTestCase {
                 // NSWorkspace can report Safari on another Space while the
                 // captured/streamed Space still shows an unrelated app.
                 frontmostApplication: "Safari",
+                frontmostApplicationIdentity: safariIdentity,
+                applicationIdentityIsAuthoritative: true,
                 visibleText: "Unrelated calculator content",
                 history: ["WAIT", "WAIT"],
                 availableDirectives: directives,
@@ -708,10 +821,13 @@ final class AppleFoundationMCPPlannerTests: XCTestCase {
             OSAtlasSemanticRoutingRequest(
                 task: task,
                 frontmostApplication: "Safari",
+                frontmostApplicationIdentity: safariIdentity,
+                applicationIdentityIsAuthoritative: true,
                 visibleText: "Fixture code Waiting for the local test token.",
                 history: ["OPEN_APP [Safari]"],
                 availableDirectives: directives,
-                openedApplications: ["Safari"]))
+                openedApplications: ["Safari"],
+                openedApplicationIdentities: [safariIdentity]))
         XCTAssertEqual(
             typeRoute,
             .init(
@@ -722,13 +838,16 @@ final class AppleFoundationMCPPlannerTests: XCTestCase {
             OSAtlasSemanticRoutingRequest(
                 task: task,
                 frontmostApplication: "Safari",
+                frontmostApplicationIdentity: safariIdentity,
+                applicationIdentityIsAuthoritative: true,
                 visibleText: "Quote unlocked below this viewport",
                 history: [
                     "OPEN_APP [Safari]",
                     "TYPE [LOCAL-QUOTE-7421]",
                 ],
                 availableDirectives: directives,
-                openedApplications: ["Safari"]))
+                openedApplications: ["Safari"],
+                openedApplicationIdentities: [safariIdentity]))
         XCTAssertEqual(
             scrollRoute,
             .init(directive: .scroll, scrollDirection: .down))
