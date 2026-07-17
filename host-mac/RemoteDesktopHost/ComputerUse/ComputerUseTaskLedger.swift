@@ -44,6 +44,11 @@ final class ComputerUseTaskLedger {
         case unavailable
     }
 
+    struct TerminalResult: Equatable {
+        let response: String
+        let outcome: ComputerUseTerminalOutcome?
+    }
+
     static let stoppedResponse = "Stopped. You're in control of the Mac."
 
     private struct ControlSnapshot: Codable {
@@ -58,6 +63,7 @@ final class ComputerUseTaskLedger {
         var promptClaimed: Bool
         var executionStarted: Bool
         var response: String?
+        var outcome: ComputerUseTerminalOutcome?
         var control: ControlSnapshot?
 
         init(
@@ -67,6 +73,7 @@ final class ComputerUseTaskLedger {
             promptClaimed: Bool,
             executionStarted: Bool,
             response: String? = nil,
+            outcome: ComputerUseTerminalOutcome? = nil,
             control: ControlSnapshot? = nil
         ) {
             self.acceptedAt = acceptedAt
@@ -75,6 +82,7 @@ final class ComputerUseTaskLedger {
             self.promptClaimed = promptClaimed
             self.executionStarted = executionStarted
             self.response = response
+            self.outcome = outcome
             self.control = control
         }
 
@@ -85,6 +93,7 @@ final class ComputerUseTaskLedger {
             case promptClaimed
             case executionStarted
             case response
+            case outcome
             case control
         }
 
@@ -94,6 +103,13 @@ final class ComputerUseTaskLedger {
             senderID = try values.decodeIfPresent(String.self, forKey: .senderID)
             sessionID = try values.decodeIfPresent(String.self, forKey: .sessionID)
             response = try values.decodeIfPresent(String.self, forKey: .response)
+            if let rawOutcome = try values.decodeIfPresent(
+                String.self,
+                forKey: .outcome) {
+                outcome = ComputerUseTerminalOutcome(rawValue: rawOutcome)
+            } else {
+                outcome = nil
+            }
             control = try values.decodeIfPresent(
                 ControlSnapshot.self,
                 forKey: .control)
@@ -266,6 +282,7 @@ final class ComputerUseTaskLedger {
             // active executor. A delayed completion can no longer overwrite
             // this absorbing user intent.
             record.response = Self.stoppedResponse
+            record.outcome = .unableToComplete
         }
         try commit(record, for: taskID)
         return ControlResolution(
@@ -276,18 +293,42 @@ final class ComputerUseTaskLedger {
             promptClaimed: record.promptClaimed)
     }
 
-    func complete(taskID: String, response: String) {
-        guard initializationError == nil else { return }
-        guard var record = records[taskID] else { return }
+    @discardableResult
+    func complete(
+        taskID: String,
+        response: String,
+        outcome: ComputerUseTerminalOutcome? = nil
+    ) throws -> TerminalResult {
+        try ensureAvailable()
+        guard var record = records[taskID] else {
+            throw LedgerError.unavailable
+        }
         // The first terminal result wins. In particular, an executor that
         // unwinds after a durable Cancel cannot replace the stopped response.
-        guard record.response == nil else { return }
+        if let existingResponse = record.response {
+            return TerminalResult(
+                response: existingResponse,
+                outcome: record.outcome)
+        }
         record.response = String(response.prefix(4_000))
-        try? commit(record, for: taskID)
+        record.outcome = outcome
+        try commit(record, for: taskID)
+        return TerminalResult(
+            response: record.response ?? "",
+            outcome: record.outcome)
+    }
+
+    func terminalOutcome(taskID: String) -> ComputerUseTerminalOutcome? {
+        guard initializationError == nil else { return nil }
+        return records[taskID]?.outcome
     }
 
     func appliedControlRevision(taskID: String) -> UInt64? {
-        guard initializationError == nil else { return nil }
+        // `records` advances only after `persist` succeeds, so this remains
+        // the last revision the host can prove reached durable storage even
+        // when a later terminal write poisons the ledger. Terminal fallback
+        // replies must carry that committed revision or a client that already
+        // received Resume would correctly reject them as stale.
         return records[taskID]?.control?.revision
     }
 

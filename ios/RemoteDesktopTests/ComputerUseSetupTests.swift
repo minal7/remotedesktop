@@ -75,6 +75,306 @@ final class ComputerUseSetupTests: XCTestCase {
             control)
     }
 
+    func test_taskUpdateTerminalOutcomesRoundTripAndLegacyPayloadStillDecodes() throws {
+        let outcomes: [ComputerUseTerminalOutcome] = [
+            .taskCompleted,
+            .userInterventionRequired,
+            .unableToComplete,
+        ]
+
+        for outcome in outcomes {
+            let update = ComputerUseTaskUpdate(
+                taskID: "task-\(outcome.rawValue)",
+                text: "Result for \(outcome.rawValue)",
+                appliedControlRevision: 4,
+                outcome: outcome)
+
+            XCTAssertEqual(
+                try ComputerUseTaskUpdate.decodeBody(update.encodedBody()),
+                update)
+        }
+
+        let legacy = try ComputerUseTaskUpdate.decodeBody(
+            #"{"taskID":"legacy-task","text":"Legacy result","appliedControlRevision":3}"#)
+        XCTAssertEqual(legacy.taskID, "legacy-task")
+        XCTAssertEqual(legacy.text, "Legacy result")
+        XCTAssertEqual(legacy.appliedControlRevision, 3)
+        XCTAssertNil(legacy.outcome)
+
+        let future = try ComputerUseTaskUpdate.decodeBody(
+            #"{"taskID":"future-task","text":"Future result","outcome":"deferredByPolicy"}"#)
+        XCTAssertEqual(future.taskID, "future-task")
+        XCTAssertEqual(future.text, "Future result")
+        XCTAssertNil(
+            future.outcome,
+            "An unknown future outcome must not reject the correlated update")
+    }
+
+    func test_typedAssistantUpdatesExposeAndApplyAllTerminalOutcomes() async throws {
+        let rows: [(ComputerUseTerminalOutcome, String, String)] = [
+            (
+                .taskCompleted,
+                "The requested task is complete.",
+                "Task completed — ready for another request"),
+            (
+                .userInterventionRequired,
+                "Please choose which account I should use.",
+                "Your input is required before your Mac can continue"),
+            (
+                .unableToComplete,
+                "Could not complete this request — retry?",
+                "Unable to complete — ready for another request"),
+        ]
+
+        for (outcome, text, expectedStatus) in rows {
+            let channel = FakeComputerUseSessionChannel()
+            let model = ComputerUseSessionModel(
+                hostName: "Studio Mac",
+                pairingCode: "123456",
+                hostID: "HOST-\(UUID().uuidString)",
+                sessionID: "session-1",
+                pendingStore: InMemoryComputerUsePendingPromptStore(),
+                channel: channel)
+            model.start()
+            model.sendPrompt("Exercise \(outcome.rawValue)")
+            let sentPrompt = await waitForSentMessage(
+                kind: .prompt,
+                channel: channel)
+            let prompt = try XCTUnwrap(sentPrompt)
+
+            try await channel.enqueueHostEnvelope(
+                kind: .assistant,
+                body: ComputerUseTaskUpdate(
+                    taskID: prompt.id,
+                    text: text,
+                    outcome: outcome).encodedBody())
+            await waitUntil { model.latestTerminalOutcome == outcome }
+
+            XCTAssertEqual(model.latestTerminalOutcome, outcome)
+            XCTAssertEqual(model.state, .ready)
+            XCTAssertTrue(model.messages.contains {
+                $0.author == .assistant && $0.text == text
+            })
+            XCTAssertFalse(model.hasActivePrompt)
+            XCTAssertNil(model.interventionGuidance)
+            XCTAssertEqual(model.statusText, expectedStatus)
+            model.stop()
+        }
+    }
+
+    func test_newPromptPersistenceFailureClearsPreviousTerminalOutcome() async throws {
+        let store = InMemoryComputerUsePendingPromptStore(
+            failAfterSuccessfulSaves: 1)
+        let channel = FakeComputerUseSessionChannel()
+        let model = ComputerUseSessionModel(
+            hostName: "Studio Mac",
+            pairingCode: "123456",
+            hostID: "HOST-\(UUID().uuidString)",
+            sessionID: "session-1",
+            pendingStore: store,
+            channel: channel)
+        defer { model.stop() }
+        model.start()
+
+        model.sendPrompt("Open Calculator")
+        let sentPrompt = await waitForSentMessage(
+            kind: .prompt,
+            channel: channel)
+        let prompt = try XCTUnwrap(sentPrompt)
+        try await channel.enqueueHostEnvelope(
+            kind: .assistant,
+            body: ComputerUseTaskUpdate(
+                taskID: prompt.id,
+                text: "Calculator is open.",
+                outcome: .taskCompleted).encodedBody())
+        await waitUntil { model.latestTerminalOutcome == .taskCompleted }
+        XCTAssertEqual(model.state, .ready)
+
+        model.sendPrompt("Open Notes")
+
+        XCTAssertNil(model.latestTerminalOutcome)
+        XCTAssertEqual(
+            model.state,
+            .error("Couldn’t securely save this request, so it was not sent."))
+        XCTAssertEqual(
+            model.statusText,
+            "Request not sent — secure recovery storage is unavailable")
+        XCTAssertNil(ComputerUseTerminalStatusStyle(
+            model.latestTerminalOutcome))
+        let promptAttempts = await channel.sendAttemptCount(kind: .prompt)
+        XCTAssertEqual(
+            promptAttempts,
+            1,
+            "The unsaved request must not be transmitted")
+    }
+
+    func test_typedStatusUpdatesExposeAndApplyAllTerminalOutcomes() async throws {
+        let guidance = "Finish signing in yourself, then resume."
+        let rows: [(ComputerUseTerminalOutcome, String, String, ComputerUseSessionModel.State)] = [
+            (.taskCompleted, "Task complete.", "Task complete.", .ready),
+            (
+                .userInterventionRequired,
+                ComputerUseStatusSignal.userIntervention(guidance),
+                guidance,
+                .paused),
+            (.unableToComplete, "Task cannot be completed.", "Task cannot be completed.", .ready),
+        ]
+
+        for (outcome, text, displayedText, expectedState) in rows {
+            let channel = FakeComputerUseSessionChannel()
+            let model = ComputerUseSessionModel(
+                hostName: "Studio Mac",
+                pairingCode: "123456",
+                hostID: "HOST-\(UUID().uuidString)",
+                sessionID: "session-1",
+                pendingStore: InMemoryComputerUsePendingPromptStore(),
+                channel: channel)
+            model.start()
+            model.sendPrompt("Exercise status \(outcome.rawValue)")
+            let sentPrompt = await waitForSentMessage(
+                kind: .prompt,
+                channel: channel)
+            let prompt = try XCTUnwrap(sentPrompt)
+
+            try await channel.enqueueHostEnvelope(
+                kind: .status,
+                body: ComputerUseTaskUpdate(
+                    taskID: prompt.id,
+                    text: text,
+                    outcome: outcome).encodedBody())
+            await waitUntil { model.latestTerminalOutcome == outcome }
+
+            XCTAssertEqual(model.latestTerminalOutcome, outcome)
+            XCTAssertEqual(model.state, expectedState)
+            XCTAssertEqual(model.statusText, displayedText)
+            if outcome == .userInterventionRequired {
+                XCTAssertTrue(model.hasActivePrompt)
+                XCTAssertEqual(model.interventionGuidance, guidance)
+            } else {
+                XCTAssertFalse(model.hasActivePrompt)
+                XCTAssertNil(model.interventionGuidance)
+            }
+            model.stop()
+        }
+    }
+
+    func test_resumingOrWorkingClearsStaleInterventionOutcome() async throws {
+        let channel = FakeComputerUseSessionChannel()
+        let model = ComputerUseSessionModel(
+            hostName: "Studio Mac",
+            pairingCode: "123456",
+            hostID: "HOST-\(UUID().uuidString)",
+            sessionID: "session-1",
+            pendingStore: InMemoryComputerUsePendingPromptStore(),
+            channel: channel)
+        defer { model.stop() }
+        model.start()
+        model.sendPrompt("Continue after I sign in")
+        let sentPrompt = await waitForSentMessage(
+            kind: .prompt,
+            channel: channel)
+        let prompt = try XCTUnwrap(sentPrompt)
+        let status = ComputerUseStatusSignal.userIntervention(
+            "Finish signing in, then resume.")
+
+        try await channel.enqueueHostEnvelope(
+            kind: .status,
+            body: ComputerUseTaskUpdate(
+                taskID: prompt.id,
+                text: status,
+                outcome: .userInterventionRequired).encodedBody())
+        await waitUntil {
+            model.latestTerminalOutcome == .userInterventionRequired
+        }
+        _ = await waitForSentMessage(kind: .pause, channel: channel)
+
+        model.applyHostStatus("working")
+        XCTAssertNil(model.latestTerminalOutcome)
+        XCTAssertEqual(model.state, .working)
+
+        try await channel.enqueueHostEnvelope(
+            kind: .status,
+            body: ComputerUseTaskUpdate(
+                taskID: prompt.id,
+                text: status,
+                appliedControlRevision: 1,
+                outcome: .userInterventionRequired).encodedBody())
+        await waitUntil {
+            model.latestTerminalOutcome == .userInterventionRequired
+        }
+        model.resumeAI()
+        XCTAssertNil(model.latestTerminalOutcome)
+        XCTAssertEqual(model.state, .working)
+    }
+
+    func test_versionedPausedAcknowledgementPreservesTypedInterventionGuidance() async throws {
+        let channel = FakeComputerUseSessionChannel()
+        let model = ComputerUseSessionModel(
+            hostName: "Studio Mac",
+            pairingCode: "123456",
+            hostID: "HOST-\(UUID().uuidString)",
+            sessionID: "session-1",
+            pendingStore: InMemoryComputerUsePendingPromptStore(),
+            channel: channel)
+        defer { model.stop() }
+        model.start()
+        model.sendPrompt("Continue after I sign in")
+        let sentPrompt = await waitForSentMessage(
+            kind: .prompt,
+            channel: channel)
+        let prompt = try XCTUnwrap(sentPrompt)
+        let guidance = "Finish signing in to Contoso, then tap Let AI continue."
+
+        try await channel.enqueueHostEnvelope(
+            kind: .status,
+            body: ComputerUseTaskUpdate(
+                taskID: prompt.id,
+                text: ComputerUseStatusSignal.userIntervention(guidance),
+                outcome: .userInterventionRequired).encodedBody())
+        await waitUntil {
+            model.latestTerminalOutcome == .userInterventionRequired
+                && model.interventionGuidance == guidance
+        }
+        _ = await waitForSentMessage(kind: .pause, channel: channel)
+
+        let acknowledgedBefore = await channel.acknowledgedEnvelopeCount()
+        try await channel.enqueueHostEnvelope(
+            kind: .status,
+            body: ComputerUseTaskUpdate(
+                taskID: prompt.id,
+                text: "paused",
+                appliedControlRevision: 1).encodedBody())
+        await waitUntilAsync {
+            await channel.acknowledgedEnvelopeCount() > acknowledgedBefore
+        }
+
+        XCTAssertEqual(model.state, .paused)
+        XCTAssertEqual(
+            model.latestTerminalOutcome,
+            .userInterventionRequired)
+        XCTAssertEqual(model.interventionGuidance, guidance)
+        XCTAssertEqual(model.statusText, guidance)
+    }
+
+    func test_typedTerminalOutcomesSelectNonSuccessStatusStyles() {
+        let completed = ComputerUseTerminalStatusStyle(.taskCompleted)
+        XCTAssertEqual(completed, .completed)
+        XCTAssertEqual(completed?.systemImage, "checkmark.circle.fill")
+        XCTAssertEqual(completed?.tint, .green)
+
+        let clarification = ComputerUseTerminalStatusStyle(
+            .userInterventionRequired)
+        XCTAssertEqual(clarification, .userIntervention)
+        XCTAssertEqual(clarification?.systemImage, "hand.raised.fill")
+        XCTAssertEqual(clarification?.tint, .orange)
+
+        let unable = ComputerUseTerminalStatusStyle(.unableToComplete)
+        XCTAssertEqual(unable, .unable)
+        XCTAssertEqual(unable?.systemImage, "exclamationmark.triangle.fill")
+        XCTAssertEqual(unable?.tint, .red)
+        XCTAssertNil(ComputerUseTerminalStatusStyle(nil))
+    }
+
     func test_userInterventionStatusEntersManualControlWithResumeGuidance() {
         let guidance = "DoorDash needs you to sign in yourself, then tap Let AI continue."
         let status = ComputerUseStatusSignal.userIntervention(guidance)
@@ -261,7 +561,7 @@ final class ComputerUseSetupTests: XCTestCase {
             ComputerUseControlRequest(taskID: prompt.id, revision: 2))
     }
 
-    func test_restoredPauseReplaysExactRevisionWithoutRefreshingPrompt() async throws {
+    func test_restoredTypedPauseReplaysExactRevisionAndPreservesGuidance() async throws {
         let hostID = "HOST-\(UUID().uuidString)"
         let store = InMemoryComputerUsePendingPromptStore()
         let firstChannel = FakeComputerUseSessionChannel()
@@ -283,6 +583,18 @@ final class ComputerUseSetupTests: XCTestCase {
             kind: .pause,
             channel: firstChannel)
         _ = try XCTUnwrap(sentPause)
+        let guidance = "Check the Mac, then tap Let AI continue when you're ready."
+        try await firstChannel.enqueueHostEnvelope(
+            kind: .status,
+            body: ComputerUseTaskUpdate(
+                taskID: prompt.id,
+                text: ComputerUseStatusSignal.userIntervention(guidance),
+                appliedControlRevision: 1,
+                outcome: .userInterventionRequired).encodedBody())
+        await waitUntil {
+            first.latestTerminalOutcome == .userInterventionRequired
+                && first.interventionGuidance == guidance
+        }
         first.stop()
 
         let recoveryChannel = FakeComputerUseSessionChannel()
@@ -294,6 +606,11 @@ final class ComputerUseSetupTests: XCTestCase {
             channel: recoveryChannel)
         defer { recovered.stop() }
         XCTAssertEqual(recovered.state, .paused)
+        XCTAssertEqual(
+            recovered.latestTerminalOutcome,
+            .userInterventionRequired)
+        XCTAssertEqual(recovered.interventionGuidance, guidance)
+        XCTAssertEqual(recovered.statusText, guidance)
         recovered.start()
         let replayedPause = await waitForSentMessage(
             kind: .pause,
@@ -302,6 +619,22 @@ final class ComputerUseSetupTests: XCTestCase {
         XCTAssertEqual(
             try ComputerUseControlRequest.decodeBody(replayed.body),
             ComputerUseControlRequest(taskID: prompt.id, revision: 1))
+        let acknowledgedBefore = await recoveryChannel.acknowledgedEnvelopeCount()
+        try await recoveryChannel.enqueueHostEnvelope(
+            kind: .status,
+            body: ComputerUseTaskUpdate(
+                taskID: prompt.id,
+                text: "paused",
+                appliedControlRevision: 1).encodedBody())
+        await waitUntilAsync {
+            await recoveryChannel.acknowledgedEnvelopeCount()
+                > acknowledgedBefore
+        }
+        XCTAssertEqual(
+            recovered.latestTerminalOutcome,
+            .userInterventionRequired)
+        XCTAssertEqual(recovered.interventionGuidance, guidance)
+        XCTAssertEqual(recovered.statusText, guidance)
         let promptAttempts = await recoveryChannel.sendAttemptCount(kind: .prompt)
         XCTAssertEqual(promptAttempts, 0)
     }
@@ -2406,7 +2739,11 @@ final class ComputerUseSetupTests: XCTestCase {
             messageID: "message-1",
             prompt: "Open Notes",
             wireBody: #"{"conversation":[],"prompt":"Open Notes","version":1}"#,
-            createdAt: Date())
+            createdAt: Date(),
+            controlRevision: 3,
+            lastControlKind: .pause,
+            interventionGuidance:
+                "Finish signing in, then tap Let AI continue.")
 
         store.save(pending)
 
@@ -2416,6 +2753,10 @@ final class ComputerUseSetupTests: XCTestCase {
         XCTAssertEqual(
             store.load(hostID: hostID, pairingCode: "123456")?.exactWireBody,
             pending.wireBody)
+        XCTAssertEqual(
+            store.load(hostID: hostID, pairingCode: "123456")?
+                .interventionGuidance,
+            "Finish signing in, then tap Let AI continue.")
     }
 
     func test_legacyPendingPromptRecordDecodesWithoutRevisionOrDecisionFields() throws {
@@ -2438,6 +2779,7 @@ final class ComputerUseSetupTests: XCTestCase {
         XCTAssertNil(decoded.controlRevision)
         XCTAssertNil(decoded.lastControlKind)
         XCTAssertNil(decoded.approvalDecision)
+        XCTAssertNil(decoded.interventionGuidance)
     }
 
     func test_sessionSendsClarificationAnswerWithRecentChatContext() async throws {

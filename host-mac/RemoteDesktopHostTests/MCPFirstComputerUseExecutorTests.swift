@@ -129,6 +129,441 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         XCTAssertEqual(approvedCount, 0)
     }
 
+    func testDeliveryQuoteInModelHistoryCannotDivertCurrentTrustedRead() async throws {
+        let focusedApp = try makePlannerVisibleReadOnlyTool("focused_app")
+        let resultText = #"{"ok":true,"app":{"pid":4242,"name":"Notes","bundleIdentifier":"com.apple.Notes","isActive":true}}"#
+        let planner = SequencedMCPPlanner(steps: [
+            .call(
+                toolName: "focused_app",
+                arguments: [:],
+                requiredPromptFragment: nil),
+            .completion(
+                "Notes is focused.",
+                requiredPromptFragment: resultText),
+        ])
+        let pool = RecordingMCPClientPool(
+            tools: [focusedApp, try makeMailTool()],
+            resultsByTool: [
+                "focused_app": try MCPToolResult(
+                    text: resultText,
+                    structuredContent: .object([
+                        "ok": .bool(true),
+                        "app": .object([
+                            "pid": .integer(4_242),
+                            "name": .string("Notes"),
+                            "bundleIdentifier": .string("com.apple.Notes"),
+                            "isActive": .bool(true),
+                        ]),
+                    ]),
+                    isError: false,
+                    wasTruncated: false),
+            ])
+        let fallback = StubVisualExecutor()
+        let executor = try await MCPFirstComputerUseExecutor.load(
+            binaryURL: URL(fileURLWithPath:
+                "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
+            visualFallback: fallback,
+            planner: planner,
+            clientPool: pool)
+        let modelPrompt = "Assistant previously discussed a DoorDash delivery price and ETA quote. Current request: Which app is focused?"
+        let trustedPrompt = "Which app is focused?"
+
+        let result = try await executor.execute(
+            taskID: "history-quote-current-focused-app",
+            prompt: modelPrompt,
+            trustedUserPrompt: trustedPrompt,
+            tools: makeHostTools(),
+            progress: { _ in })
+
+        XCTAssertEqual(
+            result,
+            .completed(
+                "Focused app: Notes — PID 4242; bundle: com.apple.Notes; active: yes."))
+        XCTAssertEqual(fallback.callCount, 0)
+        let directCalls = await pool.directCalls()
+        XCTAssertEqual(directCalls.count, 1)
+    }
+
+    func testCompoundDeliveryQuoteAndSaveDoesNotUsePureQuoteFastPath() async throws {
+        let planner = StubMCPPlanner(mode: .clarification)
+        let pool = StubMCPClientPool(tools: [try makeMailTool()])
+        let fallback = StubVisualExecutor(
+            result: .completed("Pure visual quote route was used."))
+        let executor = try await MCPFirstComputerUseExecutor.load(
+            binaryURL: URL(fileURLWithPath:
+                "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
+            visualFallback: fallback,
+            planner: planner,
+            clientPool: pool)
+
+        let result = try await executor.execute(
+            taskID: "compound-quote-save",
+            prompt: "Check the current DoorDash delivery price and ETA, then save it.",
+            trustedUserPrompt:
+                "Check the current DoorDash delivery price and ETA, then save it.",
+            tools: makeHostTools(),
+            progress: { _ in })
+
+        XCTAssertEqual(
+            result,
+            .clarificationRequired("Which document should I use?"))
+        XCTAssertEqual(fallback.callCount, 0)
+        XCTAssertEqual(planner.proposedToolNames.count, 1)
+    }
+
+    func testDeliveryQuoteFollowUpRetainsEffectWhenWithoutOnlyModifiesItsDetails()
+        async throws {
+        let prompts = [
+            "Check the current DoorDash delivery price and ETA, then email it to me without changing the subject line.",
+            "Check the current DoorDash delivery price and ETA, then save it without overwriting my old quote.",
+        ]
+
+        for (index, prompt) in prompts.enumerated() {
+            let planner = StubMCPPlanner(mode: .clarification)
+            let pool = StubMCPClientPool(tools: [try makeMailTool()])
+            let fallback = StubVisualExecutor(
+                result: .completed("Pure visual quote route was used."))
+            let executor = try await MCPFirstComputerUseExecutor.load(
+                binaryURL: URL(fileURLWithPath:
+                    "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
+                visualFallback: fallback,
+                planner: planner,
+                clientPool: pool)
+
+            let result = try await executor.execute(
+                taskID: "compound-quote-without-(index)",
+                prompt: prompt,
+                trustedUserPrompt: prompt,
+                tools: makeHostTools(),
+                progress: { _ in })
+
+            XCTAssertEqual(
+                result,
+                .clarificationRequired("Which document should I use?"),
+                prompt)
+            XCTAssertEqual(fallback.callCount, 0, prompt)
+            XCTAssertEqual(planner.proposedToolNames.count, 1, prompt)
+        }
+    }
+
+    func testExplicitlyNegatedDeliveryEffectsRemainOnPureQuoteFastPath()
+        async throws {
+        let planner = StubMCPPlanner(mode: .generationFailure)
+        let pool = StubMCPClientPool(tools: [try makeMailTool()])
+        let fallback = StubVisualExecutor(result: .completed("Quote reported."))
+        let executor = try await MCPFirstComputerUseExecutor.load(
+            binaryURL: URL(fileURLWithPath:
+                "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
+            visualFallback: fallback,
+            planner: planner,
+            clientPool: pool)
+        let prompt = "Check the current DoorDash delivery price and ETA without emailing or saving it. Do not place the order."
+
+        let result = try await executor.execute(
+            taskID: "pure-quote-negated-effects",
+            prompt: prompt,
+            trustedUserPrompt: prompt,
+            tools: makeHostTools(),
+            progress: { _ in })
+
+        XCTAssertEqual(result, .completed("Quote reported."))
+        XCTAssertEqual(fallback.callCount, 1)
+        XCTAssertTrue(
+            planner.proposedToolNames.isEmpty,
+            "Explicitly denied follow-ups must not disable the pure quote route")
+    }
+
+    func testNegatedPrivateReadClausesCannotAuthorizeContactsOrReminders()
+        async throws {
+        let rows: [(
+            label: String,
+            toolName: String,
+            prompt: String,
+            arguments: [String: MCPJSONValue]
+        )] = [
+            (
+                label: "negated-contact",
+                toolName: "contacts_search",
+                prompt: "Do not show Jordan Lee's contact. Tell me the weather instead.",
+                arguments: [
+                    "query": .string("Jordan Lee"),
+                    "limit": .integer(5),
+                ]),
+            (
+                label: "negated-contact-with-comma-interjections",
+                toolName: "contacts_search",
+                prompt: "Do not, under any circumstances, show Jordan Lee's contact.",
+                arguments: [
+                    "query": .string("Jordan Lee"),
+                    "limit": .integer(5),
+                ]),
+            (
+                label: "negated-contact-with-however-interjection",
+                toolName: "contacts_search",
+                prompt: "Do not, however, show Jordan Lee's contact.",
+                arguments: [
+                    "query": .string("Jordan Lee"),
+                    "limit": .integer(5),
+                ]),
+            (
+                label: "excluded-contact-after-anything-but",
+                toolName: "contacts_search",
+                prompt: "Do anything but show Jordan Lee's contact.",
+                arguments: [
+                    "query": .string("Jordan Lee"),
+                    "limit": .integer(5),
+                ]),
+            (
+                label: "excluded-contact-after-expanded-anything-but",
+                toolName: "contacts_search",
+                prompt: "Do anything at all but show Jordan Lee's contact.",
+                arguments: [
+                    "query": .string("Jordan Lee"),
+                    "limit": .integer(5),
+                ]),
+            (
+                label: "excluded-contact-after-other-than",
+                toolName: "contacts_search",
+                prompt: "Show everything other than Jordan Lee's contact.",
+                arguments: [
+                    "query": .string("Jordan Lee"),
+                    "limit": .integer(5),
+                ]),
+            (
+                label: "excluded-contact-after-excluding",
+                toolName: "contacts_search",
+                prompt: "Show all local data excluding Jordan Lee's contact.",
+                arguments: [
+                    "query": .string("Jordan Lee"),
+                    "limit": .integer(5),
+                ]),
+            (
+                label: "negated-contact-entity-with-affirmative-alternative",
+                toolName: "contacts_search",
+                prompt: "Do not show Jordan Lee's contact; show Avery Chen's phone number instead.",
+                arguments: [
+                    "query": .string("Jordan Lee"),
+                    "limit": .integer(5),
+                ]),
+            (
+                label: "negated-contact-after-incidental-report-noun",
+                toolName: "contacts_search",
+                prompt: "The contact report mentions Jordan Lee; do not show Jordan Lee's contact.",
+                arguments: [
+                    "query": .string("Jordan Lee"),
+                    "limit": .integer(5),
+                ]),
+            (
+                label: "negated-reminders",
+                toolName: "reminders_list",
+                prompt: "Never list my reminders. Tell me which app is focused instead.",
+                arguments: [
+                    "include_completed": .bool(false),
+                    "limit": .integer(5),
+                ]),
+            (
+                label: "negated-reminders-with-comma-interjections",
+                toolName: "reminders_list",
+                prompt: "Never, ever, list my reminders.",
+                arguments: [
+                    "include_completed": .bool(false),
+                    "limit": .integer(5),
+                ]),
+            (
+                label: "negated-reminders-with-however-interjection",
+                toolName: "reminders_list",
+                prompt: "Do not, however, list my reminders.",
+                arguments: [
+                    "include_completed": .bool(false),
+                    "limit": .integer(5),
+                ]),
+            (
+                label: "without-reminders",
+                toolName: "reminders_list",
+                prompt: "Tell me which app is focused without showing my reminders.",
+                arguments: [
+                    "include_completed": .bool(false),
+                    "limit": .integer(5),
+                ]),
+        ]
+
+        for row in rows {
+            let tool = try makePlannerVisibleReadOnlyTool(row.toolName)
+            let planner = SequencedMCPPlanner(steps: [
+                .call(
+                    toolName: row.toolName,
+                    arguments: row.arguments,
+                    requiredPromptFragment: nil),
+            ])
+            let pool = RecordingMCPClientPool(
+                tools: [tool, try makeMailTool()],
+                resultsByTool: [:])
+            let fallback = StubVisualExecutor(
+                result: .completed("Visual verification took over."))
+            let executor = try await MCPFirstComputerUseExecutor.load(
+                binaryURL: URL(fileURLWithPath:
+                    "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
+                visualFallback: fallback,
+                planner: planner,
+                clientPool: pool)
+
+            let result = try await executor.execute(
+                taskID: row.label,
+                prompt: row.prompt,
+                trustedUserPrompt: row.prompt,
+                tools: makeHostTools(),
+                progress: { _ in })
+
+            XCTAssertEqual(
+                result,
+                .completed("Visual verification took over."),
+                row.label)
+            XCTAssertEqual(fallback.callCount, 1, row.label)
+            let directCalls = await pool.directCalls()
+            XCTAssertTrue(
+                directCalls.isEmpty,
+                "A negated private read executed for (row.label)")
+            XCTAssertEqual(planner.completedStepCount, 1, row.label)
+        }
+    }
+
+    func testAffirmativePrivateReadsRemainAuthorizedBeforeTrailingWithoutClause()
+        async throws {
+        let rows: [PlannerVisibleReadOnlyRow] = [
+            PlannerVisibleReadOnlyRow(
+                toolName: "contacts_search",
+                prompt: "Show me Jordan Lee's phone number in Contacts without editing the contact.",
+                arguments: [
+                    "query": .string("Jordan Lee"),
+                    "limit": .integer(5),
+                ],
+                resultText: #"{"ok":true,"contacts":[{"name":"Jordan Lee","phones":["+1 415 555 0142"],"emails":[]}]}"#,
+                structuredContent: .object([
+                    "ok": .bool(true),
+                    "contacts": .array([.object([
+                        "name": .string("Jordan Lee"),
+                        "phones": .array([.string("+1 415 555 0142")]),
+                        "emails": .array([]),
+                    ])]),
+                ]),
+                completion: "Jordan Lee has +1 415 555 0142.",
+                expectedProjection: "Contacts (showing up to 5):\n1. Jordan Lee — phones: +1 415 555 0142; emails: none."),
+            PlannerVisibleReadOnlyRow(
+                toolName: "contacts_search",
+                prompt: "Please, when convenient, show me Jordan Lee's phone number in Contacts.",
+                arguments: [
+                    "query": .string("Jordan Lee"),
+                    "limit": .integer(5),
+                ],
+                resultText: #"{"ok":true,"contacts":[{"name":"Jordan Lee","phones":["+1 415 555 0142"],"emails":[]}]}"#,
+                structuredContent: .object([
+                    "ok": .bool(true),
+                    "contacts": .array([.object([
+                        "name": .string("Jordan Lee"),
+                        "phones": .array([.string("+1 415 555 0142")]),
+                        "emails": .array([]),
+                    ])]),
+                ]),
+                completion: "Jordan Lee has +1 415 555 0142.",
+                expectedProjection: "Contacts (showing up to 5):\n1. Jordan Lee — phones: +1 415 555 0142; emails: none."),
+            PlannerVisibleReadOnlyRow(
+                toolName: "contacts_search",
+                prompt: "Do not show my reminders, but show Jordan Lee's contact.",
+                arguments: [
+                    "query": .string("Jordan Lee"),
+                    "limit": .integer(5),
+                ],
+                resultText: #"{"ok":true,"contacts":[{"name":"Jordan Lee","phones":["+1 415 555 0142"],"emails":[]}]}"#,
+                structuredContent: .object([
+                    "ok": .bool(true),
+                    "contacts": .array([.object([
+                        "name": .string("Jordan Lee"),
+                        "phones": .array([.string("+1 415 555 0142")]),
+                        "emails": .array([]),
+                    ])]),
+                ]),
+                completion: "Jordan Lee has +1 415 555 0142.",
+                expectedProjection: "Contacts (showing up to 5):\n1. Jordan Lee — phones: +1 415 555 0142; emails: none."),
+            PlannerVisibleReadOnlyRow(
+                toolName: "reminders_list",
+                prompt: "Show my incomplete reminders without changing them.",
+                arguments: [
+                    "include_completed": .bool(false),
+                    "limit": .integer(5),
+                ],
+                resultText: #"{"ok":true,"reminders":[{"title":"Pick up library holds","completed":false,"list":"Errands"}]}"#,
+                structuredContent: .object([
+                    "ok": .bool(true),
+                    "reminders": .array([.object([
+                        "title": .string("Pick up library holds"),
+                        "completed": .bool(false),
+                        "list": .string("Errands"),
+                    ])]),
+                ]),
+                completion: "Pick up library holds is incomplete.",
+                expectedProjection: "Reminders (showing up to 5):\n1. Pick up library holds — incomplete; list: Errands."),
+            PlannerVisibleReadOnlyRow(
+                toolName: "reminders_list",
+                prompt: "Please, when convenient, list my incomplete reminders.",
+                arguments: [
+                    "include_completed": .bool(false),
+                    "limit": .integer(5),
+                ],
+                resultText: #"{"ok":true,"reminders":[{"title":"Pick up library holds","completed":false,"list":"Errands"}]}"#,
+                structuredContent: .object([
+                    "ok": .bool(true),
+                    "reminders": .array([.object([
+                        "title": .string("Pick up library holds"),
+                        "completed": .bool(false),
+                        "list": .string("Errands"),
+                    ])]),
+                ]),
+                completion: "Pick up library holds is incomplete.",
+                expectedProjection: "Reminders (showing up to 5):\n1. Pick up library holds — incomplete; list: Errands."),
+        ]
+
+        for (index, row) in rows.enumerated() {
+            let tool = try makePlannerVisibleReadOnlyTool(row.toolName)
+            let planner = SequencedMCPPlanner(steps: [
+                .call(
+                    toolName: row.toolName,
+                    arguments: row.arguments,
+                    requiredPromptFragment: nil),
+                .completion(
+                    row.completion,
+                    requiredPromptFragment: row.resultText),
+            ])
+            let pool = RecordingMCPClientPool(
+                tools: [tool, try makeMailTool()],
+                resultsByTool: [
+                    row.toolName: try MCPToolResult(
+                        text: row.resultText,
+                        structuredContent: row.structuredContent,
+                        isError: false,
+                        wasTruncated: false),
+                ])
+            let fallback = StubVisualExecutor()
+            let executor = try await MCPFirstComputerUseExecutor.load(
+                binaryURL: URL(fileURLWithPath:
+                    "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
+                visualFallback: fallback,
+                planner: planner,
+                clientPool: pool)
+
+            let result = try await executor.execute(
+                taskID: "affirmative-private-read-(index)",
+                prompt: row.prompt,
+                trustedUserPrompt: row.prompt,
+                tools: makeHostTools(),
+                progress: { _ in })
+
+            XCTAssertEqual(result, .completed(row.expectedProjection), row.toolName)
+            XCTAssertEqual(fallback.callCount, 0, row.toolName)
+            let directCalls = await pool.directCalls()
+            XCTAssertEqual(directCalls.map(\.toolName), [row.toolName], row.toolName)
+        }
+    }
+
     func testEveryPlannerVisibleReadOnlyOperationTraversesProductionExecutor() async throws {
         let rows: [PlannerVisibleReadOnlyRow] = [
             PlannerVisibleReadOnlyRow(
@@ -147,7 +582,8 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
                         "emails": .array([.string("jordan.lee@example.invalid")]),
                     ])]),
                 ]),
-                completion: "Jordan Lee is listed with +1 415 555 0142 and jordan.lee@example.invalid."),
+                completion: "Jordan Lee is listed with +1 415 555 0142 and jordan.lee@example.invalid.",
+                expectedProjection: "Contacts (showing up to 5):\n1. Jordan Lee — phones: +1 415 555 0142; emails: jordan.lee@example.invalid."),
             PlannerVisibleReadOnlyRow(
                 toolName: "reminders_list",
                 prompt: "Show my first five incomplete reminders so I can plan this afternoon.",
@@ -164,7 +600,8 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
                         "list": .string("Errands"),
                     ])]),
                 ]),
-                completion: "Your first incomplete reminder is Pick up library holds in Errands."),
+                completion: "Your first incomplete reminder is Pick up library holds in Errands.",
+                expectedProjection: "Reminders:\n1. Pick up library holds — incomplete; list: Errands."),
             PlannerVisibleReadOnlyRow(
                 toolName: "list_shortcuts",
                 prompt: "Which Apple Shortcuts are available on this Mac? Do not run one.",
@@ -175,7 +612,8 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
                     "names": .array([.string("Log Water"), .string("Start Focus")]),
                     "count": .integer(2),
                 ]),
-                completion: "The available Shortcuts are Log Water and Start Focus."),
+                completion: "The available Shortcuts are Log Water and Start Focus.",
+                expectedProjection: "Available Shortcuts (2):\n1. Log Water\n2. Start Focus"),
             PlannerVisibleReadOnlyRow(
                 toolName: "focused_app",
                 prompt: "Which Mac app am I currently using?",
@@ -190,7 +628,8 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
                         "isActive": .bool(true),
                     ]),
                 ]),
-                completion: "Notes is the currently focused app."),
+                completion: "Notes is the currently focused app.",
+                expectedProjection: "Focused app: Notes — PID 4242; bundle: com.apple.Notes; active: yes."),
             PlannerVisibleReadOnlyRow(
                 toolName: "list_apps",
                 prompt: "Which apps are currently running on my Mac?",
@@ -203,22 +642,23 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
                         .object(["pid": .integer(4_343), "name": .string("Calendar")]),
                     ]),
                 ]),
-                completion: "Notes and Calendar are currently running."),
+                completion: "Notes and Calendar are currently running.",
+                expectedProjection: "Running apps:\n1. Notes — PID 4242.\n2. Calendar — PID 4343."),
             PlannerVisibleReadOnlyRow(
                 toolName: "list_windows",
-                prompt: "List the open Notes windows so I can find my packing list.",
-                arguments: ["pid": .integer(4_242)],
-                resultText: #"{"ok":true,"pid":4242,"windows":[{"pid":4242,"index":0,"title":"Packing list"}]}"#,
+                prompt: "List the open windows so I can find my packing list.",
+                arguments: [:],
+                resultText: #"{"ok":true,"windows":[{"pid":4242,"index":0,"title":"Packing list"}]}"#,
                 structuredContent: .object([
                     "ok": .bool(true),
-                    "pid": .integer(4_242),
                     "windows": .array([.object([
                         "pid": .integer(4_242),
                         "index": .integer(0),
                         "title": .string("Packing list"),
                     ])]),
                 ]),
-                completion: "Notes has an open window titled Packing list."),
+                completion: "Notes has an open window titled Packing list.",
+                expectedProjection: "Open windows:\n1. Packing list — PID 4242; index 0."),
             PlannerVisibleReadOnlyRow(
                 toolName: "permissions_status",
                 prompt: "Check whether this Mac is ready for Accessibility computer control.",
@@ -228,7 +668,8 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
                     "ok": .bool(true),
                     "accessibility": .string("granted"),
                 ]),
-                completion: "Accessibility access is granted, so this Mac is ready for computer control."),
+                completion: "Accessibility access is granted, so this Mac is ready for computer control.",
+                expectedProjection: "Accessibility permission: granted."),
         ]
         let expectedReadOnlySurface = MCPFirstComputerUseExecutor
             .structuredToolNames.subtracting([RemoteDesktopMailMCP.toolName])
@@ -270,7 +711,10 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
                 tools: makeHostTools(),
                 progress: { progress.append($0) })
 
-            XCTAssertEqual(result, .completed(row.completion), row.toolName)
+            XCTAssertEqual(
+                result,
+                .completed(row.expectedProjection),
+                row.toolName)
             XCTAssertEqual(fallback.callCount, 0, row.toolName)
             let directCalls = await pool.directCalls()
             XCTAssertEqual(directCalls.count, 1, row.toolName)
@@ -294,6 +738,1005 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
                 "The planner did not consume the exact local result for \(row.toolName)")
             XCTAssertTrue(progress.contains("Checking the local result…"), row.toolName)
         }
+    }
+
+    func testPlannerCannotSelectPromptAlternativeOverTypedFocusedApp() async throws {
+        let focusedApp = try makePlannerVisibleReadOnlyTool("focused_app")
+        let resultText = #"{"ok":true,"app":{"pid":4242,"name":"Notes","bundleIdentifier":"com.apple.Notes","isActive":true}}"#
+        let planner = SequencedMCPPlanner(steps: [
+            .call(
+                toolName: "focused_app",
+                arguments: [:],
+                requiredPromptFragment: nil),
+            .completion(
+                "Safari is the currently focused app.",
+                requiredPromptFragment: resultText),
+        ])
+        let pool = RecordingMCPClientPool(
+            tools: [focusedApp, try makeMailTool()],
+            resultsByTool: [
+                "focused_app": try MCPToolResult(
+                    text: resultText,
+                    structuredContent: .object([
+                        "ok": .bool(true),
+                        "app": .object([
+                            "pid": .integer(4_242),
+                            "name": .string("Notes"),
+                            "bundleIdentifier": .string("com.apple.Notes"),
+                            "isActive": .bool(true),
+                        ]),
+                    ]),
+                    isError: false,
+                    wasTruncated: false),
+            ])
+        let fallback = StubVisualExecutor(
+            result: .completed("Visual verification took over."))
+        let executor = try await MCPFirstComputerUseExecutor.load(
+            binaryURL: URL(fileURLWithPath:
+                "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
+            visualFallback: fallback,
+            planner: planner,
+            clientPool: pool)
+
+        let result = try await executor.execute(
+            taskID: "typed-focused-app-prompt-alternative",
+            prompt: "Is Notes or Safari the Mac app I am currently using?",
+            tools: makeHostTools(),
+            progress: { _ in })
+
+        XCTAssertEqual(
+            result,
+            .completed(
+                "Focused app: Notes — PID 4242; bundle: com.apple.Notes; active: yes."))
+        XCTAssertEqual(fallback.callCount, 0)
+        let directCalls = await pool.directCalls()
+        XCTAssertEqual(directCalls.count, 1)
+    }
+
+    func testReadOnlyCompletionRequiresSuccessfulUntruncatedStructuredContent() async throws {
+        let validContent = MCPJSONValue.object([
+            "ok": .bool(true),
+            "app": .object([
+                "pid": .integer(4_242),
+                "name": .string("Notes"),
+                "bundleIdentifier": .string("com.apple.Notes"),
+                "isActive": .bool(true),
+            ]),
+        ])
+        let cases: [(String, MCPJSONValue?, Bool)] = [
+            ("missing typed content", nil, false),
+            ("truncated result", validContent, true),
+            ("unsuccessful typed content", .object(["ok": .bool(false)]), false),
+        ]
+
+        for (label, structuredContent, wasTruncated) in cases {
+            let focusedApp = try makePlannerVisibleReadOnlyTool("focused_app")
+            let resultText = #"{"ok":true,"app":{"pid":4242,"name":"Notes"}}"#
+            let planner = SequencedMCPPlanner(steps: [
+                .call(
+                    toolName: "focused_app",
+                    arguments: [:],
+                    requiredPromptFragment: nil),
+                .completion(
+                    "Notes is focused.",
+                    requiredPromptFragment: resultText),
+            ])
+            let pool = RecordingMCPClientPool(
+                tools: [focusedApp, try makeMailTool()],
+                resultsByTool: [
+                    "focused_app": try MCPToolResult(
+                        text: resultText,
+                        structuredContent: structuredContent,
+                        isError: false,
+                        wasTruncated: wasTruncated),
+                ])
+            let fallback = StubVisualExecutor(
+                result: .completed("Visual verification took over."))
+            let executor = try await MCPFirstComputerUseExecutor.load(
+                binaryURL: URL(fileURLWithPath:
+                    "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
+                visualFallback: fallback,
+                planner: planner,
+                clientPool: pool)
+
+            let result = try await executor.execute(
+                taskID: "typed-result-precondition-\(label)",
+                prompt: "Which app is currently focused?",
+                tools: makeHostTools(),
+                progress: { _ in })
+
+            XCTAssertEqual(
+                result,
+                .completed("Visual verification took over."),
+                label)
+            XCTAssertEqual(fallback.callCount, 1, label)
+            let directCalls = await pool.directCalls()
+            XCTAssertEqual(directCalls.count, 1, label)
+        }
+    }
+
+    func testPlannerCannotInvertTypedReminderCompletionPolarity() async throws {
+        let reminders = try makePlannerVisibleReadOnlyTool("reminders_list")
+        let resultText = #"{"ok":true,"reminders":[{"title":"Submit expense report","completed":false,"list":"Work"}]}"#
+        let planner = SequencedMCPPlanner(steps: [
+            .call(
+                toolName: "reminders_list",
+                arguments: [
+                    "include_completed": .bool(false),
+                    "limit": .integer(5),
+                ],
+                requiredPromptFragment: nil),
+            .completion(
+                "Submit expense report is completed in Work.",
+                requiredPromptFragment: resultText),
+        ])
+        let pool = RecordingMCPClientPool(
+            tools: [reminders, try makeMailTool()],
+            resultsByTool: [
+                "reminders_list": try MCPToolResult(
+                    text: resultText,
+                    structuredContent: .object([
+                        "ok": .bool(true),
+                        "reminders": .array([.object([
+                            "title": .string("Submit expense report"),
+                            "completed": .bool(false),
+                            "list": .string("Work"),
+                        ])]),
+                    ]),
+                    isError: false,
+                    wasTruncated: false),
+            ])
+        let fallback = StubVisualExecutor()
+        let executor = try await MCPFirstComputerUseExecutor.load(
+            binaryURL: URL(fileURLWithPath:
+                "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
+            visualFallback: fallback,
+            planner: planner,
+            clientPool: pool)
+
+        let result = try await executor.execute(
+            taskID: "typed-reminder-polarity",
+            prompt: "Which reminders are incomplete in my Work list?",
+            tools: makeHostTools(),
+            progress: { _ in })
+
+        XCTAssertEqual(
+            result,
+            .completed(
+                "Reminders (showing up to 5):\n1. Submit expense report — incomplete; list: Work."))
+        XCTAssertEqual(fallback.callCount, 0)
+    }
+
+    func testPlannerCannotRecombineFieldsAcrossTypedContacts() async throws {
+        let contacts = try makePlannerVisibleReadOnlyTool("contacts_search")
+        let resultText = #"{"ok":true,"contacts":[{"name":"Jordan Lee","phones":["+1 415 555 0142"],"emails":["jordan@example.invalid"]},{"name":"Avery Lee","phones":["+1 212 555 0199"],"emails":["avery@example.invalid"]}]}"#
+        let planner = SequencedMCPPlanner(steps: [
+            .call(
+                toolName: "contacts_search",
+                arguments: [
+                    "query": .string("Lee"),
+                    "limit": .integer(5),
+                ],
+                requiredPromptFragment: nil),
+            .completion(
+                "Jordan Lee has +1 212 555 0199 and avery@example.invalid; Avery Lee has +1 415 555 0142 and jordan@example.invalid.",
+                requiredPromptFragment: resultText),
+        ])
+        let pool = RecordingMCPClientPool(
+            tools: [contacts, try makeMailTool()],
+            resultsByTool: [
+                "contacts_search": try MCPToolResult(
+                    text: resultText,
+                    structuredContent: .object([
+                        "ok": .bool(true),
+                        "contacts": .array([
+                            .object([
+                                "name": .string("Jordan Lee"),
+                                "phones": .array([.string("+1 415 555 0142")]),
+                                "emails": .array([.string("jordan@example.invalid")]),
+                            ]),
+                            .object([
+                                "name": .string("Avery Lee"),
+                                "phones": .array([.string("+1 212 555 0199")]),
+                                "emails": .array([.string("avery@example.invalid")]),
+                            ]),
+                        ]),
+                    ]),
+                    isError: false,
+                    wasTruncated: false),
+            ])
+        let fallback = StubVisualExecutor()
+        let executor = try await MCPFirstComputerUseExecutor.load(
+            binaryURL: URL(fileURLWithPath:
+                "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
+            visualFallback: fallback,
+            planner: planner,
+            clientPool: pool)
+
+        let result = try await executor.execute(
+            taskID: "typed-contact-associations",
+            prompt: "Find phone numbers and email addresses for contacts matching Lee in Contacts.",
+            tools: makeHostTools(),
+            progress: { _ in })
+
+        XCTAssertEqual(
+            result,
+            .completed(
+                "Contacts (showing up to 5):\n1. Jordan Lee — phones: +1 415 555 0142; emails: jordan@example.invalid.\n2. Avery Lee — phones: +1 212 555 0199; emails: avery@example.invalid."))
+        XCTAssertEqual(fallback.callCount, 0)
+    }
+
+    func testIrrelevantTypedToolTextCannotCompleteTrustedUserRequest() async throws {
+        let contacts = try makePlannerVisibleReadOnlyTool("contacts_search")
+        let resultText = #"{"ok":true,"contacts":[{"name":"Desktop wallpaper","phones":["blue"],"emails":[]}]}"#
+        let planner = SequencedMCPPlanner(steps: [
+            .call(
+                toolName: "contacts_search",
+                arguments: [
+                    "query": .string("Desktop wallpaper"),
+                    "limit": .integer(5),
+                ],
+                requiredPromptFragment: nil),
+            .completion(
+                "The current desktop wallpaper is blue.",
+                requiredPromptFragment: resultText),
+        ])
+        let pool = RecordingMCPClientPool(
+            tools: [contacts, try makeMailTool()],
+            resultsByTool: [
+                "contacts_search": try MCPToolResult(
+                    text: resultText,
+                    structuredContent: .object([
+                        "ok": .bool(true),
+                        "contacts": .array([.object([
+                            "name": .string("Desktop wallpaper"),
+                            "phones": .array([.string("blue")]),
+                            "emails": .array([]),
+                        ])]),
+                    ]),
+                    isError: false,
+                    wasTruncated: false),
+            ])
+        let fallback = StubVisualExecutor(
+            result: .completed("Visual verification took over."))
+        let executor = try await MCPFirstComputerUseExecutor.load(
+            binaryURL: URL(fileURLWithPath:
+                "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
+            visualFallback: fallback,
+            planner: planner,
+            clientPool: pool)
+        let modelPrompt = "Search Contacts for Desktop wallpaper and report its phone value."
+        let trustedUserPrompt = "What color is the current desktop wallpaper?"
+
+        let result = try await executor.execute(
+            taskID: "irrelevant-typed-tool-data",
+            prompt: modelPrompt,
+            trustedUserPrompt: trustedUserPrompt,
+            tools: makeHostTools(),
+            progress: { _ in })
+
+        XCTAssertEqual(result, .completed("Visual verification took over."))
+        XCTAssertEqual(fallback.callCount, 1)
+        XCTAssertEqual(fallback.prompts, [modelPrompt])
+        XCTAssertEqual(fallback.trustedUserPrompts, [trustedUserPrompt])
+        XCTAssertEqual(fallback.taskIDs, ["irrelevant-typed-tool-data"])
+        let directCalls = await pool.directCalls()
+        XCTAssertTrue(
+            directCalls.isEmpty,
+            "An irrelevant proposal must be denied before local data access")
+        XCTAssertEqual(planner.completedStepCount, 1)
+    }
+
+    func testContactResultMustMatchTrustedQueryEntity() async throws {
+        let contacts = try makePlannerVisibleReadOnlyTool("contacts_search")
+        let resultText = #"{"ok":true,"contacts":[{"name":"Avery Chen","phones":["+1 212 555 0199"],"emails":[]}]}"#
+        let planner = SequencedMCPPlanner(steps: [
+            .call(
+                toolName: "contacts_search",
+                arguments: [
+                    "query": .string("Jordan Lee"),
+                    "limit": .integer(5),
+                ],
+                requiredPromptFragment: nil),
+            .completion(
+                "Jordan Lee has +1 212 555 0199.",
+                requiredPromptFragment: resultText),
+        ])
+        let pool = RecordingMCPClientPool(
+            tools: [contacts, try makeMailTool()],
+            resultsByTool: [
+                "contacts_search": try MCPToolResult(
+                    text: resultText,
+                    structuredContent: .object([
+                        "ok": .bool(true),
+                        "contacts": .array([.object([
+                            "name": .string("Avery Chen"),
+                            "phones": .array([.string("+1 212 555 0199")]),
+                            "emails": .array([]),
+                        ])]),
+                    ]),
+                    isError: false,
+                    wasTruncated: false),
+            ])
+        let fallback = StubVisualExecutor(
+            result: .completed("Visual verification took over."))
+        let executor = try await MCPFirstComputerUseExecutor.load(
+            binaryURL: URL(fileURLWithPath:
+                "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
+            visualFallback: fallback,
+            planner: planner,
+            clientPool: pool)
+
+        let result = try await executor.execute(
+            taskID: "contact-query-result-mismatch",
+            prompt: "Find Jordan Lee's phone number in Contacts.",
+            tools: makeHostTools(),
+            progress: { _ in })
+
+        XCTAssertEqual(result, .completed("Visual verification took over."))
+        XCTAssertEqual(fallback.callCount, 1)
+        let directCalls = await pool.directCalls()
+        XCTAssertEqual(directCalls.count, 1)
+        XCTAssertEqual(planner.completedStepCount, 1)
+    }
+
+    func testIncompleteReminderIntentRejectsIncludeCompletedInversionBeforeRead() async throws {
+        let reminders = try makePlannerVisibleReadOnlyTool("reminders_list")
+        let planner = SequencedMCPPlanner(steps: [
+            .call(
+                toolName: "reminders_list",
+                arguments: [
+                    "include_completed": .bool(true),
+                    "limit": .integer(5),
+                ],
+                requiredPromptFragment: nil),
+        ])
+        let pool = RecordingMCPClientPool(
+            tools: [reminders, try makeMailTool()],
+            resultsByTool: [:])
+        let fallback = StubVisualExecutor(
+            result: .completed("Visual verification took over."))
+        let executor = try await MCPFirstComputerUseExecutor.load(
+            binaryURL: URL(fileURLWithPath:
+                "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
+            visualFallback: fallback,
+            planner: planner,
+            clientPool: pool)
+
+        let result = try await executor.execute(
+            taskID: "reminder-completion-filter-inversion",
+            prompt: "Show my first five incomplete reminders.",
+            tools: makeHostTools(),
+            progress: { _ in })
+
+        XCTAssertEqual(result, .completed("Visual verification took over."))
+        XCTAssertEqual(fallback.callCount, 1)
+        let directCalls = await pool.directCalls()
+        XCTAssertTrue(directCalls.isEmpty)
+    }
+
+    func testNamedAppWindowReadRejectsArbitraryPIDWithoutTypedAppProof() async throws {
+        let windows = try makePlannerVisibleReadOnlyTool("list_windows")
+        let planner = SequencedMCPPlanner(steps: [
+            .call(
+                toolName: "list_windows",
+                arguments: ["pid": .integer(4_242)],
+                requiredPromptFragment: nil),
+        ])
+        let pool = RecordingMCPClientPool(
+            tools: [windows, try makeMailTool()],
+            resultsByTool: [:])
+        let fallback = StubVisualExecutor(
+            result: .completed("Visual verification took over."))
+        let executor = try await MCPFirstComputerUseExecutor.load(
+            binaryURL: URL(fileURLWithPath:
+                "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
+            visualFallback: fallback,
+            planner: planner,
+            clientPool: pool)
+
+        let result = try await executor.execute(
+            taskID: "named-window-unproved-pid",
+            prompt: "List the open Notes windows.",
+            tools: makeHostTools(),
+            progress: { _ in })
+
+        XCTAssertEqual(result, .completed("Visual verification took over."))
+        XCTAssertEqual(fallback.callCount, 1)
+        let directCalls = await pool.directCalls()
+        XCTAssertTrue(directCalls.isEmpty)
+    }
+
+    func testNamedAppWindowReadUsesTypedAppInventoryAsMinimalDependency() async throws {
+        let apps = try makePlannerVisibleReadOnlyTool("list_apps")
+        let windows = try makePlannerVisibleReadOnlyTool("list_windows")
+        let appsText = #"{"ok":true,"apps":[{"pid":4242,"name":"Notes"},{"pid":4343,"name":"Calendar"}]}"#
+        let windowsText = #"{"ok":true,"pid":4242,"windows":[{"pid":4242,"index":0,"title":"Packing list"}]}"#
+        let planner = SequencedMCPPlanner(steps: [
+            .call(
+                toolName: "list_apps",
+                arguments: [:],
+                requiredPromptFragment: nil),
+            .call(
+                toolName: "list_windows",
+                arguments: ["pid": .integer(4_242)],
+                requiredPromptFragment: appsText),
+            .completion(
+                "Notes has a Packing list window.",
+                requiredPromptFragment: windowsText),
+        ])
+        let pool = RecordingMCPClientPool(
+            tools: [apps, windows, try makeMailTool()],
+            resultsByTool: [
+                "list_apps": try MCPToolResult(
+                    text: appsText,
+                    structuredContent: .object([
+                        "ok": .bool(true),
+                        "apps": .array([
+                            .object([
+                                "pid": .integer(4_242),
+                                "name": .string("Notes"),
+                            ]),
+                            .object([
+                                "pid": .integer(4_343),
+                                "name": .string("Calendar"),
+                            ]),
+                        ]),
+                    ]),
+                    isError: false,
+                    wasTruncated: false),
+                "list_windows": try MCPToolResult(
+                    text: windowsText,
+                    structuredContent: .object([
+                        "ok": .bool(true),
+                        "pid": .integer(4_242),
+                        "windows": .array([.object([
+                            "pid": .integer(4_242),
+                            "index": .integer(0),
+                            "title": .string("Packing list"),
+                        ])]),
+                    ]),
+                    isError: false,
+                    wasTruncated: false),
+            ])
+        let fallback = StubVisualExecutor()
+        let executor = try await MCPFirstComputerUseExecutor.load(
+            binaryURL: URL(fileURLWithPath:
+                "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
+            visualFallback: fallback,
+            planner: planner,
+            clientPool: pool)
+
+        let result = try await executor.execute(
+            taskID: "named-window-typed-pid-proof",
+            prompt: "List the open Notes windows.",
+            tools: makeHostTools(),
+            progress: { _ in })
+
+        XCTAssertEqual(
+            result,
+            .completed(
+                "Open windows for Notes:\n1. Packing list — PID 4242; index 0."))
+        XCTAssertEqual(fallback.callCount, 0)
+        let directCalls = await pool.directCalls()
+        XCTAssertEqual(
+            directCalls.map(\.toolName),
+            ["list_apps", "list_windows"])
+    }
+
+    func testNamedWindowPromptFormsRejectUnscopedReadsWhileGenericFormsRemainUnscoped() async throws {
+        let windows = try makePlannerVisibleReadOnlyTool("list_windows")
+        let namedPrompts = [
+            "List windows for Notes.",
+            "Which windows does Notes have?",
+            "Notes open windows.",
+        ]
+        for (index, prompt) in namedPrompts.enumerated() {
+            let planner = SequencedMCPPlanner(steps: [
+                .call(
+                    toolName: "list_windows",
+                    arguments: [:],
+                    requiredPromptFragment: nil),
+            ])
+            let pool = RecordingMCPClientPool(
+                tools: [windows, try makeMailTool()],
+                resultsByTool: [:])
+            let fallback = StubVisualExecutor(
+                result: .completed("Visual verification took over."))
+            let executor = try await MCPFirstComputerUseExecutor.load(
+                binaryURL: URL(fileURLWithPath:
+                    "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
+                visualFallback: fallback,
+                planner: planner,
+                clientPool: pool)
+
+            let result = try await executor.execute(
+                taskID: "named-window-form-\(index)",
+                prompt: prompt,
+                tools: makeHostTools(),
+                progress: { _ in })
+
+            XCTAssertEqual(
+                result,
+                .completed("Visual verification took over."),
+                prompt)
+            XCTAssertEqual(fallback.callCount, 1, prompt)
+            let directCalls = await pool.directCalls()
+            XCTAssertTrue(
+                directCalls.isEmpty,
+                "Named request executed an unscoped window read: \(prompt)")
+        }
+
+        let genericPrompts = [
+            "List all windows.",
+            "List current windows.",
+            "List open windows.",
+        ]
+        let windowsText = #"{"ok":true,"windows":[]}"#
+        for (index, prompt) in genericPrompts.enumerated() {
+            let planner = SequencedMCPPlanner(steps: [
+                .call(
+                    toolName: "list_windows",
+                    arguments: [:],
+                    requiredPromptFragment: nil),
+                .completion(
+                    "No windows are open.",
+                    requiredPromptFragment: windowsText),
+            ])
+            let pool = RecordingMCPClientPool(
+                tools: [windows, try makeMailTool()],
+                resultsByTool: [
+                    "list_windows": try MCPToolResult(
+                        text: windowsText,
+                        structuredContent: .object([
+                            "ok": .bool(true),
+                            "windows": .array([]),
+                        ]),
+                        isError: false,
+                        wasTruncated: false),
+                ])
+            let fallback = StubVisualExecutor()
+            let executor = try await MCPFirstComputerUseExecutor.load(
+                binaryURL: URL(fileURLWithPath:
+                    "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
+                visualFallback: fallback,
+                planner: planner,
+                clientPool: pool)
+
+            let result = try await executor.execute(
+                taskID: "generic-window-form-\(index)",
+                prompt: prompt,
+                tools: makeHostTools(),
+                progress: { _ in })
+
+            XCTAssertEqual(
+                result,
+                .completed("No matching open windows were found."),
+                prompt)
+            XCTAssertEqual(fallback.callCount, 0, prompt)
+            let directCalls = await pool.directCalls()
+            XCTAssertEqual(directCalls.map(\.toolName), ["list_windows"], prompt)
+        }
+    }
+
+    func testNamedWindowPIDProofRejectsAmbiguousDuplicateApplicationInventory() async throws {
+        let apps = try makePlannerVisibleReadOnlyTool("list_apps")
+        let windows = try makePlannerVisibleReadOnlyTool("list_windows")
+        let appsText = #"{"ok":true,"apps":[{"pid":4242,"name":"Notes"},{"pid":4343,"name":"Notes"}]}"#
+        let planner = SequencedMCPPlanner(steps: [
+            .call(
+                toolName: "list_apps",
+                arguments: [:],
+                requiredPromptFragment: nil),
+            .call(
+                toolName: "list_windows",
+                arguments: ["pid": .integer(4_242)],
+                requiredPromptFragment: appsText),
+        ])
+        let pool = RecordingMCPClientPool(
+            tools: [apps, windows, try makeMailTool()],
+            resultsByTool: [
+                "list_apps": try MCPToolResult(
+                    text: appsText,
+                    structuredContent: .object([
+                        "ok": .bool(true),
+                        "apps": .array([
+                            .object([
+                                "pid": .integer(4_242),
+                                "name": .string("Notes"),
+                            ]),
+                            .object([
+                                "pid": .integer(4_343),
+                                "name": .string("Notes"),
+                            ]),
+                        ]),
+                    ]),
+                    isError: false,
+                    wasTruncated: false),
+            ])
+        let fallback = StubVisualExecutor(
+            result: .completed("Visual verification took over."))
+        let executor = try await MCPFirstComputerUseExecutor.load(
+            binaryURL: URL(fileURLWithPath:
+                "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
+            visualFallback: fallback,
+            planner: planner,
+            clientPool: pool)
+
+        let result = try await executor.execute(
+            taskID: "ambiguous-named-window-pid-proof",
+            prompt: "List windows for Notes.",
+            tools: makeHostTools(),
+            progress: { _ in })
+
+        XCTAssertEqual(result, .completed("Visual verification took over."))
+        XCTAssertEqual(fallback.callCount, 1)
+        let directCalls = await pool.directCalls()
+        XCTAssertEqual(
+            directCalls.map(\.toolName),
+            ["list_apps"],
+            "An ambiguous app-name-to-PID mapping must not authorize list_windows")
+    }
+
+    func testEveryContactValueRequestRejectsFinitePlannerLimitBeforeLocalAccess() async throws {
+        let contacts = try makePlannerVisibleReadOnlyTool("contacts_search")
+        let phones = (1 ... 20).map {
+            "Jordan-number-\($0)-" + String(repeating: "9", count: 100)
+        }
+        let resultText = "typed contact result with many phone values"
+        let planner = SequencedMCPPlanner(steps: [
+            .call(
+                toolName: "contacts_search",
+                arguments: [
+                    "query": .string("Jordan Lee"),
+                    "limit": .integer(5),
+                ],
+                requiredPromptFragment: nil),
+            .completion(
+                "Here are every one of Jordan's phone numbers.",
+                requiredPromptFragment: resultText),
+        ])
+        let pool = RecordingMCPClientPool(
+            tools: [contacts, try makeMailTool()],
+            resultsByTool: [
+                "contacts_search": try MCPToolResult(
+                    text: resultText,
+                    structuredContent: .object([
+                        "ok": .bool(true),
+                        "contacts": .array([.object([
+                            "name": .string("Jordan Lee"),
+                            "phones": .array(phones.map { .string($0) }),
+                            "emails": .array([]),
+                        ])]),
+                    ]),
+                    isError: false,
+                    wasTruncated: false),
+            ])
+        let fallback = StubVisualExecutor(
+            result: .completed("Visual verification took over."))
+        let executor = try await MCPFirstComputerUseExecutor.load(
+            binaryURL: URL(fileURLWithPath:
+                "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
+            visualFallback: fallback,
+            planner: planner,
+            clientPool: pool)
+
+        let result = try await executor.execute(
+            taskID: "exhaustive-contact-values-over-bound",
+            prompt: "Find every phone number for Jordan Lee in Contacts.",
+            tools: makeHostTools(),
+            progress: { _ in })
+
+        XCTAssertEqual(result, .completed("Visual verification took over."))
+        XCTAssertEqual(fallback.callCount, 1)
+        let directCalls = await pool.directCalls()
+        XCTAssertTrue(
+            directCalls.isEmpty,
+            "A finite contact limit cannot prove an every-value request")
+        XCTAssertEqual(
+            planner.completedStepCount,
+            1,
+            "The proposed bounded read should be rejected before execution")
+    }
+
+    func testEveryReminderRequestRejectsFinitePlannerLimitBeforeLocalAccess() async throws {
+        let reminders = try makePlannerVisibleReadOnlyTool("reminders_list")
+        let reminderValues: [MCPJSONValue] = (1 ... 30).map { index in
+            .object([
+                "title": .string(
+                    "Incomplete reminder \(index) "
+                        + String(repeating: "x", count: 70)),
+                "completed": .bool(false),
+                "list": .string("Work"),
+            ])
+        }
+        let resultText = "typed reminder result with many rows"
+        let planner = SequencedMCPPlanner(steps: [
+            .call(
+                toolName: "reminders_list",
+                arguments: [
+                    "include_completed": .bool(false),
+                    "limit": .integer(1),
+                ],
+                requiredPromptFragment: nil),
+            .completion(
+                "Here is every incomplete reminder.",
+                requiredPromptFragment: resultText),
+        ])
+        let pool = RecordingMCPClientPool(
+            tools: [reminders, try makeMailTool()],
+            resultsByTool: [
+                "reminders_list": try MCPToolResult(
+                    text: resultText,
+                    structuredContent: .object([
+                        "ok": .bool(true),
+                        "reminders": .array(reminderValues),
+                    ]),
+                    isError: false,
+                    wasTruncated: false),
+            ])
+        let fallback = StubVisualExecutor(
+            result: .completed("Visual verification took over."))
+        let executor = try await MCPFirstComputerUseExecutor.load(
+            binaryURL: URL(fileURLWithPath:
+                "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
+            visualFallback: fallback,
+            planner: planner,
+            clientPool: pool)
+
+        let result = try await executor.execute(
+            taskID: "exhaustive-reminder-rows-over-bound",
+            prompt: "Show every incomplete reminder.",
+            tools: makeHostTools(),
+            progress: { _ in })
+
+        XCTAssertEqual(result, .completed("Visual verification took over."))
+        XCTAssertEqual(fallback.callCount, 1)
+        let directCalls = await pool.directCalls()
+        XCTAssertTrue(
+            directCalls.isEmpty,
+            "A finite reminder limit cannot prove an every-row request")
+        XCTAssertEqual(planner.completedStepCount, 1)
+    }
+
+    func testAllWindowRequestFailsClosedWhenBoundedProjectionCannotIncludeEveryRow() async throws {
+        let windows = try makePlannerVisibleReadOnlyTool("list_windows")
+        let windowValues: [MCPJSONValue] = (1 ... 30).map { index in
+            .object([
+                "pid": .integer(4_000 + index),
+                "index": .integer(index - 1),
+                "title": .string(
+                    "Window \(index) " + String(repeating: "x", count: 70)),
+            ])
+        }
+        let resultText = "typed window result with many rows"
+        let planner = SequencedMCPPlanner(steps: [
+            .call(
+                toolName: "list_windows",
+                arguments: [:],
+                requiredPromptFragment: nil),
+            .completion(
+                "Here are all windows.",
+                requiredPromptFragment: resultText),
+        ])
+        let pool = RecordingMCPClientPool(
+            tools: [windows, try makeMailTool()],
+            resultsByTool: [
+                "list_windows": try MCPToolResult(
+                    text: resultText,
+                    structuredContent: .object([
+                        "ok": .bool(true),
+                        "windows": .array(windowValues),
+                    ]),
+                    isError: false,
+                    wasTruncated: false),
+            ])
+        let fallback = StubVisualExecutor(
+            result: .completed("Visual verification took over."))
+        let executor = try await MCPFirstComputerUseExecutor.load(
+            binaryURL: URL(fileURLWithPath:
+                "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
+            visualFallback: fallback,
+            planner: planner,
+            clientPool: pool)
+
+        let result = try await executor.execute(
+            taskID: "all-window-rows-over-projection-bound",
+            prompt: "List all windows.",
+            tools: makeHostTools(),
+            progress: { _ in })
+
+        XCTAssertEqual(result, .completed("Visual verification took over."))
+        XCTAssertEqual(fallback.callCount, 1)
+        let directCalls = await pool.directCalls()
+        XCTAssertEqual(directCalls.map(\.toolName), ["list_windows"])
+        XCTAssertEqual(
+            planner.completedStepCount,
+            1,
+            "A partial host projection must never reach TASK_COMPLETE")
+    }
+
+    func testTwoDomainPromptCannotCompleteFromOnlyOneDomain() async throws {
+        let contacts = try makePlannerVisibleReadOnlyTool("contacts_search")
+        let resultText = #"{"ok":true,"contacts":[{"name":"Jordan Lee","phones":["+1 415 555 0142"],"emails":[]}]}"#
+        let planner = SequencedMCPPlanner(steps: [
+            .call(
+                toolName: "contacts_search",
+                arguments: [
+                    "query": .string("Jordan Lee"),
+                    "limit": .integer(5),
+                ],
+                requiredPromptFragment: nil),
+            .completion(
+                "Jordan Lee has +1 415 555 0142 and there are no incomplete reminders.",
+                requiredPromptFragment: resultText),
+        ])
+        let pool = RecordingMCPClientPool(
+            tools: [contacts, try makeMailTool()],
+            resultsByTool: [
+                "contacts_search": try MCPToolResult(
+                    text: resultText,
+                    structuredContent: .object([
+                        "ok": .bool(true),
+                        "contacts": .array([.object([
+                            "name": .string("Jordan Lee"),
+                            "phones": .array([.string("+1 415 555 0142")]),
+                            "emails": .array([]),
+                        ])]),
+                    ]),
+                    isError: false,
+                    wasTruncated: false),
+            ])
+        let fallback = StubVisualExecutor(
+            result: .completed("Visual verification took over."))
+        let executor = try await MCPFirstComputerUseExecutor.load(
+            binaryURL: URL(fileURLWithPath:
+                "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
+            visualFallback: fallback,
+            planner: planner,
+            clientPool: pool)
+
+        let result = try await executor.execute(
+            taskID: "multi-domain-partial-proof",
+            prompt: "Find Jordan Lee's phone number in Contacts and show my incomplete reminders.",
+            tools: makeHostTools(),
+            progress: { _ in })
+
+        XCTAssertEqual(result, .completed("Visual verification took over."))
+        XCTAssertEqual(fallback.callCount, 1)
+        let directCalls = await pool.directCalls()
+        XCTAssertEqual(directCalls.count, 1)
+        XCTAssertEqual(planner.completedStepCount, 2)
+    }
+
+    func testTwoDomainPromptCombinesOnlyHostProjectedProofs() async throws {
+        let contacts = try makePlannerVisibleReadOnlyTool("contacts_search")
+        let reminders = try makePlannerVisibleReadOnlyTool("reminders_list")
+        let contactsText = #"{"ok":true,"contacts":[{"name":"Jordan Lee","phones":["+1 415 555 0142"],"emails":[]}]}"#
+        let remindersText = #"{"ok":true,"reminders":[{"title":"Pick up library holds","completed":false,"list":"Errands"}]}"#
+        let planner = SequencedMCPPlanner(steps: [
+            .call(
+                toolName: "contacts_search",
+                arguments: [
+                    "query": .string("Jordan Lee"),
+                    "limit": .integer(5),
+                ],
+                requiredPromptFragment: nil),
+            .call(
+                toolName: "reminders_list",
+                arguments: [
+                    "include_completed": .bool(false),
+                    "limit": .integer(5),
+                ],
+                requiredPromptFragment: contactsText),
+            .completion(
+                "Jordan Lee has +1 415 555 0142; Pick up library holds is incomplete.",
+                requiredPromptFragment: remindersText),
+        ])
+        let pool = RecordingMCPClientPool(
+            tools: [contacts, reminders, try makeMailTool()],
+            resultsByTool: [
+                "contacts_search": try MCPToolResult(
+                    text: contactsText,
+                    structuredContent: .object([
+                        "ok": .bool(true),
+                        "contacts": .array([.object([
+                            "name": .string("Jordan Lee"),
+                            "phones": .array([.string("+1 415 555 0142")]),
+                            "emails": .array([]),
+                        ])]),
+                    ]),
+                    isError: false,
+                    wasTruncated: false),
+                "reminders_list": try MCPToolResult(
+                    text: remindersText,
+                    structuredContent: .object([
+                        "ok": .bool(true),
+                        "reminders": .array([.object([
+                            "title": .string("Pick up library holds"),
+                            "completed": .bool(false),
+                            "list": .string("Errands"),
+                        ])]),
+                    ]),
+                    isError: false,
+                    wasTruncated: false),
+            ])
+        let fallback = StubVisualExecutor()
+        let executor = try await MCPFirstComputerUseExecutor.load(
+            binaryURL: URL(fileURLWithPath:
+                "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
+            visualFallback: fallback,
+            planner: planner,
+            clientPool: pool)
+
+        let result = try await executor.execute(
+            taskID: "multi-domain-complete-proof",
+            prompt: "Find Jordan Lee's phone number in Contacts and show my first five incomplete reminders.",
+            tools: makeHostTools(),
+            progress: { _ in })
+
+        XCTAssertEqual(
+            result,
+            .completed(
+                "Contacts (showing up to 5):\n1. Jordan Lee — phones: +1 415 555 0142; emails: none.\n\nReminders (showing up to 5):\n1. Pick up library holds — incomplete; list: Errands."))
+        XCTAssertEqual(fallback.callCount, 0)
+        let directCalls = await pool.directCalls()
+        XCTAssertEqual(
+            directCalls.map(\.toolName),
+            ["contacts_search", "reminders_list"])
+    }
+
+    func testReminderResultMustMatchTrustedNamedListIntent() async throws {
+        let reminders = try makePlannerVisibleReadOnlyTool("reminders_list")
+        let resultText = #"{"ok":true,"reminders":[{"title":"Buy milk","completed":false,"list":"Personal"}]}"#
+        let planner = SequencedMCPPlanner(steps: [
+            .call(
+                toolName: "reminders_list",
+                arguments: [
+                    "include_completed": .bool(false),
+                    "limit": .integer(5),
+                ],
+                requiredPromptFragment: nil),
+            .completion(
+                "Buy milk is in Work.",
+                requiredPromptFragment: resultText),
+        ])
+        let pool = RecordingMCPClientPool(
+            tools: [reminders, try makeMailTool()],
+            resultsByTool: [
+                "reminders_list": try MCPToolResult(
+                    text: resultText,
+                    structuredContent: .object([
+                        "ok": .bool(true),
+                        "reminders": .array([.object([
+                            "title": .string("Buy milk"),
+                            "completed": .bool(false),
+                            "list": .string("Personal"),
+                        ])]),
+                    ]),
+                    isError: false,
+                    wasTruncated: false),
+            ])
+        let fallback = StubVisualExecutor(
+            result: .completed("Visual verification took over."))
+        let executor = try await MCPFirstComputerUseExecutor.load(
+            binaryURL: URL(fileURLWithPath:
+                "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
+            visualFallback: fallback,
+            planner: planner,
+            clientPool: pool)
+
+        let result = try await executor.execute(
+            taskID: "reminder-list-intent-mismatch",
+            prompt: "Show my first five incomplete reminders in my Work list.",
+            tools: makeHostTools(),
+            progress: { _ in })
+
+        XCTAssertEqual(result, .completed("Visual verification took over."))
+        XCTAssertEqual(fallback.callCount, 1)
+        let directCalls = await pool.directCalls()
+        XCTAssertEqual(directCalls.count, 1)
+        XCTAssertEqual(planner.completedStepCount, 1)
     }
 
     func testPlannerFindsNamedContactThenStopsAtExactMailApprovalBeforeSending() async throws {
@@ -665,7 +2108,10 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
 
         XCTAssertEqual(result, .completed("Visual fallback finished"))
         let directCount = await pool.directExecuteCount()
-        XCTAssertEqual(directCount, 1)
+        XCTAssertEqual(
+            directCount,
+            0,
+            "GUI-only context must not authorize an unrelated focused-app read")
         XCTAssertEqual(fallback.callCount, 1)
     }
 
@@ -690,9 +2136,12 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
 
         XCTAssertEqual(
             result,
-            .completed("Who should receive the email, and what should it say?"))
+            .clarificationRequired("Who should receive the email, and what should it say?"))
         let directCount = await pool.directExecuteCount()
-        XCTAssertEqual(directCount, 1)
+        XCTAssertEqual(
+            directCount,
+            0,
+            "An incomplete Mail request must not expose unrelated app state")
         XCTAssertEqual(fallback.callCount, 0)
     }
 
@@ -802,7 +2251,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             tools: makeHostTools(),
             progress: { _ in })
 
-        XCTAssertEqual(result, .completed("What should the email say?"))
+        XCTAssertEqual(result, .clarificationRequired("What should the email say?"))
         XCTAssertEqual(fallback.callCount, 0)
         let directCount = await pool.directExecuteCount()
         let approvedCount = await pool.approvedExecuteCount()
@@ -897,7 +2346,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             tools: makeHostTools(),
             progress: { _ in })
 
-        XCTAssertEqual(result, .completed("What should the email say?"))
+        XCTAssertEqual(result, .clarificationRequired("What should the email say?"))
         XCTAssertEqual(fallback.callCount, 0)
         let directCount = await pool.directExecuteCount()
         let approvedCount = await pool.approvedExecuteCount()
@@ -924,7 +2373,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
 
         XCTAssertEqual(
             result,
-            .completed("Should I send the email now, or create a draft for review?"))
+            .clarificationRequired("Should I send the email now, or create a draft for review?"))
         XCTAssertEqual(fallback.callCount, 0)
         let directCount = await pool.directExecuteCount()
         let approvedCount = await pool.approvedExecuteCount()
@@ -1166,7 +2615,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
 
         XCTAssertEqual(
             result,
-            .completed("Who should receive the email, and what should it say?"))
+            .clarificationRequired("Who should receive the email, and what should it say?"))
         XCTAssertEqual(fallback.callCount, 0)
         let directCount = await pool.directExecuteCount()
         XCTAssertEqual(directCount, 0)
@@ -1189,7 +2638,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             tools: makeHostTools(),
             progress: { _ in })
 
-        XCTAssertEqual(result, .completed("Which document should I use?"))
+        XCTAssertEqual(result, .clarificationRequired("Which document should I use?"))
         XCTAssertEqual(fallback.callCount, 0)
     }
 
@@ -1222,7 +2671,16 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         let planner = StubMCPPlanner(mode: .informationalCompletionAfterRead)
         let pool = StubMCPClientPool(
             tools: [try makeMailTool(), try makeFocusedAppTool()],
-            resultText: "Safari is focused")
+            resultText: "Safari is focused",
+            structuredContent: .object([
+                "ok": .bool(true),
+                "app": .object([
+                    "pid": .integer(4_242),
+                    "name": .string("Safari"),
+                    "bundleIdentifier": .string("com.apple.Safari"),
+                    "isActive": .bool(true),
+                ]),
+            ]))
         let fallback = StubVisualExecutor()
         let executor = try await MCPFirstComputerUseExecutor.load(
             binaryURL: URL(fileURLWithPath:
@@ -1237,7 +2695,10 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             tools: makeHostTools(),
             progress: { _ in })
 
-        XCTAssertEqual(result, .completed("Safari is focused."))
+        XCTAssertEqual(
+            result,
+            .completed(
+                "Focused app: Safari — PID 4242; bundle: com.apple.Safari; active: yes."))
         XCTAssertEqual(fallback.callCount, 0)
         let directCount = await pool.directExecuteCount()
         XCTAssertEqual(directCount, 1)
@@ -1377,6 +2838,7 @@ private struct PlannerVisibleReadOnlyRow {
     let resultText: String
     let structuredContent: MCPJSONValue
     let completion: String
+    let expectedProjection: String
 }
 
 private final class SequencedMCPPlanner: MCPProposalPlanning, @unchecked Sendable {
@@ -1602,15 +3064,18 @@ private final class StubMCPPlanner: MCPProposalPlanning, @unchecked Sendable {
 private actor StubMCPClientPool: MCPClientPooling {
     let tools: [MCPAllowedTool]
     let resultText: String
+    let structuredContent: MCPJSONValue
     private var directCount = 0
     private var approvedCount = 0
 
     init(
         tools: [MCPAllowedTool],
-        resultText: String = "email sent to codex-acceptance@example.invalid"
+        resultText: String = "email sent to codex-acceptance@example.invalid",
+        structuredContent: MCPJSONValue = .object(["ok": .bool(true)])
     ) {
         self.tools = tools
         self.resultText = resultText
+        self.structuredContent = structuredContent
     }
 
     func start(binaryURL: URL) async throws -> MCPProcessIdentity {
@@ -1656,7 +3121,7 @@ private actor StubMCPClientPool: MCPClientPooling {
     private func result() throws -> MCPToolResult {
         try MCPToolResult(
             text: resultText,
-            structuredContent: .object(["ok": .bool(true)]),
+            structuredContent: structuredContent,
             isError: false,
             wasTruncated: false)
     }
@@ -1669,6 +3134,8 @@ private final class StubVisualExecutor: ComputerUseExecuting {
     let result: ComputerUseExecutionResult
     private(set) var callCount = 0
     private(set) var prompts: [String] = []
+    private(set) var trustedUserPrompts: [String] = []
+    private(set) var taskIDs: [String] = []
 
     init(result: ComputerUseExecutionResult = .completed("Visual complete")) {
         self.result = result
@@ -1681,6 +3148,21 @@ private final class StubVisualExecutor: ComputerUseExecuting {
     ) async throws -> ComputerUseExecutionResult {
         callCount += 1
         prompts.append(prompt)
+        trustedUserPrompts.append(prompt)
+        return result
+    }
+
+    func execute(
+        taskID: String,
+        prompt: String,
+        trustedUserPrompt: String,
+        tools: ComputerUseHostTools,
+        progress: @escaping (String) -> Void
+    ) async throws -> ComputerUseExecutionResult {
+        callCount += 1
+        taskIDs.append(taskID)
+        prompts.append(prompt)
+        trustedUserPrompts.append(trustedUserPrompt)
         return result
     }
 }

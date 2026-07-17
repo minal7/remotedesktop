@@ -401,6 +401,14 @@ public struct ComputerUseControlRequest: Codable, Equatable, Sendable {
     }
 }
 
+/// Host-authoritative classification for a terminal task result or a
+/// resumable person-only handoff.
+public enum ComputerUseTerminalOutcome: String, Codable, Equatable, Sendable {
+    case taskCompleted
+    case userInterventionRequired
+    case unableToComplete
+}
+
 /// Correlates assistant/status traffic with the stable privileged prompt ID.
 /// This lets iOS safely ignore a delayed replay from an older task after the
 /// user has already started a newer one in the same chat session.
@@ -411,15 +419,57 @@ public struct ComputerUseTaskUpdate: Codable, Equatable, Sendable {
     /// this update was created. `nil` preserves decoding and behavior for
     /// peers that predate ordered controls.
     public let appliedControlRevision: UInt64?
+    /// A machine-readable result for terminal assistant replies and resumable
+    /// person-only status updates. `nil` preserves wire compatibility with
+    /// peers that only understand the existing text and status prefix.
+    public let outcome: ComputerUseTerminalOutcome?
 
     public init(
         taskID: String,
         text: String,
-        appliedControlRevision: UInt64? = nil
+        appliedControlRevision: UInt64? = nil,
+        outcome: ComputerUseTerminalOutcome? = nil
     ) {
         self.taskID = taskID
         self.text = String(text.prefix(8_000))
         self.appliedControlRevision = appliedControlRevision
+        self.outcome = outcome
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case taskID
+        case text
+        case appliedControlRevision
+        case outcome
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        taskID = try values.decode(String.self, forKey: .taskID)
+        text = try values.decode(String.self, forKey: .text)
+        appliedControlRevision = try values.decodeIfPresent(
+            UInt64.self,
+            forKey: .appliedControlRevision)
+        if let rawOutcome = try values.decodeIfPresent(
+            String.self,
+            forKey: .outcome) {
+            // A newer peer may add another result category. Preserve the
+            // correlated text update and fall back to legacy presentation
+            // instead of rejecting the entire JSON envelope.
+            outcome = ComputerUseTerminalOutcome(rawValue: rawOutcome)
+        } else {
+            outcome = nil
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(taskID, forKey: .taskID)
+        try values.encode(text, forKey: .text)
+        try values.encodeIfPresent(
+            appliedControlRevision,
+            forKey: .appliedControlRevision)
+        try values.encodeIfPresent(outcome?.rawValue, forKey: .outcome)
     }
 
     public func encodedBody() throws -> String {

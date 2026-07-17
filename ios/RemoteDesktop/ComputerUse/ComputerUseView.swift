@@ -1,5 +1,45 @@
 import SwiftUI
 
+/// A typed terminal result owns the status glyph independently of the broader
+/// session state. In particular, clarification and failure both leave the
+/// composer ready for another request, but neither is a successful result.
+enum ComputerUseTerminalStatusStyle: Equatable {
+    enum Tint: Equatable {
+        case green
+        case orange
+        case red
+    }
+
+    case completed
+    case userIntervention
+    case unable
+
+    init?(_ outcome: ComputerUseTerminalOutcome?) {
+        switch outcome {
+        case .taskCompleted: self = .completed
+        case .userInterventionRequired: self = .userIntervention
+        case .unableToComplete: self = .unable
+        case nil: return nil
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .completed: return "checkmark.circle.fill"
+        case .userIntervention: return "hand.raised.fill"
+        case .unable: return "exclamationmark.triangle.fill"
+        }
+    }
+
+    var tint: Tint {
+        switch self {
+        case .completed: return .green
+        case .userIntervention: return .orange
+        case .unable: return .red
+        }
+    }
+}
+
 /// AI Computer Use keeps the live, interactive screen visible above a simple
 /// conversation. The user can pause automation and take over without leaving
 /// the screen, then hand control back with one tap.
@@ -373,21 +413,52 @@ struct ComputerUseView: View {
         }
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("computer-use-status")
+        .accessibilityValue(Text(terminalOutcomeAccessibilityValue))
+    }
+
+    /// Keeps the host's machine-readable terminal result available to people
+    /// using assistive technology without replacing the conversational status
+    /// text. It also gives shipped-path acceptance a stable, non-secret way to
+    /// prove that iOS decoded the typed outcome rather than inferring it from
+    /// the assistant's wording.
+    private var terminalOutcomeAccessibilityValue: String {
+        switch model.latestTerminalOutcome {
+        case .taskCompleted:
+            return "Task completed"
+        case .userInterventionRequired:
+            return "User intervention required"
+        case .unableToComplete:
+            return "Unable to complete"
+        case nil:
+            return ""
+        }
     }
 
     @ViewBuilder
     private var statusIcon: some View {
-        switch model.state {
-        case .ready:
-            Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
-        case .working:
-            ProgressView().controlSize(.mini)
-        case .paused:
-            Image(systemName: "hand.raised.fill").foregroundStyle(.orange)
-        case .approvalRequired:
-            Image(systemName: "checkmark.shield.fill").foregroundStyle(.orange)
-        case .error:
-            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
+        if let style = ComputerUseTerminalStatusStyle(
+            model.latestTerminalOutcome) {
+            switch style.tint {
+            case .green:
+                Image(systemName: style.systemImage).foregroundStyle(.green)
+            case .orange:
+                Image(systemName: style.systemImage).foregroundStyle(.orange)
+            case .red:
+                Image(systemName: style.systemImage).foregroundStyle(.red)
+            }
+        } else {
+            switch model.state {
+            case .ready:
+                Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+            case .working:
+                ProgressView().controlSize(.mini)
+            case .paused:
+                Image(systemName: "hand.raised.fill").foregroundStyle(.orange)
+            case .approvalRequired:
+                Image(systemName: "checkmark.shield.fill").foregroundStyle(.orange)
+            case .error:
+                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
+            }
         }
     }
 

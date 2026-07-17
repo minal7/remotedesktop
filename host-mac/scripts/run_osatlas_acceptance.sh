@@ -6,6 +6,9 @@ PROJECT="$ROOT/host-mac/RemoteDesktopHost.xcodeproj"
 SCHEME="RemoteDesktopHost"
 MODEL_FLAG="/tmp/com.threadmark.remotedesktop.osatlas-model-e2e-$(id -u)"
 LIVE_CONFIG="/tmp/com.threadmark.remotedesktop.osatlas-live-doordash-$(id -u).json"
+VERIFY_XCRESULT="$ROOT/host-mac/scripts/verify_xcresult_counts.sh"
+DETERMINISTIC_EXPECTED_TESTS=102
+RESULT_ROOT=""
 
 run_actual_model=0
 run_live_doordash=0
@@ -46,9 +49,52 @@ done
 
 cleanup() {
     /bin/rm -f "$MODEL_FLAG" "$LIVE_CONFIG"
+    case "$RESULT_ROOT" in
+        /tmp/com.threadmark.remotedesktop.osatlas-acceptance.*)
+            if [[ -e "$RESULT_ROOT" ]]; then
+                /usr/bin/find "$RESULT_ROOT" -depth -delete
+            fi
+            ;;
+        "")
+            ;;
+        *)
+            /bin/echo "Refusing to remove unexpected acceptance result path: $RESULT_ROOT" >&2
+            ;;
+    esac
 }
 trap cleanup EXIT INT TERM
 cleanup
+
+reclaimable_memory_bytes() {
+    local page_size pages
+    page_size="$(/usr/sbin/sysctl -n hw.pagesize)"
+    pages="$(/usr/bin/vm_stat | /usr/bin/awk '
+        /Pages free:/ || /Pages inactive:/ || /Pages speculative:/ {
+            gsub(/\./, "", $3)
+            total += $3
+        }
+        END { printf "%.0f", total }
+    ')"
+    /bin/echo $((page_size * pages))
+}
+
+wait_for_actual_model_headroom() {
+    # Keep a buffer above the production launch gate. Each actual-checkpoint
+    # method gets a fresh XCTest process so reclaimed VM/Metal pages from one
+    # cold launch cannot turn the next method into a cascade of zero-duration
+    # `insufficientAvailableMemory` failures.
+    local minimum_bytes=$((8 * 1024 * 1024 * 1024))
+    local available_bytes attempt
+    for attempt in $(/usr/bin/seq 1 30); do
+        available_bytes="$(reclaimable_memory_bytes)"
+        if [[ "$available_bytes" -ge "$minimum_bytes" ]]; then
+            return 0
+        fi
+        /bin/sleep 1
+    done
+    /bin/echo "Actual-model acceptance needs at least 8 GiB of reclaimable memory before a cold launch; found $((available_bytes / 1024 / 1024)) MiB." >&2
+    return 1
+}
 
 if [[ $run_live_doordash -eq 1 ]]; then
     if [[ $allow_visible_ui -ne 1 ]]; then
@@ -61,14 +107,18 @@ if [[ $run_live_doordash -eq 1 ]]; then
 fi
 
 cd "$ROOT"
+RESULT_ROOT="$(/usr/bin/mktemp -d "/tmp/com.threadmark.remotedesktop.osatlas-acceptance.XXXXXX")"
+/bin/chmod 700 "$RESULT_ROOT"
 
 # This default gate never opens a fixture, captures the desktop, or posts real
 # input. The ComputerUseHostTools screen and event providers are in-memory.
+deterministic_result="$RESULT_ROOT/deterministic.xcresult"
 xcodebuild test \
     -project "$PROJECT" \
     -scheme "$SCHEME" \
     -configuration Debug \
     -destination 'platform=macOS' \
+    -resultBundlePath "$deterministic_result" \
     -only-testing:RemoteDesktopHostTests/OSAtlasComputerUseExecutorTests \
     -only-testing:RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testCompletionRequestIsAuthenticatedLoopbackOnlyAndDeterministic \
     -only-testing:RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testLaunchArgumentsPinLoopbackAuthNoLogsAndInferenceBudget \
@@ -83,15 +133,35 @@ xcodebuild test \
     -only-testing:RemoteDesktopHostTests/ComputerUseTests/test_computerUseScrollPostsRequestedDeltaExactlyOnce \
     -only-testing:RemoteDesktopHostTests/ComputerUseTests/test_computerUseTextPreservesEmojiAndSupplementaryUnicode \
     -only-testing:RemoteDesktopHostTests/ComputerUseTests/test_computerUseDragInterpolatesHeldPointerPath
+/bin/bash "$VERIFY_XCRESULT" \
+    "$deterministic_result" \
+    "$DETERMINISTIC_EXPECTED_TESTS" \
+    "deterministic OS-Atlas acceptance"
 
 if [[ $run_actual_model -eq 1 ]]; then
     /usr/bin/install -m 600 /dev/null "$MODEL_FLAG"
-    xcodebuild test \
-        -project "$PROJECT" \
-        -scheme "$SCHEME" \
-        -configuration Debug \
-        -destination 'platform=macOS' \
-        -only-testing:RemoteDesktopHostTests/OSAtlasActualModelAcceptanceTests
+    actual_model_tests=(
+        testInstalledHybridCompletesExactRegularUserScenarioMatrixWithoutVisibleUI
+        testInstalledHybridUnderstandsNaturalLanguageAcrossFullActionSurfaceWithoutVisibleUI
+        testActualModelNavigatesDeliveryQuoteAndValidatedLocalOCRReturnsExactFactsWithoutVisibleUI
+        testActualModelCompletesMultiActionDeliveryQuoteWorkflowWithoutVisibleUI
+    )
+    for test_name in "${actual_model_tests[@]}"; do
+        wait_for_actual_model_headroom
+        actual_result="$RESULT_ROOT/actual-$test_name.xcresult"
+        xcodebuild test \
+            -project "$PROJECT" \
+            -scheme "$SCHEME" \
+            -configuration Debug \
+            -destination 'platform=macOS' \
+            -parallel-testing-enabled NO \
+            -resultBundlePath "$actual_result" \
+            -only-testing:"RemoteDesktopHostTests/OSAtlasActualModelAcceptanceTests/$test_name"
+        /bin/bash "$VERIFY_XCRESULT" \
+            "$actual_result" \
+            1 \
+            "actual OS-Atlas acceptance $test_name"
+    done
 fi
 
 if [[ $run_live_doordash -eq 1 ]]; then
@@ -103,10 +173,16 @@ if [[ $run_live_doordash -eq 1 ]]; then
     /usr/bin/plutil -insert expectedItem -string "$DOORDASH_EXPECTED_ITEM" "$LIVE_CONFIG"
     /usr/bin/plutil -insert expectedTotal -string "$DOORDASH_EXPECTED_TOTAL" "$LIVE_CONFIG"
     /usr/bin/plutil -insert expectedETA -string "$DOORDASH_EXPECTED_ETA" "$LIVE_CONFIG"
+    live_result="$RESULT_ROOT/live-doordash.xcresult"
     xcodebuild test \
         -project "$PROJECT" \
         -scheme "$SCHEME" \
         -configuration Debug \
         -destination 'platform=macOS' \
+        -resultBundlePath "$live_result" \
         -only-testing:RemoteDesktopHostTests/OSAtlasLiveDoorDashSmokeTests
+    /bin/bash "$VERIFY_XCRESULT" \
+        "$live_result" \
+        1 \
+        "live DoorDash OS-Atlas acceptance"
 fi

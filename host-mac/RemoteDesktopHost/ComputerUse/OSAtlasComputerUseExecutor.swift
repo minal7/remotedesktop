@@ -229,6 +229,10 @@ enum OSAtlasSemanticActionArgument: Equatable, Sendable {
     case hotkey(String)
     case question(String)
     case visibleAnswer(summary: String, evidence: [String])
+    /// A deterministic host route proved that the visible, task-related state
+    /// prevents the requested action. Foundation-model tool calls can never
+    /// construct this provenance marker.
+    case visibleObstacle(summary: String, evidence: [String])
 }
 
 /// A no-effect natural-language routing decision. Scroll direction is carried
@@ -453,6 +457,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
         case malformedAction
         case unsupportedAction(String)
         case unverifiedCheckpointAction(String)
+        case unverifiedTerminalAction(String)
         case stepLimit
         case invalidImage
         case proModelRequired
@@ -465,6 +470,8 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                 return "The local OS-Atlas model requested an unsupported action (\(name)), so the Mac was left untouched."
             case .unverifiedCheckpointAction(let name):
                 return "The installed OS-Atlas checkpoint has not passed end-to-end validation for \(name), so the Mac was left untouched."
+            case .unverifiedTerminalAction(let name):
+                return "The local model proposed \(name) without host-verifiable evidence, so the task was not marked complete."
             case .stepLimit:
                 return "The safety limit of 25 actions was reached. Review the screen and send a new request to continue."
             case .invalidImage:
@@ -595,8 +602,23 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
         tools: ComputerUseHostTools,
         progress: @escaping (String) -> Void
     ) async throws -> ComputerUseExecutionResult {
+        try await execute(
+            taskID: "legacy",
+            prompt: prompt,
+            trustedUserPrompt: prompt,
+            tools: tools,
+            progress: progress)
+    }
+
+    func execute(
+        taskID _: String,
+        prompt: String,
+        trustedUserPrompt: String,
+        tools: ComputerUseHostTools,
+        progress: @escaping (String) -> Void
+    ) async throws -> ComputerUseExecutionResult {
         if let explicitDirective = Self.explicitlyRequiredAction(
-            in: prompt,
+            in: trustedUserPrompt,
             actionContract: actionContract),
            !checkpointActionProfile.declares(explicitDirective) {
             throw RuntimeError.unverifiedCheckpointAction(
@@ -607,6 +629,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
         return try await withTaskCancellationHandler {
             try await executeLoop(
                 prompt: prompt,
+                trustedUserPrompt: trustedUserPrompt,
                 endpoint: endpoint,
                 tools: tools,
                 progress: progress)
@@ -617,6 +640,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
 
     private func executeLoop(
         prompt: String,
+        trustedUserPrompt: String,
         endpoint: OSAtlasLlamaEndpoint,
         tools: ComputerUseHostTools,
         progress: @escaping (String) -> Void
@@ -627,10 +651,11 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
         var didAttemptAuthenticationEscape = false
         var didAttemptModelAction = false
         let firstAttemptDirective = Self.explicitlyRequiredAction(
-            in: prompt,
+            in: trustedUserPrompt,
             actionContract: actionContract)
         let completesAfterOpeningApplication =
-            MCPFirstComputerUseExecutor.isPureOpenApplicationRequest(prompt)
+            MCPFirstComputerUseExecutor.isPureOpenApplicationRequest(
+                trustedUserPrompt)
 
         for step in 1 ... maxSteps {
             try Task.checkCancellation()
@@ -664,12 +689,13 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
             // terminate or pause the new task.
             if !didForegroundDeliveryQuoteBrowser,
                let browser = Self.deliveryQuoteBrowserToForeground(
-                    prompt,
+                    trustedUserPrompt,
                     frontmostApplication: tools.frontmostApplicationName()) {
                 didForegroundDeliveryQuoteBrowser = true
-                let isDoorDash = prompt.localizedCaseInsensitiveContains(
-                    "doordash")
-                    || prompt.localizedCaseInsensitiveContains("door dash")
+                let isDoorDash = trustedUserPrompt
+                    .localizedCaseInsensitiveContains("doordash")
+                    || trustedUserPrompt.localizedCaseInsensitiveContains(
+                        "door dash")
                 let quoteName = isDoorDash
                     ? "DoorDash quote" : "delivery quote"
                 progress("Step \(step): opening \(browser) for the \(quoteName)…")
@@ -684,18 +710,19 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
             // only from the focused window captured with this frame. Missing
             // Accessibility geometry fails closed instead of scanning a
             // second visible window for a plausible result.
-            if Self.isDeliveryQuoteTask(prompt),
+            if Self.isDeliveryQuoteTask(trustedUserPrompt),
                try ComputerUseVisibleSignInWallDetector
                     .requiresDoorDashSignIn(from: observation) {
                 progress(Self.deliverySignInGuidance)
                 return .userInterventionRequired(Self.deliverySignInGuidance)
             }
-            if Self.isDeliveryQuoteTask(prompt),
+            if Self.isDeliveryQuoteTask(trustedUserPrompt),
                let visibleQuote = try ComputerUseVisibleQuoteExtractor.summary(
                     from: observation),
                Self.visibleDeliveryQuote(
                     visibleQuote,
-                    matchesRequest: prompt) {
+                    matchesRequest: trustedUserPrompt),
+               Self.deliveryQuoteMayTerminateTask(trustedUserPrompt) {
                 progress("Step \(step): reading the complete delivery quote…")
                 return .completed(visibleQuote)
             }
@@ -709,7 +736,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                 // the requested flow, so hand it to the person immediately.
                 // There is no relevant-app escape to infer and no reason to
                 // invoke the visual model.
-                if Self.isDeliveryQuoteTask(prompt) {
+                if Self.isDeliveryQuoteTask(trustedUserPrompt) {
                     progress(Self.deliverySignInGuidance)
                     return .userInterventionRequired(
                         Self.deliverySignInGuidance)
@@ -723,7 +750,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                    let currentApplication = tools.frontmostApplicationName() {
                     didAttemptAuthenticationEscape = true
                     let escapeTask = Self.authenticationEscapeTask(
-                        originalTask: prompt,
+                        originalTask: trustedUserPrompt,
                         currentApplication: currentApplication)
                     do {
                         let jpegData = try Self.jpegData(for: observation)
@@ -756,7 +783,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                            Self.authenticationEscapeApplicationIsRelevant(
                             destination,
                             currentApplication: currentApplication,
-                            task: prompt) {
+                            task: trustedUserPrompt) {
                             do {
                                 try await tools.openApplication(
                                     named: destination)
@@ -783,7 +810,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                 progress(Self.authenticationGuidance)
                 return .userInterventionRequired(Self.authenticationGuidance)
             }
-            let activeTask = prompt
+            let activeTask = trustedUserPrompt
             let explicitDirective =
                 didAttemptModelAction ? nil : firstAttemptDirective
             var requiredRoute: OSAtlasSemanticActionRoute?
@@ -799,7 +826,11 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                 do {
                     let selectedRoute = try await semanticRouter.route(
                         OSAtlasSemanticRoutingRequest(
-                            task: activeTask,
+                            // Preserve host-authored continuation/history for
+                            // planning, while every effect and terminal gate
+                            // below remains bound to `activeTask`, the current
+                            // trusted user request.
+                            task: prompt,
                             frontmostApplication: tools.frontmostApplicationName(),
                             visibleText: visibleText,
                             history: Self.semanticRoutingHistory(history),
@@ -807,6 +838,17 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                                 actionContract: actionContract),
                             openedApplications: openedApplications.sorted()))
                     try Task.checkCancellation()
+                    guard Self.semanticRouteHasValidArguments(selectedRoute) else {
+                        throw RuntimeError.unsupportedAction(
+                            "semantic-plan-arguments")
+                    }
+                    guard Self.semanticEffectIsAuthorized(
+                        selectedRoute,
+                        by: activeTask,
+                        visibleText: visibleText) else {
+                        throw RuntimeError.unsupportedAction(
+                            "untrusted-semantic-route")
+                    }
                     requiredRoute = selectedRoute
                     semanticRoute = selectedRoute
                     Self.log.info(
@@ -838,6 +880,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                 // point must be grounded; its raw verb is never executable.
                 action = try await composedSemanticAction(
                     route: semanticRoute,
+                    trustedTask: activeTask,
                     visibleText: visibleText,
                     observation: observation,
                     endpoint: endpoint,
@@ -847,7 +890,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
             } else {
                 let jpegData = try Self.jpegData(for: observation)
                 let modelPrompt = Self.userPrompt(
-                    task: activeTask,
+                    task: prompt,
                     formattedHistory: history,
                     actionContract: actionContract,
                     checkpointActionProfile: checkpointActionProfile)
@@ -884,7 +927,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                     // reaches it; semantic actions are host-composed above.
                     progress("Step \(step): correcting action selection…")
                     let correctionPrompt = Self.explicitActionCorrectionPrompt(
-                        originalTask: activeTask,
+                        originalTask: prompt,
                         directive: requiredRoute.directive,
                         requiredScrollDirection: requiredRoute.scrollDirection,
                         formattedHistory: history,
@@ -931,15 +974,72 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                 action = parsedAction
             }
 
+            // The legacy visual checkpoint may still emit a HOTKEY when the
+            // semantic router is unavailable. Keep the same exact trusted-task
+            // authorization on both paths; parser validity alone never grants
+            // permission to execute an arbitrary modifier chord.
+            if case .hotkey(_, _, let displayName) = action,
+               !Self.reviewedHotkeyIsAuthorized(
+                   displayName,
+                   by: activeTask) {
+                throw RuntimeError.unsupportedAction(
+                    "untrusted-semantic-route")
+            }
+            if case .ask(let question) = action {
+                let questionVisibleText: String
+                if visibleText.isEmpty {
+                    questionVisibleText = try Self.boundedVisibleText(
+                        from: observation.image)
+                } else {
+                    questionVisibleText = visibleText
+                }
+                guard Self.semanticQuestionIsAuthorized(
+                    question,
+                    trustedTask: activeTask,
+                    visibleText: questionVisibleText) else {
+                    throw RuntimeError.unsupportedAction(
+                        "untrusted-semantic-route")
+                }
+            }
+
             // Never log raw model output, reasoning, task text, application
             // names, or typed text. Diagnostics contain only action shape and
             // non-sensitive counts.
             Self.log.info(
                 "OS-Atlas step \(step) parsed \(Self.telemetryDescription(action), privacy: .public)")
 
+            let hostVerifiedCompletion: Bool
+            if case .complete = action,
+               semanticRoute?.directive == .complete {
+                let focusedVisibleText = try Self.boundedFocusedVisibleText(
+                    from: observation)
+                hostVerifiedCompletion = AppleFoundationVisualActionRouter
+                    .hostVerifiesCompletion(
+                        for: activeTask,
+                        visibleText: focusedVisibleText,
+                        history: Self.semanticRoutingHistory(history),
+                        availableDirectives: Self.semanticRoutingDirectives(
+                            actionContract: actionContract))
+            } else {
+                hostVerifiedCompletion = false
+            }
+            let evidenceCheckedAction = try Self.evidenceCheckedTerminalAction(
+                action,
+                cameFromTypedSemanticRoute: semanticRoute != nil,
+                hostVerifiedCompletion: hostVerifiedCompletion,
+                trustedTask: activeTask,
+                observation: observation)
+            let isHostVerifiedObstacle: Bool
+            if let semanticRoute,
+               case .visibleObstacle = semanticRoute.argument {
+                isHostVerifiedObstacle = true
+            } else {
+                isHostVerifiedObstacle = false
+            }
             if let terminalResult = Self.terminalResult(
-                for: action,
-                step: step) {
+                for: evidenceCheckedAction,
+                step: step,
+                isHostVerifiedObstacle: isHostVerifiedObstacle) {
                 return terminalResult
             }
 
@@ -992,6 +1092,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
     /// substituted for the operation selected by the language router.
     private func composedSemanticAction(
         route: OSAtlasSemanticActionRoute,
+        trustedTask: String,
         visibleText: String,
         observation: ComputerUseScreenObservation,
         endpoint: OSAtlasLlamaEndpoint,
@@ -1062,10 +1163,24 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
             return .ask(question)
         case (.answer, .visibleAnswer(let summary, let evidence)),
              (.report, .visibleAnswer(let summary, let evidence)):
+            let focusedVisibleText = try Self.boundedFocusedVisibleText(
+                from: observation)
             return .report(try Self.verifiedVisibleAnswer(
                 summary: summary,
                 evidence: evidence,
-                visibleText: visibleText))
+                visibleText: focusedVisibleText,
+                trustedTask: trustedTask,
+                verificationMode: .answer))
+        case (.answer, .visibleObstacle(let summary, let evidence)),
+             (.report, .visibleObstacle(let summary, let evidence)):
+            let focusedVisibleText = try Self.boundedFocusedVisibleText(
+                from: observation)
+            return .report(try Self.verifiedVisibleAnswer(
+                summary: summary,
+                evidence: evidence,
+                visibleText: focusedVisibleText,
+                trustedTask: trustedTask,
+                verificationMode: .obstacle))
         default:
             throw RuntimeError.unsupportedAction(
                 "semantic-plan-arguments")
@@ -1203,10 +1318,23 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private static func verifiedVisibleAnswer(
+    private struct EvidenceOCRLine {
+        let sourceIndex: Int
+        let raw: String
+        let words: [String]
+    }
+
+    enum VisibleAnswerVerificationMode: Equatable, Sendable {
+        case answer
+        case obstacle
+    }
+
+    static func verifiedVisibleAnswer(
         summary: String,
         evidence: [String],
-        visibleText: String
+        visibleText: String,
+        trustedTask: String,
+        verificationMode: VisibleAnswerVerificationMode = .answer
     ) throws -> String {
         let boundedSummary = summary.trimmingCharacters(
             in: .whitespacesAndNewlines)
@@ -1215,16 +1343,1381 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
               (1 ... 6).contains(evidence.count) else {
             throw RuntimeError.malformedAction
         }
-        let visible = normalizedEvidenceText(visibleText)
-        guard !visible.isEmpty else { throw RuntimeError.malformedAction }
+        guard verificationMode == .obstacle
+                || taskIsEligibleForVisibleAnswer(trustedTask) else {
+            throw RuntimeError.unsupportedAction(
+                "task-ineligible-visible-answer")
+        }
+
+        let lines: [EvidenceOCRLine] = visibleText
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .enumerated()
+            .compactMap { sourceIndex, rawLine in
+                let raw = rawLine.trimmingCharacters(
+                    in: .whitespacesAndNewlines)
+                let words = evidenceWords(raw)
+                guard !raw.isEmpty, !words.isEmpty, raw.count <= 500 else {
+                    return nil
+                }
+                return EvidenceOCRLine(
+                    sourceIndex: sourceIndex,
+                    raw: raw,
+                    words: words)
+            }
+        guard !lines.isEmpty else { throw RuntimeError.malformedAction }
+
+        var candidateLines: [[Int]] = []
+        candidateLines.reserveCapacity(evidence.count)
         for item in evidence {
-            let fact = normalizedEvidenceText(item)
-            guard !fact.isEmpty, visible.contains(fact) else {
+            let boundedFact = item.trimmingCharacters(
+                in: .whitespacesAndNewlines)
+            let factWords = evidenceWords(boundedFact)
+            guard (2 ... 500).contains(boundedFact.count),
+                  (evidencePhraseIsSubstantive(factWords)
+                    || answerQualifierLineIsBounded(factWords)) else {
                 throw RuntimeError.unsupportedAction(
                     "unverified-visible-answer")
             }
+            let candidates = lines.indices.filter {
+                containsTokenPhrase(factWords, in: lines[$0].words)
+            }
+            guard !candidates.isEmpty else {
+                throw RuntimeError.unsupportedAction(
+                    "unverified-visible-answer")
+            }
+            candidateLines.append(Array(candidates))
         }
-        return boundedSummary
+
+        let taskSubjects = evidenceSubjectWords(in: trustedTask)
+        guard !taskSubjects.isEmpty else {
+            throw RuntimeError.unsupportedAction(
+                "task-irrelevant-visible-answer")
+        }
+        let taskSubjectGroups = evidenceSubjectGroups(in: trustedTask)
+        let requiredSubjectOverlap = min(2, taskSubjects.count)
+        func coversEveryTaskGroup(_ words: Set<String>) -> Bool {
+            guard verificationMode == .answer else { return true }
+            return taskSubjectGroups.allSatisfy { group in
+                group.intersection(words).count >= min(2, group.count)
+            }
+        }
+        let candidateSourceIndices = candidateLines.flatMap { candidates in
+            candidates.map { lines[$0].sourceIndex }
+        }
+        guard let minimumSourceIndex = candidateSourceIndices.min(),
+              let maximumSourceIndex = candidateSourceIndices.max() else {
+            throw RuntimeError.unsupportedAction(
+                "unverified-visible-answer")
+        }
+
+        struct VerifiedGroup {
+            let score: Int
+            let output: String
+        }
+        var groupsByOutput: [String: VerifiedGroup] = [:]
+        let maximumEvidenceSpan = 4
+        let firstWindowStart = max(0, minimumSourceIndex - maximumEvidenceSpan)
+        for windowStart in firstWindowStart ... maximumSourceIndex {
+            let windowEnd = windowStart + maximumEvidenceSpan
+            let selections = candidateLines.map { candidates in
+                candidates.filter {
+                    (windowStart ... windowEnd)
+                        .contains(lines[$0].sourceIndex)
+                }
+            }
+            guard selections.allSatisfy({ $0.count == 1 }) else { continue }
+            let matchedIndices = Set(selections.compactMap(\.first))
+            guard !matchedIndices.isEmpty else { continue }
+            let minimumMatchedSource = matchedIndices
+                .map { lines[$0].sourceIndex }.min()!
+            let maximumMatchedSource = matchedIndices
+                .map { lines[$0].sourceIndex }.max()!
+            let contextRange = max(0, minimumMatchedSource - 1)
+                ... maximumMatchedSource + 1
+            let contextIndices = lines.indices.filter {
+                contextRange.contains(lines[$0].sourceIndex)
+            }
+            let contextWords = Set(contextIndices.flatMap { lines[$0].words })
+            let overlap = taskSubjects.intersection(contextWords)
+            guard overlap.count >= requiredSubjectOverlap,
+                  coversEveryTaskGroup(contextWords) else { continue }
+
+            let evidenceTokens = Set(matchedIndices.flatMap {
+                lines[$0].words
+            })
+            if verificationMode == .obstacle {
+                let obstacleBindingSubjects = taskSubjects.subtracting([
+                    "create", "draw", "edit", "make", "new", "run",
+                ])
+                let hasBoundReviewedObstacle = matchedIndices.contains {
+                    matchedIndex in
+                    let matchedWords = lines[matchedIndex].words
+                    guard let status = reviewedVisibleObstacleStatus(
+                        in: matchedWords) else {
+                        return false
+                    }
+                    switch status {
+                    case .windowsOnly:
+                        return obstacleBindingSubjects.intersection(
+                            Set(matchedWords)).count >= 2
+                    case .reportUnavailable:
+                        // A generic `REPORT REMOVED` line is bound below to an
+                        // exact adjacent qualified report heading.
+                        return true
+                    }
+                }
+                guard hasBoundReviewedObstacle else { continue }
+            } else {
+                guard evidenceTokens.contains(where: {
+                    evidenceTokenIsAnswerBearing($0)
+                        && !taskSubjects.contains($0)
+                }) else {
+                    continue
+                }
+            }
+
+            // A conjunctive, multi-entity request needs one answer-bearing
+            // evidence item bound to each entity group. Merely placing Bob's
+            // heading next to Alice's answer cannot complete both slots.
+            let everyGroupHasEvidence = taskSubjectGroups.allSatisfy { group in
+                let requiredGroupOverlap = min(2, group.count)
+                return matchedIndices.contains { matchedIndex in
+                    let sourceIndex = lines[matchedIndex].sourceIndex
+                    let nearbyWords = Set(lines.indices.filter {
+                        (sourceIndex - 1 ... sourceIndex)
+                            .contains(lines[$0].sourceIndex)
+                    }.flatMap { lines[$0].words })
+                    let matchedWords = lines[matchedIndex].words
+                    return group.intersection(nearbyWords).count
+                            >= requiredGroupOverlap
+                        && matchedWords.contains(where: {
+                            evidenceTokenIsAnswerBearing($0)
+                                && !taskSubjects.contains($0)
+                        })
+                }
+            }
+            guard verificationMode == .obstacle
+                    || everyGroupHasEvidence else { continue }
+
+            var outputIndices = matchedIndices
+            var coveredSubjects = taskSubjects.intersection(Set(
+                matchedIndices.flatMap { lines[$0].words }))
+            let anchorIndices = contextIndices
+                .filter { !outputIndices.contains($0) }
+                .filter {
+                    !taskSubjects.intersection(Set(lines[$0].words)).isEmpty
+                }
+                .sorted {
+                    let leftDistance = min(
+                        abs(lines[$0].sourceIndex - minimumMatchedSource),
+                        abs(lines[$0].sourceIndex - maximumMatchedSource))
+                    let rightDistance = min(
+                        abs(lines[$1].sourceIndex - minimumMatchedSource),
+                        abs(lines[$1].sourceIndex - maximumMatchedSource))
+                    return leftDistance < rightDistance
+                }
+            for anchorIndex in anchorIndices where
+                coveredSubjects.count < requiredSubjectOverlap
+                    || !coversEveryTaskGroup(Set(outputIndices.flatMap {
+                        lines[$0].words
+                    })) {
+                outputIndices.insert(anchorIndex)
+                coveredSubjects.formUnion(
+                    taskSubjects.intersection(Set(lines[anchorIndex].words)))
+            }
+
+            // Preserve a status/qualifier that changes the meaning of the
+            // matched value, but only when it is one OCR line away and the
+            // entire line is from a tiny reviewed vocabulary. This retains
+            // `CANCELED` and `Before fees` without sweeping a neighboring
+            // unrelated sentence such as `Account canceled` into the answer.
+            let matchedSourceIndices = Set(matchedIndices.map {
+                lines[$0].sourceIndex
+            })
+            let qualifierIndices = lines.indices.filter { candidateIndex in
+                guard !outputIndices.contains(candidateIndex),
+                      answerQualifierLineIsBounded(
+                        lines[candidateIndex].words) else {
+                    return false
+                }
+                return matchedSourceIndices.contains { matchedSource in
+                    abs(lines[candidateIndex].sourceIndex - matchedSource) == 1
+                }
+            }
+            outputIndices.formUnion(qualifierIndices)
+            guard coveredSubjects.count >= requiredSubjectOverlap,
+                  coversEveryTaskGroup(Set(outputIndices.flatMap {
+                      lines[$0].words
+                  })),
+                  reportStatusEvidenceMatchesTrustedTask(
+                    trustedTask,
+                    outputLines: outputIndices
+                        .sorted { lines[$0].sourceIndex < lines[$1].sourceIndex }
+                        .map { lines[$0] }) else {
+                continue
+            }
+
+            let orderedIndices = outputIndices.sorted {
+                lines[$0].sourceIndex < lines[$1].sourceIndex
+            }
+            let output = orderedIndices.map { lines[$0].raw }
+                .joined(separator: "; ")
+            let span = maximumMatchedSource - minimumMatchedSource
+            let score = coveredSubjects.count * 100 - span * 10
+                - orderedIndices.count
+            if groupsByOutput[output]?.score ?? Int.min < score {
+                groupsByOutput[output] = VerifiedGroup(
+                    score: score,
+                    output: output)
+            }
+        }
+
+        guard let bestScore = groupsByOutput.values.map(\.score).max() else {
+            throw RuntimeError.unsupportedAction(
+                "task-irrelevant-visible-answer")
+        }
+        let bestGroups = groupsByOutput.values.filter {
+            $0.score == bestScore
+        }
+        guard bestGroups.count == 1 else {
+            throw RuntimeError.unsupportedAction(
+                "ambiguous-visible-answer")
+        }
+        // The model-authored summary and fragments are not returned. The host
+        // emits complete OCR lines, including an adjacent task qualifier when
+        // the value/status was split into a structured label-detail pair.
+        let hostAnswer = bestGroups[0].output
+        guard !hostAnswer.isEmpty, hostAnswer.count <= 1_000 else {
+            throw RuntimeError.malformedAction
+        }
+        return hostAnswer
+    }
+
+    private static func evidenceWords(_ value: String) -> [String] {
+        normalizedEvidenceText(value)
+            .split(whereSeparator: \.isWhitespace)
+            .map(String.init)
+    }
+
+    /// Reject mismatched or empty typed-plan arguments before either effect
+    /// authorization or visual point grounding. This keeps malformed plans
+    /// distinguishable from well-formed plans that the current user request
+    /// did not authorize.
+    private static func semanticRouteHasValidArguments(
+        _ route: OSAtlasSemanticActionRoute
+    ) -> Bool {
+        switch (route.directive, route.argument) {
+        case (.click, .targetHint(let value)),
+             (.doubleClick, .targetHint(let value)),
+             (.rightClick, .targetHint(let value)):
+            return (1 ... 256).contains(value.count)
+                && !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        case (.drag, .dragHints(let source, let destination)):
+            return [source, destination].allSatisfy {
+                (1 ... 256).contains($0.count)
+                    && !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            }
+        case (.type, .text(let value)):
+            return (1 ... 10_000).contains(value.count)
+        case (.openApplication, .applicationName(let value)):
+            return (1 ... 200).contains(value.count)
+                && !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        case (.hotkey, .hotkey(let value)):
+            return (1 ... 100).contains(value.count)
+                && !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        case (.ask, .question(let value)):
+            return (1 ... 500).contains(value.count)
+                && !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        case (.answer, .visibleAnswer), (.answer, .visibleObstacle),
+             (.report, .visibleAnswer), (.report, .visibleObstacle):
+            return true
+        case (.scroll, .none):
+            return route.scrollDirection != nil
+        case (.enter, .none), (.wait, .none), (.complete, .none):
+            return route.scrollDirection == nil
+        default:
+            return false
+        }
+    }
+
+    /// Conversation history and visible text may help the semantic planner, but
+    /// neither can authorize an effect. Every model-selected route, including a
+    /// same-turn route, must remain compatible with the signed current request.
+    /// Terminal/no-effect routes retain their dedicated evidence gates below.
+    private static let reviewedPurchaseEffectWords: Set<String> = [
+        "buy", "order", "place", "purchase",
+    ]
+
+    private static let reviewedEffectSynonymFamilies: [Set<String>] = [
+        ["archive", "move"],
+        ["buy", "order", "place", "purchase"],
+        ["cancel"],
+        ["checkout", "pay"],
+        ["delete", "erase", "remove", "trash"],
+        ["download"],
+        ["edit", "rename", "replace"],
+        ["save"],
+        ["send", "share"],
+        ["submit"],
+        ["upload"],
+    ]
+
+    private static func semanticEffectIsAuthorized(
+        _ route: OSAtlasSemanticActionRoute,
+        by trustedTask: String,
+        visibleText: String
+    ) -> Bool {
+        let taskWords = evidenceWords(trustedTask)
+        let taskWordSet = Set(taskWords)
+        let ignoredTargetWords: Set<String> = [
+            "a", "an", "and", "at", "button", "by", "card", "column",
+            "control", "field", "file", "folder", "for", "from", "in",
+            "item", "label", "link", "menu", "named", "of", "on", "or",
+            "row", "tab", "the", "to", "visible", "window", "with",
+        ]
+        func targetIsBoundToTask(_ target: String) -> Bool {
+            let targetWords = Set(evidenceWords(target).filter {
+                !ignoredTargetWords.contains($0)
+            })
+            guard !targetWords.isEmpty else { return false }
+            return targetWords.allSatisfy { targetWord in
+                guard let family = Self.reviewedEffectSynonymFamilies.first(
+                    where: { $0.contains(targetWord) }) else {
+                    return taskWordSet.contains(targetWord)
+                }
+                return taskWordSet.contains(targetWord)
+                    || !taskWordSet.isDisjoint(with: family)
+            }
+        }
+
+        switch (route.directive, route.argument) {
+        case (.answer, _), (.report, _), (.complete, _),
+             (.wait, _):
+            return true
+        case (.ask, .question(let question)):
+            return semanticQuestionIsAuthorized(
+                question,
+                trustedTask: trustedTask,
+                visibleText: visibleText)
+        case (.openApplication, .applicationName(let name)):
+            let explicitlyRequestsActivation = AppleFoundationVisualActionRouter
+                .taskAffirmativelyRequestsOperation(
+                    trustedTask,
+                    operationVerbs: [
+                        "activate", "launch", "open", "start", "switch", "use",
+                    ])
+            let explicitlyNamesTaskApplication = AppleFoundationVisualActionRouter
+                .task(trustedTask, explicitlyNamesApplication: name)
+            let requestsWorkInNamedApplication = AppleFoundationVisualActionRouter
+                .taskAffirmativelyRequestsOperation(
+                    trustedTask,
+                    operationVerbs: [
+                        "add", "calculate", "check", "create", "edit", "enter",
+                        "find", "insert", "list", "paste", "read", "review",
+                        "search", "show", "summarize", "type", "write",
+                    ])
+            return (explicitlyRequestsActivation
+                    || (explicitlyNamesTaskApplication
+                        && requestsWorkInNamedApplication))
+                && authenticationEscapeApplicationIsRelevant(
+                name,
+                currentApplication: "trusted-route-policy",
+                task: trustedTask)
+        case (.type, .text(let text)):
+            return taskAffirmativelyBindsTypedPayload(
+                text,
+                in: trustedTask)
+        case (.scroll, .none):
+            let navigationWords: Set<String> = [
+                "go", "navigate", "reveal", "scroll", "show",
+            ]
+            guard AppleFoundationVisualActionRouter
+                    .taskAffirmativelyRequestsOperation(
+                        trustedTask,
+                        operationVerbs: navigationWords),
+                  let direction = route.scrollDirection else {
+                return false
+            }
+            switch direction {
+            case .up:
+                return taskWordSet.contains("up")
+                    || taskWordSet.contains("above")
+            case .down:
+                return taskWordSet.contains("down")
+                    || taskWordSet.contains("below")
+            case .left:
+                return taskWordSet.contains("left")
+            case .right:
+                return taskWordSet.contains("right")
+            }
+        case (.enter, .none):
+            return AppleFoundationVisualActionRouter
+                .taskAffirmativelyRequestsOperation(
+                    trustedTask,
+                    operationVerbs: [
+                        "enter", "execute", "return", "run", "search", "submit",
+                    ])
+        case (.hotkey, .hotkey(let shortcut)):
+            return reviewedHotkeyIsAuthorized(shortcut, by: trustedTask)
+        case (.click, .targetHint(let target)):
+            let directClick = AppleFoundationVisualActionRouter
+                .taskAffirmativelyRequestsOperation(
+                    trustedTask,
+                    operationVerbs: [
+                        "choose", "click", "open", "press", "select", "show",
+                    ])
+            let targetWords = Set(evidenceWords(target))
+            let reviewedEffectClick = Self.reviewedEffectSynonymFamilies
+                .contains { family in
+                    !targetWords.isDisjoint(with: family)
+                        && Self.taskAffirmativelyAuthorizesEffectFamily(
+                            family,
+                            in: trustedTask)
+                }
+            let deterministicNavigation = AppleFoundationVisualActionRouter
+                .deterministicCurrentAppRoute(
+                    for: trustedTask,
+                    history: [],
+                    availableDirectives: [.click]) == route
+                && AppleFoundationVisualActionRouter
+                    .taskAffirmativelyRequestsOperation(
+                        trustedTask,
+                        operationVerbs: [
+                            "advance", "go", "navigate", "reveal", "show",
+                        ])
+            return (directClick || reviewedEffectClick
+                    || deterministicNavigation)
+                && targetDoesNotWidenTaskEffect(target, trustedTask: trustedTask)
+                && targetIsBoundToTask(target)
+        case (.doubleClick, .targetHint(let target)):
+            return AppleFoundationVisualActionRouter
+                .taskAffirmativelyRequestsOperation(
+                    trustedTask,
+                    operationVerbs: ["double", "open"])
+                && targetDoesNotWidenTaskEffect(target, trustedTask: trustedTask)
+                && targetIsBoundToTask(target)
+        case (.rightClick, .targetHint(let target)):
+            let explicitlyRequestsContextMenu =
+                !taskWordSet.isDisjoint(with: ["context", "contextual", "menu"])
+                    && !taskWordSet.isDisjoint(with: [
+                        "open", "option", "options", "show",
+                    ])
+            return AppleFoundationVisualActionRouter
+                .taskAffirmativelyRequestsOperation(
+                    trustedTask,
+                    operationVerbs: ["click", "open", "show"])
+                && ((taskWordSet.contains("right")
+                    && taskWordSet.contains("click"))
+                || explicitlyRequestsContextMenu)
+                && targetDoesNotWidenTaskEffect(target, trustedTask: trustedTask)
+                && targetIsBoundToTask(target)
+        case (.drag, .dragHints(let source, let destination)):
+            return AppleFoundationVisualActionRouter
+                .taskAffirmativelyRequestsOperation(
+                    trustedTask,
+                    operationVerbs: ["drag", "move"])
+                && taskAffirmativelyBindsDrag(
+                    source: source,
+                    destination: destination,
+                    in: trustedTask)
+                // A drag source is an entity, not an activated control. A card
+                // named “Buy groceries” must not be mistaken for purchase
+                // authority; the destination still receives the full effect
+                // widening check (for example, dragging a file to Trash).
+                && targetDoesNotWidenTaskEffect(
+                    destination,
+                    trustedTask: trustedTask)
+                && targetIsBoundToTask(source)
+                && targetIsBoundToTask(destination)
+        default:
+            return false
+        }
+    }
+
+    /// The semantic model may propose a clarification, but it cannot invent a
+    /// recovery question. The Apple router canonicalizes a visibly missing
+    /// field to `What <field> should I use?`; this second boundary requires the
+    /// canonical field to be the exact OCR label marked missing. An explicit
+    /// host-authored ASK directive remains valid when it contains the exact
+    /// question selected by the route.
+    private static func semanticQuestionIsAuthorized(
+        _ question: String,
+        trustedTask: String,
+        visibleText: String
+    ) -> Bool {
+        let boundedQuestion = question.trimmingCharacters(
+            in: .whitespacesAndNewlines)
+        guard !boundedQuestion.isEmpty,
+              boundedQuestion.count <= 500,
+              AppleFoundationVisualActionRouter
+                .clarificationQuestionIsTaskRelevant(
+                    boundedQuestion,
+                    trustedTask: trustedTask) else {
+            return false
+        }
+
+        let explicitQuestionForms = [
+            "ASK [\(boundedQuestion)]",
+            "ask [\(boundedQuestion)]",
+        ]
+        if explicitQuestionForms.contains(where: trustedTask.contains) {
+            return true
+        }
+
+        let pattern = #"(?i)^what\s+(.+?)\s+should\s+i\s+use\?$"#
+        guard let expression = try? NSRegularExpression(pattern: pattern),
+              let match = expression.firstMatch(
+                in: boundedQuestion,
+                range: NSRange(boundedQuestion.startIndex..., in: boundedQuestion)),
+              match.range.location == 0,
+              match.range.length == boundedQuestion.utf16.count,
+              let fieldRange = Range(match.range(at: 1), in: boundedQuestion) else {
+            return false
+        }
+        let canonicalField = normalizedEvidenceText(
+            String(boundedQuestion[fieldRange]))
+        guard !canonicalField.isEmpty else { return false }
+        return explicitlyMissingFieldLabels(in: visibleText)
+            .contains(canonicalField)
+    }
+
+    private static func explicitlyMissingFieldLabels(
+        in visibleText: String
+    ) -> Set<String> {
+        let missingValues: Set<String> = [
+            "empty", "missing", "not provided", "not set", "required",
+        ]
+        let lines = visibleText.split(separator: "\n", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        var labels: Set<String> = []
+        for (index, line) in lines.enumerated() where !line.isEmpty {
+            let parts = line.split(separator: ":", maxSplits: 1)
+            if parts.count == 2,
+               missingValues.contains(normalizedEvidenceText(String(parts[1]))),
+               let label = safeMissingFieldLabel(String(parts[0])) {
+                labels.insert(label)
+            }
+            if missingValues.contains(normalizedEvidenceText(line)),
+               index > 0,
+               !lines[index - 1].contains(":"),
+               let label = safeMissingFieldLabel(lines[index - 1]) {
+                labels.insert(label)
+            }
+        }
+        return labels
+    }
+
+    private static func safeMissingFieldLabel(_ rawLabel: String) -> String? {
+        let normalized = normalizedEvidenceText(rawLabel)
+        let words = evidenceWords(normalized)
+        guard (1 ... 8).contains(words.count),
+              (2 ... 80).contains(normalized.count) else {
+            return nil
+        }
+        let genericLabels: Set<String> = [
+            "details", "field", "fields", "form", "form details",
+            "information", "input", "missing information",
+            "required field", "required fields", "required information",
+            "section", "trip details", "value",
+        ]
+        let sensitiveWords: Set<String> = [
+            "credential", "credentials", "otp", "passcode", "password",
+            "phrase", "pin", "recovery", "secret", "seed", "token",
+        ]
+        guard !genericLabels.contains(normalized),
+              Set(words).isDisjoint(with: sensitiveWords),
+              let finalWord = words.last,
+              !["details", "information", "section"].contains(finalWord) else {
+            return nil
+        }
+        return normalized
+    }
+
+    /// A target hint identifies a visible object; it cannot smuggle in a new
+    /// operation. Effect-bearing words in the hint must already occur in the
+    /// trusted request (including reviewed synonyms such as delete/remove).
+    private static func targetDoesNotWidenTaskEffect(
+        _ target: String,
+        trustedTask: String
+    ) -> Bool {
+        let targetWords = Set(evidenceWords(target))
+        let taskWords = Set(evidenceWords(trustedTask))
+        return reviewedEffectSynonymFamilies.allSatisfy { family in
+            if targetWords.isDisjoint(with: family) { return true }
+            if family == reviewedPurchaseEffectWords {
+                return taskAffirmativelyRequestsPurchase(
+                    trustedTask,
+                    directCommitTarget: target)
+            }
+            return !taskWords.isDisjoint(with: family)
+        }
+    }
+
+    private static func taskAffirmativelyAuthorizesEffectFamily(
+        _ family: Set<String>,
+        in trustedTask: String
+    ) -> Bool {
+        if family == reviewedPurchaseEffectWords {
+            return taskAffirmativelyRequestsPurchase(trustedTask)
+        }
+        return AppleFoundationVisualActionRouter
+            .taskAffirmativelyRequestsOperation(
+                trustedTask,
+                operationVerbs: family)
+    }
+
+    /// Purchase nouns are common in read-only requests. Require a genuine
+    /// affirmative purchase verb, an affirmative `place ... order` phrase, or
+    /// a direct click/press request that itself names a reviewed commit control.
+    private static func taskAffirmativelyRequestsPurchase(
+        _ trustedTask: String,
+        directCommitTarget: String? = nil
+    ) -> Bool {
+        let nounOnlyFollowups: Set<String> = [
+            "confirmation", "date", "details", "history", "information",
+            "number", "status", "summary", "total", "tracking",
+        ]
+        let placeOrderFillers: Set<String> = [
+            "a", "an", "my", "the", "this", "your",
+        ]
+
+        for clause in trustedAuthorityClauses(trustedTask) {
+            let words = evidenceWords(clause)
+            guard !words.isEmpty else { continue }
+
+            // `Order these groceries` and `Purchase this item` are effects;
+            // `Order history` and `Purchase details` are noun-only navigation.
+            for purchaseVerb in ["buy", "order", "purchase"] {
+                guard AppleFoundationVisualActionRouter
+                        .taskAffirmativelyRequestsOperation(
+                            clause,
+                            operationVerbs: [purchaseVerb]) else {
+                    continue
+                }
+                for index in words.indices where words[index] == purchaseVerb {
+                    let nextIndex = words.index(after: index)
+                    if ["order", "purchase"].contains(purchaseVerb),
+                       nextIndex < words.endIndex,
+                       nounOnlyFollowups.contains(words[nextIndex]) {
+                        continue
+                    }
+                    return true
+                }
+            }
+
+            // `Place [the] Order` is a reviewed purchase command only when
+            // PLACE itself is affirmative and ORDER is not a history/status
+            // noun that follows it.
+            if AppleFoundationVisualActionRouter
+                    .taskAffirmativelyRequestsOperation(
+                        clause,
+                        operationVerbs: ["place"]),
+               let placeIndex = words.firstIndex(of: "place") {
+                var orderIndex = words.index(after: placeIndex)
+                while orderIndex < words.endIndex,
+                      placeOrderFillers.contains(words[orderIndex]) {
+                    orderIndex = words.index(after: orderIndex)
+                }
+                if orderIndex < words.endIndex,
+                   words[orderIndex] == "order" {
+                    let followup = words.index(after: orderIndex)
+                    if followup == words.endIndex
+                        || !nounOnlyFollowups.contains(words[followup]) {
+                        return true
+                    }
+                }
+            }
+
+            // A direct click can name a final commit control, but it must name
+            // that control as its object. This is what separates `Click
+            // Purchase` / `Click Place Order` from `Click Purchase History`,
+            // even if a model attempts to widen the latter to Place Order.
+            guard directCommitTarget != nil,
+                  AppleFoundationVisualActionRouter
+                    .taskAffirmativelyRequestsOperation(
+                        clause,
+                        operationVerbs: ["click", "press"]),
+                  let activationIndex = words.firstIndex(where: {
+                      $0 == "click" || $0 == "press"
+                  }) else {
+                continue
+            }
+            var object = Array(words[words.index(after: activationIndex)...])
+            while let first = object.first,
+                  ["a", "an", "the", "this"].contains(first) {
+                object.removeFirst()
+            }
+            guard let first = object.first else { continue }
+            if first == "place" {
+                var index = 1
+                while index < object.count,
+                      placeOrderFillers.contains(object[index]) {
+                    index += 1
+                }
+                guard index < object.count, object[index] == "order" else {
+                    continue
+                }
+                let followup = object.index(after: index)
+                if followup == object.endIndex
+                    || ["button", "control", "now"].contains(object[followup]) {
+                    return true
+                }
+                continue
+            }
+            guard ["buy", "order", "purchase"].contains(first) else {
+                continue
+            }
+            if object.count == 1
+                || ["button", "control", "now"].contains(object[1]) {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// Requires the source and destination to occur on their respective sides
+    /// of an affirmative MOVE/DRAG clause. Merely mentioning both labels is not
+    /// enough: reversed model endpoints and a destination mentioned only under
+    /// `not`/`without` are rejected before either grounding request is sent.
+    private static func taskAffirmativelyBindsDrag(
+        source: String,
+        destination: String,
+        in trustedTask: String
+    ) -> Bool {
+        let sourceWords = meaningfulDragTargetWords(source)
+        let destinationWords = meaningfulDragTargetWords(destination)
+        guard !sourceWords.isEmpty, !destinationWords.isEmpty else {
+            return false
+        }
+
+        for clause in trustedAuthorityClauses(trustedTask) {
+            guard AppleFoundationVisualActionRouter
+                    .taskAffirmativelyRequestsOperation(
+                        clause,
+                        operationVerbs: ["drag", "move"]) else {
+                continue
+            }
+            let words = evidenceWords(clause)
+            for operationIndex in words.indices
+            where words[operationIndex] == "drag"
+                || words[operationIndex] == "move" {
+                let afterOperation = words.index(after: operationIndex)
+                let destinationMarkers: Set<String> = ["into", "onto", "to"]
+                guard let destinationMarker = words.indices.last(where: {
+                    $0 >= afterOperation
+                        && destinationMarkers.contains(words[$0])
+                }) else {
+                    continue
+                }
+                let sourceBoundary = words.indices.first(where: {
+                    $0 >= afterOperation
+                        && ($0 == destinationMarker || words[$0] == "from")
+                }) ?? destinationMarker
+                var sourceRegion = Array(words[afterOperation ..< sourceBoundary])
+                if sourceRegion.isEmpty,
+                   sourceBoundary < destinationMarker,
+                   words[sourceBoundary] == "from" {
+                    let afterFrom = words.index(after: sourceBoundary)
+                    sourceRegion = Array(words[afterFrom ..< destinationMarker])
+                }
+                let afterDestination = words.index(after: destinationMarker)
+                let destinationRegion = Array(words[afterDestination...])
+
+                if phraseHasAffirmativeOccurrence(
+                    sourceWords,
+                    in: sourceRegion),
+                   phraseHasAffirmativeOccurrence(
+                    destinationWords,
+                    in: destinationRegion) {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
+    private static func meaningfulDragTargetWords(_ target: String) -> [String] {
+        let articles: Set<String> = ["a", "an", "the", "this"]
+        let roleWords: Set<String> = [
+            "button", "card", "column", "control", "document", "file",
+            "folder", "item", "row",
+        ]
+        let withoutArticles = evidenceWords(target).filter {
+            !articles.contains($0)
+        }
+        let withoutRoles = withoutArticles.filter { !roleWords.contains($0) }
+        return withoutRoles.isEmpty ? withoutArticles : withoutRoles
+    }
+
+    private static func phraseHasAffirmativeOccurrence(
+        _ phrase: [String],
+        in words: [String]
+    ) -> Bool {
+        guard !phrase.isEmpty, phrase.count <= words.count else { return false }
+        let scopeBoundaries: Set<String> = ["and", "but", "however", "then"]
+        let negativeWords: Set<String> = [
+            "avoid", "dont", "except", "excluding", "instead", "never",
+            "no", "not", "omit", "rather", "skip", "stop", "without",
+        ]
+        for index in 0 ... (words.count - phrase.count)
+        where Array(words[index ..< index + phrase.count]) == phrase {
+            let boundary = words[..<index].lastIndex(where: {
+                scopeBoundaries.contains($0)
+            })
+            let scopeStart = boundary.map { words.index(after: $0) }
+                ?? words.startIndex
+            let prefix = words[scopeStart ..< index]
+            if prefix.allSatisfy({ !negativeWords.contains($0) })
+                && !authorityWordsContainExplicitNegation(Array(prefix)) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private static func authorityWordsContainExplicitNegation(
+        _ words: [String]
+    ) -> Bool {
+        let directNegations: Set<String> = [
+            "arent", "cannot", "couldnt", "didnt", "doesnt", "dont",
+            "hasnt", "havent", "isnt", "never", "no", "not", "shouldnt",
+            "wasnt", "werent", "wont", "wouldnt",
+        ]
+        if words.contains(where: directNegations.contains) { return true }
+        let contractionStems: Set<String> = [
+            "aren", "can", "couldn", "didn", "doesn", "don", "hadn",
+            "hasn", "haven", "isn", "shouldn", "wasn", "weren", "won",
+            "wouldn",
+        ]
+        return words.indices.contains { index in
+            index > words.startIndex
+                && words[index] == "t"
+                && contractionStems.contains(words[index - 1])
+        }
+    }
+
+    private static func trustedAuthorityClauses(_ task: String) -> [String] {
+        var clauses: [String] = []
+        var clause = ""
+        for index in task.indices {
+            let character = task[index]
+            let isHardBoundary = ["!", "?", ";", "\n"].contains(character)
+            let isSentencePeriod: Bool
+            if character == "." {
+                let previous = index > task.startIndex
+                    ? task[task.index(before: index)] : nil
+                let nextIndex = task.index(after: index)
+                let next = nextIndex < task.endIndex ? task[nextIndex] : nil
+                isSentencePeriod = !(previous?.isLetter == true
+                    || previous?.isNumber == true)
+                    || !(next?.isLetter == true || next?.isNumber == true)
+            } else {
+                isSentencePeriod = false
+            }
+            if isHardBoundary || isSentencePeriod {
+                if !evidenceWords(clause).isEmpty { clauses.append(clause) }
+                clause.removeAll(keepingCapacity: true)
+            } else {
+                clause.append(character)
+            }
+        }
+        if !evidenceWords(clause).isEmpty { clauses.append(clause) }
+        return clauses
+    }
+
+    /// Bind typed text to a complete, case-sensitive token phrase inside the
+    /// same affirmative clause as the user's typing verb. This rejects both
+    /// substring borrowing (`cat` from `catfish`) and payloads copied from a
+    /// nearby negated clause.
+    private static func taskAffirmativelyBindsTypedPayload(
+        _ payload: String,
+        in trustedTask: String
+    ) -> Bool {
+        guard !payload.isEmpty, payload.count <= 10_000 else { return false }
+        let separatorPattern =
+            #"(?i)(?:[.!?;\n]+|,\s*(?:but|however|instead|then)\b|\b(?:but|however|instead|then)\b)"#
+        guard let separators = try? NSRegularExpression(
+            pattern: separatorPattern) else {
+            return false
+        }
+        let nsTask = trustedTask as NSString
+        let fullRange = NSRange(location: 0, length: nsTask.length)
+        var clauseRanges: [NSRange] = []
+        var clauseStart = 0
+        for separator in separators.matches(in: trustedTask, range: fullRange) {
+            if separator.range.location > clauseStart {
+                clauseRanges.append(NSRange(
+                    location: clauseStart,
+                    length: separator.range.location - clauseStart))
+            }
+            clauseStart = separator.range.location + separator.range.length
+        }
+        if clauseStart < nsTask.length {
+            clauseRanges.append(NSRange(
+                location: clauseStart,
+                length: nsTask.length - clauseStart))
+        }
+
+        let escapedPayload = NSRegularExpression.escapedPattern(for: payload)
+        let payloadPattern =
+            "(?<![\\p{L}\\p{N}])\(escapedPayload)(?![\\p{L}\\p{N}])"
+        guard let payloadExpression = try? NSRegularExpression(
+            pattern: payloadPattern) else {
+            return false
+        }
+        let typingVerbs: Set<String> = [
+            "add", "enter", "insert", "paste", "put", "type", "write",
+        ]
+        return clauseRanges.contains { clauseRange in
+            guard payloadExpression.firstMatch(
+                in: trustedTask,
+                range: clauseRange) != nil else {
+                return false
+            }
+            let clause = nsTask.substring(with: clauseRange)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return AppleFoundationVisualActionRouter
+                .taskAffirmativelyRequestsOperation(
+                    clause,
+                    operationVerbs: typingVerbs)
+        }
+    }
+
+    /// Only a small set of standard macOS Command shortcuts has a reviewed
+    /// semantic meaning. Exact chord matching prevents CONTROL+C (Terminal
+    /// interrupt) or COMMAND+CONTROL+Q from borrowing Copy authorization merely
+    /// because a modifier name contains “+C”.
+    private static func reviewedHotkeyIsAuthorized(
+        _ shortcut: String,
+        by trustedTask: String
+    ) -> Bool {
+        let normalizedShortcut = shortcut.uppercased()
+            .split(separator: "+", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .joined(separator: "+")
+        let requiredIntent: Set<String>
+        switch normalizedShortcut {
+        case "COMMAND+C":
+            requiredIntent = ["copy"]
+        case "COMMAND+V", "COMMAND+SHIFT+V":
+            requiredIntent = ["paste"]
+        case "COMMAND+X":
+            requiredIntent = ["cut"]
+        case "COMMAND+S", "COMMAND+SHIFT+S":
+            requiredIntent = ["save"]
+        case "COMMAND+A":
+            requiredIntent = ["all", "select"]
+        case "COMMAND+Z":
+            requiredIntent = ["undo"]
+        case "COMMAND+SHIFT+Z":
+            requiredIntent = ["redo"]
+        case "COMMAND+F":
+            requiredIntent = ["find", "search"]
+        default:
+            return false
+        }
+
+        if taskAffirmativelyRequestsExactHotkey(
+            normalizedShortcut,
+            in: trustedTask) {
+            return true
+        }
+        if normalizedShortcut == "COMMAND+A" {
+            return AppleFoundationVisualActionRouter
+                .taskAffirmativelyRequestsOperation(
+                    trustedTask,
+                    operationVerbs: ["select"])
+                && Set(evidenceWords(trustedTask)).contains("all")
+        }
+        return AppleFoundationVisualActionRouter
+            .taskAffirmativelyRequestsOperation(
+                trustedTask,
+                operationVerbs: requiredIntent)
+    }
+
+    private static func taskAffirmativelyRequestsExactHotkey(
+        _ normalizedShortcut: String,
+        in trustedTask: String
+    ) -> Bool {
+        let separatorPattern =
+            #"(?i)(?:[.!?;\n]+|,\s*(?:but|however|instead|then)\b|\b(?:but|however|instead|then)\b)"#
+        guard let separators = try? NSRegularExpression(
+            pattern: separatorPattern) else {
+            return false
+        }
+        let nsTask = trustedTask as NSString
+        let fullRange = NSRange(location: 0, length: nsTask.length)
+        var clauseRanges: [NSRange] = []
+        var clauseStart = 0
+        for separator in separators.matches(in: trustedTask, range: fullRange) {
+            if separator.range.location > clauseStart {
+                clauseRanges.append(NSRange(
+                    location: clauseStart,
+                    length: separator.range.location - clauseStart))
+            }
+            clauseStart = separator.range.location + separator.range.length
+        }
+        if clauseStart < nsTask.length {
+            clauseRanges.append(NSRange(
+                location: clauseStart,
+                length: nsTask.length - clauseStart))
+        }
+
+        let escaped = NSRegularExpression.escapedPattern(
+            for: normalizedShortcut)
+        let exactChordPattern =
+            "(?<![A-Z0-9+])\(escaped)(?![A-Z0-9+])"
+        guard let chordExpression = try? NSRegularExpression(
+            pattern: exactChordPattern,
+            options: [.caseInsensitive]) else {
+            return false
+        }
+        return clauseRanges.contains { clauseRange in
+            guard chordExpression.firstMatch(
+                in: trustedTask,
+                range: clauseRange) != nil else {
+                return false
+            }
+            let clause = nsTask.substring(with: clauseRange)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return AppleFoundationVisualActionRouter
+                .taskAffirmativelyRequestsOperation(
+                    clause,
+                    operationVerbs: ["press", "use"])
+        }
+    }
+
+    private static func containsTokenPhrase(
+        _ phrase: [String],
+        in words: [String]
+    ) -> Bool {
+        guard !phrase.isEmpty, phrase.count <= words.count else { return false }
+        for index in 0 ... (words.count - phrase.count)
+        where Array(words[index ..< index + phrase.count]) == phrase {
+            return true
+        }
+        return false
+    }
+
+    private static func evidencePhraseIsSubstantive(
+        _ words: [String]
+    ) -> Bool {
+        let commonWords: Set<String> = [
+            "a", "an", "and", "are", "as", "at", "be", "by", "for",
+            "from", "here", "in", "is", "it", "of", "on", "or", "that",
+            "the", "this", "to", "visible", "was", "were", "with",
+        ]
+        let meaningful = words.filter {
+            $0.count >= 2 && !commonWords.contains($0)
+        }
+        if meaningful.count >= 2 { return true }
+        guard let only = meaningful.first else { return false }
+        if only.count >= 2 && only.contains(where: \.isNumber) {
+            return true
+        }
+        let genericSingleWords: Set<String> = [
+            "am", "done", "no", "ok", "okay", "pm", "ready", "result",
+            "shown", "status", "visible", "yes",
+        ]
+        return only.count >= 4 && !genericSingleWords.contains(only)
+    }
+
+    /// Exact short statuses and price qualifiers can be answer-bearing even
+    /// though they are intentionally terse. Every token must come from one of
+    /// the reviewed shapes; adding a subject such as `account` makes the line
+    /// ineligible for automatic inclusion.
+    private static func answerQualifierLineIsBounded(
+        _ words: [String]
+    ) -> Bool {
+        let normalized = words.joined(separator: " ")
+        let exactStatuses: Set<String> = [
+            "canceled", "cancelled", "confirmed", "delayed", "no",
+            "postponed", "rescheduled", "sold out", "unavailable", "yes",
+        ]
+        if exactStatuses.contains(normalized) { return true }
+
+        let qualifierRelations: Set<String> = [
+            "after", "before", "excluding", "including", "without",
+        ]
+        let qualifierObjects: Set<String> = [
+            "discount", "discounts", "fee", "fees", "tax", "taxes", "tip",
+            "tips",
+        ]
+        guard (2 ... 3).contains(words.count),
+              let first = words.first,
+              qualifierRelations.contains(first),
+              let last = words.last,
+              qualifierObjects.contains(last) else {
+            return false
+        }
+        let allowed = qualifierRelations
+            .union(qualifierObjects)
+            .union(["all", "any", "the"])
+        return Set(words).isSubset(of: allowed)
+    }
+
+    private static func evidenceTokenIsAnswerBearing(_ token: String) -> Bool {
+        let commonWords: Set<String> = [
+            "a", "an", "and", "are", "as", "at", "be", "by", "for",
+            "from", "here", "in", "is", "it", "of", "on", "or", "says",
+            "screen", "shows", "that", "the", "this", "to", "visible",
+            "was", "were", "with",
+        ]
+        return token.count >= 2 && !commonWords.contains(token)
+    }
+
+    private static func taskIsEligibleForVisibleAnswer(_ task: String) -> Bool {
+        let words = evidenceWords(task)
+        guard !words.isEmpty else { return false }
+
+        let questionStarters: Set<String> = [
+            "are", "can", "could", "did", "do", "does", "has", "have",
+            "how", "is", "was", "were", "what", "when", "where", "which",
+            "who", "why", "will", "would",
+        ]
+        let beginsWithQuestion = questionStarters.contains(words[0])
+            && !(words.count > 1
+                && ["can", "could", "will", "would"].contains(words[0])
+                && words[1] == "you")
+        if beginsWithQuestion {
+            return true
+        }
+
+        let hardEffectWords: Set<String> = [
+            "add", "book", "buy", "change", "create", "delete", "download",
+            "edit", "enter", "install", "move", "order", "paste", "place",
+            "purchase", "remove", "save", "send", "set", "submit", "type",
+            "upload", "write",
+        ]
+        if words.contains(where: hardEffectWords.contains) {
+            return false
+        }
+
+        let factVerbs: Set<String> = [
+            "answer", "check", "confirm", "find", "inspect", "read",
+            "summarize", "tell", "verify",
+        ]
+        let factNouns: Set<String> = [
+            "details", "eta", "hours", "information", "price", "quote",
+            "status", "summary", "total",
+        ]
+        var hasInformationIntent = words.contains(where: factVerbs.contains)
+            || words.contains(where: factNouns.contains)
+
+        if let reportIndex = words.firstIndex(of: "report") {
+            let commandPrefixes: Set<String> = [
+                "and", "please", "then", "to",
+            ]
+            hasInformationIntent = hasInformationIntent
+                || reportIndex == words.startIndex
+                || commandPrefixes.contains(words[reportIndex - 1])
+
+            let completionWords: Set<String> = [
+                "complete", "completed", "done", "finished",
+            ]
+            let suffixEnd = min(words.endIndex, reportIndex + 6)
+            let reportsOnlyCompletion = words[(reportIndex + 1) ..< suffixEnd]
+                .contains(where: completionWords.contains)
+            if reportsOnlyCompletion
+                && !words.contains(where: factNouns.contains)
+                && !words.contains(where: {
+                    factVerbs.subtracting(["confirm"]).contains($0)
+                }) {
+                return false
+            }
+        }
+        return hasInformationIntent
+    }
+
+    private static func evidenceSubjectWords(in task: String) -> Set<String> {
+        let ignored: Set<String> = [
+            "a", "about", "an", "and", "answer", "are", "as", "at", "be",
+            "been", "can", "check", "confirm", "could", "current", "do",
+            "details", "does", "find", "for", "from", "get", "give", "has", "have",
+            "here", "how", "i", "in", "inspect", "is", "it", "latest",
+            "information", "me", "my", "of", "on", "open", "our", "please", "read",
+            "result", "run", "screen", "shown", "summarize", "tell", "that",
+            "summary", "the", "then", "this", "to", "use", "verify", "view", "visible",
+            "wait", "was", "were", "what", "when", "where", "which", "who",
+            "why", "will", "would", "you", "your",
+        ]
+        let words = evidenceWords(task)
+        var subjects = Set(words.filter {
+            $0.count >= 3 && !ignored.contains($0) && $0 != "report"
+        })
+        if subjects.isEmpty, words.contains("report") {
+            subjects.insert("report")
+        }
+        return subjects
+    }
+
+    /// Splits only clearly substantive conjunctions into independent answer
+    /// slots. Requiring at least two subject tokens on each side avoids treating
+    /// ordinary phrases such as “date and time” as separate named entities.
+    private static func evidenceSubjectGroups(
+        in task: String
+    ) -> [Set<String>] {
+        let ignored: Set<String> = [
+            "a", "about", "an", "and", "answer", "are", "as", "at", "be",
+            "been", "can", "check", "confirm", "could", "current", "do",
+            "details", "does", "find", "for", "from", "get", "give", "has", "have",
+            "here", "how", "i", "in", "inspect", "is", "it", "latest",
+            "information", "me", "my", "of", "on", "open", "our", "please", "read",
+            "result", "run", "screen", "shown", "summarize", "tell", "that",
+            "summary", "the", "then", "this", "to", "use", "verify", "view", "visible",
+            "wait", "was", "were", "what", "when", "where", "which", "who",
+            "why", "will", "would", "you", "your",
+        ]
+        let separators: Set<String> = ["also", "and", "plus"]
+        var rawGroups: [[String]] = [[]]
+        for word in evidenceWords(task) {
+            if separators.contains(word) {
+                if rawGroups.last?.isEmpty == false {
+                    rawGroups.append([])
+                }
+            } else {
+                rawGroups[rawGroups.count - 1].append(word)
+            }
+        }
+        // “Read the inbox and report the appointment” is a workflow, not two
+        // answer entities. Different operation verbs on each side of the
+        // conjunction identify that shape; repeated/no operation verbs remain
+        // eligible for multi-entity coverage (for example, Alice and Bob).
+        let operationVerbs: Set<String> = [
+            "access", "check", "confirm", "find", "get", "inspect", "open",
+            "read", "report", "retrieve", "review", "summarize", "tell",
+            "use", "verify", "view",
+        ]
+        let operationGroups = rawGroups.map {
+            Set($0).intersection(operationVerbs)
+        }.filter { !$0.isEmpty }
+        if operationGroups.count >= 2 {
+            var sharedOperations = operationGroups[0]
+            for operations in operationGroups.dropFirst() {
+                sharedOperations.formIntersection(operations)
+            }
+            if sharedOperations.isEmpty {
+                return []
+            }
+        }
+        let groups = rawGroups.map { words in
+            Set(words.filter {
+                $0.count >= 3 && !ignored.contains($0) && $0 != "report"
+            })
+        }.filter { $0.count >= 2 }
+        return groups.count >= 2 ? groups : []
+    }
+
+    private enum ReviewedVisibleObstacleStatus {
+        case reportUnavailable
+        case windowsOnly
+    }
+
+    private static func reviewedVisibleObstacleStatus(
+        in words: [String]
+    ) -> ReviewedVisibleObstacleStatus? {
+        func containsAffirmativePhrase(_ phrase: [String]) -> Bool {
+            guard !phrase.isEmpty, phrase.count <= words.count else {
+                return false
+            }
+            for index in 0 ... (words.count - phrase.count)
+            where Array(words[index ..< index + phrase.count]) == phrase {
+                let recentPrefix = words[..<index].suffix(4)
+                if Set(recentPrefix).isDisjoint(with: [
+                    "never", "not", "without",
+                ]) {
+                    return true
+                }
+            }
+            return false
+        }
+
+        if containsAffirmativePhrase(["only", "for", "windows"])
+            || containsAffirmativePhrase(["requires", "windows"]) {
+            return .windowsOnly
+        }
+        if words.contains("report"),
+           containsAffirmativePhrase(["removed"])
+            || containsAffirmativePhrase(["no", "longer", "available"]) {
+            return .reportUnavailable
+        }
+        return nil
+    }
+
+    /// When a report status is involved, bind it to the report qualifier in
+    /// the trusted task. This rejects structures such as a Quarterly heading
+    /// followed by "Annual report removed" while still allowing a split
+    /// "Quarterly Report" / "REPORT REMOVED" title-detail pair.
+    private static func reportStatusEvidenceMatchesTrustedTask(
+        _ trustedTask: String,
+        outputLines: [EvidenceOCRLine]
+    ) -> Bool {
+        let taskWords = evidenceWords(trustedTask)
+        guard let reportIndex = taskWords.firstIndex(of: "report") else {
+            return true
+        }
+        let statusPhrases = [
+            ["removed"], ["no", "longer", "available"],
+        ]
+        guard outputLines.contains(where: { line in
+            statusPhrases.contains(where: {
+                containsTokenPhrase($0, in: line.words)
+            })
+        }) else {
+            return true
+        }
+        let ignoredQualifierWords: Set<String> = [
+            "a", "access", "an", "and", "consult", "download", "edit",
+            "export", "inspect", "load", "my", "open", "our", "please",
+            "read", "retrieve", "review", "summarize", "the", "this", "use",
+            "view",
+        ]
+        guard let qualifier = taskWords[..<reportIndex].reversed().first(
+            where: { !ignoredQualifierWords.contains($0) }) else {
+            return true
+        }
+        let genericModifiers: Set<String> = [
+            "a", "an", "my", "our", "that", "the", "this", "your",
+        ]
+        for line in outputLines {
+            let reportIndices = line.words.indices.filter {
+                line.words[$0] == "report"
+            }
+            for index in reportIndices {
+                let modifier: String?
+                if index == line.words.startIndex
+                    || genericModifiers.contains(line.words[index - 1]) {
+                    modifier = nil
+                } else {
+                    modifier = line.words[index - 1]
+                }
+                let suffix = Array(line.words[index...])
+                let hasStatus = statusPhrases.contains(where: {
+                    containsTokenPhrase($0, in: suffix)
+                })
+                if hasStatus, let modifier, modifier != qualifier {
+                    return false
+                }
+                if hasStatus, modifier == qualifier {
+                    return true
+                }
+            }
+        }
+        let hasQualifiedHeading = outputLines.contains {
+            containsTokenPhrase([qualifier, "report"], in: $0.words)
+        }
+        let hasGenericStatus = outputLines.contains { line in
+            line.words.indices.contains { index in
+                guard line.words[index] == "report" else { return false }
+                let modifier = index == line.words.startIndex
+                    ? nil : line.words[index - 1]
+                return (modifier == nil || genericModifiers.contains(modifier!))
+                    && statusPhrases.contains(where: {
+                        containsTokenPhrase($0, in: Array(line.words[index...]))
+                    })
+            }
+        }
+        return hasQualifiedHeading && hasGenericStatus
     }
 
     private static func normalizedEvidenceText(_ value: String) -> String {
@@ -1291,13 +2784,16 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
 
     static func terminalResult(
         for action: OSAtlasGUIAction,
-        step: Int
+        step: Int,
+        isHostVerifiedObstacle: Bool = false
     ) -> ComputerUseExecutionResult? {
         switch action {
         case .ask(let question):
-            return .completed(question)
+            return .clarificationRequired(question)
         case .report(let summary):
-            return .completed(summary)
+            return isHostVerifiedObstacle
+                ? .unableToComplete(summary)
+                : .completed(summary)
         case .complete:
             return .completed(step == 1
                 ? "Done. The task was already complete."
@@ -1305,6 +2801,89 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
         default:
             return nil
         }
+    }
+
+    /// Model terminal tokens are advisory only. Every COMPLETE requires a
+    /// host-proven postcondition, regardless of whether it came from the raw
+    /// checkpoint or the typed semantic router. Typed visible answers already
+    /// carry checked evidence; a raw REPORT must independently match OCR from
+    /// the focused window.
+    static func evidenceCheckedTerminalAction(
+        _ action: OSAtlasGUIAction,
+        cameFromTypedSemanticRoute: Bool,
+        hostVerifiedCompletion: Bool = false,
+        trustedTask: String,
+        observation: ComputerUseScreenObservation
+    ) throws -> OSAtlasGUIAction {
+        switch action {
+        case .complete:
+            guard hostVerifiedCompletion else {
+                throw RuntimeError.unverifiedTerminalAction("COMPLETE")
+            }
+            return action
+        case .report(let summary):
+            guard !cameFromTypedSemanticRoute else { return action }
+            let visibleText = try boundedFocusedVisibleText(from: observation)
+            return .report(try verifiedRawVisibleReport(
+                summary: summary,
+                visibleText: visibleText,
+                trustedTask: trustedTask))
+        default:
+            return action
+        }
+    }
+
+    static func verifiedRawVisibleReport(
+        summary: String,
+        visibleText: String,
+        trustedTask: String
+    ) throws -> String {
+        let bounded = summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !bounded.isEmpty, bounded.count <= 1_000 else {
+            throw RuntimeError.malformedAction
+        }
+        guard taskIsEligibleForVisibleAnswer(trustedTask) else {
+            throw RuntimeError.unverifiedTerminalAction("REPORT")
+        }
+        let claimWords = evidenceWords(bounded)
+        guard evidencePhraseIsSubstantive(claimWords) else {
+            throw RuntimeError.unverifiedTerminalAction("REPORT")
+        }
+        let rawLines = visibleText
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        let maximumStructuredLines = min(5, rawLines.count)
+        guard maximumStructuredLines > 0 else {
+            throw RuntimeError.unverifiedTerminalAction("REPORT")
+        }
+        for span in 1 ... maximumStructuredLines {
+            for start in 0 ... (rawLines.count - span) {
+                let selectedLines = Array(rawLines[start ..< start + span])
+                    .filter { !$0.isEmpty }
+                guard !selectedLines.isEmpty,
+                      containsTokenPhrase(
+                        claimWords,
+                        in: selectedLines.flatMap { evidenceWords($0) }) else {
+                    continue
+                }
+                do {
+                    let hostSelectedLines = try verifiedVisibleAnswer(
+                        summary: bounded,
+                        evidence: selectedLines,
+                        visibleText: visibleText,
+                        trustedTask: trustedTask,
+                        verificationMode: .answer)
+                    // Return only the complete host-selected OCR lines. The
+                    // model's raw summary is a matching hint, not provenance;
+                    // punctuation and qualifiers such as `? No` and `before
+                    // fees` must survive exactly as the host observed them.
+                    return hostSelectedLines
+                } catch {
+                    continue
+                }
+            }
+        }
+        throw RuntimeError.unverifiedTerminalAction("REPORT")
     }
 
     static func isDeliveryQuoteTask(_ prompt: String) -> Bool {
@@ -1316,6 +2895,21 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
             "ubereats", "grubhub", "food order",
         ].contains(where: value.contains)
         return asksForPrice && deliveryContext
+    }
+
+    /// A coherent quote proves the quote slot, not a requested follow-up send,
+    /// save, or other operation. Keep ordinary app/navigation work used to
+    /// acquire the quote eligible, but leave compound work in the executor loop.
+    static func deliveryQuoteMayTerminateTask(_ prompt: String) -> Bool {
+        guard isDeliveryQuoteTask(prompt) else { return false }
+        let followUpEffects: Set<String> = [
+            "copy", "draft", "email", "message", "post", "save", "send",
+            "share", "submit", "text", "upload", "write",
+        ]
+        return !AppleFoundationVisualActionRouter
+            .taskAffirmativelyRequestsOperation(
+                prompt,
+                operationVerbs: followUpEffects)
     }
 
     static func explicitlyRequiredAction(
@@ -2548,6 +4142,29 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
             remaining -= bounded.count
         }
         return lines.joined(separator: "\n")
+    }
+
+    static func boundedFocusedVisibleText(
+        from observation: ComputerUseScreenObservation
+    ) throws -> String {
+        guard let normalizedBounds = observation.normalizedFrontmostWindowBounds
+        else {
+            throw RuntimeError.unverifiedTerminalAction("REPORT")
+        }
+        let extent = observation.image.extent
+        let crop = CGRect(
+            x: extent.minX + normalizedBounds.minX * extent.width,
+            y: extent.minY + normalizedBounds.minY * extent.height,
+            width: normalizedBounds.width * extent.width,
+            height: normalizedBounds.height * extent.height)
+            .intersection(extent)
+        guard crop.width.isFinite,
+              crop.height.isFinite,
+              crop.width > 1,
+              crop.height > 1 else {
+            throw RuntimeError.unverifiedTerminalAction("REPORT")
+        }
+        return try boundedVisibleText(from: observation.image.cropped(to: crop))
     }
 
     private static func progressSummary(_ action: OSAtlasGUIAction) -> String {

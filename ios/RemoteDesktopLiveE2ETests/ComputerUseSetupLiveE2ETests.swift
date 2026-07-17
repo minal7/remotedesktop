@@ -248,3 +248,163 @@ final class ComputerUseTaskLiveE2ETests: XCTestCase {
         return predicate()
     }
 }
+
+/// Separately opted-in proof that a current signed host sends, and the Release
+/// iOS client decodes, the typed terminal result carried by the production
+/// Computer Use channel. The deliberately incomplete Mail request is stopped
+/// by the host's deterministic clarification preflight before any Mac app,
+/// model inference, approval, or external action can begin.
+final class ComputerUseTypedTerminalOutcomeSimulatorLiveE2ETests: XCTestCase {
+    private enum EnvironmentKey {
+        static let liveSuite = "RUN_COMPUTER_USE_LIVE_E2E"
+        static let thisTest =
+            "RUN_COMPUTER_USE_TYPED_OUTCOME_SIMULATOR_E2E"
+    }
+
+    override func setUpWithError() throws {
+        continueAfterFailure = false
+        let environment = ProcessInfo.processInfo.environment
+        guard environment[EnvironmentKey.liveSuite] == "1" else {
+            throw XCTSkip(
+                "Use the RemoteDesktopLiveE2E scheme for live Computer Use acceptance.")
+        }
+        guard environment[EnvironmentKey.thisTest] == "1" else {
+            throw XCTSkip(
+                "Set \(EnvironmentKey.thisTest)=1 to run the no-action typed-outcome acceptance test.")
+        }
+    }
+
+    func testDeterministicClarificationCarriesTypedUserInterventionOutcome() throws {
+        let app = XCUIApplication()
+        var taskWasSent = false
+        var taskReachedTerminalResponse = false
+        var assistantCountBefore = 0
+        defer {
+            if taskWasSent, !taskReachedTerminalResponse {
+                XCTAssertTrue(
+                    ComputerUseLiveE2ECleanup.finishPendingTask(
+                        in: app,
+                        previousAssistantCount: assistantCountBefore),
+                    "Cleanup could not obtain a terminal host response; inspect the current host before running another live task.")
+            }
+        }
+
+        addUIInterruptionMonitor(withDescription: "Local network access") { alert in
+            guard alert.buttons["Allow"].exists else { return false }
+            alert.buttons["Allow"].tap()
+            return true
+        }
+
+        app.launch()
+        XCTAssertTrue(
+            app.wait(for: .runningForeground, timeout: 10),
+            "The Release iOS client did not reach the foreground in Simulator.")
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.01)).tap()
+
+        let readyButtons = app.buttons.matching(
+            NSPredicate(
+                format: "label BEGINSWITH %@",
+                "Use AI Computer Use on "))
+        XCTAssertTrue(
+            waitUntil(timeout: 45) { readyButtons.count > 0 },
+            "A current AI-ready Production host did not appear.")
+        XCTAssertEqual(
+            readyButtons.count,
+            1,
+            "More than one AI-ready Production host appeared; refusing to send the live request to an ambiguous first match.")
+        let readyButton = readyButtons.element(boundBy: 0)
+        XCTAssertTrue(
+            readyButton.isHittable,
+            "Use AI was not directly tappable in Simulator.")
+        readyButton.tap()
+
+        let composer = app.textFields.matching(
+            NSPredicate(
+                format: "placeholderValue == %@",
+                "Tell your Mac what to do")).firstMatch
+        let hostUpdateRequired = app.staticTexts.matching(
+            NSPredicate(
+                format: "label BEGINSWITH %@",
+                "Update Remote Desktop Host on this Mac before using AI Computer Use"))
+            .firstMatch
+        XCTAssertTrue(
+            waitUntil(timeout: 45) {
+                (composer.exists && composer.isEnabled)
+                    || hostUpdateRequired.exists
+            },
+            "The Computer Use conversation neither became ready nor reported a host compatibility error.")
+        guard !hostUpdateRequired.exists else {
+            XCTFail(
+                "The installed signed Mac host is older than this Release iOS client. Install and relaunch the current host before verifying typed outcomes.")
+            return
+        }
+
+        let prompt = "Send an email"
+        let expectedClarification =
+            "AI: Who should receive the email, and what should it say?"
+        assistantCountBefore = assistantMessages(in: app).count
+        let clarificationCountBefore = app.staticTexts.matching(
+            NSPredicate(format: "label == %@", expectedClarification)).count
+        composer.tap()
+        composer.typeText(prompt)
+
+        let sendButton = app.buttons["Send request"]
+        XCTAssertTrue(
+            waitUntil(timeout: 10) { sendButton.exists && sendButton.isEnabled },
+            "The deterministic clarification prompt did not enable Send.")
+        sendButton.tap()
+        taskWasSent = true
+
+        XCTAssertTrue(
+            waitUntil(timeout: 60) {
+                assistantMessages(in: app).count > assistantCountBefore
+                    && app.staticTexts.matching(
+                        NSPredicate(
+                            format: "label == %@",
+                            expectedClarification)).count > clarificationCountBefore
+            },
+            "The host did not append a new no-action deterministic clarification for this request.")
+        taskReachedTerminalResponse = true
+
+        let status = app.descendants(matching: .any).matching(
+            identifier: "computer-use-status").firstMatch
+        XCTAssertTrue(
+            waitUntil(timeout: 10) {
+                (status.value as? String) == "User intervention required"
+                    && composer.exists
+                    && composer.isEnabled
+            },
+            "iOS displayed the clarification but did not expose the typed user-intervention outcome. Status value: \(String(describing: status.value))")
+        XCTAssertFalse(
+            app.descendants(matching: .any)[
+                "computer-use-intervention-guidance"].exists,
+            "A terminal clarification was incorrectly shown as a resumable takeover.")
+        XCTAssertFalse(
+            app.descendants(matching: .any).matching(
+                NSPredicate(format: "label == %@", "Approve before AI continues"))
+                .firstMatch.exists,
+            "The no-action clarification unexpectedly entered approval.")
+        XCTAssertFalse(
+            app.buttons["computer-use-take-control"].exists
+                || app.buttons["computer-use-resume-ai"].exists
+                || app.buttons["computer-use-stop-task"].exists,
+            "Terminal clarification left lifecycle controls active.")
+    }
+
+    private func assistantMessages(in app: XCUIApplication) -> XCUIElementQuery {
+        app.staticTexts.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "AI: "))
+    }
+
+    private func waitUntil(
+        timeout: TimeInterval,
+        predicate: () -> Bool
+    ) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            if predicate() { return true }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.25))
+        } while Date() < deadline
+        return predicate()
+    }
+}

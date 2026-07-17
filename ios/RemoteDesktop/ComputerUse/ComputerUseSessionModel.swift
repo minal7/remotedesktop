@@ -59,6 +59,9 @@ final class ComputerUseSessionModel: ObservableObject {
     @Published private(set) var state: State = .ready
     @Published private(set) var statusText = "Ready for a request"
     @Published private(set) var retryPrompt: String?
+    /// The newest machine-readable result received for the active or most
+    /// recently finished request. Legacy hosts leave this `nil`.
+    @Published private(set) var latestTerminalOutcome: ComputerUseTerminalOutcome?
     /// Becomes true only when `SessionModel` receives the authenticated host
     /// hello and calls `start()`. CloudKit recovery and lifecycle traffic must
     /// never leave the phone while the WebRTC peer is still unauthenticated.
@@ -176,8 +179,14 @@ final class ComputerUseSessionModel: ObservableObject {
                 createdAt: restored.createdAt))
             switch restored.lastControlKind {
             case .pause:
+                let guidance = Self.boundedInterventionGuidance(
+                    restored.interventionGuidance)
+                userInterventionGuidance = guidance
+                if guidance != nil {
+                    latestTerminalOutcome = .userInterventionRequired
+                }
                 state = .paused
-                statusText = "AI paused — you're in control"
+                statusText = guidance ?? "AI paused — you're in control"
             case .cancel:
                 state = .working
                 statusText = "Confirming your previous Stop…"
@@ -249,6 +258,11 @@ final class ComputerUseSessionModel: ObservableObject {
             return
         }
 
+        // A valid new submission attempt supersedes the presentation of the
+        // previous task's terminal result even if durable recovery storage is
+        // unavailable. Otherwise the error below can retain a stale green
+        // "Task completed" status from an unrelated request.
+        latestTerminalOutcome = nil
         let operationGeneration = advanceStateGeneration()
         let messageID = UUID().uuidString
         let request = ComputerUsePromptRequest(
@@ -335,6 +349,7 @@ final class ComputerUseSessionModel: ObservableObject {
               activePromptID != nil,
               lastControlKind != .cancel else { return }
         let operationGeneration = advanceStateGeneration()
+        latestTerminalOutcome = nil
         userInterventionGuidance = nil
         responseTimeoutTask?.cancel()
         responseTimeoutTask = nil
@@ -348,6 +363,7 @@ final class ComputerUseSessionModel: ObservableObject {
               activePromptID != nil,
               lastControlKind != .cancel else { return }
         let operationGeneration = advanceStateGeneration()
+        latestTerminalOutcome = nil
         userInterventionGuidance = nil
         responseTimeoutTask?.cancel()
         responseTimeoutTask = nil
@@ -364,6 +380,7 @@ final class ComputerUseSessionModel: ObservableObject {
               activePromptID != nil,
               lastControlKind != .cancel else { return }
         let operationGeneration = advanceStateGeneration()
+        latestTerminalOutcome = nil
         userInterventionGuidance = nil
         responseTimeoutTask?.cancel()
         responseTimeoutTask = nil
@@ -732,13 +749,7 @@ final class ComputerUseSessionModel: ObservableObject {
                     author: .assistant,
                     text: assistantText,
                     createdAt: envelope.createdAt))
-                state = .ready
-                statusText = assistantText
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                    .hasSuffix("?")
-                    ? "Answer the question so your Mac can continue"
-                    : "Ready for another request"
-                clearActivePrompt()
+                applyAssistantOutcome(update?.outcome, text: assistantText)
             case .status:
                 if let update = try? ComputerUseTaskUpdate.decodeBody(envelope.body) {
                     guard update.taskID == activePromptID else { continue }
@@ -750,7 +761,7 @@ final class ComputerUseSessionModel: ObservableObject {
                     retryPrompt = nil
                     retryMessageID = nil
                     retryWireBody = nil
-                    applyHostStatus(update.text)
+                    applyHostStatus(update.text, outcome: update.outcome)
                 } else {
                     // Legacy raw statuses have no task identity. They may
                     // describe the active v2 task, but must never resurrect a
@@ -921,29 +932,57 @@ final class ComputerUseSessionModel: ObservableObject {
     }
 
     func applyHostStatus(_ status: String) {
+        applyHostStatus(status, outcome: nil)
+    }
+
+    private func applyHostStatus(
+        _ status: String,
+        outcome: ComputerUseTerminalOutcome?
+    ) {
         advanceStateGeneration()
+        if let outcome {
+            latestTerminalOutcome = outcome
+            switch outcome {
+            case .userInterventionRequired:
+                enterUserIntervention(status)
+                return
+            case .taskCompleted, .unableToComplete:
+                userInterventionGuidance = nil
+                responseTimeoutTask?.cancel()
+                responseTimeoutTask = nil
+                state = .ready
+                statusText = status
+                clearActivePrompt()
+                return
+            }
+        }
         if let guidance = ComputerUseStatusSignal.userInterventionMessage(
             from: status) {
-            userInterventionGuidance = guidance
-            state = .paused
-            statusText = guidance
-            responseTimeoutTask?.cancel()
-            responseTimeoutTask = nil
-            stabilizeAuthoritativePause()
+            enterUserIntervention(guidance)
             return
         }
         switch status {
         case "working":
+            latestTerminalOutcome = nil
             userInterventionGuidance = nil
             state = .working
             statusText = "Your Mac is working on it…"
             scheduleResponseTimeout()
         case "paused":
-            userInterventionGuidance = nil
+            // A typed intervention causes iOS to persist a versioned Pause so
+            // the host and phone agree that the person owns the screen. The
+            // host's later generic `paused` acknowledgement must not erase the
+            // specific instruction that caused that safety pause.
+            let interventionGuidance = latestTerminalOutcome
+                == .userInterventionRequired
+                ? userInterventionGuidance
+                : nil
+            userInterventionGuidance = interventionGuidance
             responseTimeoutTask?.cancel()
             responseTimeoutTask = nil
             state = .paused
-            statusText = "AI paused — you're in control"
+            statusText = interventionGuidance
+                ?? "AI paused — you're in control"
             stabilizeAuthoritativePause()
         case "ready":
             userInterventionGuidance = nil
@@ -980,6 +1019,64 @@ final class ComputerUseSessionModel: ObservableObject {
                 if activePromptID != nil { scheduleResponseTimeout() }
             }
         }
+    }
+
+    private func applyAssistantOutcome(
+        _ outcome: ComputerUseTerminalOutcome?,
+        text: String
+    ) {
+        latestTerminalOutcome = outcome
+        // Assistant envelopes are conversational task boundaries. Even a
+        // typed intervention outcome is a terminal clarification whose answer
+        // arrives as a new prompt; resumable live-screen takeover is carried
+        // by a status envelope instead.
+        userInterventionGuidance = nil
+        state = .ready
+        switch outcome {
+        case .taskCompleted:
+            statusText = "Task completed — ready for another request"
+        case .userInterventionRequired:
+            statusText = "Your input is required before your Mac can continue"
+        case .unableToComplete:
+            statusText = "Unable to complete — ready for another request"
+        case nil:
+            statusText = text
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .hasSuffix("?")
+                ? "Answer the question so your Mac can continue"
+                : "Ready for another request"
+        }
+        clearActivePrompt()
+    }
+
+    private func enterUserIntervention(_ status: String) {
+        let unboundedGuidance = ComputerUseStatusSignal
+            .userInterventionMessage(from: status) ?? status
+        let guidance = Self.boundedInterventionGuidance(unboundedGuidance)
+            ?? "Your input is required before AI can continue."
+        latestTerminalOutcome = .userInterventionRequired
+        userInterventionGuidance = guidance
+        state = .paused
+        statusText = guidance
+        responseTimeoutTask?.cancel()
+        responseTimeoutTask = nil
+        // Persist the exact handoff instruction even when a Pause revision was
+        // already durable. Without this write, a host acknowledgement that
+        // arrives after Take control could be visible now but disappear after
+        // an app relaunch because `stabilizeAuthoritativePause` has no newer
+        // control to allocate.
+        _ = persistActivePrompt()
+        stabilizeAuthoritativePause()
+    }
+
+    private static func boundedInterventionGuidance(
+        _ value: String?
+    ) -> String? {
+        guard let value else { return nil }
+        let bounded = String(value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .prefix(ComputerUseStatusSignal.maximumInterventionCharacters))
+        return bounded.isEmpty ? nil : bounded
     }
 
     /// A host can pause on its own for manual input or because a Resume could
@@ -1132,7 +1229,8 @@ final class ComputerUseSessionModel: ObservableObject {
             createdAt: createdAt,
             controlRevision: controlRevision == 0 ? nil : controlRevision,
             lastControlKind: lastControlKind,
-            approvalDecision: approvalSubmission))
+            approvalDecision: approvalSubmission,
+            interventionGuidance: userInterventionGuidance))
     }
 
     private func clearActivePrompt() {

@@ -34,6 +34,10 @@ struct ComputerUsePendingPrompt: Codable, Equatable, Sendable {
     /// A locked, durable approval choice. It is removed only by a terminal task
     /// result or a genuinely new approval request ID.
     let approvalDecision: ComputerUsePendingApprovalDecision?
+    /// Exact bounded guidance for a resumable person-only handoff. Presence is
+    /// also durable proof that the active paused task's typed outcome is
+    /// `userInterventionRequired`; older recovery records decode it as `nil`.
+    let interventionGuidance: String?
 
     init(
         hostID: String,
@@ -45,7 +49,8 @@ struct ComputerUsePendingPrompt: Codable, Equatable, Sendable {
         createdAt: Date,
         controlRevision: UInt64? = nil,
         lastControlKind: ComputerUseEnvelope.Kind? = nil,
-        approvalDecision: ComputerUsePendingApprovalDecision? = nil
+        approvalDecision: ComputerUsePendingApprovalDecision? = nil,
+        interventionGuidance: String? = nil
     ) {
         self.hostID = hostID
         self.pairingCode = pairingCode
@@ -57,6 +62,11 @@ struct ComputerUsePendingPrompt: Codable, Equatable, Sendable {
         self.controlRevision = controlRevision
         self.lastControlKind = lastControlKind
         self.approvalDecision = approvalDecision
+        self.interventionGuidance = interventionGuidance.map {
+            String($0
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .prefix(ComputerUseStatusSignal.maximumInterventionCharacters))
+        }
     }
 
     var exactWireBody: String { wireBody ?? prompt }

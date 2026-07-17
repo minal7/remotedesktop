@@ -22,6 +22,7 @@ protocol ComputerUseTaskAwareExecuting: ComputerUseExecuting {
     func execute(
         taskID: String,
         prompt: String,
+        trustedUserPrompt: String,
         tools: ComputerUseHostTools,
         progress: @escaping (String) -> Void
     ) async throws -> ComputerUseExecutionResult
@@ -83,12 +84,68 @@ final class MCPFirstComputerUseExecutor: ComputerUseTaskAwareExecuting, MCPAppro
     private struct StepResult: Equatable {
         let toolName: String
         let risk: MCPToolRisk
+        let arguments: [String: MCPJSONValue]
+        let readProvenance: ReadProvenance?
         let text: String
+        let structuredContent: MCPJSONValue?
+        let wasTruncated: Bool
+    }
+
+    private enum ReadDomain: String, CaseIterable, Equatable, Hashable {
+        case contacts
+        case reminders
+        case shortcuts
+        case focusedApp
+        case runningApps
+        case windows
+        case permissions
+    }
+
+    private enum ReminderCompletionIntent: Equatable {
+        case incompleteOnly
+        case completedOnly
+        case all
+        case unspecified
+    }
+
+    /// Host-reviewed meaning of one exact read call. This is captured before
+    /// execution and retained beside the result so completion cannot reinterpret
+    /// arguments after seeing private data.
+    private enum ReadProvenance: Equatable {
+        case contacts(query: String, limit: Int?)
+        case reminders(
+            completion: ReminderCompletionIntent,
+            listName: String?,
+            includeCompleted: Bool,
+            limit: Int?)
+        case shortcuts
+        case focusedApp
+        case runningApps
+        case windowApplicationInventoryDependency
+        case windows(pid: Int?, applicationName: String?)
+        case permissions
+
+        var completionDomain: ReadDomain? {
+            switch self {
+            case .contacts: return .contacts
+            case .reminders: return .reminders
+            case .shortcuts: return .shortcuts
+            case .focusedApp: return .focusedApp
+            case .runningApps: return .runningApps
+            case .windowApplicationInventoryDependency: return nil
+            case .windows: return .windows
+            case .permissions: return .permissions
+            }
+        }
     }
 
     private struct PlanningState: Equatable {
         let taskID: String
         let originalPrompt: String
+        /// The current user-authored turn from the signed task envelope. The
+        /// model prompt may contain conversation history, so it must never be
+        /// used to authorize a read result as relevant to this request.
+        let trustedUserPrompt: String
         var results: [StepResult]
         var executedCallDigests: Set<String>
     }
@@ -235,6 +292,7 @@ final class MCPFirstComputerUseExecutor: ComputerUseTaskAwareExecuting, MCPAppro
         return try await execute(
             taskID: "legacy-\(digest)",
             prompt: prompt,
+            trustedUserPrompt: prompt,
             tools: tools,
             progress: progress)
     }
@@ -242,6 +300,21 @@ final class MCPFirstComputerUseExecutor: ComputerUseTaskAwareExecuting, MCPAppro
     func execute(
         taskID: String,
         prompt: String,
+        tools: ComputerUseHostTools,
+        progress: @escaping (String) -> Void
+    ) async throws -> ComputerUseExecutionResult {
+        try await execute(
+            taskID: taskID,
+            prompt: prompt,
+            trustedUserPrompt: prompt,
+            tools: tools,
+            progress: progress)
+    }
+
+    func execute(
+        taskID: String,
+        prompt: String,
+        trustedUserPrompt: String,
         tools: ComputerUseHostTools,
         progress: @escaping (String) -> Void
     ) async throws -> ComputerUseExecutionResult {
@@ -257,6 +330,7 @@ final class MCPFirstComputerUseExecutor: ComputerUseTaskAwareExecuting, MCPAppro
         if let mailResult = try await routeCompleteMailBeforePlanner(
             taskID: taskID,
             prompt: prompt,
+            trustedUserPrompt: trustedUserPrompt,
             progress: progress) {
             return mailResult
         }
@@ -291,12 +365,14 @@ final class MCPFirstComputerUseExecutor: ComputerUseTaskAwareExecuting, MCPAppro
         // navigation nor checkout controls. Route it directly to the verified
         // visual executor so Apple Intelligence cannot probe an unrelated
         // local app (for example Reminders) before eventually falling back.
-        if OSAtlasComputerUseExecutor.isDeliveryQuoteTask(prompt) {
+        if Self.isPureDeliveryQuoteReadRequest(trustedUserPrompt) {
             Self.log.info(
                 "Routed delivery quote directly to local visual computer use")
             progress("Using visual control for this delivery quote…")
             return try await visualFallback.execute(
+                taskID: taskID,
                 prompt: prompt,
+                trustedUserPrompt: trustedUserPrompt,
                 tools: tools,
                 progress: progress)
         }
@@ -305,12 +381,15 @@ final class MCPFirstComputerUseExecutor: ComputerUseTaskAwareExecuting, MCPAppro
             if let mailResult = try await routeMailWithoutPlanner(
                 taskID: taskID,
                 prompt: prompt,
+                trustedUserPrompt: trustedUserPrompt,
                 progress: progress) {
                 return mailResult
             }
             progress("Using visual control on this Mac…")
             return try await visualFallback.execute(
+                taskID: taskID,
                 prompt: prompt,
+                trustedUserPrompt: trustedUserPrompt,
                 tools: tools,
                 progress: progress)
         }
@@ -318,6 +397,7 @@ final class MCPFirstComputerUseExecutor: ComputerUseTaskAwareExecuting, MCPAppro
         let state = PlanningState(
             taskID: taskID,
             originalPrompt: prompt,
+            trustedUserPrompt: trustedUserPrompt,
             results: [],
             executedCallDigests: [])
 
@@ -331,13 +411,16 @@ final class MCPFirstComputerUseExecutor: ComputerUseTaskAwareExecuting, MCPAppro
             if let mailResult = try await routeMailWithoutPlanner(
                 taskID: taskID,
                 prompt: prompt,
+                trustedUserPrompt: trustedUserPrompt,
                 progress: progress) {
                 return mailResult
             }
             guard Self.canFallBackAfterPlannerError(error) else { throw error }
             progress("This app needs visual control — switching locally…")
             return try await visualFallback.execute(
+                taskID: taskID,
                 prompt: prompt,
+                trustedUserPrompt: trustedUserPrompt,
                 tools: tools,
                 progress: progress)
         } catch let error as ExecutorError {
@@ -353,6 +436,7 @@ final class MCPFirstComputerUseExecutor: ComputerUseTaskAwareExecuting, MCPAppro
             if let mailResult = try await routeMailWithoutPlanner(
                 taskID: taskID,
                 prompt: prompt,
+                trustedUserPrompt: trustedUserPrompt,
                 progress: progress) {
                 return mailResult
             }
@@ -360,7 +444,9 @@ final class MCPFirstComputerUseExecutor: ComputerUseTaskAwareExecuting, MCPAppro
                 "Structured planner stalled on non-approved steps; switching to local visual control")
             progress("Structured tools can’t finish this task — switching locally…")
             return try await visualFallback.execute(
+                taskID: taskID,
                 prompt: prompt,
+                trustedUserPrompt: trustedUserPrompt,
                 tools: tools,
                 progress: progress)
         } catch {
@@ -369,6 +455,7 @@ final class MCPFirstComputerUseExecutor: ComputerUseTaskAwareExecuting, MCPAppro
             if let mailResult = try await routeMailWithoutPlanner(
                 taskID: taskID,
                 prompt: prompt,
+                trustedUserPrompt: trustedUserPrompt,
                 progress: progress) {
                 return mailResult
             }
@@ -403,7 +490,11 @@ final class MCPFirstComputerUseExecutor: ComputerUseTaskAwareExecuting, MCPAppro
             state.results.append(StepResult(
                 toolName: prepared.call.toolName,
                 risk: prepared.call.risk,
-                text: Self.boundedResult(result.text)))
+                arguments: prepared.call.arguments,
+                readProvenance: nil,
+                text: Self.boundedResult(result.text),
+                structuredContent: result.structuredContent,
+                wasTruncated: result.wasTruncated))
 
             // Approval-required tools are intentionally terminal operations:
             // returning their verified local result avoids ever asking a model
@@ -526,25 +617,23 @@ final class MCPFirstComputerUseExecutor: ComputerUseTaskAwareExecuting, MCPAppro
                         guard !clarification.isEmpty else {
                             throw AppleFoundationMCPPlannerError.noProposal
                         }
-                        return .completed(clarification)
+                        return .clarificationRequired(clarification)
                     }
                     if let completion = Self.sentinelBody(
                         "TASK_COMPLETE:",
                         in: bounded) {
-                        // Free text is not execution evidence. Structured
-                        // approval-required actions return terminally from
-                        // continueAfterApproval, so this branch is only valid
-                        // for a response grounded in a real read-only result.
+                        // Planner prose is only a stop signal. The returned
+                        // answer is projected by host code from the latest
+                        // typed, untruncated read result; no planner-authored
+                        // factual claim crosses this boundary.
                         guard !completion.isEmpty,
-                              state.results.contains(where: {
-                                  $0.risk == .readOnly
-                              }),
+                              let answer = Self.hostProjectedReadOnlyAnswer(
+                                  state: state),
                               !Self.requestsConsequentialMutation(
-                                  state.originalPrompt),
-                              !Self.claimsConsequentialMutation(completion) else {
+                                  state.trustedUserPrompt) else {
                             throw AppleFoundationMCPPlannerError.noProposal
                         }
-                        return .completed(completion)
+                        return .completed(answer)
                     }
                     // Initial or untyped free text can never complete a task.
                     throw AppleFoundationMCPPlannerError.noProposal
@@ -563,18 +652,43 @@ final class MCPFirstComputerUseExecutor: ComputerUseTaskAwareExecuting, MCPAppro
                         pendingApprovalDigest = call.canonicalDigest
                         return .mcpApprovalRequired(prepared)
 
-                    case .readOnly, .reversible:
+                    case .readOnly:
+                        // A planner may see untrusted conversation history.
+                        // It cannot turn that context into a local data read:
+                        // the signed current user turn must independently
+                        // authorize this exact read-tool category.
+                        guard let provenance = Self.reviewedReadProvenance(
+                            for: call,
+                            state: state) else {
+                            throw AppleFoundationMCPPlannerError.noProposal
+                        }
                         progress(Self.progressMessage(for: call.toolName))
                         let result = try await clientPool.execute(call)
                         guard !result.isError else {
                             throw ExecutorError.structuredToolFailed(
                                 Self.boundedFailure(result.text))
                         }
-                        state.executedCallDigests.insert(call.canonicalDigest)
-                        state.results.append(StepResult(
+                        let stepResult = StepResult(
                             toolName: call.toolName,
                             risk: call.risk,
-                            text: Self.boundedResult(result.text)))
+                            arguments: call.arguments,
+                            readProvenance: provenance,
+                            text: Self.boundedResult(result.text),
+                            structuredContent: result.structuredContent,
+                            wasTruncated: result.wasTruncated)
+                        guard Self.hostProjection(
+                            for: stepResult,
+                            trustedPrompt: state.trustedUserPrompt) != nil else {
+                            throw AppleFoundationMCPPlannerError.noProposal
+                        }
+                        state.executedCallDigests.insert(call.canonicalDigest)
+                        state.results.append(stepResult)
+
+                    case .reversible:
+                        // No reversible operation is currently reviewed for
+                        // the planner-visible surface. Keep future registry
+                        // drift fail-closed until it gets a typed intent gate.
+                        throw MCPClientError.toolNotAllowed(call.toolName)
                     }
                 }
             }
@@ -590,6 +704,7 @@ final class MCPFirstComputerUseExecutor: ComputerUseTaskAwareExecuting, MCPAppro
     private func routeCompleteMailBeforePlanner(
         taskID: String,
         prompt: String,
+        trustedUserPrompt: String,
         progress: @escaping (String) -> Void
     ) async throws -> ComputerUseExecutionResult? {
         guard case .request(let request) = Self.deterministicMailDecision(
@@ -599,6 +714,7 @@ final class MCPFirstComputerUseExecutor: ComputerUseTaskAwareExecuting, MCPAppro
         return try await prepareDeterministicMailApproval(
             taskID: taskID,
             prompt: prompt,
+            trustedUserPrompt: trustedUserPrompt,
             request: request,
             progress: progress)
     }
@@ -606,6 +722,7 @@ final class MCPFirstComputerUseExecutor: ComputerUseTaskAwareExecuting, MCPAppro
     private func routeMailWithoutPlanner(
         taskID: String,
         prompt: String,
+        trustedUserPrompt: String,
         progress: @escaping (String) -> Void
     ) async throws -> ComputerUseExecutionResult? {
         switch Self.deterministicMailDecision(for: prompt) {
@@ -613,12 +730,13 @@ final class MCPFirstComputerUseExecutor: ComputerUseTaskAwareExecuting, MCPAppro
             return nil
 
         case .clarification(let question):
-            return .completed(question)
+            return .clarificationRequired(question)
 
         case .request(let request):
             return try await prepareDeterministicMailApproval(
                 taskID: taskID,
                 prompt: prompt,
+                trustedUserPrompt: trustedUserPrompt,
                 request: request,
                 progress: progress)
         }
@@ -627,6 +745,7 @@ final class MCPFirstComputerUseExecutor: ComputerUseTaskAwareExecuting, MCPAppro
     private func prepareDeterministicMailApproval(
         taskID: String,
         prompt: String,
+        trustedUserPrompt: String,
         request: DeterministicMailRequest,
         progress: @escaping (String) -> Void
     ) async throws -> ComputerUseExecutionResult {
@@ -648,6 +767,7 @@ final class MCPFirstComputerUseExecutor: ComputerUseTaskAwareExecuting, MCPAppro
         pendingApprovalState = PlanningState(
             taskID: taskID,
             originalPrompt: prompt,
+            trustedUserPrompt: trustedUserPrompt,
             results: [],
             executedCallDigests: [])
         pendingApprovalDigest = call.canonicalDigest
@@ -1213,28 +1333,1105 @@ final class MCPFirstComputerUseExecutor: ComputerUseTaskAwareExecuting, MCPAppro
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private static func claimsConsequentialMutation(_ message: String) -> Bool {
-        let normalized = message.lowercased()
-        let firstPersonClaims = [
-            "i sent", "i created", "i added", "i scheduled", "i ran",
-            "i ordered", "i purchased", "i paid", "i submitted", "i deleted",
-        ]
-        if firstPersonClaims.contains(where: normalized.contains) { return true }
+    /// A TASK_COMPLETE signal is accepted only after every read domain the
+    /// current user explicitly requested has its own host-reviewed proof.
+    /// Dependency reads never appear in the final answer and cannot substitute
+    /// for a requested domain.
+    private static func hostProjectedReadOnlyAnswer(
+        state: PlanningState
+    ) -> String? {
+        let requiredDomains = explicitlyRequestedReadDomains(
+            state.trustedUserPrompt)
+        guard !requiredDomains.isEmpty else { return nil }
 
-        let claimedPairs: [(String, [String])] = [
-            ("email", ["sent", "delivered"]),
-            ("message", ["sent", "delivered"]),
-            ("reminder", ["created", "added"]),
-            ("event", ["created", "added", "scheduled"]),
-            ("shortcut", ["ran", "run", "finished"]),
-            ("order", ["placed", "ordered", "completed"]),
-            ("purchase", ["purchased", "completed"]),
-            ("payment", ["paid", "submitted", "completed"]),
-            ("form", ["submitted"]),
+        var sections: [String] = []
+        for domain in ReadDomain.allCases where requiredDomains.contains(domain) {
+            let evidence = state.results.filter {
+                $0.risk == .readOnly
+                    && $0.readProvenance?.completionDomain == domain
+            }
+            guard !evidence.isEmpty else { return nil }
+            let projections = evidence.compactMap {
+                hostProjection(
+                    for: $0,
+                    trustedPrompt: state.trustedUserPrompt)
+            }
+            guard projections.count == evidence.count else { return nil }
+            sections.append(projections.joined(separator: "\n"))
+        }
+        return sections.joined(separator: "\n\n")
+    }
+
+    /// Turns one exact, pre-reviewed read call and its typed result into prose.
+    /// Raw result text and planner wording are never consulted.
+    private static func hostProjection(
+        for result: StepResult,
+        trustedPrompt: String
+    ) -> String? {
+        guard result.risk == .readOnly,
+              !result.wasTruncated,
+              let provenance = result.readProvenance,
+              case .object(let root)? = result.structuredContent,
+              root["ok"] == .bool(true) else { return nil }
+
+        switch provenance {
+        case .contacts(let query, let limit):
+            let requiresAllValues = requiresExhaustiveProjection(
+                trustedPrompt,
+                domain: .contacts)
+            guard result.toolName == "contacts_search",
+                  exactContactArguments(
+                      result.arguments,
+                      query: query,
+                      limit: limit),
+                  trustedPromptAffirmativelyRequestsPrivateRead(
+                      trustedPrompt,
+                      domain: .contacts,
+                      requiredEntity: query),
+                  case .array(let values)? = root["contacts"],
+                  limit.map({ values.count <= $0 }) ?? true else {
+                return nil
+            }
+            var rows: [String] = []
+            for value in values {
+                guard case .object(let contact) = value,
+                      let name = projectedString(contact["name"]),
+                      let phones = projectedStringArray(contact["phones"]),
+                      let emails = projectedStringArray(contact["emails"]),
+                      contactMatchesQuery(
+                          query,
+                          name: name,
+                          phones: phones,
+                          emails: emails),
+                      let projectedPhones = projectedValues(
+                          phones,
+                          requireAll: requiresAllValues),
+                      let projectedEmails = projectedValues(
+                          emails,
+                          requireAll: requiresAllValues) else {
+                    return nil
+                }
+                rows.append(
+                    "\(name) — phones: \(projectedPhones); emails: \(projectedEmails).")
+            }
+            return projectedList(
+                heading: boundedCollectionHeading(
+                    "Contacts",
+                    limit: limit,
+                    trustedPrompt: trustedPrompt),
+                empty: "No matching contacts were found.",
+                rows: rows,
+                requireAll: requiresAllValues)
+
+        case .reminders(
+            let completion,
+            let listName,
+            let includeCompleted,
+            let limit):
+            guard result.toolName == "reminders_list",
+                  exactReminderArguments(
+                      result.arguments,
+                      includeCompleted: includeCompleted,
+                      limit: limit),
+                  case .array(let values)? = root["reminders"],
+                  limit.map({ values.count <= $0 }) ?? true else {
+                return nil
+            }
+            var rows: [String] = []
+            for value in values {
+                guard case .object(let reminder) = value,
+                      let title = projectedString(reminder["title"]),
+                      case .bool(let completed)? = reminder["completed"],
+                      let list = projectedString(reminder["list"]) else {
+                    return nil
+                }
+                if let listName,
+                   normalizedEntity(list) != normalizedEntity(listName) {
+                    return nil
+                }
+                switch completion {
+                case .incompleteOnly:
+                    guard !completed else { return nil }
+                case .completedOnly:
+                    if !completed { continue }
+                case .all, .unspecified:
+                    break
+                }
+                rows.append(
+                    "\(title) — \(completed ? "completed" : "incomplete"); list: \(list).")
+            }
+            return projectedList(
+                heading: boundedCollectionHeading(
+                    "Reminders",
+                    limit: limit,
+                    trustedPrompt: trustedPrompt),
+                empty: "No matching reminders were found.",
+                rows: rows,
+                requireAll: requiresExhaustiveProjection(
+                    trustedPrompt,
+                    domain: .reminders))
+
+        case .shortcuts:
+            guard result.toolName == "list_shortcuts",
+                  result.arguments.isEmpty,
+                  let names = projectedStringArray(root["names"]),
+                  case .integer(let count)? = root["count"],
+                  count == names.count else {
+                return nil
+            }
+            return projectedList(
+                heading: "Available Shortcuts (\(count)):",
+                empty: "No Apple Shortcuts are available.",
+                rows: names,
+                requireAll: requiresExhaustiveProjection(
+                    trustedPrompt,
+                    domain: .shortcuts))
+
+        case .focusedApp:
+            guard result.toolName == "focused_app",
+                  result.arguments.isEmpty,
+                  case .object(let app)? = root["app"],
+                  let name = projectedString(app["name"]),
+                  case .integer(let pid)? = app["pid"],
+                  let bundleIdentifier = projectedString(
+                      app["bundleIdentifier"]),
+                  case .bool(let active)? = app["isActive"] else {
+                return nil
+            }
+            return "Focused app: \(name) — PID \(pid); bundle: \(bundleIdentifier); active: \(active ? "yes" : "no")."
+
+        case .runningApps, .windowApplicationInventoryDependency:
+            guard result.toolName == "list_apps",
+                  result.arguments.isEmpty,
+                  case .array(let values)? = root["apps"] else {
+                return nil
+            }
+            var rows: [String] = []
+            var promptMatchedApplication = false
+            for value in values {
+                guard case .object(let app) = value,
+                      let name = projectedString(app["name"]),
+                      case .integer(let pid)? = app["pid"] else {
+                    return nil
+                }
+                var attributes = ["PID \(pid)"]
+                if let activeValue = app["isActive"] {
+                    guard case .bool(let active) = activeValue else {
+                        return nil
+                    }
+                    attributes.append("active: \(active ? "yes" : "no")")
+                }
+                if trustedPromptContainsEntity(name, prompt: trustedPrompt) {
+                    promptMatchedApplication = true
+                }
+                rows.append("\(name) — \(attributes.joined(separator: "; ")).")
+            }
+            if provenance == .windowApplicationInventoryDependency,
+               !promptMatchedApplication {
+                return nil
+            }
+            return projectedList(
+                heading: "Running apps:",
+                empty: "No running apps were reported.",
+                rows: rows,
+                requireAll: requiresExhaustiveProjection(
+                    trustedPrompt,
+                    domain: .runningApps))
+
+        case .windows(let requestedPID, let applicationName):
+            guard result.toolName == "list_windows",
+                  exactWindowArguments(
+                      result.arguments,
+                      pid: requestedPID),
+                  exactWindowResultScope(
+                      root["pid"],
+                      requestedPID: requestedPID),
+                  case .array(let values)? = root["windows"] else {
+                return nil
+            }
+            var rows: [String] = []
+            for value in values {
+                guard case .object(let window) = value,
+                      let title = projectedString(window["title"]),
+                      case .integer(let pid)? = window["pid"],
+                      case .integer(let index)? = window["index"] else {
+                    return nil
+                }
+                if let requestedPID, pid != requestedPID { return nil }
+                rows.append("\(title) — PID \(pid); index \(index).")
+            }
+            return projectedList(
+                heading: applicationName.map { "Open windows for \($0):" }
+                    ?? "Open windows:",
+                empty: "No matching open windows were found.",
+                rows: rows,
+                requireAll: requiresExhaustiveProjection(
+                    trustedPrompt,
+                    domain: .windows))
+
+        case .permissions:
+            guard result.toolName == "permissions_status",
+                  result.arguments.isEmpty,
+                  let rawStatus = projectedString(root["accessibility"]),
+                  let status = projectedAccessibilityStatus(rawStatus) else {
+                return nil
+            }
+            return "Accessibility permission: \(status)."
+        }
+    }
+
+    /// Private local data needs affirmative authority in the same bounded
+    /// clause as the domain it would expose. A domain noun elsewhere in the
+    /// turn is not enough: `do not show Jordan's contact` and
+    /// `without showing my reminders` are denials, not read requests. When a
+    /// contact query is known, bind that exact entity to the affirmative clause
+    /// as well so a permitted Avery lookup cannot authorize a negated Jordan
+    /// lookup from the same turn.
+    private static func trustedPromptAffirmativelyRequestsPrivateRead(
+        _ prompt: String,
+        domain: ReadDomain,
+        requiredEntity: String? = nil
+    ) -> Bool {
+        let domainWords: Set<String>
+        let domainPhrases: [String]
+        switch domain {
+        case .contacts:
+            domainWords = [
+                "contact", "contacts", "email", "number", "phone",
+                "telephone",
+            ]
+            domainPhrases = ["address book"]
+        case .reminders:
+            domainWords = ["reminder", "reminders", "todo", "todos"]
+            domainPhrases = ["to-do"]
+        default:
+            return false
+        }
+
+        var separated = prompt.folding(
+            options: [.caseInsensitive, .diacriticInsensitive],
+            locale: Locale(identifier: "en_US_POSIX")).lowercased()
+        let negatedSegmentMarker = "__negated_private_read__"
+        if let regex = try? NSRegularExpression(
+            pattern: #"(?i)\b(?:without|except|excluding|nor)\b|\b(?:other|rather)\s+than\b|\binstead\s+of\b|\bapart\s+from\b|\b(?:all|anything|everything)(?:\s+\w+){0,4}\s+but\b"#) {
+            separated = regex.stringByReplacingMatches(
+                in: separated,
+                range: NSRange(separated.startIndex..., in: separated),
+                withTemplate: "\n\(negatedSegmentMarker) ")
+        }
+        if let regex = try? NSRegularExpression(
+            pattern: #"(?i)[.!?;\n]+|,\s*but\b|\bbut\b"#) {
+            separated = regex.stringByReplacingMatches(
+                in: separated,
+                range: NSRange(separated.startIndex..., in: separated),
+                withTemplate: "\n")
+        }
+
+        let readCues: Set<String> = [
+            "check", "display", "find", "get", "list", "look", "read",
+            "report", "search", "show", "status", "tell", "what", "which",
+            "who",
         ]
-        return claimedPairs.contains { noun, verbs in
-            normalized.contains(noun)
-                && verbs.contains(where: normalized.contains)
+        let interrogativeStarts: Set<String> = [
+            "are", "do", "does", "has", "have", "is",
+        ]
+        let explicitNegativeWords: Set<String> = [
+            "avoid", "cannot", "cant", "dont", "exclude", "excluding",
+            "never", "no", "not", "omit", "omitting", "refuse", "skip",
+            "skipping", "without",
+        ]
+
+        func containsExplicitNegation(_ words: ArraySlice<String>) -> Bool {
+            if !Set(words).isDisjoint(with: explicitNegativeWords) {
+                return true
+            }
+            let values = Array(words)
+            guard values.count >= 2 else { return false }
+            return (0 ..< values.count - 1).contains { index in
+                (values[index] == "don" && values[index + 1] == "t")
+                    || (values[index] == "do" && values[index + 1] == "not")
+                    || (values[index] == "can" && values[index + 1] == "not")
+            }
+        }
+
+        for rawSegment in separated.split(separator: "\n").map(String.init) {
+            let inheritedNegation = rawSegment.contains(negatedSegmentMarker)
+            let segment = rawSegment.replacingOccurrences(
+                of: negatedSegmentMarker,
+                with: "")
+            let words = segment.split {
+                !$0.isLetter && !$0.isNumber
+            }.map(String.init)
+            guard !words.isEmpty, !inheritedNegation else { continue }
+            if let requiredEntity,
+               !trustedPromptContainsEntity(requiredEntity, prompt: segment) {
+                continue
+            }
+
+            var domainIndices = words.indices.filter {
+                domainWords.contains(words[$0])
+            }
+            for phrase in domainPhrases {
+                let phraseWords = normalizedEntity(phrase).split(separator: " ")
+                    .map(String.init)
+                guard !phraseWords.isEmpty,
+                      words.count >= phraseWords.count else { continue }
+                for start in 0 ... (words.count - phraseWords.count)
+                where Array(words[start ..< start + phraseWords.count])
+                        == phraseWords {
+                    domainIndices.append(start + phraseWords.count - 1)
+                }
+            }
+            guard !domainIndices.isEmpty else { continue }
+
+            let cueIndices = words.indices.filter { index in
+                readCues.contains(words[index])
+                    || (index == words.startIndex
+                        && interrogativeStarts.contains(words[index]))
+            }
+            guard !cueIndices.isEmpty else { continue }
+
+            for domainIndex in domainIndices {
+                // Authority must lead the private-data noun. A later noun that
+                // happens to look like a read cue (`email report status`) cannot
+                // retroactively turn an earlier Contacts/Reminders mention into
+                // permission to access local data.
+                let cueIndex = cueIndices.last(where: { $0 <= domainIndex })
+                guard let cueIndex else { continue }
+                let prefix = words[..<cueIndex]
+                let cueToDomainStart = min(cueIndex + 1, domainIndex)
+                let cueToDomain = words[
+                    cueToDomainStart ... max(cueToDomainStart, domainIndex)]
+                if !containsExplicitNegation(prefix),
+                   !containsExplicitNegation(cueToDomain) {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
+    private static func trustedPromptIsRelevant(
+        _ prompt: String,
+        to toolName: String
+    ) -> Bool {
+        let normalized = prompt.folding(
+            options: [.caseInsensitive, .diacriticInsensitive],
+            locale: Locale(identifier: "en_US_POSIX")).lowercased()
+        let orderedWords = normalized.split {
+            !$0.isLetter && !$0.isNumber
+        }.map(String.init)
+        let words = Set(orderedWords)
+        let readCues: Set<String> = [
+            "check", "display", "find", "get", "list", "look", "read",
+            "report", "search", "show", "status", "tell", "what", "which",
+            "who",
+        ]
+        let interrogativeStarts: Set<String> = [
+            "are", "do", "does", "has", "have", "is",
+        ]
+        guard !words.intersection(readCues).isEmpty
+                || orderedWords.first.map(interrogativeStarts.contains) == true else {
+            return false
+        }
+
+        switch toolName {
+        case "contacts_search":
+            guard words.intersection([
+                "add", "change", "create", "delete", "edit", "remove",
+                "update",
+            ]).isEmpty else { return false }
+            return trustedPromptAffirmativelyRequestsPrivateRead(
+                prompt,
+                domain: .contacts)
+
+        case "reminders_list":
+            guard words.intersection([
+                "add", "change", "complete", "create", "delete", "edit",
+                "mark", "remove", "update",
+            ]).isEmpty else { return false }
+            return trustedPromptAffirmativelyRequestsPrivateRead(
+                prompt,
+                domain: .reminders)
+
+        case "list_shortcuts":
+            guard words.intersection([
+                "create", "delete", "remove",
+            ]).isEmpty else { return false }
+            let executionWords = words.intersection(["execute", "run"])
+            if !executionWords.isEmpty {
+                let explicitlyReadOnly = normalized.contains("do not run")
+                    || normalized.contains("don't run")
+                    || normalized.contains("do not execute")
+                    || normalized.contains("don't execute")
+                    || normalized.contains("without running")
+                    || normalized.contains("without executing")
+                guard explicitlyReadOnly else { return false }
+            }
+            return words.contains("shortcut") || words.contains("shortcuts")
+
+        case "focused_app":
+            guard words.intersection([
+                "activate", "close", "launch", "open", "quit", "start",
+                "switch", "terminate",
+            ]).isEmpty else { return false }
+            let appWords: Set<String> = ["app", "application", "program"]
+            let focusWords: Set<String> = [
+                "active", "current", "currently", "focus", "focused",
+                "frontmost", "using",
+            ]
+            return !words.intersection(appWords).isEmpty
+                && !words.intersection(focusWords).isEmpty
+
+        case "list_apps":
+            guard words.intersection([
+                "activate", "close", "launch", "quit", "start", "switch",
+                "terminate",
+            ]).isEmpty else { return false }
+            let appWords: Set<String> = [
+                "app", "application", "applications", "apps", "process",
+                "processes", "program", "programs",
+            ]
+            let inventoryWords: Set<String> = [
+                "list", "open", "running",
+            ]
+            return !words.intersection(appWords).isEmpty
+                && !words.intersection(inventoryWords).isEmpty
+
+        case "list_windows":
+            guard words.intersection([
+                "activate", "close", "focus", "maximize", "minimize",
+                "move", "resize", "switch",
+            ]).isEmpty else { return false }
+            return words.contains("window") || words.contains("windows")
+
+        case "permissions_status":
+            guard words.intersection([
+                "change", "disable", "enable", "grant", "revoke",
+            ]).isEmpty else { return false }
+            return !words.intersection([
+                "access", "accessibility", "control", "permission",
+                "permissions",
+            ]).isEmpty
+
+        default:
+            return false
+        }
+    }
+
+    /// The fast visual quote route is read-only. Model conversation history is
+    /// never considered, and any unnegated follow-on effect keeps the request
+    /// on structured planning/approval instead of bypassing it.
+    private static func isPureDeliveryQuoteReadRequest(_ prompt: String) -> Bool {
+        guard OSAtlasComputerUseExecutor.isDeliveryQuoteTask(prompt) else {
+            return false
+        }
+        let effectPrompt: String
+        if let regex = try? NSRegularExpression(
+            pattern: #"(?i)\bcheck\s+out\b"#) {
+            effectPrompt = regex.stringByReplacingMatches(
+                in: prompt,
+                range: NSRange(prompt.startIndex..., in: prompt),
+                withTemplate: "checkout")
+        } else {
+            effectPrompt = prompt
+        }
+        let followUpEffectWords: Set<String> = [
+            "add", "buy", "checkout", "compose", "copy", "create", "draft",
+            "email", "message", "order", "pay", "place", "post", "purchase",
+            "save", "send", "share", "store", "submit", "text", "upload",
+            "write",
+        ]
+        return !AppleFoundationVisualActionRouter
+            .taskAffirmativelyRequestsOperation(
+                effectPrompt,
+                operationVerbs: followUpEffectWords)
+    }
+
+    private static func explicitlyRequestedReadDomains(
+        _ prompt: String
+    ) -> Set<ReadDomain> {
+        Set(ReadDomain.allCases.filter {
+            trustedPromptIsRelevant(prompt, to: toolName(for: $0))
+        })
+    }
+
+    private static func toolName(for domain: ReadDomain) -> String {
+        switch domain {
+        case .contacts: return "contacts_search"
+        case .reminders: return "reminders_list"
+        case .shortcuts: return "list_shortcuts"
+        case .focusedApp: return "focused_app"
+        case .runningApps: return "list_apps"
+        case .windows: return "list_windows"
+        case .permissions: return "permissions_status"
+        }
+    }
+
+    /// Reviews exact arguments against the trusted current turn before any
+    /// private read executes. The returned value is immutable provenance for
+    /// validating the typed result and terminal projection later.
+    private static func reviewedReadProvenance(
+        for call: MCPToolCall,
+        state: PlanningState
+    ) -> ReadProvenance? {
+        let prompt = state.trustedUserPrompt
+        let requested = explicitlyRequestedReadDomains(prompt)
+
+        switch call.toolName {
+        case "contacts_search":
+            guard requested.contains(.contacts),
+                  !requiresExhaustiveProjection(prompt, domain: .contacts),
+                  Set(call.arguments.keys).isSubset(of: ["query", "limit"]),
+                  case .string(let rawQuery)? = call.arguments["query"],
+                  let query = projectedString(.string(rawQuery)),
+                  normalizedEntity(query).count >= 2,
+                  trustedPromptAffirmativelyRequestsPrivateRead(
+                      prompt,
+                      domain: .contacts,
+                      requiredEntity: query),
+                  let reviewedLimit = reviewedOptionalPositiveInteger(
+                      call.arguments["limit"],
+                      maximum: 100),
+                  let limit = reviewedLimit else { return nil }
+            if let requestedLimit = requestedResultLimit(prompt),
+               limit != requestedLimit {
+                return nil
+            }
+            return .contacts(query: query, limit: limit)
+
+        case "reminders_list":
+            guard requested.contains(.reminders),
+                  !requiresExhaustiveProjection(prompt, domain: .reminders),
+                  Set(call.arguments.keys).isSubset(of: [
+                      "include_completed", "limit",
+                  ]),
+                  case .bool(let includeCompleted)? =
+                      call.arguments["include_completed"],
+                  let reviewedLimit = reviewedOptionalPositiveInteger(
+                      call.arguments["limit"],
+                      maximum: 100),
+                  let limit = reviewedLimit else { return nil }
+            let completion = reminderCompletionIntent(prompt)
+            switch completion {
+            case .incompleteOnly where includeCompleted:
+                return nil
+            case .completedOnly where !includeCompleted:
+                return nil
+            case .all where !includeCompleted:
+                return nil
+            case .incompleteOnly, .completedOnly, .all, .unspecified:
+                break
+            }
+            if let requestedLimit = requestedResultLimit(prompt),
+               limit != requestedLimit {
+                return nil
+            }
+            return .reminders(
+                completion: completion,
+                listName: requestedReminderListName(prompt),
+                includeCompleted: includeCompleted,
+                limit: limit)
+
+        case "list_shortcuts":
+            guard requested.contains(.shortcuts),
+                  call.arguments.isEmpty else { return nil }
+            return .shortcuts
+
+        case "focused_app":
+            guard requested.contains(.focusedApp),
+                  call.arguments.isEmpty else { return nil }
+            return .focusedApp
+
+        case "list_apps":
+            guard call.arguments.isEmpty else { return nil }
+            if requested.contains(.runningApps) {
+                return .runningApps
+            }
+            guard requested.contains(.windows),
+                  trustedPromptHasNamedWindowApplication(prompt) else {
+                return nil
+            }
+            return .windowApplicationInventoryDependency
+
+        case "list_windows":
+            guard requested.contains(.windows),
+                  Set(call.arguments.keys).isSubset(of: ["pid"]) else {
+                return nil
+            }
+            if case .integer(let pid)? = call.arguments["pid"] {
+                guard pid > 0,
+                      let applicationName = applicationNameProvingPID(
+                          pid,
+                          state: state) else { return nil }
+                return .windows(pid: pid, applicationName: applicationName)
+            }
+            guard call.arguments["pid"] == nil,
+                  !trustedPromptHasNamedWindowApplication(prompt) else {
+                return nil
+            }
+            return .windows(pid: nil, applicationName: nil)
+
+        case "permissions_status":
+            guard requested.contains(.permissions),
+                  call.arguments.isEmpty else { return nil }
+            return .permissions
+
+        default:
+            return nil
+        }
+    }
+
+    /// Returns `.some(nil)` for an omitted optional integer and `nil` for an
+    /// invalid value, allowing callers to distinguish absence from rejection.
+    private static func reviewedOptionalPositiveInteger(
+        _ value: MCPJSONValue?,
+        maximum: Int
+    ) -> Int?? {
+        guard let value else { return .some(nil) }
+        guard case .integer(let integer) = value,
+              (1 ... maximum).contains(integer) else { return nil }
+        return .some(.some(integer))
+    }
+
+    private static func exactContactArguments(
+        _ arguments: [String: MCPJSONValue],
+        query: String,
+        limit: Int?
+    ) -> Bool {
+        guard Set(arguments.keys).isSubset(of: ["query", "limit"]),
+              arguments["query"] == .string(query) else { return false }
+        return exactOptionalInteger(arguments["limit"], expected: limit)
+    }
+
+    private static func exactReminderArguments(
+        _ arguments: [String: MCPJSONValue],
+        includeCompleted: Bool,
+        limit: Int?
+    ) -> Bool {
+        guard Set(arguments.keys).isSubset(of: [
+            "include_completed", "limit",
+        ]),
+        arguments["include_completed"] == .bool(includeCompleted) else {
+            return false
+        }
+        return exactOptionalInteger(arguments["limit"], expected: limit)
+    }
+
+    private static func exactWindowArguments(
+        _ arguments: [String: MCPJSONValue],
+        pid: Int?
+    ) -> Bool {
+        guard Set(arguments.keys).isSubset(of: ["pid"]) else { return false }
+        return exactOptionalInteger(arguments["pid"], expected: pid)
+    }
+
+    private static func exactWindowResultScope(
+        _ value: MCPJSONValue?,
+        requestedPID: Int?
+    ) -> Bool {
+        switch (value, requestedPID) {
+        case (nil, nil): return true
+        case (.integer(let actual)?, .some(let requested)):
+            return actual == requested
+        default: return false
+        }
+    }
+
+    private static func exactOptionalInteger(
+        _ value: MCPJSONValue?,
+        expected: Int?
+    ) -> Bool {
+        switch (value, expected) {
+        case (nil, nil): return true
+        case (.integer(let actual)?, .some(let expected)):
+            return actual == expected
+        default: return false
+        }
+    }
+
+    private static func reminderCompletionIntent(
+        _ prompt: String
+    ) -> ReminderCompletionIntent {
+        let normalized = prompt.lowercased()
+        let words = Set(normalized.split {
+            !$0.isLetter && !$0.isNumber
+        }.map(String.init))
+        if words.contains("all")
+            || normalized.contains("include completed")
+            || normalized.contains("including completed") {
+            return .all
+        }
+        if !words.intersection([
+            "incomplete", "pending", "unfinished",
+        ]).isEmpty || normalized.contains("not completed") {
+            return .incompleteOnly
+        }
+        if !words.intersection([
+            "completed", "done", "finished",
+        ]).isEmpty {
+            return .completedOnly
+        }
+        return .unspecified
+    }
+
+    private static func requestedResultLimit(_ prompt: String) -> Int? {
+        let normalized = prompt.lowercased()
+        let wordValues: [String: Int] = [
+            "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+            "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+        ]
+        let patterns = [
+            #"\b(?:first|top|show|list)\s+(\d{1,3})\b"#,
+            #"\b(?:first|top|show|list)\s+(one|two|three|four|five|six|seven|eight|nine|ten)\b"#,
+        ]
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(
+                pattern: pattern,
+                options: [.caseInsensitive]),
+                let match = regex.firstMatch(
+                    in: normalized,
+                    range: NSRange(normalized.startIndex..., in: normalized)),
+                match.numberOfRanges > 1,
+                let range = Range(match.range(at: 1), in: normalized) else {
+                continue
+            }
+            let value = String(normalized[range])
+            return Int(value) ?? wordValues[value]
+        }
+        return nil
+    }
+
+    private static func requestedReminderListName(_ prompt: String) -> String? {
+        let pattern = #"\b(?:in|from|on)\s+(?:my\s+)?([\p{L}\p{N}][\p{L}\p{N} ._'\-]{0,60}?)\s+list\b"#
+        guard let regex = try? NSRegularExpression(
+            pattern: pattern,
+            options: [.caseInsensitive]),
+            let match = regex.firstMatch(
+                in: prompt,
+                range: NSRange(prompt.startIndex..., in: prompt)),
+            match.numberOfRanges > 1,
+            let range = Range(match.range(at: 1), in: prompt) else {
+            return nil
+        }
+        return String(prompt[range])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func trustedPromptHasNamedWindowApplication(
+        _ prompt: String
+    ) -> Bool {
+        let words = prompt.lowercased().split {
+            !$0.isLetter && !$0.isNumber
+        }.map(String.init)
+        let genericWords: Set<String> = [
+            "a", "all", "an", "any", "current", "currently", "desktop",
+            "every", "list", "mac", "my", "open", "show", "the",
+            "visible", "what", "which",
+        ]
+        for index in words.indices
+        where words[index] == "window" || words[index] == "windows" {
+            // "Notes windows", "Notes open windows", and
+            // "the open Notes windows" all name the app before the noun.
+            if index > words.startIndex {
+                var candidateIndex = words.index(before: index)
+                if words[candidateIndex] == "open",
+                   candidateIndex > words.startIndex {
+                    candidateIndex = words.index(before: candidateIndex)
+                }
+                let candidate = words[candidateIndex]
+                if !genericWords.contains(candidate),
+                   Int(candidate) == nil {
+                    return true
+                }
+            }
+
+            // "windows for Notes" / "windows in Notes" name the app after
+            // an explicit scoping preposition.
+            let nextIndex = words.index(after: index)
+            if nextIndex < words.endIndex,
+               ["for", "in", "of"].contains(words[nextIndex]) {
+                var candidateIndex = words.index(after: nextIndex)
+                while candidateIndex < words.endIndex,
+                      ["a", "an", "the"].contains(words[candidateIndex]) {
+                    candidateIndex = words.index(after: candidateIndex)
+                }
+                if candidateIndex < words.endIndex,
+                   !genericWords.contains(words[candidateIndex]),
+                   Int(words[candidateIndex]) == nil {
+                    return true
+                }
+            }
+
+            // "Which windows does Notes have?" is another common named-app
+            // form. Auxiliary-only generic questions remain unscoped.
+            if nextIndex < words.endIndex,
+               ["do", "does", "did"].contains(words[nextIndex]) {
+                var candidateIndex = words.index(after: nextIndex)
+                while candidateIndex < words.endIndex,
+                      ["a", "an", "the"].contains(words[candidateIndex]) {
+                    candidateIndex = words.index(after: candidateIndex)
+                }
+                if candidateIndex < words.endIndex,
+                   !genericWords.contains(words[candidateIndex]),
+                   Int(words[candidateIndex]) == nil {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
+    /// Tests an inventory-provided application name against the trusted
+    /// window-request grammar. This prevents incidental app names elsewhere in
+    /// a compound prompt from becoming PID authorization evidence.
+    private static func trustedPromptNamesWindowApplication(
+        _ applicationName: String,
+        prompt: String
+    ) -> Bool {
+        let promptWords = normalizedEntity(prompt).split(separator: " ")
+            .map(String.init)
+        let applicationWords = normalizedEntity(applicationName)
+            .split(separator: " ")
+            .map(String.init)
+        guard !applicationWords.isEmpty,
+              promptWords.count >= applicationWords.count else { return false }
+
+        for start in 0 ... (promptWords.count - applicationWords.count) {
+            let end = start + applicationWords.count
+            guard Array(promptWords[start ..< end]) == applicationWords else {
+                continue
+            }
+
+            // "Notes windows" / "Notes open windows". An optional app noun
+            // supports natural forms such as "Notes app windows".
+            var suffix = end
+            if suffix < promptWords.count,
+               ["app", "application"].contains(promptWords[suffix]) {
+                suffix += 1
+            }
+            if suffix < promptWords.count,
+               promptWords[suffix] == "open" {
+                suffix += 1
+            }
+            if suffix < promptWords.count,
+               ["window", "windows"].contains(promptWords[suffix]) {
+                return true
+            }
+
+            // "windows for Notes" / "windows in Notes".
+            if start >= 2,
+               ["for", "in", "of"].contains(promptWords[start - 1]),
+               ["window", "windows"].contains(promptWords[start - 2]) {
+                return true
+            }
+            if start >= 3,
+               ["a", "an", "the"].contains(promptWords[start - 1]),
+               ["for", "in", "of"].contains(promptWords[start - 2]),
+               ["window", "windows"].contains(promptWords[start - 3]) {
+                return true
+            }
+
+            // "Which windows does Notes have?".
+            if start >= 2,
+               ["do", "does", "did"].contains(promptWords[start - 1]),
+               ["window", "windows"].contains(promptWords[start - 2]),
+               end < promptWords.count,
+               ["have", "show"].contains(promptWords[end]) {
+                return true
+            }
+            if start >= 3,
+               ["a", "an", "the"].contains(promptWords[start - 1]),
+               ["do", "does", "did"].contains(promptWords[start - 2]),
+               ["window", "windows"].contains(promptWords[start - 3]),
+               end < promptWords.count,
+               ["have", "show"].contains(promptWords[end]) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private static func applicationNameProvingPID(
+        _ pid: Int,
+        state: PlanningState
+    ) -> String? {
+        guard let inventory = state.results.reversed().first(where: {
+            $0.toolName == "list_apps"
+                && ($0.readProvenance == .runningApps
+                    || $0.readProvenance
+                        == .windowApplicationInventoryDependency)
+        }),
+        !inventory.wasTruncated,
+        case .object(let root)? = inventory.structuredContent,
+        root["ok"] == .bool(true),
+        case .array(let apps)? = root["apps"] else { return nil }
+
+        var candidates: [(name: String, pid: Int)] = []
+        for value in apps {
+            guard case .object(let app) = value,
+                  let name = projectedString(app["name"]),
+                  case .integer(let candidatePID)? = app["pid"] else {
+                return nil
+            }
+            if trustedPromptNamesWindowApplication(
+                name,
+                prompt: state.trustedUserPrompt) {
+                candidates.append((name: name, pid: candidatePID))
+            }
+        }
+
+        // One exact inventory row must uniquely bind the trusted app name to
+        // the requested PID. Duplicate names, duplicate rows, and multiple
+        // PIDs are all ambiguous and therefore fail closed.
+        guard candidates.count == 1,
+              candidates[0].pid == pid else { return nil }
+        return candidates[0].name
+    }
+
+    private static func trustedPromptContainsEntity(
+        _ entity: String,
+        prompt: String
+    ) -> Bool {
+        let normalized = normalizedEntity(entity)
+        guard normalized.count >= 2 else { return false }
+        let promptValue = " \(normalizedEntity(prompt)) "
+        return promptValue.contains(" \(normalized) ")
+    }
+
+    private static func contactMatchesQuery(
+        _ query: String,
+        name: String,
+        phones: [String],
+        emails: [String]
+    ) -> Bool {
+        let queryValue = normalizedEntity(query)
+        guard !queryValue.isEmpty else { return false }
+        return ([name] + phones + emails).contains {
+            let value = " \(normalizedEntity($0)) "
+            return value.contains(" \(queryValue) ")
+        }
+    }
+
+    private static func normalizedEntity(_ value: String) -> String {
+        value.folding(
+            options: [.caseInsensitive, .diacriticInsensitive],
+            locale: Locale(identifier: "en_US_POSIX"))
+            .unicodeScalars
+            .split(whereSeparator: {
+                !CharacterSet.alphanumerics.contains($0)
+            })
+            .map(String.init)
+            .joined(separator: " ")
+    }
+
+    private static func projectedString(
+        _ value: MCPJSONValue?,
+        maximumCharacters: Int = 160
+    ) -> String? {
+        guard case .string(let raw)? = value else { return nil }
+        let withoutControls = raw.unicodeScalars.map { scalar in
+            CharacterSet.controlCharacters.contains(scalar) ? " " : String(scalar)
+        }.joined()
+        let normalized = withoutControls
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        guard !normalized.isEmpty,
+              normalized.count <= maximumCharacters else { return nil }
+        return normalized
+    }
+
+    private static func projectedStringArray(
+        _ value: MCPJSONValue?
+    ) -> [String]? {
+        guard case .array(let values)? = value else { return nil }
+        var result: [String] = []
+        result.reserveCapacity(values.count)
+        for value in values {
+            guard let string = projectedString(value) else { return nil }
+            result.append(string)
+        }
+        return result
+    }
+
+    private static func projectedValues(
+        _ values: [String],
+        requireAll: Bool
+    ) -> String? {
+        guard !values.isEmpty else { return "none" }
+        if requireAll {
+            return values.joined(separator: ", ")
+        }
+        let visible = values.prefix(3).joined(separator: ", ")
+        guard values.count > 3 else { return visible }
+        return "\(visible) (+\(values.count - 3) more)"
+    }
+
+    private static func projectedList(
+        heading: String,
+        empty: String,
+        rows: [String],
+        requireAll: Bool
+    ) -> String? {
+        guard !rows.isEmpty else { return empty }
+        var answer = heading
+        var visibleCount = 0
+        for row in rows {
+            let next = "\n\(visibleCount + 1). \(row)"
+            guard answer.count + next.count <= 1_800 else {
+                if requireAll { return nil }
+                break
+            }
+            answer += next
+            visibleCount += 1
+        }
+        guard visibleCount > 0 else { return nil }
+        if visibleCount < rows.count {
+            guard !requireAll else { return nil }
+            answer += "\nShowing \(visibleCount) of \(rows.count) results."
+        }
+        return answer
+    }
+
+    private static func boundedCollectionHeading(
+        _ name: String,
+        limit: Int?,
+        trustedPrompt: String
+    ) -> String {
+        let domains = explicitlyRequestedReadDomains(trustedPrompt)
+        let userExplicitlyBoundedThisCollection = domains.count == 1
+            && requestedResultLimit(trustedPrompt) != nil
+        guard let limit,
+              !userExplicitlyBoundedThisCollection else {
+            return "\(name):"
+        }
+        return "\(name) (showing up to \(limit)):"
+    }
+
+    /// Explicit "all" / "every" requests may only complete when host
+    /// projection can include every typed value and row. Ordinary reads retain
+    /// the concise bounded summary behavior.
+    private static func requiresExhaustiveProjection(
+        _ prompt: String,
+        domain: ReadDomain
+    ) -> Bool {
+        guard explicitlyRequestedReadDomains(prompt).contains(domain) else {
+            return false
+        }
+        let words = Set(prompt.lowercased().split {
+            !$0.isLetter && !$0.isNumber
+        }.map(String.init))
+        return words.contains("all") || words.contains("every")
+    }
+
+    private static func projectedAccessibilityStatus(_ value: String) -> String? {
+        switch value.lowercased() {
+        case "granted": return "granted"
+        case "denied": return "denied"
+        case "not granted", "not_granted": return "not granted"
+        case "unknown": return "unknown"
+        default: return nil
         }
     }
 

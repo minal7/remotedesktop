@@ -139,6 +139,7 @@ schemes:
         - RemoteDesktopLiveE2ETests
       environmentVariables:
         RUN_COMPUTER_USE_LIVE_E2E: "1"
+        RUN_COMPUTER_USE_TYPED_OUTCOME_SIMULATOR_E2E: "$(RUN_COMPUTER_USE_TYPED_OUTCOME_SIMULATOR_E2E)"
         # DoorDash/OS-Atlas is independently gated. Values are command-line
         # build settings expanded into the test process only for an explicit
         # run; an ordinary LiveE2E invocation sees empty values and skips it.

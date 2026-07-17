@@ -357,6 +357,22 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
         return bestMatch?.name
     }
 
+    /// Confirms that an application route names the one common application
+    /// explicitly present in the trusted task. This is used only as one half of
+    /// app-first authorization; the task must separately contain an affirmative
+    /// operation to perform in that application.
+    static func task(
+        _ task: String,
+        explicitlyNamesApplication applicationName: String
+    ) -> Bool {
+        guard let namedApplication = explicitlyNamedApplication(in: task) else {
+            return false
+        }
+        return frontmostApplication(
+            applicationName,
+            matches: namedApplication)
+    }
+
     /// A nominal frontmost-app name can refer to another Space. Explicit
     /// activation wording therefore requires one recorded open even when
     /// NSWorkspace already reports the requested app. Incidental app nouns
@@ -445,6 +461,19 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
             availableDirectives: availableDirectives) {
             return route
         }
+        if let route = deterministicAlreadySatisfiedCompletionRoute(
+            for: task,
+            visibleText: visibleText,
+            history: history,
+            availableDirectives: availableDirectives) {
+            return route
+        }
+        if let route = deterministicSelectedCopyShortcutRoute(
+            for: task,
+            history: history,
+            availableDirectives: availableDirectives) {
+            return route
+        }
         let entryVerbs: Set<String> = [
             "add", "enter", "insert", "paste", "put", "type", "write",
         ]
@@ -477,6 +506,245 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
             availableDirectives: availableDirectives)
     }
 
+    /// A model-selected COMPLETE is only a proposal. This predicate repeats
+    /// the bounded host checks that can independently prove completion from
+    /// trusted task text, executed-action history, and current OCR.
+    static func hostVerifiesCompletion(
+        for task: String,
+        visibleText: String,
+        history: [String],
+        availableDirectives: [OSAtlasExplicitActionDirective]
+    ) -> Bool {
+        if deterministicVerifiedPostActionRoute(
+            for: task,
+            visibleText: visibleText,
+            history: history,
+            availableDirectives: availableDirectives)?.directive == .complete {
+            return true
+        }
+        if deterministicSatisfiedNavigationRoute(
+            for: task,
+            visibleText: visibleText,
+            history: history,
+            availableDirectives: availableDirectives)?.directive == .complete {
+            return true
+        }
+        return deterministicAlreadySatisfiedCompletionRoute(
+            for: task,
+            visibleText: visibleText,
+            history: history,
+            availableDirectives: availableDirectives)?.directive == .complete
+    }
+
+    /// Recognizes only an already-finished state whose positive completion
+    /// wording and task subject are both present in current OCR. This covers
+    /// read-only verification such as a finished checklist without allowing a
+    /// generic "done" banner from an unrelated window to finish the task.
+    private static func deterministicAlreadySatisfiedCompletionRoute(
+        for task: String,
+        visibleText: String,
+        history: [String],
+        availableDirectives: [OSAtlasExplicitActionDirective]
+    ) -> OSAtlasSemanticActionRoute? {
+        guard history.isEmpty,
+              availableDirectives.contains(.complete),
+              !visibleTextHasPendingOrNegativePostActionState(visibleText)
+        else {
+            return nil
+        }
+
+        let taskWords = normalizedWords(task)
+        let completionWords: Set<String> = [
+            "complete", "completed", "done", "finished", "succeeded",
+            "successful",
+        ]
+        guard taskWords.contains(where: completionWords.contains) else {
+            return nil
+        }
+        guard !taskHasPendingCompoundWork(
+            task,
+            afterAny: completionWords,
+            pendingAnywhere: [
+                "archive", "close", "copy", "delete", "draft", "email",
+                "move", "open", "post", "quit", "remove", "rename", "save",
+                "send", "share", "submit", "text", "upload", "write",
+            ]) else {
+            return nil
+        }
+
+        let ignoredTaskWords: Set<String> = [
+            "all", "are", "be", "check", "complete", "completed",
+            "confirm", "done", "ensure", "finished", "for", "have",
+            "is", "make", "my", "of", "please", "sure", "that",
+            "the", "to", "succeeded", "successful", "verify",
+        ]
+        let subjectWords = Set(taskWords.filter {
+            $0.count >= 3 && !ignoredTaskWords.contains($0)
+        })
+        guard !subjectWords.isEmpty else { return nil }
+        let requiredOverlap = min(2, subjectWords.count)
+        let rawLines = visibleText.components(separatedBy: .newlines).map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let lines = rawLines.map(normalizedWords)
+
+        func lineIsQuestion(_ index: Int) -> Bool {
+            rawLines[index].contains("?") || rawLines[index].contains("¿")
+        }
+
+        func lineHasEqualCheckedCount(_ index: Int) -> Bool {
+            guard !lineIsQuestion(index) else { return false }
+            let line = lines[index]
+            guard line.count >= 4 else { return false }
+            for tokenIndex in 0 ... (line.count - 4) {
+                guard let completedCount = Int(line[tokenIndex]),
+                      line[tokenIndex + 1] == "of",
+                      let totalCount = Int(line[tokenIndex + 2]),
+                      completedCount > 0,
+                      completedCount == totalCount,
+                      ["checked", "complete"]
+                        .contains(line[tokenIndex + 3]) else {
+                    continue
+                }
+                let countRange = tokenIndex ..< tokenIndex + 4
+                let residualWords = line.indices.compactMap { residualIndex in
+                    countRange.contains(residualIndex)
+                        ? nil
+                        : line[residualIndex]
+                }
+                if residualWords.isEmpty {
+                    return true
+                }
+                // A same-line ratio may include the requested subject and a
+                // tiny amount of checklist/status grammar, but no unrelated
+                // entity can ride beside an otherwise valid N-of-N count.
+                let reviewedContextWords: Set<String> = [
+                    "all", "checklist", "item", "items", "status", "task",
+                    "tasks",
+                ]
+                let allowedContextWords = subjectWords
+                    .union(reviewedContextWords)
+                let residualSet = Set(residualWords)
+                if residualSet.isSubset(of: allowedContextWords),
+                   subjectWords.intersection(residualSet).count
+                    >= requiredOverlap {
+                    return true
+                }
+            }
+            return false
+        }
+
+        func lineIsExplicitlyCheckedItem(_ index: Int) -> Bool {
+            guard !lineIsQuestion(index), !lineHasEqualCheckedCount(index)
+            else { return false }
+            let raw = rawLines[index]
+            let words = lines[index]
+            let hasVisualMarker = ["✓", "☑", "✅", "[x]", "[X]"]
+                .contains(where: { raw.hasPrefix($0) })
+            // Vision renders the fixture's leading checkmark inconsistently
+            // as a standalone `V` or `/`. Review only those exact leading
+            // marker shapes; a word beginning with V or an interior slash is
+            // still ordinary item text, not completed-state evidence.
+            let hasOCRDegradedVisualMarker = raw.hasPrefix("V ")
+                || raw.hasPrefix("v ")
+                || raw.hasPrefix("/ ")
+            let ignoredItemWords: Set<String> = [
+                "checked", "complete", "completed", "done", "item", "task",
+            ]
+            let itemWords = words.filter {
+                $0.count >= 2 && !ignoredItemWords.contains($0)
+            }
+            return (hasVisualMarker
+                    || hasOCRDegradedVisualMarker)
+                && !itemWords.isEmpty
+        }
+
+        // A non-checklist status must bind the requested subject and an
+        // unmistakable status phrase on the same OCR line. Adjacent “Complete”
+        // or “Done” controls have no role information and cannot prove state.
+        for lineIndex in lines.indices where !lineIsQuestion(lineIndex) {
+            let line = lines[lineIndex]
+            guard subjectWords.intersection(Set(line)).count
+                    >= requiredOverlap else {
+                continue
+            }
+            if lineHasEqualCheckedCount(lineIndex) {
+                return .init(directive: .complete)
+            }
+            let isAllItemsBanner = firstIndex(
+                of: ["all", "items"],
+                in: line) != nil
+            let hasTiedStatus = firstUnnegatedIndex(
+                of: ["completed"],
+                in: line) != nil
+                || firstUnnegatedIndex(
+                    of: ["finished"],
+                    in: line) != nil
+                || firstUnnegatedIndex(
+                    of: ["succeeded"],
+                    in: line) != nil
+                || (firstUnnegatedIndex(of: ["is", "complete"], in: line)
+                    != nil)
+            if hasTiedStatus && !isAllItemsBanner {
+                return .init(directive: .complete)
+            }
+        }
+
+        // A checklist may bind a global status across its own rows only when
+        // those rows carry explicit checked-state markers. Alternatively, an
+        // exact N-of-N checked status can stand alone immediately beneath the
+        // requested checklist subject. Bare ALL ITEMS COMPLETE is merely text
+        // (and can be a question or unrelated banner), never sufficient proof.
+        guard taskWords.contains("all") else { return nil }
+        for checklistIndex in lines.indices
+        where lines[checklistIndex].contains("checklist") {
+            let subjectEnd = min(lines.index(before: lines.endIndex),
+                                 checklistIndex + 2)
+            guard let subjectIndex = (checklistIndex ... subjectEnd).first(
+                where: {
+                    subjectWords.intersection(Set(lines[$0])).count
+                        >= requiredOverlap
+                }) else {
+                continue
+            }
+            let statusStart = subjectIndex + 1
+            guard statusStart < lines.endIndex else { continue }
+            let statusEnd = min(lines.index(before: lines.endIndex),
+                                subjectIndex + 8)
+            var checkedRowCount = 0
+            var structureRemainsBound = true
+            for statusIndex in statusStart ... statusEnd {
+                if lines[statusIndex].isEmpty { continue }
+                if lines[statusIndex].contains("checklist") {
+                    structureRemainsBound = false
+                    break
+                }
+                if lineIsExplicitlyCheckedItem(statusIndex) {
+                    checkedRowCount += 1
+                    continue
+                }
+                if lineHasEqualCheckedCount(statusIndex),
+                   structureRemainsBound,
+                   statusIndex == statusStart {
+                    return .init(directive: .complete)
+                }
+                let isAllItemsStatus = lines[statusIndex]
+                    == ["all", "items", "complete"]
+                if isAllItemsStatus,
+                   !lineIsQuestion(statusIndex),
+                   structureRemainsBound,
+                   checkedRowCount >= 2 {
+                    return .init(directive: .complete)
+                }
+                // An unmarked row/section breaks the bounded checklist
+                // structure; a later status belongs to an unknown region.
+                structureRemainsBound = false
+                break
+            }
+        }
+        return nil
+    }
+
     /// Returns an evidence-backed answer for a persistent obstacle that is
     /// explicitly visible and tied to the requested item. The exact OCR line
     /// is both the summary and verification evidence; task text alone can
@@ -488,11 +756,32 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
     ) -> OSAtlasSemanticActionRoute? {
         guard availableDirectives.contains(.answer) else { return nil }
         let taskWords = normalizedWords(task)
-        let visibleWords = normalizedWords(visibleText)
+        let visibleLines = visibleText
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { normalizedWords(String($0)) }
         let requestedApplicationWords = explicitlyRequestedApplicationWords(
             in: taskWords)
+        let reportOperationVerbs: Set<String> = [
+            "access", "consult", "download", "edit", "export", "inspect",
+            "load", "open", "read", "retrieve", "review", "summarize",
+            "summarized", "use", "view",
+        ]
+        let applicationOperationVerbs: Set<String> = [
+            "access", "create", "draw", "edit", "execute", "install",
+            "launch", "load", "open", "run", "start", "use",
+        ]
+        let affirmativelyRequestsReportOperation =
+            taskAffirmativelyRequestsOperation(
+                task,
+                operationVerbs: reportOperationVerbs)
+        let affirmativelyRequestsApplicationOperation =
+            taskAffirmativelyRequestsOperation(
+                task,
+                operationVerbs: applicationOperationVerbs)
 
-        for rawLine in visibleText.split(separator: "\n") {
+        for (lineIndex, rawLine) in visibleText
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .enumerated() {
             let evidence = rawLine.trimmingCharacters(
                 in: .whitespacesAndNewlines)
             guard (2 ... 240).contains(evidence.count) else { continue }
@@ -505,14 +794,15 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
                 of: ["no", "longer", "available"],
                 in: words) != nil
             if words.contains("report"),
+               affirmativelyRequestsReportOperation,
                visibleTextMatchesRequestedReport(
                    taskWords: taskWords,
-                   visibleWords: visibleWords,
-                   obstacleWords: words),
+                   visibleLines: visibleLines,
+                   obstacleLineIndex: lineIndex),
                saysRemoved || saysNoLongerAvailable {
                 return .init(
                     directive: .answer,
-                    argument: .visibleAnswer(
+                    argument: .visibleObstacle(
                         summary: evidence,
                         evidence: [evidence]))
             }
@@ -524,6 +814,7 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
                     of: ["requires", "windows"],
                     in: words) != nil
             guard saysWindowsOnly,
+                  affirmativelyRequestsApplicationOperation,
                   let requestedApplicationWords,
                   firstIndex(
                       of: requestedApplicationWords,
@@ -532,11 +823,275 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
             }
             return .init(
                 directive: .answer,
-                argument: .visibleAnswer(
+                argument: .visibleObstacle(
                     summary: evidence,
                     evidence: [evidence]))
         }
         return nil
+    }
+
+    /// Recognizes an affirmative request to perform an operation, including
+    /// polite/modal commands, while excluding status questions and negated
+    /// imperatives. The operation vocabulary is supplied by the caller so
+    /// report access and application execution keep separate allowlists.
+    private static func taskTextMaskingQuotedContent(_ task: String) -> String {
+        var maskedTask = ""
+        var insideStraightQuote = false
+        var insideCurlyQuote = false
+        for character in task {
+            switch character {
+            case "\"":
+                insideStraightQuote.toggle()
+                maskedTask.append(" ")
+            case "“":
+                insideCurlyQuote = true
+                maskedTask.append(" ")
+            case "”":
+                insideCurlyQuote = false
+                maskedTask.append(" ")
+            default:
+                maskedTask.append(
+                    insideStraightQuote || insideCurlyQuote ? " " : character)
+            }
+        }
+        return maskedTask
+    }
+
+    static func taskAffirmativelyRequestsOperation(
+        _ task: String,
+        operationVerbs: Set<String>
+    ) -> Bool {
+        struct AuthorityClause {
+            let raw: String
+            let words: [String]
+            let endsAsQuestion: Bool
+        }
+
+        // Quoted payloads are data, not authority. In particular, the content
+        // in `Type "Do not call"` must not negate the surrounding TYPE request.
+        let maskedTask = taskTextMaskingQuotedContent(task)
+
+        var clauses: [AuthorityClause] = []
+        var clauseText = ""
+        func appendClause(ending: Character?) {
+            let words = normalizedWords(clauseText)
+            if !words.isEmpty {
+                clauses.append(AuthorityClause(
+                    raw: clauseText,
+                    words: words,
+                    endsAsQuestion: ending == "?"))
+            }
+            clauseText.removeAll(keepingCapacity: true)
+        }
+        for character in maskedTask {
+            if [".", "!", "?", ";", "\n"].contains(character) {
+                appendClause(ending: character)
+            } else {
+                clauseText.append(character)
+            }
+        }
+        appendClause(ending: nil)
+        guard !clauses.isEmpty else { return false }
+
+        // A denial of following the next/below text scopes over a later line;
+        // a newline must not turn that explicitly untrusted text into a fresh
+        // imperative sentence.
+        for clause in clauses {
+            let words = clause.words
+            let deniesFollowingText = words.contains("follow")
+                && containsExplicitNegation(in: words)
+                && !Set(words).isDisjoint(with: [
+                    "below", "following", "instruction", "instructions",
+                    "next", "text", "this",
+                ])
+            let ignoresFollowingText = words.contains("ignore")
+                && !Set(words).isDisjoint(with: [
+                    "below", "following", "instruction", "instructions",
+                    "next", "text", "this",
+                ])
+            if deniesFollowingText || ignoresFollowingText {
+                return false
+            }
+        }
+
+        let negativeCommands: Set<String> = [
+            "avoid", "dont", "except", "exclude", "excluding", "never",
+            "not", "omit", "omitting", "refuse", "skip", "skipping",
+            "stop", "without",
+        ]
+        let modalWords: Set<String> = [
+            "can", "could", "may", "will", "would",
+        ]
+        let contrastBoundaries: Set<String> = ["but"]
+        let contrastExclusionWords: Set<String> = [
+            "all", "anything", "everything",
+        ]
+        let exclusionPhrases: Set<[String]> = [
+            ["apart", "from"],
+            ["instead", "of"],
+            ["other", "than"],
+            ["rather", "than"],
+        ]
+        let directPrefixes: Set<String> = [
+            "and", "but", "please", "then", "try",
+        ]
+        let desireWords: Set<String> = ["need", "want"]
+        let explanatoryQuestionWords: Set<String> = [
+            "how", "if", "what", "when", "where", "whether", "which",
+            "who", "why",
+        ]
+        let questionStarters: Set<String> = [
+            "are", "did", "do", "does", "has", "have", "how", "is",
+            "should", "was", "were", "what", "when", "where", "whether",
+            "which", "who", "why",
+        ]
+
+        for clause in clauses {
+            let words = clause.words
+            let operationIndices = words.indices.filter {
+                operationVerbs.contains(words[$0])
+            }
+            for index in operationIndices {
+                let completePrefix = Array(words[..<index])
+                // A contrast starts a new authority scope: in “without saving
+                // it, but email it,” WITHOUT denies SAVE but does not deny the
+                // later EMAIL. Ordinary commas remain inside the same scope so
+                // interjections cannot strand “do not” away from its verb.
+                let prefix: [String]
+                if let boundary = completePrefix.lastIndex(
+                    where: contrastBoundaries.contains) {
+                    let previousBoundary = completePrefix[..<boundary]
+                        .lastIndex(where: contrastBoundaries.contains)
+                    let boundaryScopeStart = previousBoundary.map { $0 + 1 }
+                        ?? completePrefix.startIndex
+                    let boundaryScope = completePrefix[
+                        boundaryScopeStart ..< boundary]
+                    if boundaryScope.contains(
+                        where: contrastExclusionWords.contains) {
+                        continue
+                    }
+                    prefix = Array(completePrefix[(boundary + 1)...])
+                } else {
+                    prefix = completePrefix
+                }
+                // Inspect the complete scoped prefix. A fixed token window lets
+                // a sufficiently long “do not … click” instruction escape.
+                if prefix.contains(where: negativeCommands.contains)
+                    || containsExplicitNegation(in: prefix)
+                    || exclusionPhrases.contains(where: { phrase in
+                        guard phrase.count <= prefix.count else { return false }
+                        return (0 ... prefix.count - phrase.count).contains {
+                            Array(prefix[$0 ..< $0 + phrase.count]) == phrase
+                        }
+                    }) {
+                    continue
+                }
+
+                let prefixSet = Set(prefix)
+                let tellMeInformation = prefixSet.contains("tell")
+                    && prefixSet.contains("me")
+                    && !prefixSet.isDisjoint(with: explanatoryQuestionWords)
+                let deliberativeQuestion = prefixSet.contains("whether")
+                    || (prefixSet.contains("should")
+                        && (prefixSet.contains("i")
+                            || prefixSet.contains("we")))
+                let isExplanatory = prefixSet.contains("explain")
+                    || prefixSet.contains("describe")
+                    || tellMeInformation
+                    || deliberativeQuestion
+                    || prefix.first.map(questionStarters.contains) == true
+                if isExplanatory { continue }
+
+                let modalRequest: Bool
+                if let modalIndex = prefix.lastIndex(
+                    where: modalWords.contains) {
+                    modalRequest = prefix[modalIndex...].contains("you")
+                } else {
+                    modalRequest = false
+                }
+                // A question is authoritative only in the ordinary polite
+                // “Could you click …?” shape. Informational questions above
+                // remain non-authorizing.
+                if clause.endsAsQuestion && !modalRequest { continue }
+
+                if index == words.startIndex
+                    || directPrefixes.contains(words[index - 1]) {
+                    return true
+                }
+                if let comma = clause.raw.lastIndex(of: ","),
+                   normalizedWords(String(clause.raw[clause.raw.index(
+                       after: comma)...])).first == words[index] {
+                    return true
+                }
+                if prefix.suffix(5).contains("please") || modalRequest {
+                    return true
+                }
+                if let desireIndex = prefix.lastIndex(
+                    where: desireWords.contains) {
+                    let suffix = prefix[desireIndex...]
+                    let subjectStart = max(prefix.startIndex, desireIndex - 2)
+                    let subject = prefix[subjectStart ..< desireIndex]
+                    if subject.contains("i") || subject.contains("we")
+                        || suffix.contains("you") {
+                        return true
+                    }
+                }
+            }
+        }
+        return false
+    }
+
+    /// Maps only an affirmative request to copy already-selected content to
+    /// the reviewed macOS Copy chord. This avoids asking the language model to
+    /// distinguish selection wording from a drag while preserving the host's
+    /// separate shortcut authorization gate. Negated/explanatory copy text,
+    /// an explicitly negated selection, and a previously executed hotkey do
+    /// not gain another keyboard action.
+    private static func deterministicSelectedCopyShortcutRoute(
+        for task: String,
+        history: [String],
+        availableDirectives: [OSAtlasExplicitActionDirective]
+    ) -> OSAtlasSemanticActionRoute? {
+        guard availableDirectives.contains(.hotkey),
+              !history.contains(where: {
+                  $0 == "HOTKEY" || $0.hasPrefix("HOTKEY [")
+              }),
+              taskAffirmativelyRequestsOperation(
+                  task,
+                  operationVerbs: ["copy"]) else {
+            return nil
+        }
+        let maskedTask = taskTextMaskingQuotedContent(task)
+        let selectionClauses = maskedTask.split(
+            omittingEmptySubsequences: true,
+            whereSeparator: { [".", "!", "?", ";", "\n"].contains($0) })
+        let explicitlyDeniesSelection = selectionClauses.contains { clause in
+            let clauseWords = normalizedWords(String(clause))
+            return clauseWords.indices.contains { index in
+                guard clauseWords[index] == "selected"
+                        || clauseWords[index] == "selection" else {
+                    return false
+                }
+                // Selection state is scoped to its full clause. A fixed
+                // lookback lets a long but explicit `no ... selected` status
+                // fall outside the window and authorize an unsafe Copy.
+                let prefix = Array(clauseWords[..<index])
+                return containsExplicitNegation(in: prefix)
+                    || prefix.contains("nothing")
+                    || prefix.contains("none")
+                    || prefix.contains("without")
+            }
+        }
+        guard !explicitlyDeniesSelection else { return nil }
+        let words = normalizedWords(maskedTask)
+        let hasAffirmativeSelection = firstUnnegatedIndex(
+            of: ["selected"],
+            in: words) != nil
+            || firstUnnegatedIndex(of: ["selection"], in: words) != nil
+        guard hasAffirmativeSelection else { return nil }
+        return .init(
+            directive: .hotkey,
+            argument: .hotkey("COMMAND+C"))
     }
 
     /// Returns the first exact phrase occurrence that is not denied by a
@@ -586,17 +1141,19 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
     /// Generic requests for "the report" remain supported.
     private static func visibleTextMatchesRequestedReport(
         taskWords: [String],
-        visibleWords: [String],
-        obstacleWords: [String]
+        visibleLines: [[String]],
+        obstacleLineIndex: Int
     ) -> Bool {
-        guard let reportIndex = taskWords.firstIndex(of: "report") else {
+        guard let taskReportIndex = taskWords.firstIndex(of: "report"),
+              visibleLines.indices.contains(obstacleLineIndex) else {
             return false
         }
+        let obstacleWords = visibleLines[obstacleLineIndex]
         let ignoredWords: Set<String> = [
             "a", "an", "and", "here", "my", "open", "our", "please",
             "shown", "summarize", "the", "this", "view",
         ]
-        let qualifier = taskWords[..<reportIndex].reversed().first(where: {
+        let qualifier = taskWords[..<taskReportIndex].reversed().first(where: {
             !ignoredWords.contains($0)
         })
         guard let qualifier else { return true }
@@ -640,10 +1197,18 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
         let hasGenericReportObstacle = lineReportIndices.contains(where: {
             modifier(before: $0) == nil && hasObstacleStatus(after: $0)
         })
-        return hasGenericReportObstacle
-            && firstIndex(
+        guard hasGenericReportObstacle else { return false }
+
+        // A generic status line may inherit a qualifier only from the
+        // immediately adjacent title/detail line. Document-wide flattening
+        // would allow a distant Quarterly heading to relabel an Annual row.
+        let adjacentIndices = [obstacleLineIndex - 1, obstacleLineIndex + 1]
+            .filter { visibleLines.indices.contains($0) }
+        return adjacentIndices.contains {
+            firstIndex(
                 of: [qualifier, "report"],
-                in: visibleWords) != nil
+                in: visibleLines[$0]) != nil
+        }
     }
 
     /// Extracts the exact application phrase following an explicit activation
@@ -653,7 +1218,8 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
         in taskWords: [String]
     ) -> [String]? {
         let activationVerbs: Set<String> = [
-            "launch", "open", "run", "start",
+            "access", "execute", "install", "launch", "load", "open", "run",
+            "start", "use",
         ]
         let clauseBoundaries: Set<String> = [
             "and", "before", "create", "edit", "make", "please", "show",
@@ -806,6 +1372,15 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
         if lastAction == "ENTER",
            availableDirectives.contains(.complete),
            taskExplicitlyRequestsSearchExecution(task),
+           !taskHasPendingCompoundWork(
+               task,
+               afterAny: ["execute", "run", "search"],
+               pendingAnywhere: [
+                   "archive", "close", "copy", "delete", "draft", "email",
+                   "move", "open", "post", "quit", "remove", "rename",
+                   "save", "send", "share", "submit", "text", "upload",
+                   "write",
+               ]),
            visibleTextHasStrongSearchResultState(
                visibleText,
                task: task) {
@@ -815,8 +1390,23 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
         if (lastAction == "TYPE" || lastAction.hasPrefix("TYPE [")),
            availableDirectives.contains(.complete),
            let quotedText = exactDoubleQuotedText(in: task),
-           visibleTextContainsExactLiteral(
+           !taskHasPendingCompoundWork(
+               task,
+               afterAny: [
+                   "add", "enter", "insert", "paste", "put", "type", "write",
+               ],
+               pendingAnywhere: [
+                   "archive", "book", "buy", "change", "choose", "click",
+                   "close", "copy", "create", "delete", "disable", "download",
+                   "draft", "edit", "email", "enable", "install", "launch",
+                   "mark", "message", "move", "open", "order", "pay", "post",
+                   "press", "purchase", "quit", "remove", "rename", "save",
+                   "schedule", "select", "send", "share", "submit", "switch",
+                   "toggle", "upload",
+               ]),
+           visibleTextConfirmsTextEntry(
                quotedText,
+               task: task,
                visibleText: visibleText) {
             return .init(directive: .complete)
         }
@@ -825,6 +1415,14 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
                 || lastAction.hasPrefix("DOUBLE_CLICK [[")),
            availableDirectives.contains(.complete),
            let targetWords = explicitlyRequestedFolderNameWords(in: task),
+           !taskHasPendingCompoundWork(
+               task,
+               afterAny: ["open"],
+               pendingAnywhere: [
+                   "archive", "close", "copy", "delete", "draft", "email",
+                   "move", "post", "quit", "remove", "rename", "save", "send",
+                   "share", "submit", "upload", "write",
+               ]),
            visibleTextConfirmsFolderOpened(
                visibleText,
                targetWords: targetWords) {
@@ -843,6 +1441,15 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
                 requestedValue = nil
             }
             if let requestedValue,
+               !taskHasPendingCompoundWork(
+                   task,
+                   afterAny: ["price", "total"],
+                   pendingAnywhere: [
+                       "archive", "close", "copy", "delete", "draft", "email",
+                       "move", "open", "post", "quit", "remove", "rename",
+                       "save", "send", "share", "submit", "text", "upload",
+                       "write",
+                   ]),
                let amount = visibleCurrencyAmount(
                    labeled: requestedValue,
                    in: visibleText) {
@@ -1066,13 +1673,130 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
         return " \(observed) ".contains(" \(expected) ")
     }
 
+    /// A successful TYPE milestone must prove the literal at its requested
+    /// destination when the task names one. Seeing the same word in unrelated
+    /// instructions is insufficient. A split label/value layout is accepted
+    /// only when the literal is the entire next non-empty line after the label.
+    private static func visibleTextConfirmsTextEntry(
+        _ literal: String,
+        task: String,
+        visibleText: String
+    ) -> Bool {
+        guard visibleTextContainsExactLiteral(literal, visibleText: visibleText)
+        else { return false }
+        guard let destinationWords = explicitlyRequestedTextDestinationWords(
+            in: task) else {
+            // “the focused note/field” is a host-owned focus context rather
+            // than a named destination, so exact literal visibility remains
+            // the appropriate bounded proof.
+            return true
+        }
+
+        func foldedInline(_ value: String) -> String {
+            value.folding(
+                options: [.caseInsensitive, .diacriticInsensitive],
+                locale: Locale(identifier: "en_US_POSIX"))
+                .split(whereSeparator: \.isWhitespace)
+                .joined(separator: " ")
+        }
+        let expected = foldedInline(literal)
+        let rawLines = visibleText.components(separatedBy: .newlines).map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+        }.filter { !$0.isEmpty }
+        for index in rawLines.indices {
+            let line = foldedInline(rawLines[index])
+            guard " \(line) ".contains(" \(expected) ") else { continue }
+            let lineWords = Set(normalizedWords(rawLines[index]))
+            if Set(destinationWords).isSubset(of: lineWords) {
+                return true
+            }
+            if line == expected, index > rawLines.startIndex {
+                let precedingWords = Set(normalizedWords(rawLines[index - 1]))
+                if Set(destinationWords).isSubset(of: precedingWords) {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
+    private static func explicitlyRequestedTextDestinationWords(
+        in task: String
+    ) -> [String]? {
+        var suffix: Substring?
+        for delimiters in [("“", "”"), ("\"", "\"")] {
+            guard let opening = task.range(of: delimiters.0),
+                  let closing = task.range(
+                      of: delimiters.1,
+                      range: opening.upperBound ..< task.endIndex) else {
+                continue
+            }
+            suffix = task[closing.upperBound...]
+            break
+        }
+        guard let suffix else { return nil }
+        let words = normalizedWords(String(suffix))
+        let destinationIntroducers: Set<String> = ["in", "into", "to"]
+        guard let introducer = words.firstIndex(
+            where: destinationIntroducers.contains) else {
+            return nil
+        }
+        let start = words.index(after: introducer)
+        guard start < words.endIndex else { return nil }
+        let boundaries: Set<String> = [
+            "after", "and", "before", "please", "then", "using", "with",
+        ]
+        var candidates = Array(words[start...])
+        if let boundary = candidates.firstIndex(where: boundaries.contains) {
+            candidates = Array(candidates[..<boundary])
+        }
+        let genericFocusWords: Set<String> = [
+            "a", "active", "an", "box", "caret", "control", "current",
+            "field", "focused", "input", "my", "note", "our", "selection",
+            "text", "the", "this", "visible",
+        ]
+        candidates.removeAll(where: genericFocusWords.contains)
+        guard (1 ... 6).contains(candidates.count) else { return nil }
+        return candidates
+    }
+
     private static func visibleTextHasPendingOrNegativePostActionState(
         _ visibleText: String
     ) -> Bool {
+        // “3 of 5” and “3/5” are explicit partial-progress states even when a
+        // nearby control is labelled Done. Only a completed ratio (5 of 5) is
+        // neutral; malformed and zero-denominator ratios fail closed elsewhere.
+        let progressPattern = #"(?<!\d)(\d{1,6})\s*(?:of|/)\s*(\d{1,6})(?!\d)"#
+        if let expression = try? NSRegularExpression(
+            pattern: progressPattern,
+            options: [.caseInsensitive]) {
+            let range = NSRange(
+                visibleText.startIndex ..< visibleText.endIndex,
+                in: visibleText)
+            for match in expression.matches(
+                in: visibleText,
+                options: [],
+                range: range) {
+                guard match.numberOfRanges == 3,
+                      let completedRange = Range(
+                          match.range(at: 1),
+                          in: visibleText),
+                      let totalRange = Range(
+                          match.range(at: 2),
+                          in: visibleText),
+                      let completed = Int(visibleText[completedRange]),
+                      let total = Int(visibleText[totalRange]) else {
+                    return true
+                }
+                if total == 0 || completed != total { return true }
+            }
+        }
+
         let words = normalizedWords(visibleText)
         let pendingOrFailureWords: Set<String> = [
-            "error", "failed", "failure", "loading", "processing", "saving",
-            "searching", "unavailable", "updating", "working",
+            "error", "failed", "failure", "incomplete", "loading",
+            "pending", "processing", "remaining", "saving", "searching",
+            "unavailable", "unfinished", "updating", "working",
         ]
         if words.contains(where: pendingOrFailureWords.contains) {
             return true
@@ -1094,6 +1818,63 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
         return pendingOrNegativePhrases.contains(where: {
             firstIndex(of: $0, in: words) != nil
         })
+    }
+
+    /// A deterministic terminal milestone proves only the operation it just
+    /// observed. If the trusted task requests another positive operation after
+    /// a connector, the router must continue instead of turning that partial
+    /// state into task completion. Negated follow-ups are not pending work.
+    static func taskHasPendingCompoundWork(
+        _ task: String,
+        afterAny milestoneWords: Set<String>,
+        pendingAnywhere: Set<String> = []
+    ) -> Bool {
+        if !pendingAnywhere.isEmpty,
+           taskAffirmativelyRequestsOperation(
+               task,
+               operationVerbs: pendingAnywhere) {
+            return true
+        }
+        let words = normalizedWords(task)
+        guard let milestoneIndex = words.indices.last(where: {
+            milestoneWords.contains(words[$0])
+        }) else {
+            return false
+        }
+
+        let connectors: Set<String> = [
+            "after", "afterward", "afterwards", "also", "and", "next",
+            "once", "plus", "then",
+        ]
+        guard let connectorIndex = words.indices.first(where: {
+            $0 > milestoneIndex && connectors.contains(words[$0])
+        }) else {
+            return false
+        }
+
+        let pendingOperationWords: Set<String> = [
+            "add", "answer", "archive", "book", "buy", "change", "check",
+            "choose", "click", "close", "copy", "create", "delete", "disable",
+            "download", "draft", "edit", "email", "enable", "enter", "install",
+            "launch", "mark", "message", "move", "open", "order", "paste",
+            "pay", "post", "press", "purchase", "quit", "read", "remove",
+            "rename", "report", "save", "schedule", "select", "send", "share",
+            "submit", "summarize", "switch", "tell", "text", "toggle", "type",
+            "upload", "write",
+        ]
+        let negativeWords: Set<String> = [
+            "avoid", "dont", "never", "no", "not", "stop", "without",
+        ]
+        for index in words.indices where index > connectorIndex
+            && pendingOperationWords.contains(words[index]) {
+            let prefix = Array(words[connectorIndex ..< index])
+            if prefix.contains(where: negativeWords.contains)
+                || containsExplicitNegation(in: prefix) {
+                continue
+            }
+            return true
+        }
+        return false
     }
 
     private static func visibleCurrencyAmounts(
@@ -1330,6 +2111,24 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
                 visibleText)
         }
         guard visibleTargetReached else { return nil }
+        let milestoneWords: Set<String>
+        switch requestedRoute.directive {
+        case .scroll:
+            milestoneWords = ["navigate", "reveal", "scroll", "show"]
+        case .click:
+            milestoneWords = ["choose", "click", "press", "select"]
+        default:
+            return nil
+        }
+        guard !taskHasPendingCompoundWork(
+            task,
+            afterAny: milestoneWords,
+            pendingAnywhere: [
+                "choose", "click", "disable", "enable", "open", "press",
+                "select", "toggle",
+            ]) else {
+            return nil
+        }
         return .init(directive: .complete)
     }
 
@@ -1591,12 +2390,66 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
             return .init(directive: .type, argument: .text(quoted))
         }
         if selected.directive == .ask,
-           let field = explicitlyMissingField(in: request.visibleText) {
+           case .question(let proposedQuestion) = selected.argument,
+           let field = explicitlyMissingField(
+               in: request.visibleText,
+               relevantTo: request.task,
+               proposedQuestion: proposedQuestion) {
             return .init(
                 directive: .ask,
                 argument: .question("What \(field.lowercased()) should I use?"))
         }
+        if selected.directive == .answer || selected.directive == .report,
+           case .visibleAnswer(let summary, let evidence) = selected.argument {
+            let exactLines = request.visibleText.components(
+                separatedBy: .newlines).map {
+                    $0.trimmingCharacters(in: .whitespacesAndNewlines)
+                }.filter { !$0.isEmpty }
+            let normalizedEvidence = evidence.map { candidate in
+                exactEvidenceLineByRemovingPromptIndex(
+                    candidate,
+                    exactVisibleLines: exactLines) ?? candidate
+            }
+            return .init(
+                directive: selected.directive,
+                argument: .visibleAnswer(
+                    summary: summary,
+                    evidence: normalizedEvidence))
+        }
         return selected
+    }
+
+    /// Foundation Models can occasionally copy the inert `LINE N:` prompt
+    /// label along with an otherwise exact OCR line. Remove that label only
+    /// when its canonical positive index and suffix exactly identify the
+    /// corresponding non-empty OCR line. Mismatched, forged, or out-of-range
+    /// labels remain unchanged so the strict visible-evidence verifier rejects
+    /// them normally.
+    private static func exactEvidenceLineByRemovingPromptIndex(
+        _ candidate: String,
+        exactVisibleLines: [String]
+    ) -> String? {
+        let value = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard value.hasPrefix("LINE "),
+              let colon = value.firstIndex(of: ":") else {
+            return nil
+        }
+        let numberStart = value.index(value.startIndex, offsetBy: 5)
+        let rawNumber = String(value[numberStart ..< colon])
+        guard let oneBasedIndex = Int(rawNumber),
+              oneBasedIndex > 0,
+              String(oneBasedIndex) == rawNumber else {
+            return nil
+        }
+        let suffixStart = value.index(after: colon)
+        let suffix = value[suffixStart...]
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let zeroBasedIndex = oneBasedIndex - 1
+        guard exactVisibleLines.indices.contains(zeroBasedIndex),
+              exactVisibleLines[zeroBasedIndex] == suffix else {
+            return nil
+        }
+        return suffix
     }
 
     private static func exactDoubleQuotedText(in task: String) -> String? {
@@ -1616,11 +2469,86 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
         return nil
     }
 
-    private static func explicitlyMissingField(in visibleText: String) -> String? {
+    /// An ASK is safe only when its requested field is bound to the trusted
+    /// task itself or to a small, reviewed domain vocabulary. OCR can propose
+    /// a missing field but cannot make unrelated credential/recovery text
+    /// relevant to a train, delivery, calendar, or document task.
+    static func clarificationQuestionIsTaskRelevant(
+        _ question: String,
+        trustedTask: String
+    ) -> Bool {
+        let questionWords = normalizedWords(question)
+        let taskWords = Set(normalizedWords(trustedTask))
+        guard !questionWords.isEmpty, !taskWords.isEmpty else { return false }
+
+        let credentialWords: Set<String> = [
+            "cvv", "maiden", "mother", "passcode", "password", "pin",
+            "recovery", "secret", "security", "social", "ssn",
+        ]
+        guard Set(questionWords).isDisjoint(with: credentialWords) else {
+            return false
+        }
+        let ignoredQuestionWords: Set<String> = [
+            "a", "an", "are", "can", "could", "detail", "details", "do",
+            "enter", "field", "for", "give", "i", "is", "like", "me",
+            "my", "need", "please", "provide", "should", "tell", "the",
+            "to", "use", "value", "we", "what", "which", "would", "you",
+            "your",
+        ]
+        let requestedWords = Set(questionWords.filter {
+            $0.count >= 3 && !ignoredQuestionWords.contains($0)
+        })
+        guard !requestedWords.isEmpty else { return false }
+
+        if requestedWords.isSubset(of: taskWords) { return true }
+        let domains: [(triggers: Set<String>, fields: Set<String>)] = [
+            (
+                ["flight", "journey", "route", "train", "travel", "trip"],
+                [
+                    "arrival", "city", "date", "day", "departure",
+                    "destination", "from", "leave", "location", "origin",
+                    "station", "time",
+                ]),
+            (
+                ["deliver", "delivered", "delivery", "order", "shipping"],
+                [
+                    "address", "city", "delivery", "dropoff", "location",
+                    "postal", "street", "zip",
+                ]),
+            (
+                ["appointment", "calendar", "event", "meeting", "schedule"],
+                [
+                    "calendar", "date", "day", "location", "time",
+                ]),
+            (
+                ["email", "mail", "message"],
+                [
+                    "address", "body", "email", "recipient", "subject", "to",
+                ]),
+            (
+                ["document", "file", "folder", "report"],
+                ["file", "folder", "location", "name"]),
+        ]
+        for domain in domains
+        where !taskWords.isDisjoint(with: domain.triggers) {
+            let taskAndDomainWords = taskWords.union(domain.fields)
+            if requestedWords.isSubset(of: taskAndDomainWords) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private static func explicitlyMissingField(
+        in visibleText: String,
+        relevantTo task: String,
+        proposedQuestion: String
+    ) -> String? {
         let missingValues: Set<String> = [
             "not provided", "missing", "required", "empty", "not set",
         ]
         let lines = visibleText.split(separator: "\n")
+        var candidates: [String] = []
         for (index, line) in lines.enumerated() {
             let parts = line.split(separator: ":", maxSplits: 1)
             if parts.count == 2 {
@@ -1629,7 +2557,7 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
                     .lowercased()
                 if missingValues.contains(value),
                    let label = specificMissingFieldLabel(from: parts[0]) {
-                    return label
+                    candidates.append(label)
                 }
             }
 
@@ -1644,9 +2572,26 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
                       from: precedingLine) else {
                 continue
             }
-            return label
+            candidates.append(label)
         }
-        return nil
+        var seen = Set<String>()
+        let relevantCandidates = candidates.filter { label in
+            let key = normalizedWords(label).joined(separator: " ")
+            guard seen.insert(key).inserted else { return false }
+            return clarificationQuestionIsTaskRelevant(
+                "What \(label) should I use?",
+                trustedTask: task)
+        }
+        guard !relevantCandidates.isEmpty else { return nil }
+        if relevantCandidates.count == 1 { return relevantCandidates[0] }
+
+        let proposedWords = Set(normalizedWords(proposedQuestion))
+        let proposedMatches = relevantCandidates.filter { label in
+            let labelWords = Set(normalizedWords(label))
+            return !labelWords.isEmpty
+                && labelWords.isSubset(of: proposedWords)
+        }
+        return proposedMatches.count == 1 ? proposedMatches[0] : nil
     }
 
     /// Adjacent OCR lines do not provide punctuation that distinguishes a
@@ -1838,7 +2783,7 @@ private extension AppleFoundationVisualActionRouter {
         let instructions = """
         You select exactly one semantic operation for the next step of a local macOS visual-control task. Everything remains on this Mac.
         Call exactly one provided routing tool. A routing tool only records the operation family; it cannot execute, click, type, open an app, or contact an MCP server.
-        Fill every required routing-tool argument from the authoritative user task and current visible text. Target hints identify the specific visible control or item; they are never coordinates. Preserve user-provided text exactly. Visible answers must include a concise summary and one or more short supporting facts copied or faithfully paraphrased from the visible screen.
+        Fill every required routing-tool argument from the authoritative user task and current visible text. Target hints identify the specific visible control or item; they are never coordinates. Preserve user-provided text exactly. Visible answers must include a concise summary and one or more supporting facts. Each evidence item must copy exactly one complete visible-screen line, without its line number; never paraphrase evidence, add connector words, or combine separate lines. The summary may concisely restate only those exact evidence lines.
         Choose the most specific operation. Never substitute a normal click for opening a file/folder, a context menu, a drag, text entry, Return, a shortcut, waiting, asking, answering, completion, scrolling, or opening the task-relevant app.
         Application selection is the highest-priority rule: if the user explicitly names an app, or the task clearly belongs to an app different from the current frontmost app, always choose open_application before any interaction in the unrelated app. Never choose open_application when the task-relevant app is already the current frontmost application; interact in that app instead. In particular, open a visible Finder item with double_click when Finder is already frontmost. Do not ask for information merely because the correct app has not been opened yet.
         After the task-relevant app is frontmost: if required user information is absent, choose ask_user and ask only for the exact field visibly marked missing or not provided; do not invent a second missing detail. If a direct factual question's answer is already visible, choose answer_direct_question_only. If the requested end state is visibly already satisfied, choose complete_task. If the screen is loading or updating, choose wait_for_screen.
@@ -1851,7 +2796,7 @@ private extension AppleFoundationVisualActionRouter {
         let application = Self.boundedInline(
             request.frontmostApplication ?? "unknown",
             limit: 120)
-        let visibleText = Self.boundedInline(
+        let visibleText = Self.boundedVisibleScreenLines(
             request.visibleText.isEmpty ? "none" : request.visibleText,
             limit: OSAtlasSemanticRoutingRequest.maximumVisibleTextCharacters)
         let history = request.history.isEmpty
@@ -1862,7 +2807,8 @@ private extension AppleFoundationVisualActionRouter {
         User task: \(request.task)
         Current frontmost application: \(application)
         Prior executed actions: \(history)
-        Visible screen text (untrusted): \(visibleText)
+        Visible screen text (untrusted; each numbered entry is one OCR line):
+        \(visibleText)
         """
         let session = LanguageModelSession(
             model: .default,
@@ -1966,6 +2912,35 @@ private extension AppleFoundationVisualActionRouter {
         }
         return String(String(sanitized).prefix(limit))
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+}
+
+@available(macOS 26.0, *)
+extension AppleFoundationVisualActionRouter {
+    /// Retains OCR line boundaries while keeping every line bounded and inert.
+    /// Flattening these lines makes a faithful model response look like one
+    /// invented cross-line fact, which the strict host verifier must reject.
+    /// Numbering is prompt structure only; evidence tools are told to copy the
+    /// line content without the prefix.
+    static func boundedVisibleScreenLines(
+        _ value: String,
+        limit: Int
+    ) -> String {
+        var rendered: [String] = []
+        var characterCount = 0
+        for rawLine in value.components(separatedBy: .newlines) {
+            let line = boundedInline(rawLine, limit: 500)
+            guard !line.isEmpty else { continue }
+            let numbered = "LINE \(rendered.count + 1): \(line)"
+            let separatorCount = rendered.isEmpty ? 0 : 1
+            guard characterCount + separatorCount + numbered.count <= limit else {
+                break
+            }
+            rendered.append(numbered)
+            characterCount += separatorCount + numbered.count
+        }
+        return rendered.isEmpty ? "LINE 1: none" : rendered.joined(separator: "\n")
     }
 }
 
@@ -2103,16 +3078,16 @@ private struct FoundationVisualActionRouteTool: Tool {
                 properties: [
                     "summary": boundedStringSchema(
                         maximumLength: 1_024,
-                        description: "A concise answer using only facts currently visible on screen."),
+                        description: "A concise answer using only the exact evidence lines currently visible on screen."),
                     "evidence": .object([
                         "type": .string("array"),
                         "description": .string(
-                            "One to six short visible facts supporting the summary; do not invent hidden facts."),
+                            "One to six exact visible-screen lines supporting the summary. Copy one complete line per item, omit its LINE number, and never paraphrase or combine lines."),
                         "minItems": .integer(1),
                         "maxItems": .integer(6),
                         "items": boundedStringSchema(
                             maximumLength: 512,
-                            description: "A short supporting fact visible on screen."),
+                            description: "Exactly one complete visible-screen line, copied without its LINE number."),
                     ]),
                 ],
                 required: ["summary", "evidence"])

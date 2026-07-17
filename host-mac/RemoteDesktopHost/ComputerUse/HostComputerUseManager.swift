@@ -1221,6 +1221,13 @@ private final class ComputerUsePeerAuthorizationEpoch: @unchecked Sendable {
 @MainActor
 enum ComputerUseExecutionResult: Equatable {
     case completed(String)
+    /// The executor reached a terminal, evidence-backed explanation that the
+    /// requested end state cannot be achieved on this host.
+    case unableToComplete(String)
+    /// The task cannot proceed until the user supplies missing information.
+    /// Unlike live-screen intervention, this terminalizes the stable task ID;
+    /// the answer arrives as a new prompt with recent conversation context.
+    case clarificationRequired(String)
     /// The requested task is still active, but the next step must be performed
     /// by the person (for example, entering account credentials). The manager
     /// preserves the task context and pauses all automation until Resume.
@@ -1295,6 +1302,37 @@ protocol ComputerUseExecuting: AnyObject {
         tools: ComputerUseHostTools,
         progress: @escaping (String) -> Void
     ) async throws -> ComputerUseExecutionResult
+
+    /// Runs a task while keeping model conversation context structurally
+    /// separate from the current user-authored request. Implementations may
+    /// show `prompt` to a planner, but host policy, evidence, and completion
+    /// gates must use only `trustedUserPrompt`.
+    func execute(
+        taskID: String,
+        prompt: String,
+        trustedUserPrompt: String,
+        tools: ComputerUseHostTools,
+        progress: @escaping (String) -> Void
+    ) async throws -> ComputerUseExecutionResult
+}
+
+extension ComputerUseExecuting {
+    func execute(
+        taskID: String,
+        prompt: String,
+        trustedUserPrompt: String,
+        tools: ComputerUseHostTools,
+        progress: @escaping (String) -> Void
+    ) async throws -> ComputerUseExecutionResult {
+        try await execute(
+            // An executor that has not explicitly adopted the separated API
+            // gets the narrower user request by default. This is fail-safe:
+            // it may lose conversational convenience, but it can never
+            // accidentally treat prior assistant prose as host authority.
+            prompt: trustedUserPrompt,
+            tools: tools,
+            progress: progress)
+    }
 }
 
 typealias ComputerUseExecutorComposer = @MainActor @Sendable (
@@ -1310,6 +1348,10 @@ final class HostComputerUseManager: ObservableObject {
         "AI paused because control of the Mac changed. Check the screen, then tap Let AI continue."
     static let connectionEndedResponse =
         "The connection ended before this task finished. It will not resume automatically."
+    static let terminalPersistenceFailureResponse =
+        "The host could not safely save the final result, so the task was not reported as complete."
+    static let activeTaskConflictResponse =
+        "Another AI Computer Use task is still active. Finish it or stop it, then send this request again. This request was not run."
 
     enum ModelState: Equatable {
         case downloadRequired
@@ -1393,6 +1435,9 @@ final class HostComputerUseManager: ObservableObject {
     private struct ExecutionContext {
         let envelope: ComputerUseEnvelope
         let channel: any HostComputerUseChannel
+        /// Current user-authored request, retained separately from the model
+        /// prompt so assistant conversation can never become host evidence.
+        let trustedUserPrompt: String
         /// False only when a versioned Pause reached the durable ledger before
         /// its Prompt. Resume can then claim and start that Prompt exactly once
         /// instead of treating it as work that needs a continuation replan.
@@ -1401,10 +1446,14 @@ final class HostComputerUseManager: ObservableObject {
         init(
             envelope: ComputerUseEnvelope,
             channel: any HostComputerUseChannel,
+            trustedUserPrompt: String? = nil,
             hasStarted: Bool = true
         ) {
             self.envelope = envelope
             self.channel = channel
+            self.trustedUserPrompt = trustedUserPrompt
+                ?? ComputerUsePromptRequest.decodeCompatibleBody(
+                    envelope.body).prompt
             self.hasStarted = hasStarted
         }
 
@@ -1451,6 +1500,11 @@ final class HostComputerUseManager: ObservableObject {
     private var executionTask: Task<Void, Never>?
     private var currentExecution: ExecutionContext?
     private var pausedExecution: ExecutionContext?
+    /// One host task can be resumably paused at a time. Retaining its exact
+    /// bounded instruction lets a duplicate accepted Prompt replay the same
+    /// typed handoff instead of replacing useful sign-in guidance with a
+    /// generic pause explanation.
+    private var lastUserIntervention: (taskID: String, guidance: String)?
     private var currentExecutionToken: UUID?
     private var pendingApproval: PendingApproval?
     private var approvalDeliveryTask: Task<Void, Never>?
@@ -1722,9 +1776,8 @@ final class HostComputerUseManager: ObservableObject {
             executionTask = nil
             activity = .paused
             if let interrupted {
-                sendStatus(
-                    ComputerUseStatusSignal.userIntervention(
-                        Self.userInterventionGuidance),
+                sendUserInterventionStatus(
+                    Self.userInterventionGuidance,
                     replyingTo: interrupted.envelope,
                     channel: interrupted.channel)
             }
@@ -1738,9 +1791,8 @@ final class HostComputerUseManager: ObservableObject {
             approvalDeliveryTask = nil
             activity = .paused
             if let invalidated {
-                sendStatus(
-                    ComputerUseStatusSignal.userIntervention(
-                        Self.userInterventionGuidance),
+                sendUserInterventionStatus(
+                    Self.userInterventionGuidance,
                     replyingTo: invalidated.context.envelope,
                     channel: invalidated.context.channel)
             }
@@ -1777,12 +1829,9 @@ final class HostComputerUseManager: ObservableObject {
             ?? pausedExecution
             ?? invalidatedApproval?.context
         if let terminalContext {
-            taskLedger.complete(
-                taskID: terminalContext.envelope.id,
-                response: Self.connectionEndedResponse)
-            send(
-                kind: .assistant,
-                body: Self.connectionEndedResponse,
+            sendDurableTerminal(
+                Self.connectionEndedResponse,
+                outcome: .unableToComplete,
                 replyingTo: terminalContext.envelope,
                 channel: terminalContext.channel)
             sendStatus(
@@ -1876,7 +1925,8 @@ final class HostComputerUseManager: ObservableObject {
                     kind: .assistant,
                     body: "Update Remote Desktop on this iPhone or iPad before using AI Computer Use. Ordinary remote control is still available.",
                     replyingTo: envelope,
-                    channel: channel)
+                    channel: channel,
+                    outcome: .userInterventionRequired)
                 sendStatus("ready", replyingTo: envelope, channel: channel)
                 return true
             }
@@ -1956,7 +2006,8 @@ final class HostComputerUseManager: ObservableObject {
                 kind: .assistant,
                 body: terminalResponse,
                 replyingTo: replyEnvelope,
-                channel: replyChannel)
+                channel: replyChannel,
+                outcome: taskLedger.terminalOutcome(taskID: request.taskID))
             sendStatus(
                 "ready",
                 replyingTo: replyEnvelope,
@@ -1971,8 +2022,8 @@ final class HostComputerUseManager: ObservableObject {
             } else {
                 // The Prompt may still be in flight. Its stable ID is used for
                 // correlation even though no execution context exists yet.
-                sendStatus(
-                    "paused",
+                sendUserInterventionStatus(
+                    Self.userInterventionGuidance,
                     replyingTo: replyEnvelope,
                     channel: replyChannel)
             }
@@ -2038,15 +2089,12 @@ final class HostComputerUseManager: ObservableObject {
             }
             resumeExecution(context, controlEnvelope: envelope)
         case .cancel:
-            taskLedger.complete(
-                taskID: context.envelope.id,
-                response: ComputerUseTaskLedger.stoppedResponse)
-            stopExecution(context)
-            send(
-                kind: .assistant,
-                body: ComputerUseTaskLedger.stoppedResponse,
+            sendDurableTerminal(
+                ComputerUseTaskLedger.stoppedResponse,
+                outcome: .unableToComplete,
                 replyingTo: context.envelope,
                 channel: context.channel)
+            stopExecution(context)
             sendStatus(
                 "ready",
                 replyingTo: context.envelope,
@@ -2114,8 +2162,8 @@ final class HostComputerUseManager: ObservableObject {
         executionTask?.cancel()
         executionTask = nil
         activity = .paused
-        sendStatus(
-            "paused",
+        sendUserInterventionStatus(
+            Self.userInterventionGuidance,
             replyingTo: context.envelope,
             channel: context.channel)
     }
@@ -2156,8 +2204,8 @@ final class HostComputerUseManager: ObservableObject {
             actionGate.setAllowsActions(false)
             actionGate.endAutomation(allowsActions: false)
             activity = .paused
-            sendStatus(
-                "paused",
+            sendUserInterventionStatus(
+                Self.userInterventionGuidance,
                 replyingTo: pausedExecution.envelope,
                 channel: pausedExecution.channel)
             return
@@ -2177,6 +2225,7 @@ final class HostComputerUseManager: ObservableObject {
         beginExecution(
             executor,
             for: resumed,
+            trustedUserPrompt: pausedExecution.trustedUserPrompt,
             channel: pausedExecution.channel,
             isResuming: true)
     }
@@ -2258,12 +2307,9 @@ final class HostComputerUseManager: ObservableObject {
             cancelMCPApprovalIfNeeded(pendingApproval)
             actionGate.endAutomation(allowsActions: true)
             activity = .idle
-            taskLedger.complete(
-                taskID: pendingApproval.context.envelope.id,
-                response: "Canceled. No action was taken.")
-            send(
-                kind: .assistant,
-                body: "Canceled. No action was taken.",
+            sendDurableTerminal(
+                "Canceled. No action was taken.",
+                outcome: .unableToComplete,
                 replyingTo: pendingApproval.context.envelope,
                 channel: pendingApproval.context.channel)
             sendStatus(
@@ -2319,6 +2365,8 @@ final class HostComputerUseManager: ObservableObject {
                 beginExecution(
                     executor,
                     for: replanned,
+                    trustedUserPrompt:
+                        pendingApproval.context.trustedUserPrompt,
                     channel: pendingApproval.context.channel,
                     isResuming: true)
                 return
@@ -2352,6 +2400,8 @@ final class HostComputerUseManager: ObservableObject {
             beginExecution(
                 executor,
                 for: approvedPrompt,
+                trustedUserPrompt:
+                    pendingApproval.context.trustedUserPrompt,
                 channel: pendingApproval.context.channel,
                 isResuming: true)
         }
@@ -2366,8 +2416,8 @@ final class HostComputerUseManager: ObservableObject {
         executionTask = nil
         pausedExecution = context
         activity = .paused
-        sendStatus(
-            "paused",
+        sendUserInterventionStatus(
+            Self.userInterventionGuidance,
             replyingTo: context.envelope,
             channel: context.channel)
     }
@@ -2422,10 +2472,9 @@ final class HostComputerUseManager: ObservableObject {
         actionGate.endAutomation(allowsActions: true)
         activity = .idle
         let response = "The approved action was not performed: \(error.localizedDescription)"
-        taskLedger.complete(taskID: context.envelope.id, response: response)
-        send(
-            kind: .assistant,
-            body: response,
+        sendDurableTerminal(
+            response,
+            outcome: .unableToComplete,
             replyingTo: context.envelope,
             channel: context.channel)
         sendStatus("ready", replyingTo: context.envelope, channel: context.channel)
@@ -2807,24 +2856,18 @@ final class HostComputerUseManager: ObservableObject {
         for envelope: ComputerUseEnvelope,
         channel: any HostComputerUseChannel
     ) {
-        guard case .idle = activity else {
-            switch activity {
-            case .working:
-                sendStatus(
-                    "Your Mac is already working on the current request…",
-                    replyingTo: envelope,
-                    channel: channel)
-            case .paused:
-                sendStatus("paused", replyingTo: envelope, channel: channel)
-            case .awaitingApproval:
-                sendStatus(
-                    "Waiting for your approval before continuing…",
-                    replyingTo: envelope,
-                    channel: channel)
-            case .idle:
-                break
-            }
-            return
+        let activeTaskID = currentExecution?.envelope.id
+            ?? pausedExecution?.envelope.id
+            ?? pendingApproval?.context.envelope.id
+        let hasDifferentActiveTask: Bool
+        switch activity {
+        case .idle:
+            hasDifferentActiveTask = false
+        case .working, .paused, .awaitingApproval:
+            // A non-idle state without this task's matching context is also
+            // treated as a conflict. It is safer to terminalize the new ID
+            // than to let a transient invariant failure strand it forever.
+            hasDifferentActiveTask = activeTaskID != envelope.id
         }
         do {
             switch try taskLedger.claim(
@@ -2832,8 +2875,24 @@ final class HostComputerUseManager: ObservableObject {
                 senderID: envelope.senderID,
                 sessionID: envelope.sessionID) {
             case .new:
+                if hasDifferentActiveTask {
+                    sendDurableTerminal(
+                        Self.activeTaskConflictResponse,
+                        outcome: .userInterventionRequired,
+                        replyingTo: envelope,
+                        channel: channel)
+                    return
+                }
                 break
             case .paused:
+                if hasDifferentActiveTask {
+                    sendDurableTerminal(
+                        Self.activeTaskConflictResponse,
+                        outcome: .userInterventionRequired,
+                        replyingTo: envelope,
+                        channel: channel)
+                    return
+                }
                 let context = ExecutionContext(
                     envelope: envelope,
                     channel: channel,
@@ -2845,8 +2904,8 @@ final class HostComputerUseManager: ObservableObject {
                 actionGate.setAllowsActions(false)
                 actionGate.endAutomation(allowsActions: false)
                 activity = .paused
-                sendStatus(
-                    "paused",
+                sendUserInterventionStatus(
+                    Self.userInterventionGuidance,
                     replyingTo: envelope,
                     channel: channel)
                 return
@@ -2855,7 +2914,8 @@ final class HostComputerUseManager: ObservableObject {
                     kind: .assistant,
                     body: response,
                     replyingTo: envelope,
-                    channel: channel)
+                    channel: channel,
+                    outcome: taskLedger.terminalOutcome(taskID: envelope.id))
                 sendStatus("ready", replyingTo: envelope, channel: channel)
                 return
             case .accepted:
@@ -2863,21 +2923,40 @@ final class HostComputerUseManager: ObservableObject {
                     ?? pausedExecution?.envelope.id
                     ?? pendingApproval?.context.envelope.id
                 if activeID == envelope.id {
-                    let status: String
                     switch activity {
-                    case .working: status = "working"
-                    case .paused: status = "paused"
+                    case .working:
+                        sendStatus(
+                            "working",
+                            replyingTo: envelope,
+                            channel: channel)
+                    case .paused:
+                        let guidance: String
+                        if let lastUserIntervention,
+                           lastUserIntervention.taskID == envelope.id {
+                            guidance = lastUserIntervention.guidance
+                        } else {
+                            guidance = Self.userInterventionGuidance
+                        }
+                        sendUserInterventionStatus(
+                            guidance,
+                            replyingTo: envelope,
+                            channel: channel)
                     case .awaitingApproval:
-                        status = "Waiting for your approval before continuing…"
-                    case .idle: status = "ready"
+                        sendStatus(
+                            "Waiting for your approval before continuing…",
+                            replyingTo: envelope,
+                            channel: channel)
+                    case .idle:
+                        sendStatus(
+                            "ready",
+                            replyingTo: envelope,
+                            channel: channel)
                     }
-                    sendStatus(status, replyingTo: envelope, channel: channel)
                 } else {
                     let response = "That request was received before the host restarted, so it was not run again. Send it as a new request if it is still needed."
-                    taskLedger.complete(taskID: envelope.id, response: response)
-                    send(
-                        kind: .assistant,
-                        body: response,
+                    sendDurableTerminal(
+                        response,
+                        outcome: .unableToComplete,
                         replyingTo: envelope,
                         channel: channel)
                     sendStatus("ready", replyingTo: envelope, channel: channel)
@@ -2891,18 +2970,17 @@ final class HostComputerUseManager: ObservableObject {
                 kind: .assistant,
                 body: "The host could not safely record this request, so no action was taken.",
                 replyingTo: envelope,
-                channel: channel)
+                channel: channel,
+                outcome: .unableToComplete)
             return
         }
         guard let executor, executor.isReady else {
             let response = "AI Computer Use still needs setup. Return to Devices and tap Set up AI."
-            taskLedger.complete(taskID: envelope.id, response: response)
-            send(
-                kind: .assistant,
-                body: response,
+            sendDurableTerminal(
+                response,
+                outcome: .userInterventionRequired,
                 replyingTo: envelope,
                 channel: channel)
-            sendStatus("setupRequired", replyingTo: envelope, channel: channel)
             return
         }
 
@@ -2918,10 +2996,9 @@ final class HostComputerUseManager: ObservableObject {
             // answer is a new prompt carrying this question in recent chat
             // context, which keeps retries at-most-once and multi-turn chat
             // unambiguous across host or app restarts.
-            taskLedger.complete(taskID: envelope.id, response: clarification)
-            send(
-                kind: .assistant,
-                body: clarification,
+            sendDurableTerminal(
+                clarification,
+                outcome: .userInterventionRequired,
                 replyingTo: envelope,
                 channel: channel)
             sendStatus("ready", replyingTo: envelope, channel: channel)
@@ -2940,18 +3017,26 @@ final class HostComputerUseManager: ObservableObject {
             kind: envelope.kind,
             body: request.modelPrompt,
             createdAt: envelope.createdAt)
-        beginExecution(executor, for: executionEnvelope, channel: channel)
+        beginExecution(
+            executor,
+            for: executionEnvelope,
+            trustedUserPrompt: request.prompt,
+            channel: channel)
     }
 
     private func beginExecution(
         _ executor: any ComputerUseExecuting,
         for envelope: ComputerUseEnvelope,
+        trustedUserPrompt: String,
         channel: any HostComputerUseChannel,
         isResuming: Bool = false
     ) {
         executionTask?.cancel()
         actionGate.beginAutomation()
-        let context = ExecutionContext(envelope: envelope, channel: channel)
+        let context = ExecutionContext(
+            envelope: envelope,
+            channel: channel,
+            trustedUserPrompt: trustedUserPrompt)
         let token = UUID()
         currentExecution = context
         currentExecutionToken = token
@@ -2965,19 +3050,12 @@ final class HostComputerUseManager: ObservableObject {
                     self?.activity = .working(value)
                     self?.sendStatus(value, replyingTo: envelope, channel: channel)
                 }
-                let result: ComputerUseExecutionResult
-                if let taskAware = executor as? any ComputerUseTaskAwareExecuting {
-                    result = try await taskAware.execute(
-                        taskID: envelope.id,
-                        prompt: envelope.body,
-                        tools: tools,
-                        progress: progress)
-                } else {
-                    result = try await executor.execute(
-                        prompt: envelope.body,
-                        tools: tools,
-                        progress: progress)
-                }
+                let result = try await executor.execute(
+                    taskID: envelope.id,
+                    prompt: envelope.body,
+                    trustedUserPrompt: trustedUserPrompt,
+                    tools: tools,
+                    progress: progress)
                 guard !Task.isCancelled,
                       currentExecutionToken == token else { return }
                 try acceptExecutionResult(
@@ -3005,7 +3083,10 @@ final class HostComputerUseManager: ObservableObject {
                 pausedExecution = context
                 actionGate.endAutomation(allowsActions: false)
                 activity = .paused
-                sendStatus("paused", replyingTo: envelope, channel: channel)
+                sendUserInterventionStatus(
+                    Self.userInterventionGuidance,
+                    replyingTo: envelope,
+                    channel: channel)
             } catch {
                 guard currentExecutionToken == token else { return }
                 if currentExecution?.envelope.id == envelope.id {
@@ -3017,10 +3098,9 @@ final class HostComputerUseManager: ObservableObject {
                 let message = (error as? LocalizedError)?.errorDescription
                     ?? error.localizedDescription
                 let response = "I couldn't complete that task: \(message)"
-                taskLedger.complete(taskID: envelope.id, response: response)
-                send(
-                    kind: .assistant,
-                    body: response,
+                sendDurableTerminal(
+                    response,
+                    outcome: .unableToComplete,
                     replyingTo: envelope,
                     channel: channel)
                 sendStatus("ready", replyingTo: envelope, channel: channel)
@@ -3101,10 +3181,35 @@ final class HostComputerUseManager: ObservableObject {
 
         switch result {
         case .completed(let response):
-            taskLedger.complete(taskID: envelope.id, response: response)
-            send(
-                kind: .assistant,
-                body: response,
+            sendDurableTerminal(
+                response,
+                outcome: .taskCompleted,
+                replyingTo: envelope,
+                channel: context.channel)
+            currentExecution = nil
+            currentExecutionToken = nil
+            executionTask = nil
+            actionGate.endAutomation(allowsActions: true)
+            activity = .idle
+            sendStatus("ready", replyingTo: envelope, channel: context.channel)
+
+        case .unableToComplete(let response):
+            sendDurableTerminal(
+                response,
+                outcome: .unableToComplete,
+                replyingTo: envelope,
+                channel: context.channel)
+            currentExecution = nil
+            currentExecutionToken = nil
+            executionTask = nil
+            actionGate.endAutomation(allowsActions: true)
+            activity = .idle
+            sendStatus("ready", replyingTo: envelope, channel: context.channel)
+
+        case .clarificationRequired(let response):
+            sendDurableTerminal(
+                response,
+                outcome: .userInterventionRequired,
                 replyingTo: envelope,
                 channel: context.channel)
             currentExecution = nil
@@ -3126,8 +3231,8 @@ final class HostComputerUseManager: ObservableObject {
             actionGate.setAllowsActions(false)
             actionGate.endAutomation(allowsActions: false)
             activity = .paused
-            sendStatus(
-                ComputerUseStatusSignal.userIntervention(message),
+            sendUserInterventionStatus(
+                message,
                 replyingTo: envelope,
                 channel: context.channel)
 
@@ -3175,10 +3280,9 @@ final class HostComputerUseManager: ObservableObject {
         actionGate.endAutomation(allowsActions: true)
         activity = .idle
         let response = "The task stopped before it finished. It will not be retried automatically."
-        taskLedger.complete(taskID: context.envelope.id, response: response)
-        send(
-            kind: .assistant,
-            body: response,
+        sendDurableTerminal(
+            response,
+            outcome: .unableToComplete,
             replyingTo: context.envelope,
             channel: context.channel)
         sendStatus("ready", replyingTo: context.envelope, channel: context.channel)
@@ -3213,9 +3317,69 @@ final class HostComputerUseManager: ObservableObject {
     private func sendStatus(
         _ status: String,
         replyingTo envelope: ComputerUseEnvelope,
+        channel: any HostComputerUseChannel,
+        outcome: ComputerUseTerminalOutcome? = nil
+    ) {
+        send(
+            kind: .status,
+            body: status,
+            replyingTo: envelope,
+            channel: channel,
+            outcome: outcome)
+    }
+
+    /// Every resumable handoff carries both the legacy-safe text prefix and the
+    /// host-authoritative typed outcome. The prefix keeps older clients safely
+    /// paused; the outcome lets current clients and evaluators distinguish a
+    /// person-only step from generic progress without parsing prose.
+    private func sendUserInterventionStatus(
+        _ guidance: String,
+        replyingTo envelope: ComputerUseEnvelope,
         channel: any HostComputerUseChannel
     ) {
-        send(kind: .status, body: status, replyingTo: envelope, channel: channel)
+        let signal = ComputerUseStatusSignal.userIntervention(guidance)
+        if let boundedGuidance = ComputerUseStatusSignal
+            .userInterventionMessage(from: signal) {
+            lastUserIntervention = (
+                taskID: envelope.id,
+                guidance: boundedGuidance)
+        }
+        sendStatus(
+            signal,
+            replyingTo: envelope,
+            channel: channel,
+            outcome: .userInterventionRequired)
+    }
+
+    /// A terminal reply is authoritative only after its first-result-wins
+    /// ledger record reaches durable storage. If that write fails, never emit
+    /// the requested result (especially success); report the storage failure
+    /// directly and leave the poisoned ledger to reject future retries.
+    private func sendDurableTerminal(
+        _ response: String,
+        outcome: ComputerUseTerminalOutcome,
+        replyingTo envelope: ComputerUseEnvelope,
+        channel: any HostComputerUseChannel
+    ) {
+        do {
+            let terminal = try taskLedger.complete(
+                taskID: envelope.id,
+                response: response,
+                outcome: outcome)
+            send(
+                kind: .assistant,
+                body: terminal.response,
+                replyingTo: envelope,
+                channel: channel,
+                outcome: terminal.outcome)
+        } catch {
+            send(
+                kind: .assistant,
+                body: Self.terminalPersistenceFailureResponse,
+                replyingTo: envelope,
+                channel: channel,
+                outcome: .unableToComplete)
+        }
     }
 
     private func startApprovalDelivery(_ approval: PendingApproval) {
@@ -3244,7 +3408,8 @@ final class HostComputerUseManager: ObservableObject {
         kind: ComputerUseEnvelope.Kind,
         body: String,
         replyingTo envelope: ComputerUseEnvelope,
-        channel: any HostComputerUseChannel
+        channel: any HostComputerUseChannel,
+        outcome: ComputerUseTerminalOutcome? = nil
     ) {
         let wireBody: String
         switch kind {
@@ -3253,7 +3418,8 @@ final class HostComputerUseManager: ObservableObject {
                 taskID: envelope.id,
                 text: body,
                 appliedControlRevision: taskLedger.appliedControlRevision(
-                    taskID: envelope.id)).encodedBody()) ?? body
+                    taskID: envelope.id),
+                outcome: outcome).encodedBody()) ?? body
         default:
             wireBody = body
         }
