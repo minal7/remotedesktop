@@ -161,9 +161,9 @@ final class ComputerUseSetupLiveE2ETests: XCTestCase {
     }
 }
 
-/// Manual acceptance for the real phone -> CloudKit -> local host automation
-/// loop. The ordinary test scheme never includes this target, and the
-/// live scheme retains the explicit environment opt-in above.
+/// Manual acceptance for the Release iOS client -> Production CloudKit ->
+/// local host automation loop. The ordinary test scheme never includes this
+/// target, and the live scheme retains the explicit environment opt-in above.
 final class ComputerUseTaskLiveE2ETests: XCTestCase {
     private let optInEnvironmentKey = "RUN_COMPUTER_USE_LIVE_E2E"
 
@@ -210,6 +210,17 @@ final class ComputerUseTaskLiveE2ETests: XCTestCase {
             "Open Calculator, clear it, calculate 27 times 43, and stop only when the Calculator display shows 1161.")
 
         let sendButton = app.buttons["Send request"]
+        let assistantMessages = app.staticTexts.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "AI: "))
+        let assistantCountBefore = assistantMessages.count
+        let successMessages = app.staticTexts.matching(
+            NSPredicate(
+                format: "label == %@",
+                "AI: Calculator displays 1161."))
+        let successCountBefore = successMessages.count
+        let failureMessages = app.descendants(matching: .any).matching(
+            NSPredicate(format: "label BEGINSWITH %@", "AI: I couldn't"))
+        let failureCountBefore = failureMessages.count
         XCTAssertTrue(
             waitUntil(timeout: 10) { sendButton.exists && sendButton.isEnabled },
             "The typed one-prompt task did not enable Send.")
@@ -219,21 +230,43 @@ final class ComputerUseTaskLiveE2ETests: XCTestCase {
         // cleared Calculator, entered the expression, and verified both the
         // expression and result through Accessibility. A generic "Done" is
         // intentionally insufficient for this end-to-end acceptance gate.
-        let success = app.descendants(matching: .any).matching(
-            NSPredicate(
-                format: "label == %@",
-                "AI: Calculator displays 1161.")).firstMatch
-        let failure = app.descendants(matching: .any).matching(
-            NSPredicate(format: "label BEGINSWITH %@", "AI: I couldn't")).firstMatch
         XCTAssertTrue(
-            waitUntil(timeout: 150) { success.exists || failure.exists },
+            waitUntil(timeout: 150) {
+                (assistantMessages.count > assistantCountBefore
+                    && successMessages.count > successCountBefore)
+                    || failureMessages.count > failureCountBefore
+            },
             "The host did not return a terminal result for the Calculator calculation task.")
-        XCTAssertFalse(
-            failure.exists,
-            "Local Computer Use returned a failure: \(failure.label)")
+        let failureCountAfter = failureMessages.count
+        let newestFailure = failureCountAfter > failureCountBefore
+            ? failureMessages.element(boundBy: failureCountAfter - 1).label
+            : ""
+        XCTAssertEqual(
+            failureCountAfter,
+            failureCountBefore,
+            "Local Computer Use returned a failure: \(newestFailure)")
         XCTAssertTrue(
-            success.exists,
+            successMessages.count > successCountBefore,
             "The host did not report the AX-verified Calculator result 1161.")
+
+        // The wording above proves the visible Calculator postcondition. This
+        // stable accessibility value separately proves that the Release iOS
+        // client decoded the host's typed terminal outcome from Production
+        // CloudKit instead of inferring success from assistant prose.
+        let status = app.descendants(matching: .any).matching(
+            identifier: "computer-use-status").firstMatch
+        XCTAssertTrue(
+            waitUntil(timeout: 10) {
+                (status.value as? String) == "Task completed"
+                    && composer.exists
+                    && composer.isEnabled
+            },
+            "iOS displayed the verified Calculator result but did not expose the typed task-completed outcome. Status value: \(String(describing: status.value))")
+        XCTAssertFalse(
+            app.buttons["computer-use-take-control"].exists
+                || app.buttons["computer-use-resume-ai"].exists
+                || app.buttons["computer-use-stop-task"].exists,
+            "The completed task left lifecycle controls active.")
     }
 
     private func waitUntil(

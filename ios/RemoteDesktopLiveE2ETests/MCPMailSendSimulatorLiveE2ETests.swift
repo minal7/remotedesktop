@@ -384,9 +384,28 @@ final class MCPMailSendSimulatorLiveE2ETests: XCTestCase {
             currentRequestAssistant.label,
             expectedCancellation,
             "The denied approval did not terminate as a no-action cancellation.")
+
+        // The exact cancellation prose proves which request terminated. This
+        // accessibility value independently proves that the Release client
+        // decoded the host-authored typed failure outcome rather than
+        // classifying the sentence locally.
+        let status = app.descendants(matching: .any).matching(
+            identifier: "computer-use-status").firstMatch
+        XCTAssertTrue(
+            waitUntil(timeout: 10) {
+                (status.value as? String) == "Unable to complete"
+                    && composer.exists
+                    && composer.isEnabled
+            },
+            "iOS displayed the approval cancellation but did not expose the typed unable-to-complete outcome. Status value: \(String(describing: status.value))")
         XCTAssertFalse(
             app.buttons["Send email"].exists,
             "The denied send remained executable after its approval was consumed.")
+        XCTAssertFalse(
+            app.buttons["computer-use-take-control"].exists
+                || app.buttons["computer-use-resume-ai"].exists
+                || app.buttons["computer-use-stop-task"].exists,
+            "The unable-to-complete task left lifecycle controls active.")
         XCTAssertTrue(
             privacyShield.exists,
             "Canceling Mail exposed unrelated desktop pixels without an explicit reveal.")

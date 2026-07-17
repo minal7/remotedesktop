@@ -27,10 +27,12 @@ import XCTest
 /// `NSApplication.sendEvent`; this proves native UI behavior without
 /// requesting a new permission or weakening normal onboarding. Create the
 /// adjacent `-require-global-<uid>` file to fail unless the production global
-/// event path is available.
+/// event path is available. The status-bar fixture isolates injector behavior;
+/// a separate ordinary floating-window case exercises the live Notification
+/// Center obstruction decision before posting a double-click.
 @MainActor
 final class OSAtlasNativeRealUIAcceptanceTests: XCTestCase {
-    func testOpenApplicationThenNativeActionMatrixProducesVisiblePostconditions()
+    func testStatusBarInjectorLayerIsolationOpenApplicationThenNativeActionMatrixProducesVisiblePostconditions()
         async throws {
         guard Self.isEnabled else {
             throw XCTSkip(
@@ -85,7 +87,8 @@ final class OSAtlasNativeRealUIAcceptanceTests: XCTestCase {
             return
         }
 
-        let visibleFixture = try OSAtlasNativeActionFixture.show()
+        let visibleFixture = try OSAtlasNativeActionFixture.show(
+            presentation: .injectorLayerIsolation)
         fixture = visibleFixture
         let fixtureActivated = await Self.eventually {
             visibleFixture.isKeyAndFrontmost
@@ -99,10 +102,12 @@ final class OSAtlasNativeRealUIAcceptanceTests: XCTestCase {
         let eventDelivery: String
         let injector: InputInjector
         if hasGlobalEventAccess {
-            eventDelivery = "production global .cghidEventTap"
+            eventDelivery =
+                "production global .cghidEventTap (status-bar injector-layer isolation)"
             injector = InputInjector()
         } else {
-            eventDelivery = "process-targeted NSApplication.sendEvent fallback"
+            eventDelivery =
+                "process-targeted NSApplication.sendEvent fallback (status-bar injector-layer isolation)"
             injector = visibleFixture.makeProcessTargetedInjector()
         }
         let tools = ComputerUseHostTools(
@@ -114,21 +119,26 @@ final class OSAtlasNativeRealUIAcceptanceTests: XCTestCase {
             _ action: OSAtlasGUIAction,
             expected: OSAtlasNativeUIPostcondition
         ) async throws -> Bool {
+            let predicted = try OSAtlasComputerUseExecutor.predictedAction(
+                from: action,
+                displayBounds: displayBounds)
             guard visibleFixture.isKeyAndFrontmost else {
                 XCTFail(
-                    "Fixture lost key/frontmost state immediately before \(expected.rawValue): \(visibleFixture.diagnostics)")
+                    "Fixture lost key/frontmost state immediately before \(expected.rawValue): \(visibleFixture.diagnostics(for: predicted))")
                 return false
             }
+            let preActionDiagnostics = visibleFixture.diagnostics(
+                for: predicted)
             let eventCountBeforeAction = visibleFixture.localTaggedEventCount
-            try tools.perform(try OSAtlasComputerUseExecutor.predictedAction(
-                from: action,
-                displayBounds: displayBounds))
+            try tools.perform(predicted)
             let confirmed = await Self.eventually(timeout: 1) {
                 visibleFixture.hasVisiblePostcondition(expected)
             }
             guard confirmed else {
                 XCTFail(
-                    "\(expected.rawValue) did not produce its visible UI postcondition: \(visibleFixture.diagnostics)")
+                    "\(expected.rawValue) did not produce its visible UI postcondition. "
+                        + "Before: \(preActionDiagnostics). "
+                        + "After: \(visibleFixture.diagnostics(for: predicted))")
                 return false
             }
             XCTAssertGreaterThan(
@@ -186,7 +196,124 @@ final class OSAtlasNativeRealUIAcceptanceTests: XCTestCase {
             "OPEN_APP: \(openApplicationEvidence)\n"
                 + "CGEvent delivery: \(eventDelivery)\n"
                 + visibleFixture.visibleStatus)
-        evidence.name = "OS-Atlas native real-UI postconditions"
+        evidence.name = "OS-Atlas native injector-layer postconditions"
+        evidence.lifetime = .keepAlways
+        add(evidence)
+    }
+
+    func testFloatingFixtureLiveNotificationGateBlocksOrDeliversDoubleClick()
+        async throws {
+        guard Self.isEnabled else {
+            throw XCTSkip(
+                "Create the per-user /tmp opt-in file to run the visible native-action acceptance fixture.")
+        }
+
+        let hasGlobalEventAccess = AXIsProcessTrusted()
+            && CGPreflightPostEventAccess()
+        if Self.requiresGlobalEventAccess {
+            XCTAssertTrue(
+                hasGlobalEventAccess,
+                "The exact built host test process lacks Accessibility or PostEvent access required for production-global CGEvent delivery")
+            guard hasGlobalEventAccess else { return }
+        }
+
+        let originalFrontmostApplication =
+            NSWorkspace.shared.frontmostApplication
+        let originalActivationPolicy = NSApp.activationPolicy()
+        var fixture: OSAtlasNativeActionFixture?
+        defer {
+            fixture?.close()
+            if let originalFrontmostApplication,
+               !originalFrontmostApplication.isTerminated {
+                originalFrontmostApplication.activate(options: [
+                    .activateAllWindows,
+                ])
+            }
+            _ = NSApp.setActivationPolicy(originalActivationPolicy)
+        }
+
+        let visibleFixture = try OSAtlasNativeActionFixture.show(
+            presentation: .liveFloatingOverlayGate)
+        fixture = visibleFixture
+        let fixtureActivated = await Self.eventually {
+            visibleFixture.isKeyAndFrontmost
+        }
+        guard fixtureActivated else {
+            XCTFail(
+                "The ordinary floating fixture must be key and frontmost before testing live notification obstruction")
+            return
+        }
+
+        let postedEvents = OSAtlasNativePostedEventCounter()
+        let eventDelivery: String
+        let injector: InputInjector
+        if hasGlobalEventAccess {
+            eventDelivery = "production global .cghidEventTap"
+            injector = InputInjector(eventPoster: { event in
+                postedEvents.record()
+                event.post(tap: .cghidEventTap)
+            })
+        } else {
+            eventDelivery =
+                "process-targeted NSApplication.sendEvent fallback"
+            injector = visibleFixture.makeProcessTargetedInjector(
+                eventObserver: { _ in postedEvents.record() })
+        }
+        let tools = ComputerUseHostTools(
+            injector: injector,
+            mayAct: { true })
+        let predicted = try OSAtlasComputerUseExecutor.predictedAction(
+            from: visibleFixture.doubleClickAction,
+            displayBounds: visibleFixture.displayBounds)
+        let localEventCountBeforeAction =
+            visibleFixture.localTaggedEventCount
+
+        let isObstructed = try tools
+            .actionIsObstructedByTransientSystemOverlay(predicted)
+        if isObstructed {
+            XCTAssertEqual(
+                postedEvents.count,
+                0,
+                "Notification Center obstruction must stop before the event poster")
+            XCTAssertEqual(
+                visibleFixture.localTaggedEventCount,
+                localEventCountBeforeAction,
+                "Notification Center obstruction unexpectedly delivered a tagged event")
+            XCTAssertFalse(
+                visibleFixture.hasVisiblePostcondition(.doubleClick),
+                "The blocked double-click unexpectedly changed the fixture")
+            let evidence = XCTAttachment(string:
+                "Outcome: blocked at exact target by live Notification Center AX ownership\n"
+                    + "Posted events: \(postedEvents.count)\n"
+                    + visibleFixture.diagnostics(for: predicted))
+            evidence.name = "OS-Atlas live notification obstruction"
+            evidence.lifetime = .keepAlways
+            add(evidence)
+            return
+        }
+
+        try tools.perform(predicted)
+        let delivered = await Self.eventually(timeout: 1) {
+            visibleFixture.hasVisiblePostcondition(.doubleClick)
+        }
+        XCTAssertTrue(
+            delivered,
+            "An unobstructed ordinary floating target did not receive the production double-click: \(visibleFixture.diagnostics(for: predicted))")
+        XCTAssertGreaterThan(
+            postedEvents.count,
+            0,
+            "The unobstructed double-click never reached the event poster")
+        XCTAssertGreaterThan(
+            visibleFixture.localTaggedEventCount,
+            localEventCountBeforeAction,
+            "The ordinary floating fixture changed without a tagged event")
+
+        let evidence = XCTAttachment(string:
+            "Outcome: unobstructed double-click delivered\n"
+                + "CGEvent delivery: \(eventDelivery)\n"
+                + "Posted events: \(postedEvents.count)\n"
+                + visibleFixture.visibleStatus)
+        evidence.name = "OS-Atlas floating live-overlay gate"
         evidence.lifetime = .keepAlways
         add(evidence)
     }
@@ -225,6 +352,33 @@ private enum OSAtlasNativeUIPostcondition: String, CaseIterable, Hashable {
     case scrollRight = "SCROLL_RIGHT"
     case enter = "ENTER"
     case hotkey = "HOTKEY"
+}
+
+private enum OSAtlasNativeActionFixturePresentation {
+    /// Raises only the synthetic target fixture above ambient system panels so
+    /// the full action matrix proves InputInjector semantics independently of
+    /// desktop state. This is not evidence for ordinary app-window routing.
+    case injectorLayerIsolation
+
+    /// Matches an ordinary app target. The focused live-overlay acceptance
+    /// checks Notification Center ownership before posting any input here.
+    case liveFloatingOverlayGate
+
+    var level: NSWindow.Level {
+        switch self {
+        case .injectorLayerIsolation: return .statusBar
+        case .liveFloatingOverlayGate: return .floating
+        }
+    }
+
+    var windowTitle: String {
+        switch self {
+        case .injectorLayerIsolation:
+            return "Remote Desktop OS-Atlas Injector Isolation Fixture"
+        case .liveFloatingOverlayGate:
+            return "Remote Desktop OS-Atlas Live Overlay Fixture"
+        }
+    }
 }
 
 @MainActor
@@ -271,7 +425,9 @@ private final class OSAtlasNativeActionFixture {
         }
     }
 
-    static func show() throws -> OSAtlasNativeActionFixture {
+    static func show(
+        presentation: OSAtlasNativeActionFixturePresentation
+    ) throws -> OSAtlasNativeActionFixture {
         guard let screen = screen(for: CGMainDisplayID()) else {
             throw OSAtlasNativeActionFixtureError.mainDisplayUnavailable
         }
@@ -298,9 +454,9 @@ private final class OSAtlasNativeActionFixture {
             backing: .buffered,
             defer: false,
             screen: screen)
-        window.title = "Remote Desktop OS-Atlas Native Action Fixture"
+        window.title = presentation.windowTitle
         window.isReleasedWhenClosed = false
-        window.level = .floating
+        window.level = presentation.level
         window.collectionBehavior = [.moveToActiveSpace]
         let content = OSAtlasNativeActionFixtureView(frame: NSRect(
             origin: .zero,
@@ -362,7 +518,7 @@ private final class OSAtlasNativeActionFixture {
         content.locallyDeliveredTaggedEventTypes.count
     }
 
-    var diagnostics: String {
+    func diagnostics(for action: ComputerUsePredictedAction) -> String {
         let eventTypes = content.locallyDeliveredTaggedEventTypes
             .map(String.init(describing:))
             .joined(separator: ",")
@@ -370,19 +526,108 @@ private final class OSAtlasNativeActionFixture {
             .joined(separator: "; ")
         let allEventDetails = content.allLocallyDeliveredEventDetails
             .joined(separator: "; ")
+        let targets = diagnosticTargets(for: action)
+        let targetDescription = targets.isEmpty
+            ? "none"
+            : targets.enumerated().map {
+                "target\($0.offset)=\($0.element)"
+            }.joined(separator: ", ")
+        let windowStacks = targets.isEmpty
+            ? "none"
+            : targets.enumerated().map {
+                "target\($0.offset){\(privacySafeWindowStack(at: $0.element))}"
+            }.joined(separator: "; ")
         return "key=\(window.isKeyWindow) frontmost=\(isKeyAndFrontmost) "
+            + "visible=\(window.isVisible) occlusion=\(window.occlusionState.rawValue) "
+            + "frame=\(window.frame) pointerTargets=[\(targetDescription)] "
+            + "privacySafeWindowStacks=[\(windowStacks)] "
             + "window=\(window.windowNumber) taggedLocalEvents=[\(eventTypes)] "
             + "taggedLocalDetails=[\(eventDetails)] "
             + "allLocalDetails=[\(allEventDetails)] "
             + "status=\(visibleStatus)"
     }
 
-    func makeProcessTargetedInjector() -> InputInjector {
+    private func privacySafeWindowStack(at target: CGPoint) -> String {
+        guard let windows = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements],
+            kCGNullWindowID) as? [[String: Any]] else {
+            return "unavailable"
+        }
+        return windows.compactMap { info -> String? in
+            guard let rawBounds = info[
+                    kCGWindowBounds as String] as? [String: Any],
+                  let bounds = CGRect(
+                    dictionaryRepresentation: rawBounds as CFDictionary),
+                  bounds.contains(target) else {
+                return nil
+            }
+            let number = (info[
+                kCGWindowNumber as String] as? NSNumber)?.intValue
+            let ownerPID = (info[
+                kCGWindowOwnerPID as String] as? NSNumber).map {
+                    pid_t($0.int32Value)
+                }
+            let layer = info[kCGWindowLayer as String] ?? "?"
+            let category = privacySafeOwnerCategory(
+                windowNumber: number,
+                processIdentifier: ownerPID)
+            return "window=\(number.map(String.init) ?? "?")"
+                + ":category=\(category):layer=\(layer):bounds=\(bounds)"
+        }.prefix(6).joined(separator: " | ")
+    }
+
+    private func privacySafeOwnerCategory(
+        windowNumber: Int?,
+        processIdentifier: pid_t?
+    ) -> String {
+        if windowNumber == window.windowNumber {
+            return "fixture"
+        }
+        guard let processIdentifier else { return "unknown" }
+        if processIdentifier == ProcessInfo.processInfo.processIdentifier {
+            return "test-process-other"
+        }
+        let bundleIdentifier = NSRunningApplication(
+            processIdentifier: processIdentifier)?.bundleIdentifier
+        if ComputerUseHostTools.isTransientSystemOverlayApplication(
+            bundleIdentifier: bundleIdentifier) {
+            return "notification-center"
+        }
+        if bundleIdentifier?.lowercased().hasPrefix("com.apple.") == true {
+            return "apple-system"
+        }
+        return bundleIdentifier == nil ? "unknown" : "other-application"
+    }
+
+    private func diagnosticTargets(
+        for action: ComputerUsePredictedAction
+    ) -> [CGPoint] {
+        switch action {
+        case .click(let x, let y, _, _):
+            return [CGPoint(x: x, y: y)]
+        case .drag(let fromX, let fromY, let toX, let toY):
+            return [
+                CGPoint(x: fromX, y: fromY),
+                CGPoint(x: toX, y: toY),
+            ]
+        case .scroll(let x, let y, _, _):
+            return [CGPoint(x: x, y: y)]
+        case .requestApproval(_, let proposedAction):
+            return diagnosticTargets(for: proposedAction)
+        case .key, .typeText, .wait, .done:
+            return []
+        }
+    }
+
+    func makeProcessTargetedInjector(
+        eventObserver: (@Sendable (CGEvent) -> Void)? = nil
+    ) -> InputInjector {
         InputInjector(eventPoster: { [weak self] event in
             MainActor.assumeIsolated {
                 guard let self,
                       let appKitEvent = self.processTargetedEvent(from: event)
                 else { return }
+                eventObserver?(event)
                 let handledBefore = self.content.handledScrollEventCount
                 NSApp.sendEvent(appKitEvent)
                 if event.type == .scrollWheel,
@@ -466,14 +711,7 @@ private final class OSAtlasNativeActionFixture {
     }
 
     private func normalizedPoint(at localPoint: NSPoint) -> (x: Int, y: Int) {
-        let windowPoint = content.convert(localPoint, to: nil)
-        let appKitScreenPoint = window.convertPoint(toScreen: windowPoint)
-        let appKitFrame = screen.frame
-        let globalPoint = CGPoint(
-            x: displayBounds.minX
-                + appKitScreenPoint.x - appKitFrame.minX,
-            y: displayBounds.minY
-                + appKitFrame.maxY - appKitScreenPoint.y)
+        let globalPoint = coreGraphicsPoint(at: localPoint)
         let x = Int((((globalPoint.x - displayBounds.minX)
             / displayBounds.width) * 1_000).rounded())
         let y = Int((((globalPoint.y - displayBounds.minY)
@@ -481,6 +719,17 @@ private final class OSAtlasNativeActionFixture {
         return (
             min(1_000, max(0, x)),
             min(1_000, max(0, y)))
+    }
+
+    private func coreGraphicsPoint(at localPoint: NSPoint) -> CGPoint {
+        let windowPoint = content.convert(localPoint, to: nil)
+        let appKitScreenPoint = window.convertPoint(toScreen: windowPoint)
+        let appKitFrame = screen.frame
+        return CGPoint(
+            x: displayBounds.minX
+                + appKitScreenPoint.x - appKitFrame.minX,
+            y: displayBounds.minY
+                + appKitFrame.maxY - appKitScreenPoint.y)
     }
 
     private static func screen(for displayID: CGDirectDisplayID) -> NSScreen? {
@@ -495,6 +744,23 @@ private final class OSAtlasNativeActionFixture {
 private enum OSAtlasNativeActionFixtureError: Error {
     case mainDisplayUnavailable
     case displayTooSmall
+}
+
+private final class OSAtlasNativePostedEventCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage = 0
+
+    var count: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
+
+    func record() {
+        lock.lock()
+        storage += 1
+        lock.unlock()
+    }
 }
 
 @MainActor

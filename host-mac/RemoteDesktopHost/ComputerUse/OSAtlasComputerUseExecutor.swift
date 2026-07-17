@@ -490,6 +490,8 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
     static let screenCaptureConsentGuidance = "macOS needs your permission before AI can use the screen. On the Mac, choose Allow in the “RemoteDesktopHost” screen-and-audio access prompt, then tap Let AI continue. AI won’t click this system permission prompt or open System Settings."
     static let authenticationGuidance = "This screen needs you to sign in or verify your account. You’re in control now: complete that yourself on the live screen, then tap Let AI continue. AI won’t enter passwords, passcodes, verification codes, or other credentials."
     static let deliverySignInGuidance = "DoorDash needs you to sign in before it can show the delivery quote. You’re in control now: sign in yourself on the live screen, then tap Let AI continue. AI won’t enter credentials, check out, or place the order."
+    static let transientSystemOverlayGuidance = "A macOS notification is still covering the control AI needs. Dismiss or move that notification on the Mac, then tap Let AI continue. AI won’t click through or dismiss unrelated notifications."
+    static let maximumTransientSystemOverlayObservations = 3
     private static let screenshotContext = CIContext(options: [
         .useSoftwareRenderer: false,
         .cacheIntermediates: false,
@@ -650,6 +652,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
         var didForegroundDeliveryQuoteBrowser = false
         var didAttemptAuthenticationEscape = false
         var didAttemptModelAction = false
+        var transientSystemOverlayObservations = 0
         let firstAttemptDirective = Self.explicitlyRequiredAction(
             in: trustedUserPrompt,
             actionContract: actionContract)
@@ -1062,6 +1065,25 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                 let rawPrediction = try Self.predictedAction(
                     from: action,
                     displayBounds: observation.displayBounds)
+                // Check the model's original pointer target before AX
+                // correction. A notification covering that point must never
+                // cause correction to snap the action onto a different,
+                // unobstructed control.
+                if try tools.actionIsObstructedByTransientSystemOverlay(
+                    rawPrediction) {
+                    transientSystemOverlayObservations += 1
+                    if transientSystemOverlayObservations
+                        >= Self.maximumTransientSystemOverlayObservations {
+                        progress(Self.transientSystemOverlayGuidance)
+                        return .userInterventionRequired(
+                            Self.transientSystemOverlayGuidance)
+                    }
+                    progress(
+                        "Step \(step): waiting for a notification to uncover the target…")
+                    history.append("WAIT [transient system overlay]")
+                    try await Task.sleep(for: waitDelay)
+                    continue
+                }
                 let predicted = try Self.conservativelyAdjustedPrediction(
                     rawPrediction,
                     for: action,
@@ -1071,6 +1093,25 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                     Self.log.info(
                         "OS-Atlas click snapped to one nearby enabled Accessibility control")
                 }
+                // AX correction is conservative but still changes the
+                // effective target. Recheck only when it moved.
+                if predicted != rawPrediction,
+                   try tools.actionIsObstructedByTransientSystemOverlay(
+                    predicted) {
+                    transientSystemOverlayObservations += 1
+                    if transientSystemOverlayObservations
+                        >= Self.maximumTransientSystemOverlayObservations {
+                        progress(Self.transientSystemOverlayGuidance)
+                        return .userInterventionRequired(
+                            Self.transientSystemOverlayGuidance)
+                    }
+                    progress(
+                        "Step \(step): waiting for a notification to uncover the target…")
+                    history.append("WAIT [transient system overlay]")
+                    try await Task.sleep(for: waitDelay)
+                    continue
+                }
+                transientSystemOverlayObservations = 0
                 if let reason = tools.approvalReason(for: predicted) {
                     return .approvalRequired(message: reason, action: predicted)
                 }

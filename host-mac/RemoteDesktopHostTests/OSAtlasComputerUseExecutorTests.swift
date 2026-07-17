@@ -4464,6 +4464,166 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
             "A failed semantic route must stop before asking OS-Atlas for an action")
     }
 
+    func testTransientNotificationWaitsForFreshScreensBeforeClicking() async throws {
+        let fixture = makeCorrectionRuntime(
+            completionResponses: [
+                response("CLICK [[500,500]]"),
+                response("CLICK [[500,500]]"),
+                response("CLICK [[500,500]]"),
+            ],
+            port: 43150)
+        let executor = OSAtlasComputerUseExecutor.makeForTesting(
+            inputs: fixture.inputs,
+            runtime: fixture.runtime,
+            maxSteps: 3)
+        var obstructionChecks = 0
+        var performedActions: [ComputerUsePredictedAction] = []
+        var progress: [String] = []
+
+        do {
+            _ = try await executor.execute(
+                prompt: "Use CLICK now as the single next action.",
+                tools: correctionTestTools(
+                    transientSystemOverlay: { _ in
+                        obstructionChecks += 1
+                        return obstructionChecks <= 2
+                    },
+                    actionPerformer: { performedActions.append($0) }),
+                progress: { progress.append($0) })
+            XCTFail("The three-step fixture should stop after the recovered click")
+        } catch OSAtlasComputerUseExecutor.RuntimeError.stepLimit {
+            // Expected after two safe re-observations and one click.
+        } catch {
+            await fixture.runtime.shutdown()
+            throw error
+        }
+        await fixture.runtime.shutdown()
+
+        XCTAssertEqual(obstructionChecks, 3)
+        XCTAssertEqual(performedActions, [
+            .click(x: 720, y: 450, button: 1, count: 1),
+        ])
+        XCTAssertEqual(
+            progress.filter { $0.contains("notification to uncover") }.count,
+            2)
+        let completionCount = await fixture.events.values()
+            .filter { $0 == "complete" }.count
+        XCTAssertEqual(completionCount, 3)
+    }
+
+    func testPersistentNotificationRequiresUserInterventionWithoutClicking()
+        async throws {
+        let fixture = makeCorrectionRuntime(
+            completionResponses: [
+                response("CLICK [[500,500]]"),
+                response("CLICK [[500,500]]"),
+                response("CLICK [[500,500]]"),
+            ],
+            port: 43151)
+        let executor = OSAtlasComputerUseExecutor.makeForTesting(
+            inputs: fixture.inputs,
+            runtime: fixture.runtime,
+            maxSteps: 4)
+        var performedActions: [ComputerUsePredictedAction] = []
+        var progress: [String] = []
+
+        let result = try await executor.execute(
+            prompt: "Use CLICK now as the single next action.",
+            tools: correctionTestTools(
+                transientSystemOverlay: { _ in true },
+                actionPerformer: { performedActions.append($0) }),
+            progress: { progress.append($0) })
+        await fixture.runtime.shutdown()
+
+        XCTAssertEqual(
+            result,
+            .userInterventionRequired(
+                OSAtlasComputerUseExecutor.transientSystemOverlayGuidance))
+        XCTAssertTrue(performedActions.isEmpty)
+        XCTAssertEqual(
+            progress.filter { $0.contains("notification to uncover") }.count,
+            2)
+        XCTAssertEqual(
+            progress.last,
+            OSAtlasComputerUseExecutor.transientSystemOverlayGuidance)
+        let completionCount = await fixture.events.values()
+            .filter { $0 == "complete" }.count
+        XCTAssertEqual(
+            completionCount,
+            OSAtlasComputerUseExecutor.maximumTransientSystemOverlayObservations)
+    }
+
+    func testNotificationChecksRawThenAdjustedTargetsWithoutAnyEffect()
+        async throws {
+        let fixture = makeCorrectionRuntime(
+            completionResponses: [
+                response("CLICK [[500,500]]"),
+                response("CLICK [[500,500]]"),
+            ],
+            port: 43152)
+        let executor = OSAtlasComputerUseExecutor.makeForTesting(
+            inputs: fixture.inputs,
+            runtime: fixture.runtime,
+            maxSteps: 2)
+        let raw = ComputerUsePredictedAction.click(
+            x: 720,
+            y: 450,
+            button: 1,
+            count: 1)
+        let adjusted = ComputerUsePredictedAction.click(
+            x: 800,
+            y: 500,
+            button: 1,
+            count: 1)
+        var checkedTargets: [ComputerUsePredictedAction] = []
+        var adjustmentCalls = 0
+        var performedActions: [ComputerUsePredictedAction] = []
+
+        do {
+            _ = try await executor.execute(
+                prompt: "Use CLICK now as the single next action.",
+                tools: correctionTestTools(
+                    conservativeActionAdjustment: { action in
+                        adjustmentCalls += 1
+                        XCTAssertEqual(action, raw)
+                        return adjusted
+                    },
+                    transientSystemOverlay: { action in
+                        checkedTargets.append(action)
+                        // First observation: the raw target is covered, so AX
+                        // correction must not run. Second observation: raw is
+                        // clear, but the adjusted target is covered too.
+                        return checkedTargets.count == 1 || action == adjusted
+                    },
+                    actionPerformer: { performedActions.append($0) }),
+                progress: { _ in })
+            XCTFail("Both bounded observations should wait without an effect")
+        } catch OSAtlasComputerUseExecutor.RuntimeError.stepLimit {
+            // Expected after both raw and adjusted obstruction paths wait.
+        } catch {
+            await fixture.runtime.shutdown()
+            throw error
+        }
+        await fixture.runtime.shutdown()
+
+        XCTAssertEqual(checkedTargets, [raw, raw, adjusted])
+        XCTAssertEqual(adjustmentCalls, 1)
+        XCTAssertTrue(performedActions.isEmpty)
+    }
+
+    func testTransientSystemOverlayClassifierIsNotificationSpecific() {
+        XCTAssertTrue(ComputerUseHostTools.isTransientSystemOverlayApplication(
+            bundleIdentifier: "com.apple.UserNotificationCenter"))
+        XCTAssertTrue(ComputerUseHostTools.isTransientSystemOverlayApplication(
+            bundleIdentifier: "com.apple.notificationcenterui"))
+        XCTAssertFalse(ComputerUseHostTools.isTransientSystemOverlayApplication(
+            bundleIdentifier: "com.apple.controlcenter"))
+        XCTAssertFalse(ComputerUseHostTools.isTransientSystemOverlayApplication(
+            bundleIdentifier: "com.apple.Safari"))
+        XCTAssertFalse(ComputerUseHostTools.isTransientSystemOverlayApplication(
+            bundleIdentifier: nil))
+    }
+
     func testAccessibilityCorrectionSnapsOnlyOneNearbyEnabledActionableElement() {
         let predicted = CGPoint(x: 100, y: 100)
         let container = OSAtlasAccessibilityClickCandidate(
@@ -4599,6 +4759,12 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
         observation providedObservation: ComputerUseScreenObservation? = nil,
         frontmostApplication: String = "Hidden correction fixture",
         applicationOpener: ((String) async throws -> Void)? = nil,
+        conservativeActionAdjustment:
+            @escaping (ComputerUsePredictedAction) -> ComputerUsePredictedAction = {
+                $0
+            },
+        transientSystemOverlay:
+            @escaping (ComputerUsePredictedAction) -> Bool = { _ in false },
         accessibilityContext: String =
             "AXStaticText • selected correction fixture",
         actionPerformer: @escaping (ComputerUsePredictedAction) throws -> Void
@@ -4617,6 +4783,9 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
             },
             actionPerformer: actionPerformer,
             screenProvider: { observation },
+            conservativeActionAdjustmentProvider:
+                conservativeActionAdjustment,
+            transientSystemOverlayProvider: transientSystemOverlay,
             accessibilityContextProvider: { _ in accessibilityContext },
             frontmostApplicationProvider: { frontmostApplication })
     }

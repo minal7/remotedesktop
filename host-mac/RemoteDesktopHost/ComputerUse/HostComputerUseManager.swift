@@ -78,6 +78,10 @@ final class ComputerUseHostTools {
         ((ComputerUsePredictedAction) throws -> ComputerUseApprovalTargetSnapshot)?
     private let actionPerformer: ((ComputerUsePredictedAction) throws -> Void)?
     private let screenProvider: (() throws -> ComputerUseScreenObservation)?
+    private let conservativeActionAdjustmentProvider:
+        ((ComputerUsePredictedAction) -> ComputerUsePredictedAction)?
+    private let transientSystemOverlayProvider:
+        ((ComputerUsePredictedAction) -> Bool)?
     private let accessibilityContextProvider:
         ((ComputerUsePredictedAction) -> String)?
     private let calculatorSnapshotProvider: (() -> ComputerUseCalculatorSnapshot?)?
@@ -97,6 +101,10 @@ final class ComputerUseHostTools {
             ((ComputerUsePredictedAction) throws -> ComputerUseApprovalTargetSnapshot)? = nil,
         actionPerformer: ((ComputerUsePredictedAction) throws -> Void)? = nil,
         screenProvider: (() throws -> ComputerUseScreenObservation)? = nil,
+        conservativeActionAdjustmentProvider:
+            ((ComputerUsePredictedAction) -> ComputerUsePredictedAction)? = nil,
+        transientSystemOverlayProvider:
+            ((ComputerUsePredictedAction) -> Bool)? = nil,
         accessibilityContextProvider:
             ((ComputerUsePredictedAction) -> String)? = nil,
         calculatorSnapshotProvider: (() -> ComputerUseCalculatorSnapshot?)? = nil,
@@ -114,6 +122,27 @@ final class ComputerUseHostTools {
         self.approvalTargetProvider = approvalTargetProvider
         self.actionPerformer = actionPerformer
         self.screenProvider = screenProvider
+        if let conservativeActionAdjustmentProvider {
+            self.conservativeActionAdjustmentProvider =
+                conservativeActionAdjustmentProvider
+        } else if screenProvider != nil {
+            // A virtual screen has no relationship to the person's live AX
+            // tree. Keep deterministic tests and hidden evaluation fixtures
+            // from reading or snapping to unrelated desktop controls.
+            self.conservativeActionAdjustmentProvider = { $0 }
+        } else {
+            self.conservativeActionAdjustmentProvider = nil
+        }
+        if let transientSystemOverlayProvider {
+            self.transientSystemOverlayProvider =
+                transientSystemOverlayProvider
+        } else if screenProvider != nil {
+            // Synthetic screenshots must not be combined with unrelated live
+            // Notification Center state from the person's desktop.
+            self.transientSystemOverlayProvider = { _ in false }
+        } else {
+            self.transientSystemOverlayProvider = nil
+        }
         self.accessibilityContextProvider = accessibilityContextProvider
         self.calculatorSnapshotProvider = calculatorSnapshotProvider
         if let authenticationContextProvider {
@@ -140,6 +169,77 @@ final class ComputerUseHostTools {
 
     func frontmostApplicationName() -> String? {
         frontmostApplicationProvider()
+    }
+
+    /// Checks whether a transient macOS notification owns the exact pointer
+    /// target. Waiting and re-observing is safer than sending the intended
+    /// click through an unrelated overlay or dismissing that overlay without
+    /// the person's request.
+    func actionIsObstructedByTransientSystemOverlay(
+        _ action: ComputerUsePredictedAction
+    ) throws -> Bool {
+        guard mayAct() else { throw ToolError.paused }
+        if let transientSystemOverlayProvider {
+            return transientSystemOverlayProvider(action)
+        }
+        return liveActionIsObstructedByTransientSystemOverlay(action)
+    }
+
+    static func isTransientSystemOverlayApplication(
+        bundleIdentifier: String?
+    ) -> Bool {
+        guard let bundleIdentifier else { return false }
+        switch bundleIdentifier.lowercased() {
+        case "com.apple.usernotificationcenter",
+                "com.apple.notificationcenterui":
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func liveActionIsObstructedByTransientSystemOverlay(
+        _ action: ComputerUsePredictedAction
+    ) -> Bool {
+        let points: [CGPoint]
+        switch action {
+        case .click(let x, let y, _, _):
+            points = [CGPoint(x: x, y: y)]
+        case .drag(let fromX, let fromY, let toX, let toY):
+            points = [
+                CGPoint(x: fromX, y: fromY),
+                CGPoint(x: toX, y: toY),
+            ]
+        case .scroll(let x, let y, _, _):
+            points = [CGPoint(x: x, y: y)]
+        case .requestApproval(_, let proposedAction):
+            return liveActionIsObstructedByTransientSystemOverlay(
+                proposedAction)
+        case .key, .typeText, .wait, .done:
+            return false
+        }
+
+        let systemWide = AXUIElementCreateSystemWide()
+        for point in points {
+            var element: AXUIElement?
+            guard AXUIElementCopyElementAtPosition(
+                systemWide,
+                Float(point.x),
+                Float(point.y),
+                &element) == .success,
+                  let element else { continue }
+            var processIdentifier: pid_t = 0
+            guard AXUIElementGetPid(
+                element,
+                &processIdentifier) == .success else { continue }
+            let bundleIdentifier = NSRunningApplication(
+                processIdentifier: processIdentifier)?.bundleIdentifier
+            if Self.isTransientSystemOverlayApplication(
+                bundleIdentifier: bundleIdentifier) {
+                return true
+            }
+        }
+        return false
     }
 
     /// Reads a small, value-redacted Accessibility slice from the frontmost
@@ -482,6 +582,9 @@ final class ComputerUseHostTools {
     func conservativelyAdjustedAction(
         _ action: ComputerUsePredictedAction
     ) -> ComputerUsePredictedAction {
+        if let conservativeActionAdjustmentProvider {
+            return conservativeActionAdjustmentProvider(action)
+        }
         guard case .click(let x, let y, let button, let count) = action,
               button == 1,
               count == 1 else { return action }
