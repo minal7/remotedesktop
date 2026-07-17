@@ -122,33 +122,36 @@ grounding; other actions are produced directly from the typed semantic plan.
 `ANSWER` and `REPORT` share one visible-evidence behavior. Production always
 installs the semantic router, including when Apple's model is warming up or
 unavailable at startup. Deterministic app-first, literal-entry, and unambiguous
-navigation routes run before the per-step model check; an unavailable
-non-deterministic step falls back to the parser-validated legacy 12-variant raw
-compatibility profile. That profile is a constrained fallback allowlist, not a
-claim that the checkpoint reliably infers every variant from ordinary language.
+navigation routes run before the per-step model check. An unavailable
+non-deterministic step returns `unable to complete`; it never asks OS-Atlas for
+an executable verb. OS-Atlas receives only typed pointer-grounding requests.
 
-The opt-in mode also runs a consolidated 14-scenario regular-user matrix. Its
+The opt-in mode also runs a consolidated 15-scenario regular-user matrix. Its
 terminal result is asserted as exactly one of `task completed`,
 `user intervention required`, or `unable to complete`. The matrix includes app
 opening, Return submission, exact text entry, scrolling to a named section,
 visible-fact answers, an already-finished task, wait-then-answer, missing input,
 authentication takeover, purchase approval, persistent unavailable content, a
-platform-incompatible app, and two real OS-Atlas pointer-grounding tasks. Every
+platform-incompatible app, two additional real OS-Atlas pointer-grounding
+tasks, and an unrecognized-operation fail-closed case. Purchase, calendar, and
+folder pointer proposals are the only three model calls in that forced-Apple-
+unavailable matrix, and each raw response must be a CLICK point carrier. Every
 screen is rendered in memory and every proposed host action is intercepted.
 
-The same actual-model mode runs stateful delivery-address-to-itemized-quote
-workflows against screens rendered directly in memory. The shorter guard
-requires actual OS-Atlas to emit `TYPE` with the exact address before local
-Vision OCR returns the completed quote. A separate complex workflow keeps one
-production executor loop alive across four page states and requires three real
-checkpoint inferences: `TYPE` the address, `SCROLL DOWN` to the fee details,
-then `SCROLL DOWN` to the complete quote. Only after that does local Vision
+The same actual-model test command retains stateful delivery-address-to-
+itemized-quote fixtures for regression measurement of the legacy raw checkpoint
+parser. Those fixtures use the executor's test-only compatibility configuration;
+production installs typed semantic routing and disables that raw-action mode.
+The shorter fixture requires actual OS-Atlas to emit `TYPE` with the exact
+address before local Vision OCR returns the completed quote. A separate complex
+fixture keeps one executor loop alive across four page states and measures
+`TYPE`, `SCROLL DOWN`, then `SCROLL DOWN`. Only after that does local Vision
 OCR—not model-authored pricing—extract the restaurant, item, subtotal, every
-recognized fee row, tax, total, and ETA. Both workflows remain hidden, do not
+recognized fee row, tax, total, and ETA. Both fixtures remain hidden, do not
 read the desktop, and intercept model actions before any system input is
 posted. Login always pauses for user takeover, and no path advances checkout.
-The XCTest cases are skipped with a clear reason if the installed checkpoint or
-bundled runtime is unavailable.
+The XCTest cases are skipped with a clear reason if the installed checkpoint
+or bundled runtime is unavailable.
 
 ### Shipped-path local hybrid fixture
 

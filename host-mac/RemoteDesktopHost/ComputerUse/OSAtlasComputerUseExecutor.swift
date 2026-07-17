@@ -491,6 +491,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
     static let authenticationGuidance = "This screen needs you to sign in or verify your account. You’re in control now: complete that yourself on the live screen, then tap Let AI continue. AI won’t enter passwords, passcodes, verification codes, or other credentials."
     static let deliverySignInGuidance = "DoorDash needs you to sign in before it can show the delivery quote. You’re in control now: sign in yourself on the live screen, then tap Let AI continue. AI won’t enter credentials, check out, or place the order."
     static let transientSystemOverlayGuidance = "A macOS notification is still covering the control AI needs. Dismiss or move that notification on the Mac, then tap Let AI continue. AI won’t click through or dismiss unrelated notifications."
+    static let semanticRoutingUnavailableGuidance = "The on-device action planner could not safely choose the next step, so no further action was taken. Try a more specific request or complete this task yourself."
     static let maximumTransientSystemOverlayObservations = 3
     private static let screenshotContext = CIContext(options: [
         .useSoftwareRenderer: false,
@@ -509,6 +510,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
     private let actionContract: OSAtlasActionContract
     private let checkpointActionProfile: OSAtlasCheckpointActionProfile
     private let semanticRouter: (any OSAtlasSemanticActionRouting)?
+    private let allowsExplicitActionCompatibility: Bool
     private let maxSteps: Int
     private let actionDelay: Duration
     private let waitDelay: Duration
@@ -522,6 +524,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
         actionContract: OSAtlasActionContract,
         checkpointActionProfile: OSAtlasCheckpointActionProfile,
         semanticRouter: (any OSAtlasSemanticActionRouting)?,
+        allowsExplicitActionCompatibility: Bool,
         maxSteps: Int,
         actionDelay: Duration,
         waitDelay: Duration,
@@ -534,6 +537,8 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
         self.actionContract = actionContract
         self.checkpointActionProfile = checkpointActionProfile
         self.semanticRouter = semanticRouter
+        self.allowsExplicitActionCompatibility =
+            allowsExplicitActionCompatibility
         self.maxSteps = maxSteps
         self.actionDelay = actionDelay
         self.waitDelay = waitDelay
@@ -567,6 +572,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
             // non-deterministic step. Transient startup availability must not
             // permanently downgrade the executor to raw checkpoint actions.
             semanticRouter: candidateRouter,
+            allowsExplicitActionCompatibility: false,
             maxSteps: maximumSteps,
             actionDelay: .milliseconds(700),
             waitDelay: .seconds(1))
@@ -578,6 +584,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
         actionContract: OSAtlasActionContract = .macOS,
         checkpointActionProfile: OSAtlasCheckpointActionProfile = .parserComplete,
         semanticRouter: (any OSAtlasSemanticActionRouting)? = nil,
+        allowsExplicitActionCompatibility: Bool = true,
         maxSteps: Int = maximumSteps,
         actionDelay: Duration = .zero,
         waitDelay: Duration = .zero,
@@ -591,6 +598,8 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
             actionContract: actionContract,
             checkpointActionProfile: checkpointActionProfile,
             semanticRouter: semanticRouter,
+            allowsExplicitActionCompatibility:
+                allowsExplicitActionCompatibility,
             maxSteps: maxSteps,
             actionDelay: actionDelay,
             waitDelay: waitDelay,
@@ -619,7 +628,8 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
         tools: ComputerUseHostTools,
         progress: @escaping (String) -> Void
     ) async throws -> ComputerUseExecutionResult {
-        if let explicitDirective = Self.explicitlyRequiredAction(
+        if allowsExplicitActionCompatibility,
+           let explicitDirective = Self.explicitlyRequiredAction(
             in: trustedUserPrompt,
             actionContract: actionContract),
            !checkpointActionProfile.declares(explicitDirective) {
@@ -653,9 +663,11 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
         var didAttemptAuthenticationEscape = false
         var didAttemptModelAction = false
         var transientSystemOverlayObservations = 0
-        let firstAttemptDirective = Self.explicitlyRequiredAction(
-            in: trustedUserPrompt,
-            actionContract: actionContract)
+        let firstAttemptDirective = allowsExplicitActionCompatibility
+            ? Self.explicitlyRequiredAction(
+                in: trustedUserPrompt,
+                actionContract: actionContract)
+            : nil
         let completesAfterOpeningApplication =
             MCPFirstComputerUseExecutor.isPureOpenApplicationRequest(
                 trustedUserPrompt)
@@ -745,45 +757,34 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                         Self.deliverySignInGuidance)
                 }
                 // The sign-in UI can belong to an unrelated foreground app.
-                // Permit one local, read-only inference to select only an
+                // Permit one typed, no-effect semantic route to select only an
                 // OPEN_APP destination that the host can prove is different
-                // and relevant to the original task. Every other model action
-                // is intercepted before approval, input, or another open.
+                // and relevant to the original task. The visual checkpoint is
+                // never asked for an executable verb at an authentication
+                // boundary.
                 if !didAttemptAuthenticationEscape,
-                   let currentApplication = tools.frontmostApplicationName() {
+                   let currentApplication = tools.frontmostApplicationName(),
+                   let semanticRouter {
                     didAttemptAuthenticationEscape = true
-                    let escapeTask = Self.authenticationEscapeTask(
-                        originalTask: trustedUserPrompt,
-                        currentApplication: currentApplication)
                     do {
-                        let jpegData = try Self.jpegData(for: observation)
-                        let escapePrompt = Self.explicitActionCorrectionPrompt(
-                            originalTask: escapeTask,
-                            directive: .openApplication,
-                            formattedHistory: history,
-                            actionContract: actionContract)
-                        let response = try await runtime.complete(
-                            endpoint: endpoint,
-                            prompt: escapePrompt,
-                            jpegData: jpegData)
+                        let escapeRoute = try await semanticRouter.route(
+                            OSAtlasSemanticRoutingRequest(
+                                task: trustedUserPrompt,
+                                frontmostApplication: currentApplication,
+                                // Authentication-screen OCR is not needed to
+                                // choose a task-relevant application and is
+                                // deliberately withheld from this route.
+                                visibleText: "",
+                                history: Self.semanticRoutingHistory(history),
+                                availableDirectives: [.openApplication],
+                                openedApplications:
+                                    openedApplications.sorted()))
                         try Task.checkCancellation()
-                        modelResponseObserver?(response)
-                        actionTokenObserver?(
-                            Self.privacySafeActionToken(from: response))
-                        let escapeAction = try Self.parseAction(
-                            response,
-                            actionContract: actionContract)
-                        let escapeActionLine = try Self.strictActionLine(
-                            from: response)
-                        guard checkpointActionProfile.allows(
-                            action: escapeAction,
-                            rawActionLine: escapeActionLine) else {
-                            throw RuntimeError.unverifiedCheckpointAction(
-                                Self.privacySafeActionToken(from: response))
-                        }
-                        parsedActionObserver?(escapeAction)
-                        if case .openApplication(let destination) = escapeAction,
-                           Self.authenticationEscapeApplicationIsRelevant(
+                        if escapeRoute.directive == .openApplication,
+                           case .applicationName(let destination) =
+                                escapeRoute.argument,
+                           Self.semanticRouteHasValidArguments(escapeRoute),
+                           Self.authenticationEscapeApplicationIsAuthorized(
                             destination,
                             currentApplication: currentApplication,
                             task: trustedUserPrompt) {
@@ -791,6 +792,8 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                                 try await tools.openApplication(
                                     named: destination)
                                 openedApplications.insert(destination)
+                                parsedActionObserver?(
+                                    .openApplication(destination))
                                 progress(
                                     "Step \(step): switching to the task-relevant app…")
                                 history.append("OPEN_APP [\(destination)]")
@@ -805,9 +808,15 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                         }
                     } catch is CancellationError {
                         throw CancellationError()
-                    } catch {
-                        // Malformed, non-OPEN_APP, and failed local inference
+                    } catch let error as AppleFoundationVisualActionRouterError {
+                        if error == .cancelled {
+                            throw CancellationError()
+                        }
+                        // Unavailable, malformed, or ambiguous typed routes
                         // all fall through to manual takeover without effects.
+                    } catch {
+                        // Failed typed routing falls through to manual takeover
+                        // without effects.
                     }
                 }
                 progress(Self.authenticationGuidance)
@@ -863,12 +872,12 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                     case .cancelled:
                         throw CancellationError()
                     case .unavailable, .noRoute, .generationFailed:
-                        // Availability can change after executor startup. Fall
-                        // back to the strictly validated legacy checkpoint
-                        // profile for this step; never expose composed actions
-                        // without a typed semantic plan.
-                        requiredRoute = nil
-                        semanticRoute = nil
+                        // A production semantic-router outage is not authority
+                        // to revive the raw checkpoint verb path. Stop with a
+                        // stable user-facing outcome and no inference/effects.
+                        progress(Self.semanticRoutingUnavailableGuidance)
+                        return .unableToComplete(
+                            Self.semanticRoutingUnavailableGuidance)
                     case .invalidRequest, .multipleRoutes:
                         throw error
                     }
@@ -977,10 +986,10 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                 action = parsedAction
             }
 
-            // The legacy visual checkpoint may still emit a HOTKEY when the
-            // semantic router is unavailable. Keep the same exact trusted-task
-            // authorization on both paths; parser validity alone never grants
-            // permission to execute an arbitrary modifier chord.
+            // Low-level parser/component tests may instantiate an executor
+            // without a semantic router. Keep the exact trusted-task gate on
+            // that test-only compatibility path; production loading always
+            // installs a typed semantic router.
             if case .hotkey(_, _, let displayName) = action,
                !Self.reviewedHotkeyIsAuthorized(
                    displayName,
@@ -1741,25 +1750,9 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                 trustedTask: trustedTask,
                 visibleText: visibleText)
         case (.openApplication, .applicationName(let name)):
-            let explicitlyRequestsActivation = AppleFoundationVisualActionRouter
-                .taskAffirmativelyRequestsOperation(
-                    trustedTask,
-                    operationVerbs: [
-                        "activate", "launch", "open", "start", "switch", "use",
-                    ])
-            let explicitlyNamesTaskApplication = AppleFoundationVisualActionRouter
-                .task(trustedTask, explicitlyNamesApplication: name)
-            let requestsWorkInNamedApplication = AppleFoundationVisualActionRouter
-                .taskAffirmativelyRequestsOperation(
-                    trustedTask,
-                    operationVerbs: [
-                        "add", "calculate", "check", "create", "edit", "enter",
-                        "find", "insert", "list", "paste", "read", "review",
-                        "search", "show", "summarize", "type", "write",
-                    ])
-            return (explicitlyRequestsActivation
-                    || (explicitlyNamesTaskApplication
-                        && requestsWorkInNamedApplication))
+            return AppleFoundationVisualActionRouter.task(
+                trustedTask,
+                affirmativelyRequestsWorkIn: name)
                 && authenticationEscapeApplicationIsRelevant(
                 name,
                 currentApplication: "trusted-route-policy",
@@ -2576,10 +2569,10 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
             "been", "can", "check", "confirm", "could", "current", "do",
             "details", "does", "find", "for", "from", "get", "give", "has", "have",
             "here", "how", "i", "in", "inspect", "is", "it", "latest",
-            "information", "me", "my", "of", "on", "open", "our", "please", "read",
-            "result", "run", "screen", "shown", "summarize", "tell", "that",
+            "information", "me", "my", "next", "of", "on", "open", "our", "please", "read",
+            "result", "reveal", "run", "screen", "show", "shown", "summarize", "tell", "that",
             "summary", "the", "then", "this", "to", "use", "verify", "view", "visible",
-            "wait", "was", "were", "what", "when", "where", "which", "who",
+            "upcoming", "wait", "was", "were", "what", "when", "where", "which", "who",
             "why", "will", "would", "you", "your",
         ]
         let words = evidenceWords(task)
@@ -2603,10 +2596,10 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
             "been", "can", "check", "confirm", "could", "current", "do",
             "details", "does", "find", "for", "from", "get", "give", "has", "have",
             "here", "how", "i", "in", "inspect", "is", "it", "latest",
-            "information", "me", "my", "of", "on", "open", "our", "please", "read",
-            "result", "run", "screen", "shown", "summarize", "tell", "that",
+            "information", "me", "my", "next", "of", "on", "open", "our", "please", "read",
+            "result", "reveal", "run", "screen", "show", "shown", "summarize", "tell", "that",
             "summary", "the", "then", "this", "to", "use", "verify", "view", "visible",
-            "wait", "was", "were", "what", "when", "where", "which", "who",
+            "upcoming", "wait", "was", "were", "what", "when", "where", "which", "who",
             "why", "will", "would", "you", "your",
         ]
         let separators: Set<String> = ["also", "and", "plus"]
@@ -3390,16 +3383,6 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                 && containsPhrase(actualWords, in: expectedWords))
     }
 
-    static func authenticationEscapeTask(
-        originalTask: String,
-        currentApplication: String
-    ) -> String {
-        """
-        The current application, \(currentApplication), is blocked by sign-in or account verification. Do not interact with any control, field, or credential on this screen. If the original task belongs in a different application, use OPEN_APP [app_name] as the single next action. Otherwise emit no executable credential or control action.
-        Original task: \(originalTask.trimmingCharacters(in: .whitespacesAndNewlines))
-        """
-    }
-
     static func authenticationEscapeApplicationIsRelevant(
         _ requestedApplication: String,
         currentApplication: String,
@@ -3440,6 +3423,43 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
         default:
             return false
         }
+    }
+
+    private static func authenticationEscapeApplicationIsAuthorized(
+        _ requestedApplication: String,
+        currentApplication: String,
+        task: String
+    ) -> Bool {
+        guard authenticationEscapeApplicationIsRelevant(
+            requestedApplication,
+            currentApplication: currentApplication,
+            task: task) else {
+            return false
+        }
+        let mentionsRequestedApplication = AppleFoundationVisualActionRouter
+            .task(task, mentionsApplication: requestedApplication)
+        if mentionsRequestedApplication {
+            return AppleFoundationVisualActionRouter.task(
+                task,
+                affirmativelyRequestsWorkIn: requestedApplication)
+        }
+        let taskWorkVerbs: Set<String> = [
+            "add", "calculate", "check", "compose", "create", "edit",
+            "enter", "find", "insert", "list", "open", "paste", "read",
+            "review", "search", "show", "summarize", "type", "use",
+            "write",
+        ]
+        return AppleFoundationVisualActionRouter.taskAuthoritySegments(task)
+            .contains { segment in
+                authenticationEscapeApplicationIsRelevant(
+                    requestedApplication,
+                    currentApplication: currentApplication,
+                    task: segment)
+                    && AppleFoundationVisualActionRouter
+                        .taskAffirmativelyRequestsOperation(
+                            segment,
+                            operationVerbs: taskWorkVerbs)
+            }
     }
 
     private static func canonicalApplicationName(_ value: String) -> String {

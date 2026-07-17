@@ -77,7 +77,7 @@ struct ComputerUseArtifactManifest: Codable, Equatable, Sendable {
                 downloadURL: URL(string:
                     "https://github.com/minal7/remotedesktop/releases/download/os-atlas-pro-4b-q4-k-m-b9992/mmproj-os-atlas-pro-4b-f16.gguf")!),
         ],
-        minimumMemoryBytes: 16 * 1_024 * 1_024 * 1_024)
+        minimumMemoryBytes: 8 * 1_024 * 1_024 * 1_024)
 
     static let osAtlasLicenseRevision =
         "bad08407ab54b5bf6c17a69fe1ced476b9494926"

@@ -247,8 +247,20 @@ enum AppleFoundationVisualActionRouterError: Error, LocalizedError, Equatable, S
 /// coordinates, and the host remains the sole policy, approval, and execution
 /// authority.
 struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
+    private let availabilityProvider:
+        @Sendable () -> AppleFoundationMCPPlannerAvailability
+
+    init(
+        availabilityProvider: @escaping @Sendable () ->
+            AppleFoundationMCPPlannerAvailability = {
+                AppleFoundationMCPPlanner().availability()
+            }
+    ) {
+        self.availabilityProvider = availabilityProvider
+    }
+
     func availability() -> AppleFoundationMCPPlannerAvailability {
-        AppleFoundationMCPPlanner().availability()
+        availabilityProvider()
     }
 
     func route(
@@ -280,7 +292,8 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
         // OCR or the language model. Screen text is untrusted and must not be
         // able to keep an ordinary request inside the wrong frontmost app.
         if request.availableDirectives.contains(.openApplication),
-           let applicationName = Self.explicitlyNamedApplication(in: task) {
+           let applicationName = Self.affirmativelyRequestedApplication(
+               in: task) {
             let wasOpenedByThisTask = request.openedApplications.contains {
                 Self.frontmostApplication($0, matches: applicationName)
             }
@@ -288,8 +301,8 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
                 request.frontmostApplication,
                 matches: applicationName)
             if !wasOpenedByThisTask,
-               !isNominallyFrontmost
-                || Self.explicitlyRequestsApplicationActivation(in: task) {
+               (!isNominallyFrontmost
+                    || Self.explicitlyRequestsApplicationActivation(in: task)) {
                 return OSAtlasSemanticActionRoute(
                     directive: .openApplication,
                     argument: .applicationName(applicationName))
@@ -357,6 +370,19 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
         return bestMatch?.name
     }
 
+    /// Selects one and only one common application that is bound to an
+    /// affirmative operation in the trusted task. A negated earlier app does
+    /// not hide a later affirmative target, while two affirmative targets stay
+    /// with the semantic planner instead of being guessed deterministically.
+    private static func affirmativelyRequestedApplication(
+        in task: String
+    ) -> String? {
+        let matches = commonApplications.filter {
+            self.task(task, affirmativelyRequestsWorkIn: $0.canonicalName)
+        }
+        return matches.count == 1 ? matches[0].canonicalName : nil
+    }
+
     /// Confirms that an application route names the one common application
     /// explicitly present in the trusted task. This is used only as one half of
     /// app-first authorization; the task must separately contain an affirmative
@@ -371,6 +397,136 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
         return frontmostApplication(
             applicationName,
             matches: namedApplication)
+    }
+
+    static func task(
+        _ task: String,
+        mentionsApplication applicationName: String
+    ) -> Bool {
+        guard let application = commonApplications.first(where: {
+            frontmostApplication(applicationName, matches: $0.canonicalName)
+        }) else {
+            return firstIndex(
+                of: normalizedWords(applicationName),
+                in: normalizedWords(task)) != nil
+        }
+        let words = normalizedWords(task)
+        return application.aliases.contains(where: {
+            firstIndex(of: $0, in: words) != nil
+        })
+    }
+
+    static func task(
+        _ task: String,
+        affirmativelyRequestsWorkIn applicationName: String
+    ) -> Bool {
+        guard let application = commonApplications.first(where: {
+            frontmostApplication(applicationName, matches: $0.canonicalName)
+        }) else {
+            return false
+        }
+        let operationVerbs: Set<String> = [
+            "activate", "add", "bring", "calculate", "check", "compose",
+            "create", "draft", "edit", "enter", "find", "foreground",
+            "insert", "launch", "list", "look", "open", "paste", "put",
+            "read", "review", "search", "show", "start", "summarize",
+            "switch", "type", "use", "work", "write",
+        ]
+        return taskAuthoritySegments(
+            task,
+            preservingQuotedContent: true
+        ).contains { segment in
+            let allWords = normalizedWords(segment)
+            let unquotedWords = normalizedWords(
+                taskTextMaskingQuotedContent(segment))
+            let namesApplication = application.aliases.contains {
+                firstIndex(of: $0, in: allWords) != nil
+            }
+            guard namesApplication else { return false }
+            let namesApplicationOutsideQuotes = application.aliases.contains {
+                firstIndex(of: $0, in: unquotedWords) != nil
+            }
+            if !namesApplicationOutsideQuotes {
+                return taskExplicitlyActivatesQuotedApplication(
+                    segment,
+                    aliases: application.aliases)
+            }
+            guard taskAffirmativelyRequestsOperation(
+                segment,
+                operationVerbs: operationVerbs) else {
+                return false
+            }
+            return application.aliases.contains { alias in
+                applicationAliasIsBoundToOperation(
+                    alias,
+                    in: unquotedWords)
+            }
+        }
+    }
+
+    /// Requires an unquoted app alias to be the direct activation target, a
+    /// prepositional work context (`in Notes`, `to Reminders`), or the leading
+    /// app context for the clause. Mere co-occurrence with a different verb is
+    /// not enough to authorize opening the app.
+    private static func applicationAliasIsBoundToOperation(
+        _ alias: [String],
+        in words: [String]
+    ) -> Bool {
+        guard !alias.isEmpty, alias.count <= words.count else { return false }
+        let activationVerbs: Set<String> = [
+            "activate", "bring", "foreground", "launch", "open", "start",
+            "switch", "use",
+        ]
+        let directObjectWorkVerbs: Set<String> = [
+            "check", "read", "review", "search", "show", "summarize",
+        ]
+        let contextPrepositions: Set<String> = [
+            "from", "in", "inside", "into", "on", "through", "to",
+            "using", "via", "with",
+        ]
+        for index in 0 ... (words.count - alias.count)
+        where Array(words[index ..< index + alias.count]) == alias {
+            if index == 0 { return true }
+            let prefix = Array(words[..<index])
+            if let preceding = prefix.last,
+               contextPrepositions.contains(preceding) {
+                return true
+            }
+            let directPrefix = Array(prefix.suffix(6)).filter {
+                ![
+                    "app", "application", "called", "named", "please",
+                    "the", "to", "up",
+                ].contains($0)
+            }
+            if directPrefix.last.map({
+                activationVerbs.contains($0)
+                    || directObjectWorkVerbs.contains($0)
+            }) == true {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// Quoted application names remain usable in ordinary requests such as
+    /// `Open "Notes"`, but the activation verb must directly govern the quoted
+    /// name. A different operation elsewhere in the clause cannot turn quoted
+    /// payload text into application authority.
+    private static func taskExplicitlyActivatesQuotedApplication(
+        _ task: String,
+        aliases: [[String]]
+    ) -> Bool {
+        let aliasPattern = aliases.map { alias in
+            alias.map(NSRegularExpression.escapedPattern(for:))
+                .joined(separator: #"\s+"#)
+        }.joined(separator: "|")
+        guard !aliasPattern.isEmpty else { return false }
+        let quotedName = #"[\"“]\s*(?:"# + aliasPattern + #")\s*[\"”]"#
+        let pattern = #"(?i)\b(?:activate|foreground|launch|open|start|use)\s+(?:the\s+)?"#
+            + quotedName
+            + #"|\b(?:bring|switch)\s+(?:up\s+|to\s+)?"#
+            + quotedName
+        return task.range(of: pattern, options: .regularExpression) != nil
     }
 
     /// A nominal frontmost-app name can refer to another Space. Explicit
@@ -474,6 +630,41 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
             availableDirectives: availableDirectives) {
             return route
         }
+        if let route = deterministicPreparedSubmissionRoute(
+            for: task,
+            visibleText: visibleText,
+            history: history,
+            availableDirectives: availableDirectives) {
+            return route
+        }
+        if let route = deterministicMissingInformationRoute(
+            for: task,
+            visibleText: visibleText,
+            history: history,
+            availableDirectives: availableDirectives) {
+            return route
+        }
+        if let route = deterministicWaitRoute(
+            for: task,
+            visibleText: visibleText,
+            history: history,
+            availableDirectives: availableDirectives) {
+            return route
+        }
+        if let route = deterministicVisibleAppointmentAnswerRoute(
+            for: task,
+            visibleText: visibleText,
+            history: history,
+            availableDirectives: availableDirectives) {
+            return route
+        }
+        if let route = deterministicOpenFolderRoute(
+            for: task,
+            visibleText: visibleText,
+            history: history,
+            availableDirectives: availableDirectives) {
+            return route
+        }
         let entryVerbs: Set<String> = [
             "add", "enter", "insert", "paste", "put", "type", "write",
         ]
@@ -504,6 +695,218 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
             for: task,
             history: history,
             availableDirectives: availableDirectives)
+    }
+
+    /// Presses Return only for an explicitly requested search whose task says
+    /// the query is already present in a focused field. The trusted request,
+    /// not OCR, supplies both execution authority and focus state.
+    private static func deterministicPreparedSubmissionRoute(
+        for task: String,
+        visibleText: String,
+        history: [String],
+        availableDirectives: [OSAtlasExplicitActionDirective]
+    ) -> OSAtlasSemanticActionRoute? {
+        guard availableDirectives.contains(.enter),
+              !history.contains(where: {
+                  $0 == "ENTER" || $0.hasPrefix("ENTER [")
+              }) else {
+            return nil
+        }
+        let preparedClause = taskAuthoritySegments(task).first { clause in
+            let words = normalizedWords(clause)
+            let hasPreparedPhrase = ["entered", "filled", "typed"].contains {
+                firstUnnegatedIndex(
+                    of: ["already", $0],
+                    in: words) != nil
+            }
+            return taskExplicitlyRequestsSearchExecution(clause)
+                && hasPreparedPhrase
+                && firstUnnegatedIndex(of: ["focused"], in: words) != nil
+                && !Set(words).isDisjoint(with: ["field", "input"])
+        }
+        guard preparedClause != nil else { return nil }
+
+        // Current OCR must independently show a search/query surface and a
+        // positive ready/Return cue. Screen text can confirm readiness but can
+        // never create the user's request to execute it.
+        let visibleWords = Set(normalizedWords(visibleText))
+        guard visibleWords.contains("search"),
+              !visibleWords.isDisjoint(with: ["query", "ready", "return"]),
+              !visibleTextHasPendingOrNegativePostActionState(visibleText)
+        else {
+            return nil
+        }
+        return .init(directive: .enter)
+    }
+
+    /// Turns one explicit, task-relevant missing field into a canonical host
+    /// clarification. Multiple relevant missing fields remain ambiguous and
+    /// are intentionally left unrouted.
+    private static func deterministicMissingInformationRoute(
+        for task: String,
+        visibleText: String,
+        history: [String],
+        availableDirectives: [OSAtlasExplicitActionDirective]
+    ) -> OSAtlasSemanticActionRoute? {
+        guard availableDirectives.contains(.ask),
+              taskAffirmativelyRequestsOperation(
+                  task,
+                  operationVerbs: [
+                      "book", "create", "deliver", "draft", "email",
+                      "enter", "fill", "get", "make", "open", "order",
+                      "plan", "prepare", "schedule", "send", "ship",
+                      "submit", "write",
+                  ]),
+              !history.contains(where: {
+                  $0 == "ASK" || $0.hasPrefix("ASK [")
+              }),
+              let field = explicitlyMissingField(
+                  in: visibleText,
+                  relevantTo: task,
+                  proposedQuestion: "") else {
+            return nil
+        }
+        return .init(
+            directive: .ask,
+            argument: .question("What \(field.lowercased()) should I use?"))
+    }
+
+    /// Waiting has no host side effect, but is still selected only when the
+    /// trusted task asks to wait and the current frame independently reports a
+    /// bounded in-progress state. The executor's step limit remains the final
+    /// loop bound if a screen never settles.
+    private static func deterministicWaitRoute(
+        for task: String,
+        visibleText: String,
+        history: [String],
+        availableDirectives: [OSAtlasExplicitActionDirective]
+    ) -> OSAtlasSemanticActionRoute? {
+        guard availableDirectives.contains(.wait),
+              !history.contains(where: {
+                  $0 == "WAIT" || $0.hasPrefix("WAIT [")
+              }),
+              taskAffirmativelyRequestsOperation(
+                  task,
+                  operationVerbs: ["wait"]),
+              visibleTextHasPendingOrNegativePostActionState(visibleText)
+        else {
+            return nil
+        }
+        let visibleWords = Set(normalizedWords(visibleText))
+        guard !visibleWords.isDisjoint(with: [
+            "loading", "pending", "processing", "searching", "updating",
+            "waiting", "working",
+        ]) else {
+            return nil
+        }
+        return .init(directive: .wait)
+    }
+
+    /// Projects a compact appointment answer only from exact OCR lines tied to
+    /// the appointment subject in the trusted question. This deliberately
+    /// handles no general document summarization and returns no unrelated line.
+    private static func deterministicVisibleAppointmentAnswerRoute(
+        for task: String,
+        visibleText: String,
+        history: [String],
+        availableDirectives: [OSAtlasExplicitActionDirective]
+    ) -> OSAtlasSemanticActionRoute? {
+        guard history.isEmpty,
+              availableDirectives.contains(.answer) else {
+            return nil
+        }
+        guard taskAffirmativelyRequestsAppointmentAnswer(task) else {
+            return nil
+        }
+        let taskWords = normalizedWords(task)
+        let taskWordSet = Set(taskWords)
+        guard taskWordSet.contains("appointment"),
+              taskWords.filter({ $0 == "appointment" }).count == 1,
+              !taskWordSet.isDisjoint(with: [
+                  "date", "day", "time", "what", "when",
+              ]) else {
+            return nil
+        }
+        let ignoredSubjectWords: Set<String> = [
+            "answer", "appointment", "can", "check", "could", "current",
+            "date", "day", "find", "is", "latest", "me", "my", "next",
+            "out", "please", "report", "reveal", "show", "tell", "the",
+            "time", "upcoming", "what", "when", "you",
+        ]
+        let subjectWords = Set(taskWords.filter {
+            $0.count >= 3 && !ignoredSubjectWords.contains($0)
+        })
+        guard !subjectWords.isEmpty else { return nil }
+
+        let lines = visibleText.components(separatedBy: .newlines).map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+        }.filter { (2 ... 120).contains($0.count) }
+        guard let subjectIndex = lines.indices.first(where: { index in
+            let words = Set(normalizedWords(lines[index]))
+            return words.contains("appointment")
+                && !subjectWords.isDisjoint(with: words)
+        }) else {
+            return nil
+        }
+        let weekdayWords: Set<String> = [
+            "monday", "tuesday", "wednesday", "thursday", "friday",
+            "saturday", "sunday",
+        ]
+        let detailEnd = min(lines.endIndex, subjectIndex + 3)
+        var details: [String] = []
+        var hasWeekday = false
+        var hasTime = false
+        for line in lines[(subjectIndex + 1) ..< detailEnd] {
+            let lineHasWeekday = !weekdayWords.isDisjoint(
+                with: Set(normalizedWords(line)))
+            let lineHasTime = line.range(
+                of: #"(?i)\b\d{1,2}:\d{2}\s*(?:AM|PM)\b"#,
+                options: .regularExpression) != nil
+            // Evidence must be contiguous with the subject. Skipping an
+            // intervening heading can silently attach another event's time.
+            guard lineHasWeekday || lineHasTime else { break }
+            details.append(line)
+            hasWeekday = hasWeekday || lineHasWeekday
+            hasTime = hasTime || lineHasTime
+            if hasWeekday && hasTime { break }
+        }
+        guard hasWeekday, hasTime else {
+            return nil
+        }
+        let evidence = [lines[subjectIndex]] + Array(details.prefix(2))
+        return .init(
+            directive: .answer,
+            argument: .visibleAnswer(
+                summary: evidence.joined(separator: "; "),
+                evidence: evidence))
+    }
+
+    /// Finder/Desktop open requests have one conventional typed operation.
+    /// The requested folder name comes only from trusted task text; OS-Atlas
+    /// may subsequently ground that exact target but cannot replace the verb.
+    private static func deterministicOpenFolderRoute(
+        for task: String,
+        visibleText: String,
+        history: [String],
+        availableDirectives: [OSAtlasExplicitActionDirective]
+    ) -> OSAtlasSemanticActionRoute? {
+        guard availableDirectives.contains(.doubleClick),
+              taskAffirmativelyRequestsOperation(
+                  task,
+                  operationVerbs: ["open"]),
+              !history.contains(where: {
+                  $0 == "DOUBLE_CLICK" || $0.hasPrefix("DOUBLE_CLICK [[")
+              }),
+              let targetWords = affirmativelyRequestedFolderNameWords(in: task),
+              !visibleTextConfirmsFolderOpened(
+                  visibleText,
+                  targetWords: targetWords)
+        else {
+            return nil
+        }
+        return .init(
+            directive: .doubleClick,
+            argument: .targetHint(targetWords.joined(separator: " ")))
     }
 
     /// A model-selected COMPLETE is only a proposal. This predicate repeats
@@ -755,12 +1158,9 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
         availableDirectives: [OSAtlasExplicitActionDirective]
     ) -> OSAtlasSemanticActionRoute? {
         guard availableDirectives.contains(.answer) else { return nil }
-        let taskWords = normalizedWords(task)
         let visibleLines = visibleText
             .split(separator: "\n", omittingEmptySubsequences: false)
             .map { normalizedWords(String($0)) }
-        let requestedApplicationWords = explicitlyRequestedApplicationWords(
-            in: taskWords)
         let reportOperationVerbs: Set<String> = [
             "access", "consult", "download", "edit", "export", "inspect",
             "load", "open", "read", "retrieve", "review", "summarize",
@@ -770,14 +1170,23 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
             "access", "create", "draw", "edit", "execute", "install",
             "launch", "load", "open", "run", "start", "use",
         ]
-        let affirmativelyRequestsReportOperation =
+        let authoritySegments = taskAuthoritySegments(task)
+        let affirmativeReportTaskWords = authoritySegments.compactMap {
             taskAffirmativelyRequestsOperation(
-                task,
+                $0,
                 operationVerbs: reportOperationVerbs)
-        let affirmativelyRequestsApplicationOperation =
-            taskAffirmativelyRequestsOperation(
-                task,
-                operationVerbs: applicationOperationVerbs)
+                ? normalizedWords($0) : nil
+        }
+        let requestedApplications: [[String]] = authoritySegments.compactMap {
+            segment -> [String]? in
+            guard taskAffirmativelyRequestsOperation(
+                segment,
+                operationVerbs: applicationOperationVerbs) else {
+                return nil
+            }
+            return explicitlyRequestedApplicationWords(
+                in: normalizedWords(segment))
+        }
 
         for (lineIndex, rawLine) in visibleText
             .split(separator: "\n", omittingEmptySubsequences: false)
@@ -794,11 +1203,12 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
                 of: ["no", "longer", "available"],
                 in: words) != nil
             if words.contains("report"),
-               affirmativelyRequestsReportOperation,
-               visibleTextMatchesRequestedReport(
-                   taskWords: taskWords,
-                   visibleLines: visibleLines,
-                   obstacleLineIndex: lineIndex),
+               affirmativeReportTaskWords.contains(where: {
+                   visibleTextMatchesRequestedReport(
+                       taskWords: $0,
+                       visibleLines: visibleLines,
+                       obstacleLineIndex: lineIndex)
+               }),
                saysRemoved || saysNoLongerAvailable {
                 return .init(
                     directive: .answer,
@@ -814,11 +1224,9 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
                     of: ["requires", "windows"],
                     in: words) != nil
             guard saysWindowsOnly,
-                  affirmativelyRequestsApplicationOperation,
-                  let requestedApplicationWords,
-                  firstIndex(
-                      of: requestedApplicationWords,
-                      in: words) != nil else {
+                  requestedApplications.contains(where: {
+                      firstIndex(of: $0, in: words) != nil
+                  }) else {
                 continue
             }
             return .init(
@@ -838,8 +1246,8 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
         var maskedTask = ""
         var insideStraightQuote = false
         var insideCurlyQuote = false
-        for character in task {
-            switch character {
+        for scalar in task.unicodeScalars {
+            switch scalar {
             case "\"":
                 insideStraightQuote.toggle()
                 maskedTask.append(" ")
@@ -850,11 +1258,82 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
                 insideCurlyQuote = false
                 maskedTask.append(" ")
             default:
-                maskedTask.append(
-                    insideStraightQuote || insideCurlyQuote ? " " : character)
+                if insideStraightQuote || insideCurlyQuote {
+                    maskedTask.append(contentsOf: String(
+                        repeating: " ",
+                        count: String(scalar).utf16.count))
+                } else {
+                    maskedTask.append(Character(String(scalar)))
+                }
             }
         }
         return maskedTask
+    }
+
+    /// Keeps operation authority and its target/state inside one unquoted
+    /// clause. Contrast boundaries start a fresh scope, while the negation
+    /// itself remains in the following segment.
+    static func taskAuthoritySegments(
+        _ task: String,
+        preservingQuotedContent: Bool = false
+    ) -> [String] {
+        let maskedTask = taskTextMaskingQuotedContent(task)
+        let pattern = #"(?i)(?:[.!?;\n]+|\bbut\b|\bthen\b|,(?=\s*(?:do\s+not|don['’]t|never)\b)|\band\b(?=\s+(?:do\s+not|don['’]t|never)\b)|(?=\b(?:except|excluding|without|instead\s+of|rather\s+than)\b))"#
+        guard let expression = try? NSRegularExpression(pattern: pattern) else {
+            return [preservingQuotedContent ? task : maskedTask]
+        }
+        let boundarySource = maskedTask as NSString
+        let outputSource = (preservingQuotedContent ? task : maskedTask)
+            as NSString
+        let range = NSRange(location: 0, length: boundarySource.length)
+        var segments: [String] = []
+        var start = 0
+        for match in expression.matches(in: maskedTask, range: range) {
+            let length = match.range.location - start
+            if length > 0 {
+                let segment = outputSource.substring(with: NSRange(
+                    location: start,
+                    length: length))
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !segment.isEmpty { segments.append(segment) }
+            }
+            start = NSMaxRange(match.range)
+        }
+        if start < outputSource.length {
+            let segment = outputSource.substring(from: start)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !segment.isEmpty { segments.append(segment) }
+        }
+        return segments
+    }
+
+    private static func taskAffirmativelyRequestsAppointmentAnswer(
+        _ task: String
+    ) -> Bool {
+        let relevantSegments = taskAuthoritySegments(task).filter { segment in
+            let words = Set(normalizedWords(segment))
+            return words.contains("appointment")
+                && !words.isDisjoint(with: [
+                    "date", "day", "time", "what", "when",
+                ])
+        }
+        guard !relevantSegments.isEmpty else { return false }
+        if relevantSegments.contains(where: {
+            containsExplicitNegation(in: normalizedWords($0))
+        }) {
+            return false
+        }
+        let informationVerbs: Set<String> = [
+            "answer", "check", "find", "report", "reveal", "show", "tell",
+        ]
+        return relevantSegments.contains { segment in
+            let words = normalizedWords(segment)
+            let directQuestion = words.first.map {
+                ["what", "when"].contains($0)
+            } == true
+            return directQuestion
+                || !Set(words).isDisjoint(with: informationVerbs)
+        }
     }
 
     static func taskAffirmativelyRequestsOperation(
@@ -1414,7 +1893,7 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
         if (lastAction == "DOUBLE_CLICK"
                 || lastAction.hasPrefix("DOUBLE_CLICK [[")),
            availableDirectives.contains(.complete),
-           let targetWords = explicitlyRequestedFolderNameWords(in: task),
+           let targetWords = affirmativelyRequestedFolderNameWords(in: task),
            !taskHasPendingCompoundWork(
                task,
                afterAny: ["open"],
@@ -1494,6 +1973,15 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
             let afterFolder = words.index(after: folderIndex)
             if afterFolder < words.endIndex,
                ["called", "named"].contains(words[afterFolder]) {
+                let allowedBetweenOpenAndFolder: Set<String> = [
+                    "a", "an", "my", "our", "the", "this", "that",
+                ]
+                guard let openIndex = words[..<folderIndex]
+                        .lastIndex(of: "open"),
+                      words[(openIndex + 1) ..< folderIndex]
+                        .allSatisfy(allowedBetweenOpenAndFolder.contains) else {
+                    continue
+                }
                 let targetStart = words.index(after: afterFolder)
                 if targetStart < words.endIndex,
                    let target = boundedTarget(Array(words[targetStart...])) {
@@ -1508,6 +1996,63 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
                 continue
             }
             return target
+        }
+        return nil
+    }
+
+    private static func affirmativelyRequestedFolderNameWords(
+        in task: String
+    ) -> [String]? {
+        for segment in taskAuthoritySegments(
+            task,
+            preservingQuotedContent: true)
+        where taskAffirmativelyRequestsOperation(
+            segment,
+            operationVerbs: ["open"]) {
+            let maskedSegment = taskTextMaskingQuotedContent(segment)
+            if let target = explicitlyRequestedFolderNameWords(
+                in: maskedSegment) {
+                return target
+            }
+            if let target = explicitlyRequestedQuotedFolderNameWords(
+                in: segment) {
+                return target
+            }
+        }
+        return nil
+    }
+
+    /// Extracts a quoted folder target only from a reviewed `open` shape in
+    /// which the operation and target are one span. The match's OPEN token
+    /// must itself be outside quotes, preventing payload such as
+    /// `type "Open the Summer Picnic folder"` from becoming authority.
+    private static func explicitlyRequestedQuotedFolderNameWords(
+        in task: String
+    ) -> [String]? {
+        let patterns = [
+            #"(?i)\bopen\s+(?:(?:a|my|our|the)\s+)?folder\s+(?:called|named)\s*[\"“]([^\"”]+)[\"”]"#,
+            #"(?i)\bopen\s+(?:(?:a|my|our|the)\s+)?[\"“]([^\"”]+)[\"”]\s+folder\b"#,
+        ]
+        let masked = taskTextMaskingQuotedContent(task) as NSString
+        let source = task as NSString
+        let fullRange = NSRange(location: 0, length: source.length)
+        for pattern in patterns {
+            guard let expression = try? NSRegularExpression(
+                pattern: pattern) else {
+                continue
+            }
+            for match in expression.matches(in: task, range: fullRange) {
+                guard match.range.location + 4 <= masked.length,
+                      masked.substring(with: NSRange(
+                          location: match.range.location,
+                          length: 4)).lowercased() == "open",
+                      match.numberOfRanges == 2 else {
+                    continue
+                }
+                let target = normalizedWords(
+                    source.substring(with: match.range(at: 1)))
+                if (1 ... 12).contains(target.count) { return target }
+            }
         }
         return nil
     }
@@ -1552,36 +2097,34 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
     private static func taskExplicitlyRequestsSearchExecution(
         _ task: String
     ) -> Bool {
-        let words = normalizedWords(task)
-        let searchIndices = words.indices.filter { words[$0] == "search" }
-        guard !searchIndices.isEmpty else { return false }
-
-        func isNegated(at index: Int) -> Bool {
-            let start = max(words.startIndex, index - 2)
-            let preceding = words[start ..< index]
-            return preceding.contains(where: {
-                $0 == "dont" || $0 == "never" || $0 == "not"
-                    || $0 == "without"
-            })
-        }
-
-        let executionVerbs: Set<String> = ["execute", "run", "submit"]
-        for verbIndex in words.indices
-        where executionVerbs.contains(words[verbIndex])
-                && !isNegated(at: verbIndex) {
-            if searchIndices.contains(where: {
-                $0 > verbIndex && $0 - verbIndex <= 8
-            }) {
+        for segment in taskAuthoritySegments(task) {
+            let words = normalizedWords(segment)
+            let searchIndices = words.indices.filter {
+                words[$0] == "search"
+            }
+            guard !searchIndices.isEmpty else { continue }
+            if taskAffirmativelyRequestsOperation(
+                segment,
+                operationVerbs: ["search"]) {
                 return true
             }
+            for verb in ["execute", "run", "submit"]
+            where taskAffirmativelyRequestsOperation(
+                segment,
+                operationVerbs: [verb]) {
+                let verbIndices = words.indices.filter {
+                    words[$0] == verb
+                }
+                if verbIndices.contains(where: { verbIndex in
+                    searchIndices.contains(where: {
+                        $0 > verbIndex && $0 - verbIndex <= 8
+                    })
+                }) {
+                    return true
+                }
+            }
         }
-
-        let commandPrefixes: Set<String> = ["and", "please", "then", "to"]
-        return searchIndices.contains(where: { index in
-            guard !isNegated(at: index) else { return false }
-            return index == words.startIndex
-                || commandPrefixes.contains(words[index - 1])
-        })
+        return false
     }
 
     private static func visibleTextHasStrongSearchResultState(
@@ -2581,6 +3124,9 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
             return clarificationQuestionIsTaskRelevant(
                 "What \(label) should I use?",
                 trustedTask: task)
+                && !trustedTaskSuppliesValue(
+                    forMissingField: label,
+                    task: task)
         }
         guard !relevantCandidates.isEmpty else { return nil }
         if relevantCandidates.count == 1 { return relevantCandidates[0] }
@@ -2592,6 +3138,133 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
                 && labelWords.isSubset(of: proposedWords)
         }
         return proposedMatches.count == 1 ? proposedMatches[0] : nil
+    }
+
+    private static func trustedTaskSuppliesValue(
+        forMissingField field: String,
+        task: String
+    ) -> Bool {
+        let fieldWords = Set(normalizedWords(field))
+        let taskWords = normalizedWords(task)
+        let ignoredValues: Set<String> = [
+            "a", "an", "app", "application", "arrival", "calculator",
+            "calendar", "chrome", "city", "departure", "destination",
+            "finder", "location", "mail", "my", "notes", "origin", "our",
+            "reminders", "safari", "station", "the", "this",
+        ]
+
+        func hasConcreteValue(after marker: String) -> Bool {
+            for index in taskWords.indices where taskWords[index] == marker {
+                let valueIndex = taskWords.index(after: index)
+                guard valueIndex < taskWords.endIndex else { continue }
+                let value = taskWords[valueIndex]
+                if !ignoredValues.contains(value), value.count >= 2 {
+                    return true
+                }
+            }
+            return false
+        }
+
+        func hasDestinationAfterTo() -> Bool {
+            let infinitiveVerbs: Set<String> = [
+                "book", "check", "compare", "find", "get", "look", "plan",
+                "review", "search", "see", "show", "use", "view",
+            ]
+            for index in taskWords.indices where taskWords[index] == "to" {
+                let valueIndex = taskWords.index(after: index)
+                guard valueIndex < taskWords.endIndex else { continue }
+                let value = taskWords[valueIndex]
+                if !ignoredValues.contains(value),
+                   !infinitiveVerbs.contains(value),
+                   value.count >= 2 {
+                    return true
+                }
+            }
+            return false
+        }
+
+        if !fieldWords.isDisjoint(with: [
+            "departure", "from", "origin",
+        ]) {
+            return hasConcreteValue(after: "from")
+        }
+        if !fieldWords.isDisjoint(with: [
+            "arrival", "destination", "to",
+        ]) {
+            return hasDestinationAfterTo()
+        }
+        if !fieldWords.isDisjoint(with: ["date", "day"]) {
+            let weekdays: Set<String> = [
+                "monday", "tuesday", "wednesday", "thursday", "friday",
+                "saturday", "sunday", "today", "tomorrow",
+            ]
+            if !Set(taskWords).isDisjoint(with: weekdays) { return true }
+            let monthDate = #"(?i)\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(?:[12]?\d|3[01])(?:st|nd|rd|th)?(?:,\s*\d{4})?\b"#
+            let numericDate = #"\b(?:0?[1-9]|1[0-2])[/.-](?:0?[1-9]|[12]\d|3[01])(?:[/.-]\d{2,4})?\b"#
+            return task.range(
+                of: monthDate,
+                options: .regularExpression) != nil
+                || task.range(
+                    of: numericDate,
+                    options: .regularExpression) != nil
+        }
+        if fieldWords.contains("time") {
+            let twelveHour = #"(?i)\b(?:0?[1-9]|1[0-2])(?::[0-5]\d)?\s*(?:AM|PM)\b"#
+            let twentyFourHour = #"\b(?:[01]?\d|2[0-3]):[0-5]\d\b"#
+            return task.range(
+                of: twelveHour,
+                options: .regularExpression) != nil
+                || task.range(
+                    of: twentyFourHour,
+                    options: .regularExpression) != nil
+        }
+        if !fieldWords.isDisjoint(with: [
+            "email", "recipient",
+        ]) || (fieldWords.contains("address")
+                && !Set(taskWords).isDisjoint(with: ["email", "mail"])) {
+            return task.range(
+                of: #"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b"#,
+                options: .regularExpression) != nil
+        }
+        if !fieldWords.isDisjoint(with: [
+            "address", "delivery", "dropoff", "street",
+        ]) {
+            return task.range(
+                of: #"(?i)\b\d{1,6}\s+[\p{L}\p{N}][\p{L}\p{N}.'-]*(?:\s+[\p{L}\p{N}][\p{L}\p{N}.'-]*){0,5}\s+(?:avenue|ave|boulevard|blvd|circle|court|ct|drive|dr|highway|hwy|lane|ln|parkway|pkwy|place|pl|road|rd|street|st|terrace|trail|way)\b"#,
+                options: .regularExpression) != nil
+        }
+        if !fieldWords.isDisjoint(with: ["postal", "zip"]) {
+            return task.range(
+                of: #"\b\d{5}(?:-\d{4})?\b"#,
+                options: .regularExpression) != nil
+        }
+        if fieldWords.contains("calendar") {
+            return task.range(
+                of: #"(?i)\b(?:in|on|use)\s+(?:my\s+|our\s+|the\s+)?[\p{L}\p{N}][\p{L}\p{N}.'-]*\s+calendar\b"#,
+                options: .regularExpression) != nil
+        }
+        if fieldWords.contains("subject") {
+            return task.range(
+                of: #"(?i)\b(?:subject\s*(?:is|:|=)|with\s+(?:the\s+)?subject)\s*[\"“]?[\p{L}\p{N}]"#,
+                options: .regularExpression) != nil
+        }
+        if fieldWords.contains("body") {
+            return task.range(
+                of: #"(?i)\b(?:body\s*(?:is|:|=)|(?:message\s+)?say(?:ing|s)?)\s*[\"“]?[\p{L}\p{N}]"#,
+                options: .regularExpression) != nil
+        }
+        if fieldWords.contains("location") {
+            return hasConcreteValue(after: "at")
+                || hasConcreteValue(after: "in")
+        }
+        if !fieldWords.isDisjoint(with: ["file", "folder", "name"]) {
+            return hasConcreteValue(after: "called")
+                || hasConcreteValue(after: "named")
+                || task.range(
+                    of: #"(?i)\b[\p{L}\p{N}][\p{L}\p{N} _.-]{0,80}\.[A-Z0-9]{1,8}\b"#,
+                    options: .regularExpression) != nil
+        }
+        return false
     }
 
     /// Adjacent OCR lines do not provide punctuation that distinguishes a

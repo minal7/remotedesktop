@@ -60,15 +60,60 @@ struct OSAtlasLlamaEndpoint: Equatable, Sendable {
     let bearerToken: String
 }
 
+/// Hardware-aware limits for the one-at-a-time local visual runtime. The
+/// compact profile is deliberately not just a relaxed installation check: it
+/// reduces llama.cpp's context and batch allocations, requires launch and
+/// post-load headroom, and halves the independent process kill ceiling.
+struct OSAtlasLlamaResourceProfile: Equatable, Sendable {
+    enum Tier: Equatable, Sendable {
+        case compact
+        case standard
+    }
+
+    static let minimumPhysicalMemoryBytes: UInt64 = 8 * 1_024 * 1_024 * 1_024
+    static let standardPhysicalMemoryBytes: UInt64 = 16 * 1_024 * 1_024 * 1_024
+
+    static let compact = OSAtlasLlamaResourceProfile(
+        tier: .compact,
+        contextSize: 4_096,
+        logicalBatchSize: 256,
+        physicalBatchSize: 64,
+        maximumResidentMemoryBytes: 4 * 1_024 * 1_024 * 1_024,
+        minimumLaunchMemoryBytes: 3 * 1_024 * 1_024 * 1_024,
+        minimumInferenceMemoryBytes: 1 * 1_024 * 1_024 * 1_024)
+
+    static let standard = OSAtlasLlamaResourceProfile(
+        tier: .standard,
+        contextSize: 8_192,
+        logicalBatchSize: 512,
+        physicalBatchSize: 128,
+        maximumResidentMemoryBytes: 8 * 1_024 * 1_024 * 1_024,
+        minimumLaunchMemoryBytes: 6 * 1_024 * 1_024 * 1_024,
+        minimumInferenceMemoryBytes: 2 * 1_024 * 1_024 * 1_024)
+
+    let tier: Tier
+    let contextSize: Int
+    let logicalBatchSize: Int
+    let physicalBatchSize: Int
+    let maximumResidentMemoryBytes: UInt64
+    let minimumLaunchMemoryBytes: UInt64
+    let minimumInferenceMemoryBytes: UInt64
+
+    static func select(physicalMemoryBytes: UInt64) -> Self? {
+        guard physicalMemoryBytes >= minimumPhysicalMemoryBytes else {
+            return nil
+        }
+        return physicalMemoryBytes < standardPhysicalMemoryBytes
+            ? .compact
+            : .standard
+    }
+}
+
 struct OSAtlasLlamaLaunchConfiguration: Equatable, Sendable {
     static let host = "127.0.0.1"
     static let maximumGeneratedTokens = 256
-    static let contextSize = 8_192
-    static let logicalBatchSize = 512
-    static let physicalBatchSize = 128
     static let imageTokensPerScreenshot = 256
     static let workerThreads = 4
-    static let maximumResidentMemoryBytes: UInt64 = 8 * 1_024 * 1_024 * 1_024
     static let bundledLlamaServerBuild = "b9992"
     static let bundledLlamaServerCommit = "6eddde0"
     /// Byte-for-byte equivalent to OS-Atlas Pro's upstream `phi3-chat`
@@ -85,6 +130,25 @@ struct OSAtlasLlamaLaunchConfiguration: Equatable, Sendable {
     let multimodalProjectorURL: URL
     let port: UInt16
     let bearerToken: String
+    let resourceProfile: OSAtlasLlamaResourceProfile
+
+    init(
+        executableURL: URL,
+        workingDirectoryURL: URL,
+        modelFirstSplitURL: URL,
+        multimodalProjectorURL: URL,
+        port: UInt16,
+        bearerToken: String,
+        resourceProfile: OSAtlasLlamaResourceProfile = .standard
+    ) {
+        self.executableURL = executableURL
+        self.workingDirectoryURL = workingDirectoryURL
+        self.modelFirstSplitURL = modelFirstSplitURL
+        self.multimodalProjectorURL = multimodalProjectorURL
+        self.port = port
+        self.bearerToken = bearerToken
+        self.resourceProfile = resourceProfile
+    }
 
     var arguments: [String] {
         [
@@ -96,9 +160,9 @@ struct OSAtlasLlamaLaunchConfiguration: Equatable, Sendable {
             // OS-Atlas/InternVL can otherwise inherit its 128K model context
             // and llama-server's multi-slot/batching defaults. Those defaults
             // are inappropriate for one-at-a-time local GUI grounding.
-            "--ctx-size", String(Self.contextSize),
-            "--batch-size", String(Self.logicalBatchSize),
-            "--ubatch-size", String(Self.physicalBatchSize),
+            "--ctx-size", String(resourceProfile.contextSize),
+            "--batch-size", String(resourceProfile.logicalBatchSize),
+            "--ubatch-size", String(resourceProfile.physicalBatchSize),
             "--threads", String(Self.workerThreads),
             "--threads-batch", String(Self.workerThreads),
             "--parallel", "1",
@@ -252,7 +316,7 @@ enum OSAtlasLlamaRuntimeError: Error, LocalizedError, Equatable {
         case .invalidVisionInput:
             return "The screenshot exceeded the safe local-model image limit, so the Mac was left untouched."
         case .insufficientPhysicalMemory:
-            return "AI Computer Use requires a Mac with at least 16 GB of memory."
+            return "AI Computer Use requires a Mac with at least 8 GB of memory."
         case .insufficientAvailableMemory:
             return "There is not enough free memory for AI Computer Use. Close some apps, then choose Retry."
         case .resourceInspectionFailed:
@@ -267,20 +331,10 @@ enum OSAtlasLlamaRuntimeError: Error, LocalizedError, Equatable {
 actor OSAtlasLlamaRuntime {
     static let shared = OSAtlasLlamaRuntime()
 
-    static let minimumPhysicalMemoryBytes: UInt64 = 16 * 1_024 * 1_024 * 1_024
-    static let minimumLaunchMemoryBytes: UInt64 = 6 * 1_024 * 1_024 * 1_024
-    // The launch check reserves enough reclaimable memory to make the model
-    // resident. Once it is loaded, the independent 8 GiB process guard bounds
-    // any further growth. Keeping another 4 GiB reclaimable at that point made
-    // the verified Q4 runtime reject inference on otherwise healthy 16/32 GiB
-    // Macs, including while the system still reported normal memory pressure.
-    // Two GiB covers the remaining bounded growth without making the
-    // advertised 16 GiB minimum impossible under an ordinary app workload.
-    static let minimumInferenceMemoryBytes: UInt64 = 2 * 1_024 * 1_024 * 1_024
-
     private struct ActiveServer {
         let inputs: OSAtlasLlamaRuntimeInputs
         let endpoint: OSAtlasLlamaEndpoint
+        let resourceProfile: OSAtlasLlamaResourceProfile
         let process: any OSAtlasLlamaServerProcess
         let transport: any OSAtlasLlamaHTTPTransport
     }
@@ -434,7 +488,8 @@ actor OSAtlasLlamaRuntime {
         }
         do {
             try validateResources(
-                minimumReclaimableBytes: Self.minimumInferenceMemoryBytes)
+                minimumReclaimableBytes:
+                    active.resourceProfile.minimumInferenceMemoryBytes)
         } catch {
             // Release the resident model as part of failing closed. This gives
             // memory back to the user's apps instead of leaving a multi-GB
@@ -522,8 +577,7 @@ actor OSAtlasLlamaRuntime {
             await stopActiveServerUnserialized()
             do {
                 try validateActivation(epoch: expectedActivationEpoch)
-                try validateResources(
-                    minimumReclaimableBytes: Self.minimumLaunchMemoryBytes)
+                let resourceProfile = try resourceProfileForLaunch()
                 let port = try portProvider.availableLoopbackPort()
                 let token = tokenProvider.bearerToken()
                 guard !token.isEmpty else {
@@ -538,7 +592,8 @@ actor OSAtlasLlamaRuntime {
                     modelFirstSplitURL: inputs.modelFirstSplitURL,
                     multimodalProjectorURL: inputs.multimodalProjectorURL,
                     port: port,
-                    bearerToken: token)
+                    bearerToken: token,
+                    resourceProfile: resourceProfile)
                 let transport = transportMaker.makeTransport()
                 let process = try await launcher.launch(configuration: configuration)
                 nextGeneration &+= 1
@@ -550,6 +605,7 @@ actor OSAtlasLlamaRuntime {
                 active = ActiveServer(
                     inputs: inputs,
                     endpoint: endpoint,
+                    resourceProfile: resourceProfile,
                     process: process,
                     transport: transport)
                 try validateActivation(epoch: expectedActivationEpoch)
@@ -557,7 +613,8 @@ actor OSAtlasLlamaRuntime {
                 // Recheck after model/projector residency so setup never says
                 // "ready" when there is no safe headroom for the first tile.
                 try validateResources(
-                    minimumReclaimableBytes: Self.minimumInferenceMemoryBytes)
+                    minimumReclaimableBytes:
+                        resourceProfile.minimumInferenceMemoryBytes)
                 try validateActivation(epoch: expectedActivationEpoch)
                 return .success
             } catch is CancellationError {
@@ -609,21 +666,38 @@ actor OSAtlasLlamaRuntime {
         lifecycleTransition?.task.cancel()
     }
 
-    private func validateResources(
-        minimumReclaimableBytes: UInt64
-    ) throws {
+    private func resourceProfileForLaunch() throws -> OSAtlasLlamaResourceProfile {
+        let snapshot = try resourceSnapshot()
+        guard let profile = OSAtlasLlamaResourceProfile.select(
+            physicalMemoryBytes: snapshot.physicalMemoryBytes
+        ) else {
+            throw OSAtlasLlamaRuntimeError.insufficientPhysicalMemory
+        }
+        guard snapshot.reclaimableMemoryBytes >= profile.minimumLaunchMemoryBytes else {
+            throw OSAtlasLlamaRuntimeError.insufficientAvailableMemory
+        }
+        return profile
+    }
+
+    private func validateResources(minimumReclaimableBytes: UInt64) throws {
+        let snapshot = try resourceSnapshot()
+        guard snapshot.physicalMemoryBytes >=
+                OSAtlasLlamaResourceProfile.minimumPhysicalMemoryBytes else {
+            throw OSAtlasLlamaRuntimeError.insufficientPhysicalMemory
+        }
+        guard snapshot.reclaimableMemoryBytes >= minimumReclaimableBytes else {
+            throw OSAtlasLlamaRuntimeError.insufficientAvailableMemory
+        }
+    }
+
+    private func resourceSnapshot() throws -> OSAtlasLlamaResourceSnapshot {
         let snapshot: OSAtlasLlamaResourceSnapshot
         do {
             snapshot = try resourceInspector.snapshot()
         } catch {
             throw OSAtlasLlamaRuntimeError.resourceInspectionFailed
         }
-        guard snapshot.physicalMemoryBytes >= Self.minimumPhysicalMemoryBytes else {
-            throw OSAtlasLlamaRuntimeError.insufficientPhysicalMemory
-        }
-        guard snapshot.reclaimableMemoryBytes >= minimumReclaimableBytes else {
-            throw OSAtlasLlamaRuntimeError.insufficientAvailableMemory
-        }
+        return snapshot
     }
 
     /// Call only from the lifecycle transition task. Other lifecycle requests
@@ -972,7 +1046,7 @@ private struct FoundationOSAtlasLlamaServerLauncher: OSAtlasLlamaServerLaunching
         return FoundationOSAtlasLlamaServerProcess(
             process: process,
             maximumResidentMemoryBytes:
-                OSAtlasLlamaLaunchConfiguration.maximumResidentMemoryBytes)
+                configuration.resourceProfile.maximumResidentMemoryBytes)
     }
 }
 
@@ -1138,8 +1212,8 @@ private final class FoundationOSAtlasLlamaServerProcess: OSAtlasLlamaServerProce
                    residentBytes > maximumResidentMemoryBytes {
                     // This is the last safety boundary if a future mtmd
                     // regression ignores the image/batch limits. SIGKILL is
-                    // intentional: allocating past 8 GiB is more dangerous
-                    // than preserving model state on a 16 GiB Mac.
+                    // intentional: allocating past the selected hardware
+                    // profile is more dangerous than preserving model state.
                     Darwin.kill(processID, SIGKILL)
                     return
                 }

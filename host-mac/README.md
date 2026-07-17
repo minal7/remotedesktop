@@ -132,10 +132,13 @@ who enable it must approve Microphone themselves.
   signaling record; the host streams the helper download, model download,
   verification, and runtime-loading progress back to the device row.
 - Versioned model installation in Application Support with Apple-silicon,
-  16 GiB memory, free-space, byte-size, and streaming SHA-256 checks before an
-  atomic receipt is activated. Resumable progress is calculated from durable
-  bytes across every artifact, and chat is exposed only after the complete
-  model package loads successfully.
+  8 GiB memory, free-space, byte-size, and streaming SHA-256 checks before an
+  atomic receipt is activated. An 8–15 GiB Mac uses a 4,096-token compact
+  llama.cpp profile, smaller logical/physical batches, 3 GiB launch headroom,
+  1 GiB post-load headroom, and a 4 GiB process ceiling. Macs with at least
+  16 GiB retain the 8,192-token profile and larger safety margins. Resumable
+  progress is calculated from durable bytes across every artifact, and chat is
+  exposed only after the complete model package loads successfully.
 - The host-composed surface covers 16 semantic operations. `ANSWER` and
   `REPORT` are aliases for the same evidence-checked visible-facts behavior.
   Click, double-click, secondary-click, and drag use harmless OS-Atlas primary
@@ -144,11 +147,13 @@ who enable it must approve Microphone themselves.
   clarification, and visible answers are composed directly from validated
   arguments without visual-model verb selection. The router remains installed
   regardless of Apple's startup availability and re-checks availability for
-  every non-deterministic step. If that per-step check is unavailable, only
-  that step falls back to the legacy raw checkpoint profile: `RIGHT_CLICK`,
-  `TYPE`, four-direction `SCROLL`, `OPEN_APP`, `ENTER`, `WAIT`, `ASK`,
-  `ANSWER`, and `COMPLETE`. Direct user input immediately pauses automation,
-  and malformed or out-of-range actions are rejected before any effect.
+  every non-deterministic step. Its deterministic, host-authored routes remain
+  usable during an Apple-model outage. If no such route matches, the task
+  returns `unable to complete` before any further OS-Atlas inference or host
+  effects; the raw checkpoint path is not revived. Authentication-boundary app
+  switching likewise accepts only a typed `OPEN_APP` route. Direct user input
+  immediately pauses automation, and malformed or out-of-range actions are
+  rejected before any effect.
 
 ## Computer Use local component distribution
 
@@ -248,13 +253,17 @@ product behavior:
   loads the installed Apple language model and OS-Atlas Pro checkpoint against
   hidden, in-memory screens. Its semantic matrix covers all 16 host actions:
   direct actions use the typed plan, while pointer actions require one or two
-  real OS-Atlas point-grounding inferences. The separate stateful delivery
-  workflows retain the legacy raw compatibility path and require real
-  OS-Atlas navigation before local Vision OCR returns the exact itemized quote.
-  A separate 14-scenario regular-user matrix classifies each terminal state as
-  `task completed`, `user intervention required`, or `unable to complete`,
-  including authentication, purchase approval, persistent-error, and
-  platform-incompatibility boundaries.
+  real OS-Atlas point-grounding inferences. Separate stateful delivery
+  component tests retain the legacy raw parser in a test-only configuration;
+  they are not production-equivalent fallback tests. Production loading always
+  installs the semantic router and disables explicit raw-action compatibility.
+  A separate 15-scenario regular-user matrix forces the Apple planner
+  unavailable and classifies each terminal state as `task completed`, `user
+  intervention required`, or `unable to complete`. It includes authentication,
+  purchase approval, persistent-error, platform-incompatibility, and an
+  unrecognized-operation fail-closed boundary. Every raw checkpoint response
+  in that matrix must be a `CLICK` point carrier for a typed pointer route;
+  direct and terminal routes require zero checkpoint calls.
   These tests do not capture the desktop, post system input, or advance
   checkout.
 - Live DoorDash quote reading requires `--live-doordash`,
@@ -272,6 +281,18 @@ commands, mode boundaries, privacy guidance, and the MCP operation matrix.
 - `WireFormat.swift` and `SignalingClient.swift` are duplicated
   between `ios/` and `host-mac/`. Extract to a shared SPM package
   under `protocol/Swift/` before further divergence.
+- Apple's language-model planner requires the Foundation Models framework and
+  an available on-device model. Older or ineligible Macs keep the reviewed
+  deterministic route subset and fail closed for other ordinary-language
+  steps; an open-source typed semantic planner is not yet shipped.
+- The 8–15 GiB compact runtime profile has been exercised on a 32 GiB Apple
+  silicon Mac with its exact 4,096-token limits and measured at about 2.27 GiB
+  peak process footprint. It has not yet been validated on physical 8 GiB Mac
+  hardware, so that hardware tier is supported by bounded-resource tests, not
+  a completed low-memory field qualification.
+- The downloadable v0.2.0 host release predates the current main-branch
+  Computer Use hardening. A new signed/notarized release is still required
+  before end users receive these changes.
 
 ## First-run permissions
 

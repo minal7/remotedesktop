@@ -20,7 +20,7 @@ final class ComputerUseTests: XCTestCase {
         XCTAssertEqual(
             manifest.modelRevision,
             "06b790b907d82f29bb317ba889e6888805953036")
-        XCTAssertEqual(manifest.minimumMemoryBytes, 16 * 1_024 * 1_024 * 1_024)
+        XCTAssertEqual(manifest.minimumMemoryBytes, 8 * 1_024 * 1_024 * 1_024)
         XCTAssertEqual(
             manifest.modelArtifacts.map(\.kind),
             [.textModelShard, .textModelShard, .visionProjector])

@@ -89,15 +89,19 @@ ordinary-language steps use Apple's on-device model to select one typed
 semantic action with bounded arguments. OS-Atlas-Pro-4B grounds visual pointer
 targets, and the host composes and validates the native Mac action. Non-pointer
 actions do not ask OS-Atlas to echo a verb, and a raw OS-Atlas verb can never
-override the typed plan. If a non-deterministic step finds Apple's model
-unavailable, that step falls back to the narrower 12-variant fail-closed
-OS-Atlas compatibility profile.
-For delivery quotes, the typed semantic route performs direct app, text, and
-scroll steps; OS-Atlas is used only when a visual pointer must be grounded or
-the narrower raw compatibility path is entered. Local Vision OCR extracts and
-validates itemized facts only inside the focused window. V1 loads Pro only,
-never Base and Pro at the same time, and requires a Mac with at least 16 GiB
-memory.
+override the typed plan. Deterministic host routes remain available when
+Apple's model is unavailable; an unrecognized step returns `unable to
+complete` without asking OS-Atlas for an executable action.
+For delivery quotes, the production typed semantic route performs direct app,
+text, and scroll steps; OS-Atlas is used only when a visual pointer must be
+grounded. Legacy raw delivery parsing remains in component-test configuration
+only and is not a production or ordinary-language fallback. Local Vision OCR
+extracts and validates itemized facts only inside the focused window. V1 loads
+Pro only and never Base and Pro at the same time. Macs with 8–15 GiB memory use
+a bounded
+4,096-token compact profile with smaller batches and a 4 GiB process ceiling;
+Macs with at least 16 GiB retain the 8,192-token standard profile. Both profiles
+recheck reclaimable memory before launch and every inference.
 
 Mail requests use a separately reviewed MCP tool embedded in the signed host,
 not the downloaded helper's generic Mail tool. It can create a visible draft or

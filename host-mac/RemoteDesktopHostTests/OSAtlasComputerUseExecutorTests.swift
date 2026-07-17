@@ -845,8 +845,8 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
             let events = await fixture.events.values()
             XCTAssertEqual(
                 events.filter { $0 == "complete" }.count,
-                1,
-                "Authentication escape is limited to one read-only inference")
+                0,
+                "Authentication takeover must not invoke raw OS-Atlas inference")
             XCTAssertEqual(openCount, 0, testCase.0)
             XCTAssertEqual(performCount, 0, testCase.0)
             XCTAssertEqual(approvalContextQueries, 0, testCase.0)
@@ -864,16 +864,32 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
 
     func testAuthenticationBarrierAllowsOneRelevantAppEscapeThenRechecksAX() async throws {
         let fixture = makeCorrectionRuntime(
-            completionResponses: [
-                response("OPEN_APP [Mail]"),
-                response("REPORT [Dentist appointment: Tuesday, 3:30 PM.]"),
-            ],
+            completionResponses: [response("CLICK [[500,500]]")],
             port: 43_220)
+        let routingRequests = SemanticRoutingRequestLog()
+        let router = StubSemanticActionRouter { request in
+            await routingRequests.record(request)
+            if request.availableDirectives == [.openApplication] {
+                return OSAtlasSemanticActionRoute(
+                    directive: .openApplication,
+                    argument: .applicationName("Mail"))
+            }
+            return OSAtlasSemanticActionRoute(
+                directive: .answer,
+                argument: .visibleAnswer(
+                    summary: "Dentist appointment: Tuesday, 3:30 PM.",
+                    evidence: [
+                        "DENTIST APPOINTMENT",
+                        "Tuesday",
+                        "3:30 PM",
+                    ]))
+        }
         var parsedActions: [OSAtlasGUIAction] = []
         var rawActionTokens: [String] = []
         let executor = OSAtlasComputerUseExecutor.makeForTesting(
             inputs: fixture.inputs,
             runtime: fixture.runtime,
+            semanticRouter: router,
             maxSteps: 3,
             parsedActionObserver: { parsedActions.append($0) },
             actionTokenObserver: { rawActionTokens.append($0) })
@@ -947,7 +963,7 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
             throw error
         }
         let events = await fixture.events.values()
-        XCTAssertEqual(events.filter { $0 == "complete" }.count, 2)
+        XCTAssertEqual(events.filter { $0 == "complete" }.count, 0)
         XCTAssertEqual(openedApplications, ["Mail"])
         XCTAssertEqual(authenticationQueries, ["Passwords", "Mail"])
         XCTAssertEqual(screenCaptures, 2)
@@ -956,49 +972,118 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
         XCTAssertEqual(approvalTargetQueries, 0)
         XCTAssertEqual(parsedActions, [
             .openApplication("Mail"),
-            .report("Dentist appointment: Tuesday, 3:30 PM."),
+            .report("DENTIST APPOINTMENT; Tuesday; 3:30 PM"),
         ])
-        XCTAssertEqual(rawActionTokens, ["OPEN_APP", "REPORT"])
+        XCTAssertTrue(rawActionTokens.isEmpty)
+        let requests = await routingRequests.values()
+        XCTAssertEqual(requests.count, 2)
+        XCTAssertEqual(requests.first?.availableDirectives, [.openApplication])
+        XCTAssertEqual(requests.first?.visibleText, "")
         XCTAssertTrue(progress.contains(
             "Step 1: switching to the task-relevant app…"))
         await fixture.runtime.shutdown()
     }
 
     func testAuthenticationEscapeRejectsCredentialActionsSameAppAndIrrelevantApps() async throws {
-        let cases: [(name: String, response: String, currentApp: String, task: String)] = [
+        let cases: [(name: String, route: OSAtlasSemanticActionRoute, currentApp: String, task: String)] = [
             (
                 "click",
-                response("CLICK [[500,500]]"),
+                OSAtlasSemanticActionRoute(
+                    directive: .click,
+                    argument: .targetHint("sign in")),
                 "Passwords",
                 "Read my email inbox."),
             (
                 "credential type",
-                response("TYPE [not-a-real-password]"),
+                OSAtlasSemanticActionRoute(
+                    directive: .type,
+                    argument: .text("not-a-real-password")),
                 "Passwords",
                 "Read my email inbox."),
             (
                 "same application",
-                response("OPEN_APP [Mail]"),
+                OSAtlasSemanticActionRoute(
+                    directive: .openApplication,
+                    argument: .applicationName("Mail")),
                 "Mail",
                 "Read my email inbox."),
             (
                 "irrelevant application",
-                response("OPEN_APP [Calculator]"),
+                OSAtlasSemanticActionRoute(
+                    directive: .openApplication,
+                    argument: .applicationName("Calculator")),
                 "Passwords",
                 "Read my email inbox."),
             (
                 "substring false positive",
-                response("OPEN_APP [Safari]"),
+                OSAtlasSemanticActionRoute(
+                    directive: .openApplication,
+                    argument: .applicationName("Safari")),
                 "Passwords",
                 "Complete account verification."),
+            (
+                "negated explicitly named application",
+                OSAtlasSemanticActionRoute(
+                    directive: .openApplication,
+                    argument: .applicationName("Notes")),
+                "Passwords",
+                "Do not open Notes; read my email inbox instead."),
+            (
+                "without explicitly named application",
+                OSAtlasSemanticActionRoute(
+                    directive: .openApplication,
+                    argument: .applicationName("Notes")),
+                "Passwords",
+                "Read my email inbox without opening Notes."),
+            (
+                "quoted application payload with unrelated open",
+                OSAtlasSemanticActionRoute(
+                    directive: .openApplication,
+                    argument: .applicationName("Notes")),
+                "Passwords",
+                "Open the current document and type \"Notes\" into it."),
+            (
+                "instead-of application exclusion",
+                OSAtlasSemanticActionRoute(
+                    directive: .openApplication,
+                    argument: .applicationName("Notes")),
+                "Passwords",
+                "Read the report instead of opening Notes."),
+            (
+                "rather-than application exclusion",
+                OSAtlasSemanticActionRoute(
+                    directive: .openApplication,
+                    argument: .applicationName("Notes")),
+                "Passwords",
+                "Read the report rather than open Notes."),
+            (
+                "negated implicit mail intent with unrelated work",
+                OSAtlasSemanticActionRoute(
+                    directive: .openApplication,
+                    argument: .applicationName("Mail")),
+                "Passwords",
+                "Do not read email; calculate 2+2."),
+            (
+                "negated implicit browser intent with unrelated work",
+                OSAtlasSemanticActionRoute(
+                    directive: .openApplication,
+                    argument: .applicationName("Safari")),
+                "Passwords",
+                "Don't visit a website; write a note."),
         ]
         for (index, testCase) in cases.enumerated() {
             let fixture = makeCorrectionRuntime(
-                completionResponses: [testCase.response],
+                completionResponses: [response("CLICK [[500,500]]")],
                 port: UInt16(43_221 + index))
+            let router = StubSemanticActionRouter { request in
+                XCTAssertEqual(request.availableDirectives, [.openApplication])
+                XCTAssertEqual(request.visibleText, "")
+                return testCase.route
+            }
             let executor = OSAtlasComputerUseExecutor.makeForTesting(
                 inputs: fixture.inputs,
                 runtime: fixture.runtime,
+                semanticRouter: router,
                 maxSteps: 2)
             let observation = ComputerUseScreenObservation(
                 image: CIImage(color: .white).cropped(
@@ -1055,7 +1140,7 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
             let events = await fixture.events.values()
             XCTAssertEqual(
                 events.filter { $0 == "complete" }.count,
-                1,
+                0,
                 testCase.name)
             XCTAssertEqual(openCount, 0, testCase.name)
             XCTAssertEqual(performCount, 0, testCase.name)
@@ -2107,6 +2192,13 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
                 trustedTask: twoAppointmentTask),
             "Alice Dentist Appointment; Tuesday 3:30 PM; Bob Doctor Appointment; Thursday 9:00 AM",
             "Each requested entity must contribute its own bound answer")
+        XCTAssertThrowsError(
+            try OSAtlasComputerUseExecutor.verifiedVisibleAnswer(
+                summary: "Tuesday at 3:30 PM",
+                evidence: ["NEXT APPOINTMENT", "Tuesday", "3:30 PM"],
+                visibleText: "NEXT APPOINTMENT\nTuesday\n3:30 PM\nDENTIST APPOINTMENT\nFriday\n9:00 AM",
+                trustedTask: "Show me when my next dentist appointment is."),
+            "Instruction words cannot bind an unrelated appointment row")
 
         let rejected: [(
             summary: String,
@@ -3776,6 +3868,104 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
             "A deterministic named-app route must not invoke OS-Atlas")
     }
 
+    func testOpenApplicationSemanticEffectAllowsBoundDirectAppRequests()
+        async throws {
+        let cases = [
+            ("Check Calendar.", "Calendar"),
+            ("Read Mail.", "Mail"),
+            ("Open the app called Notes.", "Notes"),
+            ("Launch the application named Mail.", "Mail"),
+        ]
+        for (index, testCase) in cases.enumerated() {
+            let fixture = makeCorrectionRuntime(
+                completionResponses: [response("CLICK [[500,500]]")],
+                port: UInt16(43_180 + index))
+            let router = StubSemanticActionRouter { _ in
+                OSAtlasSemanticActionRoute(
+                    directive: .openApplication,
+                    argument: .applicationName(testCase.1))
+            }
+            var openedApplications: [String] = []
+            let executor = OSAtlasComputerUseExecutor.makeForTesting(
+                inputs: fixture.inputs,
+                runtime: fixture.runtime,
+                semanticRouter: router,
+                maxSteps: 1)
+
+            do {
+                _ = try await executor.execute(
+                    prompt: testCase.0,
+                    tools: correctionTestTools(
+                        frontmostApplication: "Safari",
+                        applicationOpener: {
+                            openedApplications.append($0)
+                        },
+                        actionPerformer: { _ in
+                            XCTFail("A direct app route cannot post input")
+                        }),
+                    progress: { _ in })
+            } catch OSAtlasComputerUseExecutor.RuntimeError.stepLimit {
+                // Non-pure app wording continues after the one host-owned open.
+            } catch {
+                await fixture.runtime.shutdown()
+                throw error
+            }
+            await fixture.runtime.shutdown()
+            XCTAssertEqual(openedApplications, [testCase.1], testCase.0)
+        }
+    }
+
+    func testOpenApplicationSemanticEffectRequiresClauseBoundTargetAuthority()
+        async throws {
+        let prompts = [
+            "Open the current document and type \"Notes\" into it.",
+            "Open the current document and type Notes into it.",
+            "Read the report instead of opening Notes.",
+            "Read the report rather than open Notes.",
+        ]
+        for (index, prompt) in prompts.enumerated() {
+            let fixture = makeCorrectionRuntime(
+                completionResponses: [response("CLICK [[500,500]]")],
+                port: UInt16(43_170 + index))
+            let router = StubSemanticActionRouter { _ in
+                OSAtlasSemanticActionRoute(
+                    directive: .openApplication,
+                    argument: .applicationName("Notes"))
+            }
+            var openedApplications: [String] = []
+            let executor = OSAtlasComputerUseExecutor.makeForTesting(
+                inputs: fixture.inputs,
+                runtime: fixture.runtime,
+                semanticRouter: router,
+                maxSteps: 1)
+
+            do {
+                _ = try await executor.execute(
+                    prompt: prompt,
+                    tools: correctionTestTools(
+                        frontmostApplication: "Safari",
+                        applicationOpener: {
+                            openedApplications.append($0)
+                        },
+                        actionPerformer: { _ in
+                            XCTFail("A rejected app route cannot post input")
+                        }),
+                    progress: { _ in })
+                XCTFail("A target-unbound app route must be rejected: \(prompt)")
+            } catch let error as OSAtlasComputerUseExecutor.RuntimeError {
+                XCTAssertEqual(
+                    error,
+                    .unsupportedAction("untrusted-semantic-route"),
+                    prompt)
+            } catch {
+                await fixture.runtime.shutdown()
+                throw error
+            }
+            await fixture.runtime.shutdown()
+            XCTAssertTrue(openedApplications.isEmpty, prompt)
+        }
+    }
+
     func testSemanticNextWeekNavigationUsesOnlyOneClickCarrier() async throws {
         let fixture = makeCorrectionRuntime(
             completionResponses: [response("CLICK [[250,750]]")],
@@ -4376,44 +4566,104 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
             "A production-loaded executor must route a named app before raw OS-Atlas inference")
     }
 
-    func testSemanticRouterRuntimeUnavailableFallsBackToLegacyRawPath() async throws {
+    func testSemanticRouterRecoverableFailuresStopBeforeRawInferenceOrEffects()
+        async throws {
+        let cases: [(String, AppleFoundationVisualActionRouterError)] = [
+            ("unavailable", .unavailable(.modelNotReady)),
+            ("no route", .noRoute),
+            ("generation failed", .generationFailed),
+        ]
+        for (index, testCase) in cases.enumerated() {
+            let fixture = makeCorrectionRuntime(
+                completionResponses: [response("TYPE [legacy fallback]")],
+                port: UInt16(43_149 + index))
+            let router = StubSemanticActionRouter { _ in
+                throw testCase.1
+            }
+            var parsedActions: [OSAtlasGUIAction] = []
+            var rawActionTokens: [String] = []
+            var rawModelResponses: [String] = []
+            var performedActions: [ComputerUsePredictedAction] = []
+            let executor = OSAtlasComputerUseExecutor.makeForTesting(
+                inputs: fixture.inputs,
+                runtime: fixture.runtime,
+                checkpointActionProfile: .installedPro4BQ4KMLegacy,
+                semanticRouter: router,
+                maxSteps: 1,
+                parsedActionObserver: { parsedActions.append($0) },
+                actionTokenObserver: { rawActionTokens.append($0) },
+                modelResponseObserver: { rawModelResponses.append($0) })
+
+            do {
+                let result = try await executor.execute(
+                    prompt: "Format the selected note as a heading.",
+                    tools: correctionTestTools(
+                        actionPerformer: { performedActions.append($0) }),
+                    progress: { _ in })
+                XCTAssertEqual(
+                    result,
+                    .unableToComplete(
+                        OSAtlasComputerUseExecutor
+                            .semanticRoutingUnavailableGuidance),
+                    testCase.0)
+            } catch {
+                await fixture.runtime.shutdown()
+                throw error
+            }
+            await fixture.runtime.shutdown()
+
+            XCTAssertTrue(parsedActions.isEmpty, testCase.0)
+            XCTAssertTrue(rawActionTokens.isEmpty, testCase.0)
+            XCTAssertTrue(rawModelResponses.isEmpty, testCase.0)
+            XCTAssertTrue(performedActions.isEmpty, testCase.0)
+            let completionCount = await fixture.events.values()
+                .filter { $0 == "complete" }.count
+            XCTAssertEqual(completionCount, 0, testCase.0)
+        }
+    }
+
+    func testProductionModeExplicitActionTokensCannotEnterRawCompatibilityPath()
+        async throws {
         let fixture = makeCorrectionRuntime(
-            completionResponses: [response("TYPE [legacy fallback]")],
-            port: 43149)
+            completionResponses: [response("TYPE [model-selected text]")],
+            port: 43_153)
         let router = StubSemanticActionRouter { _ in
             throw AppleFoundationVisualActionRouterError.unavailable(
                 .modelNotReady)
         }
-        var parsedActions: [OSAtlasGUIAction] = []
+        var rawModelResponses: [String] = []
         var performedActions: [ComputerUsePredictedAction] = []
         let executor = OSAtlasComputerUseExecutor.makeForTesting(
             inputs: fixture.inputs,
             runtime: fixture.runtime,
             checkpointActionProfile: .installedPro4BQ4KMLegacy,
             semanticRouter: router,
+            allowsExplicitActionCompatibility: false,
             maxSteps: 1,
-            parsedActionObserver: { parsedActions.append($0) })
+            modelResponseObserver: { rawModelResponses.append($0) })
 
         do {
-            _ = try await executor.execute(
-                prompt: "Add the fallback text to the focused field.",
+            let result = try await executor.execute(
+                prompt: "Use TYPE [model-selected text] now as the single next action.",
                 tools: correctionTestTools(
                     actionPerformer: { performedActions.append($0) }),
                 progress: { _ in })
-            XCTFail("The one-step fixture should stop after legacy fallback")
-        } catch OSAtlasComputerUseExecutor.RuntimeError.stepLimit {
-            // Expected after the one legacy checkpoint action.
+            XCTAssertEqual(
+                result,
+                .unableToComplete(
+                    OSAtlasComputerUseExecutor
+                        .semanticRoutingUnavailableGuidance))
         } catch {
             await fixture.runtime.shutdown()
             throw error
         }
         await fixture.runtime.shutdown()
 
-        XCTAssertEqual(parsedActions, [.typeText("legacy fallback")])
-        XCTAssertEqual(performedActions, [.typeText("legacy fallback")])
+        XCTAssertTrue(rawModelResponses.isEmpty)
+        XCTAssertTrue(performedActions.isEmpty)
         let completionCount = await fixture.events.values()
             .filter { $0 == "complete" }.count
-        XCTAssertEqual(completionCount, 1)
+        XCTAssertEqual(completionCount, 0)
     }
 
     func testSemanticRouterFailureStopsBeforeInferenceOrHostSideEffects() async throws {
@@ -4971,12 +5221,58 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
             "--no-webui",
         ])
         XCTAssertEqual(
-            OSAtlasLlamaLaunchConfiguration.maximumResidentMemoryBytes,
+            configuration.resourceProfile.maximumResidentMemoryBytes,
             8 * 1_024 * 1_024 * 1_024)
+        XCTAssertEqual(configuration.resourceProfile, .standard)
         XCTAssertEqual(
             OSAtlasLlamaLaunchConfiguration.officialPhi3ChatTemplate,
             "{% for message in messages %}{{ '<|' + message['role'] + '|>\\n' + message['content'] + '<|end|>' }}{% endfor %}{% if add_generation_prompt %}{{ '<|assistant|>\\n' }}{% endif %}")
         XCTAssertFalse(configuration.arguments.contains("--no-jinja"))
+    }
+
+    func testCompactLaunchArgumentsBoundEightGiBRuntimeAllocations() throws {
+        let configuration = OSAtlasLlamaLaunchConfiguration(
+            executableURL: URL(fileURLWithPath: "/signed/llama-server"),
+            workingDirectoryURL: URL(fileURLWithPath: "/runtime"),
+            modelFirstSplitURL: URL(fileURLWithPath: "/model/pro-Q4_K_M-00001-of-00002.gguf"),
+            multimodalProjectorURL: URL(fileURLWithPath: "/model/mmproj-model-f16.gguf"),
+            port: 43123,
+            bearerToken: "secret-token",
+            resourceProfile: .compact)
+
+        func value(after flag: String) throws -> String {
+            let index = try XCTUnwrap(configuration.arguments.firstIndex(of: flag))
+            return configuration.arguments[index + 1]
+        }
+
+        XCTAssertEqual(try value(after: "--ctx-size"), "4096")
+        XCTAssertEqual(try value(after: "--batch-size"), "256")
+        XCTAssertEqual(try value(after: "--ubatch-size"), "64")
+        XCTAssertEqual(
+            configuration.resourceProfile.maximumResidentMemoryBytes,
+            4 * 1_024 * 1_024 * 1_024)
+        XCTAssertEqual(
+            configuration.resourceProfile.minimumLaunchMemoryBytes,
+            3 * 1_024 * 1_024 * 1_024)
+        XCTAssertEqual(
+            configuration.resourceProfile.minimumInferenceMemoryBytes,
+            1 * 1_024 * 1_024 * 1_024)
+        XCTAssertEqual(try value(after: "--parallel"), "1")
+        XCTAssertEqual(try value(after: "--cache-ram"), "0")
+        XCTAssertEqual(try value(after: "--ctx-checkpoints"), "0")
+    }
+
+    func testResourceProfileSelectionUsesExactHardwareBoundaries() {
+        let gibibyte: UInt64 = 1_024 * 1_024 * 1_024
+
+        XCTAssertNil(OSAtlasLlamaResourceProfile.select(
+            physicalMemoryBytes: 8 * gibibyte - 1))
+        XCTAssertEqual(OSAtlasLlamaResourceProfile.select(
+            physicalMemoryBytes: 8 * gibibyte), .compact)
+        XCTAssertEqual(OSAtlasLlamaResourceProfile.select(
+            physicalMemoryBytes: 16 * gibibyte - 1), .compact)
+        XCTAssertEqual(OSAtlasLlamaResourceProfile.select(
+            physicalMemoryBytes: 16 * gibibyte), .standard)
     }
 
     func testResidentMemoryGuardCanInspectAProcessWithoutAllocating() throws {
@@ -4985,7 +5281,7 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
         XCTAssertGreaterThan(bytes, 0)
         XCTAssertLessThan(
             bytes,
-            OSAtlasLlamaLaunchConfiguration.maximumResidentMemoryBytes)
+            OSAtlasLlamaResourceProfile.standard.maximumResidentMemoryBytes)
     }
 
     func testExclusiveProcessReaperAwaitsExactRuntimeBeforeLaunch() async throws {
@@ -5251,7 +5547,7 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
         XCTAssertNil(activeVariant)
     }
 
-    func testActivationFailsClosedBeforeLaunchOnUnsupportedMemory() async {
+    func testActivationFailsClosedBeforeLaunchBelowEightGiB() async {
         let events = RuntimeEventLog()
         let runtime = OSAtlasLlamaRuntime(
             launcher: FakeLlamaLauncher(events: events),
@@ -5262,7 +5558,7 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
             readinessDelay: .zero,
             resourceInspector: FixedResourceInspector(
                 snapshotValue: OSAtlasLlamaResourceSnapshot(
-                    physicalMemoryBytes: 8 * 1_024 * 1_024 * 1_024,
+                    physicalMemoryBytes: 8 * 1_024 * 1_024 * 1_024 - 1,
                     reclaimableMemoryBytes: .max)))
 
         do {
@@ -5275,6 +5571,75 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
         }
         let values = await events.values()
         XCTAssertTrue(values.isEmpty)
+    }
+
+    func testEightGiBActivationFailsBeforeLaunchWithoutCompactHeadroom() async {
+        let events = RuntimeEventLog()
+        let runtime = OSAtlasLlamaRuntime(
+            launcher: FakeLlamaLauncher(events: events),
+            transportMaker: FakeTransportMaker(events: events),
+            portProvider: FixedPortProvider(port: 43123),
+            tokenProvider: FixedTokenProvider(token: "token"),
+            readinessAttempts: 1,
+            readinessDelay: .zero,
+            resourceInspector: FixedResourceInspector(
+                snapshotValue: OSAtlasLlamaResourceSnapshot(
+                    physicalMemoryBytes:
+                        OSAtlasLlamaResourceProfile.minimumPhysicalMemoryBytes,
+                    reclaimableMemoryBytes:
+                        OSAtlasLlamaResourceProfile.compact.minimumLaunchMemoryBytes - 1)))
+
+        do {
+            _ = try await runtime.activate(inputs(variant: .pro4B, name: "pro"))
+            XCTFail("Compact setup must not launch without its measured headroom")
+        } catch let error as OSAtlasLlamaRuntimeError {
+            XCTAssertEqual(error, .insufficientAvailableMemory)
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+        let values = await events.values()
+        XCTAssertTrue(values.isEmpty)
+    }
+
+    func testEightGiBActivationStopsAfterLoadWithoutCompactInferenceHeadroom() async {
+        let events = RuntimeEventLog()
+        let resources = SequenceResourceInspector(snapshots: [
+            OSAtlasLlamaResourceSnapshot(
+                physicalMemoryBytes:
+                    OSAtlasLlamaResourceProfile.minimumPhysicalMemoryBytes,
+                reclaimableMemoryBytes:
+                    OSAtlasLlamaResourceProfile.compact.minimumLaunchMemoryBytes),
+            OSAtlasLlamaResourceSnapshot(
+                physicalMemoryBytes:
+                    OSAtlasLlamaResourceProfile.minimumPhysicalMemoryBytes,
+                reclaimableMemoryBytes:
+                    OSAtlasLlamaResourceProfile.compact.minimumInferenceMemoryBytes - 1),
+        ])
+        let runtime = OSAtlasLlamaRuntime(
+            launcher: FakeLlamaLauncher(events: events),
+            transportMaker: FakeTransportMaker(events: events),
+            portProvider: FixedPortProvider(port: 43123),
+            tokenProvider: FixedTokenProvider(token: "token"),
+            readinessAttempts: 1,
+            readinessDelay: .zero,
+            resourceInspector: resources)
+
+        do {
+            _ = try await runtime.activate(inputs(variant: .pro4B, name: "pro"))
+            XCTFail("Compact setup must not report ready without inference headroom")
+        } catch let error as OSAtlasLlamaRuntimeError {
+            XCTAssertEqual(error, .insufficientAvailableMemory)
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        let values = await events.values()
+        XCTAssertTrue(values.contains("health"))
+        XCTAssertTrue(values.contains("cancel-http"))
+        XCTAssertTrue(values.contains(
+            "terminate:pro-Q4_K_M-00001-of-00002.gguf"))
+        let activeVariant = await runtime.activeVariant()
+        XCTAssertNil(activeVariant)
     }
 
     func testActivationRechecksHeadroomAfterModelBecomesResident() async {
@@ -5313,16 +5678,21 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
 
     func testActivationAcceptsBoundedPostLoadInferenceHeadroom() async throws {
         let events = RuntimeEventLog()
+        let launcher = FakeLlamaLauncher(events: events)
         let resources = SequenceResourceInspector(snapshots: [
             OSAtlasLlamaResourceSnapshot(
-                physicalMemoryBytes: OSAtlasLlamaRuntime.minimumPhysicalMemoryBytes,
-                reclaimableMemoryBytes: OSAtlasLlamaRuntime.minimumLaunchMemoryBytes),
+                physicalMemoryBytes:
+                    OSAtlasLlamaResourceProfile.minimumPhysicalMemoryBytes,
+                reclaimableMemoryBytes:
+                    OSAtlasLlamaResourceProfile.compact.minimumLaunchMemoryBytes),
             OSAtlasLlamaResourceSnapshot(
-                physicalMemoryBytes: OSAtlasLlamaRuntime.minimumPhysicalMemoryBytes,
-                reclaimableMemoryBytes: OSAtlasLlamaRuntime.minimumInferenceMemoryBytes),
+                physicalMemoryBytes:
+                    OSAtlasLlamaResourceProfile.minimumPhysicalMemoryBytes,
+                reclaimableMemoryBytes:
+                    OSAtlasLlamaResourceProfile.compact.minimumInferenceMemoryBytes),
         ])
         let runtime = OSAtlasLlamaRuntime(
-            launcher: FakeLlamaLauncher(events: events),
+            launcher: launcher,
             transportMaker: FakeTransportMaker(events: events),
             portProvider: FixedPortProvider(port: 43123),
             tokenProvider: FixedTokenProvider(token: "token"),
@@ -5337,8 +5707,12 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
         XCTAssertEqual(endpoint.variant, .pro4B)
         XCTAssertEqual(activeVariant, .pro4B)
         XCTAssertEqual(
-            OSAtlasLlamaRuntime.minimumInferenceMemoryBytes,
-            2 * 1_024 * 1_024 * 1_024)
+            OSAtlasLlamaResourceProfile.compact.minimumInferenceMemoryBytes,
+            1 * 1_024 * 1_024 * 1_024)
+        let configurations = await launcher.configurations()
+        XCTAssertEqual(configurations.count, 1)
+        XCTAssertEqual(configurations.first?.resourceProfile, .compact)
+        XCTAssertEqual(configurations.first?.resourceProfile.contextSize, 4_096)
         await runtime.shutdown()
         let values = await events.values()
         XCTAssertTrue(values.contains("health"))
@@ -5461,6 +5835,7 @@ private actor FakeLlamaLauncher: OSAtlasLlamaServerLaunching {
     let events: RuntimeEventLog
     let blocksFirstLaunch: Bool
     private var launchCount = 0
+    private var launchedConfigurations: [OSAtlasLlamaLaunchConfiguration] = []
     private var firstLaunchStarted = false
     private var firstLaunchContinuation: CheckedContinuation<Void, Never>?
 
@@ -5473,6 +5848,7 @@ private actor FakeLlamaLauncher: OSAtlasLlamaServerLaunching {
         configuration: OSAtlasLlamaLaunchConfiguration
     ) async throws -> any OSAtlasLlamaServerProcess {
         let name = configuration.modelFirstSplitURL.lastPathComponent
+        launchedConfigurations.append(configuration)
         await events.append("launch:\(name)")
         launchCount += 1
         if blocksFirstLaunch, launchCount == 1 {
@@ -5491,6 +5867,10 @@ private actor FakeLlamaLauncher: OSAtlasLlamaServerLaunching {
     func releaseFirstLaunch() {
         firstLaunchContinuation?.resume()
         firstLaunchContinuation = nil
+    }
+
+    func configurations() -> [OSAtlasLlamaLaunchConfiguration] {
+        launchedConfigurations
     }
 }
 
@@ -6089,7 +6469,7 @@ final class OSAtlasActualModelAcceptanceTests: XCTestCase {
         add(attachment)
     }
 
-    func testInstalledHybridCompletesExactRegularUserScenarioMatrixWithoutVisibleUI()
+    func testInstalledGrounderCompletesRegularUserMatrixWithApplePlannerUnavailableUsingOnlyClickCarriers()
         async throws {
         try XCTSkipUnless(
             OSAtlasAcceptanceOptIn.modelE2EIsEnabled,
@@ -6117,6 +6497,29 @@ final class OSAtlasActualModelAcceptanceTests: XCTestCase {
                 capture.outcome(),
                 expectedOutcome,
                 "\(capture.name) returned the wrong regular-user outcome",
+                file: file,
+                line: line)
+            let expectedGroundings = capture.semanticRoutes.reduce(0) {
+                count, route in
+                switch route.directive {
+                case .click, .doubleClick, .rightClick:
+                    return count + 1
+                case .drag:
+                    return count + 2
+                default:
+                    return count
+                }
+            }
+            XCTAssertEqual(
+                capture.rawActionTokens,
+                Array(repeating: "CLICK", count: expectedGroundings),
+                "\(capture.name) exposed a raw verb instead of a CLICK-only point carrier",
+                file: file,
+                line: line)
+            XCTAssertEqual(
+                capture.rawModelResponses.count,
+                expectedGroundings,
+                "\(capture.name) used an unexpected number of grounding calls",
                 file: file,
                 line: line)
         }
@@ -6509,15 +6912,38 @@ final class OSAtlasActualModelAcceptanceTests: XCTestCase {
                 .summerPicnicFolderTarget.contains(rawFolderPoint)
             evidence.append(
                 "open_picnic_folder_grounding pointer: raw=\(rawFolderPoint), rawInside=\(rawFolderInside), effective=\(effectiveFolderPoint), effectiveInside=true")
+
+            let unrecognized = await observeActualScenario(
+                named: "planner_unavailable_unrecognized_operation",
+                prompt: "Apply my custom house style to the selected content.",
+                observations: [
+                    try OSAtlasAcceptanceFixtureRenderer
+                        .everydayOperation(.focusedNote),
+                ],
+                inputs: inputs,
+                runtime: runtime,
+                frontmostApplication: "Notes")
+            record(unrecognized, expectedOutcome: .unableToComplete)
+            XCTAssertEqual(
+                unrecognized.result,
+                .unableToComplete(
+                    OSAtlasComputerUseExecutor
+                        .semanticRoutingUnavailableGuidance))
+            XCTAssertTrue(unrecognized.semanticRoutes.isEmpty)
+            XCTAssertTrue(unrecognized.parsedActions.isEmpty)
+            XCTAssertTrue(unrecognized.performedActions.isEmpty)
+            XCTAssertTrue(unrecognized.openedApplications.isEmpty)
+            XCTAssertTrue(unrecognized.rawActionTokens.isEmpty)
+            XCTAssertTrue(unrecognized.rawModelResponses.isEmpty)
         } catch {
             await runtime.shutdown()
             throw error
         }
         await runtime.shutdown()
 
-        XCTAssertEqual(scenarioCount, 14)
+        XCTAssertEqual(scenarioCount, 15)
         let attachment = XCTAttachment(string: evidence.joined(separator: "\n"))
-        attachment.name = "Installed hybrid exact regular-user scenario evidence"
+        attachment.name = "Installed OS-Atlas grounder regular-user scenario evidence"
         attachment.lifetime = .keepAlways
         add(attachment)
     }
@@ -7253,7 +7679,11 @@ private actor ActualSemanticRouteCapture {
 private struct ActualRecordingSemanticActionRouter:
     OSAtlasSemanticActionRouting {
     let capture: ActualSemanticRouteCapture
-    private let base = AppleFoundationVisualActionRouter()
+    // Force the Apple language model out of the ordinary-user matrix. Host
+    // deterministic routes still run; any unrecognized step must fail closed
+    // before the pinned open-source checkpoint receives an action request.
+    private let base = AppleFoundationVisualActionRouter(
+        availabilityProvider: { .unavailable(.modelNotReady) })
 
     func availability() -> AppleFoundationMCPPlannerAvailability {
         base.availability()

@@ -277,7 +277,7 @@ final class MCPFirstComputerUseExecutor: ComputerUseTaskAwareExecuting, MCPAppro
         case .available:
             return "Apple on-device planner + local Mac tools, with OS-Atlas Pro visual fallback"
         case .unavailable:
-            return "Local Mac tools + OS-Atlas Pro visual computer use"
+            return "Local deterministic tools + OS-Atlas Pro visual grounding (Apple planner unavailable)"
         }
     }
 

@@ -7,8 +7,9 @@ Computer Use is MCP-first on the Mac host. Apple's local Foundation Model plans
 within a reviewed surface of seven read-only helper operations plus the host's
 embedded Mail operation; the public OS-Atlas-Pro-4B model is used only for
 GUI-only visual fallback. Both run locally, with no API key or paid AI service.
-V1 loads Pro only on Macs with at least 16 GiB memory. The host ships the
-required third-party licenses and notices.
+V1 loads Pro only. Macs with 8–15 GiB memory use a smaller bounded context and
+batch profile; Macs with at least 16 GiB use the standard profile. The host
+ships the required third-party licenses and notices.
 
 ## Build
 
@@ -68,9 +69,11 @@ iPhone/iPad microphone.
   helper/model download bytes, verification, and runtime loading; setup is
   resumable and idempotent over CloudKit and reuses verified components.
 - A live-screen-plus-chat view, with Apple Foundation Models planning typed MCP
-  calls first and OS-Atlas-Pro-4B reserved for GUI-only fallback. Phone-triggered
-  setup downloads only verified GGUF model data; executable inference code stays
-  in the signed Mac host.
+  calls first and OS-Atlas-Pro-4B reserved for typed visual-point grounding and
+  the production delivery workflow's pointer targets. If no typed route is
+  available, the Mac reports that it cannot complete the step instead of
+  executing a raw model verb. Phone-triggered setup downloads only verified
+  GGUF model data; executable inference code stays in the signed Mac host.
 - Pause, resume, stop, direct intervention, and one-action consequential-action
   approvals tied to the exact host target.
 - Apple Mail approval cards state that the default Mail account will be used
