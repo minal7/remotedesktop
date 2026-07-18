@@ -391,7 +391,8 @@ final class MCPFirstComputerUseExecutor: ComputerUseTaskAwareExecuting, MCPAppro
         // Handle only that bounded shape before either planner/model path: the
         // host opens the real app, types the expression through the same
         // intervention-gated GUI injector, and requires AX display evidence.
-        if let request = Self.deterministicCalculatorRequest(for: prompt) {
+        if let request = Self.deterministicCalculatorRequest(
+            for: trustedUserPrompt) {
             return try await executeDeterministicCalculator(
                 request,
                 tools: tools,
@@ -404,7 +405,8 @@ final class MCPFirstComputerUseExecutor: ComputerUseTaskAwareExecuting, MCPAppro
         // has been observed clicking the visible app instead of honoring
         // OPEN_APP. Chained requests and consequential mutations intentionally
         // remain on the normal planner/approval path.
-        if let applicationName = Self.pureOpenApplicationName(prompt) {
+        if let applicationName = Self.pureOpenApplicationName(
+            trustedUserPrompt) {
             Self.log.info(
                 "Routed one current-turn pure open-app request to validated Launch Services")
             progress("Opening the requested app…")

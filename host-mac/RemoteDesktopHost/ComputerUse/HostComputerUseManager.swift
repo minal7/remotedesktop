@@ -72,6 +72,79 @@ struct ComputerUseApplicationCodeIdentity:
 /// host fingerprints and ledgers, but those process-local values never enter
 /// model context.
 struct ComputerUseApplicationIdentity: Equatable, Hashable, Sendable {
+    struct ReviewedApplication: Equatable, Sendable {
+        let canonicalName: String
+        let aliases: [String]
+        let bundleIdentifiers: Set<String>
+    }
+
+    /// One host-owned registry supplies both natural-language app routing and
+    /// signed-code verification. Keeping those views together prevents a
+    /// planner alias from silently drifting away from the identity that the
+    /// executor will actually launch and attest.
+    static let reviewedApplications: [ReviewedApplication] = [
+        .init(
+            canonicalName: "Notes",
+            aliases: ["Notes", "Apple Notes"],
+            bundleIdentifiers: ["com.apple.Notes"]),
+        .init(
+            canonicalName: "Mail",
+            aliases: ["Mail", "Apple Mail"],
+            bundleIdentifiers: ["com.apple.mail"]),
+        .init(
+            canonicalName: "Calendar",
+            aliases: ["Calendar", "Apple Calendar"],
+            bundleIdentifiers: ["com.apple.iCal"]),
+        .init(
+            canonicalName: "Finder",
+            aliases: ["Finder"],
+            bundleIdentifiers: ["com.apple.finder"]),
+        .init(
+            canonicalName: "Safari",
+            aliases: ["Safari"],
+            bundleIdentifiers: ["com.apple.Safari"]),
+        .init(
+            canonicalName: "Google Chrome",
+            aliases: ["Google Chrome", "Chrome"],
+            bundleIdentifiers: ["com.google.Chrome"]),
+        .init(
+            canonicalName: "Reminders",
+            aliases: ["Reminders", "Apple Reminders"],
+            bundleIdentifiers: ["com.apple.reminders"]),
+        .init(
+            canonicalName: "Calculator",
+            aliases: ["Calculator"],
+            bundleIdentifiers: ["com.apple.calculator"]),
+        .init(
+            canonicalName: "Books",
+            aliases: ["Books", "Apple Books"],
+            bundleIdentifiers: ["com.apple.iBooksX"]),
+        .init(
+            canonicalName: "TextEdit",
+            aliases: ["TextEdit"],
+            bundleIdentifiers: ["com.apple.TextEdit"]),
+        .init(
+            canonicalName: "Freeform",
+            aliases: ["Freeform", "Apple Freeform"],
+            bundleIdentifiers: ["com.apple.freeform"]),
+        .init(
+            canonicalName: "Stickies",
+            aliases: ["Stickies"],
+            bundleIdentifiers: ["com.apple.Stickies"]),
+        .init(
+            canonicalName: "Preview",
+            aliases: ["Preview"],
+            bundleIdentifiers: ["com.apple.Preview"]),
+        .init(
+            canonicalName: "Maps",
+            aliases: ["Maps", "Apple Maps"],
+            bundleIdentifiers: ["com.apple.Maps"]),
+        .init(
+            canonicalName: "Music",
+            aliases: ["Music", "Apple Music"],
+            bundleIdentifiers: ["com.apple.Music"]),
+    ]
+
     static let maximumBundleIdentifierBytes = 255
 
     let bundleIdentifier: String
@@ -160,45 +233,26 @@ struct ComputerUseApplicationIdentity: Equatable, Hashable, Sendable {
     static func reviewedBundleIdentifiers(
         forApplicationNamed rawName: String
     ) -> Set<String>? {
-        switch normalizedApplicationName(rawName) {
-        case "notes", "apple notes": return ["com.apple.Notes"]
-        case "mail", "apple mail": return ["com.apple.mail"]
-        case "calendar", "apple calendar": return ["com.apple.iCal"]
-        case "finder": return ["com.apple.finder"]
-        case "safari": return ["com.apple.Safari"]
-        case "google chrome", "chrome": return ["com.google.Chrome"]
-        case "reminders", "apple reminders": return ["com.apple.reminders"]
-        case "calculator": return ["com.apple.calculator"]
-        default: return nil
-        }
+        let normalized = normalizedApplicationName(rawName)
+        return reviewedApplications.first { application in
+            application.aliases.contains {
+                normalizedApplicationName($0) == normalized
+            }
+        }?.bundleIdentifiers
     }
 
     static func reviewedApplicationName(
         forBundleIdentifier bundleIdentifier: String
     ) -> String? {
-        switch bundleIdentifier.lowercased() {
-        case "com.apple.notes": return "Notes"
-        case "com.apple.mail": return "Mail"
-        case "com.apple.ical": return "Calendar"
-        case "com.apple.finder": return "Finder"
-        case "com.apple.safari": return "Safari"
-        case "com.google.chrome": return "Google Chrome"
-        case "com.apple.reminders": return "Reminders"
-        case "com.apple.calculator": return "Calculator"
-        default: return nil
-        }
+        reviewedApplications.first { application in
+            application.bundleIdentifiers.contains {
+                $0.caseInsensitiveCompare(bundleIdentifier) == .orderedSame
+            }
+        }?.canonicalName
     }
 
-    static let allReviewedBundleIdentifiers: Set<String> = [
-        "com.apple.Notes",
-        "com.apple.mail",
-        "com.apple.iCal",
-        "com.apple.finder",
-        "com.apple.Safari",
-        "com.google.Chrome",
-        "com.apple.reminders",
-        "com.apple.calculator",
-    ]
+    static let allReviewedBundleIdentifiers = Set(
+        reviewedApplications.flatMap(\.bundleIdentifiers))
 
     private static func normalizedApplicationName(_ value: String) -> String {
         String(value.lowercased().unicodeScalars.map { scalar -> Character in
