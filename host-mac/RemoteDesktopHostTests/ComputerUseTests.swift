@@ -4039,7 +4039,7 @@ final class ComputerUseInstallerMigrationTests: XCTestCase {
             atPath: fixture.legacyDirectory.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.root
             .appendingPathComponent(
-                ComputerUseInstaller.deferredLegacyCleanupMarkerName).path))
+                ComputerUseInstaller.pendingRuntimeActivationMarkerName).path))
         XCTAssertEqual(
             RangeServingURLProtocol.requestedURLs().map(\.lastPathComponent),
             ["semantic-router.gguf"])
@@ -4083,23 +4083,191 @@ final class ComputerUseInstallerMigrationTests: XCTestCase {
         _ = try await sameLaunchInstaller.install { _ in }
         XCTAssertTrue(FileManager.default.fileExists(
             atPath: fixture.legacyDirectory.path),
-            "A receipt visible in its creating process is not yet power-loss proof")
+            "Package verification alone must not retire the prior generation")
 
-        let nextLaunchInstaller = ComputerUseInstaller(
-            manifest: fixture.targetManifest,
-            rootDirectory: fixture.root,
-            legalResourceDirectory: fixture.legalDirectory,
-            legacyManifest: fixture.legacyManifest,
-            launchIdentifier: "migration-launch-2")
-        let nextLaunchStatus = await nextLaunchInstaller.currentInstallation()
+        try await sameLaunchInstaller.recordRuntimeActivationSuccess(for: receipt)
 
-        XCTAssertEqual(nextLaunchStatus?.installationVersion,
-            fixture.targetManifest.installationVersion)
         XCTAssertFalse(FileManager.default.fileExists(
             atPath: fixture.legacyDirectory.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.root
             .appendingPathComponent(
-                ComputerUseInstaller.deferredLegacyCleanupMarkerName).path))
+                ComputerUseInstaller.pendingRuntimeActivationMarkerName).path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.root
+            .appendingPathComponent(
+                ComputerUseInstaller.runtimeActivationSuccessMarkerName).path))
+    }
+
+    func testFailedRuntimeActivationRestoresVerifiedPriorReceiptAndPackage()
+        async throws {
+        let fixture = try makeMigrationFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let originalReceiptData = try Data(contentsOf: fixture.receiptURL)
+        RangeServingURLProtocol.configure(payload: fixture.payload)
+        defer { RangeServingURLProtocol.reset() }
+        let session = makeSession()
+        defer { session.invalidateAndCancel() }
+        let installer = ComputerUseInstaller(
+            manifest: fixture.targetManifest,
+            rootDirectory: fixture.root,
+            legalResourceDirectory: fixture.legalDirectory,
+            downloadSession: session,
+            downloadChunkByteCount: Int64(fixture.payload.count),
+            legacyManifest: fixture.legacyManifest,
+            launchIdentifier: "failed-activation-launch")
+
+        let replacement = try await installer.install { _ in }
+        try await installer.restorePreviousInstallation(
+            afterFailedActivationOf: replacement)
+
+        XCTAssertEqual(try Data(contentsOf: fixture.receiptURL), originalReceiptData)
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: fixture.legacyDirectory.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.root
+            .appendingPathComponent(
+                ComputerUseInstaller.pendingRuntimeActivationMarkerName).path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.root
+            .appendingPathComponent(
+                ComputerUseInstaller.runtimeActivationSuccessMarkerName).path))
+
+        let priorInstaller = ComputerUseInstaller(
+            manifest: fixture.legacyManifest,
+            rootDirectory: fixture.root,
+            legalResourceDirectory: fixture.legalDirectory,
+            legacyManifest: nil)
+        let priorStatus = await priorInstaller.currentInstallation()
+        XCTAssertEqual(
+            priorStatus?.installationVersion,
+            fixture.legacyManifest.installationVersion)
+    }
+
+    func testFailedActivationNeverRestoresAChangedPriorPackage() async throws {
+        let fixture = try makeMigrationFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        RangeServingURLProtocol.configure(payload: fixture.payload)
+        defer { RangeServingURLProtocol.reset() }
+        let session = makeSession()
+        defer { session.invalidateAndCancel() }
+        let installer = ComputerUseInstaller(
+            manifest: fixture.targetManifest,
+            rootDirectory: fixture.root,
+            legalResourceDirectory: fixture.legalDirectory,
+            downloadSession: session,
+            downloadChunkByteCount: Int64(fixture.payload.count),
+            legacyManifest: fixture.legacyManifest,
+            launchIdentifier: "changed-prior-launch")
+        let replacement = try await installer.install { _ in }
+        let priorArtifact = fixture.legacyDirectory.appendingPathComponent(
+            fixture.legacyManifest.modelArtifacts[0].fileName)
+        try Data(repeating: 0xee, count: fixture.payload.count).write(
+            to: priorArtifact,
+            options: .atomic)
+
+        do {
+            try await installer.restorePreviousInstallation(
+                afterFailedActivationOf: replacement)
+            XCTFail("Rollback must reverify the prior package")
+        } catch let error as ComputerUseInstaller.InstallError {
+            XCTAssertEqual(error, .invalidReceipt)
+        }
+
+        let active = try JSONDecoder().decode(
+            ComputerUseInstallationReceipt.self,
+            from: Data(contentsOf: fixture.receiptURL))
+        XCTAssertEqual(active, replacement)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.root
+            .appendingPathComponent(
+                ComputerUseInstaller.pendingRuntimeActivationMarkerName).path))
+    }
+
+    func testNextLaunchRollsBackPendingActivationWithoutSuccessMarker()
+        async throws {
+        let fixture = try makeMigrationFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        RangeServingURLProtocol.configure(payload: fixture.payload)
+        defer { RangeServingURLProtocol.reset() }
+        let session = makeSession()
+        defer { session.invalidateAndCancel() }
+        let firstLaunch = ComputerUseInstaller(
+            manifest: fixture.targetManifest,
+            rootDirectory: fixture.root,
+            legalResourceDirectory: fixture.legalDirectory,
+            downloadSession: session,
+            downloadChunkByteCount: Int64(fixture.payload.count),
+            legacyManifest: fixture.legacyManifest,
+            launchIdentifier: "crashed-activation-launch")
+        _ = try await firstLaunch.install { _ in }
+
+        let nextLaunch = ComputerUseInstaller(
+            manifest: fixture.targetManifest,
+            rootDirectory: fixture.root,
+            legalResourceDirectory: fixture.legalDirectory,
+            legacyManifest: fixture.legacyManifest,
+            launchIdentifier: "recovery-launch")
+        let replacementStatus = await nextLaunch.currentInstallation()
+        let restoredReceipt = try JSONDecoder().decode(
+            ComputerUseInstallationReceipt.self,
+            from: Data(contentsOf: fixture.receiptURL))
+
+        XCTAssertNil(replacementStatus)
+        XCTAssertEqual(
+            restoredReceipt.installationVersion,
+            fixture.legacyManifest.installationVersion)
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: fixture.legacyDirectory.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.root
+            .appendingPathComponent(
+                ComputerUseInstaller.pendingRuntimeActivationMarkerName).path))
+    }
+
+    func testDurableActivationSuccessSurvivesCleanupInterruptionAndNextLaunch()
+        async throws {
+        let fixture = try makeMigrationFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        RangeServingURLProtocol.configure(payload: fixture.payload)
+        defer { RangeServingURLProtocol.reset() }
+        let session = makeSession()
+        defer { session.invalidateAndCancel() }
+        let firstLaunch = ComputerUseInstaller(
+            manifest: fixture.targetManifest,
+            rootDirectory: fixture.root,
+            legalResourceDirectory: fixture.legalDirectory,
+            downloadSession: session,
+            downloadChunkByteCount: Int64(fixture.payload.count),
+            legacyManifest: fixture.legacyManifest,
+            operations: operations(prepareCleanup: {
+                throw CocoaError(.fileWriteUnknown)
+            }),
+            launchIdentifier: "activation-success-launch")
+        let replacement = try await firstLaunch.install { _ in }
+
+        try await firstLaunch.recordRuntimeActivationSuccess(for: replacement)
+
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: fixture.legacyDirectory.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.root
+            .appendingPathComponent(
+                ComputerUseInstaller.pendingRuntimeActivationMarkerName).path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.root
+            .appendingPathComponent(
+                ComputerUseInstaller.runtimeActivationSuccessMarkerName).path))
+
+        let nextLaunch = ComputerUseInstaller(
+            manifest: fixture.targetManifest,
+            rootDirectory: fixture.root,
+            legalResourceDirectory: fixture.legalDirectory,
+            legacyManifest: fixture.legacyManifest,
+            launchIdentifier: "activation-cleanup-recovery-launch")
+        let status = await nextLaunch.currentInstallation()
+
+        XCTAssertEqual(status, replacement)
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: fixture.legacyDirectory.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.root
+            .appendingPathComponent(
+                ComputerUseInstaller.pendingRuntimeActivationMarkerName).path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.root
+            .appendingPathComponent(
+                ComputerUseInstaller.runtimeActivationSuccessMarkerName).path))
     }
 
     func testLegacyHashAndSizeDriftDisableReuseWithoutMutatingSource() async throws {
@@ -4931,9 +5099,9 @@ final class ComputerUseInstallerMigrationTests: XCTestCase {
         let stagingIndex = try index("staging-directory")
         let renameIndex = try index("model-rename")
         let modelIndex = try index("model-directory")
+        let pendingActivationIndex = try index("pending-runtime-activation")
         let prepareReceiptIndex = try index("prepare-receipt")
         let receiptIndex = try index("receipt")
-        let cleanupMarkerIndex = try index("deferred-cleanup-marker")
         let markerRemovalIndex = try index("installation-marker-removed")
         XCTAssertLessThan(try index("installation-marker"), stagingIndex)
         for artifact in fixture.targetManifest.modelArtifacts {
@@ -4944,10 +5112,10 @@ final class ComputerUseInstallerMigrationTests: XCTestCase {
         for legal in ComputerUseArtifactManifest.modelLegalArtifacts {
             XCTAssertLessThan(try index("legal:\(legal.fileName)"), modelIndex)
         }
-        XCTAssertLessThan(modelIndex, prepareReceiptIndex)
+        XCTAssertLessThan(modelIndex, pendingActivationIndex)
+        XCTAssertLessThan(pendingActivationIndex, prepareReceiptIndex)
         XCTAssertLessThan(prepareReceiptIndex, receiptIndex)
-        XCTAssertLessThan(receiptIndex, cleanupMarkerIndex)
-        XCTAssertLessThan(cleanupMarkerIndex, markerRemovalIndex)
+        XCTAssertLessThan(receiptIndex, markerRemovalIndex)
     }
 
     func testSymlinkedManagedRootLeafIsRejectedBeforeLockOrMutation() async throws {
@@ -5127,8 +5295,12 @@ final class ComputerUseInstallerMigrationTests: XCTestCase {
             downloadSession: session,
             downloadChunkByteCount: Int64(fixture.payload.count),
             legacyManifest: fixture.legacyManifest,
+            operations: operations(prepareCleanup: {
+                throw CocoaError(.fileWriteUnknown)
+            }),
             launchIdentifier: "cleanup-launch-1")
-        _ = try await firstLaunch.install { _ in }
+        let replacement = try await firstLaunch.install { _ in }
+        try await firstLaunch.recordRuntimeActivationSuccess(for: replacement)
         try FileManager.default.createDirectory(
             at: outside,
             withIntermediateDirectories: true)
@@ -5162,7 +5334,10 @@ final class ComputerUseInstallerMigrationTests: XCTestCase {
             .appendingPathComponent(fixture.legacyManifest.installationVersion).path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: parkedRoot
             .appendingPathComponent(
-                ComputerUseInstaller.deferredLegacyCleanupMarkerName).path))
+                ComputerUseInstaller.pendingRuntimeActivationMarkerName).path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: parkedRoot
+            .appendingPathComponent(
+                ComputerUseInstaller.runtimeActivationSuccessMarkerName).path))
     }
 
     func testPassiveStatusDoesNotRepairPermissionsLegalFilesOrMarkers() async throws {

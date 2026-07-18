@@ -11,6 +11,13 @@ private func computerUseFlock(_ descriptor: Int32, _ operation: Int32) -> Int32
 
 actor ComputerUseInstaller {
     nonisolated static let interruptedInstallationMarkerName = ".installation-in-progress"
+    nonisolated static let pendingRuntimeActivationMarkerName =
+        ".pending-runtime-activation.json"
+    nonisolated static let runtimeActivationSuccessMarkerName =
+        ".runtime-activation-succeeded.json"
+    // Removed by uninstall for compatibility with builds that used package
+    // verification on a later launch as their cleanup boundary. It is never
+    // treated as activation proof by this build.
     nonisolated static let deferredLegacyCleanupMarkerName = ".deferred-legacy-cleanup.json"
     nonisolated static let installationHeadroomBytes: Int64 = 1_000_000_000
     private nonisolated static let processLaunchIdentifier = UUID().uuidString
@@ -989,10 +996,17 @@ actor ComputerUseInstaller {
         }
     }
 
-    private struct DeferredLegacyCleanup: Codable, Equatable, Sendable {
-        let replacementInstallationVersion: String
-        let legacyInstallationVersion: String
+    private struct PendingRuntimeActivation: Codable, Equatable, Sendable {
+        let activationIdentifier: String
+        let replacementReceipt: ComputerUseInstallationReceipt
+        let previousReceipt: ComputerUseInstallationReceipt
+        let previousReceiptData: Data
         let createdByLaunchIdentifier: String
+    }
+
+    private struct RuntimeActivationSuccess: Codable, Equatable, Sendable {
+        let activationIdentifier: String
+        let replacementReceipt: ComputerUseInstallationReceipt
     }
 
     func currentInstallation() async -> ComputerUseInstallationReceipt? {
@@ -1001,45 +1015,36 @@ actor ComputerUseInstaller {
             return nil
         }
 
-        // Ordinary status remains read-only. A narrowly scoped exception is a
-        // cleanup record created by an earlier process launch: acquire the same
-        // interprocess transaction lock, verify the full replacement once
-        // under that lock, and only then retire the legacy package.
-        guard deferredCleanupWasCreatedByEarlierLaunch(rootPin: rootPin) else {
+        // Ordinary status remains read-only. Recovery is the narrow exception:
+        // an activation that crossed a process launch must be resolved under
+        // the installation lease before its replacement can be advertised.
+        // A durable success marker permits cleanup; its absence requires a
+        // verified rollback to the prior receipt.
+        guard runtimeActivationRecoveryRequired(rootPin: rootPin) else {
             return currentInstallation(using: rootPin)
         }
         guard let lease = try? await acquireInstallationLease() else {
             return currentInstallation(using: rootPin)
         }
-        guard let lockedReceipt = currentInstallation(using: lease) else {
-            return nil
-        }
         do {
-            try performDeferredLegacyCleanup(
-                afterVerifying: lockedReceipt,
-                lease: lease)
-            return lockedReceipt
+            try recoverPendingRuntimeActivationIfNeeded(lease: lease)
+            return currentInstallation(using: lease)
         } catch {
-            return (try? lease.validate()) == nil ? nil : lockedReceipt
+            return (try? lease.validate()) == nil
+                ? nil
+                : currentInstallation(using: lease)
         }
     }
 
-    private func deferredCleanupWasCreatedByEarlierLaunch(
+    private func runtimeActivationRecoveryRequired(
         rootPin: ManagedRootPin
     ) -> Bool {
-        guard (try? rootPin.validate()) != nil,
-              let data = try? rootPin.readData(
-                name: Self.deferredLegacyCleanupMarkerName),
-              let cleanup = try? JSONDecoder().decode(
-                DeferredLegacyCleanup.self,
-                from: data),
-              cleanup.replacementInstallationVersion
-                == manifest.installationVersion,
-              cleanup.createdByLaunchIdentifier != launchIdentifier,
-              (try? rootPin.validate()) != nil else {
-            return false
+        guard (try? rootPin.validate()) != nil else { return false }
+        if let pending = pendingRuntimeActivation(rootPin: rootPin),
+           pending.createdByLaunchIdentifier != launchIdentifier {
+            return true
         }
-        return true
+        return runtimeActivationSuccess(rootPin: rootPin) != nil
     }
 
     private func currentInstallation(
@@ -1098,11 +1103,69 @@ actor ComputerUseInstaller {
         try? lease.removeLeafIfPresent(name: Self.interruptedInstallationMarkerName)
     }
 
+    /// Commits the second half of installation only after the downloaded
+    /// package has loaded and the composed runtime is ready. Once this marker
+    /// is durable, a crash may delay cleanup but can never make the prior
+    /// receipt authoritative again.
+    func recordRuntimeActivationSuccess(
+        for receipt: ComputerUseInstallationReceipt
+    ) async throws {
+        let lease = try await acquireInstallationLease()
+        try lease.validate()
+        guard currentInstallation(using: lease) == receipt else {
+            throw InstallError.invalidReceipt
+        }
+        guard let pending = pendingRuntimeActivation(rootPin: lease) else {
+            if try markerExists(
+                Self.pendingRuntimeActivationMarkerName,
+                rootPin: lease) {
+                throw InstallError.invalidReceipt
+            }
+            return
+        }
+        guard pending.replacementReceipt == receipt else {
+            throw InstallError.invalidReceipt
+        }
+
+        let success = RuntimeActivationSuccess(
+            activationIdentifier: pending.activationIdentifier,
+            replacementReceipt: receipt)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try lease.writeAtomically(
+            encoder.encode(success),
+            name: Self.runtimeActivationSuccessMarkerName)
+        operations.durabilityBarrier("runtime-activation-success")
+        try lease.validate()
+
+        // Marker durability is the commit point. Cleanup is intentionally
+        // best-effort so an interruption here is completed on the next launch
+        // without misreporting a working runtime as failed.
+        try? performCompletedRuntimeActivationCleanup(
+            pending: pending,
+            success: success,
+            afterVerifying: receipt,
+            lease: lease)
+    }
+
+    /// Restores the prior receipt only while activation is still pending.
+    /// The old package is re-hashed first; a durable success marker always wins
+    /// over a late failure callback.
+    func restorePreviousInstallation(
+        afterFailedActivationOf receipt: ComputerUseInstallationReceipt
+    ) async throws {
+        let lease = try await acquireInstallationLease()
+        try restorePreviousInstallation(
+            afterFailedActivationOf: receipt,
+            lease: lease)
+    }
+
     func install(
         progress: @MainActor @Sendable @escaping (Update) -> Void
     ) async throws -> ComputerUseInstallationReceipt {
         let lease = try await acquireInstallationLease()
         try lease.validate()
+        try recoverPendingRuntimeActivationIfNeeded(lease: lease)
 
         if let existing = currentInstallation(using: lease) {
             for artifact in manifest.modelArtifacts {
@@ -1114,9 +1177,6 @@ actor ComputerUseInstaller {
             try installLegalDocuments(
                 directoryComponents: activeModelComponents,
                 rootPin: lease)
-            try performDeferredLegacyCleanup(
-                afterVerifying: existing,
-                lease: lease)
             try lease.removeLeafIfPresent(
                 name: Self.interruptedInstallationMarkerName)
             try lease.validate()
@@ -1132,8 +1192,8 @@ actor ComputerUseInstaller {
         // plan under that lease prevents another installer instance from
         // committing a new receipt while this transaction retains stale
         // rollback state.
-        let legacyDirectoryForCleanup = try legacyReusePlan(rootPin: lease)?
-            .modelDirectory
+        let previousInstallation = try verifiedPreviousInstallation(
+            rootPin: lease)
         await progress(Update(
             phase: .preparing,
             fraction: 0,
@@ -1176,6 +1236,23 @@ actor ComputerUseInstaller {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let receiptData = try encoder.encode(receipt)
+        let pendingActivation: PendingRuntimeActivation?
+        if let previousInstallation,
+           previousInstallation.receipt.modelDirectory != receipt.modelDirectory {
+            let pending = PendingRuntimeActivation(
+                activationIdentifier: UUID().uuidString,
+                replacementReceipt: receipt,
+                previousReceipt: previousInstallation.receipt,
+                previousReceiptData: previousInstallation.receiptData,
+                createdByLaunchIdentifier: launchIdentifier)
+            pendingActivation = pending
+            try lease.writeAtomically(
+                encoder.encode(pending),
+                name: Self.pendingRuntimeActivationMarkerName)
+            operations.durabilityBarrier("pending-runtime-activation")
+        } else {
+            pendingActivation = nil
+        }
         do {
             try operations.prepareReceiptCommit(receiptData, receiptURL)
             try lease.validate()
@@ -1184,6 +1261,10 @@ actor ComputerUseInstaller {
             // still authoritative and the uncommitted replacement can be
             // rolled back while the canonical root remains pinned.
             if (try? lease.validate()) != nil {
+                if pendingActivation != nil {
+                    try? lease.removeLeafIfPresent(
+                        name: Self.pendingRuntimeActivationMarkerName)
+                }
                 try? lease.removeTreeIfPresent(
                     parent: modelsComponents,
                     name: manifest.installationVersion)
@@ -1200,25 +1281,9 @@ actor ComputerUseInstaller {
         operations.durabilityBarrier("receipt")
         try lease.validate()
 
-        if let legacyDirectoryForCleanup,
-           legacyDirectoryForCleanup.standardizedFileURL
-            != modelDirectory.standardizedFileURL,
-           let legacyManifest {
-            let cleanup = DeferredLegacyCleanup(
-                replacementInstallationVersion: manifest.installationVersion,
-                legacyInstallationVersion: legacyManifest.installationVersion,
-                createdByLaunchIdentifier: launchIdentifier)
-            let cleanupEncoder = JSONEncoder()
-            cleanupEncoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            // Cleanup is not eligible until this exact marker and its parent
-            // entry have both crossed the strict descriptor-relative barrier.
-            try lease.writeAtomically(
-                cleanupEncoder.encode(cleanup),
-                name: Self.deferredLegacyCleanupMarkerName)
-            operations.durabilityBarrier("deferred-cleanup-marker")
-        }
-        // Legacy data intentionally survives this launch. Only a distinct
-        // later launch that re-hashes the replacement package may remove it.
+        // The prior package is deliberately retained after receipt commit.
+        // Only a runtime-success marker, written after first load and tool
+        // composition, can authorize its deletion.
         try lease.removeLeafIfPresent(
             name: Self.interruptedInstallationMarkerName)
         operations.durabilityBarrier("installation-marker-removed")
@@ -1250,6 +1315,10 @@ actor ComputerUseInstaller {
             rootPin: lease)
         try lease.removeLeafIfPresent(
             name: Self.deferredLegacyCleanupMarkerName)
+        try lease.removeLeafIfPresent(
+            name: Self.pendingRuntimeActivationMarkerName)
+        try lease.removeLeafIfPresent(
+            name: Self.runtimeActivationSuccessMarkerName)
         try lease.removeLeafIfPresent(
             name: Self.interruptedInstallationMarkerName)
         try lease.validate()
@@ -1635,6 +1704,78 @@ actor ComputerUseInstaller {
         }
     }
 
+    private struct VerifiedPreviousInstallation: Sendable {
+        let receipt: ComputerUseInstallationReceipt
+        let receiptData: Data
+        let modelDirectory: URL
+        let directoryComponents: [String]
+    }
+
+    /// Validates the complete prior package independently from hard-link reuse.
+    /// This deliberately supports migrations whose artifact sets do not share
+    /// the current visual-only shape; rollback safety must not depend on an
+    /// optimization being available.
+    private func verifiedPreviousInstallation(
+        rootPin: ManagedRootPin
+    ) throws -> VerifiedPreviousInstallation? {
+        try rootPin.validate()
+        guard let data = try? rootPin.readData(name: receiptURL.lastPathComponent),
+              let receipt = try? JSONDecoder().decode(
+                ComputerUseInstallationReceipt.self,
+                from: data) else {
+            return nil
+        }
+        return try verifiedPreviousInstallation(
+            receipt: receipt,
+            receiptData: data,
+            rootPin: rootPin)
+    }
+
+    private func verifiedPreviousInstallation(
+        receipt: ComputerUseInstallationReceipt,
+        receiptData: Data,
+        rootPin: ManagedRootPin
+    ) throws -> VerifiedPreviousInstallation? {
+        guard let legacyManifest,
+              legacyManifest.installationVersion != manifest.installationVersion,
+              receipt.installationVersion == legacyManifest.installationVersion,
+              receipt.modelVariant == legacyManifest.modelVariant,
+              (receipt.modelDirectory as NSString).isAbsolutePath else {
+            return nil
+        }
+        let expectedDirectory = modelsDirectory.appendingPathComponent(
+            legacyManifest.installationVersion,
+            isDirectory: true).standardizedFileURL
+        let receiptDirectory = URL(
+            fileURLWithPath: receipt.modelDirectory,
+            isDirectory: true).standardizedFileURL
+        let directoryComponents = modelsComponents
+            + [legacyManifest.installationVersion]
+        guard receiptDirectory == expectedDirectory,
+              rootPin.directoryExists(directoryComponents) else {
+            return nil
+        }
+        do {
+            for artifact in legacyManifest.modelArtifacts {
+                try verifyReadOnly(
+                    artifact,
+                    directoryComponents: directoryComponents,
+                    rootPin: rootPin)
+                try rootPin.validate()
+            }
+        } catch let error as InstallError where error == .unsafeManagedRoot {
+            throw error
+        } catch {
+            if Task.isCancelled { throw CancellationError() }
+            return nil
+        }
+        return VerifiedPreviousInstallation(
+            receipt: receipt,
+            receiptData: receiptData,
+            modelDirectory: receiptDirectory,
+            directoryComponents: directoryComponents)
+    }
+
     /// Returns a migration source only when the receipt, managed path,
     /// package identity, and all three source artifacts match exactly. Any
     /// drift simply disables reuse; it never edits or deletes legacy data.
@@ -1642,8 +1783,8 @@ actor ComputerUseInstaller {
         rootPin: ManagedRootPin
     ) throws -> LegacyReusePlan? {
         try rootPin.validate()
-        let receiptName = receiptURL.lastPathComponent
-        guard let legacyManifest,
+        guard let previous = try verifiedPreviousInstallation(rootPin: rootPin),
+              let legacyManifest,
               legacyManifest.installationVersion != manifest.installationVersion,
               legacyManifest.modelVariant == manifest.modelVariant,
               legacyManifest.modelArtifacts.count == 3,
@@ -1663,44 +1804,12 @@ actor ComputerUseInstaller {
               }).count == 1,
               legacyManifest.modelArtifacts.allSatisfy({ legacyArtifact in
                 manifest.modelArtifacts.contains(legacyArtifact)
-              }),
-              let data = try? rootPin.readData(name: receiptName),
-              let receipt = try? JSONDecoder().decode(
-                ComputerUseInstallationReceipt.self,
-                from: data),
-              receipt.installationVersion == legacyManifest.installationVersion,
-              receipt.modelVariant == legacyManifest.modelVariant,
-              (receipt.modelDirectory as NSString).isAbsolutePath else {
-            return nil
-        }
-
-        let expectedDirectory = modelsDirectory.appendingPathComponent(
-            legacyManifest.installationVersion,
-            isDirectory: true).standardizedFileURL
-        let receiptDirectory = URL(
-            fileURLWithPath: receipt.modelDirectory,
-            isDirectory: true).standardizedFileURL
-        let directoryComponents = modelsComponents + [legacyManifest.installationVersion]
-        guard receiptDirectory == expectedDirectory,
-              rootPin.directoryExists(directoryComponents) else {
-            return nil
-        }
-
-        do {
-            for artifact in legacyManifest.modelArtifacts {
-                try verifyReadOnly(
-                    artifact,
-                    directoryComponents: directoryComponents,
-                    rootPin: rootPin)
-                try rootPin.validate()
-            }
-        } catch {
-            if Task.isCancelled { throw CancellationError() }
+              }) else {
             return nil
         }
         return LegacyReusePlan(
-            modelDirectory: receiptDirectory,
-            directoryComponents: directoryComponents,
+            modelDirectory: previous.modelDirectory,
+            directoryComponents: previous.directoryComponents,
             artifacts: legacyManifest.modelArtifacts)
     }
 
@@ -1752,25 +1861,217 @@ actor ComputerUseInstaller {
         try rootPin.validate()
     }
 
-    private func performDeferredLegacyCleanup(
+    private func markerExists(
+        _ name: String,
+        rootPin: ManagedRootPin
+    ) throws -> Bool {
+        try rootPin.validate()
+        return try rootPin.itemStatus(name: name) != nil
+    }
+
+    private func activeReceipt(
+        rootPin: ManagedRootPin
+    ) -> ComputerUseInstallationReceipt? {
+        guard (try? rootPin.validate()) != nil,
+              let data = try? rootPin.readData(name: receiptURL.lastPathComponent),
+              let receipt = try? JSONDecoder().decode(
+                ComputerUseInstallationReceipt.self,
+                from: data),
+              (try? rootPin.validate()) != nil else {
+            return nil
+        }
+        return receipt
+    }
+
+    private func pendingRuntimeActivation(
+        rootPin: ManagedRootPin
+    ) -> PendingRuntimeActivation? {
+        guard (try? rootPin.validate()) != nil,
+              let legacyManifest,
+              let data = try? rootPin.readData(
+                name: Self.pendingRuntimeActivationMarkerName),
+              let pending = try? JSONDecoder().decode(
+                PendingRuntimeActivation.self,
+                from: data),
+              !pending.activationIdentifier.isEmpty,
+              !pending.createdByLaunchIdentifier.isEmpty,
+              pending.replacementReceipt.installationVersion
+                == manifest.installationVersion,
+              pending.replacementReceipt.modelVariant == manifest.modelVariant,
+              (pending.replacementReceipt.modelDirectory as NSString)
+                .isAbsolutePath,
+              URL(
+                fileURLWithPath: pending.replacementReceipt.modelDirectory,
+                isDirectory: true).standardizedFileURL
+                == activeModelDirectory.standardizedFileURL,
+              pending.previousReceipt.installationVersion
+                == legacyManifest.installationVersion,
+              pending.previousReceipt.modelVariant == legacyManifest.modelVariant,
+              (pending.previousReceipt.modelDirectory as NSString)
+                .isAbsolutePath,
+              URL(
+                fileURLWithPath: pending.previousReceipt.modelDirectory,
+                isDirectory: true).standardizedFileURL
+                == modelsDirectory.appendingPathComponent(
+                    legacyManifest.installationVersion,
+                    isDirectory: true).standardizedFileURL,
+              (try? JSONDecoder().decode(
+                ComputerUseInstallationReceipt.self,
+                from: pending.previousReceiptData)) == pending.previousReceipt,
+              (try? rootPin.validate()) != nil else {
+            return nil
+        }
+        return pending
+    }
+
+    private func runtimeActivationSuccess(
+        rootPin: ManagedRootPin
+    ) -> RuntimeActivationSuccess? {
+        guard (try? rootPin.validate()) != nil,
+              let data = try? rootPin.readData(
+                name: Self.runtimeActivationSuccessMarkerName),
+              let success = try? JSONDecoder().decode(
+                RuntimeActivationSuccess.self,
+                from: data),
+              !success.activationIdentifier.isEmpty,
+              success.replacementReceipt.installationVersion
+                == manifest.installationVersion,
+              success.replacementReceipt.modelVariant == manifest.modelVariant,
+              (success.replacementReceipt.modelDirectory as NSString)
+                .isAbsolutePath,
+              URL(
+                fileURLWithPath: success.replacementReceipt.modelDirectory,
+                isDirectory: true).standardizedFileURL
+                == activeModelDirectory.standardizedFileURL,
+              (try? rootPin.validate()) != nil else {
+            return nil
+        }
+        return success
+    }
+
+    private func recoverPendingRuntimeActivationIfNeeded(
+        lease: InstallationTransactionLease
+    ) throws {
+        try lease.validate()
+        guard let pending = pendingRuntimeActivation(rootPin: lease) else {
+            if try markerExists(
+                Self.pendingRuntimeActivationMarkerName,
+                rootPin: lease) {
+                throw InstallError.invalidReceipt
+            }
+            // Cleanup may have removed the pending marker immediately before a
+            // power loss. A matching active receipt makes the remaining success
+            // marker stale but harmless, so retire it durably.
+            if let success = runtimeActivationSuccess(rootPin: lease),
+               currentInstallation(using: lease) == success.replacementReceipt {
+                try lease.removeLeafIfPresent(
+                    name: Self.runtimeActivationSuccessMarkerName)
+            }
+            return
+        }
+
+        guard let active = activeReceipt(rootPin: lease) else {
+            throw InstallError.invalidReceipt
+        }
+        if active == pending.previousReceipt {
+            guard try verifiedPreviousInstallation(
+                receipt: pending.previousReceipt,
+                receiptData: pending.previousReceiptData,
+                rootPin: lease) != nil else {
+                throw InstallError.invalidReceipt
+            }
+            try removeRuntimeActivationMarkers(lease: lease)
+            return
+        }
+        guard active == pending.replacementReceipt else {
+            throw InstallError.invalidReceipt
+        }
+
+        if let success = runtimeActivationSuccess(rootPin: lease) {
+            guard success.activationIdentifier == pending.activationIdentifier,
+                  success.replacementReceipt == pending.replacementReceipt,
+                  currentInstallation(using: lease) == pending.replacementReceipt else {
+                throw InstallError.invalidReceipt
+            }
+            try performCompletedRuntimeActivationCleanup(
+                pending: pending,
+                success: success,
+                afterVerifying: pending.replacementReceipt,
+                lease: lease)
+        } else if try markerExists(
+            Self.runtimeActivationSuccessMarkerName,
+            rootPin: lease) {
+            throw InstallError.invalidReceipt
+        } else if pending.createdByLaunchIdentifier != launchIdentifier {
+            try restorePreviousInstallation(
+                afterFailedActivationOf: pending.replacementReceipt,
+                lease: lease)
+        }
+    }
+
+    private func restorePreviousInstallation(
+        afterFailedActivationOf receipt: ComputerUseInstallationReceipt,
+        lease: InstallationTransactionLease
+    ) throws {
+        try lease.validate()
+        guard let pending = pendingRuntimeActivation(rootPin: lease) else {
+            if try markerExists(
+                Self.pendingRuntimeActivationMarkerName,
+                rootPin: lease) {
+                throw InstallError.invalidReceipt
+            }
+            return
+        }
+        guard pending.replacementReceipt == receipt else {
+            throw InstallError.invalidReceipt
+        }
+        if let success = runtimeActivationSuccess(rootPin: lease) {
+            guard success.activationIdentifier == pending.activationIdentifier,
+                  success.replacementReceipt == receipt else {
+                throw InstallError.invalidReceipt
+            }
+            return
+        }
+        if try markerExists(
+            Self.runtimeActivationSuccessMarkerName,
+            rootPin: lease) {
+            throw InstallError.invalidReceipt
+        }
+
+        guard let active = activeReceipt(rootPin: lease),
+              active == receipt || active == pending.previousReceipt,
+              try verifiedPreviousInstallation(
+                receipt: pending.previousReceipt,
+                receiptData: pending.previousReceiptData,
+                rootPin: lease) != nil else {
+            throw InstallError.invalidReceipt
+        }
+        if active != pending.previousReceipt {
+            try lease.writeAtomically(
+                pending.previousReceiptData,
+                name: receiptURL.lastPathComponent)
+            operations.durabilityBarrier("runtime-activation-rollback-receipt")
+            try lease.validate()
+        }
+        try removeRuntimeActivationMarkers(lease: lease)
+        operations.durabilityBarrier("runtime-activation-rollback-complete")
+    }
+
+    private func performCompletedRuntimeActivationCleanup(
+        pending: PendingRuntimeActivation,
+        success: RuntimeActivationSuccess,
         afterVerifying receipt: ComputerUseInstallationReceipt,
         lease: InstallationTransactionLease
     ) throws {
         try lease.validate()
-        guard receipt.installationVersion == manifest.installationVersion,
-              receipt.modelVariant == manifest.modelVariant,
+        guard pending.replacementReceipt == receipt,
+              success.activationIdentifier == pending.activationIdentifier,
+              success.replacementReceipt == receipt,
+              currentInstallation(using: lease) == receipt,
               let legacyManifest,
-              let data = try? lease.readData(
-                name: Self.deferredLegacyCleanupMarkerName),
-              let cleanup = try? JSONDecoder().decode(
-                DeferredLegacyCleanup.self,
-                from: data),
-              cleanup.replacementInstallationVersion
-                == manifest.installationVersion,
-              cleanup.legacyInstallationVersion
-                == legacyManifest.installationVersion,
-              cleanup.createdByLaunchIdentifier != launchIdentifier else {
-            return
+              pending.previousReceipt.installationVersion
+                == legacyManifest.installationVersion else {
+            throw InstallError.invalidReceipt
         }
 
         try operations.prepareDeferredCleanup()
@@ -1787,9 +2088,20 @@ actor ComputerUseInstaller {
         try removeManagedDirectoryIfPresent(
             named: legacyAdaptersDirectory.lastPathComponent,
             rootPin: lease)
-        try lease.removeLeafIfPresent(name: Self.deferredLegacyCleanupMarkerName)
+        try removeRuntimeActivationMarkers(lease: lease)
+        try lease.removeLeafIfPresent(
+            name: Self.deferredLegacyCleanupMarkerName)
         operations.durabilityBarrier("legacy-cleanup")
         try lease.validate()
+    }
+
+    private func removeRuntimeActivationMarkers(
+        lease: InstallationTransactionLease
+    ) throws {
+        try lease.removeLeafIfPresent(
+            name: Self.pendingRuntimeActivationMarkerName)
+        try lease.removeLeafIfPresent(
+            name: Self.runtimeActivationSuccessMarkerName)
     }
 
     private func removeManagedDirectoryIfPresent(

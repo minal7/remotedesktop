@@ -339,7 +339,11 @@ final class SemanticCandidateSelectionV5Tests: XCTestCase {
                 })
                 return .candidateID(click.candidateID)
             })
-        let selectedRoute = try await selectingRouter.route(routingRequest())
+        let request = routingRequest()
+        let pairedRequest = OSAtlasSemanticCandidateRoutingRequests(
+            proposalRequest: request,
+            selectorRequest: request)
+        let selectedRoute = try await selectingRouter.route(pairedRequest)
         XCTAssertEqual(
             selectedRoute,
             sampleRoutes[0])
@@ -350,10 +354,73 @@ final class SemanticCandidateSelectionV5Tests: XCTestCase {
                 _, _ in .abstain(.ambiguousRequest)
             })
         do {
-            _ = try await abstainingRouter.route(routingRequest())
+            _ = try await abstainingRouter.route(pairedRequest)
             XCTFail("Abstention must not return an executable route")
         } catch let error as AppleFoundationVisualActionRouterError {
             XCTAssertEqual(error, .noRoute)
+        }
+    }
+
+    @MainActor
+    func testExecutorCompositionDerivesAndKeepsV4ProposalAndV5SelectorRequestsSeparate()
+        async throws {
+        let rawHistory = [
+            "TYPE [private fixture token]",
+            "CLICK [[300,400]]",
+            "SCROLL [UP]",
+            "SCROLL [DOWN]",
+            "SCROLL [LEFT]",
+            "SCROLL [RIGHT]",
+            "OPEN_APP [Finder]",
+            "HOTKEY [COMMAND+S]",
+            "ENTER",
+        ]
+        let baseRequest = routingRequest().replacingHistory([
+            "must be replaced at the executor boundary",
+        ])
+        let proposerRecorder = SemanticCandidateRouterRecorder()
+        let selectorRecorder = SemanticCandidateSelectorRecorder()
+        let router = CandidateSelectingSemanticActionRouter(
+            proposer: AppleFoundationSemanticActionCandidateProposer(
+                router: SemanticCandidateRouterStub(
+                    reportedAvailability: .unavailable(.modelNotReady),
+                    route: sampleRoutes[0],
+                    recorder: proposerRecorder),
+                caseIDProvider: { "runtime.paired-boundary" }),
+            selector: EffectFreeSemanticActionCandidateSelector {
+                request, candidates in
+                try await selectorRecorder.selectFirst(
+                    request: request,
+                    candidates: candidates)
+            })
+
+        let erasedRouter: any OSAtlasSemanticActionRouting = router
+        let selected = try await OSAtlasComputerUseExecutor.semanticActionRoute(
+            using: erasedRouter,
+            request: baseRequest,
+            rawHistory: rawHistory)
+        let recordedProposalRequests = await proposerRecorder
+            .recordedRequests()
+        let recordedSelectorRequests = await selectorRecorder
+            .recordedRequests()
+        let expectedProposalRequest = baseRequest.replacingHistory(
+            OSAtlasComputerUseExecutor.semanticRoutingHistory(rawHistory))
+        let expectedSelectorRequest = baseRequest.replacingHistory(
+            OSAtlasComputerUseExecutor.semanticRoutingHistoryV5(rawHistory))
+
+        XCTAssertEqual(selected, sampleRoutes[0])
+        XCTAssertEqual(recordedProposalRequests, [expectedProposalRequest])
+        XCTAssertEqual(recordedSelectorRequests, [expectedSelectorRequest])
+        XCTAssertNotEqual(
+            expectedSelectorRequest.history,
+            OSAtlasComputerUseExecutor.semanticRoutingHistoryV5(
+                expectedProposalRequest.history))
+
+        do {
+            _ = try await erasedRouter.route(baseRequest)
+            XCTFail("A V5 composite must reject the unpaired legacy API")
+        } catch let error as AppleFoundationVisualActionRouterError {
+            XCTAssertEqual(error, .invalidRequest)
         }
     }
 
@@ -384,15 +451,97 @@ final class SemanticCandidateSelectionV5Tests: XCTestCase {
                 reportedAvailability: .unavailable(.modelNotReady),
                 route: sampleRoutes[0],
                 recorder: unavailableRecorder),
-            caseIDProvider: { "runtime.unused" })
+            caseIDProvider: { "runtime.reported-unavailable" })
+        let reportedUnavailableProposal = try await unavailable
+            .proposeCandidates(for: request)
+        XCTAssertEqual(reportedUnavailableProposal.routes, [sampleRoutes[0]])
+        let unavailableRequests = await unavailableRecorder.recordedRequests()
+        XCTAssertEqual(unavailableRequests, [request])
+    }
+
+    func testModelNotReadyStillAllowsDeterministicAppleRouteThroughComposite()
+        async throws {
+        let deterministicRequest = OSAtlasSemanticRoutingRequest(
+            task: "Open Notes.",
+            frontmostApplication: "Safari",
+            visibleText: "",
+            history: [],
+            availableDirectives: [.openApplication])
+        let proposer = AppleFoundationSemanticActionCandidateProposer(
+            router: AppleFoundationVisualActionRouter(
+                availabilityProvider: { .unavailable(.modelNotReady) }),
+            caseIDProvider: { "runtime.deterministic-open" })
+        let router = CandidateSelectingSemanticActionRouter(
+            proposer: proposer,
+            selector: EffectFreeSemanticActionCandidateSelector {
+                _, candidates in
+                .candidateID(candidates.candidates[0].candidateID)
+            })
+
+        XCTAssertEqual(router.availability(), .unavailable(.modelNotReady))
+        let erasedRouter: any OSAtlasSemanticActionRouting = router
+        let deterministicRoute = try await OSAtlasComputerUseExecutor
+            .semanticActionRoute(
+                using: erasedRouter,
+                request: deterministicRequest,
+                rawHistory: [])
+        XCTAssertEqual(
+            deterministicRoute,
+            OSAtlasSemanticActionRoute(
+                directive: .openApplication,
+                argument: .applicationName("Notes")))
+
+        let modelDependentRequest = OSAtlasSemanticRoutingRequest(
+            task: "Choose the appropriate next action.",
+            frontmostApplication: "Notes",
+            visibleText: "Save",
+            history: [],
+            availableDirectives: [.click])
         do {
-            _ = try await unavailable.proposeCandidates(for: request)
-            XCTFail("An unavailable Foundation model must not propose")
+            _ = try await proposer.proposeCandidates(
+                for: modelDependentRequest)
+            XCTFail("A model-dependent route must still fail unavailable")
         } catch let error as AppleFoundationVisualActionRouterError {
             XCTAssertEqual(error, .unavailable(.modelNotReady))
         }
-        let unavailableRequests = await unavailableRecorder.recordedRequests()
-        XCTAssertTrue(unavailableRequests.isEmpty)
+    }
+
+    func testCandidateRouterChecksSelectorAvailabilityOnlyAfterProposal()
+        async throws {
+        let request = routingRequest()
+        let proposerRecorder = SemanticCandidateRouterRecorder()
+        let selectorRecorder = SemanticCandidateSelectorRecorder()
+        let router = CandidateSelectingSemanticActionRouter(
+            proposer: AppleFoundationSemanticActionCandidateProposer(
+                router: SemanticCandidateRouterStub(
+                    reportedAvailability: .unavailable(.modelNotReady),
+                    route: sampleRoutes[0],
+                    recorder: proposerRecorder),
+                caseIDProvider: { "runtime.selector-unavailable" }),
+            selector: EffectFreeSemanticActionCandidateSelector(
+                availability: .unavailable(.modelNotReady)) {
+                    selectorRequest, candidates in
+                    try await selectorRecorder.selectFirst(
+                        request: selectorRequest,
+                        candidates: candidates)
+                })
+
+        do {
+            _ = try await router.route(
+                OSAtlasSemanticCandidateRoutingRequests(
+                    proposalRequest: request,
+                    selectorRequest: request))
+            XCTFail("An unavailable selector must fail without invocation")
+        } catch let error as AppleFoundationVisualActionRouterError {
+            XCTAssertEqual(error, .unavailable(.modelNotReady))
+        }
+        let recordedProposals = await proposerRecorder.recordedRequests()
+        let recordedSelections = await selectorRecorder.recordedRequests()
+        XCTAssertEqual(
+            recordedProposals,
+            [request],
+            "proposer availability must never be pre-guarded")
+        XCTAssertTrue(recordedSelections.isEmpty)
     }
 
     func testLlamaCandidateSelectorUsesFrozenRequestAndRuntimeBoundary()
@@ -432,6 +581,11 @@ final class SemanticCandidateSelectionV5Tests: XCTestCase {
             SemanticCandidateSelectionV5.maximumInputTokens)
         let semanticRequest = try XCTUnwrap(
             invocation.candidateRequests.only)
+        XCTAssertEqual(semanticRequest.contract, .candidateSelectionV5)
+        XCTAssertTrue(semanticRequest.matchesFrozenShape(
+            for: .candidateSelectionV5))
+        XCTAssertFalse(semanticRequest.matchesFrozenShape(
+            for: .nativeRoutingV4))
         XCTAssertEqual(semanticRequest.maxTokens,
                        SemanticCandidateSelectionV5.maximumTokens)
         XCTAssertEqual(semanticRequest.messages, [
@@ -452,6 +606,79 @@ final class SemanticCandidateSelectionV5Tests: XCTestCase {
             try LlamaSemanticActionCandidateSelector.semanticRequest(
                 for: request,
                 candidates: candidates))
+    }
+
+    func testFrozenRuntimeShapeRejectsEveryV5ContractMutationAndKeepsV4Distinct()
+        throws {
+        let request = routingRequest()
+        let candidates = try OSAtlasSemanticActionCandidateSet.deterministic(
+            caseID: "runtime.shape-validation",
+            routes: [sampleRoutes[0], sampleRoutes[2]])
+        let v5 = try LlamaSemanticActionCandidateSelector.semanticRequest(
+            for: request,
+            candidates: candidates)
+        XCTAssertTrue(v5.matchesFrozenShape(for: .candidateSelectionV5))
+        XCTAssertFalse(v5.matchesFrozenShape(for: .nativeRoutingV4))
+
+        var mutatedMessages = v5.messages
+        mutatedMessages[0] = .init(
+            role: .system,
+            content: SemanticCandidateSelectionV5.systemPrompt + " ")
+        let mutatedSystem = OSAtlasLlamaSemanticRequest(
+            contract: .candidateSelectionV5,
+            messages: mutatedMessages,
+            tools: v5.tools,
+            maxTokens: v5.maxTokens)
+        XCTAssertFalse(mutatedSystem.matchesFrozenShape(
+            for: .candidateSelectionV5))
+
+        let mutatedMaximum = OSAtlasLlamaSemanticRequest(
+            contract: .candidateSelectionV5,
+            messages: v5.messages,
+            tools: v5.tools,
+            maxTokens: v5.maxTokens - 1)
+        XCTAssertFalse(mutatedMaximum.matchesFrozenShape(
+            for: .candidateSelectionV5))
+
+        var mutatedSchemaTools = v5.tools
+        mutatedSchemaTools[0] = OSAtlasLlamaSemanticTool(
+            name: mutatedSchemaTools[0].name,
+            description: mutatedSchemaTools[0].description,
+            parameters: .object(["type": .string("object")]))
+        let mutatedSchema = OSAtlasLlamaSemanticRequest(
+            contract: .candidateSelectionV5,
+            messages: v5.messages,
+            tools: mutatedSchemaTools,
+            maxTokens: v5.maxTokens)
+        XCTAssertFalse(mutatedSchema.matchesFrozenShape(
+            for: .candidateSelectionV5))
+
+        guard case .object(var chooseRoot) = v5.tools[0].parameters,
+              case .object(var properties)? = chooseRoot["properties"],
+              case .object(var candidateID)? = properties["candidate_id"] else {
+            return XCTFail("Official V5 candidate schema must stay inspectable")
+        }
+        candidateID["enum"] = .array([
+            .string("candidate_not_a_frozen_id"),
+        ])
+        properties["candidate_id"] = .object(candidateID)
+        chooseRoot["properties"] = .object(properties)
+        var mutatedCandidateTools = v5.tools
+        mutatedCandidateTools[0] = OSAtlasLlamaSemanticTool(
+            name: mutatedCandidateTools[0].name,
+            description: mutatedCandidateTools[0].description,
+            parameters: .object(chooseRoot))
+        let mutatedCandidateID = OSAtlasLlamaSemanticRequest(
+            contract: .candidateSelectionV5,
+            messages: v5.messages,
+            tools: mutatedCandidateTools,
+            maxTokens: v5.maxTokens)
+        XCTAssertFalse(mutatedCandidateID.matchesFrozenShape(
+            for: .candidateSelectionV5))
+
+        let v4 = try LlamaSemanticActionRouter.semanticRequest(for: request)
+        XCTAssertTrue(v4.matchesFrozenShape(for: .nativeRoutingV4))
+        XCTAssertFalse(v4.matchesFrozenShape(for: .candidateSelectionV5))
     }
 
     func testLiveCandidateAdaptersComposeAndSelectorFailuresFailClosed()
@@ -480,7 +707,10 @@ final class SemanticCandidateSelectionV5Tests: XCTestCase {
             selector: LlamaSemanticActionCandidateSelector(
                 runtime: runtime,
                 endpoint: endpoint))
-        let selectedRoute = try await router.route(request)
+        let selectedRoute = try await router.route(
+            OSAtlasSemanticCandidateRoutingRequests(
+                proposalRequest: request,
+                selectorRequest: request))
         XCTAssertEqual(selectedRoute, route)
 
         for behavior in [
@@ -592,6 +822,25 @@ private actor SemanticCandidateRouterRecorder {
 
     func record(_ request: OSAtlasSemanticRoutingRequest) {
         requests.append(request)
+    }
+
+    func recordedRequests() -> [OSAtlasSemanticRoutingRequest] {
+        requests
+    }
+}
+
+private actor SemanticCandidateSelectorRecorder {
+    private var requests: [OSAtlasSemanticRoutingRequest] = []
+
+    func selectFirst(
+        request: OSAtlasSemanticRoutingRequest,
+        candidates: OSAtlasSemanticActionCandidateSet
+    ) throws -> OSAtlasSemanticCandidateSelection {
+        requests.append(request)
+        guard let candidate = candidates.candidates.first else {
+            throw SemanticCandidateCompleterFailure()
+        }
+        return .candidateID(candidate.candidateID)
     }
 
     func recordedRequests() -> [OSAtlasSemanticRoutingRequest] {

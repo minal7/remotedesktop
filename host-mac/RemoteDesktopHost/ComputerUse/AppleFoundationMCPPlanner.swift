@@ -243,6 +243,25 @@ struct OSAtlasSemanticRoutingRequest: Equatable, Sendable {
         self.openedApplicationIdentities = openedApplicationIdentities
     }
 
+    /// Rebuilds the same typed routing request at an explicit history
+    /// boundary. The dormant schema-5 composition uses this to give Apple's
+    /// proposer the frozen V4 verbs while independently giving Granite the
+    /// schema-5 history derived from the executor's raw action ledger.
+    func replacingHistory(_ history: [String]) -> Self {
+        Self(
+            task: task,
+            conversation: conversation,
+            frontmostApplication: frontmostApplication,
+            frontmostApplicationIdentity: frontmostApplicationIdentity,
+            applicationIdentityIsAuthoritative:
+                applicationIdentityIsAuthoritative,
+            visibleText: visibleText,
+            history: history,
+            availableDirectives: availableDirectives,
+            openedApplications: openedApplications,
+            openedApplicationIdentities: openedApplicationIdentities)
+    }
+
     var frontmostApplicationPromptValue: String {
         if applicationIdentityIsAuthoritative {
             return frontmostApplicationIdentity?.promptDescription ?? "unknown"

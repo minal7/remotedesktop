@@ -2520,6 +2520,12 @@ protocol ComputerUseModelProvisioning: Sendable {
     func currentInstallation() async -> ComputerUseInstallationReceipt?
     func interruptedInstallationExists() async -> Bool
     func clearInterruptedInstallationMarker() async
+    func recordRuntimeActivationSuccess(
+        for receipt: ComputerUseInstallationReceipt
+    ) async throws
+    func restorePreviousInstallation(
+        afterFailedActivationOf receipt: ComputerUseInstallationReceipt
+    ) async throws
     func install(
         progress: @MainActor @Sendable @escaping (ComputerUseInstaller.Update) -> Void
     ) async throws -> ComputerUseInstallationReceipt
@@ -3836,6 +3842,7 @@ final class HostComputerUseManager: ObservableObject {
         setupTask = Task { [weak self] in
             guard let self else { return }
             defer { setupTask = nil }
+            var activationReceipt: ComputerUseInstallationReceipt?
             do {
                 let helperReceipt = try await macControlInstaller.install { [weak self] update in
                     self?.consumeMacControlInstallerUpdate(update)
@@ -3845,6 +3852,7 @@ final class HostComputerUseManager: ObservableObject {
                 let receipt = try await installer.install { [weak self] update in
                     self?.consumeInstallerUpdate(update)
                 }
+                activationReceipt = receipt
                 try Task.checkCancellation()
                 modelState = .installing(
                     detail: "Loading the on-device AI…",
@@ -3869,6 +3877,7 @@ final class HostComputerUseManager: ObservableObject {
                     detail: "Starting verified local Mac tools…")
                 let hybrid = try await executorComposer(helperReceipt, loaded)
                 try Task.checkCancellation()
+                try await installer.recordRuntimeActivationSuccess(for: receipt)
                 executor = hybrid
                 modelState = .ready(runtimeName: hybrid.runtimeName)
                 publishSetupProgress(
@@ -3878,6 +3887,10 @@ final class HostComputerUseManager: ObservableObject {
             } catch is CancellationError {
                 await visualExecutorLoader.deactivate()
                 executor = nil
+                if let activationReceipt {
+                    try? await installer.restorePreviousInstallation(
+                        afterFailedActivationOf: activationReceipt)
+                }
                 modelState = .downloadRequired
                 publishSetupProgress(
                     phase: .failed,
@@ -3888,6 +3901,10 @@ final class HostComputerUseManager: ObservableObject {
             } catch {
                 await visualExecutorLoader.deactivate()
                 executor = nil
+                if let activationReceipt {
+                    try? await installer.restorePreviousInstallation(
+                        afterFailedActivationOf: activationReceipt)
+                }
                 await installer.clearInterruptedInstallationMarker()
                 let message = (error as? LocalizedError)?.errorDescription
                     ?? error.localizedDescription
@@ -3925,6 +3942,7 @@ final class HostComputerUseManager: ObservableObject {
                     fraction: 0.99)
                 let hybrid = try await executorComposer(helperReceipt, loaded)
                 try Task.checkCancellation()
+                try await installer.recordRuntimeActivationSuccess(for: receipt)
                 executor = hybrid
                 modelState = .ready(runtimeName: hybrid.runtimeName)
                 publishSetupProgress(
@@ -3934,10 +3952,14 @@ final class HostComputerUseManager: ObservableObject {
             } catch is CancellationError {
                 await visualExecutorLoader.deactivate()
                 executor = nil
+                try? await installer.restorePreviousInstallation(
+                    afterFailedActivationOf: receipt)
                 modelState = .downloadRequired
             } catch {
                 await visualExecutorLoader.deactivate()
                 executor = nil
+                try? await installer.restorePreviousInstallation(
+                    afterFailedActivationOf: receipt)
                 let message = (error as? LocalizedError)?.errorDescription
                     ?? error.localizedDescription
                 modelState = .error(message)

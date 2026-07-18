@@ -46,6 +46,11 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         XCTAssertEqual(visualLoader.maximumConcurrentLoads, 1)
         XCTAssertEqual(manager.modelState, .ready(runtimeName: "OS-Atlas Pro test runtime"))
         XCTAssertEqual(manager.capability.state, .ready)
+        let successfulActivations = await modelInstaller
+            .recordedSuccessfulActivations()
+        let failedActivations = await modelInstaller.recordedFailedActivations()
+        XCTAssertEqual(successfulActivations, [receipt])
+        XCTAssertTrue(failedActivations.isEmpty)
 
         let progress = await waitForSetupProgress(
             channel: channel,
@@ -173,6 +178,92 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         XCTAssertEqual(composerCalls, 0)
         XCTAssertEqual(progress.last?.phase, .failed)
         XCTAssertTrue(progress.last?.detail.contains("stopped") == true)
+        let successfulActivations = await modelInstaller
+            .recordedSuccessfulActivations()
+        let failedActivations = await modelInstaller.recordedFailedActivations()
+        XCTAssertTrue(successfulActivations.isEmpty)
+        XCTAssertEqual(failedActivations, [mobileInitiationModelReceipt()])
+    }
+
+    func testFailedFirstModelLoadRequestsVerifiedInstallationRollback() async throws {
+        let fixture = try makeFixture(markerPresent: false)
+        defer { try? FileManager.default.removeItem(at: fixture.parent) }
+
+        let receipt = mobileInitiationModelReceipt()
+        let modelInstaller = MobileInitiationModelInstaller(receipt: receipt)
+        let visualLoader = MobileInitiationVisualLoader(throwsLoadFailure: true)
+        let channel = MobileInitiationTestChannel()
+        let manager = HostComputerUseManager(
+            injector: InputInjector(),
+            installer: modelInstaller,
+            macControlInstaller: MobileInitiationMacControlInstaller(
+                status: .notInstalled),
+            visualExecutorLoader: visualLoader,
+            executorComposer: { _, visualFallback in visualFallback },
+            taskLedger: ComputerUseTaskLedger(fileURL: fixture.ledger),
+            channelFactory: { _ in channel })
+        manager.start(pairingCode: "123456")
+        defer { manager.stop() }
+
+        XCTAssertTrue(manager.handle(
+            try setupEnvelope(requestID: "failed-first-load"),
+            channel: channel))
+        _ = await waitForSetupProgress(
+            channel: channel,
+            terminalPhase: .failed)
+
+        XCTAssertEqual(visualLoader.loadCount, 1)
+        XCTAssertEqual(visualLoader.deactivationCount, 1)
+        let failedActivations = await modelInstaller.recordedFailedActivations()
+        let successfulActivations = await modelInstaller
+            .recordedSuccessfulActivations()
+        XCTAssertEqual(failedActivations, [receipt])
+        XCTAssertTrue(successfulActivations.isEmpty)
+        guard case .error = manager.modelState else {
+            return XCTFail("A failed first model load must stay fail-closed")
+        }
+    }
+
+    func testFailedExecutorCompositionRequestsVerifiedInstallationRollback()
+        async throws {
+        let fixture = try makeFixture(markerPresent: false)
+        defer { try? FileManager.default.removeItem(at: fixture.parent) }
+
+        let receipt = mobileInitiationModelReceipt()
+        let modelInstaller = MobileInitiationModelInstaller(receipt: receipt)
+        let visualLoader = MobileInitiationVisualLoader()
+        let channel = MobileInitiationTestChannel()
+        let manager = HostComputerUseManager(
+            injector: InputInjector(),
+            installer: modelInstaller,
+            macControlInstaller: MobileInitiationMacControlInstaller(
+                status: .notInstalled),
+            visualExecutorLoader: visualLoader,
+            executorComposer: { _, _ in
+                throw CocoaError(.fileReadCorruptFile)
+            },
+            taskLedger: ComputerUseTaskLedger(fileURL: fixture.ledger),
+            channelFactory: { _ in channel })
+        manager.start(pairingCode: "123456")
+        defer { manager.stop() }
+
+        XCTAssertTrue(manager.handle(
+            try setupEnvelope(requestID: "failed-composition"),
+            channel: channel))
+        _ = await waitForSetupProgress(
+            channel: channel,
+            terminalPhase: .failed)
+
+        XCTAssertEqual(visualLoader.loadCount, 1)
+        XCTAssertEqual(visualLoader.deactivationCount, 1)
+        let failedActivations = await modelInstaller.recordedFailedActivations()
+        let successfulActivations = await modelInstaller
+            .recordedSuccessfulActivations()
+        XCTAssertEqual(failedActivations, [receipt])
+        XCTAssertTrue(successfulActivations.isEmpty)
+        guard case .error = manager.modelState else {
+            return XCTFail("A failed composition must stay fail-closed")
+        }
     }
 
     func testFreshHostWaitsForMobileSetupRequestBeforeStartingInstaller() async throws {
@@ -567,6 +658,8 @@ private actor MobileInitiationModelInstaller: ComputerUseModelProvisioning {
     private let receipt: ComputerUseInstallationReceipt
     private var installs = 0
     private var clearedMarkers = 0
+    private var successfulActivations: [ComputerUseInstallationReceipt] = []
+    private var failedActivations: [ComputerUseInstallationReceipt] = []
 
     init(receipt: ComputerUseInstallationReceipt) {
         self.receipt = receipt
@@ -578,6 +671,18 @@ private actor MobileInitiationModelInstaller: ComputerUseModelProvisioning {
 
     func clearInterruptedInstallationMarker() {
         clearedMarkers += 1
+    }
+
+    func recordRuntimeActivationSuccess(
+        for receipt: ComputerUseInstallationReceipt
+    ) {
+        successfulActivations.append(receipt)
+    }
+
+    func restorePreviousInstallation(
+        afterFailedActivationOf receipt: ComputerUseInstallationReceipt
+    ) {
+        failedActivations.append(receipt)
     }
 
     func install(
@@ -611,6 +716,12 @@ private actor MobileInitiationModelInstaller: ComputerUseModelProvisioning {
 
     func installCallCount() -> Int { installs }
     func clearedMarkerCount() -> Int { clearedMarkers }
+    func recordedSuccessfulActivations() -> [ComputerUseInstallationReceipt] {
+        successfulActivations
+    }
+    func recordedFailedActivations() -> [ComputerUseInstallationReceipt] {
+        failedActivations
+    }
 }
 
 @MainActor
@@ -620,11 +731,16 @@ private final class MobileInitiationVisualLoader: ComputerUseVisualExecutorLoadi
     private(set) var maximumConcurrentLoads = 0
     private var activeLoads = 0
     private let throwsCancellation: Bool
+    private let throwsLoadFailure: Bool
 
     var loadCount: Int { loadedReceipts.count }
 
-    init(throwsCancellation: Bool = false) {
+    init(
+        throwsCancellation: Bool = false,
+        throwsLoadFailure: Bool = false
+    ) {
         self.throwsCancellation = throwsCancellation
+        self.throwsLoadFailure = throwsLoadFailure
     }
 
     func load(
@@ -637,6 +753,7 @@ private final class MobileInitiationVisualLoader: ComputerUseVisualExecutorLoadi
         defer { activeLoads -= 1 }
         progress("Starting OS-Atlas Pro test runtime…")
         if throwsCancellation { throw CancellationError() }
+        if throwsLoadFailure { throw CocoaError(.fileReadCorruptFile) }
         return MobileInitiationReadyExecutor(
             runtimeName: "OS-Atlas Pro test runtime")
     }

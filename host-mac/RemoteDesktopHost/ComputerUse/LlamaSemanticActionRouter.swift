@@ -148,6 +148,7 @@ struct LlamaSemanticActionRouter: OSAtlasSemanticActionRouting {
         }
         return prompts.map { prompt in
             OSAtlasLlamaSemanticRequest(
+                contract: .nativeRoutingV4,
                 messages: [
                     .init(role: .system, content: systemPrompt),
                     .init(role: .user, content: prompt),

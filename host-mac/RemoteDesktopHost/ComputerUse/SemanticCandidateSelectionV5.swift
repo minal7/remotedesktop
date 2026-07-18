@@ -159,6 +159,45 @@ enum SemanticCandidateSelectionV5 {
         ]
     }
 
+    /// Verifies the complete host-authored V5 native-tool surface before the
+    /// runtime can switch to, tokenize for, or invoke the served selector. The
+    /// candidate IDs are dynamic, but every other byte of both closed schemas
+    /// and their descriptions remains frozen by this contract.
+    static func matchesRuntimeTools(
+        _ tools: [OSAtlasLlamaSemanticTool]
+    ) -> Bool {
+        guard tools.count == 2,
+              tools.map(\.name) == modelToolNames,
+              case .object(let root) = tools[0].parameters,
+              case .object(let properties)? = root["properties"],
+              case .object(let candidateID)? = properties["candidate_id"],
+              case .array(let encodedIDs)? = candidateID["enum"] else {
+            return false
+        }
+        let candidateIDs = encodedIDs.compactMap { value -> String? in
+            guard case .string(let candidateID) = value else { return nil }
+            return candidateID
+        }
+        guard candidateIDs.count == encodedIDs.count,
+              (minimumCandidateCount ... maximumCandidateCount)
+                .contains(candidateIDs.count),
+              Set(candidateIDs).count == candidateIDs.count,
+              candidateIDs.allSatisfy(isValidCandidateID) else {
+            return false
+        }
+        guard let expected = try? toolDefinitions(candidateIDs: candidateIDs)
+                .map({ definition in
+                    OSAtlasLlamaSemanticTool(
+                        name: definition.name,
+                        description: definition.description,
+                        parameters: try LlamaSemanticActionRouter.llamaJSON(
+                            definition.inputSchema))
+                }) else {
+            return false
+        }
+        return tools == expected
+    }
+
     /// Renders the schema-5 prompt with all untrusted context before the
     /// current trusted request. The JSON string for the request is the final
     /// byte sequence; no candidate or UI text can appear after it.
@@ -717,6 +756,26 @@ struct OSAtlasSemanticActionCandidateProposal: Equatable, Sendable {
     }
 }
 
+/// Paired model-facing views of one executor observation. The eventual V5
+/// composition must build both histories independently from the raw executor
+/// ledger: Apple's proposer retains the exact V4 action vocabulary while the
+/// learned selector receives only the frozen schema-5 vocabulary.
+struct OSAtlasSemanticCandidateRoutingRequests: Equatable, Sendable {
+    let proposalRequest: OSAtlasSemanticRoutingRequest
+    let selectorRequest: OSAtlasSemanticRoutingRequest
+}
+
+/// Marker protocol for the only router family allowed to receive two distinct
+/// model-facing histories. The executor detects this protocol at its raw
+/// action-ledger boundary and constructs the pair itself; callers cannot safely
+/// activate schema 5 by merely storing this router behind the legacy protocol.
+protocol OSAtlasSemanticCandidateActionRouting:
+    OSAtlasSemanticActionRouting {
+    func route(
+        _ requests: OSAtlasSemanticCandidateRoutingRequests
+    ) async throws -> OSAtlasSemanticActionRoute
+}
+
 protocol OSAtlasSemanticActionCandidateProposing: Sendable {
     func availability() -> AppleFoundationMCPPlannerAvailability
     func proposeCandidates(
@@ -821,10 +880,10 @@ struct AppleFoundationSemanticActionCandidateProposer:
         for request: OSAtlasSemanticRoutingRequest
     ) async throws -> OSAtlasSemanticActionCandidateProposal {
         try Task.checkCancellation()
-        try SemanticCandidateSelectionV5.validateRequest(request)
-        if case .unavailable(let reason) = availability() {
-            throw AppleFoundationVisualActionRouterError.unavailable(reason)
-        }
+        // The proposal boundary intentionally retains Apple's V4 history
+        // vocabulary. The production Apple router performs the common request
+        // validation itself; applying schema-5 validation here would reject
+        // exact V4 verbs before deterministic host routes can run.
         let route = try await router.route(request)
         try Task.checkCancellation()
         return OSAtlasSemanticActionCandidateProposal(
@@ -898,6 +957,7 @@ struct LlamaSemanticActionCandidateSelector:
                         definition.inputSchema))
             }
         return OSAtlasLlamaSemanticRequest(
+            contract: .candidateSelectionV5,
             messages: [
                 .init(
                     role: .system,
@@ -985,7 +1045,8 @@ struct EffectFreeSemanticActionCandidateSelector:
 /// Additive schema-5 router composition. A selection can only resolve to a
 /// route already stored by the host compiler. Abstention is a no-effect
 /// `noRoute`; malformed or unoffered identifiers fail closed.
-struct CandidateSelectingSemanticActionRouter: OSAtlasSemanticActionRouting {
+struct CandidateSelectingSemanticActionRouter:
+    OSAtlasSemanticCandidateActionRouting {
     private let proposer: any OSAtlasSemanticActionCandidateProposing
     private let compiler: any OSAtlasSemanticActionCandidateCompiling
     private let selector: any OSAtlasSemanticActionCandidateSelecting
@@ -1011,21 +1072,38 @@ struct CandidateSelectingSemanticActionRouter: OSAtlasSemanticActionRouting {
     }
 
     func route(
-        _ request: OSAtlasSemanticRoutingRequest
+        _: OSAtlasSemanticRoutingRequest
+    ) async throws -> OSAtlasSemanticActionRoute {
+        // A single request has no proof that its history came from the raw
+        // executor ledger under both frozen normalizers. Fail closed if this
+        // composite escapes the executor's paired-routing adapter.
+        throw AppleFoundationVisualActionRouterError.invalidRequest
+    }
+
+    /// Dormant schema-5 entry point. Only the executor's raw-ledger adapter may
+    /// call this overload; the production composition remains V4 until an
+    /// approved artifact and alias are switched atomically.
+    func route(
+        _ requests: OSAtlasSemanticCandidateRoutingRequests
     ) async throws -> OSAtlasSemanticActionRoute {
         do {
             try Task.checkCancellation()
-            if case .unavailable(let reason) = availability() {
+            guard requests.proposalRequest.replacingHistory([])
+                    == requests.selectorRequest.replacingHistory([]) else {
+                throw AppleFoundationVisualActionRouterError.invalidRequest
+            }
+            let proposal = try await proposer.proposeCandidates(
+                for: requests.proposalRequest)
+            try Task.checkCancellation()
+            if case .unavailable(let reason) = selector.availability() {
                 throw AppleFoundationVisualActionRouterError
                     .unavailable(reason)
             }
-            let proposal = try await proposer.proposeCandidates(for: request)
-            try Task.checkCancellation()
             let candidates = try compiler.compileAndBind(
                 proposal,
-                for: request)
+                for: requests.selectorRequest)
             let selection = try await selector.selectCandidate(
-                for: request,
+                for: requests.selectorRequest,
                 from: candidates)
             try Task.checkCancellation()
             guard let storedRoute = try candidates.compile(selection) else {

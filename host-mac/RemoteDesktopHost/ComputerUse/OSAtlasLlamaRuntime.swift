@@ -67,12 +67,30 @@ struct OSAtlasLlamaEndpoint: Equatable, Sendable {
     let bearerToken: String
 }
 
+/// Host-only discriminator for semantic prompt/tool contracts. This value is
+/// intentionally absent from the OpenAI-compatible JSON body: the host uses
+/// it to reject a request whose frozen schema does not match the installed
+/// served-model alias before any model switch, tokenization, or completion.
+enum OSAtlasLlamaSemanticContract: Equatable, Sendable {
+    case nativeRoutingV4
+    case candidateSelectionV5
+}
+
 /// Stable, application-owned router identifiers. Callers never provide model
 /// names: the runtime injects one of these values after it has validated the
 /// endpoint generation and the locally verified model installation.
 enum OSAtlasLlamaServedModel: String, CaseIterable, Equatable, Hashable, Sendable {
     case visualGrounder = "visual-grounder-v1"
     case semanticRouter = "semantic-router-v1"
+
+    var semanticContract: OSAtlasLlamaSemanticContract? {
+        switch self {
+        case .visualGrounder:
+            return nil
+        case .semanticRouter:
+            return .nativeRoutingV4
+        }
+    }
 }
 
 /// A deliberately small JSON value used for native-tool parameter schemas.
@@ -149,18 +167,73 @@ struct OSAtlasLlamaSemanticRequest: Equatable, Sendable {
     static let maximumToolDescriptionBytes = 4 * 1_024
     static let maximumGeneratedTokens = 256
 
+    let contract: OSAtlasLlamaSemanticContract
     let messages: [OSAtlasLlamaSemanticMessage]
     let tools: [OSAtlasLlamaSemanticTool]
     let maxTokens: Int
 
     init(
+        contract: OSAtlasLlamaSemanticContract,
         messages: [OSAtlasLlamaSemanticMessage],
         tools: [OSAtlasLlamaSemanticTool],
         maxTokens: Int = Self.maximumGeneratedTokens
     ) {
+        self.contract = contract
         self.messages = messages
         self.tools = tools
         self.maxTokens = maxTokens
+    }
+
+    /// Binds the caller's host-only discriminator to the exact frozen prompt
+    /// and native-tool surface. The tag alone is not authority: a request with
+    /// V5 messages/tools relabeled as V4 must fail before model switching,
+    /// tokenization, or completion.
+    func matchesFrozenShape(
+        for servedContract: OSAtlasLlamaSemanticContract
+    ) -> Bool {
+        guard contract == servedContract,
+              messages.count == 2,
+              messages[0].role == .system,
+              messages[1].role == .user else {
+            return false
+        }
+        switch servedContract {
+        case .nativeRoutingV4:
+            guard messages[0].content == LlamaSemanticActionRouter.systemPrompt,
+                  maxTokens == Self.maximumGeneratedTokens else {
+                return false
+            }
+            let names = tools.map(\.name)
+            let allowedOrder = SemanticNativeToolWireContract
+                .canonicalToolNames
+                + [SemanticNativeToolWireContract.evaluatorAbstainName]
+            let offered = Set(names)
+            guard !names.isEmpty,
+                  offered.count == names.count,
+                  names == allowedOrder.filter(offered.contains),
+                  names.last
+                    == SemanticNativeToolWireContract.evaluatorAbstainName else {
+                return false
+            }
+            for tool in tools {
+                guard let definition = SemanticNativeToolWireContract
+                        .definition(named: tool.name),
+                      let parameters = try? LlamaSemanticActionRouter
+                        .llamaJSON(definition.inputSchema),
+                      tool == OSAtlasLlamaSemanticTool(
+                        name: definition.name,
+                        description: definition.description,
+                        parameters: parameters) else {
+                    return false
+                }
+            }
+            return true
+        case .candidateSelectionV5:
+            return messages[0].content
+                    == SemanticCandidateSelectionV5.systemPrompt
+                && maxTokens == SemanticCandidateSelectionV5.maximumTokens
+                && SemanticCandidateSelectionV5.matchesRuntimeTools(tools)
+        }
     }
 }
 
@@ -1100,6 +1173,13 @@ actor OSAtlasLlamaRuntime {
         }
         guard !candidateRequests.isEmpty,
               maximumInputTokens > 0 else {
+            throw OSAtlasLlamaRuntimeError.invalidResponse
+        }
+        guard let servedContract = OSAtlasLlamaServedModel.semanticRouter
+                .semanticContract,
+              candidateRequests.allSatisfy({
+                  $0.matchesFrozenShape(for: servedContract)
+              }) else {
             throw OSAtlasLlamaRuntimeError.invalidResponse
         }
         let modelAccessLease = try await acquireModelAccessLease()

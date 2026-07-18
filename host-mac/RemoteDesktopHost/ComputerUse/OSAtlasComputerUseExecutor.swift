@@ -968,8 +968,9 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                    let semanticRouter {
                     didAttemptAuthenticationEscape = true
                     do {
-                        let escapeRoute = try await semanticRouter.route(
-                            OSAtlasSemanticRoutingRequest(
+                        let escapeRoute = try await Self.semanticActionRoute(
+                            using: semanticRouter,
+                            request: OSAtlasSemanticRoutingRequest(
                                 task: trustedUserPrompt,
                                 conversation: conversation,
                                 frontmostApplication: currentApplication,
@@ -987,7 +988,8 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                                 openedApplications:
                                     openedApplications.sorted(),
                                 openedApplicationIdentities:
-                                    sortedOpenedApplicationIdentities()))
+                                    sortedOpenedApplicationIdentities()),
+                            rawHistory: history)
                         try Task.checkCancellation()
                         guard let postRouteCapture = try revalidatedPlanningState(
                             expected: planningCapture.fingerprint) else {
@@ -1068,8 +1070,9 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                     planningCapture.frontmostApplication
                 let preRoutePlanningState = planningCapture.fingerprint
                 do {
-                    let selectedRoute = try await semanticRouter.route(
-                        OSAtlasSemanticRoutingRequest(
+                    let selectedRoute = try await Self.semanticActionRoute(
+                        using: semanticRouter,
+                        request: OSAtlasSemanticRoutingRequest(
                             // Prior chat remains typed context and the current
                             // user request remains a separate authority field;
                             // host policy/effect/terminal gates below are bound
@@ -1089,7 +1092,8 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                                 actionContract: actionContract),
                             openedApplications: openedApplications.sorted(),
                             openedApplicationIdentities:
-                                sortedOpenedApplicationIdentities()))
+                                sortedOpenedApplicationIdentities()),
+                        rawHistory: history)
                     try Task.checkCancellation()
                     let postRouteCapture = try capturePlanningState()
                     guard postRouteCapture.fingerprint
@@ -4746,6 +4750,42 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
             }
         }
         return selected.keys.sorted().compactMap { selected[$0] }
+    }
+
+    /// Builds the dormant schema-5 model boundary from one raw executor
+    /// ledger. Never feed the V4 compacted history into the V5 normalizer:
+    /// V4 deliberately preserves verbs that schema 5 rejects and can evict
+    /// newer workflow state before V5 has a chance to prioritize it.
+    static func semanticCandidateRoutingRequests(
+        for request: OSAtlasSemanticRoutingRequest,
+        rawHistory: [String]
+    ) -> OSAtlasSemanticCandidateRoutingRequests {
+        OSAtlasSemanticCandidateRoutingRequests(
+            proposalRequest: request.replacingHistory(
+                semanticRoutingHistory(rawHistory)),
+            selectorRequest: request.replacingHistory(
+                semanticRoutingHistoryV5(rawHistory)))
+    }
+
+    /// The executor is the sole owner of the raw action ledger, so it is also
+    /// the only boundary that may construct schema-5's paired histories. A
+    /// legacy router receives the exact V4 request it received before this
+    /// dormant adapter existed; a paired router cannot be invoked through its
+    /// unsafe single-request compatibility method.
+    static func semanticActionRoute(
+        using router: any OSAtlasSemanticActionRouting,
+        request: OSAtlasSemanticRoutingRequest,
+        rawHistory: [String]
+    ) async throws -> OSAtlasSemanticActionRoute {
+        if let candidateRouter = router
+            as? any OSAtlasSemanticCandidateActionRouting {
+            return try await candidateRouter.route(
+                semanticCandidateRoutingRequests(
+                    for: request,
+                    rawHistory: rawHistory))
+        }
+        return try await router.route(request.replacingHistory(
+            semanticRoutingHistory(rawHistory)))
     }
 
     private static func canonicalV5RoutingHistoryEntry(

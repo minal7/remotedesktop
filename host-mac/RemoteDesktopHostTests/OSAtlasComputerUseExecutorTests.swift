@@ -2835,6 +2835,54 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
         ])
     }
 
+    func testCandidateRoutingRequestsDeriveV4AndV5HistoriesFromRawLedgerIndependently() {
+        let rawHistory = [
+            "TYPE [private fixture token]",
+            "CLICK [[742,118]]",
+            "SCROLL [UP]",
+            "SCROLL [DOWN]",
+            "SCROLL [LEFT]",
+            "SCROLL [RIGHT]",
+            "OPEN_APP [Finder]",
+            "HOTKEY [COMMAND+S]",
+            "ENTER",
+        ]
+        let baseRequest = OSAtlasSemanticRoutingRequest(
+            task: "Save the file and confirm.",
+            conversation: [
+                .init(role: .user, text: "Use the current Finder window."),
+            ],
+            frontmostApplication: "Finder",
+            visibleText: "Invoice.pdf\nSave",
+            history: ["must be replaced"],
+            availableDirectives: [.click, .hotkey, .enter])
+
+        let paired = OSAtlasComputerUseExecutor
+            .semanticCandidateRoutingRequests(
+                for: baseRequest,
+                rawHistory: rawHistory)
+        let expectedV4 = OSAtlasComputerUseExecutor
+            .semanticRoutingHistory(rawHistory)
+        let expectedV5 = OSAtlasComputerUseExecutor
+            .semanticRoutingHistoryV5(rawHistory)
+
+        XCTAssertEqual(paired.proposalRequest.history, expectedV4)
+        XCTAssertEqual(paired.selectorRequest.history, expectedV5)
+        XCTAssertEqual(
+            paired.proposalRequest.replacingHistory([]),
+            baseRequest.replacingHistory([]))
+        XCTAssertEqual(
+            paired.selectorRequest.replacingHistory([]),
+            baseRequest.replacingHistory([]))
+        XCTAssertNotEqual(
+            paired.selectorRequest.history,
+            OSAtlasComputerUseExecutor.semanticRoutingHistoryV5(expectedV4),
+            "V5 must read the raw executor ledger, never V4-compacted history")
+        XCTAssertEqual(Array(paired.selectorRequest.history.suffix(3)), [
+            "OPEN_APP [Finder]", "HOTKEY [COMMAND+S]", "ENTER",
+        ])
+    }
+
     func testExplicitActionCorrectionRetriesOnceBeforeAnyHostSideEffect() async throws {
         let fixture = makeCorrectionRuntime(
             completionResponses: [
@@ -6303,6 +6351,7 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
         let request = try OSAtlasLlamaHTTPClient.makeSemanticRequest(
             endpoint: endpoint,
             request: OSAtlasLlamaSemanticRequest(
+                contract: .nativeRoutingV4,
                 messages: [
                     OSAtlasLlamaSemanticMessage(
                         role: .system,
@@ -6521,6 +6570,7 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
         XCTAssertThrowsError(try OSAtlasLlamaHTTPClient.makeSemanticRequest(
             endpoint: endpoint,
             request: OSAtlasLlamaSemanticRequest(
+                contract: .nativeRoutingV4,
                 messages: messages,
                 tools: [
                     OSAtlasLlamaSemanticTool(
@@ -6531,6 +6581,7 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
         XCTAssertThrowsError(try OSAtlasLlamaHTTPClient.makeSemanticRequest(
             endpoint: endpoint,
             request: OSAtlasLlamaSemanticRequest(
+                contract: .nativeRoutingV4,
                 messages: messages,
                 tools: [
                     OSAtlasLlamaSemanticTool(
@@ -6545,6 +6596,7 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
         XCTAssertThrowsError(try OSAtlasLlamaHTTPClient.makeSemanticRequest(
             endpoint: endpoint,
             request: OSAtlasLlamaSemanticRequest(
+                contract: .nativeRoutingV4,
                 messages: messages,
                 tools: [
                     OSAtlasLlamaSemanticTool(
@@ -7080,6 +7132,67 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
             "wait:pro-Q4_K_M-00001-of-00002.gguf"))
     }
 
+    func testSemanticRuntimeRejectsV5AndMislabeledV5ShapeBeforeTransportAgainstV1Alias()
+        async throws {
+        let events = RuntimeEventLog()
+        let transports = FakeTransportMaker(events: events)
+        let runtime = OSAtlasLlamaRuntime(
+            launcher: FakeLlamaLauncher(events: events),
+            transportMaker: transports,
+            portProvider: FixedPortProvider(port: 43_123),
+            tokenProvider: FixedTokenProvider(token: "token"),
+            readinessAttempts: 1,
+            readinessDelay: .zero,
+            resourceInspector: FixedResourceInspector.sufficient)
+        let endpoint = try await runtime.activateMultiModel(
+            visualInputs: inputs(variant: .pro4B, name: "pro"),
+            semanticModelURL: URL(
+                fileURLWithPath: "/models/semantic-Q4_K_M.gguf"))
+        let activationEvents = await events.values()
+
+        let routingRequest = OSAtlasSemanticRoutingRequest(
+            task: "Click Continue.",
+            frontmostApplication: "Safari",
+            visibleText: "Continue",
+            history: [],
+            availableDirectives: [.click])
+        let candidates = try OSAtlasSemanticActionCandidateSet.deterministic(
+            caseID: "runtime.contract-mismatch",
+            routes: [OSAtlasSemanticActionRoute(
+                directive: .click,
+                argument: .targetHint("Continue"))])
+        let v5Request = try LlamaSemanticActionCandidateSelector
+            .semanticRequest(
+                for: routingRequest,
+                candidates: candidates)
+        let mislabeledV5Request = OSAtlasLlamaSemanticRequest(
+            contract: .nativeRoutingV4,
+            messages: v5Request.messages,
+            tools: v5Request.tools,
+            maxTokens: v5Request.maxTokens)
+
+        for request in [v5Request, mislabeledV5Request] {
+            do {
+                _ = try await runtime.completeSemantic(
+                    endpoint: endpoint,
+                    candidateRequests: [request],
+                    maximumInputTokens:
+                        SemanticCandidateSelectionV5.maximumInputTokens)
+                XCTFail("V5 shape must not reach the V1 served alias")
+            } catch let error as OSAtlasLlamaRuntimeError {
+                XCTAssertEqual(error, .invalidResponse)
+            }
+        }
+
+        XCTAssertTrue(transports.recordedTokenCountRequests().isEmpty)
+        XCTAssertTrue(transports.recordedCompletionRequests().isEmpty)
+        let postRejectionEvents = await events.values()
+        let activeVariant = await runtime.activeVariant()
+        XCTAssertEqual(postRejectionEvents, activationEvents)
+        XCTAssertEqual(activeVariant, .pro4B)
+        await runtime.shutdown()
+    }
+
     func testSemanticRuntimeExactCountsCandidatesAndCompletesFirstWithinBudget()
         async throws {
         let events = RuntimeEventLog()
@@ -7101,8 +7214,9 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
         let base = semanticRequest()
         func candidate(_ marker: String) -> OSAtlasLlamaSemanticRequest {
             OSAtlasLlamaSemanticRequest(
+                contract: .nativeRoutingV4,
                 messages: [
-                    .init(role: .system, content: "Route exactly one tool."),
+                    base.messages[0],
                     .init(role: .user, content: marker),
                 ],
                 tools: base.tools,
@@ -8076,26 +8190,15 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
     }
 
     private func semanticRequest() -> OSAtlasLlamaSemanticRequest {
-        OSAtlasLlamaSemanticRequest(
-            messages: [
-                OSAtlasLlamaSemanticMessage(
-                    role: .system,
-                    content: "Select one native tool."),
-                OSAtlasLlamaSemanticMessage(
-                    role: .user,
-                    content: "Click the visible Continue button."),
-            ],
-            tools: [
-                OSAtlasLlamaSemanticTool(
-                    name: "click",
-                    description: "Click a visible target.",
-                    parameters: .object([
-                        "type": .string("object"),
-                        "properties": .object([:]),
-                        "additionalProperties": .boolean(false),
-                    ])),
-            ],
-            maxTokens: 96)
+        // This is the actual frozen V4 factory path so runtime tests exercise
+        // the same shape validation as production instead of a loose fixture.
+        try! LlamaSemanticActionRouter.semanticRequest(
+            for: OSAtlasSemanticRoutingRequest(
+                task: "Click the visible Continue button.",
+                frontmostApplication: "Safari",
+                visibleText: "Continue",
+                history: [],
+                availableDirectives: [.click]))
     }
 
     private func inputs(
