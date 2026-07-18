@@ -18,7 +18,7 @@ usage() {
     /bin/echo "Usage: $0 [--actual-model] [--live-doordash --allow-visible-ui]"
     /bin/echo ""
     /bin/echo "Default: hidden deterministic OS-Atlas parser, executor, safety, and native-input tests."
-    /bin/echo "--actual-model: additionally load the installed OS-Atlas Pro checkpoint against hidden virtual screens."
+    /bin/echo "--actual-model: additionally gate the final installed Granite + OS-Atlas production package against hidden virtual screens."
     /bin/echo "--live-doordash: read a prepared, visible DoorDash review page without performing input."
 }
 
@@ -141,6 +141,7 @@ xcodebuild test \
 if [[ $run_actual_model -eq 1 ]]; then
     /usr/bin/install -m 600 /dev/null "$MODEL_FLAG"
     actual_model_tests=(
+        testFinalV4ProductionPackageRoutesThroughGraniteOSAtlasAndHostValidation
         testInstalledGrounderCompletesRegularUserMatrixWithApplePlannerUnavailableUsingOnlyClickCarriers
         testInstalledHybridUnderstandsNaturalLanguageAcrossFullActionSurfaceWithoutVisibleUI
         testActualModelNavigatesDeliveryQuoteAndValidatedLocalOCRReturnsExactFactsWithoutVisibleUI

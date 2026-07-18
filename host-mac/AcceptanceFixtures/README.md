@@ -114,8 +114,18 @@ runtime, opt in separately:
 host-mac/scripts/run_osatlas_acceptance.sh --actual-model
 ```
 
-This mode does not download or install a model. It resolves the verified active
-OS-Atlas installation and invokes Apple's installed on-device language model.
+This mode does not download or install a model. Its first release gate resolves
+the verified active package with `ComputerUseArtifactManifest.current` and
+`resolvePackage`, then loads the installed semantic GGUF through the production
+multi-model API. Apple routing is forced unavailable without supplying a mock
+semantic answer, so a purchase prompt must travel through real Granite typed
+routing, OS-Atlas point grounding, and host approval validation. The gate
+reports an explicit prerequisite until the immutable V4 semantic artifact is
+present in the production manifest and installed; it never substitutes the
+legacy visual-only package.
+
+The additional diagnostic matrices invoke Apple's installed on-device language
+model and the installed OS-Atlas package.
 The ordinary-language matrix covers all 16 host-composed semantic actions.
 Click, double-click, secondary-click, and drag require real OS-Atlas point
 grounding; other actions are produced directly from the typed semantic plan.

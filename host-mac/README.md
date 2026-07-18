@@ -250,8 +250,16 @@ product behavior:
   parser/executor/safety/native-input matrix by default. That matrix covers the
   full host grammar: 16 semantic operations across 17 raw variants.
 - `host-mac/scripts/run_osatlas_acceptance.sh --actual-model` additionally
-  loads the installed Apple language model and OS-Atlas Pro checkpoint against
-  hidden, in-memory screens. Its semantic matrix covers all 16 host actions:
+  begins with a final-package release gate that resolves
+  `ComputerUseArtifactManifest.current` through the production package
+  resolver, loads its installed Granite semantic GGUF and OS-Atlas Pro through
+  the production multi-model API, and forces Apple's model unavailable. A
+  purchase scenario must then pass strict Granite tool decoding, OS-Atlas point
+  grounding, and host approval validation without posting input. Until the
+  immutable V4 semantic artifact is published in the production manifest and
+  installed, that test reports the prerequisite explicitly instead of falling
+  back to the visual-only package. The remaining hidden semantic matrix covers
+  all 16 host actions:
   direct actions use the typed plan, while pointer actions require one or two
   real OS-Atlas point-grounding inferences. Separate stateful delivery
   component tests retain the legacy raw parser in a test-only configuration;
