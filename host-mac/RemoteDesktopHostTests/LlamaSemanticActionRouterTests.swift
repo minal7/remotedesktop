@@ -4,10 +4,10 @@ import XCTest
 
 final class LlamaSemanticActionRouterTests: XCTestCase {
     func testCanonicalSystemAndUserPromptSnapshotsOmitOpenedApplications() throws {
-        XCTAssertEqual(LlamaSemanticActionRouter.systemPrompt.utf8.count, 2_319)
+        XCTAssertEqual(LlamaSemanticActionRouter.systemPrompt.utf8.count, 2_174)
         XCTAssertEqual(
             MCPDigest.sha256(Data(LlamaSemanticActionRouter.systemPrompt.utf8)),
-            "03f4fe8edf32ea64d58cb229f0afb08ce02860cb933c383608b4124a0a8d88e3")
+            "ac12d6d7126a1339ebbc9ca707340ca52cde33b463aac61b1604c4d34e877961")
 
         let request = OSAtlasSemanticRoutingRequest(
             task: "Copy the visible account total.",
@@ -417,7 +417,7 @@ final class LlamaSemanticActionRouterTests: XCTestCase {
                 "SCROLL [DOWN]", "SCROLL [UP]", "ENTER",
             ])
         let snapshot = MCPJSONValue.object([
-            "contract_version": .string("3.0.0"),
+            "contract_version": .string("4.0.0"),
             "system_prompt": .string(LlamaSemanticActionRouter.systemPrompt),
             "user_prompts": .object([
                 "plain": .string(LlamaSemanticActionRouter.userPrompt(
@@ -509,7 +509,7 @@ final class LlamaSemanticActionRouterTests: XCTestCase {
         ])
         XCTAssertEqual(
             try MCPDigest.sha256(of: snapshot),
-            "883f9164bfce1f33b464613d2b11a0c5675375150c858faa75aaf7282ee1f9e2")
+            "b8e55f365ac0cbb59e26bb51058ffea01fb606221083eab6c5cb265d1bdd2c64")
     }
 
     func testEvidencePromptTrimsLinesFiltersBlanksAndPreservesExactEvidence() throws {
