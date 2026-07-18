@@ -1422,6 +1422,15 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                 }
                 planningCapture = preApprovalCapture
                 observation = preApprovalCapture.observation
+                if semanticRoute != nil,
+                   case .typeText = predicted,
+                   try !tools.focusedTypingTargetIsEditable(
+                       providerAction: predicted) {
+                    Self.log.info(
+                        "Rejected a typed semantic route without a verified editable focus target")
+                    throw RuntimeError.unsupportedAction(
+                        "typing-target-not-editable")
+                }
                 if let semanticRoute,
                    try Self.groundedPointerTargetClearlyMismatches(
                     route: semanticRoute,
@@ -1444,6 +1453,15 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                 }
                 planningCapture = preEffectCapture
                 observation = preEffectCapture.observation
+                if semanticRoute != nil,
+                   case .typeText = predicted,
+                   try !tools.focusedTypingTargetIsEditable(
+                       providerAction: predicted) {
+                    Self.log.info(
+                        "Rejected a typed semantic route after its editable focus target changed")
+                    throw RuntimeError.unsupportedAction(
+                        "typing-target-not-editable")
+                }
                 progress("Step \(step): \(Self.progressSummary(action))")
                 try tools.perform(predicted)
                 history.append(action.historyEntry)

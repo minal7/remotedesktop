@@ -3622,6 +3622,8 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
                 _ = try await executor.execute(
                     prompt: "Type launch checklist into the focused field.",
                     tools: correctionTestTools(
+                        accessibilityContext:
+                            "AXTextField • focused launch checklist",
                         actionPerformer: { performedActions.append($0) }),
                     progress: { _ in })
                 XCTFail("One accepted TYPE should reach the step limit")
@@ -3684,6 +3686,94 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
                 0,
                 "Rejected TYPE must fail before inference: \(testCase.prompt)")
         }
+    }
+
+    func testSemanticTypeRequiresVerifiedEditableNonSecureFocus()
+        async throws {
+        let rejectedContexts = [
+            "AXButton • focused Save",
+            "AXStaticText • focused note heading",
+            "AXTextField • AXSecureTextField • Password",
+            "AXTextArea • editable=false • archived note",
+            "",
+        ]
+        for (index, accessibilityContext) in rejectedContexts.enumerated() {
+            let fixture = makeCorrectionRuntime(
+                completionResponses: [response("CLICK [[500,500]]")],
+                port: UInt16(43_280 + index))
+            let router = StubSemanticActionRouter { _ in
+                OSAtlasSemanticActionRoute(
+                    directive: .type,
+                    argument: .text("launch checklist"))
+            }
+            var performedActions: [ComputerUsePredictedAction] = []
+            let executor = OSAtlasComputerUseExecutor.makeForTesting(
+                inputs: fixture.inputs,
+                runtime: fixture.runtime,
+                semanticRouter: router,
+                maxSteps: 1)
+            do {
+                _ = try await executor.execute(
+                    prompt: "Type launch checklist into the focused field.",
+                    tools: correctionTestTools(
+                        accessibilityContext: accessibilityContext,
+                        actionPerformer: { performedActions.append($0) }),
+                    progress: { _ in })
+                XCTFail("A non-editable typing destination must fail closed")
+            } catch let error as OSAtlasComputerUseExecutor.RuntimeError {
+                XCTAssertEqual(
+                    error,
+                    .unsupportedAction("typing-target-not-editable"))
+            } catch {
+                await fixture.runtime.shutdown()
+                throw error
+            }
+            await fixture.runtime.shutdown()
+            XCTAssertTrue(performedActions.isEmpty)
+            let completionCount = await fixture.events.values()
+                .filter { $0 == "complete" }.count
+            XCTAssertEqual(completionCount, 0)
+        }
+
+        let changedFixture = makeCorrectionRuntime(
+            completionResponses: [response("CLICK [[500,500]]")],
+            port: 43_285)
+        let changedRouter = StubSemanticActionRouter { _ in
+            OSAtlasSemanticActionRoute(
+                directive: .type,
+                argument: .text("launch checklist"))
+        }
+        var accessibilityQueries = 0
+        var changedTargetActions: [ComputerUsePredictedAction] = []
+        let changedExecutor = OSAtlasComputerUseExecutor.makeForTesting(
+            inputs: changedFixture.inputs,
+            runtime: changedFixture.runtime,
+            semanticRouter: changedRouter,
+            maxSteps: 1)
+        do {
+            _ = try await changedExecutor.execute(
+                prompt: "Type launch checklist into the focused field.",
+                tools: correctionTestTools(
+                    accessibilityContextProvider: { _ in
+                        accessibilityQueries += 1
+                        return accessibilityQueries <= 2
+                            ? "AXTextField • focused launch checklist"
+                            : "AXButton • focused Save"
+                    },
+                    actionPerformer: { changedTargetActions.append($0) }),
+                progress: { _ in })
+            XCTFail("Typing focus that changes before input must fail closed")
+        } catch let error as OSAtlasComputerUseExecutor.RuntimeError {
+            XCTAssertEqual(
+                error,
+                .unsupportedAction("typing-target-not-editable"))
+        } catch {
+            await changedFixture.runtime.shutdown()
+            throw error
+        }
+        await changedFixture.runtime.shutdown()
+        XCTAssertGreaterThanOrEqual(accessibilityQueries, 3)
+        XCTAssertTrue(changedTargetActions.isEmpty)
     }
 
     func testDeliveryQuoteCompletionRejectsAffirmativeFollowUpEffects() {
@@ -4513,6 +4603,8 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
             _ = try await executor.execute(
                 prompt: "The caret is already active in my errands note. Add a line with exactly \"Pick up oat milk at 6 PM\".",
                 tools: correctionTestTools(
+                    accessibilityContext:
+                        "AXTextArea • focused errands note",
                     actionPerformer: { performedActions.append($0) }),
                 progress: { _ in })
             XCTFail("The one-step fixture should stop after typing")
@@ -5775,6 +5867,8 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
             @escaping (ComputerUsePredictedAction) -> Bool = { _ in false },
         accessibilityContext: String =
             "AXStaticText • selected correction fixture",
+        accessibilityContextProvider:
+            ((ComputerUsePredictedAction) -> String)? = nil,
         actionPerformer: @escaping (ComputerUsePredictedAction) throws -> Void
     ) -> ComputerUseHostTools {
         let observation = providedObservation ?? ComputerUseScreenObservation(
@@ -5794,7 +5888,9 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
             conservativeActionAdjustmentProvider:
                 conservativeActionAdjustment,
             transientSystemOverlayProvider: transientSystemOverlay,
-            accessibilityContextProvider: { _ in accessibilityContext },
+            accessibilityContextProvider: accessibilityContextProvider ?? {
+                _ in accessibilityContext
+            },
             frontmostApplicationProvider: { frontmostApplication })
     }
 

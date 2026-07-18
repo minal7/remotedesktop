@@ -1515,6 +1515,73 @@ final class ComputerUseHostTools {
         return nil
     }
 
+    /// Returns true only when the system focus is a writable, non-secure text
+    /// control. A semantic TYPE route carries exact host-owned text, but the
+    /// language router cannot prove where keyboard input will land. Keep that
+    /// final destination decision in the host and fail closed when
+    /// Accessibility cannot identify an editable target.
+    func focusedTypingTargetIsEditable(
+        providerAction: ComputerUsePredictedAction
+    ) throws -> Bool {
+        guard mayAct() else { throw ToolError.paused }
+        if let accessibilityContextProvider {
+            return Self.providedContextDescribesEditableTypingTarget(
+                accessibilityContextProvider(providerAction))
+        }
+        guard let focused = focusedElement() else { return false }
+        let role = Self.stringAttribute(
+            kAXRoleAttribute as CFString,
+            from: focused) ?? ""
+        let subrole = Self.stringAttribute(
+            kAXSubroleAttribute as CFString,
+            from: focused) ?? ""
+        let editableRoles: Set<String> = [
+            kAXTextFieldRole as String,
+            kAXTextAreaRole as String,
+            kAXComboBoxRole as String,
+        ]
+        guard editableRoles.contains(role),
+              !subrole.localizedCaseInsensitiveContains("secure"),
+              boolAttribute(
+                  kAXEnabledAttribute as CFString,
+                  from: focused) == true else { return false }
+
+        var valueIsSettable = DarwinBoolean(false)
+        guard AXUIElementIsAttributeSettable(
+            focused,
+            kAXValueAttribute as CFString,
+            &valueIsSettable) == .success else { return false }
+        return valueIsSettable.boolValue
+    }
+
+    private static func providedContextDescribesEditableTypingTarget(
+        _ context: String
+    ) -> Bool {
+        let normalized = " " + context.folding(
+            options: [.caseInsensitive, .diacriticInsensitive],
+            locale: Locale(identifier: "en_US_POSIX"))
+            .unicodeScalars
+            .map {
+                CharacterSet.alphanumerics.contains($0)
+                    ? String($0)
+                    : " "
+            }
+            .joined()
+            .split(whereSeparator: { $0.isWhitespace })
+            .joined(separator: " ") + " "
+        guard !normalized.contains(" axsecuretextfield "),
+              !normalized.contains(" secure text field "),
+              !normalized.contains(" disabled "),
+              !normalized.contains(" enabled false "),
+              !normalized.contains(" editable false ") else { return false }
+        return [
+            " axtextfield ",
+            " axtextarea ",
+            " axcombobox ",
+            " axsearchfield ",
+        ].contains(where: normalized.contains)
+    }
+
     private static func actionableLabel(
         fromProvidedContext context: String
     ) -> String? {
@@ -1782,7 +1849,7 @@ final class ComputerUseHostTools {
         return unsafeBitCast(value, to: AXUIElement.self)
     }
 
-    private func focusedElementSnapshot() -> AccessibilitySnapshot? {
+    private func focusedElement() -> AXUIElement? {
         let systemWide = AXUIElementCreateSystemWide()
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(
@@ -1791,8 +1858,12 @@ final class ComputerUseHostTools {
             &value) == .success,
               let value,
               CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
-        return accessibilitySnapshot(
-            for: unsafeBitCast(value, to: AXUIElement.self))
+        return unsafeBitCast(value, to: AXUIElement.self)
+    }
+
+    private func focusedElementSnapshot() -> AccessibilitySnapshot? {
+        guard let focused = focusedElement() else { return nil }
+        return accessibilitySnapshot(for: focused)
     }
 
     private func liveScreenCaptureConsentContext()

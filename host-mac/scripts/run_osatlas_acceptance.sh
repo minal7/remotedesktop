@@ -7,10 +7,10 @@ SCHEME="RemoteDesktopHost"
 MODEL_FLAG="/tmp/com.threadmark.remotedesktop.osatlas-model-e2e-$(id -u)"
 LIVE_CONFIG="/tmp/com.threadmark.remotedesktop.osatlas-live-doordash-$(id -u).json"
 VERIFY_XCRESULT="$ROOT/host-mac/scripts/verify_xcresult_counts.sh"
-# The selected inventory is the complete executor suite (currently 113), two
+# The selected inventory is the complete executor suite (currently 114), two
 # pinned runtime tests, and eleven native host-input tests. Keep this exact so
 # newly added or silently omitted acceptance coverage fails closed.
-DETERMINISTIC_EXPECTED_TESTS=126
+DETERMINISTIC_EXPECTED_TESTS=127
 RESULT_ROOT=""
 
 run_actual_model=0
