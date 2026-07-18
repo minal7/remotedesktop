@@ -18,7 +18,9 @@
 		14C0A61C170946E483C2E07D /* SystemPackage in Frameworks */ = {isa = PBXBuildFile; productRef = BDCD8AEF5F8B7F191D3D34D4 /* SystemPackage */; };
 		171058C690276E55ABCDE63A /* HostComputerUseManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = CB753FA95C04BD2BE084E213 /* HostComputerUseManager.swift */; };
 		18A1BC70ECAA283CF2368B53 /* HostSessionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9B1DAF90A32ED728B525762F /* HostSessionTests.swift */; };
+		1DB896FEBF27E320F0A2B5F3 /* SemanticCandidateSelectionV5.swift in Sources */ = {isa = PBXBuildFile; fileRef = 87C85D18EE74BFDF5C71512D /* SemanticCandidateSelectionV5.swift */; };
 		2042D882CA5FC124D16E9A9C /* MacControlMCPInstallerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EF30648C9B8BB3F139DCD4CA /* MacControlMCPInstallerTests.swift */; };
+		246BFFB38F4B8DAE79220A1A /* SemanticCandidateSelectionV5Tests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4BBD6129693AC1122EF4022 /* SemanticCandidateSelectionV5Tests.swift */; };
 		2A73337CEE303568F6881543 /* OS-ATLAS-APACHE-2.0-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = 7D98C1008558E1DAD992F9B0 /* OS-ATLAS-APACHE-2.0-LICENSE.txt */; };
 		2BB4F312F1FA16AD43D21ECB /* FoundationMCPJSONSchemaBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 87DBA79B150564718516A5FE /* FoundationMCPJSONSchemaBridge.swift */; };
 		2E117598F13A014329CD22FE /* MCPFirstComputerUseExecutorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49CF19459819E5602DB03150 /* MCPFirstComputerUseExecutorTests.swift */; };
@@ -143,6 +145,7 @@
 		7D98C1008558E1DAD992F9B0 /* OS-ATLAS-APACHE-2.0-LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "OS-ATLAS-APACHE-2.0-LICENSE.txt"; sourceTree = "<group>"; };
 		7DEB12F1337DC8272D20BD2A /* MacControlMCPArchiveExtractor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacControlMCPArchiveExtractor.swift; sourceTree = "<group>"; };
 		85CCC99CA7C9C57C77F670E7 /* MCPServerRegistry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPServerRegistry.swift; sourceTree = "<group>"; };
+		87C85D18EE74BFDF5C71512D /* SemanticCandidateSelectionV5.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SemanticCandidateSelectionV5.swift; sourceTree = "<group>"; };
 		87DBA79B150564718516A5FE /* FoundationMCPJSONSchemaBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FoundationMCPJSONSchemaBridge.swift; sourceTree = "<group>"; };
 		89E37207F908B9627D856D43 /* SignalingEnvelope.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignalingEnvelope.swift; sourceTree = "<group>"; };
 		8D2FEC98D1A8EA9C7CAE9D27 /* MCPTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPTypes.swift; sourceTree = "<group>"; };
@@ -162,6 +165,7 @@
 		C8A7FBD347C34995D3AEC37F /* MCPFoundationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPFoundationTests.swift; sourceTree = "<group>"; };
 		C9BE58B6666FC5BBCD6E2DBE /* RemoteDesktopMailMCP.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteDesktopMailMCP.swift; sourceTree = "<group>"; };
 		CB753FA95C04BD2BE084E213 /* HostComputerUseManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostComputerUseManager.swift; sourceTree = "<group>"; };
+		D4BBD6129693AC1122EF4022 /* SemanticCandidateSelectionV5Tests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SemanticCandidateSelectionV5Tests.swift; sourceTree = "<group>"; };
 		DE19039ABF07FF04D9C8B835 /* SemanticNativeToolWireContract.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SemanticNativeToolWireContract.swift; sourceTree = "<group>"; };
 		DFFCDBD869B91E3FA729B1B9 /* ComputerUseInstaller.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseInstaller.swift; sourceTree = "<group>"; };
 		E08F96816C348D00A1C3EC18 /* RemoteDesktopMailMCPTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteDesktopMailMCPTests.swift; sourceTree = "<group>"; };
@@ -273,6 +277,7 @@
 				BAD30262E2C7207F3FCF5E54 /* OSAtlasRuntimeInstallationTests.swift */,
 				E08F96816C348D00A1C3EC18 /* RemoteDesktopMailMCPTests.swift */,
 				037B0683983EF3DD797F9355 /* ScreenCaptureSizingTests.swift */,
+				D4BBD6129693AC1122EF4022 /* SemanticCandidateSelectionV5Tests.swift */,
 				4386734ED5C4565BC0F3E3B5 /* SemanticNativeToolWireContractTests.swift */,
 			);
 			path = RemoteDesktopHostTests;
@@ -307,6 +312,7 @@
 				16CB73E4E41BE0E7586E4129 /* OSAtlasRuntimeInstallation.swift */,
 				A548774FD133C86136F2D8CA /* RemoteDesktopMailAutomationPreflight.swift */,
 				C9BE58B6666FC5BBCD6E2DBE /* RemoteDesktopMailMCP.swift */,
+				87C85D18EE74BFDF5C71512D /* SemanticCandidateSelectionV5.swift */,
 				DE19039ABF07FF04D9C8B835 /* SemanticNativeToolWireContract.swift */,
 			);
 			path = ComputerUse;
@@ -514,6 +520,7 @@
 				A1AD1DF5F32B1BFE7CBE7FC1 /* OSAtlasRuntimeInstallationTests.swift in Sources */,
 				9D81BB015279178B6603C67D /* RemoteDesktopMailMCPTests.swift in Sources */,
 				ED079874829511ED2203A189 /* ScreenCaptureSizingTests.swift in Sources */,
+				246BFFB38F4B8DAE79220A1A /* SemanticCandidateSelectionV5Tests.swift in Sources */,
 				E2D0353B10542596A31022ED /* SemanticNativeToolWireContractTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -570,6 +577,7 @@
 				3D7BE1972BA0547D0B21E541 /* RemoteDesktopMailAutomationPreflight.swift in Sources */,
 				13010C7EF366983504391D6E /* RemoteDesktopMailMCP.swift in Sources */,
 				5BEA124BF32042E307D79208 /* ScreenCapture.swift in Sources */,
+				1DB896FEBF27E320F0A2B5F3 /* SemanticCandidateSelectionV5.swift in Sources */,
 				D22E96536F20DF25230499D9 /* SemanticNativeToolWireContract.swift in Sources */,
 				8A75048F122E44B655F410CF /* SignalingEnvelope.swift in Sources */,
 				9774C8DAD590EBB177FB4BAA /* SystemAudioBridge.swift in Sources */,
