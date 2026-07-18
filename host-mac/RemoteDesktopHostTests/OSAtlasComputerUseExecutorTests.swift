@@ -9351,7 +9351,7 @@ final class OSAtlasActualModelAcceptanceTests: XCTestCase {
                 line: line)
             XCTAssertEqual(
                 capture.outcome(),
-                expectedOutcome,
+                .terminal(expectedOutcome),
                 "\(capture.name) returned the wrong regular-user outcome",
                 file: file,
                 line: line)
@@ -10364,6 +10364,12 @@ final class OSAtlasActualModelAcceptanceTests: XCTestCase {
         case unableToComplete = "unable to complete"
     }
 
+    private enum ActualScenarioObservedOutcome: Equatable {
+        case terminal(RegularUserScenarioOutcome)
+        case evaluationError(String)
+        case noTerminalResult
+    }
+
     private struct ActualScenarioCapture {
         let name: String
         let semanticRoutes: [OSAtlasSemanticActionRoute]
@@ -10377,19 +10383,22 @@ final class OSAtlasActualModelAcceptanceTests: XCTestCase {
         let executionFailure: String?
         let screenCaptureCount: Int
 
-        func outcome() -> RegularUserScenarioOutcome {
-            guard executionFailure == nil, let result else {
-                return .unableToComplete
+        func outcome() -> ActualScenarioObservedOutcome {
+            if let executionFailure {
+                return .evaluationError(executionFailure)
+            }
+            guard let result else {
+                return .noTerminalResult
             }
             switch result {
             case .clarificationRequired, .userInterventionRequired,
                     .approvalRequired,
                     .mcpApprovalRequired:
-                return .userInterventionRequired
+                return .terminal(.userInterventionRequired)
             case .unableToComplete:
-                return .unableToComplete
+                return .terminal(.unableToComplete)
             case .completed:
-                return .taskCompleted
+                return .terminal(.taskCompleted)
             }
         }
 
@@ -10422,6 +10431,48 @@ final class OSAtlasActualModelAcceptanceTests: XCTestCase {
             let failure = executionFailure.map { "; failure=\($0)" } ?? ""
             return "\(name): routes=\(semanticRoutes), parsed=\(actionTokenSequence), raw=\(raw), effective=\(effective), screens=\(screenCaptureCount)\(failure)"
         }
+    }
+
+    func testActualScenarioOutcomeKeepsEvaluationFailuresOutOfUserUnable() {
+        func capture(
+            result: ComputerUseExecutionResult?,
+            executionFailure: String?
+        ) -> ActualScenarioCapture {
+            ActualScenarioCapture(
+                name: "synthetic-outcome",
+                semanticRoutes: [],
+                parsedActions: [],
+                rawActionTokens: [],
+                rawModelResponses: [],
+                performedActions: [],
+                openedApplications: [],
+                progress: [],
+                result: result,
+                executionFailure: executionFailure,
+                screenCaptureCount: 0)
+        }
+
+        XCTAssertEqual(
+            capture(
+                result: .unableToComplete("synthetic unsupported request"),
+                executionFailure: nil
+            ).outcome(),
+            .terminal(.unableToComplete))
+        XCTAssertEqual(
+            capture(result: nil, executionFailure: nil).outcome(),
+            .noTerminalResult)
+        XCTAssertEqual(
+            capture(
+                result: .unableToComplete("synthetic unsupported request"),
+                executionFailure: "synthetic parser failure"
+            ).outcome(),
+            .evaluationError("synthetic parser failure"))
+        XCTAssertEqual(
+            capture(
+                result: .completed("done"),
+                executionFailure: nil
+            ).outcome(),
+            .terminal(.taskCompleted))
     }
 
     /// Runs one complete ordinary-language scenario against a bounded sequence
