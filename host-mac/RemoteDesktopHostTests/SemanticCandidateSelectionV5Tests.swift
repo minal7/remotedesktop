@@ -7,6 +7,7 @@ final class SemanticCandidateSelectionV5Tests: XCTestCase {
         XCTAssertEqual(SemanticCandidateSelectionV5.contractVersion, "5.0.0")
         XCTAssertEqual(SemanticCandidateSelectionV5.modelAlias,
                        "semantic-router-v2")
+        XCTAssertEqual(SemanticCandidateSelectionV5.maximumInputTokens, 2_816)
         XCTAssertEqual(SemanticCandidateSelectionV5.maximumTokens, 96)
         XCTAssertEqual(SemanticCandidateSelectionV5.temperature, 0)
         XCTAssertEqual(SemanticCandidateSelectionV5.inferenceSeed, 0)
@@ -356,6 +357,154 @@ final class SemanticCandidateSelectionV5Tests: XCTestCase {
         }
     }
 
+    func testAppleFoundationCandidateProposerDelegatesWithoutEffects()
+        async throws {
+        let request = routingRequest()
+        let recorder = SemanticCandidateRouterRecorder()
+        let proposer = AppleFoundationSemanticActionCandidateProposer(
+            router: SemanticCandidateRouterStub(
+                reportedAvailability: .available,
+                route: sampleRoutes[0],
+                recorder: recorder),
+            caseIDProvider: { "runtime.test-case" })
+
+        XCTAssertEqual(proposer.availability(), .available)
+        let proposal = try await proposer.proposeCandidates(for: request)
+        XCTAssertEqual(proposal.caseID, "runtime.test-case")
+        XCTAssertEqual(proposal.routes, [sampleRoutes[0]])
+        XCTAssertEqual(proposal.seed,
+                       SemanticCandidateSelectionV5.defaultCandidateSeed)
+        XCTAssertEqual(proposal.permutationIndex, 0)
+        let recordedRequests = await recorder.recordedRequests()
+        XCTAssertEqual(recordedRequests, [request])
+
+        let unavailableRecorder = SemanticCandidateRouterRecorder()
+        let unavailable = AppleFoundationSemanticActionCandidateProposer(
+            router: SemanticCandidateRouterStub(
+                reportedAvailability: .unavailable(.modelNotReady),
+                route: sampleRoutes[0],
+                recorder: unavailableRecorder),
+            caseIDProvider: { "runtime.unused" })
+        do {
+            _ = try await unavailable.proposeCandidates(for: request)
+            XCTFail("An unavailable Foundation model must not propose")
+        } catch let error as AppleFoundationVisualActionRouterError {
+            XCTAssertEqual(error, .unavailable(.modelNotReady))
+        }
+        let unavailableRequests = await unavailableRecorder.recordedRequests()
+        XCTAssertTrue(unavailableRequests.isEmpty)
+    }
+
+    func testLlamaCandidateSelectorUsesFrozenRequestAndRuntimeBoundary()
+        async throws {
+        let request = routingRequest()
+        let candidates = try OSAtlasSemanticActionCandidateSet.deterministic(
+            caseID: "runtime.selector",
+            routes: [sampleRoutes[0], sampleRoutes[2]])
+        let chosen = try XCTUnwrap(candidates.candidates.first {
+            $0.productionRouteName == "normal_click"
+        })
+        let runtime = SemanticCandidateCompleterSpy(
+            behavior: .response(try candidateCompletion(
+                candidateID: chosen.candidateID)))
+        let endpoint = OSAtlasLlamaEndpoint(
+            generation: 17,
+            variant: .pro4B,
+            baseURL: URL(string: "http://127.0.0.1:49152")!,
+            bearerToken: "test-token")
+        let selector = LlamaSemanticActionCandidateSelector(
+            runtime: runtime,
+            endpoint: endpoint)
+
+        XCTAssertEqual(selector.availability(), .available)
+        let selection = try await selector.selectCandidate(
+            for: request,
+            from: candidates)
+        XCTAssertEqual(
+            selection,
+            .candidateID(chosen.candidateID))
+
+        let invocations = await runtime.recordedInvocations()
+        let invocation = try XCTUnwrap(invocations.only)
+        XCTAssertEqual(invocation.endpoint, endpoint)
+        XCTAssertEqual(
+            invocation.maximumInputTokens,
+            SemanticCandidateSelectionV5.maximumInputTokens)
+        let semanticRequest = try XCTUnwrap(
+            invocation.candidateRequests.only)
+        XCTAssertEqual(semanticRequest.maxTokens,
+                       SemanticCandidateSelectionV5.maximumTokens)
+        XCTAssertEqual(semanticRequest.messages, [
+            .init(
+                role: .system,
+                content: SemanticCandidateSelectionV5.systemPrompt),
+            .init(
+                role: .user,
+                content: try SemanticCandidateSelectionV5.userPrompt(
+                    for: request,
+                    candidates: candidates)),
+        ])
+        XCTAssertEqual(
+            semanticRequest.tools.map(\.name),
+            ["choose_candidate", "abstain"])
+        XCTAssertEqual(
+            semanticRequest,
+            try LlamaSemanticActionCandidateSelector.semanticRequest(
+                for: request,
+                candidates: candidates))
+    }
+
+    func testLiveCandidateAdaptersComposeAndSelectorFailuresFailClosed()
+        async throws {
+        let request = routingRequest()
+        let route = sampleRoutes[0]
+        let candidates = try OSAtlasSemanticActionCandidateSet.deterministic(
+            caseID: "runtime.composed",
+            routes: [route])
+        let chosenID = try XCTUnwrap(candidates.candidates.first?.candidateID)
+        let endpoint = OSAtlasLlamaEndpoint(
+            generation: 23,
+            variant: .pro4B,
+            baseURL: URL(string: "http://127.0.0.1:49153")!,
+            bearerToken: "test-token")
+        let runtime = SemanticCandidateCompleterSpy(
+            behavior: .response(try candidateCompletion(
+                candidateID: chosenID)))
+        let router = CandidateSelectingSemanticActionRouter(
+            proposer: AppleFoundationSemanticActionCandidateProposer(
+                router: SemanticCandidateRouterStub(
+                    reportedAvailability: .available,
+                    route: route,
+                    recorder: SemanticCandidateRouterRecorder()),
+                caseIDProvider: { "runtime.composed" }),
+            selector: LlamaSemanticActionCandidateSelector(
+                runtime: runtime,
+                endpoint: endpoint))
+        let selectedRoute = try await router.route(request)
+        XCTAssertEqual(selectedRoute, route)
+
+        for behavior in [
+            SemanticCandidateCompleterSpy.Behavior.failure,
+            .cancellation,
+        ] {
+            let failingSelector = LlamaSemanticActionCandidateSelector(
+                runtime: SemanticCandidateCompleterSpy(behavior: behavior),
+                endpoint: endpoint)
+            do {
+                _ = try await failingSelector.selectCandidate(
+                    for: request,
+                    from: candidates)
+                XCTFail("A failed selector runtime must fail closed")
+            } catch let error as AppleFoundationVisualActionRouterError {
+                XCTAssertEqual(
+                    error,
+                    behavior == .cancellation
+                        ? .cancelled
+                        : .generationFailed)
+            }
+        }
+    }
+
     private var sampleRoutes: [OSAtlasSemanticActionRoute] {
         [
             .init(
@@ -397,6 +546,31 @@ final class SemanticCandidateSelectionV5Tests: XCTestCase {
         }
     }
 
+    private func candidateCompletion(candidateID: String) throws -> Data {
+        try MCPDigest.canonicalData(for: .object([
+            "choices": .array([
+                .object([
+                    "message": .object([
+                        "role": .string("assistant"),
+                        "content": .null,
+                        "tool_calls": .array([
+                            .object([
+                                "type": .string("function"),
+                                "function": .object([
+                                    "name": .string("choose_candidate"),
+                                    "arguments": .object([
+                                        "candidate_id": .string(candidateID),
+                                    ]),
+                                ]),
+                            ]),
+                        ]),
+                    ]),
+                    "finish_reason": .string("tool_calls"),
+                ]),
+            ]),
+        ]))
+    }
+
     private struct Pair: Equatable {
         let first: String
         let second: String
@@ -410,5 +584,87 @@ final class SemanticCandidateSelectionV5Tests: XCTestCase {
             self.first = first
             self.second = second
         }
+    }
+}
+
+private actor SemanticCandidateRouterRecorder {
+    private var requests: [OSAtlasSemanticRoutingRequest] = []
+
+    func record(_ request: OSAtlasSemanticRoutingRequest) {
+        requests.append(request)
+    }
+
+    func recordedRequests() -> [OSAtlasSemanticRoutingRequest] {
+        requests
+    }
+}
+
+private struct SemanticCandidateRouterStub: OSAtlasSemanticActionRouting {
+    let reportedAvailability: AppleFoundationMCPPlannerAvailability
+    let route: OSAtlasSemanticActionRoute
+    let recorder: SemanticCandidateRouterRecorder
+
+    func availability() -> AppleFoundationMCPPlannerAvailability {
+        reportedAvailability
+    }
+
+    func route(
+        _ request: OSAtlasSemanticRoutingRequest
+    ) async throws -> OSAtlasSemanticActionRoute {
+        await recorder.record(request)
+        return route
+    }
+}
+
+private actor SemanticCandidateCompleterSpy:
+    OSAtlasLlamaSemanticCompleting {
+    enum Behavior: Equatable, Sendable {
+        case response(Data)
+        case failure
+        case cancellation
+    }
+
+    struct Invocation: Equatable, Sendable {
+        let endpoint: OSAtlasLlamaEndpoint
+        let candidateRequests: [OSAtlasLlamaSemanticRequest]
+        let maximumInputTokens: Int
+    }
+
+    private let behavior: Behavior
+    private var invocations: [Invocation] = []
+
+    init(behavior: Behavior) {
+        self.behavior = behavior
+    }
+
+    func completeSemantic(
+        endpoint: OSAtlasLlamaEndpoint,
+        candidateRequests: [OSAtlasLlamaSemanticRequest],
+        maximumInputTokens: Int
+    ) async throws -> Data {
+        invocations.append(Invocation(
+            endpoint: endpoint,
+            candidateRequests: candidateRequests,
+            maximumInputTokens: maximumInputTokens))
+        switch behavior {
+        case .response(let data):
+            return data
+        case .failure:
+            throw SemanticCandidateCompleterFailure()
+        case .cancellation:
+            throw CancellationError()
+        }
+    }
+
+    func recordedInvocations() -> [Invocation] {
+        invocations
+    }
+}
+
+private struct SemanticCandidateCompleterFailure: Error {}
+
+private extension Array {
+    var only: Element? {
+        count == 1 ? self[0] : nil
     }
 }

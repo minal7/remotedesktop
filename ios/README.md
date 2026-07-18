@@ -32,9 +32,51 @@ service includes container `iCloud.com.threadmark.remotedesktop`.
 
 CloudKit environments follow the build configuration on Simulator and physical
 devices: **Debug talks to Development** and **Release talks to Production**.
-Pair a Debug iOS build with a Debug Mac host. To connect Simulator to the
-officially distributed Mac host, edit the iOS scheme's Run action to use the
-Release configuration, then run it again.
+Never mix those configurations: a Debug client cannot discover a Release host
+because they use different CloudKit databases.
+
+The final acceptance pair is always a **Release macOS host + Release iPhone Air
+Simulator + Production CloudKit**. Install the Release host (the default), then
+build and install the ordinary iOS app scheme explicitly in Release with the
+exact booted iPhone Air UDID:
+
+```sh
+host-mac/scripts/install_host.sh --headless --launch
+
+SIMULATOR_UDID='<booted iPhone Air UDID>'
+xcodebuild build \
+  -project ios/RemoteDesktop.xcodeproj \
+  -scheme RemoteDesktop \
+  -configuration Release \
+  -destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" \
+  -derivedDataPath ios/build/paired-release
+xcrun simctl install "$SIMULATOR_UDID" \
+  ios/build/paired-release/Build/Products/Release-iphonesimulator/RemoteDesktop.app
+xcrun simctl launch "$SIMULATOR_UDID" com.threadmark.remotedesktop.client
+```
+
+Use Debug/Debug only for local diagnostics. The Codex Run entrypoint defaults
+to Release; select the shared diagnostic configuration once rather than setting
+separate sides:
+
+```sh
+REMOTE_DESKTOP_APPLE_CONFIGURATION=Debug ./script/build_and_run.sh --verify
+xcodebuild test \
+  -project ios/RemoteDesktop.xcodeproj \
+  -scheme RemoteDesktop \
+  -configuration Debug \
+  -destination "platform=iOS Simulator,id=${SIMULATOR_UDID}"
+```
+
+`script/build_and_run.sh` rejects differing
+`REMOTE_DESKTOP_HOST_CONFIGURATION` and
+`REMOTE_DESKTOP_IOS_CONFIGURATION` values. The interactive Release live runner
+also reads the macOS bundle's signed entitlements and the iOS build's exact
+generated `RemoteDesktop.app-Simulated.xcent`; it refuses to start UI when
+either side is not Production or contains Debug/XCTest payloads.
+After verifying its replacement bundle, the Run entrypoint stops the exact
+installed `/Applications` host before launching the workspace host, so only one
+same-bundle host advertises at a time.
 
 Choose the configured development team and use Xcode's normal **Run** action;
 do not install a build produced with `CODE_SIGNING_ALLOWED=NO`, because CloudKit

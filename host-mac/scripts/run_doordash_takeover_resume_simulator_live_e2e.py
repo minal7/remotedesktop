@@ -50,6 +50,11 @@ XCTEST_LIVE_ENVIRONMENT = {
     "RUN_OSATLAS_DOORDASH_TAKEOVER_RESUME_SIMULATOR_E2E": "1",
 }
 REQUIRED_SIMULATOR_NAME = "iPhone Air"
+REQUIRED_CLOUDKIT_ENVIRONMENT = "Production"
+REQUIRED_CLOUDKIT_CONTAINER = "iCloud.com.threadmark.remotedesktop"
+REQUIRED_IOS_APPLICATION_IDENTIFIER = (
+    "V9AX39SPJD.com.threadmark.remotedesktop.client"
+)
 
 XCTESTRUN_TARGET_NAME = "RemoteDesktopLiveE2ETests"
 RESULT_TEST_IDENTIFIER = (
@@ -135,6 +140,7 @@ class RunnerPaths:
     )
     xcodebuild: pathlib.Path = pathlib.Path("/usr/bin/xcodebuild")
     xcrun: pathlib.Path = pathlib.Path("/usr/bin/xcrun")
+    codesign: pathlib.Path = pathlib.Path("/usr/bin/codesign")
     ps: pathlib.Path = pathlib.Path("/bin/ps")
     result_directory: pathlib.Path = pathlib.Path(tempfile.gettempdir())
 
@@ -275,6 +281,7 @@ class DoorDashLiveRunner:
                 "build the private Release UI-test products",
                 environment=environment,
             )
+            self._verify_release_client_product(derived_data)
             private_xctestrun = self._prepare_private_xctestrun(derived_data)
             try:
                 arguments = self._test_without_building_arguments(
@@ -385,6 +392,182 @@ class DoorDashLiveRunner:
             raise RunnerError(
                 "The running app is not the current Release build product. Reinstall with "
                 "host-mac/scripts/install_host.sh --headless --launch, then restart it once."
+            )
+        self._verify_production_cloudkit_entitlements(
+            self.paths.installed_app,
+            product="installed Release macOS host",
+        )
+        self._reject_debug_payloads(
+            self.paths.installed_app,
+            product="installed Release macOS host",
+        )
+
+    def _verify_release_client_product(
+        self,
+        derived_data: pathlib.Path,
+    ) -> None:
+        app = (
+            derived_data
+            / "Build/Products/Release-iphonesimulator/RemoteDesktop.app"
+        )
+        executable = app / "RemoteDesktop"
+        if not executable.is_file() or not os.access(executable, os.X_OK):
+            raise RunnerError(
+                "The Release build did not produce the exact iPhone Simulator "
+                f"client executable: {executable}"
+            )
+        info = app / "Info.plist"
+        try:
+            with info.open("rb") as handle:
+                info_contents = plistlib.load(handle)
+        except (OSError, plistlib.InvalidFileException) as error:
+            raise RunnerError(
+                f"Could not validate the Release iOS client bundle: {error}"
+            ) from error
+        if not isinstance(info_contents, dict):
+            raise RunnerError(
+                "The Release iOS client Info.plist was not a dictionary."
+            )
+        bundle_identifier = info_contents.get("CFBundleIdentifier")
+        if bundle_identifier != "com.threadmark.remotedesktop.client":
+            raise RunnerError(
+                "The Release iOS client has an unexpected bundle identifier: "
+                f"{bundle_identifier!r}"
+            )
+        self._verify_release_simulator_xcent(derived_data)
+        self._reject_debug_payloads(
+            app,
+            product="Release iPhone Air Simulator client",
+        )
+
+    def _verify_release_simulator_xcent(
+        self,
+        derived_data: pathlib.Path,
+    ) -> None:
+        relative_xcent = pathlib.Path(
+            "Build/Intermediates.noindex/RemoteDesktop.build"
+            "/Release-iphonesimulator/RemoteDesktop.build"
+            "/RemoteDesktop.app-Simulated.xcent"
+        )
+        xcent = derived_data / relative_xcent
+        try:
+            canonical_derived_data = derived_data.resolve(strict=True)
+            canonical_xcent = xcent.resolve(strict=True)
+        except OSError as error:
+            raise RunnerError(
+                "The Release iPhone Simulator build omitted its exact generated "
+                f"Simulated.xcent: {error}"
+            ) from error
+        if xcent.is_symlink() \
+                or canonical_xcent != canonical_derived_data / relative_xcent:
+            raise RunnerError(
+                "The Release iPhone Simulator Simulated.xcent must be a physical "
+                f"file at its exact private-build path: {xcent}"
+            )
+        try:
+            canonical_xcent.relative_to(canonical_derived_data)
+        except ValueError as error:
+            raise RunnerError(
+                "The Release iPhone Simulator Simulated.xcent escaped private "
+                "DerivedData."
+            ) from error
+        if not xcent.is_file():
+            raise RunnerError(
+                "The Release iPhone Simulator Simulated.xcent is not a regular file."
+            )
+        try:
+            with xcent.open("rb") as handle:
+                entitlements = plistlib.load(handle)
+        except (OSError, plistlib.InvalidFileException) as error:
+            raise RunnerError(
+                f"Could not parse the Release iPhone Simulator Simulated.xcent: {error}"
+            ) from error
+        if not isinstance(entitlements, dict):
+            raise RunnerError(
+                "The Release iPhone Simulator Simulated.xcent was not a dictionary."
+            )
+        if entitlements.get("application-identifier") \
+                != REQUIRED_IOS_APPLICATION_IDENTIFIER:
+            raise RunnerError(
+                "The Release iPhone Simulator Simulated.xcent belongs to an "
+                "unexpected application identity."
+            )
+        if entitlements.get("get-task-allow") not in (None, False):
+            raise RunnerError(
+                "The Release iPhone Simulator Simulated.xcent unexpectedly enables "
+                "get-task-allow."
+            )
+        self._verify_production_cloudkit_values(
+            entitlements,
+            product="Release iPhone Air Simulator client",
+        )
+
+    def _verify_production_cloudkit_entitlements(
+        self,
+        app: pathlib.Path,
+        *,
+        product: str,
+        environment: Mapping[str, str] | None = None,
+    ) -> None:
+        completed = self._run_checked(
+            [
+                str(self.paths.codesign),
+                "-d",
+                "--entitlements",
+                ":-",
+                str(app),
+            ],
+            f"inspect {product} CloudKit entitlements",
+            environment=environment,
+        )
+        try:
+            entitlements = plistlib.loads(completed.stdout.encode("utf-8"))
+        except (UnicodeError, plistlib.InvalidFileException) as error:
+            raise RunnerError(
+                f"Could not parse {product} CloudKit entitlements: {error}"
+            ) from error
+        if not isinstance(entitlements, dict):
+            raise RunnerError(f"{product} entitlements were not a dictionary.")
+        self._verify_production_cloudkit_values(
+            entitlements,
+            product=product,
+        )
+
+    @staticmethod
+    def _verify_production_cloudkit_values(
+        entitlements: Mapping[str, Any],
+        *,
+        product: str,
+    ) -> None:
+        expected: dict[str, Any] = {
+            "com.apple.developer.icloud-container-environment":
+                REQUIRED_CLOUDKIT_ENVIRONMENT,
+            "com.apple.developer.icloud-container-identifiers":
+                [REQUIRED_CLOUDKIT_CONTAINER],
+            "com.apple.developer.icloud-services": ["CloudKit"],
+        }
+        actual = {key: entitlements.get(key) for key in expected}
+        if actual != expected:
+            raise RunnerError(
+                f"Refusing mixed or non-production Apple products: {product} "
+                f"must use {REQUIRED_CLOUDKIT_ENVIRONMENT} CloudKit with the "
+                f"reviewed container; found {actual!r}."
+            )
+
+    @staticmethod
+    def _reject_debug_payloads(app: pathlib.Path, *, product: str) -> None:
+        debug_payloads = sorted(
+            path for path in app.rglob("*")
+            if path.is_file()
+            and (
+                path.name.endswith(".debug.dylib")
+                or "XCTest" in path.name
+            )
+        )
+        if debug_payloads:
+            raise RunnerError(
+                f"Refusing {product} with Debug/XCTest payload: "
+                f"{debug_payloads[0]}"
             )
 
     def _verify_host_is_running(self) -> None:

@@ -167,6 +167,13 @@ jobs:
         working-directory: ios
         run: xcodegen generate
 
+      - name: Validate paired Apple CloudKit configurations
+        run: |
+          set -euo pipefail
+
+          ./script/verify_apple_configuration_pair.sh Debug Debug
+          ./script/verify_apple_configuration_pair.sh Release Release
+
       - name: Run deterministic Computer Use harness tests
         run: python3 -m unittest discover -s host-mac/scripts/tests -p 'test_*.py'
 
@@ -199,7 +206,7 @@ jobs:
           )"
           echo "udid=$simulator_udid" >> "$GITHUB_OUTPUT"
 
-      - name: Run iOS client unit tests
+      - name: Run Debug iOS diagnostic unit tests
         run: |
           set -euo pipefail
 
@@ -378,7 +385,7 @@ jobs:
           security default-keychain -s "$keychain_path"
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain_path"
 
-      - name: Run macOS host and deterministic Computer Use tests
+      - name: Run Debug macOS diagnostic Computer Use tests
         env:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |

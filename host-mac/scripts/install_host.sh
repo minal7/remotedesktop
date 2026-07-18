@@ -17,7 +17,7 @@ Usage:
   install_host.sh [options]
 
 Options:
-  --debug                       Build Debug instead of Release.
+  --debug                       Build a diagnostic Debug host; pair only with Debug iOS.
   --skip-build                  Install the existing build product.
   --install-dir PATH            Install directory. Default: /Applications.
   --launch                      Launch the installed host after installing.
@@ -33,6 +33,8 @@ For a screenless developer Mac mini, use:
 
 Plain SSH cannot grant every required macOS TCC permission. Use
 --ssh-permission-report for the exact breakdown.
+Final acceptance uses the default Release host with a Release iPhone Air
+Simulator; both resolve to Production CloudKit.
 USAGE
 }
 
@@ -86,6 +88,21 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+shared_configuration="${REMOTE_DESKTOP_APPLE_CONFIGURATION:-$configuration}"
+declared_host_configuration="${REMOTE_DESKTOP_HOST_CONFIGURATION:-$shared_configuration}"
+declared_ios_configuration="${REMOTE_DESKTOP_IOS_CONFIGURATION:-$shared_configuration}"
+if [[ "$configuration" != "$shared_configuration" \
+      || "$configuration" != "$declared_host_configuration" \
+      || "$configuration" != "$declared_ios_configuration" ]]; then
+  echo "Refusing mixed Apple configurations: installer=$configuration, shared=$shared_configuration, macOS=$declared_host_configuration, iOS=$declared_ios_configuration." >&2
+  echo "Use Release/Release for Production acceptance or Debug/Debug for diagnostics." >&2
+  exit 2
+fi
+case "$configuration" in
+  Debug) expected_cloudkit_environment="Development" ;;
+  Release) expected_cloudkit_environment="Production" ;;
+esac
+
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 host_dir="$(cd "$script_dir/.." && pwd)"
 derived_data="$host_dir/build/DerivedData"
@@ -93,8 +110,97 @@ app_name="RemoteDesktopHost.app"
 built_app="$derived_data/Build/Products/$configuration/$app_name"
 installed_app="$install_dir/$app_name"
 executable="$installed_app/Contents/MacOS/RemoteDesktopHost"
+installed_runtime="$installed_app/Contents/Resources/ComputerUseRuntime/llama-b9992/llama-server"
 bundle_id="com.threadmark.remotedesktop.host"
 pairing_code_file="$HOME/Library/Application Support/RemoteDesktopHost/pairing-code.txt"
+
+matching_process_ids() {
+  local expected_executable="$1"
+  /bin/ps -axo pid=,comm= | while read -r process_id process_executable; do
+    if [[ "$process_executable" == "$expected_executable" ]]; then
+      echo "$process_id"
+    fi
+  done
+}
+
+terminate_exact_processes() {
+  local process_executable="$1"
+  local label="$2"
+  local process_ids
+  process_ids="$(matching_process_ids "$process_executable")"
+  [[ -n "$process_ids" ]] || return 0
+
+  while read -r process_id; do
+    [[ -n "$process_id" ]] || continue
+    /bin/kill -TERM "$process_id" >/dev/null 2>&1 || true
+  done <<< "$process_ids"
+
+  for _ in {1..40}; do
+    [[ -z "$(matching_process_ids "$process_executable")" ]] && return 0
+    /bin/sleep 0.25
+  done
+
+  process_ids="$(matching_process_ids "$process_executable")"
+  while read -r process_id; do
+    [[ -n "$process_id" ]] || continue
+    /bin/kill -KILL "$process_id" >/dev/null 2>&1 || true
+  done <<< "$process_ids"
+  for _ in {1..20}; do
+    [[ -z "$(matching_process_ids "$process_executable")" ]] && return 0
+    /bin/sleep 0.1
+  done
+  echo "Could not stop the previous $label safely." >&2
+  return 1
+}
+
+verify_cloudkit_configuration() {
+  local entitlements
+  local actual_environment
+  local actual_container
+  local extra_container
+  local actual_service
+  local extra_service
+  entitlements="$(/usr/bin/mktemp -t remotedesktop-install-entitlements)"
+  if ! /usr/bin/codesign -d --entitlements :- "$built_app" \
+      >"$entitlements" 2>/dev/null; then
+    /bin/rm -f "$entitlements"
+    echo "Could not read CloudKit entitlements from $built_app" >&2
+    return 1
+  fi
+
+  actual_environment="$(/usr/libexec/PlistBuddy \
+    -c 'Print :com.apple.developer.icloud-container-environment' \
+    "$entitlements" 2>/dev/null || true)"
+  actual_container="$(/usr/libexec/PlistBuddy \
+    -c 'Print :com.apple.developer.icloud-container-identifiers:0' \
+    "$entitlements" 2>/dev/null || true)"
+  extra_container="$(/usr/libexec/PlistBuddy \
+    -c 'Print :com.apple.developer.icloud-container-identifiers:1' \
+    "$entitlements" 2>/dev/null || true)"
+  actual_service="$(/usr/libexec/PlistBuddy \
+    -c 'Print :com.apple.developer.icloud-services:0' \
+    "$entitlements" 2>/dev/null || true)"
+  extra_service="$(/usr/libexec/PlistBuddy \
+    -c 'Print :com.apple.developer.icloud-services:1' \
+    "$entitlements" 2>/dev/null || true)"
+  /bin/rm -f "$entitlements"
+
+  if [[ "$actual_environment" != "$expected_cloudkit_environment" \
+        || "$actual_container" != "iCloud.com.threadmark.remotedesktop" \
+        || -n "$extra_container" \
+        || "$actual_service" != "CloudKit" \
+        || -n "$extra_service" ]]; then
+    echo "Refusing $configuration host with unreviewed CloudKit entitlements: environment='$actual_environment', container='$actual_container', service='$actual_service'." >&2
+    return 1
+  fi
+  if [[ "$configuration" == "Release" ]] \
+      && /usr/bin/find "$built_app/Contents" -type f \
+          \( -name '*.debug.dylib' -o -name '*XCTest*' \) \
+          -print -quit | /usr/bin/grep -q .; then
+    echo "Refusing a Release host that contains a Debug/XCTest payload: $built_app" >&2
+    return 1
+  fi
+}
 
 if [[ "$skip_build" -eq 0 ]]; then
   if command -v xcodegen >/dev/null 2>&1; then
@@ -115,6 +221,13 @@ if [[ ! -d "$built_app" ]]; then
 fi
 
 "$script_dir/verify_host_bundle_trust.sh" "$built_app"
+verify_cloudkit_configuration
+
+# The replacement bundle has already passed trust verification. Stop only the
+# exact installed executable image and its exact packaged runtime before
+# replacing files, so launch can never leave an older same-bundle process alive.
+terminate_exact_processes "$executable" "installed Remote Desktop Host"
+terminate_exact_processes "$installed_runtime" "installed local AI runtime"
 
 mkdir -p "$install_dir"
 if [[ -d "$installed_app" ]]; then

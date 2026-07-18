@@ -83,6 +83,13 @@ class FakeExecutor:
         attachment_payloads: dict[str, bytes] | None = None,
         attachment_export_return_code: int = 0,
         direct_result_payloads: dict[str, bytes] | None = None,
+        host_cloudkit_environment: str = "Production",
+        client_cloudkit_environment: str = "Production",
+        client_debug_payload: bool = False,
+        client_application_identifier: str = (
+            runner_module.REQUIRED_IOS_APPLICATION_IDENTIFIER
+        ),
+        generate_client_xcent: bool = True,
     ) -> None:
         self.paths = paths
         self.process_return_code = process_return_code
@@ -133,6 +140,11 @@ class FakeExecutor:
         )
         self.attachment_export_return_code = attachment_export_return_code
         self.direct_result_payloads = direct_result_payloads or {}
+        self.host_cloudkit_environment = host_cloudkit_environment
+        self.client_cloudkit_environment = client_cloudkit_environment
+        self.client_debug_payload = client_debug_payload
+        self.client_application_identifier = client_application_identifier
+        self.generate_client_xcent = generate_client_xcent
         self.run_calls: list[list[str]] = []
         self.run_environments: list[dict[str, str] | None] = []
         self.popen_calls: list[tuple[list[str], dict[str, str]]] = []
@@ -212,6 +224,37 @@ class FakeExecutor:
             return subprocess.CompletedProcess(
                 arguments, 0, json.dumps(self.permissions), ""
             )
+        if arguments[0:4] == [
+            str(self.paths.codesign),
+            "-d",
+            "--entitlements",
+            ":-",
+        ]:
+            app = pathlib.Path(arguments[4])
+            # Release Simulator products are ad-hoc signed and expose an empty
+            # signed entitlement plist. Any attempt to validate the client by
+            # calling codesign is therefore a test failure masked by the fake.
+            if app != self.paths.installed_app:
+                return subprocess.CompletedProcess(
+                    arguments,
+                    0,
+                    plistlib.dumps({}).decode("utf-8"),
+                    "",
+                )
+            entitlements = {
+                "com.apple.developer.icloud-container-environment":
+                    self.host_cloudkit_environment,
+                "com.apple.developer.icloud-container-identifiers": [
+                    runner_module.REQUIRED_CLOUDKIT_CONTAINER,
+                ],
+                "com.apple.developer.icloud-services": ["CloudKit"],
+            }
+            return subprocess.CompletedProcess(
+                arguments,
+                0,
+                plistlib.dumps(entitlements).decode("utf-8"),
+                "",
+            )
         if (
             arguments[0] == str(self.paths.xcodebuild)
             and len(arguments) > 1
@@ -223,6 +266,45 @@ class FakeExecutor:
                 )
                 products = derived_data / "Build/Products"
                 products.mkdir(parents=True, exist_ok=True)
+                client_app = products / "Release-iphonesimulator/RemoteDesktop.app"
+                client_executable = client_app / "RemoteDesktop"
+                client_executable.parent.mkdir(parents=True, exist_ok=True)
+                client_executable.write_bytes(b"release-ios-client")
+                client_executable.chmod(0o755)
+                with (client_app / "Info.plist").open("wb") as handle:
+                    plistlib.dump(
+                        {
+                            "CFBundleIdentifier":
+                                "com.threadmark.remotedesktop.client",
+                        },
+                        handle,
+                    )
+                if self.client_debug_payload:
+                    (client_app / "RemoteDesktop.debug.dylib").write_bytes(
+                        b"debug"
+                    )
+                if self.generate_client_xcent:
+                    xcent = (
+                        derived_data
+                        / "Build/Intermediates.noindex/RemoteDesktop.build"
+                        / "Release-iphonesimulator/RemoteDesktop.build"
+                        / "RemoteDesktop.app-Simulated.xcent"
+                    )
+                    xcent.parent.mkdir(parents=True, exist_ok=True)
+                    with xcent.open("wb") as handle:
+                        plistlib.dump(
+                            {
+                                "application-identifier":
+                                    self.client_application_identifier,
+                                "com.apple.developer.icloud-container-environment":
+                                    self.client_cloudkit_environment,
+                                "com.apple.developer.icloud-container-identifiers": [
+                                    runner_module.REQUIRED_CLOUDKIT_CONTAINER,
+                                ],
+                                "com.apple.developer.icloud-services": ["CloudKit"],
+                            },
+                            handle,
+                        )
                 for index in range(self.generated_xctestrun_count):
                     path = products / (
                         f"{runner_module.SCHEME}_iphonesimulator26.5-arm64"
@@ -380,6 +462,7 @@ class DoorDashLiveRunnerTests(unittest.TestCase):
             release_app=release_app,
             xcodebuild=pathlib.Path("/test/bin/xcodebuild"),
             xcrun=pathlib.Path("/test/bin/xcrun"),
+            codesign=pathlib.Path("/test/bin/codesign"),
             ps=pathlib.Path("/test/bin/ps"),
             result_directory=root / "results",
         )
@@ -729,6 +812,98 @@ class DoorDashLiveRunnerTests(unittest.TestCase):
 
         self.assertEqual(executor.run_calls, [])
         self.assertEqual(executor.popen_calls, [])
+
+    def test_release_host_must_have_production_cloudkit_entitlements(self) -> None:
+        executor = FakeExecutor(
+            self.paths,
+            host_cloudkit_environment="Development",
+        )
+        runner, _, _ = self.make_runner(executor)
+
+        with self.assertRaisesRegex(
+            runner_module.RunnerError,
+            "mixed or non-production Apple products",
+        ):
+            runner.run()
+
+        self.assertFalse(any(
+            call[0:2] == [str(self.paths.xcodebuild), "build-for-testing"]
+            for call in executor.run_calls
+        ))
+        self.assertEqual(executor.popen_calls, [])
+
+    def test_release_client_must_match_host_production_configuration(self) -> None:
+        executor = FakeExecutor(
+            self.paths,
+            client_cloudkit_environment="Development",
+        )
+        runner, _, _ = self.make_runner(executor)
+
+        with self.assertRaisesRegex(
+            runner_module.RunnerError,
+            "mixed or non-production Apple products",
+        ):
+            runner.run()
+
+        self.assertTrue(any(
+            call[0:2] == [str(self.paths.xcodebuild), "build-for-testing"]
+            for call in executor.run_calls
+        ))
+        self.assertEqual(executor.popen_calls, [])
+        self.assert_private_workspace_cleaned()
+
+    def test_release_simulator_uses_exact_generated_xcent_not_empty_codesign(self) -> None:
+        executor = FakeExecutor(self.paths)
+        runner, _, stderr = self.make_runner(executor)
+
+        self.assertEqual(runner.run(), 0, stderr.getvalue())
+
+        codesign_apps = [
+            pathlib.Path(call[4])
+            for call in executor.run_calls
+            if call[0:4] == [
+                str(self.paths.codesign),
+                "-d",
+                "--entitlements",
+                ":-",
+            ]
+        ]
+        self.assertEqual(codesign_apps, [self.paths.installed_app])
+
+    def test_release_simulator_xcent_identity_and_presence_fail_closed(self) -> None:
+        cases = [
+            (
+                {"client_application_identifier": "OTHER.client"},
+                "unexpected application identity",
+            ),
+            (
+                {"generate_client_xcent": False},
+                "omitted its exact generated Simulated.xcent",
+            ),
+        ]
+        for options, expected in cases:
+            with self.subTest(expected=expected):
+                executor = FakeExecutor(self.paths, **options)
+                runner, _, _ = self.make_runner(executor)
+
+                with self.assertRaisesRegex(runner_module.RunnerError, expected):
+                    runner.run()
+
+                self.assertEqual(executor.popen_calls, [])
+                self.assert_private_workspace_cleaned()
+
+    def test_release_client_rejects_debug_payload_before_ui_launch(self) -> None:
+        executor = FakeExecutor(self.paths, client_debug_payload=True)
+        runner, _, _ = self.make_runner(executor)
+
+        with self.assertRaisesRegex(
+            runner_module.RunnerError,
+            "Debug/XCTest payload",
+        ):
+            runner.run()
+
+        self.assertEqual(executor.popen_calls, [])
+        self.assert_private_workspace_cleaned()
 
     def test_host_must_be_running_from_installed_path_in_listening_mode(self) -> None:
         executor = FakeExecutor(self.paths, host_running=False)

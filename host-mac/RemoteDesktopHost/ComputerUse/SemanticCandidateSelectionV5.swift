@@ -24,6 +24,9 @@ enum SemanticCandidateSelectionV5 {
     static let minimumCandidateCount = 1
     static let maximumCandidateCount = 8
     static let maximumResponseBytes = 4 * 1_024 * 1_024
+    /// Mirrors the reviewed 3,072-token V5 sequence cap while reserving the
+    /// evaluator's required 256-token completion/headroom boundary.
+    static let maximumInputTokens = 2_816
     static let maximumTokens = 96
     static let temperature = 0
     static let inferenceSeed = 0
@@ -738,6 +741,20 @@ protocol OSAtlasSemanticActionCandidateSelecting: Sendable {
     ) async throws -> OSAtlasSemanticCandidateSelection
 }
 
+/// Narrow runtime surface used by the schema-5 selector. The production
+/// actor and unit-test doubles share this boundary without exposing model
+/// lifecycle, installation, or visual inference controls to candidate
+/// selection.
+protocol OSAtlasLlamaSemanticCompleting: Sendable {
+    func completeSemantic(
+        endpoint: OSAtlasLlamaEndpoint,
+        candidateRequests: [OSAtlasLlamaSemanticRequest],
+        maximumInputTokens: Int
+    ) async throws -> Data
+}
+
+extension OSAtlasLlamaRuntime: OSAtlasLlamaSemanticCompleting {}
+
 /// Default schema-5 host binder. It rejects unoffered directives and ensures
 /// visible-fact candidates cite exact current evidence before assigning IDs.
 struct Schema5HostSemanticActionCandidateCompiler:
@@ -771,6 +788,128 @@ struct Schema5HostSemanticActionCandidateCompiler:
             routes: proposal.routes,
             seed: proposal.seed,
             permutationIndex: proposal.permutationIndex)
+    }
+}
+
+/// Effect-free production proposer backed by Apple's existing on-device
+/// semantic router. The Apple model can author one typed proposal, but it has
+/// no executor or input surface; schema-5 still binds that route to an opaque
+/// candidate before the learned selector can accept it or abstain.
+struct AppleFoundationSemanticActionCandidateProposer:
+    OSAtlasSemanticActionCandidateProposing {
+    typealias CaseIDProvider = @Sendable () -> String
+
+    private let router: any OSAtlasSemanticActionRouting
+    private let caseIDProvider: CaseIDProvider
+
+    init(
+        router: any OSAtlasSemanticActionRouting =
+            AppleFoundationVisualActionRouter(),
+        caseIDProvider: @escaping CaseIDProvider = {
+            "runtime.\(UUID().uuidString.lowercased())"
+        }
+    ) {
+        self.router = router
+        self.caseIDProvider = caseIDProvider
+    }
+
+    func availability() -> AppleFoundationMCPPlannerAvailability {
+        router.availability()
+    }
+
+    func proposeCandidates(
+        for request: OSAtlasSemanticRoutingRequest
+    ) async throws -> OSAtlasSemanticActionCandidateProposal {
+        try Task.checkCancellation()
+        try SemanticCandidateSelectionV5.validateRequest(request)
+        if case .unavailable(let reason) = availability() {
+            throw AppleFoundationVisualActionRouterError.unavailable(reason)
+        }
+        let route = try await router.route(request)
+        try Task.checkCancellation()
+        return OSAtlasSemanticActionCandidateProposal(
+            caseID: caseIDProvider(),
+            routes: [route])
+    }
+}
+
+/// Endpoint-bound schema-5 selector using the existing owned llama.cpp
+/// runtime. It sends only the frozen candidate-selection prompt and its two
+/// closed tools, then strictly resolves the returned opaque ID. The runtime's
+/// currently served model alias remains unchanged until a sealed V5 artifact
+/// is approved and installed by the separate production composition change.
+struct LlamaSemanticActionCandidateSelector:
+    OSAtlasSemanticActionCandidateSelecting {
+    private let runtime: any OSAtlasLlamaSemanticCompleting
+    private let endpoint: OSAtlasLlamaEndpoint
+
+    init(
+        runtime: any OSAtlasLlamaSemanticCompleting,
+        endpoint: OSAtlasLlamaEndpoint
+    ) {
+        self.runtime = runtime
+        self.endpoint = endpoint
+    }
+
+    func availability() -> AppleFoundationMCPPlannerAvailability {
+        .available
+    }
+
+    func selectCandidate(
+        for request: OSAtlasSemanticRoutingRequest,
+        from candidates: OSAtlasSemanticActionCandidateSet
+    ) async throws -> OSAtlasSemanticCandidateSelection {
+        do {
+            try Task.checkCancellation()
+            let semanticRequest = try Self.semanticRequest(
+                for: request,
+                candidates: candidates)
+            let response = try await runtime.completeSemantic(
+                endpoint: endpoint,
+                candidateRequests: [semanticRequest],
+                maximumInputTokens:
+                    SemanticCandidateSelectionV5.maximumInputTokens)
+            try Task.checkCancellation()
+            return try SemanticCandidateSelectionV5.parseResponse(
+                response,
+                offered: candidates)
+        } catch is CancellationError {
+            throw AppleFoundationVisualActionRouterError.cancelled
+        } catch let error as AppleFoundationVisualActionRouterError {
+            throw error
+        } catch let error as SemanticCandidateSelectionV5Error {
+            throw error
+        } catch {
+            throw AppleFoundationVisualActionRouterError.generationFailed
+        }
+    }
+
+    static func semanticRequest(
+        for request: OSAtlasSemanticRoutingRequest,
+        candidates: OSAtlasSemanticActionCandidateSet
+    ) throws -> OSAtlasLlamaSemanticRequest {
+        let tools = try SemanticCandidateSelectionV5
+            .toolDefinitions(for: candidates)
+            .map { definition in
+                OSAtlasLlamaSemanticTool(
+                    name: definition.name,
+                    description: definition.description,
+                    parameters: try LlamaSemanticActionRouter.llamaJSON(
+                        definition.inputSchema))
+            }
+        return OSAtlasLlamaSemanticRequest(
+            messages: [
+                .init(
+                    role: .system,
+                    content: SemanticCandidateSelectionV5.systemPrompt),
+                .init(
+                    role: .user,
+                    content: try SemanticCandidateSelectionV5.userPrompt(
+                        for: request,
+                        candidates: candidates)),
+            ],
+            tools: tools,
+            maxTokens: SemanticCandidateSelectionV5.maximumTokens)
     }
 }
 

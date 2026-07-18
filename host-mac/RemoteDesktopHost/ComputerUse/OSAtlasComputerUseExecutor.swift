@@ -4702,6 +4702,149 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
         return nil
     }
 
+    /// Dormant schema-5 boundary. The eventual V5 composition switch must
+    /// call this function on raw executor history, before the legacy V4
+    /// six-entry compactor above. Current production deliberately continues
+    /// to use `semanticRoutingHistory` until the sealed artifact is approved.
+    static func semanticRoutingHistoryV5(_ history: [String]) -> [String] {
+        let limit = OSAtlasSemanticRoutingRequest.maximumHistoryEntries
+        let canonical = history.enumerated().compactMap { index, entry in
+            canonicalV5RoutingHistoryEntry(for: entry).map {
+                (index: index, value: $0)
+            }
+        }
+        guard canonical.count > limit else {
+            return canonical.map(\.value)
+        }
+
+        var selected: [Int: String] = [:]
+        // The latest three reviewed effects are never displaced by older
+        // persistent TYPE/CLICK/scroll markers.
+        for entry in canonical.suffix(min(3, limit)) {
+            selected[entry.index] = entry.value
+        }
+        // App switches, shortcuts, and Return carry workflow state that a
+        // learned next-step selector needs more than an older pointer marker.
+        for entry in canonical.reversed()
+            where selected.count < limit
+                && isV5SemanticPriorityHistoryEntry(entry.value) {
+            selected[entry.index] = entry.value
+        }
+
+        var seenPersistent: Set<String> = []
+        for entry in canonical.reversed() where selected.count < limit {
+            guard let marker = persistentV5RoutingHistoryMarker(
+                for: entry.value),
+                  seenPersistent.insert(marker).inserted else {
+                continue
+            }
+            selected[entry.index] = marker
+        }
+        for entry in canonical.reversed() where selected.count < limit {
+            if selected[entry.index] == nil {
+                selected[entry.index] = entry.value
+            }
+        }
+        return selected.keys.sorted().compactMap { selected[$0] }
+    }
+
+    private static func canonicalV5RoutingHistoryEntry(
+        for entry: String
+    ) -> String? {
+        if entry == "TYPE" || entry.hasPrefix("TYPE [") {
+            return "TYPE"
+        }
+        if entry == "CLICK" || entry.hasPrefix("CLICK [[")
+            || entry == "DOUBLE_CLICK" || entry.hasPrefix("DOUBLE_CLICK [[")
+            || entry == "RIGHT_CLICK" || entry.hasPrefix("RIGHT_CLICK [[")
+            || entry == "DRAG" || entry.hasPrefix("DRAG [[") {
+            return "CLICK"
+        }
+        if entry == "ENTER" { return entry }
+        for direction in [
+            OSAtlasScrollDirection.up,
+            .down,
+            .left,
+            .right,
+        ] {
+            let marker = "SCROLL [\(direction.rawValue)]"
+            if entry == marker { return marker }
+        }
+        let openApplicationPrefix = "OPEN_APP ["
+        if entry.hasPrefix(openApplicationPrefix), entry.hasSuffix("]") {
+            let inner = entry.dropFirst(openApplicationPrefix.count).dropLast()
+            guard !inner.isEmpty,
+                  inner.unicodeScalars.allSatisfy({ scalar in
+                      scalar != "[" && scalar != "]"
+                          && !CharacterSet.controlCharacters.contains(scalar)
+                          && !CharacterSet.newlines.contains(scalar)
+                  }) else {
+                return nil
+            }
+            let canonical = ComputerUsePromptSanitizer.inline(
+                entry,
+                maximumUTF8Bytes:
+                    OSAtlasSemanticRoutingRequest.maximumHistoryEntryBytes)
+            return canonical.hasSuffix("]") ? canonical : nil
+        }
+        let hotkeyPrefix = "HOTKEY ["
+        if entry.hasPrefix(hotkeyPrefix), entry.hasSuffix("]") {
+            let value = String(entry.dropFirst(hotkeyPrefix.count).dropLast())
+            let aliases = [
+                "CMD": "COMMAND", "META": "COMMAND", "SUPER": "COMMAND",
+                "ALT": "OPTION", "CTRL": "CONTROL", "RETURN": "ENTER",
+                "ESC": "ESCAPE",
+            ]
+            let components = value
+                .split(separator: "+", omittingEmptySubsequences: false)
+                .map {
+                    String($0).trimmingCharacters(
+                        in: .whitespacesAndNewlines).uppercased()
+                }
+                .map { aliases[$0] ?? $0 }
+            let modifiers: Set<String> = [
+                "COMMAND", "OPTION", "CONTROL", "SHIFT",
+            ]
+            let modifierParts = components.filter(modifiers.contains)
+            let keyParts = components.filter { !modifiers.contains($0) }
+            guard !components.contains(""),
+                  !modifierParts.isEmpty,
+                  Set(modifierParts).count == modifierParts.count,
+                  keyParts.count == 1,
+                  (try? hotkey((modifierParts + keyParts)
+                    .joined(separator: "+"))) != nil else {
+                return nil
+            }
+            let normalized = (modifierParts + keyParts)
+                .joined(separator: "+")
+            return "HOTKEY [\(normalized)]"
+        }
+        // WAIT records observations rather than completed host effects. ASK,
+        // COMPLETE, and REPORT terminate execution before another route. Any
+        // other value is an unreviewed marker and must not enter schema 5.
+        return nil
+    }
+
+    private static func persistentV5RoutingHistoryMarker(
+        for canonicalEntry: String
+    ) -> String? {
+        if canonicalEntry == "TYPE" || canonicalEntry == "CLICK" {
+            return canonicalEntry
+        }
+        if canonicalEntry.hasPrefix("SCROLL [") {
+            return canonicalEntry
+        }
+        return nil
+    }
+
+    private static func isV5SemanticPriorityHistoryEntry(
+        _ canonicalEntry: String
+    ) -> Bool {
+        canonicalEntry == "ENTER"
+            || canonicalEntry.hasPrefix("OPEN_APP [")
+            || canonicalEntry.hasPrefix("HOTKEY [")
+    }
+
     static func boundedVisibleText(from image: CIImage) throws -> String {
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate

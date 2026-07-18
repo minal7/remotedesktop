@@ -402,7 +402,7 @@ struct LlamaSemanticActionRouter: OSAtlasSemanticActionRouting {
         }
     }
 
-    private static func llamaJSON(
+    static func llamaJSON(
         _ value: MCPJSONValue
     ) throws -> OSAtlasLlamaJSONValue {
         switch value {
