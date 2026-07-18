@@ -740,9 +740,10 @@ enum SemanticNativeToolWireContract {
 }
 
 /// Runs the Apple router first so its deterministic host routes remain usable
-/// even when Apple Intelligence reports unavailable. The fallback is invoked
-/// only when Apple routing itself throws `.unavailable`; malformed output,
-/// multiple/no routes, generation failures, and cancellation are propagated.
+/// even when Apple Intelligence reports unavailable. An effect-free Apple
+/// outage, empty route, or generation failure gets exactly one attempt through
+/// the strict local fallback. Invalid requests, multiple routes, and
+/// cancellation are integrity/lifecycle failures and are always propagated.
 struct AppleFirstSemanticActionRouter: OSAtlasSemanticActionRouting {
     private let appleRouter: any OSAtlasSemanticActionRouting
     private let fallbackRouter: any OSAtlasSemanticActionRouting
@@ -771,7 +772,10 @@ struct AppleFirstSemanticActionRouter: OSAtlasSemanticActionRouting {
         do {
             return try await appleRouter.route(request)
         } catch let error as AppleFoundationVisualActionRouterError {
-            guard case .unavailable = error else {
+            switch error {
+            case .unavailable, .noRoute, .generationFailed:
+                break
+            case .invalidRequest, .multipleRoutes, .cancelled:
                 throw error
             }
         }

@@ -405,27 +405,47 @@ final class SemanticNativeToolWireContractTests: XCTestCase {
         }
     }
 
-    func testAppleFirstRouterFallsBackOnlyAfterAppleUnavailable() async throws {
+    func testAppleFirstRouterFallsBackOnceAfterEveryRecoverableAppleFailure()
+        async throws {
         let request = productionRequest()
-        let appleUnavailable = SemanticRouterStub(
-            availability: .unavailable(.modelNotReady),
-            handler: { _ in
-                throw AppleFoundationVisualActionRouterError.unavailable(
-                    .modelNotReady)
-            })
+        let recoverableErrors: [AppleFoundationVisualActionRouterError] = [
+            .unavailable(.modelNotReady),
+            .noRoute,
+            .generationFailed,
+        ]
+        for expected in recoverableErrors {
+            let fallbackCalls = SemanticRouterCallCounter()
+            let apple = SemanticRouterStub(
+                availability: expected == .unavailable(.modelNotReady)
+                    ? .unavailable(.modelNotReady) : .available,
+                handler: { _ in throw expected })
+            let fallback = SemanticRouterStub(
+                availability: .available,
+                handler: { _ in
+                    await fallbackCalls.record()
+                    return .init(directive: .wait)
+                })
+            let router = AppleFirstSemanticActionRouter(
+                fallbackRouter: fallback,
+                appleRouter: apple)
+
+            XCTAssertEqual(router.availability(), .available)
+            let fallbackRoute = try await router.route(request)
+            let fallbackCallCount = await fallbackCalls.value()
+            XCTAssertEqual(fallbackRoute, .init(directive: .wait))
+            XCTAssertEqual(
+                fallbackCallCount,
+                1,
+                "\(expected) must receive exactly one fallback attempt")
+        }
+
+        let fallbackCalls = SemanticRouterCallCounter()
         let fallback = SemanticRouterStub(
             availability: .available,
-            handler: { _ in .init(directive: .wait) })
-        let router = AppleFirstSemanticActionRouter(
-            fallbackRouter: fallback,
-            appleRouter: appleUnavailable)
-
-        XCTAssertEqual(router.availability(), .available)
-        let fallbackRoute = try await router.route(request)
-        XCTAssertEqual(
-            fallbackRoute,
-            .init(directive: .wait))
-
+            handler: { _ in
+                await fallbackCalls.record()
+                return .init(directive: .wait)
+            })
         let deterministicApple = SemanticRouterStub(
             availability: .unavailable(.modelNotReady),
             handler: { _ in
@@ -442,18 +462,22 @@ final class SemanticNativeToolWireContractTests: XCTestCase {
             .init(
                 directive: .openApplication,
                 argument: .applicationName("Notes")))
+        let deterministicFallbackCallCount = await fallbackCalls.value()
+        XCTAssertEqual(deterministicFallbackCallCount, 0)
     }
 
     func testAppleFirstRouterPropagatesIntegrityAndCancellationErrors() async {
         let request = productionRequest()
+        let fallbackCalls = SemanticRouterCallCounter()
         let fallback = SemanticRouterStub(
             availability: .available,
-            handler: { _ in .init(directive: .wait) })
+            handler: { _ in
+                await fallbackCalls.record()
+                return .init(directive: .wait)
+            })
         let errors: [AppleFoundationVisualActionRouterError] = [
             .invalidRequest,
-            .noRoute,
             .multipleRoutes,
-            .generationFailed,
             .cancelled,
         ]
         for expected in errors {
@@ -472,6 +496,50 @@ final class SemanticNativeToolWireContractTests: XCTestCase {
                 XCTFail("Unexpected error: \(error)")
             }
         }
+        let fallbackCallCount = await fallbackCalls.value()
+        XCTAssertEqual(
+            fallbackCallCount,
+            0,
+            "Integrity and cancellation failures must never activate fallback")
+    }
+
+    func testAppleFirstRouterDoesNotFallbackAfterGenerationFailureWhenCancelled()
+        async {
+        let request = productionRequest()
+        let appleCalls = SemanticRouterCallCounter()
+        let fallbackCalls = SemanticRouterCallCounter()
+        let apple = SemanticRouterStub(
+            availability: .available,
+            handler: { _ in
+                await appleCalls.record()
+                throw AppleFoundationVisualActionRouterError.generationFailed
+            })
+        let fallback = SemanticRouterStub(
+            availability: .available,
+            handler: { _ in
+                await fallbackCalls.record()
+                return .init(directive: .wait)
+            })
+        let router = AppleFirstSemanticActionRouter(
+            fallbackRouter: fallback,
+            appleRouter: apple)
+        let routeTask = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await router.route(request)
+        }
+
+        do {
+            _ = try await routeTask.value
+            XCTFail("A pre-cancelled route must not activate fallback")
+        } catch let error as AppleFoundationVisualActionRouterError {
+            XCTAssertEqual(error, .cancelled)
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+        let appleCallCount = await appleCalls.value()
+        let fallbackCallCount = await fallbackCalls.value()
+        XCTAssertEqual(appleCallCount, 1)
+        XCTAssertEqual(fallbackCallCount, 0)
     }
 
     private var allProductionDirectives: [OSAtlasExplicitActionDirective] {
@@ -591,5 +659,17 @@ private struct SemanticRouterStub: OSAtlasSemanticActionRouting {
         _ request: OSAtlasSemanticRoutingRequest
     ) async throws -> OSAtlasSemanticActionRoute {
         try await handler(request)
+    }
+}
+
+private actor SemanticRouterCallCounter {
+    private var count = 0
+
+    func record() {
+        count += 1
+    }
+
+    func value() -> Int {
+        count
     }
 }
