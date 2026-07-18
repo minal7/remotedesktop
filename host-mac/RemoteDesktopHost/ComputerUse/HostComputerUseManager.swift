@@ -1481,6 +1481,67 @@ final class ComputerUseHostTools {
             accessibilityContext: accessibilityContext(for: action))
     }
 
+    /// Returns a human-facing label only when the point resolves to an
+    /// actionable Accessibility control. Missing labels deliberately remain
+    /// inconclusive for canvas and icon-only interfaces.
+    func actionablePointerTargetLabel(
+        at point: CGPoint,
+        providerAction: ComputerUsePredictedAction
+    ) -> String? {
+        if let accessibilityContextProvider {
+            return Self.actionableLabel(
+                fromProvidedContext: accessibilityContextProvider(
+                    providerAction))
+        }
+
+        let systemWide = AXUIElementCreateSystemWide()
+        var element: AXUIElement?
+        guard AXUIElementCopyElementAtPosition(
+            systemWide,
+            Float(point.x),
+            Float(point.y),
+            &element) == .success,
+              var current = element else { return nil }
+
+        for _ in 0 ..< 8 {
+            let snapshot = accessibilitySnapshot(for: current)
+            if snapshot.isActionable,
+               let label = snapshot.attestationLabel {
+                return label
+            }
+            guard let parent = parentElement(of: current) else { break }
+            current = parent
+        }
+        return nil
+    }
+
+    private static func actionableLabel(
+        fromProvidedContext context: String
+    ) -> String? {
+        let tokens = context.folding(
+            options: [.caseInsensitive, .diacriticInsensitive],
+            locale: Locale(identifier: "en_US_POSIX"))
+            .unicodeScalars
+            .split(whereSeparator: {
+                !CharacterSet.alphanumerics.contains($0)
+            })
+            .map(String.init)
+        let actionableRoles: Set<String> = [
+            "axbutton", "axcheckbox", "axradiobutton", "axpopupbutton",
+            "axcombobox", "axtextfield", "axtextarea", "axmenuitem",
+            "axslider", "axincrementor", "axlink", "axswitch", "axcell",
+        ]
+        guard !actionableRoles.isDisjoint(with: tokens) else { return nil }
+
+        let structuralValues = actionableRoles.union([
+            "role", "subrole", "title", "description", "placeholder",
+            "identifier", "enabled", "selected",
+        ])
+        let labelTokens = tokens.filter { !structuralValues.contains($0) }
+        guard !labelTokens.isEmpty else { return nil }
+        return labelTokens.joined(separator: " ")
+    }
+
     /// Correct only a primary single-click, and only when the model point lands
     /// on a non-actionable Accessibility container while one unique enabled
     /// control is visible within a tightly bounded neighborhood. This never
@@ -1563,6 +1624,7 @@ final class ComputerUseHostTools {
 
     private struct AccessibilitySnapshot {
         let summary: String
+        let attestationLabel: String?
         let identity: String
         let center: CGPoint?
         let frame: CGRect?
@@ -1988,6 +2050,18 @@ final class ComputerUseHostTools {
         }
         return AccessibilitySnapshot(
             summary: values.map(\.1).joined(separator: " • "),
+            attestationLabel: {
+                for attribute in [
+                    "title", "description", "placeholder", "help",
+                ] {
+                    if let value = values.first(where: {
+                        $0.0 == attribute
+                    })?.1 {
+                        return String(value.prefix(256))
+                    }
+                }
+                return nil
+            }(),
             identity: identity,
             center: center,
             frame: frame,

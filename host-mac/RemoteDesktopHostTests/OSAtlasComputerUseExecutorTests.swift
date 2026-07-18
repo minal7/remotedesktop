@@ -2183,6 +2183,29 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
         }
     }
 
+    func testPointerTargetAttestationTreatsInflectionsAndBenignSynonymsAsMatches() {
+        XCTAssertFalse(
+            OSAtlasComputerUseExecutor.pointerTargetLabelsClearlyMismatch(
+                expectedHint: "Download folder",
+                observedLabel: "Downloads"))
+        XCTAssertFalse(
+            OSAtlasComputerUseExecutor.pointerTargetLabelsClearlyMismatch(
+                expectedHint: "Continue",
+                observedLabel: "Proceed"))
+        XCTAssertTrue(
+            OSAtlasComputerUseExecutor.pointerTargetLabelsClearlyMismatch(
+                expectedHint: "Continue",
+                observedLabel: "Help"))
+        XCTAssertFalse(
+            OSAtlasComputerUseExecutor.pointerTargetLabelsClearlyMismatch(
+                expectedHint: "the buttons",
+                observedLabel: "Help"))
+        XCTAssertTrue(
+            OSAtlasComputerUseExecutor.pointerTargetLabelsClearlyMismatch(
+                expectedHint: "Save",
+                observedLabel: "Don't Save"))
+    }
+
     func testVisibleAnswerEvidenceIsSubstantiveStructuredAndTaskBound() throws {
         XCTAssertEqual(
             try OSAtlasComputerUseExecutor.verifiedVisibleAnswer(
@@ -4260,6 +4283,164 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
         let completionCount = await fixture.events.values()
             .filter { $0 == "complete" }.count
         XCTAssertEqual(completionCount, 1)
+    }
+
+    func testSemanticPointerAttestationRejectsContradictoryActionableLabelsBeforeInput()
+        async throws {
+        for (index, label) in ["Help", "Cancel"].enumerated() {
+            let fixture = makeCorrectionRuntime(
+                completionResponses: [response("CLICK [[500,500]]")],
+                port: UInt16(43_190 + index))
+            let router = StubSemanticActionRouter { _ in
+                OSAtlasSemanticActionRoute(
+                    directive: .click,
+                    argument: .targetHint("Continue"))
+            }
+            var performedActions: [ComputerUsePredictedAction] = []
+            let executor = OSAtlasComputerUseExecutor.makeForTesting(
+                inputs: fixture.inputs,
+                runtime: fixture.runtime,
+                semanticRouter: router,
+                maxSteps: 1)
+
+            do {
+                _ = try await executor.execute(
+                    prompt: "Click Continue.",
+                    tools: correctionTestTools(
+                        accessibilityContext: "AXButton • \(label)",
+                        actionPerformer: { performedActions.append($0) }),
+                    progress: { _ in })
+                XCTFail("A clearly mismatched \(label) button must be rejected")
+            } catch let error as OSAtlasComputerUseExecutor.RuntimeError {
+                XCTAssertEqual(
+                    error,
+                    .unsupportedAction("grounded-target-mismatch"),
+                    label)
+            } catch {
+                await fixture.runtime.shutdown()
+                throw error
+            }
+            await fixture.runtime.shutdown()
+            XCTAssertTrue(performedActions.isEmpty, label)
+        }
+    }
+
+    func testSemanticPointerAttestationPreservesMatchingAndUnlabeledControls()
+        async throws {
+        do {
+            let context = "AXButton • Continue"
+            let fixture = makeCorrectionRuntime(
+                completionResponses: [response("CLICK [[500,500]]")],
+                port: 43_192)
+            let router = StubSemanticActionRouter { _ in
+                OSAtlasSemanticActionRoute(
+                    directive: .click,
+                    argument: .targetHint("Continue"))
+            }
+            var performedActions: [ComputerUsePredictedAction] = []
+            let executor = OSAtlasComputerUseExecutor.makeForTesting(
+                inputs: fixture.inputs,
+                runtime: fixture.runtime,
+                semanticRouter: router,
+                maxSteps: 1)
+
+            do {
+                _ = try await executor.execute(
+                    prompt: "Click Continue.",
+                    tools: correctionTestTools(
+                        accessibilityContext: context,
+                        actionPerformer: { performedActions.append($0) }),
+                    progress: { _ in })
+                XCTFail("The one-step fixture should stop after its click")
+            } catch OSAtlasComputerUseExecutor.RuntimeError.stepLimit {
+                // Expected after one matching or inconclusive action.
+            } catch {
+                await fixture.runtime.shutdown()
+                throw error
+            }
+            await fixture.runtime.shutdown()
+            XCTAssertEqual(performedActions.count, 1, context)
+        }
+
+        let fixture = makeCorrectionRuntime(
+            completionResponses: [response("CLICK [[500,500]]")],
+            port: 43_193)
+        let router = StubSemanticActionRouter { _ in
+            OSAtlasSemanticActionRoute(
+                directive: .click,
+                argument: .targetHint("Continue"))
+        }
+        var performedActions: [ComputerUsePredictedAction] = []
+        let executor = OSAtlasComputerUseExecutor.makeForTesting(
+            inputs: fixture.inputs,
+            runtime: fixture.runtime,
+            semanticRouter: router,
+            maxSteps: 1)
+        let result: ComputerUseExecutionResult
+        do {
+            result = try await executor.execute(
+                prompt: "Click Continue.",
+                tools: correctionTestTools(
+                    accessibilityContext: "AXButton",
+                    actionPerformer: { performedActions.append($0) }),
+                progress: { _ in })
+        } catch {
+            await fixture.runtime.shutdown()
+            throw error
+        }
+        await fixture.runtime.shutdown()
+        guard case .approvalRequired = result else {
+            return XCTFail(
+                "An unlabeled control must retain the existing approval behavior")
+        }
+        XCTAssertTrue(performedActions.isEmpty)
+    }
+
+    func testSemanticPointerAttestationRejectsContradictoryOCRLabelBeforeInput()
+        async throws {
+        let observation = try OSAtlasAcceptanceFixtureRenderer
+            .everydayOperation(.calendar)
+        let ocrPoint = try XCTUnwrap(
+            OSAtlasComputerUseExecutor.uniqueVisibleTextGrounding(
+                targetHint: "Next week",
+                image: observation.image))
+        let fixture = makeCorrectionRuntime(
+            completionResponses: [
+                response("CLICK [[\(ocrPoint.0),\(ocrPoint.1)]]"),
+            ],
+            port: 43_194)
+        let router = StubSemanticActionRouter { _ in
+            OSAtlasSemanticActionRoute(
+                directive: .click,
+                argument: .targetHint("Help"))
+        }
+        var performedActions: [ComputerUsePredictedAction] = []
+        let executor = OSAtlasComputerUseExecutor.makeForTesting(
+            inputs: fixture.inputs,
+            runtime: fixture.runtime,
+            semanticRouter: router,
+            maxSteps: 1)
+
+        do {
+            _ = try await executor.execute(
+                prompt: "Click Help.",
+                tools: correctionTestTools(
+                    observation: observation,
+                    frontmostApplication: "Calendar",
+                    accessibilityContext: "AXGroup",
+                    actionPerformer: { performedActions.append($0) }),
+                progress: { _ in })
+            XCTFail("A contradictory OCR label must be rejected")
+        } catch let error as OSAtlasComputerUseExecutor.RuntimeError {
+            XCTAssertEqual(
+                error,
+                .unsupportedAction("grounded-target-mismatch"))
+        } catch {
+            await fixture.runtime.shutdown()
+            throw error
+        }
+        await fixture.runtime.shutdown()
+        XCTAssertTrue(performedActions.isEmpty)
     }
 
     func testSemanticPointerVerbIsHostOwnedWhenOSAtlasReturnsClickCarrier() async throws {

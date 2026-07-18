@@ -1422,6 +1422,17 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                 }
                 planningCapture = preApprovalCapture
                 observation = preApprovalCapture.observation
+                if let semanticRoute,
+                   try Self.groundedPointerTargetClearlyMismatches(
+                    route: semanticRoute,
+                    predicted: predicted,
+                    observation: observation,
+                    tools: tools) {
+                    Self.log.info(
+                        "Rejected a typed pointer route whose grounded target label did not match")
+                    throw RuntimeError.unsupportedAction(
+                        "grounded-target-mismatch")
+                }
                 if let reason = tools.approvalReason(for: predicted) {
                     return .approvalRequired(message: reason, action: predicted)
                 }
@@ -1657,6 +1668,186 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
         let best = matches.filter { $0.score == bestScore }
         guard best.count == 1 else { return nil }
         return best[0].point
+    }
+
+    /// Fails closed only when a typed pointer route and the final, adjusted
+    /// host point have clearly contradictory labels. Accessibility is the
+    /// preferred evidence; OCR is a conservative fallback for text rendered
+    /// inside custom controls. Missing or ambiguous evidence remains allowed.
+    private static func groundedPointerTargetClearlyMismatches(
+        route: OSAtlasSemanticActionRoute,
+        predicted: ComputerUsePredictedAction,
+        observation: ComputerUseScreenObservation,
+        tools: ComputerUseHostTools
+    ) throws -> Bool {
+        func targetClearlyMismatches(
+            hint: String,
+            x: Int,
+            y: Int,
+            providerAction: ComputerUsePredictedAction
+        ) throws -> Bool {
+            let point = CGPoint(x: x, y: y)
+            if let label = tools.actionablePointerTargetLabel(
+                at: point,
+                providerAction: providerAction) {
+                return pointerTargetLabelsClearlyMismatch(
+                    expectedHint: hint,
+                    observedLabel: label)
+            }
+            guard let label = try visibleTextLabel(
+                at: point,
+                observation: observation) else { return false }
+            return pointerTargetLabelsClearlyMismatch(
+                expectedHint: hint,
+                observedLabel: label)
+        }
+
+        switch (route.argument, predicted) {
+        case (.targetHint(let hint),
+              .click(let x, let y, _, _)):
+            return try targetClearlyMismatches(
+                hint: hint,
+                x: x,
+                y: y,
+                providerAction: predicted)
+        case (.dragHints(let source, let destination),
+              .drag(let fromX, let fromY, let toX, let toY)):
+            let sourceAction = ComputerUsePredictedAction.click(
+                x: fromX,
+                y: fromY,
+                button: 1,
+                count: 1)
+            if try targetClearlyMismatches(
+                hint: source,
+                x: fromX,
+                y: fromY,
+                providerAction: sourceAction) {
+                return true
+            }
+            let destinationAction = ComputerUsePredictedAction.click(
+                x: toX,
+                y: toY,
+                button: 1,
+                count: 1)
+            return try targetClearlyMismatches(
+                hint: destination,
+                x: toX,
+                y: toY,
+                providerAction: destinationAction)
+        default:
+            return false
+        }
+    }
+
+    private static func visibleTextLabel(
+        at point: CGPoint,
+        observation: ComputerUseScreenObservation
+    ) throws -> String? {
+        let bounds = observation.displayBounds
+        guard bounds.width > 0,
+              bounds.height > 0,
+              point.x >= bounds.minX,
+              point.x <= bounds.maxX,
+              point.y >= bounds.minY,
+              point.y <= bounds.maxY else { return nil }
+        let visionPoint = CGPoint(
+            x: (point.x - bounds.minX) / bounds.width,
+            y: 1 - (point.y - bounds.minY) / bounds.height)
+
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.usesLanguageCorrection = true
+        request.minimumTextHeight = 0.012
+        try VNImageRequestHandler(ciImage: observation.image, options: [:])
+            .perform([request])
+
+        var labels: [String] = []
+        for textObservation in request.results ?? [] {
+            guard textObservation.boundingBox.contains(visionPoint),
+                  let candidate = textObservation.topCandidates(1).first else {
+                continue
+            }
+            let label = candidate.string.trimmingCharacters(
+                in: .whitespacesAndNewlines)
+            guard !label.isEmpty else { continue }
+            labels.append(label)
+        }
+        guard labels.count == 1 else { return nil }
+        return labels[0]
+    }
+
+    static func pointerTargetLabelsClearlyMismatch(
+        expectedHint: String,
+        observedLabel: String
+    ) -> Bool {
+        let ignored: Set<String> = [
+            "a", "an", "the", "of", "to", "visible", "named", "called",
+            "button", "control", "item", "folder", "file", "card", "row",
+            "tab", "field", "label", "column", "center", "target",
+            "selected", "selection", "document", "role", "subrole",
+            "title", "description", "placeholder", "identifier", "enabled",
+            "axbutton", "axcheckbox", "axradiobutton", "axpopupbutton",
+            "axcombobox", "axtextfield", "axtextarea", "axmenuitem",
+            "axslider", "axincrementor", "axlink", "axswitch", "axcell",
+        ]
+        let equivalences: [String: String] = [
+            "continue": "continue", "proceed": "continue",
+            "next": "continue", "forward": "continue",
+            "cancel": "cancel", "close": "cancel", "dismiss": "cancel",
+            "back": "cancel",
+            "confirm": "confirm", "ok": "confirm", "okay": "confirm",
+            "done": "confirm", "finish": "confirm",
+            "delete": "delete", "remove": "delete", "trash": "delete",
+            "save": "save", "apply": "save",
+        ]
+        func canonicalToken(_ token: String) -> String {
+            if let equivalent = equivalences[token] { return equivalent }
+            if token.count > 4, token.hasSuffix("ies") {
+                return String(token.dropLast(3)) + "y"
+            }
+            if token.count > 3,
+               token.hasSuffix("s"),
+               !["as", "is", "ss", "us", "ws"].contains(where: {
+                   token.hasSuffix($0)
+               }) {
+                let singular = String(token.dropLast())
+                return equivalences[singular] ?? singular
+            }
+            return token
+        }
+        func evidenceTokens(_ value: String) -> Set<String> {
+            Set(groundingTokens(value).map(canonicalToken).filter {
+                !ignored.contains($0)
+            })
+        }
+        let expected = evidenceTokens(expectedHint)
+        let observed = evidenceTokens(observedLabel)
+        guard !expected.isEmpty, !observed.isEmpty else { return false }
+
+        let rawExpected = Set(groundingTokens(expectedHint))
+        let rawObserved = Set(groundingTokens(observedLabel))
+        let opposingDirections: [(Set<String>, Set<String>)] = [
+            (["next", "forward"], ["previous", "prior", "back", "last"]),
+            (["left"], ["right"]),
+            (["up", "above"], ["down", "below"]),
+        ]
+        if opposingDirections.contains(where: { pair in
+            (!pair.0.isDisjoint(with: rawExpected)
+                && !pair.1.isDisjoint(with: rawObserved))
+                || (!pair.1.isDisjoint(with: rawExpected)
+                    && !pair.0.isDisjoint(with: rawObserved))
+        }) {
+            return true
+        }
+        func isNegated(_ tokens: Set<String>) -> Bool {
+            !tokens.isDisjoint(with: ["no", "not", "never", "dont"])
+                || (tokens.contains("don") && tokens.contains("t"))
+        }
+        if isNegated(rawExpected) != isNegated(rawObserved),
+           !expected.isDisjoint(with: observed) {
+            return true
+        }
+        return expected.isDisjoint(with: observed)
     }
 
     private static func groundingTokens(_ value: String) -> [String] {
