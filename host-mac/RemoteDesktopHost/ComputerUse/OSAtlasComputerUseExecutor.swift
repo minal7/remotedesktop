@@ -541,11 +541,14 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
     private let semanticRouter: (any OSAtlasSemanticActionRouting)?
     private let semanticRouterModelURL: URL?
     private let appleSemanticRouter: (any OSAtlasSemanticActionRouting)?
+    private let semanticCandidateRequestObserver:
+        OSAtlasSemanticCandidateRequestObserver?
     private let allowsExplicitActionCompatibility: Bool
     private let maxSteps: Int
     private let actionDelay: Duration
     private let waitDelay: Duration
     private let parsedActionObserver: ((OSAtlasGUIAction) -> Void)?
+    private let rawVisualGroundingPointObserver: ((Int, Int) -> Void)?
     private let actionTokenObserver: ((String) -> Void)?
     private let modelResponseObserver: ((String) -> Void)?
 
@@ -557,11 +560,14 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
         semanticRouter: (any OSAtlasSemanticActionRouting)?,
         semanticRouterModelURL: URL? = nil,
         appleSemanticRouter: (any OSAtlasSemanticActionRouting)? = nil,
+        semanticCandidateRequestObserver:
+            OSAtlasSemanticCandidateRequestObserver? = nil,
         allowsExplicitActionCompatibility: Bool,
         maxSteps: Int,
         actionDelay: Duration,
         waitDelay: Duration,
         parsedActionObserver: ((OSAtlasGUIAction) -> Void)? = nil,
+        rawVisualGroundingPointObserver: ((Int, Int) -> Void)? = nil,
         actionTokenObserver: ((String) -> Void)? = nil,
         modelResponseObserver: ((String) -> Void)? = nil
     ) {
@@ -572,12 +578,16 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
         self.semanticRouter = semanticRouter
         self.semanticRouterModelURL = semanticRouterModelURL
         self.appleSemanticRouter = appleSemanticRouter
+        self.semanticCandidateRequestObserver =
+            semanticCandidateRequestObserver
         self.allowsExplicitActionCompatibility =
             allowsExplicitActionCompatibility
         self.maxSteps = maxSteps
         self.actionDelay = actionDelay
         self.waitDelay = waitDelay
         self.parsedActionObserver = parsedActionObserver
+        self.rawVisualGroundingPointObserver =
+            rawVisualGroundingPointObserver
         self.actionTokenObserver = actionTokenObserver
         self.modelResponseObserver = modelResponseObserver
     }
@@ -623,6 +633,9 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
         actionContract: OSAtlasActionContract = .macOS,
         appleSemanticRouter: any OSAtlasSemanticActionRouting =
             AppleFoundationVisualActionRouter(),
+        semanticCandidateRequestObserver:
+            OSAtlasSemanticCandidateRequestObserver? = nil,
+        rawVisualGroundingPointObserver: ((Int, Int) -> Void)? = nil,
         progress: @escaping @MainActor (String) -> Void
     ) async throws -> OSAtlasComputerUseExecutor {
         guard installation.visualInputs.variant == .pro4B else {
@@ -641,10 +654,14 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
             semanticRouter: nil,
             semanticRouterModelURL: installation.semanticRouterModelURL,
             appleSemanticRouter: appleSemanticRouter,
+            semanticCandidateRequestObserver:
+                semanticCandidateRequestObserver,
             allowsExplicitActionCompatibility: false,
             maxSteps: maximumSteps,
             actionDelay: .milliseconds(700),
-            waitDelay: .seconds(1))
+            waitDelay: .seconds(1),
+            rawVisualGroundingPointObserver:
+                rawVisualGroundingPointObserver)
     }
 
     static func makeForTesting(
@@ -658,6 +675,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
         actionDelay: Duration = .zero,
         waitDelay: Duration = .zero,
         parsedActionObserver: ((OSAtlasGUIAction) -> Void)? = nil,
+        rawVisualGroundingPointObserver: ((Int, Int) -> Void)? = nil,
         actionTokenObserver: ((String) -> Void)? = nil,
         modelResponseObserver: ((String) -> Void)? = nil
     ) -> OSAtlasComputerUseExecutor {
@@ -673,8 +691,42 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
             actionDelay: actionDelay,
             waitDelay: waitDelay,
             parsedActionObserver: parsedActionObserver,
+            rawVisualGroundingPointObserver:
+                rawVisualGroundingPointObserver,
             actionTokenObserver: actionTokenObserver,
             modelResponseObserver: modelResponseObserver)
+    }
+
+    /// Constructs the no-effect semantic composition that exactly matches the
+    /// application-owned alias's frozen contract. Production still serves the
+    /// V4 contract today, so this refactor preserves current behavior. The V5
+    /// branch is staged here so a future, reviewed alias/contract switch cannot
+    /// accidentally retain the V4 Apple-first fallback or bypass the host-owned
+    /// candidate compiler.
+    static func semanticActionRouter(
+        for servedContract: OSAtlasLlamaSemanticContract,
+        runtime: OSAtlasLlamaRuntime,
+        endpoint: OSAtlasLlamaEndpoint,
+        appleRouter: any OSAtlasSemanticActionRouting,
+        semanticCandidateRequestObserver:
+            OSAtlasSemanticCandidateRequestObserver? = nil
+    ) -> any OSAtlasSemanticActionRouting {
+        switch servedContract {
+        case .nativeRoutingV4:
+            return AppleFirstSemanticActionRouter(
+                fallbackRouter: LlamaSemanticActionRouter(
+                    runtime: runtime,
+                    endpoint: endpoint),
+                appleRouter: appleRouter)
+        case .candidateSelectionV5:
+            return CandidateSelectingSemanticActionRouter(
+                proposer: AppleFoundationSemanticActionCandidateProposer(
+                    router: appleRouter),
+                selector: LlamaSemanticActionCandidateSelector(
+                    runtime: runtime,
+                    endpoint: endpoint,
+                    requestObserver: semanticCandidateRequestObserver))
+        }
     }
 
     func execute(
@@ -742,13 +794,18 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
             endpoint = try await runtime.activateMultiModel(
                 visualInputs: inputs,
                 semanticModelURL: semanticRouterModelURL)
-            let fallbackRouter = LlamaSemanticActionRouter(
+            guard let servedContract = OSAtlasLlamaServedModel
+                    .semanticRouter.semanticContract else {
+                throw OSAtlasLlamaRuntimeError.invalidLocalInstallation
+            }
+            executionSemanticRouter = Self.semanticActionRouter(
+                for: servedContract,
                 runtime: runtime,
-                endpoint: endpoint)
-            executionSemanticRouter = AppleFirstSemanticActionRouter(
-                fallbackRouter: fallbackRouter,
+                endpoint: endpoint,
                 appleRouter: appleSemanticRouter
-                    ?? AppleFoundationVisualActionRouter())
+                    ?? AppleFoundationVisualActionRouter(),
+                semanticCandidateRequestObserver:
+                    semanticCandidateRequestObserver)
         } else {
             endpoint = try await runtime.activate(inputs)
             executionSemanticRouter = semanticRouter
@@ -1618,6 +1675,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
             throw RuntimeError.unsupportedAction(
                 "visual-point-grounding")
         }
+        rawVisualGroundingPointObserver?(x, y)
         if let textPoint = try? Self.uniqueVisibleTextGrounding(
             targetHint: hint,
             image: observation.image) {

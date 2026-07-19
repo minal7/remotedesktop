@@ -44,6 +44,39 @@ final class SemanticCandidateSelectionV5Tests: XCTestCase {
             "83c253a7d838a9dad941b3bff1e61cd0f0317a7df2b927acdbca8cf37f98b86c")
     }
 
+    @MainActor
+    func testContractBoundFactoryStagesV5WithoutChangingCurrentV4Activation() {
+        XCTAssertEqual(
+            OSAtlasLlamaServedModel.semanticRouter.rawValue,
+            "semantic-router-v1")
+        XCTAssertEqual(
+            OSAtlasLlamaServedModel.semanticRouter.semanticContract,
+            .nativeRoutingV4)
+
+        let runtime = OSAtlasLlamaRuntime()
+        let endpoint = OSAtlasLlamaEndpoint(
+            generation: 1,
+            variant: .pro4B,
+            baseURL: URL(string: "http://127.0.0.1:49152")!,
+            bearerToken: "test-token")
+        let appleRouter = AppleFoundationVisualActionRouter(
+            availabilityProvider: { .unavailable(.modelNotReady) })
+
+        let v4 = OSAtlasComputerUseExecutor.semanticActionRouter(
+            for: .nativeRoutingV4,
+            runtime: runtime,
+            endpoint: endpoint,
+            appleRouter: appleRouter)
+        let v5 = OSAtlasComputerUseExecutor.semanticActionRouter(
+            for: .candidateSelectionV5,
+            runtime: runtime,
+            endpoint: endpoint,
+            appleRouter: appleRouter)
+
+        XCTAssertTrue(v4 is AppleFirstSemanticActionRouter)
+        XCTAssertTrue(v5 is CandidateSelectingSemanticActionRouter)
+    }
+
     func testDeterministicOpaqueIDsAndPermutationMirrorPythonV5() throws {
         let routes = sampleRoutes
         let candidates = try OSAtlasSemanticActionCandidateSet.deterministic(
@@ -561,9 +594,13 @@ final class SemanticCandidateSelectionV5Tests: XCTestCase {
             variant: .pro4B,
             baseURL: URL(string: "http://127.0.0.1:49152")!,
             bearerToken: "test-token")
+        let requestRecorder = SemanticCandidateRequestRecorder()
         let selector = LlamaSemanticActionCandidateSelector(
             runtime: runtime,
-            endpoint: endpoint)
+            endpoint: endpoint,
+            requestObserver: { request in
+                await requestRecorder.record(request)
+            })
 
         XCTAssertEqual(selector.availability(), .available)
         let selection = try await selector.selectCandidate(
@@ -581,6 +618,10 @@ final class SemanticCandidateSelectionV5Tests: XCTestCase {
             SemanticCandidateSelectionV5.maximumInputTokens)
         let semanticRequest = try XCTUnwrap(
             invocation.candidateRequests.only)
+        let observedRequests = await requestRecorder.recordedRequests()
+        XCTAssertEqual(
+            observedRequests,
+            [semanticRequest])
         XCTAssertEqual(semanticRequest.contract, .candidateSelectionV5)
         XCTAssertTrue(semanticRequest.matchesFrozenShape(
             for: .candidateSelectionV5))
@@ -825,6 +866,18 @@ private actor SemanticCandidateRouterRecorder {
     }
 
     func recordedRequests() -> [OSAtlasSemanticRoutingRequest] {
+        requests
+    }
+}
+
+private actor SemanticCandidateRequestRecorder {
+    private var requests: [OSAtlasLlamaSemanticRequest] = []
+
+    func record(_ request: OSAtlasLlamaSemanticRequest) {
+        requests.append(request)
+    }
+
+    func recordedRequests() -> [OSAtlasLlamaSemanticRequest] {
         requests
     }
 }

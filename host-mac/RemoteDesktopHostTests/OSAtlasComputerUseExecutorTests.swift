@@ -3507,6 +3507,7 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
             "Purchase these groceries for delivery.",
             "Place an order for these groceries.",
             "Click Place Order.",
+            "Click Place Order now.",
             "Click Purchase.",
         ]
         for (index, prompt) in affirmativePrompts.enumerated() {
@@ -3556,6 +3557,31 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
                 1,
                 "Authorized purchase intent needs one grounding call: \(prompt)")
         }
+    }
+
+    func testFinalV5AcceptancePromptRequiresAppleFoundationGeneration() {
+        let task = "Click Place Order now."
+        let visibleText = """
+        AXButton
+        Place Order
+        final purchase confirmation
+        """
+
+        XCTAssertNotNil(
+            AppleFoundationVisualActionRouter.deterministicFollowupRoute(
+                for: "Order these groceries for delivery.",
+                visibleText: visibleText,
+                history: [],
+                availableDirectives: [.click, .complete]),
+            "The regression control must exercise the old deterministic purchase shortcut")
+
+        XCTAssertNil(
+            AppleFoundationVisualActionRouter.deterministicFollowupRoute(
+                for: task,
+                visibleText: visibleText,
+                history: [],
+                availableDirectives: [.click, .complete]),
+            "The final V5 gate must not be satisfiable by an Apple-router deterministic shortcut")
     }
 
     func testPurchaseTargetRequiresAffirmativeIntentBeforeGrounding()
@@ -4480,13 +4506,17 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
                 argument: .targetHint("next week"))
         }
         var parsedActions: [OSAtlasGUIAction] = []
+        var rawGroundingPoints: [(Int, Int)] = []
         var performedActions: [ComputerUsePredictedAction] = []
         let executor = OSAtlasComputerUseExecutor.makeForTesting(
             inputs: fixture.inputs,
             runtime: fixture.runtime,
             semanticRouter: router,
             maxSteps: 1,
-            parsedActionObserver: { parsedActions.append($0) })
+            parsedActionObserver: { parsedActions.append($0) },
+            rawVisualGroundingPointObserver: { x, y in
+                rawGroundingPoints.append((x, y))
+            })
 
         do {
             _ = try await executor.execute(
@@ -4508,6 +4538,9 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
             .click(x: 250, y: 750),
             .click(x: 250, y: 750),
         ])
+        XCTAssertEqual(rawGroundingPoints.count, 1)
+        XCTAssertEqual(rawGroundingPoints.first?.0, 250)
+        XCTAssertEqual(rawGroundingPoints.first?.1, 750)
         XCTAssertEqual(performedActions.count, 1)
         let completionCount = await fixture.events.values()
             .filter { $0 == "complete" }.count
@@ -9049,26 +9082,41 @@ private func makeTestJPEG(width: Int, height: Int) throws -> Data {
 // MARK: - Opt-in actual-model acceptance
 
 /// These tests use Apple's installed on-device language model together with
-/// the installed OS-Atlas Pro 4B checkpoint and signed llama.cpp runtime. They
-/// are intentionally separate from the mocked runtime tests above and are
-/// opt-in because loading OS-Atlas is a multi-gigabyte, single-owner operation.
+/// the installed Granite candidate selector, OS-Atlas Pro 4B checkpoint, and
+/// signed llama.cpp runtime. They are intentionally separate from the mocked
+/// runtime tests above and are opt-in because loading OS-Atlas is a
+/// multi-gigabyte, single-owner operation.
 /// The local fixtures are rendered directly into memory, so this suite never
 /// opens a window or reads the user's desktop.
 @MainActor
 final class OSAtlasActualModelAcceptanceTests: XCTestCase {
-    func testFinalV4ProductionPackageRoutesThroughGraniteOSAtlasAndHostValidation()
+    func testFinalV5ProductionPackageRoutesThroughAppleGraniteOSAtlasAndHostValidation()
         async throws {
         try XCTSkipUnless(
             OSAtlasAcceptanceOptIn.modelE2EIsEnabled,
-            "Run host-mac/scripts/run_osatlas_acceptance.sh --actual-model to load the final installed production package.")
+            "Run host-mac/scripts/run_osatlas_acceptance.sh --actual-model --configuration Release to load the final installed production package.")
+
+        guard OSAtlasLlamaServedModel.semanticRouter.rawValue
+                == SemanticCandidateSelectionV5.modelAlias,
+              OSAtlasLlamaServedModel.semanticRouter.semanticContract
+                == .candidateSelectionV5 else {
+            return XCTFail("""
+            Final V5 acceptance requires the atomic semantic-router-v2 / candidateSelectionV5 activation; the dormant V4 composition cannot certify this release.
+            """)
+        }
 
         let installation = try OSAtlasInstalledAcceptanceRuntime
             .resolveProductionPackage()
         let runtime = OSAtlasLlamaRuntime()
-        let appleRouteCapture = ActualSemanticRouteRequestCapture()
-        let forcedUnavailableAppleRouter =
-            ActualUnavailableAppleSemanticActionRouter(
-                capture: appleRouteCapture)
+        let appleRequestCapture = ActualSemanticRouteRequestCapture()
+        let appleProposalCapture = ActualSemanticRouteCapture()
+        let appleOnDeviceRouteCapture = ActualSemanticRouteCapture()
+        let graniteRequestCapture = ActualSemanticCandidateRequestCapture()
+        let recordingAppleRouter = ActualRecordingAppleSemanticActionRouter(
+            requestCapture: appleRequestCapture,
+            routeCapture: appleProposalCapture,
+            onDeviceRouteCapture: appleOnDeviceRouteCapture)
+        let acceptancePrompt = "Click Place Order now."
         let renderedCheckout = try OSAtlasAcceptanceFixtureRenderer
             .everydayOperation(.groceryCheckout)
         let hiddenCheckout = ComputerUseScreenObservation(
@@ -9093,21 +9141,29 @@ final class OSAtlasActualModelAcceptanceTests: XCTestCase {
         var performedActions: [ComputerUsePredictedAction] = []
         var openedApplications: [String] = []
         var progress: [String] = []
+        var rawGroundingPoints: [(Int, Int)] = []
 
         do {
             // This is the same verified two-model loader used by production.
-            // The injected Apple router supplies no route; it only forces the
-            // documented `.unavailable` branch so the endpoint-bound Granite
-            // adapter must author the typed semantic action.
+            // The wrapper records the real Apple Foundation proposal without
+            // changing it. The endpoint-bound Granite selector must then
+            // accept that one host-compiled candidate before OS-Atlas may
+            // ground its harmless pointer carrier.
             let executor = try await OSAtlasComputerUseExecutor.load(
                 installation: installation,
                 runtime: runtime,
-                appleSemanticRouter: forcedUnavailableAppleRouter,
+                appleSemanticRouter: recordingAppleRouter,
+                semanticCandidateRequestObserver: { request in
+                    await graniteRequestCapture.append(request)
+                },
+                rawVisualGroundingPointObserver: { x, y in
+                    rawGroundingPoints.append((x, y))
+                },
                 progress: { progress.append($0) })
             let tools = ComputerUseHostTools(
                 injector: InputInjector(eventPoster: { _ in
                     XCTFail(
-                        "Final V4 acceptance must never post a system event")
+                        "Final V5 acceptance must never post a system event")
                 }),
                 mayAct: { true },
                 applicationOpener: { applicationName in
@@ -9118,21 +9174,70 @@ final class OSAtlasActualModelAcceptanceTests: XCTestCase {
                 },
                 screenProvider: { hiddenCheckout },
                 accessibilityContextProvider: { _ in
-                    "AXButton • Place Order • final purchase confirmation"
+                    """
+                    AXButton
+                    Place Order
+                    final purchase confirmation
+                    """
                 },
                 frontmostApplicationIdentityProvider: { safariIdentity },
                 frontmostApplicationProvider: { "Safari" })
 
             let result = try await executor.execute(
-                prompt: "Order these groceries for delivery.",
+                prompt: acceptancePrompt,
                 tools: tools,
                 progress: { progress.append($0) })
 
-            let appleRequests = await appleRouteCapture.values()
+            let appleRequests = await appleRequestCapture.values()
+            let appleProposals = await appleProposalCapture.values()
+            let appleOnDeviceRoutes = await appleOnDeviceRouteCapture.values()
+            let graniteRequests = await graniteRequestCapture.values()
             XCTAssertEqual(
                 appleRequests.count,
                 1,
-                "The release gate must force exactly one Apple-unavailable fallback into Granite")
+                "The release gate must record exactly one real Apple proposal request")
+            XCTAssertEqual(
+                appleProposals.count,
+                1,
+                "The release gate must record exactly one real Apple proposal")
+            XCTAssertEqual(
+                appleOnDeviceRoutes.count,
+                1,
+                "The release gate must record exactly one route returned by Foundation Models")
+            XCTAssertEqual(
+                graniteRequests.count,
+                1,
+                "The release gate must record exactly one real Granite selector request")
+            let appleRequest = try XCTUnwrap(appleRequests.first)
+            XCTAssertEqual(appleRequest.task, acceptancePrompt)
+            XCTAssertNil(
+                AppleFoundationVisualActionRouter.deterministicFollowupRoute(
+                    for: appleRequest.task,
+                    visibleText: appleRequest.visibleText,
+                    history: appleRequest.history,
+                    availableDirectives: appleRequest.availableDirectives),
+                "The recorded Apple proposal must have crossed the on-device Foundation Models generation boundary")
+            let graniteRequest = try XCTUnwrap(graniteRequests.first)
+            XCTAssertEqual(
+                graniteRequest.contract,
+                OSAtlasLlamaSemanticContract.candidateSelectionV5)
+            XCTAssertTrue(
+                graniteRequest.matchesFrozenShape(
+                    for: OSAtlasLlamaSemanticContract.candidateSelectionV5))
+            XCTAssertFalse(
+                graniteRequest.matchesFrozenShape(
+                    for: OSAtlasLlamaSemanticContract.nativeRoutingV4))
+            XCTAssertEqual(
+                rawGroundingPoints.count,
+                1,
+                "The release gate must record exactly one raw OS-Atlas point carrier")
+            let rawGroundingPoint = try XCTUnwrap(rawGroundingPoints.first)
+            XCTAssertTrue(
+                OSAtlasAcceptanceFixtureRenderer.groceryPlaceOrderTarget
+                    .contains(CGPoint(
+                        x: rawGroundingPoint.0,
+                        y: rawGroundingPoint.1)),
+                "OS-Atlas's raw normalized point must hit Place Order before OCR, desktop mapping, or AX correction")
             XCTAssertTrue(
                 performedActions.isEmpty,
                 "Host approval must stop the grounded purchase before input")
@@ -9141,27 +9246,28 @@ final class OSAtlasActualModelAcceptanceTests: XCTestCase {
                   case .click(let x, let y, 1, 1) = proposedAction else {
                 await runtime.shutdown()
                 return XCTFail(
-                    "Granite → OSAtlas → host validation did not stop at a single-click purchase approval; result=\(result)")
+                    "Apple → Granite → OSAtlas → host validation did not stop at a single-click purchase approval; result=\(result)")
             }
             XCTAssertTrue(
                 OSAtlasAcceptanceFixtureRenderer.desktopTargetRect(
                     for: OSAtlasAcceptanceFixtureRenderer
                         .groceryPlaceOrderTarget)
                     .contains(CGPoint(x: x, y: y)),
-                "OSAtlas did not ground Granite's typed purchase route to the visible Place Order control")
+                "OSAtlas did not ground Granite's selected Apple proposal to the visible Place Order control")
 
             let attachment = XCTAttachment(string: """
             OUTCOME: user intervention required
             PACKAGE: \(ComputerUseArtifactManifest.current.installationVersion)
             SEMANTIC ARTIFACT: \(installation.semanticRouterModelURL.lastPathComponent)
-            APPLE ROUTES: unavailable (forced), requests=\(appleRequests.count)
-            GRANITE ROUTE: accepted by strict semantic wire contract
-            OSATLAS GROUNDING: click=(\(x), \(y))
+            APPLE PROPOSALS: real on-device, deterministic_pre_route=none, requests=\(appleRequests.count), on_device_routes=\(appleOnDeviceRoutes.count), proposals=\(appleProposals.count)
+            GRANITE SELECTION: alias=\(OSAtlasLlamaServedModel.semanticRouter.rawValue), contract=candidateSelectionV5, schema5_requests=\(graniteRequests.count)
+            OSATLAS RAW NORMALIZED GROUNDING: click=(\(rawGroundingPoint.0), \(rawGroundingPoint.1))
+            HOST-CORRECTED PROPOSAL: click=(\(x), \(y))
             HOST POLICY: purchase approval required; no input performed
             PROGRESS:
             \(progress.joined(separator: "\n"))
             """)
-            attachment.name = "Final V4 production package acceptance evidence"
+            attachment.name = "Final V5 production package acceptance evidence"
             attachment.lifetime = .keepAlways
             add(attachment)
         } catch {
@@ -9174,7 +9280,7 @@ final class OSAtlasActualModelAcceptanceTests: XCTestCase {
     func testInstalledHybridUnderstandsNaturalLanguageAcrossFullActionSurfaceWithoutVisibleUI() async throws {
         try XCTSkipUnless(
             OSAtlasAcceptanceOptIn.modelE2EIsEnabled,
-            "Run host-mac/scripts/run_osatlas_acceptance.sh --actual-model to load the installed OS-Atlas Pro model.")
+            "Run host-mac/scripts/run_osatlas_acceptance.sh --actual-model --configuration Release to load the installed OS-Atlas Pro model.")
 
         let inputs = try OSAtlasInstalledAcceptanceRuntime.resolveInputs()
         let runtime = OSAtlasLlamaRuntime()
@@ -9523,7 +9629,7 @@ final class OSAtlasActualModelAcceptanceTests: XCTestCase {
         async throws {
         try XCTSkipUnless(
             OSAtlasAcceptanceOptIn.modelE2EIsEnabled,
-            "Run host-mac/scripts/run_osatlas_acceptance.sh --actual-model to load the installed OS-Atlas Pro model.")
+            "Run host-mac/scripts/run_osatlas_acceptance.sh --actual-model --configuration Release to load the installed OS-Atlas Pro model.")
 
         let inputs = try OSAtlasInstalledAcceptanceRuntime.resolveInputs()
         let runtime = OSAtlasLlamaRuntime()
@@ -10001,7 +10107,7 @@ final class OSAtlasActualModelAcceptanceTests: XCTestCase {
     func testActualModelNavigatesDeliveryQuoteAndValidatedLocalOCRReturnsExactFactsWithoutVisibleUI() async throws {
         try XCTSkipUnless(
             OSAtlasAcceptanceOptIn.modelE2EIsEnabled,
-            "Run host-mac/scripts/run_osatlas_acceptance.sh --actual-model to load the installed OS-Atlas Pro model.")
+            "Run host-mac/scripts/run_osatlas_acceptance.sh --actual-model --configuration Release to load the installed OS-Atlas Pro model.")
 
         let inputs = try OSAtlasInstalledAcceptanceRuntime.resolveInputs()
         let runtime = OSAtlasLlamaRuntime()
@@ -10163,7 +10269,7 @@ final class OSAtlasActualModelAcceptanceTests: XCTestCase {
     func testActualModelCompletesMultiActionDeliveryQuoteWorkflowWithoutVisibleUI() async throws {
         try XCTSkipUnless(
             OSAtlasAcceptanceOptIn.modelE2EIsEnabled,
-            "Run host-mac/scripts/run_osatlas_acceptance.sh --actual-model to load the installed OS-Atlas Pro model.")
+            "Run host-mac/scripts/run_osatlas_acceptance.sh --actual-model --configuration Release to load the installed OS-Atlas Pro model.")
 
         let inputs = try OSAtlasInstalledAcceptanceRuntime.resolveInputs()
         let runtime = OSAtlasLlamaRuntime()
@@ -10789,24 +10895,52 @@ private actor ActualSemanticRouteRequestCapture {
     }
 }
 
-/// Acceptance-only availability injection. This adapter never returns a
-/// semantic route, so it cannot make a weak or mocked answer pass. Production's
-/// Apple-first router may continue only through its real endpoint-bound Granite
-/// fallback; malformed Granite output and unsafe host actions still fail closed.
-private struct ActualUnavailableAppleSemanticActionRouter:
+private actor ActualSemanticCandidateRequestCapture {
+    private var requests: [OSAtlasLlamaSemanticRequest] = []
+
+    func append(_ request: OSAtlasLlamaSemanticRequest) {
+        requests.append(request)
+    }
+
+    func values() -> [OSAtlasLlamaSemanticRequest] {
+        requests
+    }
+}
+
+/// Acceptance-only recording wrapper around the real on-device Apple router.
+/// It cannot author or replace a proposal: it records the exact request and
+/// returned typed route while production's host compiler and Granite selector
+/// retain their normal boundaries.
+private struct ActualRecordingAppleSemanticActionRouter:
     OSAtlasSemanticActionRouting {
-    let capture: ActualSemanticRouteRequestCapture
+    let requestCapture: ActualSemanticRouteRequestCapture
+    let routeCapture: ActualSemanticRouteCapture
+    private let base: AppleFoundationVisualActionRouter
+
+    init(
+        requestCapture: ActualSemanticRouteRequestCapture,
+        routeCapture: ActualSemanticRouteCapture,
+        onDeviceRouteCapture: ActualSemanticRouteCapture
+    ) {
+        self.requestCapture = requestCapture
+        self.routeCapture = routeCapture
+        base = AppleFoundationVisualActionRouter(
+            onDeviceRouteObserver: { route in
+                await onDeviceRouteCapture.append(route)
+            })
+    }
 
     func availability() -> AppleFoundationMCPPlannerAvailability {
-        .unavailable(.modelNotReady)
+        base.availability()
     }
 
     func route(
         _ request: OSAtlasSemanticRoutingRequest
     ) async throws -> OSAtlasSemanticActionRoute {
-        await capture.append(request)
-        throw AppleFoundationVisualActionRouterError.unavailable(
-            .modelNotReady)
+        await requestCapture.append(request)
+        let route = try await base.route(request)
+        await routeCapture.append(route)
+        return route
     }
 }
 
@@ -10842,7 +10976,7 @@ final class OSAtlasLiveDoorDashSmokeTests: XCTestCase {
     func testReadsPreparedDoorDashReviewWithValidatedLocalOCRWithoutActing() async throws {
         guard let configuration = OSAtlasAcceptanceOptIn.liveDoorDashConfiguration else {
             throw XCTSkip(
-                "Run host-mac/scripts/run_osatlas_acceptance.sh --live-doordash --allow-visible-ui after preparing the DoorDash review page.")
+                "Run host-mac/scripts/run_osatlas_acceptance.sh --live-doordash --allow-visible-ui --configuration Release after preparing the DoorDash review page.")
         }
         let expectedItem = configuration.expectedItem
         let expectedTotal = configuration.expectedTotal
@@ -10975,7 +11109,7 @@ private enum OSAtlasInstalledAcceptanceRuntime {
         }
         guard semanticArtifacts.count == 1 else {
             throw XCTSkip("""
-            Final V4 production-package prerequisite is not published: ComputerUseArtifactManifest.current must contain exactly one immutable semanticRouterModel artifact before this release gate can run.
+            Final V5 production-package prerequisite is not published: ComputerUseArtifactManifest.current must contain exactly one immutable semanticRouterModel artifact before this release gate can run.
             """)
         }
 
@@ -10986,12 +11120,12 @@ private enum OSAtlasInstalledAcceptanceRuntime {
                 ComputerUseInstallationReceipt.self,
                 from: receiptData) else {
             throw XCTSkip("""
-            Install the final V4 production package in RemoteDesktopHost before running actual-model acceptance; its verified active-installation.json receipt is not present.
+            Install the final V5 production package in RemoteDesktopHost before running actual-model acceptance; its verified active-installation.json receipt is not present.
             """)
         }
         guard receipt.installationVersion == manifest.installationVersion else {
             throw XCTSkip("""
-            Install the current final V4 production package before running actual-model acceptance. Active receipt is \(receipt.installationVersion); required package is \(manifest.installationVersion).
+            Install the current final V5 production package before running actual-model acceptance. Active receipt is \(receipt.installationVersion); required package is \(manifest.installationVersion).
             """)
         }
         guard let appBundleURL = enclosingAppBundleURL() else {
@@ -11008,7 +11142,7 @@ private enum OSAtlasInstalledAcceptanceRuntime {
         guard FileManager.default.isExecutableFile(atPath:
                 runtimeDirectory.appendingPathComponent("llama-server").path) else {
             throw XCTSkip(
-                "The signed host bundle does not contain the pinned llama runtime required by the final V4 package.")
+                "The signed host bundle does not contain the pinned llama runtime required by the final V5 package.")
         }
 
         // `resolvePackage` validates the receipt and every manifest artifact,
