@@ -7,22 +7,23 @@ SCHEME="RemoteDesktopHost"
 MODEL_FLAG="/tmp/com.threadmark.remotedesktop.osatlas-model-e2e-$(id -u)"
 LIVE_CONFIG="/tmp/com.threadmark.remotedesktop.osatlas-live-doordash-$(id -u).json"
 VERIFY_XCRESULT="$ROOT/host-mac/scripts/verify_xcresult_counts.sh"
-# The selected inventory is the complete executor suite (currently 114), two
+# The selected inventory is the complete executor suite (currently 119), two
 # pinned runtime tests, and eleven native host-input tests. Keep this exact so
 # newly added or silently omitted acceptance coverage fails closed.
-DETERMINISTIC_EXPECTED_TESTS=127
+DETERMINISTIC_EXPECTED_TESTS=132
 RESULT_ROOT=""
 
 run_actual_model=0
 run_live_doordash=0
 allow_visible_ui=0
+configuration="Debug"
 
 usage() {
-    /bin/echo "Usage: $0 [--actual-model] [--live-doordash --allow-visible-ui]"
+    /bin/echo "Usage: $0 [--configuration Debug|Release] [--actual-model] [--live-doordash --allow-visible-ui]"
     /bin/echo ""
     /bin/echo "Default: hidden deterministic OS-Atlas parser, executor, safety, and native-input tests."
-    /bin/echo "--actual-model: additionally gate the final installed Granite + OS-Atlas production package against hidden virtual screens."
-    /bin/echo "--live-doordash: read a prepared, visible DoorDash review page without performing input."
+    /bin/echo "--actual-model: additionally gate the final installed Granite + OS-Atlas production package against hidden virtual screens; requires --configuration Release."
+    /bin/echo "--live-doordash: read a prepared, visible DoorDash review page without performing input; requires --configuration Release."
 }
 
 while [[ $# -gt 0 ]]; do
@@ -37,6 +38,15 @@ while [[ $# -gt 0 ]]; do
         --allow-visible-ui)
             allow_visible_ui=1
             ;;
+        --configuration)
+            if [[ $# -lt 2 ]]; then
+                /bin/echo "Missing value for --configuration." >&2
+                usage >&2
+                exit 2
+            fi
+            configuration="$2"
+            shift
+            ;;
         -h|--help)
             usage
             exit 0
@@ -49,6 +59,20 @@ while [[ $# -gt 0 ]]; do
     esac
     shift
 done
+
+case "$configuration" in
+    Debug|Release)
+        ;;
+    *)
+        /bin/echo "Unsupported configuration: $configuration (expected Debug or Release)." >&2
+        exit 2
+        ;;
+esac
+
+if [[ $run_actual_model -eq 1 && "$configuration" != "Release" ]]; then
+    /bin/echo "Actual-model and live acceptance require --configuration Release." >&2
+    exit 2
+fi
 
 cleanup() {
     /bin/rm -f "$MODEL_FLAG" "$LIVE_CONFIG"
@@ -115,13 +139,19 @@ RESULT_ROOT="$(/usr/bin/mktemp -d "/tmp/com.threadmark.remotedesktop.osatlas-acc
 
 # This default gate never opens a fixture, captures the desktop, or posts real
 # input. The ComputerUseHostTools screen and event providers are in-memory.
+# ENABLE_TESTABILITY is a test-build-only override required by the app-hosted
+# suite's `@testable import`; Release still uses its normal optimization,
+# Production CloudKit setting, and mandatory real runtime signature.
 deterministic_result="$RESULT_ROOT/deterministic.xcresult"
 xcodebuild test \
     -project "$PROJECT" \
     -scheme "$SCHEME" \
-    -configuration Debug \
+    -configuration "$configuration" \
     -destination 'platform=macOS' \
     -resultBundlePath "$deterministic_result" \
+    -disableAutomaticPackageResolution \
+    -onlyUsePackageVersionsFromResolvedFile \
+    ENABLE_TESTABILITY=YES \
     -only-testing:RemoteDesktopHostTests/OSAtlasComputerUseExecutorTests \
     -only-testing:RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testCompletionRequestIsAuthenticatedLoopbackOnlyAndDeterministic \
     -only-testing:RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testLaunchArgumentsPinLoopbackAuthNoLogsAndInferenceBudget \
@@ -144,7 +174,7 @@ xcodebuild test \
 if [[ $run_actual_model -eq 1 ]]; then
     /usr/bin/install -m 600 /dev/null "$MODEL_FLAG"
     actual_model_tests=(
-        testFinalV4ProductionPackageRoutesThroughGraniteOSAtlasAndHostValidation
+        testFinalV5ProductionPackageRoutesThroughAppleGraniteOSAtlasAndHostValidation
         testInstalledGrounderCompletesRegularUserMatrixWithApplePlannerUnavailableUsingOnlyClickCarriers
         testInstalledHybridUnderstandsNaturalLanguageAcrossFullActionSurfaceWithoutVisibleUI
         testActualModelNavigatesDeliveryQuoteAndValidatedLocalOCRReturnsExactFactsWithoutVisibleUI
@@ -156,10 +186,13 @@ if [[ $run_actual_model -eq 1 ]]; then
         xcodebuild test \
             -project "$PROJECT" \
             -scheme "$SCHEME" \
-            -configuration Debug \
+            -configuration "$configuration" \
             -destination 'platform=macOS' \
             -parallel-testing-enabled NO \
             -resultBundlePath "$actual_result" \
+            -disableAutomaticPackageResolution \
+            -onlyUsePackageVersionsFromResolvedFile \
+            ENABLE_TESTABILITY=YES \
             -only-testing:"RemoteDesktopHostTests/OSAtlasActualModelAcceptanceTests/$test_name"
         /bin/bash "$VERIFY_XCRESULT" \
             "$actual_result" \
@@ -181,9 +214,12 @@ if [[ $run_live_doordash -eq 1 ]]; then
     xcodebuild test \
         -project "$PROJECT" \
         -scheme "$SCHEME" \
-        -configuration Debug \
+        -configuration "$configuration" \
         -destination 'platform=macOS' \
         -resultBundlePath "$live_result" \
+        -disableAutomaticPackageResolution \
+        -onlyUsePackageVersionsFromResolvedFile \
+        ENABLE_TESTABILITY=YES \
         -only-testing:RemoteDesktopHostTests/OSAtlasLiveDoorDashSmokeTests
     /bin/bash "$VERIFY_XCRESULT" \
         "$live_result" \

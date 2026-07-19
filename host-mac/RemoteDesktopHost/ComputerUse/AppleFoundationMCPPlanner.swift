@@ -244,7 +244,7 @@ struct OSAtlasSemanticRoutingRequest: Equatable, Sendable {
     }
 
     /// Rebuilds the same typed routing request at an explicit history
-    /// boundary. The dormant schema-5 composition uses this to give Apple's
+    /// boundary. The schema-5 composition uses this to give Apple's
     /// proposer the frozen V4 verbs while independently giving Granite the
     /// schema-5 history derived from the executor's raw action ledger.
     func replacingHistory(_ history: [String]) -> Self {
@@ -342,6 +342,9 @@ enum AppleFoundationVisualActionRouterError: Error, LocalizedError, Equatable, S
 /// coordinates, and the host remains the sole policy, approval, and execution
 /// authority.
 struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
+    typealias OnDeviceRouteObserver =
+        @Sendable (OSAtlasSemanticActionRoute) async -> Void
+
     /// Foundation Models does not expose the pinned llama.cpp tokenizer used by
     /// the open-source router, so keep its serialized conversation within the
     /// request's existing byte budget. Oldest whole turns are removed first;
@@ -380,14 +383,17 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
 
     private let availabilityProvider:
         @Sendable () -> AppleFoundationMCPPlannerAvailability
+    private let onDeviceRouteObserver: OnDeviceRouteObserver?
 
     init(
         availabilityProvider: @escaping @Sendable () ->
             AppleFoundationMCPPlannerAvailability = {
                 AppleFoundationMCPPlanner().availability()
-            }
+            },
+        onDeviceRouteObserver: OnDeviceRouteObserver? = nil
     ) {
         self.availabilityProvider = availabilityProvider
+        self.onDeviceRouteObserver = onDeviceRouteObserver
     }
 
     func availability() -> AppleFoundationMCPPlannerAvailability {
@@ -521,7 +527,11 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
 
 #if canImport(FoundationModels)
         if #available(macOS 26.0, *) {
-            return try await routeOnDevice(request)
+            let route = try await routeOnDevice(request)
+            if let onDeviceRouteObserver {
+                await onDeviceRouteObserver(route)
+            }
+            return route
         }
 #endif
         throw AppleFoundationVisualActionRouterError.unavailable(
@@ -3798,7 +3808,8 @@ extension AppleFoundationVisualActionRouter {
     /// final JSON-string section is deliberately the last model input so a
     /// recent untrusted UI or conversation instruction cannot receive the
     /// prompt's strongest recency signal. This order affects only Apple's
-    /// artifact-independent planner; Granite retains its pinned V4 grammar.
+    /// artifact-independent planner; the candidate selector retains its
+    /// separately pinned schema-5 grammar.
     static func renderedRoutingPrompt(
         _ request: OSAtlasSemanticRoutingRequest
     ) -> String {

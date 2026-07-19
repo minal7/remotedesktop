@@ -800,6 +800,12 @@ protocol OSAtlasSemanticActionCandidateSelecting: Sendable {
     ) async throws -> OSAtlasSemanticCandidateSelection
 }
 
+/// Effect-free acceptance observation point for the exact frozen request
+/// handed to the local schema-5 selector. Production leaves this nil; tests
+/// can record the request without replacing the selector or its transport.
+typealias OSAtlasSemanticCandidateRequestObserver =
+    @Sendable (OSAtlasLlamaSemanticRequest) async -> Void
+
 /// Narrow runtime surface used by the schema-5 selector. The production
 /// actor and unit-test doubles share this boundary without exposing model
 /// lifecycle, installation, or visual inference controls to candidate
@@ -901,13 +907,16 @@ struct LlamaSemanticActionCandidateSelector:
     OSAtlasSemanticActionCandidateSelecting {
     private let runtime: any OSAtlasLlamaSemanticCompleting
     private let endpoint: OSAtlasLlamaEndpoint
+    private let requestObserver: OSAtlasSemanticCandidateRequestObserver?
 
     init(
         runtime: any OSAtlasLlamaSemanticCompleting,
-        endpoint: OSAtlasLlamaEndpoint
+        endpoint: OSAtlasLlamaEndpoint,
+        requestObserver: OSAtlasSemanticCandidateRequestObserver? = nil
     ) {
         self.runtime = runtime
         self.endpoint = endpoint
+        self.requestObserver = requestObserver
     }
 
     func availability() -> AppleFoundationMCPPlannerAvailability {
@@ -929,9 +938,13 @@ struct LlamaSemanticActionCandidateSelector:
                 maximumInputTokens:
                     SemanticCandidateSelectionV5.maximumInputTokens)
             try Task.checkCancellation()
-            return try SemanticCandidateSelectionV5.parseResponse(
+            let selection = try SemanticCandidateSelectionV5.parseResponse(
                 response,
                 offered: candidates)
+            if let requestObserver {
+                await requestObserver(semanticRequest)
+            }
+            return selection
         } catch is CancellationError {
             throw AppleFoundationVisualActionRouterError.cancelled
         } catch let error as AppleFoundationVisualActionRouterError {
