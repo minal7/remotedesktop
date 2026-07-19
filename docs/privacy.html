@@ -24,15 +24,18 @@
 </head>
 <body>
   <h1>Privacy Policy</h1>
-  <p class="muted">Remote Desktop · Last updated June 4, 2026</p>
+  <p class="muted">Remote Desktop · Last updated July 19, 2026</p>
 
-  <p>Remote Desktop is built so that your data stays yours. We do not run a server that
-  collects, stores, or sees your information. This policy explains what that means in plain terms.</p>
+  <p>Remote Desktop is designed so the developer does not receive your session content. We do
+  not run a data-collection server, but the apps do store technical records in your private
+  iCloud database and device Keychain to pair your devices, deliver AI Computer Use requests,
+  and recover one unfinished request. This policy explains those records in plain terms.</p>
 
   <h2>The short version</h2>
   <ul>
-    <li>We do <strong>not</strong> collect, store, sell, or share any personal data.</li>
-    <li>There are <strong>no accounts</strong> to create and <strong>no analytics or tracking</strong> in the app.</li>
+    <li>The developer does <strong>not</strong> receive, sell, or share your session data.</li>
+    <li>There is no separate Remote Desktop account and no advertising, analytics, or tracking
+      SDK. Pairing uses the Apple Account already signed in to iCloud on your devices.</li>
     <li>Your screen, audio, and input stream <strong>directly between your own devices</strong> — they never pass through a server we control.</li>
   </ul>
 
@@ -44,23 +47,77 @@
 
   <h2>Pairing and signaling</h2>
   <p>To set up a connection, the two devices exchange a small amount of technical connection
-  information ("signaling"). This is done through <strong>your own private iCloud (CloudKit)
-  database</strong> under your personal Apple Account. It is governed by
+  information ("signaling"). Pairing records can include the host name, a random six-digit
+  pairing code, opaque device identifiers, timestamps, and the WebRTC connection descriptions
+  and network candidates needed to connect. This is done through <strong>your own private iCloud
+  (CloudKit) database</strong> under your personal Apple Account. It is governed by
   <a href="https://www.apple.com/legal/privacy/">Apple's Privacy Policy</a>. We have no access
-  to your iCloud data. Pairing only works between devices signed in to the same Apple Account,
-  so no one else can connect to your computer.</p>
+  to your iCloud data. The records are scoped to devices signed in to the same Apple Account;
+  the pairing code and authenticated WebRTC peer complete the connection.</p>
 
-  <h2>Information we collect</h2>
-  <p><strong>None.</strong> The app does not collect personal information, does not contain
-  advertising or third-party trackers, and does not use analytics SDKs.</p>
+  <p>The host generates a new pairing code whenever its listener starts, including after a
+  connection ends. The five-minute interval used by signaling is a stale-record window, not a
+  countdown that expires a code while the host remains listening. The host refreshes its live
+  advertisement while listening. The apps attempt to delete the CloudKit signaling records
+  they created after connection or teardown; any older record left behind is ignored.</p>
+
+  <h2>AI Computer Use records</h2>
+  <p>If you use AI Computer Use, the same private CloudKit database carries low-bandwidth
+  records between your iPhone or iPad and your Mac. Depending on the task, these records can
+  contain setup progress, your prompt and recent conversation context, assistant results and
+  status, pause/resume/stop controls, and approval requests and responses. They also contain
+  the pairing, session, message, sender, and recipient identifiers needed to route and
+  deduplicate a request. Live screen pixels, host audio, and direct input do not use CloudKit;
+  they stay on the peer-to-peer WebRTC connection. AI planning and visual grounding run
+  locally on the Mac host rather than through a developer-operated AI service.</p>
+
+  <p>A receiving device attempts to delete an AI CloudKit record only after it has applied the
+  message. If deletion is interrupted, it retries later. Duplicate or delayed records are
+  matched to their stable message and task identifiers so they cannot silently become a new
+  task. The iOS receiver scopes results to the current session, and both sides ignore AI
+  records older than one hour. A record that was never received or deleted can remain in your
+  private CloudKit database, where it is not accessible to the developer.</p>
+
+  <h2>Identifiers and unfinished-request recovery</h2>
+  <p>On iPhone, iPad, and Mac, Remote Desktop uses an opaque device UUID stored in the Keychain
+  to route records to the correct peer. This identifier is stable across launches and may
+  remain after an app reinstall or iCloud sign-out. It is not an advertising identifier, and
+  the app has no in-app account profile built from it.</p>
+
+  <p>Before sending an AI request, the iOS app saves a recovery record for that one in-flight
+  request in the device-only Keychain. It can include the prompt, exact encoded conversation
+  context, host and pairing identifiers, session and message identifiers, the latest
+  pause/resume/stop revision, a locked approval decision, and manual-intervention guidance.
+  This lets a relaunch ask the Mac about the same logical request without executing it as a new
+  task. A pending record is recoverable for up to 24 hours. It is removed after a terminal task
+  result is applied, or when it is found to be expired or for a different pairing code.</p>
+
+  <p>Stopping a session or losing the WebRTC peer revokes that peer's authorization for AI
+  actions and closes the host's action gate. An unfinished host task is ended rather than
+  silently resumed by a later connection, and the host starts listening with a new pairing
+  code. A locally recoverable iOS record can remain until the terminal result is received or
+  the 24-hour recovery limit is reached.</p>
+
+  <h2>Information the developer receives</h2>
+  <p><strong>None from the app.</strong> We do not receive the private CloudKit or Keychain
+  records described above. The app does not contain advertising or third-party trackers and
+  does not use analytics SDKs.</p>
 
   <h2>Device permissions</h2>
   <p>The app requests <strong>Local Network</strong> access on your device. This is used only
   to establish the direct connection to your computer. It is not used to gather information
   about your network or other devices.</p>
 
+  <p>The iOS app declares both camera and microphone usage-description keys because its bundled
+  WebRTC component is capable of those features. Those declarations do not themselves request
+  access, and this version of the app does not request camera or microphone permission. It
+  creates receive-only audio and video connections and configures audio for playback. It can
+  receive your computer's screen and system audio, but it does not capture, record, store, or
+  transmit camera video or microphone audio from your iPhone or iPad.</p>
+
   <h2>Children's privacy</h2>
-  <p>The app does not collect data from anyone, including children under 13.</p>
+  <p>The app does not send session data to the developer for any user. The device and private
+  CloudKit records described above work the same way for all users.</p>
 
   <h2>Changes to this policy</h2>
   <p>If this policy changes, the updated version will be posted on this page with a new date.</p>

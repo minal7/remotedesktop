@@ -1,6 +1,11 @@
 import Foundation
 
 enum Config {
+    /// Public policy shown from the app's pairing screen. Keep this URL on the
+    /// same GitHub Pages site used for App Store privacy disclosures.
+    static let privacyPolicyURL = URL(
+        string: "https://minal7.github.io/remotedesktop/privacy.html")!
+
     /// CloudKit container used for signaling. Must match the host's
     /// container and be attached to the iOS App ID.
     static let cloudKitContainerIdentifier = "iCloud.com.threadmark.remotedesktop"

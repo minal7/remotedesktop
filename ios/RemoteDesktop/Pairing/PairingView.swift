@@ -21,6 +21,7 @@ struct PairingView: View {
 
                 availableDevices
                 manualPairing
+                privacyPolicyLink
             }
             .padding(.horizontal, 24)
             .padding(.vertical, 40)
@@ -211,6 +212,42 @@ struct PairingView: View {
         .padding(18)
         .sectionSurface()
         .animation(.smooth(duration: 0.28), value: showCodeEntry)
+    }
+
+    private var privacyPolicyLink: some View {
+        Link(destination: Config.privacyPolicyURL) {
+            HStack(spacing: 12) {
+                Image(systemName: "hand.raised.fill")
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(.tint)
+                    .frame(width: 32, height: 32)
+                    .background(Color.accentColor.opacity(0.12), in: Circle())
+
+                Text("Privacy Policy")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.primary)
+
+                Spacer()
+
+                Image(systemName: "arrow.up.right")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 16)
+            .frame(minHeight: 52)
+            .contentShape(Rectangle())
+            .background(
+                Color(uiColor: .secondarySystemGroupedBackground),
+                in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.06), lineWidth: 1)
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Privacy Policy")
+        .accessibilityHint("Opens the privacy policy in your browser")
+        .accessibilityIdentifier("privacy-policy-link")
     }
 
     private var codeEntryForm: some View {

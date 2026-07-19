@@ -74,7 +74,7 @@ targets:
         CODE_SIGN_STYLE: Automatic
         DEVELOPMENT_TEAM: V9AX39SPJD
         MARKETING_VERSION: "1.1"
-        CURRENT_PROJECT_VERSION: "4"
+        CURRENT_PROJECT_VERSION: "5"
         PRODUCT_BUNDLE_IDENTIFIER: com.threadmark.remotedesktop.client
         TARGETED_DEVICE_FAMILY: "1,2"
         SUPPORTS_MACCATALYST: NO

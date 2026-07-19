@@ -5,6 +5,14 @@ import UIKit
 final class InputAndDiscoveryTests: XCTestCase {
     private let hostID = "8A2269A1-A94C-4FA2-BD63-BEAEEA79A97A"
 
+    func test_privacyPolicyURL_isPublishedHTTPSPage() {
+        XCTAssertEqual(Config.privacyPolicyURL.scheme, "https")
+        XCTAssertEqual(Config.privacyPolicyURL.host, "minal7.github.io")
+        XCTAssertEqual(
+            Config.privacyPolicyURL.path,
+            "/remotedesktop/privacy.html")
+    }
+
     func test_localHostAdvertisement_roundTripsServiceName() {
         let name = LocalHostAdvertisement.serviceName(hostname: "Studio Mac", code: "123456")
         let parsed = LocalHostAdvertisement.parse(serviceName: name)

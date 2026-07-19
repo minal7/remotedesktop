@@ -1,6 +1,6 @@
 [package]
 name = "remote-desktop-host"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 publish = false
 description = "Windows host agent for Remote Desktop (CloudKit-signaled WebRTC)."

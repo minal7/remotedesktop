@@ -83,12 +83,12 @@ do not install a build produced with `CODE_SIGNING_ALLOWED=NO`, because CloudKit
 rejects that unsigned simulator binary. The Simulator must also be signed into
 the same Apple Account as the host under Settings.
 
-The iOS app has no camera capture path and does not declare Camera or Location
-permission. It does declare a defensive microphone usage description because
-the bundled WebRTC component is microphone-capable. The app does not request
-that permission: its media transceivers are receive-only, audio uses the
-playback session category, and it never records, stores, or transmits the
-iPhone/iPad microphone.
+The iOS app declares defensive Camera and Microphone usage descriptions because
+the bundled WebRTC component is capable of both features; these declarations do
+not request permission. The app has no camera or microphone capture path and
+does not declare Location access. Its media transceivers are receive-only,
+audio uses the playback session category, and it never records, stores, or
+transmits the iPhone/iPad camera or microphone.
 
 ## What works today
 

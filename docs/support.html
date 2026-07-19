@@ -58,8 +58,10 @@
   iCloud account on each, and make sure the host app is open and showing a code.</p>
 
   <h3>The pairing code isn't working.</h3>
-  <p>Codes expire after 5 minutes or when a session ends. Restart the host app to get a fresh
-  code and enter it promptly.</p>
+  <p>The host generates a new code whenever it starts listening, including after a connection
+  ends. Stop and start the listener, or restart the host app, to get a fresh code. The
+  five-minute interval applies only to ignoring stale CloudKit signaling records; while the
+  host is listening, it refreshes the current code's advertisement.</p>
 
   <h3>The connection won't establish.</h3>
   <p>For the most reliable connection, put your device and your computer on the
@@ -72,7 +74,8 @@
   screen capture and input features.</p>
 
   <h3>Is it free?</h3>
-  <p>Yes. There are no accounts, subscriptions, or fees.</p>
+  <p>Yes. There is no separate Remote Desktop account, subscription, or fee. Pairing does use
+  the Apple Account already signed in to iCloud on both devices.</p>
 
   <h3>Is it private?</h3>
   <p>Yes — your screen, audio, and input stream directly between your own devices, and pairing

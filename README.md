@@ -40,7 +40,9 @@ Latest host release: [v0.2.0](https://github.com/minal7/remotedesktop/releases/t
   client surfaces a "try the same Wi-Fi" error.
 - **Pairing model:** same-iCloud only. The iPad/iPhone and the host must be
   signed into the same iCloud account. A 6-digit numeric code shown on the
-  host is typed into the client; codes expire on teardown or after 5 minutes.
+  host is typed into the client. A new code is generated whenever the host
+  listener starts, including after a disconnect. Five minutes is the stale
+  CloudKit-record window; a listening host refreshes its current advertisement.
 
 ## Repository layout
 
@@ -203,11 +205,12 @@ cargo run --release
   backgrounded and prompt the user to resume. This is within Apple's BGTask
   rules.
 - Privacy strings in `Info.plist`: `NSLocalNetworkUsageDescription`,
-  `NSBonjourServices`, and a defensive `NSMicrophoneUsageDescription` because
-  the bundled WebRTC component is microphone-capable. The iOS client configures
-  receive-only media and a playback audio session; it does not request, record,
-  store, or transmit microphone audio.
-- The iOS client does not declare Camera or Location access. On the Mac,
+  `NSBonjourServices`, and defensive `NSMicrophoneUsageDescription` and
+  `NSCameraUsageDescription` keys because the bundled WebRTC component is
+  microphone- and camera-capable. The declarations do not request access. The
+  iOS client creates receive-only media and a playback audio session; it does
+  not request, record, store, or transmit iPhone/iPad microphone or camera data.
+- The iOS client does not declare Location access. On the Mac,
   Screen Recording and Accessibility are required for remote control;
   Microphone is optional and used only to enable the system-audio bridge. A
   separately declared Apple Events permission is requested only after the user
