@@ -49,6 +49,47 @@ final class OSAtlasRuntimeInstallationTests: XCTestCase {
                 fixture.manifest.modelArtifacts[3].fileName))
     }
 
+    func testAvailablePackageSelectsCurrentVisualOnlyReleaseShape() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let visualManifest = manifest(
+            from: fixture.manifest,
+            artifacts: Array(fixture.manifest.modelArtifacts.dropLast()))
+
+        let package = try OSAtlasRuntimeInputResolver(
+            manifest: visualManifest).resolveAvailablePackage(
+                receipt: fixture.receipt,
+                runtimeDirectoryURL: fixture.runtimeDirectory,
+                enclosingBundleURL: fixture.bundleDirectory)
+
+        guard case .visualOnly(let inputs) = package else {
+            return XCTFail("A visual-only manifest must retain the Foundation + OS-Atlas activation path.")
+        }
+        XCTAssertEqual(inputs.variant, .pro4B)
+        XCTAssertEqual(
+            inputs.multimodalProjectorURL.lastPathComponent,
+            "mmproj-os-atlas-pro-4b-f16.gguf")
+    }
+
+    func testAvailablePackageSelectsTwoModelShapeOnlyWithOneSemanticArtifact()
+        throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        let package = try OSAtlasRuntimeInputResolver(
+            manifest: fixture.manifest).resolveAvailablePackage(
+                receipt: fixture.receipt,
+                runtimeDirectoryURL: fixture.runtimeDirectory,
+                enclosingBundleURL: fixture.bundleDirectory)
+
+        guard case .visualAndSemantic(let installation) = package else {
+            return XCTFail("One pinned semantic artifact must select the two-model activation path.")
+        }
+        XCTAssertEqual(
+            installation.semanticRouterModelURL.lastPathComponent,
+            "semantic-router-q4_k_m.gguf")
+    }
+
     func testMultiModelPackageRequiresExactlyOneSemanticArtifact() throws {
         let fixture = try makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
@@ -80,6 +121,16 @@ final class OSAtlasRuntimeInstallationTests: XCTestCase {
             artifacts: fixture.manifest.modelArtifacts + [duplicate])
         XCTAssertThrowsError(try OSAtlasRuntimeInputResolver(
             manifest: duplicateManifest).resolvePackage(
+                receipt: fixture.receipt,
+                runtimeDirectoryURL: fixture.runtimeDirectory,
+                enclosingBundleURL: fixture.bundleDirectory)) { error in
+            XCTAssertEqual(
+                error as? OSAtlasRuntimeInstallationError,
+                .invalidReceipt)
+        }
+
+        XCTAssertThrowsError(try OSAtlasRuntimeInputResolver(
+            manifest: duplicateManifest).resolveAvailablePackage(
                 receipt: fixture.receipt,
                 runtimeDirectoryURL: fixture.runtimeDirectory,
                 enclosingBundleURL: fixture.bundleDirectory)) { error in

@@ -566,6 +566,21 @@ final class AppleFoundationMCPPlannerTests: XCTestCase {
                 directive: .ask,
                 argument: .question("What departure city should I use?")))
 
+        let flattenedRoute = try await router.route(
+            OSAtlasSemanticRoutingRequest(
+                task: task,
+                frontmostApplication: "Trip Planner",
+                visibleText:
+                    "Departure city required  Destination Monterey",
+                history: [],
+                availableDirectives: [.ask]))
+        XCTAssertEqual(
+            flattenedRoute,
+            .init(
+                directive: .ask,
+                argument: .question("What departure city should I use?")),
+            "Flattened OCR must retain one reviewed missing-field boundary")
+
         await assertUnavailableVisualRoute(
             router,
             request: OSAtlasSemanticRoutingRequest(
@@ -584,6 +599,26 @@ final class AppleFoundationMCPPlannerTests: XCTestCase {
                 history: [],
                 availableDirectives: [.ask]),
             message: "Untrusted credential fields are unrelated to the trip")
+        await assertUnavailableVisualRoute(
+            router,
+            request: OSAtlasSemanticRoutingRequest(
+                task: "Plan a train trip.",
+                frontmostApplication: "Trip Planner",
+                visibleText:
+                    "Departure city required  Arrival city missing",
+                history: [],
+                availableDirectives: [.ask]),
+            message: "Two flattened missing fields must remain ambiguous")
+        await assertUnavailableVisualRoute(
+            router,
+            request: OSAtlasSemanticRoutingRequest(
+                task: task,
+                frontmostApplication: "Trip Planner",
+                visibleText:
+                    "Password required  Destination Monterey",
+                history: [],
+                availableDirectives: [.ask]),
+            message: "Flattened credential text cannot create an ASK")
         await assertUnavailableVisualRoute(
             router,
             request: OSAtlasSemanticRoutingRequest(
@@ -2131,6 +2166,22 @@ final class AppleFoundationMCPPlannerTests: XCTestCase {
                 directive: .ask,
                 argument: .question("What departure city should I use?")))
 
+        let flattenedClarificationRequest = OSAtlasSemanticRoutingRequest(
+            task: "Plan this Saturday train trip to Monterey.",
+            frontmostApplication: "Trip Planner",
+            visibleText: "Departure city required  Destination Monterey",
+            history: [],
+            availableDirectives: [.ask])
+        XCTAssertEqual(
+            AppleFoundationVisualActionRouter.validatedSemanticRoute(
+                .init(
+                    directive: .ask,
+                    argument: .question("What day of the week is Saturday?")),
+                request: flattenedClarificationRequest),
+            .init(
+                directive: .ask,
+                argument: .question("What departure city should I use?")))
+
         let adjacentLabelRequest = OSAtlasSemanticRoutingRequest(
             task: "Plan this Saturday train trip to Monterey.",
             frontmostApplication: "Trip Planner",
@@ -2425,7 +2476,7 @@ final class AppleFoundationMCPPlannerTests: XCTestCase {
              "Dentist appointment\nTuesday\n3:30 PM", .init(directive: .answer),
              .visibleAnswer(["tuesday", "3:30"])),
             ("Make sure all of my Saturday chores are complete.", "Reminders",
-             "All items complete  4 of 4 checked", .init(directive: .complete), .none),
+             "Saturday chores — 4 of 4 checked", .init(directive: .complete), .none),
         ]
 
         for row in rows {
@@ -2617,6 +2668,44 @@ final class AppleFoundationMCPPlannerTests: XCTestCase {
             XCTAssertEqual(error, .multipleRoutes)
         } catch {
             XCTFail("Unexpected typed visual capture error: \(error)")
+        }
+    }
+
+    @available(macOS 26.0, *)
+    func testVisualRouteIntentionalStopRecoversExactlyOneTypedCapture()
+        async throws {
+        let capture = FoundationVisualActionRouteCapture()
+        let route = OSAtlasSemanticActionRoute(
+            directive: .type,
+            argument: .text("Pick up oat milk at 6 PM"))
+        try await capture.record(route)
+
+        let recovered = try await AppleFoundationVisualActionRouter
+            .recoverIntentionallyCompletedRoute(
+                after: FoundationVisualActionSelectionComplete(),
+                capture: capture)
+        XCTAssertEqual(recovered, route)
+
+        let unrelated = try await AppleFoundationVisualActionRouter
+            .recoverIntentionallyCompletedRoute(
+                after: CocoaError(.fileReadUnknown),
+                capture: capture)
+        XCTAssertNil(unrelated)
+
+        do {
+            try await capture.record(.init(directive: .complete))
+            XCTFail("A second route must still poison the capture")
+        } catch let error as AppleFoundationVisualActionRouterError {
+            XCTAssertEqual(error, .multipleRoutes)
+        }
+        do {
+            _ = try await AppleFoundationVisualActionRouter
+                .recoverIntentionallyCompletedRoute(
+                    after: FoundationVisualActionSelectionComplete(),
+                    capture: capture)
+            XCTFail("The intentional stop must not mask multiple callbacks")
+        } catch let error as AppleFoundationVisualActionRouterError {
+            XCTAssertEqual(error, .multipleRoutes)
         }
     }
 
