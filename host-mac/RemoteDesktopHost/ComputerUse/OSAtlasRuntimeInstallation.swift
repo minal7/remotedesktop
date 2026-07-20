@@ -34,6 +34,15 @@ struct OSAtlasResolvedRuntimeInstallation: Equatable, Sendable {
     let semanticRouterModelURL: URL
 }
 
+/// The verified model receipt can describe either the currently shipped
+/// visual package or a future visual + semantic package. Keeping that choice
+/// explicit prevents a visual-only receipt from being rejected before the
+/// existing on-device Foundation planner can be composed around OS-Atlas.
+enum OSAtlasResolvedRuntimePackage: Equatable, Sendable {
+    case visualOnly(OSAtlasLlamaRuntimeInputs)
+    case visualAndSemantic(OSAtlasResolvedRuntimeInstallation)
+}
+
 /// Converts a verified, data-only model receipt into the exact local inputs
 /// accepted by OSAtlasLlamaRuntime. The model may live in Application Support,
 /// but executable code must resolve inside the signed host application bundle.
@@ -209,6 +218,33 @@ struct OSAtlasRuntimeInputResolver {
             semanticRouterModelURL: semanticURL)
     }
 
+    /// Resolves exactly the package shape declared by the pinned manifest.
+    /// Zero semantic artifacts is the supported visual-only release shape;
+    /// exactly one activates the two-model path. Any other count fails closed.
+    func resolveAvailablePackage(
+        receipt: ComputerUseInstallationReceipt,
+        runtimeDirectoryURL: URL,
+        enclosingBundleURL: URL
+    ) throws -> OSAtlasResolvedRuntimePackage {
+        let semanticArtifactCount = manifest.modelArtifacts.filter {
+            $0.kind == .semanticRouterModel
+        }.count
+        switch semanticArtifactCount {
+        case 0:
+            return .visualOnly(try resolve(
+                receipt: receipt,
+                runtimeDirectoryURL: runtimeDirectoryURL,
+                enclosingBundleURL: enclosingBundleURL))
+        case 1:
+            return .visualAndSemantic(try resolvePackage(
+                receipt: receipt,
+                runtimeDirectoryURL: runtimeDirectoryURL,
+                enclosingBundleURL: enclosingBundleURL))
+        default:
+            throw OSAtlasRuntimeInstallationError.invalidReceipt
+        }
+    }
+
     private func isDirectory(_ url: URL) -> Bool {
         (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true
     }
@@ -281,14 +317,22 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
         progress: @escaping @MainActor (String) -> Void
     ) async throws -> any ComputerUseExecuting {
         let runtimeDirectoryURL = try bundledRuntimeDirectoryURL()
-        let installation = try resolver.resolvePackage(
+        let package = try resolver.resolveAvailablePackage(
             receipt: receipt,
             runtimeDirectoryURL: runtimeDirectoryURL,
             enclosingBundleURL: bundle.bundleURL)
-        return try await OSAtlasComputerUseExecutor.load(
-            installation: installation,
-            runtime: runtime,
-            progress: progress)
+        switch package {
+        case .visualOnly(let inputs):
+            return try await OSAtlasComputerUseExecutor.load(
+                inputs: inputs,
+                runtime: runtime,
+                progress: progress)
+        case .visualAndSemantic(let installation):
+            return try await OSAtlasComputerUseExecutor.load(
+                installation: installation,
+                runtime: runtime,
+                progress: progress)
+        }
     }
 
     func deactivate() async {

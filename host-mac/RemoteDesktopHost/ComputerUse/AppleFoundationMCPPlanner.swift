@@ -3351,6 +3351,62 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
                 }
             }
 
+            // Vision/OCR can flatten adjacent form labels and values onto one
+            // line. Recognize only reviewed task-field phrases immediately
+            // followed by a closed missing marker; arbitrary UI nouns and all
+            // credential fields remain unable to create a clarification.
+            let flattenedWords = normalizedWords(String(line))
+            let reviewedLabels: [([String], String)] = [
+                (["departure", "city"], "Departure city"),
+                (["departure", "station"], "Departure station"),
+                (["origin", "city"], "Origin city"),
+                (["arrival", "city"], "Arrival city"),
+                (["destination", "city"], "Destination city"),
+                (["delivery", "address"], "Delivery address"),
+                (["dropoff", "address"], "Dropoff address"),
+                (["street", "address"], "Street address"),
+                (["postal", "code"], "Postal code"),
+                (["zip", "code"], "ZIP code"),
+                (["email", "address"], "Email address"),
+                (["file", "name"], "File name"),
+                (["folder", "name"], "Folder name"),
+                (["destination"], "Destination"),
+                (["origin"], "Origin"),
+                (["recipient"], "Recipient"),
+                (["subject"], "Subject"),
+                (["body"], "Body"),
+                (["calendar"], "Calendar"),
+                (["location"], "Location"),
+                (["date"], "Date"),
+                (["time"], "Time"),
+            ]
+            let flattenedMissingMarkers = [
+                ["not", "provided"],
+                ["not", "set"],
+                ["missing"],
+                ["required"],
+                ["empty"],
+            ]
+            for (labelWords, canonicalLabel) in reviewedLabels {
+                guard flattenedWords.count > labelWords.count else {
+                    continue
+                }
+                for start in flattenedWords.indices
+                where start + labelWords.count <= flattenedWords.count
+                    && Array(flattenedWords[
+                        start ..< start + labelWords.count]) == labelWords {
+                    let markerStart = start + labelWords.count
+                    if flattenedMissingMarkers.contains(where: { marker in
+                        markerStart + marker.count <= flattenedWords.count
+                            && Array(flattenedWords[
+                                markerStart ..< markerStart + marker.count])
+                                == marker
+                    }) {
+                        candidates.append(canonicalLabel)
+                    }
+                }
+            }
+
             let adjacentValue = normalizedWords(String(line))
                 .joined(separator: " ")
             guard missingValues.contains(adjacentValue), index > 0 else {
@@ -3741,6 +3797,16 @@ private extension AppleFoundationVisualActionRouter {
         } catch let error as AppleFoundationVisualActionRouterError {
             throw error
         } catch let error as LanguageModelSession.ToolCallError {
+            if let selected = try await Self
+                .recoverIntentionallyCompletedRoute(
+                    after: error.underlyingError,
+                    capture: capture) {
+                return try await resolvedSelectedRoute(
+                    selected,
+                    request: request,
+                    omittingRedundantOpenApplication:
+                        omittingRedundantOpenApplication)
+            }
             if let selected = try await Self.recoverSingleCapturedRoute(
                 after: error.underlyingError
                     as? AppleFoundationVisualActionRouterError,
@@ -3857,6 +3923,20 @@ extension AppleFoundationVisualActionRouter {
         return try await capture.selectedDirective()
     }
 
+    /// A routing callback deliberately stops generation immediately after its
+    /// first schema-validated capture. Only that private sentinel may turn a
+    /// tool error into the captured route; unrelated framework/tool failures
+    /// retain the existing fail-closed recovery rules below.
+    static func recoverIntentionallyCompletedRoute(
+        after error: Error,
+        capture: FoundationVisualActionRouteCapture
+    ) async throws -> OSAtlasSemanticActionRoute? {
+        guard error is FoundationVisualActionSelectionComplete else {
+            return nil
+        }
+        return try await capture.selectedDirective()
+    }
+
     /// Retains OCR line boundaries while keeping every line bounded and inert.
     /// Flattening these lines makes a faithful model response look like one
     /// invented cross-line fact, which the strict host verifier must reject.
@@ -3904,6 +3984,12 @@ actor FoundationVisualActionRouteCapture {
     }
 }
 
+/// Private control-flow sentinel used to end Foundation's tool loop after one
+/// typed, no-effect route has been captured. It carries no route or authority;
+/// the actor-owned capture remains the only value the host can resolve.
+@available(macOS 26.0, *)
+struct FoundationVisualActionSelectionComplete: Error {}
+
 @available(macOS 26.0, *)
 private struct FoundationVisualActionRouteTool: Tool {
     typealias Arguments = GeneratedContent
@@ -3937,7 +4023,7 @@ private struct FoundationVisualActionRouteTool: Tool {
             scrollDirection: route.scrollDirection,
             argument: typedArgument))
         try Task.checkCancellation()
-        return "Visual operation selected. Do not call another routing tool."
+        throw FoundationVisualActionSelectionComplete()
     }
 
     static func name(for route: OSAtlasSemanticActionRoute) -> String {
