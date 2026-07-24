@@ -274,12 +274,36 @@ jobs:
             -configuration Debug \
             -destination 'platform=iOS Simulator,id=${{ steps.simulator.outputs.udid }}' \
             -derivedDataPath "$RUNNER_TEMP/ios-derived-data" \
+            -resultBundlePath "$RUNNER_TEMP/ios-debug-tests-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.xcresult" \
             -disableAutomaticPackageResolution \
             -onlyUsePackageVersionsFromResolvedFile \
             -quiet
 
           # The live CloudKit/TCC and installed actual-model acceptances require
           # a prepared physical Mac and are intentionally not claimed by this CI job.
+
+      - name: Summarize failed iOS Debug tests
+        if: ${{ failure() }}
+        run: |
+          set -euo pipefail
+
+          result_bundle="$RUNNER_TEMP/ios-debug-tests-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.xcresult"
+          if [[ ! -d "$result_bundle" ]]; then
+            echo "No iOS Debug xcresult bundle was produced."
+            exit 0
+          fi
+          xcrun xcresulttool get test-results summary \
+            --path "$result_bundle" \
+            --format json
+
+      - name: Upload failed iOS Debug test result
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ios-debug-xcresult-${{ needs.resolve-version.outputs.release_sha }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ios-debug-tests-${{ github.run_id }}-${{ github.run_attempt }}.xcresult
+          if-no-files-found: ignore
+          retention-days: 7
 
   build-windows:
     runs-on: windows-latest
@@ -778,6 +802,9 @@ jobs:
             exit 1
           fi
 
+          # Xcode's Swift stdlib embedding phase re-signs copied
+          # compatibility dylibs with OTHER_CODE_SIGN_FLAGS. Require the same
+          # hardened-runtime seal as the app and bundled llama runtime.
           xcodebuild archive \
             -project host-mac/RemoteDesktopHost.xcodeproj \
             -scheme RemoteDesktopHost \
@@ -792,7 +819,7 @@ jobs:
             PROVISIONING_PROFILE_SPECIFIER="$MACOS_PROVISIONING_PROFILE_SPECIFIER" \
             MARKETING_VERSION="$VERSION" \
             CURRENT_PROJECT_VERSION="$GITHUB_RUN_NUMBER" \
-            OTHER_CODE_SIGN_FLAGS="--timestamp" \
+            OTHER_CODE_SIGN_FLAGS="--timestamp --options runtime" \
             archive
 
           app_path="$archive_path/Products/Applications/RemoteDesktopHost.app"

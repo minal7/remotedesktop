@@ -205,8 +205,9 @@ repeats bundle verification.
 
 First open the fixture in Safari, make the Safari content area at least
 900 x 650 points, and leave **Start local quote setup** unclicked. Leave that
-tab loaded in the background, then foreground Calculator so the fixture and
-Safari are not visible in the streamed starting frame:
+tab loaded, then hide Safari and foreground Calculator so the fixture is not
+visible in the streamed starting frame. The acceptance runner performs and
+verifies those last two steps fail-closed:
 
 ```sh
 cd /path/to/remotedesktop

@@ -136,6 +136,30 @@ class ReleaseWorkflowSecurityContractTests(unittest.TestCase):
             self.workflow[upload:archive],
         )
 
+    def test_archive_hardens_xcode_embedded_swift_compatibility_code(
+        self,
+    ) -> None:
+        archive = self.workflow.index("- name: Build signed archive")
+        validate = self.workflow.index(
+            "- name: Validate macOS distribution signature"
+        )
+        archive_block = self.workflow[archive:validate]
+        self.assertIn(
+            'OTHER_CODE_SIGN_FLAGS="--timestamp --options runtime"',
+            archive_block,
+        )
+
+        notarize = self.workflow.index("- name: Notarize and staple app")
+        validation_block = self.workflow[validate:notarize]
+        self.assertIn(
+            "Nested Mach-O code is missing the hardened runtime",
+            validation_block,
+        )
+        self.assertIn(
+            "Nested code is missing a secure timestamp",
+            validation_block,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

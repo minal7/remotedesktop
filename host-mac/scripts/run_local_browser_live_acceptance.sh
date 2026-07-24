@@ -1306,10 +1306,55 @@ $.NSWorkspace.sharedWorkspace.frontmostApplication.bundleIdentifier.js
 JXA
 }
 
+hide_safari() {
+    /usr/bin/osascript -l JavaScript <<'JXA' >/dev/null
+ObjC.import('AppKit')
+const applications =
+    $.NSRunningApplication.runningApplicationsWithBundleIdentifier(
+        "com.apple.Safari")
+if (applications.count === 0) {
+    throw new Error("Safari is not running")
+}
+for (let index = 0; index < applications.count; index += 1) {
+    const application = applications.objectAtIndex(index)
+    // NSRunningApplication reports the request result before AppKit updates
+    // `hidden` on some macOS releases. The bounded shell poll below is the
+    // authoritative fail-closed acknowledgement.
+    Boolean(application.hide)
+}
+JXA
+}
+
+safari_is_hidden() {
+    /usr/bin/osascript -l JavaScript <<'JXA' >/dev/null
+ObjC.import('AppKit')
+const applications =
+    $.NSRunningApplication.runningApplicationsWithBundleIdentifier(
+        "com.apple.Safari")
+if (applications.count === 0) {
+    throw new Error("Safari is not running")
+}
+for (let index = 0; index < applications.count; index += 1) {
+    if (!Boolean(applications.objectAtIndex(index).hidden)) {
+        throw new Error("Safari is still visible")
+    }
+}
+JXA
+}
+
 activate_calculator_and_verify() {
     local frontmost_bundle=""
     local attempt
 
+    # "Frontmost" alone is not a visual starting-state guarantee: Calculator
+    # is intentionally small, so a visible Safari window behind it can leak the
+    # fixture into the streamed frame. Hide (but do not terminate) Safari so
+    # the fresh-frame assertion proves the agent must visibly reopen the exact
+    # prepared tab before it can act.
+    hide_safari || {
+        /bin/echo "Safari could not be hidden behind the unrelated starting app." >&2
+        return 1
+    }
     /usr/bin/open "$CALCULATOR_APP"
     for ((attempt = 1; attempt <= 40; attempt++)); do
         /usr/bin/osascript -e 'tell application "Calculator" to activate' \
@@ -1317,12 +1362,13 @@ activate_calculator_and_verify() {
         if ! frontmost_bundle="$(frontmost_bundle_identifier 2>/dev/null)"; then
             frontmost_bundle=""
         fi
-        if [[ "$frontmost_bundle" == "com.apple.calculator" ]]; then
+        if [[ "$frontmost_bundle" == "com.apple.calculator" ]] \
+            && safari_is_hidden; then
             return 0
         fi
         /bin/sleep 0.25
     done
-    /bin/echo "Calculator did not become genuinely frontmost; observed bundle: ${frontmost_bundle:-unknown}." >&2
+    /bin/echo "Calculator did not become genuinely frontmost with Safari hidden; observed bundle: ${frontmost_bundle:-unknown}." >&2
     return 1
 }
 
@@ -1643,7 +1689,7 @@ APPLESCRIPT
             "$acceptance_nonce" || return $?
     fi
     activate_calculator_and_verify || return $?
-    /bin/echo "Prepared fresh $CONFIGURATION/$CONFIGURATION background Safari fixture $target_url with Calculator genuinely frontmost."
+    /bin/echo "Prepared fresh $CONFIGURATION/$CONFIGURATION hidden Safari fixture $target_url with Calculator genuinely frontmost."
 }
 
 verify_browser_postcondition() {

@@ -350,6 +350,35 @@ class LocalBrowserLiveAcceptanceContractTests(unittest.TestCase):
         self.assertIn("Safari postcondition was not evaluated", between)
         self.assertIn("return 1", between)
 
+    def test_browser_preparation_hides_safari_before_activating_calculator(
+        self,
+    ) -> None:
+        hide = self.runner.split(
+            "hide_safari() {", maxsplit=1
+        )[1].split("\n}\n\nsafari_is_hidden()", maxsplit=1)[0]
+        self.assertIn(
+            "runningApplicationsWithBundleIdentifier(\n"
+            '        "com.apple.Safari")',
+            hide,
+        )
+        self.assertIn("Boolean(application.hide)", hide)
+
+        activate = self.runner.split(
+            "activate_calculator_and_verify() {", maxsplit=1
+        )[1].split("\n}\n\nsafari_page_count()", maxsplit=1)[0]
+        hide_request = activate.index("hide_safari")
+        calculator_open = activate.index('/usr/bin/open "$CALCULATOR_APP"')
+        self.assertLess(hide_request, calculator_open)
+        self.assertIn(
+            '[[ "$frontmost_bundle" == "com.apple.calculator" ]]',
+            activate,
+        )
+        self.assertIn("&& safari_is_hidden", activate)
+        self.assertIn(
+            "Calculator did not become genuinely frontmost with Safari hidden",
+            activate,
+        )
+
     def test_b03_and_b04_attach_standardized_typed_outcomes(self) -> None:
         sign_in = self.outcome_live_test.split(
             "func testLocalSignInPageRequiresUserInterventionWithoutCredentialInput",
@@ -475,10 +504,18 @@ class LocalBrowserLiveAcceptanceContractTests(unittest.TestCase):
             "timeout: Self.visualSidecarLiveTimeout",
             "timeout: Self.freshCalculatorFrameTimeout",
             "fixtureProofRecognition(",
-            "Safari, fixture, and stale-frame text are rejected",
+            "Exact fixture and stale-frame text are rejected",
+            '!text.contains("local-only acceptance fixture")',
+            '!text.contains("delivery quote setup")',
+            '!text.contains("start local quote setup")',
+            '!text.contains("fixture code")',
         ):
             self.assertIn(contract, self.b01_live_test)
 
+        self.assertNotIn(
+            '!text.contains("safari")',
+            self.b01_live_test,
+        )
         self.assertNotIn("captureStreamProof", self.b01_live_test)
         self.assertNotIn(
             "if liveScreen.waitForExistence",

@@ -135,12 +135,12 @@ final class OSAtlasLocalFixtureSimulatorLiveE2ETests: XCTestCase {
                 initialStreamRecognition = recognized
                 let text = canonical(recognized)
                 return text.contains("calculator")
-                    && !text.contains("safari")
+                    && !text.contains("local-only acceptance fixture")
                     && !text.contains("delivery quote setup")
                     && !text.contains("start local quote setup")
                     && !text.contains("fixture code")
             },
-            "The visual sidecar reported live, but B01 did not decode the fresh Calculator starting frame within \(Int(Self.freshCalculatorFrameTimeout)) seconds. Safari, fixture, and stale-frame text are rejected. Vision last saw: \(initialStreamRecognition)")
+            "The visual sidecar reported live, but B01 did not decode the fresh Calculator starting frame within \(Int(Self.freshCalculatorFrameTimeout)) seconds. Exact fixture and stale-frame text are rejected; unrelated background text may mention a browser. Vision last saw: \(initialStreamRecognition)")
 
         attachSimulatorScreenshot(named: "Local OS-Atlas fixture - before request")
 
@@ -259,7 +259,7 @@ final class OSAtlasLocalFixtureSimulatorLiveE2ETests: XCTestCase {
         VISUAL SIDECAR: optional product media path; mandatory for B01; live only after compatible host hello, current display metadata, and a fresh decoded frame
         HYBRID ROUTE: host semantic app/type/scroll routing + installed OS-Atlas visual point grounding for the required setup control
         ONE NATURAL-LANGUAGE SUBMISSION: true
-        INITIAL APP PROOF: streamed Calculator text was visible while Safari and local-fixture markers were absent
+        INITIAL APP PROOF: streamed Calculator text was visible while exact local-fixture markers were absent; the runner independently verified Safari hidden
         APP-FIRST PROGRESS OBSERVED: \(terminal.sawRequestedApplicationOpenProgress)
         SAFARI-BEFORE-TYPE STREAM PROOF: \(terminal.sawSafariFixtureBeforeNativeType)
         OS-ATLAS POINTER-CLICK PROGRESS OBSERVED: \(terminal.sawOSAtlasPointerClickProgress)

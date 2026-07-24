@@ -425,10 +425,12 @@ final class WebRTCTransportTests: XCTestCase {
         XCTAssertTrue(model.computerUseSession?.isConnected == false)
         XCTAssertEqual(model.computerUseVisualSidecarState, .unavailable)
 
-        for _ in 0..<100 {
-            if await validationGate.callCount() == 3 { break }
-            await Task.yield()
-        }
+        let revalidationStarted = await validationGate.waitForCallCount(
+            3,
+            timeout: .seconds(1))
+        XCTAssertTrue(
+            revalidationStarted,
+            "The account-change path did not start its causally required revalidation.")
         let validationCallCount = await validationGate.callCount()
         XCTAssertEqual(validationCallCount, 3)
         await validationGate.resumeRevalidation()
@@ -598,6 +600,18 @@ private actor InitialLocalAccountValidationGate {
     }
 
     func callCount() -> Int { calls }
+
+    func waitForCallCount(
+        _ expectedCount: Int,
+        timeout: Duration
+    ) async -> Bool {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while calls < expectedCount, clock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        return calls >= expectedCount
+    }
 
     func resumeRevalidation() {
         revalidationContinuation?.resume()
