@@ -413,9 +413,10 @@ final class MCPFoundationTests: XCTestCase {
         let tools = try await pool.allowedTools()
         let tool = try XCTUnwrap(tools.first)
         let call = try tool.makeCall(taskID: "cancel-read", arguments: [:])
+        let session = try XCTUnwrap(factory.latestSession())
 
         let operation = Task { try await pool.execute(call) }
-        try await Task.sleep(for: .milliseconds(50))
+        await session.waitForExecution()
         operation.cancel()
         do {
             _ = try await operation.value
@@ -441,8 +442,9 @@ final class MCPFoundationTests: XCTestCase {
         let firstTools = try await pool.allowedTools()
         let firstTool = try XCTUnwrap(firstTools.first)
         let firstCall = try firstTool.makeCall(taskID: "old-read", arguments: [:])
+        let firstSession = try XCTUnwrap(factory.latestSession())
         let oldOperation = Task { try await pool.execute(firstCall) }
-        try await Task.sleep(for: .milliseconds(50))
+        await firstSession.waitForExecution()
 
         let secondIdentity = try await pool.start(binaryURL: fakeBinaryURL)
         XCTAssertGreaterThan(
@@ -585,6 +587,7 @@ private actor FakeMCPSession: MCPClientSessioning {
     private let behavior: FakeMCPSessionFactory.Behavior
     private var executions = 0
     private var stops = 0
+    private var executionWaiters: [CheckedContinuation<Void, Never>] = []
 
     init(
         binary: MCPValidatedBinary,
@@ -623,6 +626,9 @@ private actor FakeMCPSession: MCPClientSessioning {
 
     func execute(_ call: MCPToolCall) async throws -> MCPToolResult {
         executions += 1
+        let pendingExecutionWaiters = executionWaiters
+        executionWaiters.removeAll()
+        pendingExecutionWaiters.forEach { $0.resume() }
         switch behavior {
         case .succeed:
             return try MCPToolResult(
@@ -646,6 +652,13 @@ private actor FakeMCPSession: MCPClientSessioning {
 
     func executionCount() -> Int { executions }
     func stopCount() -> Int { stops }
+
+    func waitForExecution() async {
+        if executions > 0 { return }
+        await withCheckedContinuation { continuation in
+            executionWaiters.append(continuation)
+        }
+    }
 
     private static func schema(for name: String) -> MCPJSONValue {
         let fields: [String: MCPJSONValue]

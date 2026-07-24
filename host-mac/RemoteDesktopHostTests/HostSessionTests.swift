@@ -483,10 +483,7 @@ final class HostSessionTests: XCTestCase {
 
         session.handleCloudAccountChanged()
         await channel.waitForTerminalSend()
-        for _ in 0 ..< 20 {
-            if await signalingCleanupStarted.isOpen { break }
-            await Task.yield()
-        }
+        await signalingCleanupStarted.wait()
         let cleanupStartedBeforeDeliveryFinished =
             await signalingCleanupStarted.isOpen
         let replacementStartedBeforeCleanup =

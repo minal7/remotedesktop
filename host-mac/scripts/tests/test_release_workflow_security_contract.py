@@ -107,6 +107,35 @@ class ReleaseWorkflowSecurityContractTests(unittest.TestCase):
             cleanup_snippet,
         )
 
+    def test_failed_macos_debug_tests_retain_exact_result_bundle(self) -> None:
+        self.assertIn(
+            '-resultBundlePath "$RUNNER_TEMP/host-tests.xcresult"',
+            self.workflow,
+        )
+        summarize = self.workflow.index(
+            "- name: Summarize failed macOS Debug tests"
+        )
+        upload = self.workflow.index(
+            "- name: Upload failed macOS Debug test result"
+        )
+        archive = self.workflow.index("- name: Build signed archive")
+        self.assertLess(summarize, upload)
+        self.assertLess(upload, archive)
+        self.assertIn(
+            "xcrun xcresulttool get test-results summary",
+            self.workflow[summarize:upload],
+        )
+        self.assertIn(
+            "if: ${{ failure() }}",
+            self.workflow[summarize:archive],
+        )
+        self.assertIn(
+            "macos-debug-xcresult-"
+            "${{ needs.resolve-version.outputs.release_sha }}-attempt-"
+            "${{ github.run_attempt }}",
+            self.workflow[upload:archive],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

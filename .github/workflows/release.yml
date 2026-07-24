@@ -712,6 +712,7 @@ jobs:
             -configuration Debug \
             -destination 'platform=macOS' \
             -derivedDataPath "$RUNNER_TEMP/host-tests-derived-data" \
+            -resultBundlePath "$RUNNER_TEMP/host-tests.xcresult" \
             -disableAutomaticPackageResolution \
             -onlyUsePackageVersionsFromResolvedFile \
             DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
@@ -722,6 +723,29 @@ jobs:
 
           # Actual-model, live desktop, TCC, and production CloudKit checks are
           # separate prepared-machine acceptance gates, not GitHub-hosted CI.
+
+      - name: Summarize failed macOS Debug tests
+        if: ${{ failure() }}
+        run: |
+          set -euo pipefail
+
+          result_bundle="$RUNNER_TEMP/host-tests.xcresult"
+          if [[ ! -d "$result_bundle" ]]; then
+            echo "No macOS Debug xcresult bundle was produced."
+            exit 0
+          fi
+          xcrun xcresulttool get test-results summary \
+            --path "$result_bundle" \
+            --format json
+
+      - name: Upload failed macOS Debug test result
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: macos-debug-xcresult-${{ needs.resolve-version.outputs.release_sha }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/host-tests.xcresult
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Build signed archive
         env:
