@@ -24,12 +24,13 @@
 </head>
 <body>
   <h1>Privacy Policy</h1>
-  <p class="muted">Remote Desktop · Last updated July 19, 2026</p>
+  <p class="muted">Remote Desktop · Last updated July 23, 2026</p>
 
   <p>Remote Desktop is designed so the developer does not receive your session content. We do
   not run a data-collection server, but the apps do store technical records in your private
-  iCloud database and device Keychain to pair your devices, deliver AI Computer Use requests,
-  and recover one unfinished request. This policy explains those records in plain terms.</p>
+  iCloud database and device Keychain to discover and enroll your devices, negotiate remote
+  screen connections, report AI component setup, and recover one unfinished local request.
+  This policy explains those records in plain terms.</p>
 
   <h2>The short version</h2>
   <ul>
@@ -37,6 +38,9 @@
     <li>There is no separate Remote Desktop account and no advertising, analytics, or tracking
       SDK. Pairing uses the Apple Account already signed in to iCloud on your devices.</li>
     <li>Your screen, audio, and input stream <strong>directly between your own devices</strong> — they never pass through a server we control.</li>
+    <li>After enrollment, AI prompts, conversation, task results, controls, and approvals use
+      only an authenticated local-network connection to your Mac; they do not fall back to
+      CloudKit.</li>
   </ul>
 
   <h2>How the connection works</h2>
@@ -47,36 +51,49 @@
 
   <h2>Pairing and signaling</h2>
   <p>To set up a connection, the two devices exchange a small amount of technical connection
-  information ("signaling"). Pairing records can include the host name, a random six-digit
-  pairing code, opaque device identifiers, timestamps, and the WebRTC connection descriptions
+  information ("signaling"). Pairing records can include the host name, a short-lived internal
+  routing binding, opaque device identifiers, timestamps, and the WebRTC connection descriptions
   and network candidates needed to connect. This is done through <strong>your own private iCloud
   (CloudKit) database</strong> under your personal Apple Account. It is governed by
   <a href="https://www.apple.com/legal/privacy/">Apple's Privacy Policy</a>. We have no access
   to your iCloud data. The records are scoped to devices signed in to the same Apple Account;
-  the pairing code and authenticated WebRTC peer complete the connection.</p>
+  automatic pairing is limited to that account. No pairing code or local credential is shown or
+  entered.</p>
 
-  <p>The host generates a new pairing code whenever its listener starts, including after a
-  connection ends. The five-minute interval used by signaling is a stale-record window, not a
-  countdown that expires a code while the host remains listening. The host refreshes its live
-  advertisement while listening. The apps attempt to delete the CloudKit signaling records
-  they created after connection or teardown; any older record left behind is ignored.</p>
+  <p>The host generates a new internal routing binding whenever its listener starts, including
+  after a connection ends. Discovery, enrollment, and remote-control signaling records have a
+  five-minute validity window. The host refreshes its live advertisement while listening. The
+  apps attempt to delete the CloudKit records they created after connection or teardown; any
+  expired record left behind is ignored. Reads, cleanup queues, and replay tracking are capped
+  so malformed or excessive records fail closed rather than causing unbounded retention in the
+  apps.</p>
 
-  <h2>AI Computer Use records</h2>
-  <p>If you use AI Computer Use, the same private CloudKit database carries low-bandwidth
-  records between your iPhone or iPad and your Mac. Depending on the task, these records can
-  contain setup progress, your prompt and recent conversation context, assistant results and
-  status, pause/resume/stop controls, and approval requests and responses. They also contain
-  the pairing, session, message, sender, and recipient identifiers needed to route and
-  deduplicate a request. Live screen pixels, host audio, and direct input do not use CloudKit;
-  they stay on the peer-to-peer WebRTC connection. AI planning and visual grounding run
-  locally on the Mac host rather than through a developer-operated AI service.</p>
+  <p>For nearby AI Computer Use, the device sends an ephemeral public key through private
+  CloudKit. The Mac returns its local credential encrypted with an ephemeral key agreement.
+  CloudKit never receives that credential in plaintext; the device stores it only in its
+  non-synchronizing, device-only Keychain.</p>
 
-  <p>A receiving device attempts to delete an AI CloudKit record only after it has applied the
-  message. If deletion is interrupted, it retries later. Duplicate or delayed records are
-  matched to their stable message and task identifiers so they cannot silently become a new
-  task. The iOS receiver scopes results to the current session, and both sides ignore AI
-  records older than one hour. A record that was never received or deleted can remain in your
-  private CloudKit database, where it is not accessible to the developer.</p>
+  <h2>AI Computer Use transport</h2>
+  <p>CloudKit is limited to the AI component setup lifecycle. Before the local broker is ready,
+  a setup record can contain a setup request, installation phase, normalized progress, and the
+  session, message, sender, and recipient identifiers needed to route and deduplicate that
+  setup. It does not contain an ordinary natural-language task, recent conversation, assistant
+  task result, task controls, or an approval decision.</p>
+
+  <p>After enrollment, your prompt and recent conversation context, assistant task progress and
+  result, pause/resume/stop controls, and approval requests and responses travel only over an
+  authenticated TLS connection on your local network. If that broker cannot be authenticated
+  or reached, the app stops instead of sending those values through CloudKit. Live screen
+  pixels, host audio, and direct input stay on the separate peer-to-peer WebRTC connection. AI
+  planning, policy checks, and visual grounding run locally on the Mac host rather than through
+  a developer-operated AI service.</p>
+
+  <p>A receiving device attempts to delete a CloudKit setup record only after it has applied the
+  message. If deletion is interrupted, the app retains a bounded cleanup identity and retries
+  later. Both sides ignore setup records older than one hour and cap query pages, observed
+  records, pending acknowledgements, and replay state. An expired record that CloudKit has not
+  yet deleted can remain in your private database, where it is not accessible to the developer,
+  but the app will not accept it.</p>
 
   <h2>Identifiers and unfinished-request recovery</h2>
   <p>On iPhone, iPad, and Mac, Remote Desktop uses an opaque device UUID stored in the Keychain
@@ -84,19 +101,21 @@
   remain after an app reinstall or iCloud sign-out. It is not an advertising identifier, and
   the app has no in-app account profile built from it.</p>
 
-  <p>Before sending an AI request, the iOS app saves a recovery record for that one in-flight
+  <p>Before sending a local AI request, the iOS app saves a recovery record for that one in-flight
   request in the device-only Keychain. It can include the prompt, exact encoded conversation
-  context, host and pairing identifiers, session and message identifiers, the latest
+  context, host and internal routing identifiers, session and message identifiers, the latest
   pause/resume/stop revision, a locked approval decision, and manual-intervention guidance.
-  This lets a relaunch ask the Mac about the same logical request without executing it as a new
-  task. A pending record is recoverable for up to 24 hours. It is removed after a terminal task
-  result is applied, or when it is found to be expired or for a different pairing code.</p>
+  This lets a relaunch ask the same enrolled Mac over authenticated LAN TLS about the same
+  logical request without executing it as a new task or copying it into CloudKit. A pending
+  record is recoverable for up to 24 hours. It is removed after a terminal task result is
+  applied, or when it is found to be expired or for a different internal session binding.</p>
 
-  <p>Stopping a session or losing the WebRTC peer revokes that peer's authorization for AI
-  actions and closes the host's action gate. An unfinished host task is ended rather than
-  silently resumed by a later connection, and the host starts listening with a new pairing
-  code. A locally recoverable iOS record can remain until the terminal result is received or
-  the 24-hour recovery limit is reached.</p>
+  <p>Stopping a Computer Use session, losing its authenticated LAN task channel, or failing the
+  Apple Account binding check revokes that peer's authorization for AI actions and closes the
+  host's action gate. Losing the optional WebRTC visual sidecar removes live pixels and direct
+  input; it never moves task traffic to CloudKit. An unfinished host task is not silently
+  resumed by a different connection. A locally recoverable iOS record can remain until the
+  terminal result is received or the 24-hour recovery limit is reached.</p>
 
   <h2>Information the developer receives</h2>
   <p><strong>None from the app.</strong> We do not receive the private CloudKit or Keychain

@@ -5,10 +5,8 @@ struct PairingView: View {
     @EnvironmentObject private var computerUseSetup: ComputerUseSetupCoordinator
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @StateObject private var discovery = LocalHostDiscovery()
-    @State private var code: String = ""
-    @State private var showCodeEntry = false
     @State private var aiHelpMessage: String?
-    @FocusState private var focused: Bool
+    private let localCredentialStore = LocalComputerUseCredentialStore()
 
     var body: some View {
         ScrollView {
@@ -20,7 +18,6 @@ struct PairingView: View {
                 }
 
                 availableDevices
-                manualPairing
                 privacyPolicyLink
             }
             .padding(.horizontal, 24)
@@ -71,7 +68,7 @@ struct PairingView: View {
                     .lineLimit(horizontalSizeClass == .compact ? 2 : 1)
                     .minimumScaleFactor(0.8)
 
-                Text("Choose your Mac below. If it isn’t listed, enter the pairing code shown by Remote Desktop Host on your Mac.")
+                Text("Choose your Mac below. Devices signed into the same Apple Account pair automatically—there are no codes to copy or enter.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -101,6 +98,7 @@ struct PairingView: View {
                 title: "Available devices",
                 count: discovery.hosts.isEmpty ? nil : discovery.hosts.count,
                 isLoading: discovery.hosts.isEmpty
+                    && discovery.accountPairingStatus == nil
             )
 
             if discovery.hosts.isEmpty {
@@ -125,9 +123,9 @@ struct PairingView: View {
     private var simulatorCloudKitHint: some View {
         Label {
             #if DEBUG
-            Text("This Debug Simulator app finds Debug Mac hosts. To connect to the official Mac host, run the iOS app in Release.")
+            Text("This Debug Simulator app pairs with Debug Mac hosts. Run both apps in Release to use the installed host and its matching local database.")
             #else
-            Text("This Release Simulator app can find the official Mac host through iCloud.")
+            Text("This Release app pairs automatically with the installed Release Mac host through your private iCloud account.")
             #endif
         } icon: {
             Image(systemName: "info.circle")
@@ -135,11 +133,20 @@ struct PairingView: View {
         .font(.caption)
         .foregroundStyle(.secondary)
         .fixedSize(horizontal: false, vertical: true)
-        .accessibilityLabel("Simulator iCloud environment")
+        .accessibilityLabel("Simulator local environment")
     }
     #endif
 
+    @ViewBuilder
     private var emptyDevicesState: some View {
+        if let status = discovery.accountPairingStatus {
+            cloudAccountActionState(status)
+        } else {
+            searchingDevicesState
+        }
+    }
+
+    private var searchingDevicesState: some View {
         HStack(alignment: .center, spacing: 14) {
             ProgressView()
                 .controlSize(.regular)
@@ -149,7 +156,7 @@ struct PairingView: View {
                 Text("Searching for hosts")
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.primary)
-                Text("Open Remote Desktop Host on your Mac, or use a pairing code below.")
+                Text("Open Remote Desktop Host on a Mac signed into the same Apple Account.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -165,53 +172,38 @@ struct PairingView: View {
         }
     }
 
-    private var manualPairing: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            sectionHeader(title: "Pair with code")
+    private func cloudAccountActionState(
+        _ status: LocalCloudAccountPairingStatus
+    ) -> some View {
+        HStack(alignment: .center, spacing: 14) {
+            Image(systemName: status.systemImage)
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(.orange)
+                .frame(width: 34, height: 34)
+                .accessibilityHidden(true)
 
-            Button {
-                toggleCodeEntry()
-            } label: {
-                HStack(spacing: 12) {
-                    Image(systemName: "number.square")
-                        .font(.title3.weight(.semibold))
-                        .foregroundStyle(.tint)
-                        .frame(width: 34, height: 34)
-                        .background(Color.accentColor.opacity(0.12), in: Circle())
-
-                    Text("Enter code")
-                        .font(.headline)
-                        .foregroundStyle(.primary)
-
-                    Spacer()
-
-                    Image(systemName: "chevron.down")
-                        .font(.footnote.weight(.bold))
-                        .foregroundStyle(.secondary)
-                        .rotationEffect(showCodeEntry ? .degrees(180) : .zero)
-                }
-                .padding(16)
-                .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .strokeBorder(Color.primary.opacity(0.06), lineWidth: 1)
-                }
-                .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            VStack(alignment: .leading, spacing: 3) {
+                Text(status.title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.primary)
+                Text(status.guidance)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            .buttonStyle(.plain)
-            .disabled(session.state == .connecting)
 
-            if showCodeEntry {
-                codeEntryForm
-                    .transition(.asymmetric(
-                        insertion: .opacity.combined(with: .move(edge: .top)),
-                        removal: .opacity.combined(with: .move(edge: .top))
-                    ))
-            }
+            Spacer(minLength: 0)
         }
-        .padding(18)
-        .sectionSurface()
-        .animation(.smooth(duration: 0.28), value: showCodeEntry)
+        .padding(16)
+        .background(
+            Color.orange.opacity(0.08),
+            in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(Color.orange.opacity(0.18), lineWidth: 1)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("cloud-account-action-required")
     }
 
     private var privacyPolicyLink: some View {
@@ -250,53 +242,6 @@ struct PairingView: View {
         .accessibilityIdentifier("privacy-policy-link")
     }
 
-    private var codeEntryForm: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            TextField("000000", text: $code)
-                .keyboardType(.numberPad)
-                .textContentType(.oneTimeCode)
-                .font(.system(size: 42, weight: .semibold, design: .monospaced))
-                .multilineTextAlignment(.center)
-                .tracking(8)
-                .focused($focused)
-                .onChange(of: code) { _, value in
-                    code = String(value.filter(\.isNumber).prefix(6))
-                    if code.count == 6 { submit() }
-                }
-                .padding(.vertical, 16)
-                .padding(.horizontal, 20)
-                .background(Color(uiColor: .systemBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .strokeBorder(focused ? Color.accentColor.opacity(0.62) : Color.primary.opacity(0.08), lineWidth: 1)
-                }
-                .accessibilityLabel("Pairing code")
-
-            Button(action: submit) {
-                HStack {
-                    Spacer()
-                    if case .connecting = session.state {
-                        ProgressView()
-                            .controlSize(.small)
-                    } else {
-                        Text("Connect")
-                            .font(.headline)
-                    }
-                    Spacer()
-                }
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-            .disabled(code.count != 6 || session.state == .connecting)
-        }
-        .padding(16)
-        .background(Color(uiColor: .tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .strokeBorder(Color.primary.opacity(0.06), lineWidth: 1)
-        }
-    }
-
     private func sectionHeader(title: String, count: Int? = nil, isLoading: Bool = false) -> some View {
         HStack(spacing: 10) {
             Text(title)
@@ -320,13 +265,29 @@ struct PairingView: View {
 
     @ViewBuilder
     private func hostButton(_ host: LocalHostAdvertisement) -> some View {
-        let computerUseAction: ComputerUseRowAction = if host.canOfferComputerUse {
+        let localPromptReady = host.canOfferLocalComputerUse
+            && hasLocalCredential(for: host)
+        let computerUseAction: ComputerUseRowAction = if host.canOfferLocalComputerUse,
+           !localPromptReady {
+            if host.hasAuthenticatedCloudMatch {
+                switch discovery.automaticPairingState(for: host) {
+                case .failed(let message):
+                    .retryLocalPairing(message)
+                case .pairing, .none:
+                    .pairingLocal
+                }
+            } else {
+                .unavailable(
+                    "Sign into the same Apple Account on this device and the Mac so local AI can pair automatically.")
+            }
+        } else if host.canOfferComputerUse {
             ComputerUseRowAction.resolve(
                 host: host,
-                state: computerUseSetup.state(for: host))
+                state: computerUseSetup.state(for: host),
+                localPromptReady: localPromptReady)
         } else {
             .unavailable(
-                "Remote control is available nearby. AI Computer Use will become available after iCloud confirms this Mac for the current app version. Keep Remote Desktop Host open and make sure both devices use the same Apple Account.")
+                "Remote control is available nearby. Update and reopen Remote Desktop Host to enable its secure local AI connection.")
         }
 
         Group {
@@ -373,6 +334,9 @@ struct PairingView: View {
         }
         .buttonStyle(.plain)
         .disabled(session.state == .connecting)
+        .accessibilityLabel(
+            "Remote control \(host.accessibilityDisplayName)")
+        .accessibilityHint("Connects to this exact Mac")
     }
 
     private func hostSummary(
@@ -391,7 +355,7 @@ struct PairingView: View {
                         .font(.body.weight(.semibold))
                         .foregroundStyle(.primary)
                         .lineLimit(1)
-                    Text(host.source == .cloudKit ? "Ready through iCloud" : "Ready nearby")
+                    Text(hostAvailabilityLabel(host))
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                     computerUseStatus(computerUseAction, host: host)
@@ -430,7 +394,42 @@ struct PairingView: View {
             .buttonStyle(.bordered)
             .buttonBorderShape(.roundedRectangle(radius: 14))
             .tint(.secondary)
-            .accessibilityLabel("AI Computer Use availability for \(host.hostname)")
+            .accessibilityLabel(
+                "AI Computer Use availability for \(host.accessibilityDisplayName)")
+            .accessibilityHint(message)
+
+        case .pairingLocal:
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Securing AI")
+                    .font(.subheadline.weight(.semibold))
+            }
+            .frame(maxWidth: fillsWidth ? .infinity : nil, minHeight: 44)
+            .padding(.horizontal, fillsWidth ? 10 : 8)
+            .foregroundStyle(.indigo)
+            .background(
+                Color.indigo.opacity(0.1),
+                in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(
+                "Pairing local AI automatically on \(host.accessibilityDisplayName)")
+
+        case .retryLocalPairing(let message):
+            Button {
+                discovery.retryAutomaticPairing(for: host)
+            } label: {
+                computerUseButtonLabel(
+                    "Retry AI",
+                    systemImage: "arrow.clockwise.icloud",
+                    fillsWidth: fillsWidth)
+            }
+            .buttonStyle(.borderedProminent)
+            .buttonBorderShape(.roundedRectangle(radius: 14))
+            .tint(.orange)
+            .disabled(session.state == .connecting)
+            .accessibilityLabel(
+                "Retry automatic local AI pairing on \(host.accessibilityDisplayName)")
             .accessibilityHint(message)
 
         case .setup:
@@ -446,7 +445,8 @@ struct PairingView: View {
             .buttonBorderShape(.roundedRectangle(radius: 14))
             .tint(.indigo)
             .disabled(session.state == .connecting)
-            .accessibilityLabel("Set up AI Computer Use on \(host.hostname)")
+            .accessibilityLabel(
+                "Set up AI Computer Use on \(host.accessibilityDisplayName)")
             .accessibilityHint("Downloads and prepares AI on your Mac")
 
         case .progress(let progress):
@@ -465,8 +465,10 @@ struct PairingView: View {
             .buttonBorderShape(.roundedRectangle(radius: 14))
             .tint(.indigo)
             .disabled(session.state == .connecting)
-            .accessibilityLabel("Use AI Computer Use on \(host.hostname)")
-            .accessibilityHint("Opens a chat with the live computer screen")
+            .accessibilityLabel(
+                "Use AI Computer Use on \(host.accessibilityDisplayName)")
+            .accessibilityHint(
+                "Opens a secure local AI conversation")
 
         case .retry(let message):
             Button {
@@ -481,7 +483,8 @@ struct PairingView: View {
             .buttonBorderShape(.roundedRectangle(radius: 14))
             .tint(.orange)
             .disabled(session.state == .connecting)
-            .accessibilityLabel("Retry AI setup on \(host.hostname)")
+            .accessibilityLabel(
+                "Retry AI setup on \(host.accessibilityDisplayName)")
             .accessibilityHint(message)
         }
     }
@@ -558,8 +561,20 @@ struct PairingView: View {
                 .strokeBorder(Color.indigo.opacity(0.2), lineWidth: 1)
         }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Setting up AI Computer Use on \(host.hostname)")
+        .accessibilityLabel(
+            "Setting up AI Computer Use on \(host.accessibilityDisplayName)")
         .accessibilityValue(progressAccessibilityValue(progress))
+    }
+
+    private func hostAvailabilityLabel(
+        _ host: LocalHostAdvertisement
+    ) -> String {
+        let readiness = host.source == .cloudKit
+            ? "Ready through iCloud" : "Ready nearby"
+        guard let discriminator = host.presentationDiscriminator else {
+            return readiness
+        }
+        return "\(readiness) • \(discriminator)"
     }
 
     private func progressAccessibilityValue(_ progress: ComputerUseSetupProgress) -> String {
@@ -590,6 +605,15 @@ struct PairingView: View {
                         .lineLimit(1)
                         .minimumScaleFactor(0.78)
                 }
+            case .pairingLocal:
+                Label("Pairing local AI automatically", systemImage: "icloud.and.arrow.down")
+                    .foregroundStyle(.indigo)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.78)
+            case .retryLocalPairing(let message):
+                Label(message, systemImage: "exclamationmark.icloud")
+                    .foregroundStyle(.orange)
+                    .lineLimit(horizontalSizeClass == .compact ? 2 : 1)
             case .setup:
                 Label("AI setup available", systemImage: "sparkles")
                     .foregroundStyle(.indigo)
@@ -615,34 +639,30 @@ struct PairingView: View {
     }
 
     private func connect(to host: LocalHostAdvertisement, experience: SessionModel.Experience) {
-        focused = false
-        code = host.code
         session.connect(
             code: host.code,
             experience: experience,
             computerUseHostID: host.senderID,
-            hostName: host.hostname)
+            hostName: host.hostname,
+            localComputerUseEndpoint: host.localEndpoint,
+            localCredentialID: host.localCredentialID,
+            localCloudAccountBinding: host.accountBinding)
     }
 
-    private func toggleCodeEntry() {
-        withAnimation(.smooth(duration: 0.28)) {
-            showCodeEntry.toggle()
+    private func hasLocalCredential(
+        for host: LocalHostAdvertisement
+    ) -> Bool {
+        guard let hostID = host.senderID,
+              let credentialID = host.localCredentialID,
+              let accountBinding = host.accountBinding else {
+            return false
         }
-
-        if showCodeEntry {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
-                focused = true
-            }
-        } else {
-            focused = false
-        }
+        return localCredentialStore.clientCredential(
+            hostID: hostID,
+            credentialID: credentialID,
+            accountBinding: accountBinding) != nil
     }
 
-    private func submit() {
-        guard code.count == 6 else { return }
-        focused = false
-        session.connect(code: code)
-    }
 }
 
 private extension View {

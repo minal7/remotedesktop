@@ -301,15 +301,22 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
     private let resolver: OSAtlasRuntimeInputResolver
     private let bundle: Bundle
     private let runtime: OSAtlasLlamaRuntime
+    private let browserActionAttestationLedger:
+        ComputerUseBrowserActionAttestationLedger
 
     init(
         resolver: OSAtlasRuntimeInputResolver = OSAtlasRuntimeInputResolver(),
         bundle: Bundle = .main,
-        runtime: OSAtlasLlamaRuntime = .shared
+        runtime: OSAtlasLlamaRuntime = .shared,
+        browserActionAttestationLedger:
+            ComputerUseBrowserActionAttestationLedger =
+                ComputerUseBrowserActionAttestationLedger()
     ) {
         self.resolver = resolver
         self.bundle = bundle
         self.runtime = runtime
+        self.browserActionAttestationLedger =
+            browserActionAttestationLedger
     }
 
     func load(
@@ -326,11 +333,15 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
             return try await OSAtlasComputerUseExecutor.load(
                 inputs: inputs,
                 runtime: runtime,
+                browserActionAttestationLedger:
+                    browserActionAttestationLedger,
                 progress: progress)
         case .visualAndSemantic(let installation):
             return try await OSAtlasComputerUseExecutor.load(
                 installation: installation,
                 runtime: runtime,
+                browserActionAttestationLedger:
+                    browserActionAttestationLedger,
                 progress: progress)
         }
     }

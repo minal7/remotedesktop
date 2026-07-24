@@ -72,8 +72,8 @@ struct MenuContent: View {
         case .starting:
             HStack { ProgressView(); Text("Starting…") }
                 .frame(maxWidth: .infinity)
-        case .advertising(let code):
-            advertisingView(code)
+        case .advertising:
+            advertisingView
         case .paired(let client):
             pairedView(client)
         case .error(let message):
@@ -106,18 +106,15 @@ struct MenuContent: View {
         }
     }
 
-    private func advertisingView(_ code: String) -> some View {
+    private var advertisingView: some View {
         VStack(spacing: 10) {
-            Text("Enter this code on your iPad or iPhone:")
+            Label("Ready for your devices", systemImage: "checkmark.icloud.fill")
+                .font(.headline)
+                .foregroundStyle(.green)
+            Text("Open Remote Desktop on an iPhone or iPad signed into the same Apple Account. Pairing happens automatically.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
-            Text(code)
-                .font(.system(size: 40, weight: .semibold, design: .monospaced))
-                .tracking(6)
-                .padding(.vertical, 10)
-                .frame(maxWidth: .infinity)
-                .background(.quaternary, in: RoundedRectangle(cornerRadius: 12))
             Button("Stop") { session.stop() }
                 .buttonStyle(.bordered)
                 .controlSize(.regular)
@@ -157,7 +154,7 @@ struct MenuContent: View {
         switch session.state {
         case .idle:        return "Ready"
         case .starting:    return "Starting…"
-        case .advertising: return "Waiting for pairing"
+        case .advertising: return "Ready for your devices"
         case .paired:      return "Connected"
         case .error:       return "Error"
         }

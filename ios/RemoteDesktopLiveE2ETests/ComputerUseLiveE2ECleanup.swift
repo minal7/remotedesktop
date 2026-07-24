@@ -1,5 +1,67 @@
 import XCTest
 
+/// Read-only device prerequisites shared by the opted-in Computer Use UI tests.
+/// This intentionally observes SpringBoard without activating it or interacting
+/// with account-verification UI.
+enum ComputerUseLiveE2EPreflight {
+    static let appleAccountVerificationFailureMessage =
+        "USER INTERVENTION REQUIRED: Complete Apple Account Verification in iPhone Air Simulator Settings, then rerun this live acceptance test. The test did not dismiss the alert or enter Apple Account credentials."
+    private static let simulatorRegistrationSettleInterval: TimeInterval = 7
+
+    private enum Failure: Error {
+        case appleAccountVerificationRequired
+    }
+
+    /// `xcodebuild test-without-building` installs the UI target immediately
+    /// before XCTest launches it. Simulator can briefly run that first process
+    /// before LaunchServices has committed the app's CloudKit entitlements,
+    /// causing cloudd to create an anonymous account and cache `.noAccount`.
+    /// A bounded prelaunch followed by one ordinary relaunch exercises the
+    /// shipped app after registration, without mocking or bypassing CloudKit.
+    static func launchAfterSimulatorRegistrationSettles(
+        _ app: XCUIApplication
+    ) throws {
+        app.launch()
+        try requireNoAppleAccountVerification()
+
+        #if targetEnvironment(simulator)
+        let deadline = Date().addingTimeInterval(
+            simulatorRegistrationSettleInterval)
+        repeat {
+            RunLoop.current.run(
+                until: min(
+                    deadline,
+                    Date().addingTimeInterval(0.1)))
+        } while Date() < deadline
+
+        if app.state != .notRunning {
+            app.terminate()
+        }
+        app.launch()
+        try requireNoAppleAccountVerification()
+        #endif
+    }
+
+    static func requireNoAppleAccountVerification() throws {
+        let springboard = XCUIApplication(
+            bundleIdentifier: "com.apple.springboard")
+        let alertTitle = "Apple Account Verification"
+        let titledAlert = springboard.alerts.matching(
+            NSPredicate(format: "label == %@", alertTitle)).firstMatch
+        let titledText = springboard.staticTexts.matching(
+            NSPredicate(format: "label == %@", alertTitle)).firstMatch
+        let deadline = Date().addingTimeInterval(2)
+
+        repeat {
+            if titledAlert.exists || titledText.exists {
+                XCTFail(appleAccountVerificationFailureMessage)
+                throw Failure.appleAccountVerificationRequired
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        } while Date() < deadline
+    }
+}
+
 /// Fixed-label, artifact-free cleanup for opted-in Computer Use UI tests.
 /// It never touches the streamed screen or a macOS prompt. Approval is denied
 /// through the shipped card; otherwise active work is paused and stopped

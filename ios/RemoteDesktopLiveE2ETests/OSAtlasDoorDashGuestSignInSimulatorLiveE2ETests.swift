@@ -8,7 +8,7 @@ final class OSAtlasDoorDashGuestSignInSimulatorLiveE2ETests: XCTestCase {
     private let liveSuiteKey = "RUN_COMPUTER_USE_LIVE_E2E"
     private let optInKey = "RUN_OSATLAS_DOORDASH_GUEST_HANDOFF_SIMULATOR_E2E"
 
-    private let expectedGuidance = "DoorDash needs you to sign in before it can show the delivery quote. You’re in control now: sign in yourself on the live screen, then tap Let AI continue. AI won’t enter credentials, check out, or place the order."
+    private let expectedGuidance = "DoorDash needs you to sign in before it can show the delivery quote. You’re in control now: sign in yourself on the Mac, then tap Let AI continue. AI won’t enter credentials, check out, or place the order."
 
     override func setUpWithError() throws {
         continueAfterFailure = false
@@ -86,6 +86,13 @@ final class OSAtlasDoorDashGuestSignInSimulatorLiveE2ETests: XCTestCase {
         let guidance = app.descendants(matching: .any).matching(
             NSPredicate(format: "label CONTAINS %@", expectedGuidance)).firstMatch
         XCTAssertTrue(guidance.exists, "The exact private sign-in guidance is not visible.")
+        let status = app.descendants(matching: .any).matching(
+            identifier: "computer-use-status").firstMatch
+        XCTAssertTrue(
+            waitUntil(timeout: 10) {
+                (status.value as? String) == "User intervention required"
+            },
+            "The safe browser handoff did not expose its typed user-intervention outcome. Status value: \(String(describing: status.value))")
         let resume = app.buttons["Let AI continue"]
         XCTAssertTrue(resume.exists && resume.isHittable)
         XCTAssertTrue(

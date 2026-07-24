@@ -42,6 +42,7 @@ final class HostPeerSession: NSObject {
     private let onEnded: @Sendable (String) -> Void
     private let log = Logger(subsystem: "com.threadmark.remotedesktop.host", category: "webrtc")
     private let signalingStateQueue = DispatchQueue(label: "com.threadmark.remotedesktop.host.webrtc.signaling")
+    private let closeStateLock = NSLock()
 
     private let factory: RTCPeerConnectionFactory
     private let audioBridge: SystemAudioBridge
@@ -65,6 +66,7 @@ final class HostPeerSession: NSObject {
     private var helloAuthenticated = false
     private var orderedComputerUseControls = 0
     private var captureRestartTask: Task<Void, Never>?
+    private var captureTeardownTask: Task<Void, Never>?
     private var hostSeq: UInt32 = 0
     private var answerSent = false
     private var pendingLocalICEPayloads: [[String: String]] = []
@@ -189,9 +191,19 @@ final class HostPeerSession: NSObject {
         }
     }
 
-    func close(reason: String) {
+    /// Synchronously revokes input/media ownership and returns the exact screen
+    /// capture teardown barrier. A replacement peer must await the returned
+    /// task before installing new capture callbacks on the shared capturer.
+    @discardableResult
+    func close(reason: String) -> Task<Void, Never> {
+        closeStateLock.lock()
+        if let captureTeardownTask {
+            closeStateLock.unlock()
+            return captureTeardownTask
+        }
         ended = true
         helloAuthenticated = false
+        injector.releaseHeldInput()
         notifyPeerAuthorization(authorized: false)
         orderedComputerUseControls = 0
         captureRestartTask?.cancel()
@@ -212,11 +224,16 @@ final class HostPeerSession: NSObject {
         // Clear capture callbacks before stopping to prevent the
         // delegate's didStopWithError from re-firing onEnded.
         capture.onStopped = nil
-        Task {
+        capture.onVideoSample = nil
+        capture.onAudioSample = nil
+        let teardown = Task {
             await capture.stop()
         }
+        captureTeardownTask = teardown
         captureStarted = false
         localMediaConfigured = false
+        closeStateLock.unlock()
+        return teardown
     }
 
     private func makePeerConnection() throws -> RTCPeerConnection {

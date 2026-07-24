@@ -2,33 +2,41 @@ import Foundation
 
 final class BonjourAdvertiser: NSObject {
     private var service: NetService?
+    private var localCredentialID: String?
+    private var routingBinding: String?
     private(set) var publishedMetadata: LocalHostBonjourMetadata?
 
     func publish(
         hostname: String,
         code: String,
         senderID: String,
-        computerUseCapability: ComputerUseCapability
+        computerUseCapability: ComputerUseCapability,
+        port: Int32 = 9,
+        localCredentialID: String? = nil
     ) {
         stop()
         let advertisedName = LocalHostAdvertisementName.serviceName(hostname: hostname, code: code)
         let service = NetService(domain: "local.",
                                  type: LocalHostAdvertisementName.serviceType,
                                  name: advertisedName,
-                                 port: 9)
+                                 port: port)
         if let metadata = LocalHostBonjourMetadata(
             senderID: senderID,
-            computerUseCapability: computerUseCapability
+            computerUseCapability: computerUseCapability,
+            localCredentialID: localCredentialID,
+            routingBinding: code
         ), service.setTXTRecord(metadata.txtRecordData()) {
             publishedMetadata = metadata
         }
+        self.localCredentialID = localCredentialID
+        routingBinding = code
         service.publish()
         self.service = service
     }
 
     /// Updates AI readiness without withdrawing and republishing the Bonjour
     /// service. Resolved iOS clients monitoring the service receive the new
-    /// TXT record while the six-digit legacy service name remains unchanged.
+    /// TXT record while the legacy internal routing binding remains unchanged.
     @discardableResult
     func update(
         senderID: String,
@@ -37,7 +45,9 @@ final class BonjourAdvertiser: NSObject {
         guard let service,
               let metadata = LocalHostBonjourMetadata(
                 senderID: senderID,
-                computerUseCapability: computerUseCapability) else {
+                computerUseCapability: computerUseCapability,
+                localCredentialID: localCredentialID,
+                routingBinding: routingBinding) else {
             return false
         }
         if metadata == publishedMetadata {
@@ -53,6 +63,8 @@ final class BonjourAdvertiser: NSObject {
     func stop() {
         service?.stop()
         service = nil
+        localCredentialID = nil
+        routingBinding = nil
         publishedMetadata = nil
     }
 }
@@ -61,6 +73,10 @@ enum LocalHostAdvertisementName {
     static let serviceType = "_remotedesktop._tcp."
 
     static func serviceName(hostname: String, code: String) -> String {
-        "\(hostname) [\(code)]"
+        // Keep the legacy parameter for call-site/source compatibility. The
+        // routing value now lives in bounded TXT metadata and is never shown
+        // as part of the browser-visible Bonjour instance name.
+        _ = code
+        return hostname
     }
 }

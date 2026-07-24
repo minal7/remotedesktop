@@ -51,6 +51,13 @@ with **Web Auth Token** authentication:
    launches.
 5. All subsequent private-database record ops include the token.
 
+Once the Windows host and iPhone or iPad use the same Apple Account,
+discovery and connection setup are automatic. There is no pairing-code field
+to type or value to copy. The deployed CloudKit schema still carries a
+short-lived six-digit routing binding internally; nearby Bonjour publishes it
+only as the `rb` TXT property, while the visible service instance is just the
+Windows computer name.
+
 Apple documents these web-auth tokens as short-lived and single-use;
 CloudKit may rotate the token in responses, and the host stores a
 replacement token whenever one is returned.
@@ -129,8 +136,10 @@ Optional environment variables:
 Implemented end-to-end:
 
 - Mandatory Apple ID/iCloud auth gate before the host can run.
-- CloudKit Web Services client; `HostAdvertisement` publish +
-  `WebRTCSignal` poll; preflight-offer response.
+- Automatic same-Apple-Account discovery with no user-entered pairing code;
+  CloudKit `HostAdvertisement` publish + `WebRTCSignal` poll and a plain-name
+  Bonjour service with the internal routing binding in TXT metadata only.
+- CloudKit Web Services preflight-offer response.
 - `ICEConfig` (public DB) STUN fetch with baked-in fallback.
 - WebRTC: accept the client SDP offer, add a send-only H.264 screen
   track and send-only Opus system-audio track, answer, trickle ICE
@@ -144,15 +153,15 @@ Implemented end-to-end:
 ### What is verified
 
 The portable surface — protocol codec, HID→key mapping, BGRA→I420 +
-H.264 + Opus encoders, signaling, ICE config — compiles and unit-tests
-on any host (`cargo test`, 32 tests).
+H.264 + Opus encoders, signaling, ICE config, and zero-code Bonjour
+metadata — compiles and unit-tests on any host (`cargo test`, 43 tests).
 
 The release build compiles and runs on Windows and produces a working,
 distributable `.exe` (see [Packaging & distribution](#packaging--distribution)).
 
 **Still to validate through a live session:** the capture seam in
 `src/capture.rs` (`windows-capture` + `wasapi`) is `#[cfg(windows)]` and
-can only be exercised by completing a pairing — confirm screen capture,
+can only be exercised in a connected session — confirm screen capture,
 loopback audio, and `SendInput` injection once a client connects to a
 running host.
 
@@ -227,13 +236,24 @@ upgrade.
 
 ### Code signing & SmartScreen
 
-The released exe/installer is **unsigned**. On first download users see
-a Microsoft Defender SmartScreen "unknown publisher" warning and must
-click *More info → Run anyway*. To remove it, sign the artifacts with an
-Authenticode certificate (an EV cert clears SmartScreen reputation
-immediately). Wire `signtool sign /fd sha256 /tr <timestamp-url> ...`
-into the workflow after the build and installer steps once a cert is
-available. The Microsoft Store path (below) signs the package for you.
+The release workflow publishes a Windows installer only after both the inner
+host executable and final Inno Setup installer pass fail-closed Authenticode
+verification with an RFC 3161 timestamp. Configure these repository secrets:
+
+- `WINDOWS_CERTIFICATE_PFX` — base64-encoded code-signing PFX containing
+  exactly one currently valid private-key certificate with the Code Signing
+  EKU.
+- `WINDOWS_CERTIFICATE_PASSWORD` — password for that PFX.
+
+`WINDOWS_TIMESTAMP_URL` may optionally select another RFC 3161 service; CI
+defaults to DigiCert. A publishing run fails when signing is unavailable,
+partial, expired, issued by the wrong imported certificate, or not
+timestamped. CI imports the PFX into a run-unique certificate store and removes
+both the temporary PFX and that isolated store even when signing fails; it
+never deletes a certificate from the runner's shared personal store. A
+non-publishing candidate without these secrets still compiles and tests the
+Windows source, but deliberately packages and uploads no unsigned Windows
+installer.
 
 ## Microsoft Store (MSIX) — future
 

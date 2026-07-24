@@ -775,7 +775,8 @@ struct AppleFirstSemanticActionRouter: OSAtlasSemanticActionRouting {
             switch error {
             case .unavailable, .noRoute, .generationFailed:
                 break
-            case .invalidRequest, .multipleRoutes, .cancelled:
+            case .invalidRequest, .multipleRoutes, .unsafeVisibleEvidence,
+                    .cancelled:
                 throw error
             }
         }

@@ -51,7 +51,7 @@ final class SignalingPreflightTransport: Transport {
             ],
             ts: Date().timeIntervalSince1970)
         try await signaling.send(offer)
-        log.info("preflight offer sent code=\(pairingCode, privacy: .public)")
+        log.info("preflight offer sent")
 
         let answer = try await waitForAnswer()
         onHostHello?(hostHello(from: answer.payload))

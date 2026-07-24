@@ -101,6 +101,53 @@ struct ComputerUseView: View {
                     .accessibilityLabel("Human resume recorded")
                     .accessibilityIdentifier("computer-use-human-resume-proof")
                     .allowsHitTesting(false)
+                }
+        }
+        .overlay(alignment: .topTrailing) {
+            if !model.taskProgressHistory.isEmpty {
+                // Keep ordered host progress queryable even when several LAN
+                // envelopes arrive in one poll and SwiftUI coalesces the
+                // visible status label to the newest update.
+                Color.clear
+                    .frame(width: 1, height: 1)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("Recent AI progress")
+                    .accessibilityIdentifier("computer-use-progress-history")
+                    .accessibilityValue(
+                        model.taskProgressHistory.joined(separator: "\n"))
+                    .allowsHitTesting(false)
+            }
+        }
+        .overlay(alignment: .bottomLeading) {
+            if session.computerUseConnectionMode == .localPromptOnly,
+               case .connected = session.state {
+                VStack(spacing: 0) {
+                    // Fixed, non-secret proof that the authoritative TLS task
+                    // channel remains ready even when live video is present.
+                    Color.clear
+                        .frame(width: 1, height: 1)
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel("Secure local AI prompt channel")
+                        .accessibilityIdentifier(
+                            "computer-use-local-prompt-channel")
+                        .accessibilityValue(
+                            session.isComputerUsePromptTransportReady
+                                ? "Ready"
+                                : "Paused")
+
+                    if session.hasInteractiveRemoteScreen {
+                        // The visible placeholder owns this identifier before
+                        // the sidecar has a fresh frame. Keep it queryable once
+                        // live pixels replace that placeholder.
+                        Color.clear
+                            .frame(width: 1, height: 1)
+                            .accessibilityElement(children: .ignore)
+                            .accessibilityLabel("Secure local AI connection")
+                            .accessibilityIdentifier(
+                                "computer-use-local-connection")
+                    }
+                }
+                .allowsHitTesting(false)
             }
         }
         .background {
@@ -144,6 +191,12 @@ struct ComputerUseView: View {
             remoteKeyboardOpen = false
             session.releaseSoftModifiers()
         }
+        .onChange(of: session.hasInteractiveRemoteScreen) {
+            _, interactive in
+            guard !interactive else { return }
+            remoteKeyboardOpen = false
+            session.releaseSoftModifiers()
+        }
     }
 
     private var header: some View {
@@ -178,13 +231,37 @@ struct ComputerUseView: View {
 
     private func liveScreen(height: CGFloat) -> some View {
         ZStack(alignment: .topLeading) {
-            RemoteScreenView(accessories: accessories, zoom: zoom)
-                .background(.black)
-                .allowsHitTesting(
-                    model.isConnected && !model.isLiveScreenPrivacyShielded)
-                .accessibilityHidden(model.isLiveScreenPrivacyShielded)
+            if session.hasInteractiveRemoteScreen {
+                RemoteScreenView(accessories: accessories, zoom: zoom)
+                    .background(.black)
+                    .allowsHitTesting(
+                        model.isConnected && !model.isLiveScreenPrivacyShielded)
+                    .accessibilityHidden(model.isLiveScreenPrivacyShielded)
+            } else {
+                Color(uiColor: .secondarySystemGroupedBackground)
+                    .overlay {
+                        VStack(spacing: 10) {
+                            Label(
+                                "Secure local AI connection",
+                                systemImage: "lock.shield.fill")
+                                .font(.headline)
+                                .foregroundStyle(.green)
+                            Text("Your prompt, progress, approvals, and result stay between this device and your Mac.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.center)
+                                .fixedSize(horizontal: false, vertical: true)
+                            localVisualSidecarStatus
+                        }
+                        .padding(24)
+                        .frame(maxWidth: 520)
+                    }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("computer-use-local-connection")
+            }
 
-            if !session.hasReceivedVideoFrame {
+            if session.hasInteractiveRemoteScreen,
+               !session.hasReceivedVideoFrame {
                 VStack(spacing: 8) {
                     Label(
                         session.state == .connecting
@@ -206,9 +283,10 @@ struct ComputerUseView: View {
                 .accessibilityIdentifier("computer-use-live-screen-waiting")
             }
 
-            if model.isLiveScreenPrivacyShielded {
+            if session.hasInteractiveRemoteScreen,
+               model.isLiveScreenPrivacyShielded {
                 postMailPrivacyShield
-            } else {
+            } else if session.hasInteractiveRemoteScreen {
                 RemoteScreenZoomControls(zoom: zoom)
                     .padding(10)
             }
@@ -216,14 +294,60 @@ struct ComputerUseView: View {
         .frame(height: height)
         .clipped()
         .accessibilityElement(children: .contain)
-        .accessibilityLabel(model.isLiveScreenPrivacyShielded
-            ? "Mac screen hidden for this Mail task"
-            : session.hasReceivedVideoFrame
-                ? "Live interactive screen for \(session.hostName ?? model.hostName)"
-                : "Waiting for live screen from \(session.hostName ?? model.hostName)")
-        .accessibilityHint(model.isLiveScreenPrivacyShielded
-            ? "Choose Show Mac when you are ready to reveal the live desktop."
-            : "Turn on Zoom and move to pinch or drag the view without controlling the Mac. Turn it off to control the Mac.")
+        .accessibilityLabel(screenAccessibilityLabel)
+        .accessibilityHint(screenAccessibilityHint)
+    }
+
+    @ViewBuilder
+    private var localVisualSidecarStatus: some View {
+        switch session.computerUseVisualSidecarState {
+        case .connecting:
+            Label("Adding the optional live screen…", systemImage: "display")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+        case .waitingForFreshFrame:
+            Label(
+                "Waiting for a fresh Mac screen frame…",
+                systemImage: "display")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+        case .failed:
+            Text("The live screen is unavailable. Your AI task connection is still ready; end and reconnect to try the screen again.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+        case .unavailable:
+            Text("The live screen is optional and does not delay AI tasks.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        case .live:
+            EmptyView()
+        }
+    }
+
+    private var screenAccessibilityLabel: String {
+        if !session.hasInteractiveRemoteScreen {
+            return "Secure local AI connection to \(session.hostName ?? model.hostName)"
+        }
+        if model.isLiveScreenPrivacyShielded {
+            return "Mac screen hidden for this Mail task"
+        }
+        if session.hasReceivedVideoFrame {
+            return "Live interactive screen for \(session.hostName ?? model.hostName)"
+        }
+        return "Waiting for live screen from \(session.hostName ?? model.hostName)"
+    }
+
+    private var screenAccessibilityHint: String {
+        if !session.hasInteractiveRemoteScreen {
+            return "Prompts and results use the secure local connection. Use the Mac directly if AI asks for help."
+        }
+        if model.isLiveScreenPrivacyShielded {
+            return "Choose Show Mac when you are ready to reveal the live desktop."
+        }
+        return "Turn on Zoom and move to pinch or drag the view without controlling the Mac. Turn it off to control the Mac."
     }
 
     private var postMailPrivacyShield: some View {
@@ -274,7 +398,8 @@ struct ComputerUseView: View {
             statusLabel
             Spacer(minLength: 8)
 
-            if case .working = model.state,
+            if session.hasInteractiveRemoteScreen,
+               case .working = model.state,
                !model.isCancellationPending {
                 Button {
                     didExplicitlyResumeAI = false
@@ -393,7 +518,9 @@ struct ComputerUseView: View {
     }
 
     private var isTakingControl: Bool {
-        if model.isConnected, case .paused = model.state { return true }
+        if session.hasInteractiveRemoteScreen,
+           model.isConnected,
+           case .paused = model.state { return true }
         return false
     }
 
@@ -498,6 +625,11 @@ struct ComputerUseView: View {
                     Label("Approve before AI continues", systemImage: "checkmark.shield.fill")
                         .font(.headline)
                         .foregroundStyle(.orange)
+                    Text(terminalOutcomeAccessibilityValue)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.orange)
+                        .accessibilityIdentifier(
+                            "computer-use-approval-outcome")
                     Text(request.message)
                         .font(.callout)
                         .fixedSize(horizontal: false, vertical: true)
@@ -667,6 +799,7 @@ struct ComputerUseView: View {
                         .font(.caption.weight(.semibold))
                 }
                 .buttonStyle(.borderless)
+                .accessibilityIdentifier("computer-use-stop-task")
                 .disabled(!model.isConnected)
             }
 
@@ -689,7 +822,7 @@ struct ComputerUseView: View {
                             || isAwaitingApproval
                             || model.hasActivePrompt
                             || !model.isConnected
-                            || !session.hasReceivedVideoFrame)
+                            || !session.isComputerUsePromptTransportReady)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 11)
                     .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
@@ -717,7 +850,7 @@ struct ComputerUseView: View {
     private var canSend: Bool {
         guard case .connected = session.state,
               model.isConnected,
-              session.hasReceivedVideoFrame else { return false }
+              session.isComputerUsePromptTransportReady else { return false }
         switch model.state {
         case .ready, .error:
             break

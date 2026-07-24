@@ -70,7 +70,7 @@ class OSAtlasAcceptanceRunnerContractTests(unittest.TestCase):
         self.assertEqual(source.count("ENABLE_TESTABILITY=YES"), 3)
         self.assertNotIn("    -configuration Debug \\\n", source)
         self.assertIn('configuration="Debug"', source)
-        self.assertIn("DETERMINISTIC_EXPECTED_TESTS=132", source)
+        self.assertIn("DETERMINISTIC_EXPECTED_TESTS=138", source)
 
 
 if __name__ == "__main__":

@@ -2,9 +2,10 @@ import XCTest
 import UIKit
 import Vision
 
-/// Opt-in shipped-path acceptance for the real Release iOS client,
-/// Production CloudKit, signed macOS host, installed OS-Atlas checkpoint,
-/// native macOS input injection, and streamed-screen result.
+/// Opt-in shipped-path acceptance for the real configuration-matched signed
+/// iOS client, its authenticated local LAN broker, the signed macOS host,
+/// installed OS-Atlas checkpoint, native macOS input injection, fresh visual
+/// sidecar frames, and a typed terminal result.
 ///
 /// The Mac prerequisite is the repository's local-only Safari fixture. It has
 /// no form action or network capability. The request starts in an unrelated
@@ -19,6 +20,12 @@ final class OSAtlasLocalFixtureSimulatorLiveE2ETests: XCTestCase {
     }
 
     private static let fixtureToken = "LOCAL-QUOTE-7421"
+    private static let promptChannelReadyTimeout: TimeInterval = 45
+    private static let visualSidecarLiveTimeout: TimeInterval = 45
+    private static let freshCalculatorFrameTimeout: TimeInterval = 20
+    private static let screenCaptureConsentGuidance =
+        "macOS needs your permission before AI can use the screen. On the Mac, choose Allow in the “RemoteDesktopHost” screen-and-audio access prompt, then tap Let AI continue. AI won’t click this system permission prompt or open System Settings."
+    private static let screenCaptureConsentTimeout: TimeInterval = 15 * 60
     private static let expectedFields: [(label: String, value: String)] = [
         ("Restaurant", "Pizzeria Uno"),
         ("Item", "Large Pepperoni Pizza"),
@@ -63,7 +70,8 @@ final class OSAtlasLocalFixtureSimulatorLiveE2ETests: XCTestCase {
             return true
         }
 
-        app.launch()
+        try ComputerUseLiveE2EPreflight
+            .launchAfterSimulatorRegistrationSettles(app)
         XCTAssertTrue(
             app.wait(for: .runningForeground, timeout: 10),
             "The shipped iOS client did not reach the foreground in Simulator.")
@@ -73,21 +81,41 @@ final class OSAtlasLocalFixtureSimulatorLiveE2ETests: XCTestCase {
             NSPredicate(
                 format: "label BEGINSWITH %@",
                 "Use AI Computer Use on ")).firstMatch
+        let legacyPairButton = app.buttons.matching(
+            NSPredicate(
+                format: "label BEGINSWITH %@",
+                "Pair local AI Computer Use on ")).firstMatch
         XCTAssertTrue(
-            readyButton.waitForExistence(timeout: 45),
-            "A Release iOS client could not find an AI-ready production host.")
+            readyButton.waitForExistence(timeout: 90),
+            "The iOS client did not automatically pair with the same-iCloud local AI host.")
+        XCTAssertFalse(
+            legacyPairButton.exists,
+            "The shipped client must never ask for a local AI access key.")
+        XCTAssertFalse(
+            app.textFields["Pairing code"].exists,
+            "The shipped client must not expose a pairing-code entry field.")
         XCTAssertTrue(
             readyButton.isHittable,
             "Use AI must be directly tappable in Simulator.")
         readyButton.tap()
+
+        let promptChannel = app.descendants(matching: .any).matching(
+            identifier: "computer-use-local-prompt-channel").firstMatch
+        XCTAssertTrue(
+            waitUntil(timeout: Self.promptChannelReadyTimeout) {
+                promptChannel.exists
+                    && (promptChannel.value as? String) == "Ready"
+            },
+            "The TLS-authenticated local AI prompt channel did not become Ready within \(Int(Self.promptChannelReadyTimeout)) seconds. This assertion is independent of the optional visual sidecar. Last value: \(String(describing: promptChannel.value))")
 
         let liveScreen = app.descendants(matching: .any).matching(
             NSPredicate(
                 format: "label BEGINSWITH %@",
                 "Live interactive screen for ")).firstMatch
         XCTAssertTrue(
-            liveScreen.waitForExistence(timeout: 45),
-            "The user-visible live Mac screen did not appear in the shipped iOS UI.")
+            liveScreen.waitForExistence(
+                timeout: Self.visualSidecarLiveTimeout),
+            "The TLS prompt channel is ready, but B01's optional product media sidecar did not become live with a compatible host, current display metadata, and a fresh decoded frame within \(Int(Self.visualSidecarLiveTimeout)) seconds. Media remains independent of task transport, but is mandatory evidence for this visual acceptance case.")
 
         let composer = app.textFields.matching(
             NSPredicate(
@@ -95,11 +123,11 @@ final class OSAtlasLocalFixtureSimulatorLiveE2ETests: XCTestCase {
                 "Tell your Mac what to do")).firstMatch
         XCTAssertTrue(
             waitUntil(timeout: 45) { composer.exists && composer.isEnabled },
-            "The Simulator conversation did not become ready after receiving a real Mac video frame.")
+            "The Simulator conversation did not become ready over the authenticated local connection.")
 
         var initialStreamRecognition = ""
         XCTAssertTrue(
-            waitUntil(timeout: 20) {
+            waitUntil(timeout: Self.freshCalculatorFrameTimeout) {
                 guard let recognized = fixtureProofRecognition(
                     in: liveScreen) else {
                     return false
@@ -112,7 +140,7 @@ final class OSAtlasLocalFixtureSimulatorLiveE2ETests: XCTestCase {
                     && !text.contains("start local quote setup")
                     && !text.contains("fixture code")
             },
-            "The live run did not begin with Calculator visible and Safari/fixture text absent. Vision saw: \(initialStreamRecognition)")
+            "The visual sidecar reported live, but B01 did not decode the fresh Calculator starting frame within \(Int(Self.freshCalculatorFrameTimeout)) seconds. Safari, fixture, and stale-frame text are rejected. Vision last saw: \(initialStreamRecognition)")
 
         attachSimulatorScreenshot(named: "Local OS-Atlas fixture - before request")
 
@@ -120,6 +148,9 @@ final class OSAtlasLocalFixtureSimulatorLiveE2ETests: XCTestCase {
         Please open Safari and use the local no-network delivery quote page that's already loaded there. First activate the visible Start local quote setup button, then enter the fixture code \(Self.fixtureToken) into the field labeled Fixture code. Scroll down until the whole itemized quote is visible and tell me the restaurant, item, subtotal, every fee, tax, total, and ETA. Don't sign in, check out, pay, or place an order.
         """
         let assistantCountBefore = assistantMessages(in: app).count
+        let userMessages = app.staticTexts.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "You: "))
+        let userCountBefore = userMessages.count
         cleanupAssistantCount = assistantCountBefore
         composer.tap()
         composer.typeText(prompt)
@@ -136,6 +167,10 @@ final class OSAtlasLocalFixtureSimulatorLiveE2ETests: XCTestCase {
         XCTAssertTrue(
             sentMessage.waitForExistence(timeout: 10),
             "The exact local-fixture request was not shown in the shipped conversation.")
+        XCTAssertEqual(
+            userMessages.count,
+            userCountBefore + 1,
+            "The one natural-language browser request was submitted more than once.")
 
         let terminal = try waitForFixtureResult(
             in: app,
@@ -143,6 +178,10 @@ final class OSAtlasLocalFixtureSimulatorLiveE2ETests: XCTestCase {
             previousAssistantCount: assistantCountBefore,
             timeout: 300)
         taskReachedTerminalResponse = true
+        XCTAssertEqual(
+            assistantMessages(in: app).count,
+            assistantCountBefore + 1,
+            "The one browser request produced more than one terminal assistant response.")
         XCTAssertTrue(
             terminal.sawRequestedApplicationOpenProgress,
             "The task returned without app-first open progress.")
@@ -171,6 +210,29 @@ final class OSAtlasLocalFixtureSimulatorLiveE2ETests: XCTestCase {
             "Only the production complete-screen quote validator is accepted: \(response)")
         assertExactFixtureFields(in: response)
 
+        // The quote text proves the visible browser postcondition. This
+        // stable accessibility value separately proves that the iOS client
+        // decoded the host's typed terminal outcome instead of inferring
+        // success from assistant prose.
+        let status = app.descendants(matching: .any).matching(
+            identifier: "computer-use-status").firstMatch
+        XCTAssertTrue(
+            waitUntil(timeout: 10) {
+                (status.value as? String) == "Task completed"
+                    && composer.exists
+                    && composer.isEnabled
+            },
+            "iOS displayed the verified browser result but did not expose the typed task-completed outcome. Status value: \(String(describing: status.value))")
+        XCTAssertFalse(
+            app.buttons["computer-use-take-control"].exists
+                || app.buttons["computer-use-resume-ai"].exists
+                || app.buttons["computer-use-stop-task"].exists,
+            "The completed browser task left lifecycle controls active.")
+        XCTAssertEqual(
+            userMessages.count,
+            userCountBefore + 1,
+            "The local browser task created more than one user request before reaching its terminal result.")
+
         var lastStreamRecognition = ""
         let streamProofIsVisible = waitUntil(timeout: 20) {
             guard let recognized = fixtureProofRecognition(in: liveScreen) else {
@@ -191,9 +253,12 @@ final class OSAtlasLocalFixtureSimulatorLiveE2ETests: XCTestCase {
             "The shipped iOS app left the foreground during local OS-Atlas acceptance.")
 
         let evidence = XCTAttachment(string: """
-        OUTCOME: PASS
-        TRANSPORT: Release iOS -> Production CloudKit -> signed macOS host
+        OUTCOME: task completed
+        CONFIGURATION: matched signed iOS and macOS products under test
+        PROMPT CHANNEL: TLS-authenticated local LAN broker; independently ready before visual media
+        VISUAL SIDECAR: optional product media path; mandatory for B01; live only after compatible host hello, current display metadata, and a fresh decoded frame
         HYBRID ROUTE: host semantic app/type/scroll routing + installed OS-Atlas visual point grounding for the required setup control
+        ONE NATURAL-LANGUAGE SUBMISSION: true
         INITIAL APP PROOF: streamed Calculator text was visible while Safari and local-fixture markers were absent
         APP-FIRST PROGRESS OBSERVED: \(terminal.sawRequestedApplicationOpenProgress)
         SAFARI-BEFORE-TYPE STREAM PROOF: \(terminal.sawSafariFixtureBeforeNativeType)
@@ -204,6 +269,7 @@ final class OSAtlasLocalFixtureSimulatorLiveE2ETests: XCTestCase {
         TYPE PROOF: exact token unlocked content that did not exist beforehand
         SCROLL PROOF: complete quote was outside the initial viewport
         FACT SOURCE: production local visible-quote OCR validator
+        TERMINAL RESULT VERIFIED IN UI: true
         EXTERNAL EFFECTS: none; fixture CSP blocks all network and exposes only a local setup control, with no submit control
         """)
         evidence.name = "Local OS-Atlas shipped-path evidence"
@@ -250,8 +316,16 @@ final class OSAtlasLocalFixtureSimulatorLiveE2ETests: XCTestCase {
             NSPredicate(format: "label == %@", "Approve before AI continues")).firstMatch
         let intervention = app.descendants(matching: .any)[
             "computer-use-intervention-guidance"]
+        let status = app.descendants(matching: .any).matching(
+            identifier: "computer-use-status").firstMatch
+        let resume = app.buttons["computer-use-resume-ai"]
+        let stop = app.buttons["computer-use-stop-task"]
+        let humanResumeProof = app.descendants(matching: .any).matching(
+            identifier: "computer-use-human-resume-proof").firstMatch
+        let durableProgress = app.descendants(matching: .any).matching(
+            identifier: "computer-use-progress-history").firstMatch
         let retry = app.buttons["Retry sending the last request"]
-        let deadline = Date().addingTimeInterval(timeout)
+        var deadline = Date().addingTimeInterval(timeout)
         var sawRequestedApplicationOpenProgress = false
         var sawSafariFixtureBeforeNativeType = false
         var sawOSAtlasPointerClickProgress = false
@@ -261,7 +335,83 @@ final class OSAtlasLocalFixtureSimulatorLiveE2ETests: XCTestCase {
         var nextStreamInspection = Date.distantPast
         var nextSetupEffectInspection = Date.distantPast
 
+        func absorbDurableProgress() throws {
+            guard durableProgress.exists,
+                  let value = durableProgress.value as? String else { return }
+            let options: String.CompareOptions = [
+                .regularExpression, .caseInsensitive,
+            ]
+            let openRange = value.range(
+                of: #"Step [0-9]+: opening (?:an app|Safari for the delivery quote)"#,
+                options: options)
+            let clickRange = value.range(
+                of: #"Step [0-9]+: clicking"#,
+                options: options)
+            let typeRange = value.range(
+                of: #"Step [0-9]+: typing 16 characters"#,
+                options: options)
+            let scrollRange = value.range(
+                of: #"Step [0-9]+: scrolling down"#,
+                options: options)
+
+            if value.range(
+                of: #"Step [0-9]+: dragging"#,
+                options: options) != nil {
+                XCTFail(
+                    "The router substituted a drag for the required setup-control click.")
+                throw AcceptanceFailure.unexpectedIntervention
+            }
+            if let typeRange {
+                guard let clickRange,
+                      clickRange.lowerBound < typeRange.lowerBound else {
+                    XCTFail(
+                        "Durable progress proves typing occurred before the required OS-Atlas click.")
+                    throw AcceptanceFailure.unexpectedIntervention
+                }
+                sawNativeTypeProgress = true
+            }
+            if let scrollRange {
+                guard let clickRange,
+                      clickRange.lowerBound < scrollRange.lowerBound else {
+                    XCTFail(
+                        "Durable progress proves scrolling occurred before the required OS-Atlas click.")
+                    throw AcceptanceFailure.unexpectedIntervention
+                }
+                sawNativeScrollProgress = true
+            }
+            sawRequestedApplicationOpenProgress =
+                sawRequestedApplicationOpenProgress || openRange != nil
+            sawOSAtlasPointerClickProgress =
+                sawOSAtlasPointerClickProgress || clickRange != nil
+        }
+
         repeat {
+            try absorbDurableProgress()
+            if intervention.exists {
+                guard intervention.label == Self.screenCaptureConsentGuidance,
+                      status.exists,
+                      (status.value as? String) == "User intervention required",
+                      resume.exists,
+                      resume.isHittable,
+                      stop.exists,
+                      stop.isHittable,
+                      !humanResumeProof.exists else {
+                    XCTFail(
+                        "The harmless fixture paused for an unexpected intervention or an incomplete person-controlled handoff.")
+                    throw AcceptanceFailure.unexpectedIntervention
+                }
+                XCTContext.runActivity(
+                    named: "Manual step: choose Allow in the macOS RemoteDesktopHost prompt, then tap Let AI continue"
+                ) { _ in }
+                try waitForScreenCaptureConsentResume(
+                    in: app,
+                    previousAssistantCount: previousAssistantCount,
+                    timeout: Self.screenCaptureConsentTimeout)
+                // Consent is a one-time prerequisite, not browser-task runtime.
+                // Give the unchanged single request its full independent bound
+                // after the person explicitly returns control.
+                deadline = Date().addingTimeInterval(timeout)
+            }
             if relevantApplicationProgress.exists {
                 sawRequestedApplicationOpenProgress = true
             }
@@ -320,11 +470,6 @@ final class OSAtlasLocalFixtureSimulatorLiveE2ETests: XCTestCase {
                     "The harmless fixture path unexpectedly selected an approval-gated action.")
                 throw AcceptanceFailure.unexpectedIntervention
             }
-            if intervention.exists {
-                XCTFail(
-                    "The host paused for a manual prerequisite; satisfy macOS capture/accessibility consent and reload the local fixture before retrying.")
-                throw AcceptanceFailure.unexpectedIntervention
-            }
             if retry.exists {
                 XCTFail(
                     "The iOS-to-host request failed in transport before OS-Atlas completed the local fixture.")
@@ -333,6 +478,7 @@ final class OSAtlasLocalFixtureSimulatorLiveE2ETests: XCTestCase {
 
             let messages = assistantMessages(in: app)
             if messages.count > previousAssistantCount {
+                try absorbDurableProgress()
                 return (
                     messages.element(boundBy: messages.count - 1).label,
                     sawRequestedApplicationOpenProgress,
@@ -347,6 +493,71 @@ final class OSAtlasLocalFixtureSimulatorLiveE2ETests: XCTestCase {
 
         XCTFail(
             "No terminal local-fixture quote returned through the Simulator within \(Int(timeout)) seconds.")
+        throw AcceptanceFailure.timedOut
+    }
+
+    private func waitForScreenCaptureConsentResume(
+        in app: XCUIApplication,
+        previousAssistantCount: Int,
+        timeout: TimeInterval
+    ) throws {
+        let guidance = app.descendants(matching: .any).matching(
+            identifier: "computer-use-intervention-guidance").firstMatch
+        let humanResumeProof = app.descendants(matching: .any).matching(
+            identifier: "computer-use-human-resume-proof").firstMatch
+        let approval = app.descendants(matching: .any).matching(
+            NSPredicate(format: "label == %@", "Approve before AI continues"))
+            .firstMatch
+        let retry = app.buttons["Retry sending the last request"]
+        let stopped = app.staticTexts[
+            "AI: Stopped. You're in control of the Mac."]
+        let deadline = Date().addingTimeInterval(timeout)
+        var sawHumanResume = false
+
+        repeat {
+            if approval.exists {
+                XCTFail(
+                    "The macOS system consent was represented as an AI approval instead of person-only takeover.")
+                throw AcceptanceFailure.unexpectedIntervention
+            }
+            if retry.exists {
+                XCTFail(
+                    "The consent resume failed in local transport before the browser task continued.")
+                throw AcceptanceFailure.transportFailure
+            }
+            sawHumanResume = sawHumanResume || humanResumeProof.exists
+            let assistantCount = assistantMessages(in: app).count
+            if sawHumanResume,
+               !guidance.exists || assistantCount > previousAssistantCount {
+                return
+            }
+            if !sawHumanResume, assistantCount > previousAssistantCount {
+                XCTFail(
+                    "The browser task returned a terminal answer while macOS consent was still person-controlled.")
+                throw AcceptanceFailure.unexpectedIntervention
+            }
+            if stopped.exists {
+                XCTFail(
+                    "The browser task was stopped instead of resumed after macOS consent.")
+                throw AcceptanceFailure.unexpectedIntervention
+            }
+            if app.state != .runningForeground {
+                XCTFail(
+                    "The shipped iOS app left the foreground during macOS consent takeover.")
+                throw AcceptanceFailure.unexpectedIntervention
+            }
+            if guidance.exists {
+                guard guidance.label == Self.screenCaptureConsentGuidance else {
+                    XCTFail(
+                        "The macOS consent handoff changed into an unexpected intervention.")
+                    throw AcceptanceFailure.unexpectedIntervention
+                }
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.25))
+        } while Date() < deadline
+
+        XCTFail(
+            "The person did not choose Allow on the Mac and tap Let AI continue within the bounded \(Int(timeout / 60))-minute consent window. The test intentionally did not click the system prompt or stop the paused task.")
         throw AcceptanceFailure.timedOut
     }
 

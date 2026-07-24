@@ -680,7 +680,7 @@ final class OSAtlasDoorDashTakeoverResumeSimulatorLiveE2ETests: XCTestCase {
     }
 
     private static let expectedGuidance =
-        "DoorDash needs you to sign in before it can show the delivery quote. You’re in control now: sign in yourself on the live screen, then tap Let AI continue. AI won’t enter credentials, check out, or place the order."
+        "DoorDash needs you to sign in before it can show the delivery quote. You’re in control now: sign in yourself on the Mac, then tap Let AI continue. AI won’t enter credentials, check out, or place the order."
 
     private static let expectedScreenCaptureConsentGuidance =
         "macOS needs your permission before AI can use the screen. On the Mac, choose Allow in the “RemoteDesktopHost” screen-and-audio access prompt, then tap Let AI continue. AI won’t click this system permission prompt or open System Settings."

@@ -102,15 +102,15 @@ public struct CloudKitHostAdvertisement: Identifiable, Equatable, Sendable {
 /// ## Model
 /// - **Same-iCloud only.** Both peers must be signed into the same iCloud
 ///   account. All signaling records live in the user's **Private DB** →
-///   zero cost to us regardless of user count. The pairing code disambiguates
-///   between multiple Macs owned by the same user.
+///   zero cost to us regardless of user count. An internal session binding
+///   disambiguates multiple Macs owned by the same user; no person enters it.
 /// - **Polling, not push.** During an active session we poll every 2 s.
 ///   CloudKit rate limit is 40 req/s/user; this is safely under it. Idle
 ///   clients / hosts poll nothing.
 ///
 /// ## Record types
-/// - `HostAdvertisement` — written by host at pairing-code show. Discoverable
-///   by pairing code.
+/// - `HostAdvertisement` — written while the host is ready. Discoverable by
+///   the private internal session binding and stable host identity.
 /// - `WebRTCSignal` — per-envelope record. `targetID` is the receiver's
 ///   `senderID`; `poll()` queries for records with `targetID == self`.
 ///
@@ -123,6 +123,10 @@ public actor CloudKitSignalingClient: SignalingChannel {
     // MARK: Public API
 
     public static let defaultStaleSeconds: TimeInterval = 300
+    nonisolated static let maximumQueryRecords = 500
+    nonisolated static let maximumQueryPages = 10
+    nonisolated static let maximumTrackedOwnedRecords = 256
+    nonisolated static let maximumConsumedRecords = 512
 
     public nonisolated static func advertisementRefreshInterval(
         staleSeconds: TimeInterval = defaultStaleSeconds
@@ -202,17 +206,16 @@ public actor CloudKitSignalingClient: SignalingChannel {
         query.sortDescriptors = [NSSortDescriptor(key: "createdAt", ascending: false)]
 
         let database = container.privateCloudDatabase
-        let matchResults: [(CKRecord.ID, Result<CKRecord, Error>)]
+        let records: [CKRecord]
         do {
-            let response = try await database.records(
-                matching: query,
-                inZoneWith: nil,
-                desiredKeys: [
-                    "senderID", "pairingCode", "hostName", "createdAt",
-                    "computerUseState", "computerUseDetail",
-                ],
-                resultsLimit: 100)
-            matchResults = response.matchResults
+            records = try completeQueryRecords(
+                try await boundedQueryRecords(
+                    query,
+                    in: database,
+                    desiredKeys: [
+                        "senderID", "pairingCode", "hostName", "createdAt",
+                        "computerUseState", "computerUseDetail",
+                    ]))
         } catch {
             guard Self.isAdvertisementSchemaCompatibilityError(error) else {
                 throw error
@@ -221,21 +224,21 @@ public actor CloudKitSignalingClient: SignalingChannel {
             // the optional AI columns. Capability is still encoded in the
             // existing hostName field, so retry with the deployed key set.
             do {
-                let response = try await database.records(
-                    matching: query,
-                    inZoneWith: nil,
-                    desiredKeys: ["senderID", "pairingCode", "hostName", "createdAt"],
-                    resultsLimit: 100)
-                matchResults = response.matchResults
+                records = try completeQueryRecords(
+                    try await boundedQueryRecords(
+                        query,
+                        in: database,
+                        desiredKeys: [
+                            "senderID", "pairingCode", "hostName", "createdAt",
+                        ]))
             } catch let cloudKit as CKError where cloudKit.code == .unknownItem {
                 return []
             }
         }
 
         var newestBySenderID: [String: CloudKitHostAdvertisement] = [:]
-        for (_, result) in matchResults {
-            guard case .success(let record) = result,
-                  let advertisement = Self.hostAdvertisement(from: record) else {
+        for record in records {
+            guard let advertisement = Self.hostAdvertisement(from: record) else {
                 continue
             }
 
@@ -249,13 +252,17 @@ public actor CloudKitSignalingClient: SignalingChannel {
         return newestBySenderID.values.sorted { lhs, rhs in
             let nameOrder = lhs.hostName.localizedCaseInsensitiveCompare(rhs.hostName)
             if nameOrder == .orderedSame {
-                return lhs.pairingCode < rhs.pairingCode
+                if lhs.pairingCode != rhs.pairingCode {
+                    return lhs.pairingCode < rhs.pairingCode
+                }
+                return lhs.senderID < rhs.senderID
             }
             return nameOrder == .orderedAscending
         }
     }
 
-    /// `code` is the 6-digit pairing code. `role` determines whether
+    /// `code` is the legacy six-digit internal routing binding; it is never
+    /// shown for manual entry. `role` determines whether
     /// `claim()` advertises (host) or looks up (client).
     /// `hostName` is only read when `role == .host`; it shows on the
     /// client's pairing screen.
@@ -277,6 +284,10 @@ public actor CloudKitSignalingClient: SignalingChannel {
         self.expectedTargetID = expectedTargetID
         self.senderID = senderID
         self.staleSeconds = staleSeconds
+        consumedRecordRetention = BoundedCloudKitReplayRetention(
+            validityWindow: staleSeconds,
+            maximumEntries: Self.maximumConsumedRecords,
+            clock: { Date() })
     }
 
     /// Host: writes a `HostAdvertisement` so clients can find us. Also
@@ -285,9 +296,12 @@ public actor CloudKitSignalingClient: SignalingChannel {
     /// `targetID` for subsequent `send()`s. Throws `SignalingError.hostUnavailable`
     /// if no advertisement exists.
     public func claim() async throws {
+        try requireStableDeviceIdentity()
         try await ensureAccountAvailable()
+        try await prepareOwnedRecordLifecycle()
 
-        // Scrub own stale records from any prior run with this code.
+        // Scrub durably tracked records from a prior process run before this
+        // session creates new signaling state.
         try? await deleteOwnRecords(forPairingCode: code)
 
         switch role {
@@ -299,28 +313,39 @@ public actor CloudKitSignalingClient: SignalingChannel {
     }
 
     public func send(_ envelope: SignalingEnvelope) async throws {
+        try requireStableDeviceIdentity()
         guard let peerID = try await resolveTargetID() else {
             throw SignalingError.transport("Peer not resolved yet; call claim() first.")
         }
-        let record = CKRecord(recordType: "WebRTCSignal")
+        try await prepareOwnedRecordLifecycle()
+        let record = CKRecord(
+            recordType: "WebRTCSignal",
+            recordID: CKRecord.ID(
+                recordName: "WebRTCSignal-Signaling-\(UUID().uuidString)"))
         record["senderID"] = senderID as CKRecordValue
         record["targetID"] = peerID as CKRecordValue
         record["pairingCode"] = code as CKRecordValue
         record["kind"] = envelope.kind.rawValue as CKRecordValue
         record["payload"] = serializePayload(envelope.payload) as CKRecordValue
         record["createdAt"] = Date() as CKRecordValue
+        try await reserveOwnedRecord(
+            record.recordID,
+            createdAt: record["createdAt"] as? Date ?? Date(),
+            refreshesDeadline: false)
         let database = try cloudKitDatabase()
         do {
             _ = try await retryingCloudKit("send signaling envelope") {
-                try await database.save(record)
+                try await revalidateOwnedRecordAccountBinding(
+                    operation: "send signaling envelope")
+                return try await database.save(record)
             }
-            ownedRecordIDs.insert(record.recordID)
         } catch {
             throw SignalingError.transport("CloudKit send failed: \(error.localizedDescription)")
         }
     }
 
     public func poll() async throws -> [SignalingEnvelope] {
+        try requireStableDeviceIdentity()
         let cutoff = Date(timeIntervalSinceNow: -staleSeconds)
         let startedAt = self.startedAt
         let predicate = NSPredicate(
@@ -331,15 +356,17 @@ public actor CloudKitSignalingClient: SignalingChannel {
 
         let database = try cloudKitDatabase()
         let (matchResults, _) = try await queryRecords(query, in: database)
-        // A per-record CloudKit failure is not consumed: a later poll may be
-        // able to fetch it. Successful records are decoded together so a host
-        // can select the first valid offer sender and retain that sender's ICE
-        // from the same query, even when ICE sorts before the offer.
-        let records = matchResults.compactMap { _, result -> CKRecord? in
-            guard case .success(let record) = result else { return nil }
-            return record
+        do {
+            // Reject the complete page set before replay retention changes if
+            // CloudKit could not materialize even one observed record.
+            return try consumePollQueryResults(matchResults)
+        } catch BoundedCloudKitRecordError.retentionUnavailable {
+            throw SignalingError.transport(
+                "Too many signaling messages are waiting for bounded replay cleanup. Keep both apps open and try again shortly.")
+        } catch {
+            throw SignalingError.transport(
+                "iCloud returned an incomplete signaling batch. Keep both apps open and try again.")
         }
-        return consumePollRecords(records)
     }
 
     /// Host-only keepalive for the `HostAdvertisement` record. Clients
@@ -347,12 +374,17 @@ public actor CloudKitSignalingClient: SignalingChannel {
     /// that is left running must keep that field current until pairing.
     public func refreshAdvertisement() async throws {
         guard role == .host else { return }
+        try requireStableDeviceIdentity()
         guard let advertisementRecord else {
             try await writeAdvertisement()
             return
         }
 
         updateAdvertisementFields(on: advertisementRecord)
+        try await reserveOwnedRecord(
+            advertisementRecord.recordID,
+            createdAt: advertisementRecord["createdAt"] as? Date ?? Date(),
+            refreshesDeadline: true)
 
         let database = try cloudKitDatabase()
         do {
@@ -361,7 +393,6 @@ public actor CloudKitSignalingClient: SignalingChannel {
                 in: database,
                 operation: "refresh pairing advertisement")
             self.advertisementRecord = saved
-            ownedRecordIDs.insert(saved.recordID)
         } catch let refreshError {
             let staleRecord = self.advertisementRecord
             self.advertisementRecord = nil
@@ -385,12 +416,12 @@ public actor CloudKitSignalingClient: SignalingChannel {
     /// signaling records needed by an active peer session.
     public func stopAdvertising() async {
         guard role == .host else { return }
+        guard !senderID.isEmpty else { return }
 
         let recordID = advertisementRecord?.recordID
             ?? Self.advertisementRecordID(senderID: senderID)
         do {
             try await deleteRecordIDs([recordID])
-            ownedRecordIDs.remove(recordID)
             advertisementRecord = nil
         } catch {
             log.warning("advertisement delete failed (non-fatal): \(String(describing: error), privacy: .public)")
@@ -417,8 +448,11 @@ public actor CloudKitSignalingClient: SignalingChannel {
     private let log = Logger(subsystem: "com.threadmark.remotedesktop.signaling", category: "cloudkit")
 
     private var targetID: String?
-    private var ownedRecordIDs: Set<CKRecord.ID> = []
-    private var consumedRecordIDs: Set<CKRecord.ID> = []
+    private var consumedRecordRetention: BoundedCloudKitReplayRetention
+    private let ownedRecordStore: any BoundedCloudKitOwnedRecordStore =
+        UserDefaultsBoundedCloudKitOwnedRecordStore()
+    private var ownedRecordLifecycle: BoundedCloudKitOwnedRecordLifecycle?
+    private var ownedRecordAccountBinding: CloudKitAccountBinding?
     private var advertisementRecord: CKRecord?
     private var container: CKContainer?
     private var database: CKDatabase?
@@ -491,6 +525,13 @@ public actor CloudKitSignalingClient: SignalingChannel {
         }
     }
 
+    private func requireStableDeviceIdentity() throws {
+        guard !senderID.isEmpty else {
+            throw SignalingError.transport(
+                "This device could not securely save its connection identity. Restart the app and try again.")
+        }
+    }
+
     private func writeAdvertisement() async throws {
         let database = try cloudKitDatabase()
         let recordID = Self.advertisementRecordID(senderID: senderID)
@@ -508,13 +549,16 @@ public actor CloudKitSignalingClient: SignalingChannel {
         }
 
         updateAdvertisementFields(on: record)
+        try await reserveOwnedRecord(
+            record.recordID,
+            createdAt: record["createdAt"] as? Date ?? Date(),
+            refreshesDeadline: true)
         do {
             let saved = try await saveAdvertisement(
                 record,
                 in: database,
                 operation: "publish pairing advertisement")
             advertisementRecord = saved
-            ownedRecordIDs.insert(saved.recordID)
         } catch {
             throw SignalingError.transport(
                 "Couldn't publish the pairing advertisement: \(error.localizedDescription)")
@@ -555,7 +599,9 @@ public actor CloudKitSignalingClient: SignalingChannel {
         operation: String
     ) async throws -> CKRecord {
         try await retryingCloudKit(operation) {
-            try await database.save(record)
+            try await revalidateOwnedRecordAccountBinding(
+                operation: operation)
+            return try await database.save(record)
         }
     }
 
@@ -585,9 +631,12 @@ public actor CloudKitSignalingClient: SignalingChannel {
 
         let database = try cloudKitDatabase()
         let (matchResults, _) = try await queryRecords(query, in: database)
-        let records = matchResults.compactMap { _, result -> CKRecord? in
-            guard case .success(let record) = result else { return nil }
-            return record
+        let records: [CKRecord]
+        do {
+            records = try Self.completeQueryRecords(matchResults)
+        } catch {
+            throw SignalingError.transport(
+                "iCloud returned an incomplete host lookup. Keep both apps open and try again.")
         }
         if let id = Self.selectedHostSenderID(
             from: records,
@@ -605,28 +654,73 @@ public actor CloudKitSignalingClient: SignalingChannel {
         from records: [CKRecord],
         expectedTargetID: String?
     ) -> String? {
-        for record in records {
+        let senderIDs = Set(records.compactMap { record -> String? in
             guard let senderID = record["senderID"] as? String,
-                  !senderID.isEmpty else {
-                continue
-            }
-            if let expectedTargetID, senderID != expectedTargetID {
-                continue
-            }
+                  !senderID.isEmpty else { return nil }
             return senderID
+        })
+        if let expectedTargetID {
+            return senderIDs.contains(expectedTargetID)
+                ? expectedTargetID
+                : nil
         }
-        return nil
+        guard senderIDs.count == 1 else { return nil }
+        return senderIDs.first
+    }
+
+    /// A CloudKit query is one logical observation. Returning its successful
+    /// subset would let an arbitrary failed record change offer selection or
+    /// host discovery, so any per-record failure rejects the whole batch.
+    nonisolated static func completeQueryRecords(
+        _ matchResults: [(CKRecord.ID, Result<CKRecord, Error>)]
+    ) throws -> [CKRecord] {
+        try matchResults.map { _, result in
+            try result.get()
+        }
+    }
+
+    /// CloudKit guarantees the requested sort descriptor but does not define
+    /// tie ordering. Record names are unique within the queried zone; sender
+    /// and wire fields retain a total fallback for synthetic/test records.
+    nonisolated static func deterministicallyOrderedSignalingRecords(
+        _ records: [CKRecord]
+    ) -> [CKRecord] {
+        records.sorted { lhs, rhs in
+            let lhsTime = deterministicCreatedAt(lhs)
+            let rhsTime = deterministicCreatedAt(rhs)
+            if lhsTime != rhsTime { return lhsTime < rhsTime }
+
+            let lhsName = lhs.recordID.recordName
+            let rhsName = rhs.recordID.recordName
+            if lhsName != rhsName { return lhsName < rhsName }
+
+            let lhsSender = lhs["senderID"] as? String ?? ""
+            let rhsSender = rhs["senderID"] as? String ?? ""
+            if lhsSender != rhsSender { return lhsSender < rhsSender }
+
+            let lhsKind = lhs["kind"] as? String ?? ""
+            let rhsKind = rhs["kind"] as? String ?? ""
+            if lhsKind != rhsKind { return lhsKind < rhsKind }
+
+            let lhsPayload = lhs["payload"] as? String ?? ""
+            let rhsPayload = rhs["payload"] as? String ?? ""
+            return lhsPayload < rhsPayload
+        }
+    }
+
+    private nonisolated static func deterministicCreatedAt(
+        _ record: CKRecord
+    ) -> TimeInterval {
+        let value = (record["createdAt"] as? Date)?
+            .timeIntervalSinceReferenceDate ?? -.greatestFiniteMagnitude
+        return value.isFinite ? value : -.greatestFiniteMagnitude
     }
 
     private func resolveTargetID() async throws -> String? {
         if let targetID { return targetID }
         // The host learns its peer from the first inbound offer on the
-        // WebRTCSignal poll — it will call rememberTargetID().
+        // WebRTCSignal poll and binds it with acceptOfferSenderID(_:).
         return nil
-    }
-
-    public func rememberTargetID(_ id: String) {
-        self.targetID = id
     }
 
     /// Atomically binds a host to the first offer sender it accepts. Repeated
@@ -645,13 +739,26 @@ public actor CloudKitSignalingClient: SignalingChannel {
         targetID
     }
 
-    /// Applies peer selection to an already ordered CloudKit result batch.
+    /// Rejects an incomplete CloudKit batch before applying any replay or peer
+    /// selection state. Internal for focused regression tests.
+    func consumePollQueryResults(
+        _ matchResults: [(CKRecord.ID, Result<CKRecord, Error>)]
+    ) throws -> [SignalingEnvelope] {
+        try consumePollRecords(Self.completeQueryRecords(matchResults))
+    }
+
+    /// Applies peer selection after imposing a total order independent of
+    /// CloudKit page/array order.
     /// This is internal so both host and iOS regression suites can exercise
     /// the real record decoder without issuing a CloudKit query.
-    func consumePollRecords(_ records: [CKRecord]) -> [SignalingEnvelope] {
-        let pending = records.filter {
-            !consumedRecordIDs.contains($0.recordID)
-        }
+    func consumePollRecords(
+        _ records: [CKRecord]
+    ) throws -> [SignalingEnvelope] {
+        var nextRetention = consumedRecordRetention
+        let pending = Self.deterministicallyOrderedSignalingRecords(
+            records.filter {
+                !nextRetention.contains(recordName: $0.recordID.recordName)
+            })
         let decoded = pending.map { record in
             (record: record, envelope: envelopeFrom(record))
         }
@@ -677,7 +784,12 @@ public actor CloudKitSignalingClient: SignalingChannel {
         for (index, item) in decoded.enumerated() {
             guard let envelope = item.envelope else {
                 // Structurally invalid records can never become valid later.
-                consumedRecordIDs.insert(item.record.recordID)
+                guard nextRetention.reserve(
+                    recordName: item.record.recordID.recordName,
+                    createdAt: item.record["createdAt"] as? Date
+                ) else {
+                    throw BoundedCloudKitRecordError.retentionUnavailable
+                }
                 continue
             }
             guard let selectedSenderID else {
@@ -685,7 +797,12 @@ public actor CloudKitSignalingClient: SignalingChannel {
                 // records so they can accompany that sender's later offer.
                 continue
             }
-            consumedRecordIDs.insert(item.record.recordID)
+            guard nextRetention.reserve(
+                recordName: item.record.recordID.recordName,
+                createdAt: item.record["createdAt"] as? Date
+            ) else {
+                throw BoundedCloudKitRecordError.retentionUnavailable
+            }
             guard envelope.senderID == selectedSenderID else {
                 // Once an offer sender is selected, records from any other
                 // sender are permanently outside this pairing session.
@@ -700,6 +817,7 @@ public actor CloudKitSignalingClient: SignalingChannel {
             }
             envelopes.append(envelope)
         }
+        consumedRecordRetention = nextRetention
         return envelopes
     }
 
@@ -708,6 +826,7 @@ public actor CloudKitSignalingClient: SignalingChannel {
               !recordSenderID.isEmpty,
               record["targetID"] as? String == senderID,
               record["pairingCode"] as? String == code,
+              let createdAt = record["createdAt"] as? Date,
               let kindRaw = record["kind"] as? String,
               let kind = SignalingEnvelope.Kind(rawValue: kindRaw),
               let payloadString = record["payload"] as? String,
@@ -717,45 +836,226 @@ public actor CloudKitSignalingClient: SignalingChannel {
         // `role` on the envelope is advisory; the sender knows its own
         // role. Reconstruct from record fields.
         let role: SignalingEnvelope.Role = recordSenderID == senderID ? .host : .client
-        let ts = (record["createdAt"] as? Date)?.timeIntervalSince1970 ?? Date().timeIntervalSince1970
         return SignalingEnvelope(
             role: role,
             kind: kind,
             payload: payload,
-            ts: ts,
+            ts: createdAt.timeIntervalSince1970,
             senderID: recordSenderID)
     }
 
-    private func deleteOwnRecords(forPairingCode code: String) async throws {
-        // Query WebRTCSignal + HostAdvertisement for records we wrote with
-        // this pairing code. Cheapest correct approach: iterate ownedRecordIDs
-        // and delete in batches. The host advertisement uses a stable record
-        // name, so it is included here after the current run writes it.
-        guard !ownedRecordIDs.isEmpty else { return }
-        let ids = Array(ownedRecordIDs)
-        do {
-            try await deleteRecordIDs(ids)
-            ownedRecordIDs.removeAll()
-            advertisementRecord = nil
-        } catch {
-            log.warning("cleanup delete failed (non-fatal): \(String(describing: error), privacy: .public)")
+    private func deleteOwnRecords(forPairingCode _: String) async throws {
+        guard let lifecycle = ownedRecordLifecycle else { return }
+        let ids = lifecycle.recordsForShutdownCleanup().map {
+            CKRecord.ID(recordName: $0)
         }
+        let cleaned = await cleanupOwnedRecordIDs(ids)
+        guard cleaned.count == ids.count else {
+            throw SignalingError.transport(
+                "Some signaling records are still waiting for iCloud cleanup.")
+        }
+        advertisementRecord = nil
     }
 
     private func deleteRecordIDs(_ ids: [CKRecord.ID]) async throws {
         guard !ids.isEmpty else { return }
-        let database = try cloudKitDatabase()
-        let op = CKModifyRecordsOperation(recordsToSave: nil, recordIDsToDelete: ids)
-        op.savePolicy = .allKeys
-        _ = try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-            op.modifyRecordsResultBlock = { result in
-                switch result {
-                case .success: cont.resume(returning: ())
-                case .failure(let error): cont.resume(throwing: error)
+        let cleaned = await cleanupOwnedRecordIDs(ids)
+        guard cleaned.count == Set(ids).count else {
+            throw SignalingError.transport(
+                "Some signaling records are still waiting for iCloud cleanup.")
+        }
+    }
+
+    private func prepareOwnedRecordLifecycle() async throws {
+        if ownedRecordLifecycle != nil {
+            guard ownedRecordAccountBinding != nil else {
+                throw SignalingError.iCloudUnavailable(
+                    "The signaling cleanup account binding is unavailable. Restart the app and try again.")
+            }
+            return
+        }
+        let binding = try await resolveCurrentAccountBinding(
+            operation: "prepare signaling cleanup")
+        let advertisementName = Self.advertisementRecordName(
+            senderID: senderID)
+        let lifecycle = BoundedCloudKitOwnedRecordLifecycle(
+            namespace: BoundedCloudKitOwnedRecordLifecycle.namespace(
+                purpose: "signaling",
+                containerIdentifier: containerIdentifier,
+                senderID: senderID,
+                accountBinding: binding),
+            validityWindow: staleSeconds,
+            maximumEntries: Self.maximumTrackedOwnedRecords,
+            clock: { Date() },
+            store: ownedRecordStore,
+            ownsRecordName: { recordName in
+                Self.isOwnedRecordName(
+                    recordName,
+                    advertisementName: advertisementName)
+            })
+        ownedRecordAccountBinding = binding
+        ownedRecordLifecycle = lifecycle
+        _ = await cleanupOwnedRecordIDs(
+            lifecycle.restorationOverflowRecordNames.map {
+                CKRecord.ID(recordName: $0)
+            })
+    }
+
+    private func resolveCurrentAccountBinding(
+        operation: String
+    ) async throws -> CloudKitAccountBinding {
+        let container = try cloudKit().container
+        let status: CKAccountStatus
+        do {
+            status = try await retryingCloudKit(
+                "\(operation): check iCloud account"
+            ) {
+                try await container.accountStatus()
+            }
+        } catch {
+            throw SignalingError.iCloudUnavailable(
+                "Couldn't safely verify the Apple Account before \(operation).")
+        }
+        guard status == .available else {
+            throw SignalingError.iCloudUnavailable(
+                "The Apple Account is not available for \(operation).")
+        }
+
+        let userRecordID: CKRecord.ID
+        do {
+            userRecordID = try await retryingCloudKit(
+                "\(operation): identify iCloud account"
+            ) {
+                try await container.userRecordID()
+            }
+        } catch {
+            throw SignalingError.iCloudUnavailable(
+                "Couldn't safely identify the Apple Account before \(operation).")
+        }
+        do {
+            return try CloudKitAccountBinding.derived(
+                containerIdentifier: containerIdentifier,
+                userRecordName: userRecordID.recordName)
+        } catch {
+            throw SignalingError.iCloudUnavailable(
+                "The Apple Account could not be safely bound before \(operation).")
+        }
+    }
+
+    private func revalidateOwnedRecordAccountBinding(
+        operation: String
+    ) async throws {
+        guard let expected = ownedRecordAccountBinding else {
+            throw SignalingError.iCloudUnavailable(
+                "The signaling account binding is unavailable before \(operation).")
+        }
+        let current = try await resolveCurrentAccountBinding(
+            operation: operation)
+        guard current == expected else {
+            throw SignalingError.iCloudUnavailable(
+                "The Apple Account changed before \(operation). Restart the app before continuing.")
+        }
+    }
+
+    private func reserveOwnedRecord(
+        _ recordID: CKRecord.ID,
+        createdAt: Date,
+        refreshesDeadline: Bool
+    ) async throws {
+        while var lifecycle = ownedRecordLifecycle {
+            switch lifecycle.track(
+                recordName: recordID.recordName,
+                createdAt: createdAt,
+                refreshesDeadline: refreshesDeadline) {
+            case .tracked:
+                ownedRecordLifecycle = lifecycle
+                return
+            case .retentionUnavailable:
+                ownedRecordLifecycle = lifecycle
+                throw SignalingError.transport(
+                    "The signaling record could not be durably tracked for iCloud cleanup.")
+            case .cleanupRequired(let recordNames):
+                ownedRecordLifecycle = lifecycle
+                let cleaned = await cleanupOwnedRecordIDs(recordNames.map {
+                    CKRecord.ID(recordName: $0)
+                })
+                guard cleaned.count == recordNames.count else {
+                    throw SignalingError.transport(
+                        "Signaling is waiting for iCloud cleanup. Keep both apps open and try again shortly.")
                 }
             }
-            database.add(op)
         }
+        throw SignalingError.transport(
+            "The signaling record could not be durably tracked for iCloud cleanup.")
+    }
+
+    private func markOwnedRecordsCleaned(_ ids: [CKRecord.ID]) {
+        guard var lifecycle = ownedRecordLifecycle,
+              lifecycle.markCleaned(recordNames: ids.map(\.recordName)) else {
+            return
+        }
+        ownedRecordLifecycle = lifecycle
+    }
+
+    @discardableResult
+    private func cleanupOwnedRecordIDs(
+        _ ids: [CKRecord.ID]
+    ) async -> Set<CKRecord.ID> {
+        let uniqueIDs = Set(ids).sorted {
+            $0.recordName < $1.recordName
+        }
+        guard !uniqueIDs.isEmpty,
+              let database = try? cloudKitDatabase() else { return [] }
+        var cleaned: Set<CKRecord.ID> = []
+        for start in stride(from: 0, to: uniqueIDs.count, by: 100) {
+            let end = min(start + 100, uniqueIDs.count)
+            let batch = Array(uniqueIDs[start..<end])
+            do {
+                try await revalidateOwnedRecordAccountBinding(
+                    operation: "delete owned signaling records")
+            } catch {
+                log.warning("signaling cleanup account revalidation failed; retaining the durable cleanup ledger")
+                return []
+            }
+            let operation = CKModifyRecordsOperation(
+                recordsToSave: nil,
+                recordIDsToDelete: batch)
+            operation.savePolicy = .allKeys
+            operation.isAtomic = false
+            let result: Result<Void, Error> = await withCheckedContinuation {
+                continuation in
+                operation.modifyRecordsResultBlock = {
+                    continuation.resume(returning: $0)
+                }
+                database.add(operation)
+            }
+            cleaned.formUnion(
+                BoundedCloudKitDeleteAccounting.confirmedRecordIDs(
+                    in: batch,
+                    result: result))
+        }
+        do {
+            try await revalidateOwnedRecordAccountBinding(
+                operation: "release the signaling cleanup ledger")
+        } catch {
+            log.warning("signaling cleanup account changed before ledger release; retaining the durable cleanup ledger")
+            return []
+        }
+        markOwnedRecordsCleaned(Array(cleaned))
+        return cleaned
+    }
+
+    private nonisolated static func isOwnedRecordName(
+        _ recordName: String,
+        advertisementName: String
+    ) -> Bool {
+        if recordName == advertisementName { return true }
+        let prefix = "WebRTCSignal-Signaling-"
+        guard recordName.hasPrefix(prefix),
+              recordName.utf8.count <= 128 else { return false }
+        let suffix = String(recordName.dropFirst(prefix.count))
+        guard let uuid = UUID(uuidString: suffix) else { return false }
+        return uuid.uuidString == suffix.uppercased()
     }
 
     private func retryingCloudKit<Value>(
@@ -825,7 +1125,33 @@ public actor CloudKitSignalingClient: SignalingChannel {
         matchResults: [(CKRecord.ID, Result<CKRecord, Error>)],
         queryCursor: CKQueryOperation.Cursor?) {
         do {
-            return try await database.records(matching: query, inZoneWith: nil, desiredKeys: nil, resultsLimit: 50)
+            var accumulator = BoundedCloudKitRecordAccumulator<
+                (CKRecord.ID, Result<CKRecord, Error>)>(
+                    maximumObservedRecords: Self.maximumQueryRecords,
+                    maximumPages: Self.maximumQueryPages)
+            var page = try await database.records(
+                matching: query,
+                inZoneWith: nil,
+                desiredKeys: nil,
+                resultsLimit: 50)
+            try accumulator.append(
+                page.matchResults,
+                observedRecordCount: page.matchResults.count,
+                hasMore: page.queryCursor != nil)
+            while let cursor = page.queryCursor {
+                page = try await database.records(
+                    continuingMatchFrom: cursor,
+                    desiredKeys: nil,
+                    resultsLimit: 50)
+                try accumulator.append(
+                    page.matchResults,
+                    observedRecordCount: page.matchResults.count,
+                    hasMore: page.queryCursor != nil)
+            }
+            return (accumulator.records, nil)
+        } catch BoundedCloudKitRecordError.queryLimitExceeded {
+            throw SignalingError.transport(
+                "Too many iCloud signaling records are waiting. Keep both apps open and try again shortly.")
         } catch let error as CKError {
             switch error.code {
             case .notAuthenticated:
@@ -842,6 +1168,40 @@ public actor CloudKitSignalingClient: SignalingChannel {
                 throw SignalingError.transport("CloudKit: \(error.localizedDescription)")
             }
         }
+    }
+
+    /// Host discovery has the same adversarial-prefix constraint as signaling:
+    /// never present a partial first page as the complete set of selectable
+    /// Macs. A cursor at either hard ceiling fails closed.
+    private nonisolated static func boundedQueryRecords(
+        _ query: CKQuery,
+        in database: CKDatabase,
+        desiredKeys: [CKRecord.FieldKey]
+    ) async throws -> [(CKRecord.ID, Result<CKRecord, Error>)] {
+        var accumulator = BoundedCloudKitRecordAccumulator<
+            (CKRecord.ID, Result<CKRecord, Error>)>(
+                maximumObservedRecords: maximumQueryRecords,
+                maximumPages: maximumQueryPages)
+        var page = try await database.records(
+            matching: query,
+            inZoneWith: nil,
+            desiredKeys: desiredKeys,
+            resultsLimit: 100)
+        try accumulator.append(
+            page.matchResults,
+            observedRecordCount: page.matchResults.count,
+            hasMore: page.queryCursor != nil)
+        while let cursor = page.queryCursor {
+            page = try await database.records(
+                continuingMatchFrom: cursor,
+                desiredKeys: desiredKeys,
+                resultsLimit: 100)
+            try accumulator.append(
+                page.matchResults,
+                observedRecordCount: page.matchResults.count,
+                hasMore: page.queryCursor != nil)
+        }
+        return accumulator.records
     }
 
     private func serializePayload(_ payload: [String: String]) -> String {

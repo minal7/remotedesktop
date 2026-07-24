@@ -39,6 +39,8 @@ pub enum CloudKitError {
     AuthenticationRequired { redirect_url: String },
     #[error("Apple ID sign-in failed or expired: {0}")]
     AuthenticationFailed(String),
+    #[error("CloudKit account changed during an account-bound operation")]
+    AccountIdentityChanged,
     #[error("CloudKit returned {code}: {reason}")]
     Server { code: String, reason: String },
     #[error("CloudKit returned HTTP {status}: {body}")]
@@ -97,6 +99,14 @@ impl CloudKitClient {
     pub async fn current_user(&self) -> Result<CurrentUser, CloudKitError> {
         let value = self.get_authenticated("public", "users/caller").await?;
         current_user_from_value(&value)
+    }
+
+    pub async fn revalidate_current_user(
+        &self,
+        expected_user_record_name: &str,
+    ) -> Result<(), CloudKitError> {
+        let current = self.current_user().await?;
+        validate_account_identity(expected_user_record_name, &current)
     }
 
     pub async fn authentication_redirect_url(&self) -> Result<String, CloudKitError> {
@@ -158,24 +168,47 @@ impl CloudKitClient {
         .await
     }
 
-    /// Like [`post_authenticated`], but retries transient CloudKit failures
-    /// (throttling / service-busy / transport blips) with backoff. Use for
-    /// signaling writes that must not be silently dropped — production
-    /// CloudKit throttles hard enough that a single attempt regularly loses
-    /// trickled ICE candidates, which breaks ICE pairing. Non-transient
-    /// errors (auth, validation) return immediately.
-    pub async fn post_authenticated_retrying(
+    /// Revalidates the captured account immediately before the private
+    /// database mutation. The caller must use this for deletion so an auth
+    /// token rotated to a different Apple Account cannot target that account
+    /// with record identities retained from the original one.
+    pub async fn post_authenticated_for_account(
         &self,
         database: &str,
         operation_path: &str,
         body: &Value,
+        expected_user_record_name: &str,
+    ) -> Result<Value, CloudKitError> {
+        self.revalidate_current_user(expected_user_record_name)
+            .await?;
+        self.post_authenticated(database, operation_path, body)
+            .await
+    }
+
+    /// Like [`post_authenticated_for_account`], but retries transient
+    /// CloudKit failures. Account identity is revalidated before every retry,
+    /// not only before the first attempt, so a credential rotation during
+    /// backoff cannot redirect an owned-record write.
+    pub async fn post_authenticated_retrying_for_account(
+        &self,
+        database: &str,
+        operation_path: &str,
+        body: &Value,
+        expected_user_record_name: &str,
     ) -> Result<Value, CloudKitError> {
         let mut attempt = 0;
         loop {
-            match self
-                .post_authenticated(database, operation_path, body)
+            let result = match self
+                .revalidate_current_user(expected_user_record_name)
                 .await
             {
+                Ok(()) => {
+                    self.post_authenticated(database, operation_path, body)
+                        .await
+                }
+                Err(error) => Err(error),
+            };
+            match result {
                 Ok(value) => return Ok(value),
                 Err(error) if error.is_transient() && attempt < CLOUDKIT_RETRY_BACKOFF_MS.len() => {
                     let delay = CLOUDKIT_RETRY_BACKOFF_MS[attempt];
@@ -316,7 +349,11 @@ fn web_auth_token_from_value(value: &Value) -> Option<&str> {
 }
 
 fn current_user_from_value(value: &Value) -> Result<CurrentUser, CloudKitError> {
-    if let Some(record_name) = value.get("userRecordName").and_then(Value::as_str) {
+    if let Some(record_name) = value
+        .get("userRecordName")
+        .and_then(Value::as_str)
+        .filter(|record_name| !record_name.is_empty())
+    {
         return Ok(CurrentUser {
             user_record_name: record_name.to_string(),
         });
@@ -328,11 +365,25 @@ fn current_user_from_value(value: &Value) -> Result<CurrentUser, CloudKitError> 
         .and_then(|users| users.first())
         .and_then(|user| user.get("userRecordName"))
         .and_then(Value::as_str)
+        .filter(|record_name| !record_name.is_empty())
         .ok_or(CloudKitError::MissingField("users[0].userRecordName"))?;
 
     Ok(CurrentUser {
         user_record_name: record_name.to_string(),
     })
+}
+
+fn validate_account_identity(
+    expected_user_record_name: &str,
+    current: &CurrentUser,
+) -> Result<(), CloudKitError> {
+    if expected_user_record_name.is_empty()
+        || current.user_record_name.is_empty()
+        || current.user_record_name != expected_user_record_name
+    {
+        return Err(CloudKitError::AccountIdentityChanged);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -367,5 +418,45 @@ mod tests {
         let value = json!({ "users": [{ "userRecordName": "_abc123" }] });
         let user = current_user_from_value(&value).unwrap();
         assert_eq!(user.user_record_name, "_abc123");
+    }
+
+    #[test]
+    fn account_identity_revalidation_rejects_empty_or_changed_accounts() {
+        let expected = "_abc123";
+        assert!(validate_account_identity(
+            expected,
+            &CurrentUser {
+                user_record_name: expected.to_string(),
+            }
+        )
+        .is_ok());
+        for (captured, current) in [("", expected), (expected, ""), (expected, "_different")] {
+            assert!(matches!(
+                validate_account_identity(
+                    captured,
+                    &CurrentUser {
+                        user_record_name: current.to_string(),
+                    }
+                ),
+                Err(CloudKitError::AccountIdentityChanged)
+            ));
+        }
+        assert!(
+            !CloudKitError::AccountIdentityChanged.is_transient(),
+            "an account switch must fail immediately instead of retrying the mutation"
+        );
+    }
+
+    #[test]
+    fn empty_current_user_identity_is_not_accepted() {
+        for value in [
+            json!({ "userRecordName": "" }),
+            json!({ "users": [{ "userRecordName": "" }] }),
+        ] {
+            assert!(matches!(
+                current_user_from_value(&value),
+                Err(CloudKitError::MissingField(_))
+            ));
+        }
     }
 }

@@ -160,7 +160,7 @@ impl HostApp {
             HostStatus::SigningIn => spinner_row(ui, "Signing in to iCloud…"),
             HostStatus::Idle => self.idle(ui),
             HostStatus::Starting => spinner_row(ui, "Starting…"),
-            HostStatus::Advertising { code } => self.advertising(ui, code),
+            HostStatus::Advertising => self.advertising(ui),
             HostStatus::Paired { client } => self.paired(ui, client),
             HostStatus::Error(message) => self.error(ui, message),
         }
@@ -168,7 +168,7 @@ impl HostApp {
 
     fn idle(&self, ui: &mut egui::Ui) {
         ui.label(
-            RichText::new("Ready to accept a pairing.")
+            RichText::new("Ready for devices on your Apple Account.")
                 .color(Color32::from_gray(140))
                 .size(13.0),
         );
@@ -188,27 +188,13 @@ impl HostApp {
         }
     }
 
-    fn advertising(&self, ui: &mut egui::Ui, code: &str) {
+    fn advertising(&self, ui: &mut egui::Ui) {
         ui.vertical_centered(|ui| {
             ui.label(
-                RichText::new("Enter this code on your iPad or iPhone:")
+                RichText::new("Your iPhone or iPad connects automatically when it uses the same Apple Account.")
                     .color(Color32::from_gray(140))
                     .size(13.0),
             );
-            ui.add_space(12.0);
-            egui::Frame::none()
-                .fill(Color32::from_rgba_unmultiplied(255, 255, 255, 14))
-                .rounding(Rounding::same(12.0))
-                .inner_margin(egui::Margin::symmetric(20.0, 16.0))
-                .show(ui, |ui| {
-                    ui.label(
-                        RichText::new(format_code(code))
-                            .strong()
-                            .monospace()
-                            .size(38.0)
-                            .color(Color32::WHITE),
-                    );
-                });
             ui.add_space(14.0);
             let stop = egui::Button::new(RichText::new("Stop").size(13.0).color(Color32::WHITE))
                 .min_size(Vec2::new(100.0, 28.0))
@@ -365,14 +351,6 @@ fn display_glyph(ui: &mut egui::Ui, size: f32, color: Color32) {
 
 fn accent_color() -> Color32 {
     Color32::from_rgb(58, 132, 255)
-}
-
-fn format_code(code: &str) -> String {
-    if code.len() == 6 && code.chars().all(|c| c.is_ascii_digit()) {
-        format!("{} {}", &code[..3], &code[3..])
-    } else {
-        code.to_string()
-    }
 }
 
 /// Build a small in-memory icon used both for the window frame and the

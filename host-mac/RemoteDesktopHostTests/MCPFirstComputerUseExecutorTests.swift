@@ -3,6 +3,56 @@ import XCTest
 
 @MainActor
 final class MCPFirstComputerUseExecutorTests: XCTestCase {
+    func testVisualApprovalContinuationForwardsDirectlyToFallbackWithoutPlannerOrMCP()
+        async throws {
+        let planner = StubMCPPlanner(mode: .clarification)
+        let pool = StubMCPClientPool(tools: [try makeMailTool()])
+        let fallback = StubVisualExecutor(
+            result: .completed("Approved visual task finished"))
+        let executor = try await MCPFirstComputerUseExecutor.load(
+            binaryURL: URL(fileURLWithPath:
+                "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
+            visualFallback: fallback,
+            planner: planner,
+            clientPool: pool)
+        let continuation = ComputerUseVisualApprovalContinuation(
+            taskID: "task-b09",
+            nonce: UUID(uuidString:
+                "01234567-89AB-CDEF-0123-456789ABCDEF")!)
+        let action = ComputerUsePredictedAction.click(
+            x: 499,
+            y: 529,
+            button: 0,
+            count: 1)
+        var progress: [String] = []
+
+        let result = try await executor.continueAfterApprovedVisualAction(
+            continuation,
+            action: action,
+            tools: makeHostTools(),
+            progress: { progress.append($0) })
+
+        XCTAssertEqual(result, .completed("Approved visual task finished"))
+        XCTAssertEqual(fallback.continuations, [continuation])
+        XCTAssertEqual(fallback.continuationActions, [action])
+        XCTAssertEqual(progress, ["Continuing the approved visual task…"])
+        XCTAssertTrue(
+            planner.proposedToolNames.isEmpty,
+            "Typed visual continuation must not re-enter the Apple planner")
+        let directCountAfterContinuation = await pool.directExecuteCount()
+        let approvedCountAfterContinuation = await pool.approvedExecuteCount()
+        XCTAssertEqual(directCountAfterContinuation, 0)
+        XCTAssertEqual(approvedCountAfterContinuation, 0)
+
+        executor.cancelVisualApprovalContinuation(continuation)
+        XCTAssertEqual(fallback.cancelledContinuations, [continuation])
+        XCTAssertTrue(planner.proposedToolNames.isEmpty)
+        let directCountAfterCancellation = await pool.directExecuteCount()
+        let approvedCountAfterCancellation = await pool.approvedExecuteCount()
+        XCTAssertEqual(directCountAfterCancellation, 0)
+        XCTAssertEqual(approvedCountAfterCancellation, 0)
+    }
+
     func testMutationProposalStopsBeforeExecutionAndRunsExactlyOnceAfterApproval() async throws {
         let tool = try makeMailTool()
         let planner = StubMCPPlanner(mode: .draft)
@@ -82,7 +132,146 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         XCTAssertEqual(approvedCount, 0)
     }
 
-    func testDoorDashPricingSkipsBlockedBrowserToolsAndPreservesLoginHandoffPrompt() async throws {
+    func testVisibleSupportPhoneReadUsesGenericPlannerWithoutVisualPreRoute()
+        async throws {
+        let prompts = [
+            "Please open Safari and tell me the support phone number shown on the local page already loaded there.",
+            "What is the support phone shown on the Safari page?",
+            "Which is the support phone shown on the Safari page?",
+            "What is the support telephone number shown on the Safari page?",
+            "Give me the support contact number shown on the current webpage.",
+            "Please open Safari and tell me the support phone number shown on the local page already loaded there. Do not use Contacts.",
+        ]
+        for (index, prompt) in prompts.enumerated() {
+            let planner = StubMCPPlanner(mode: .clarification)
+            let pool = StubMCPClientPool(tools: [
+                try makeMailTool(),
+                try makePlannerVisibleReadOnlyTool("contacts_search"),
+            ])
+            let fallback = StubVisualExecutor(
+                result: .completed("A visual fallback must not run"))
+            let executor = try await MCPFirstComputerUseExecutor.load(
+                binaryURL: URL(fileURLWithPath:
+                    "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
+                visualFallback: fallback,
+                planner: planner,
+                clientPool: pool)
+            var progress: [String] = []
+            let taskID = "hostile-support-phone-visible-read-\(index)"
+
+            let result = try await executor.execute(
+                taskID: taskID,
+                prompt: prompt,
+                trustedUserPrompt: prompt,
+                tools: makeHostTools(),
+                progress: { progress.append($0) })
+
+            XCTAssertEqual(
+                result,
+                .clarificationRequired("Which document should I use?"),
+                prompt)
+            XCTAssertEqual(fallback.callCount, 0, prompt)
+            XCTAssertTrue(fallback.prompts.isEmpty, prompt)
+            XCTAssertTrue(fallback.trustedUserPrompts.isEmpty, prompt)
+            XCTAssertTrue(fallback.taskIDs.isEmpty, prompt)
+            XCTAssertEqual(
+                planner.proposedToolNames.count,
+                1,
+                "No benchmark-shaped prompt may bypass the ordinary planner: \(prompt)")
+            XCTAssertEqual(
+                progress.first,
+                "Planning with on-device Apple Intelligence…")
+            let directCount = await pool.directExecuteCount()
+            let approvedCount = await pool.approvedExecuteCount()
+            XCTAssertEqual(directCount, 0, prompt)
+            XCTAssertEqual(approvedCount, 0, prompt)
+        }
+    }
+
+    func testVisibleSupportPhoneCompoundWorkUsesGenericPlannerWithoutEffects()
+        async throws {
+        let prefix =
+            "Please open Safari and tell me the support phone number shown on the local page already loaded there."
+        let prompts = [
+            prefix + " Then call it.",
+            prefix + " Then click Help.",
+            prefix + " Then tell me the support hours.",
+            prefix + " Then search Contacts for the same number.",
+        ]
+        for (index, prompt) in prompts.enumerated() {
+            let planner = StubMCPPlanner(mode: .clarification)
+            let pool = StubMCPClientPool(tools: [
+                try makeMailTool(),
+                try makePlannerVisibleReadOnlyTool("contacts_search"),
+            ])
+            let fallback = StubVisualExecutor(
+                result: .completed("A visual fallback must not run"))
+            let executor = try await MCPFirstComputerUseExecutor.load(
+                binaryURL: URL(fileURLWithPath:
+                    "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
+                visualFallback: fallback,
+                planner: planner,
+                clientPool: pool)
+
+            let result = try await executor.execute(
+                taskID: "hostile-support-phone-compound-\(index)",
+                prompt: prompt,
+                trustedUserPrompt: prompt,
+                tools: makeHostTools(),
+                progress: { _ in })
+
+            XCTAssertEqual(
+                result,
+                .clarificationRequired("Which document should I use?"),
+                prompt)
+            XCTAssertEqual(fallback.callCount, 0, prompt)
+            XCTAssertTrue(fallback.prompts.isEmpty, prompt)
+            XCTAssertTrue(fallback.trustedUserPrompts.isEmpty, prompt)
+            XCTAssertEqual(
+                planner.proposedToolNames.count,
+                1,
+                "Compound work must use the ordinary planner/policy path: \(prompt)")
+            let directCount = await pool.directExecuteCount()
+            let approvedCount = await pool.approvedExecuteCount()
+            XCTAssertEqual(directCount, 0, prompt)
+            XCTAssertEqual(approvedCount, 0, prompt)
+        }
+    }
+
+    func testVisibleSupportPhoneReadUsesGenericFallbackWhenPlannerUnavailable()
+        async throws {
+        let prompt =
+            "Please open Safari and tell me the support phone number shown on the local page already loaded there."
+        let planner = StubMCPPlanner(mode: .unavailable)
+        let pool = StubMCPClientPool(tools: [try makeMailTool()])
+        let fallback = StubVisualExecutor(
+            result: .completed("Visible page read finished"))
+        let executor = try await MCPFirstComputerUseExecutor.load(
+            binaryURL: URL(fileURLWithPath:
+                "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
+            visualFallback: fallback,
+            planner: planner,
+            clientPool: pool)
+
+        let result = try await executor.execute(
+            taskID: "support-phone-generic-unavailable",
+            prompt: prompt,
+            trustedUserPrompt: prompt,
+            tools: makeHostTools(),
+            progress: { _ in })
+
+        XCTAssertEqual(result, .completed("Visible page read finished"))
+        XCTAssertEqual(fallback.callCount, 1)
+        XCTAssertEqual(fallback.prompts, [prompt])
+        XCTAssertEqual(fallback.trustedUserPrompts, [prompt])
+        XCTAssertTrue(planner.proposedToolNames.isEmpty)
+        let directCount = await pool.directExecuteCount()
+        let approvedCount = await pool.approvedExecuteCount()
+        XCTAssertEqual(directCount, 0)
+        XCTAssertEqual(approvedCount, 0)
+    }
+
+    func testBrowserOnlyReadUsesGenericPlannerFallbackWithoutAdvertisingBlockedBrowserTools() async throws {
         let browserNames = [
             "browser_close_tab", "browser_get_active_tab", "browser_list_tabs",
             "browser_navigate", "browser_new_tab",
@@ -112,12 +301,22 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
 
         XCTAssertEqual(result, .userInterventionRequired(guidance))
         XCTAssertEqual(fallback.prompts, [prompt])
+        XCTAssertEqual(
+            planner.proposedToolNames.count,
+            1,
+            "The generic planner must get one opportunity to select the visual fallback")
+        let proposedToolNames = try XCTUnwrap(
+            planner.proposedToolNames.first)
         XCTAssertTrue(
-            planner.proposedToolNames.isEmpty,
-            "A visual-only DoorDash quote must not probe unrelated MCP tools")
+            proposedToolNames.allSatisfy {
+                !browserNames.contains($0)
+            },
+            "Blocked browser advertisements must never enter the planner surface")
         XCTAssertEqual(
             progress.first,
-            "Using visual control for this delivery quote…")
+            "Planning with on-device Apple Intelligence…")
+        XCTAssertTrue(progress.contains(
+            "This app needs visual control — switching locally…"))
         XCTAssertFalse(progress.contains(where: {
             $0.localizedCaseInsensitiveContains("Reminders")
                 || $0.localizedCaseInsensitiveContains("Calendar")
@@ -231,7 +430,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
                 clientPool: pool)
 
             let result = try await executor.execute(
-                taskID: "compound-quote-without-(index)",
+                taskID: "compound-quote-without-\(index)",
                 prompt: prompt,
                 trustedUserPrompt: prompt,
                 tools: makeHostTools(),
@@ -246,7 +445,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         }
     }
 
-    func testExplicitlyNegatedDeliveryEffectsRemainOnPureQuoteFastPath()
+    func testExplicitlyNegatedDeliveryEffectsUseGenericVisualFallbackWithoutEffects()
         async throws {
         let planner = StubMCPPlanner(mode: .generationFailure)
         let pool = StubMCPClientPool(tools: [try makeMailTool()])
@@ -268,9 +467,20 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
 
         XCTAssertEqual(result, .completed("Quote reported."))
         XCTAssertEqual(fallback.callCount, 1)
-        XCTAssertTrue(
-            planner.proposedToolNames.isEmpty,
-            "Explicitly denied follow-ups must not disable the pure quote route")
+        XCTAssertEqual(
+            planner.proposedToolNames.count,
+            1,
+            "Browser reads should get the generic planner opportunity before visual fallback")
+        let directCount = await pool.directExecuteCount()
+        let approvedCount = await pool.approvedExecuteCount()
+        XCTAssertEqual(
+            directCount,
+            0,
+            "Negated follow-up effects must not execute a structured tool")
+        XCTAssertEqual(
+            approvedCount,
+            0,
+            "Negated follow-up effects must not reach an approval execution")
     }
 
     func testNegatedPrivateReadClausesCannotAuthorizeContactsOrReminders()
@@ -551,7 +761,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
                 clientPool: pool)
 
             let result = try await executor.execute(
-                taskID: "affirmative-private-read-(index)",
+                taskID: "affirmative-private-read-\(index)",
                 prompt: row.prompt,
                 trustedUserPrompt: row.prompt,
                 tools: makeHostTools(),
@@ -3203,7 +3413,9 @@ private actor StubMCPClientPool: MCPClientPooling {
 }
 
 @MainActor
-private final class StubVisualExecutor: ComputerUseExecuting {
+private final class StubVisualExecutor:
+    ComputerUseExecuting,
+    ComputerUseVisualApprovalContinuing {
     let isReady = true
     let runtimeName = "Stub visual fallback"
     let result: ComputerUseExecutionResult
@@ -3211,6 +3423,9 @@ private final class StubVisualExecutor: ComputerUseExecuting {
     private(set) var prompts: [String] = []
     private(set) var trustedUserPrompts: [String] = []
     private(set) var taskIDs: [String] = []
+    private(set) var continuations: [ComputerUseVisualApprovalContinuation] = []
+    private(set) var continuationActions: [ComputerUsePredictedAction] = []
+    private(set) var cancelledContinuations: [ComputerUseVisualApprovalContinuation] = []
 
     init(result: ComputerUseExecutionResult = .completed("Visual complete")) {
         self.result = result
@@ -3239,5 +3454,23 @@ private final class StubVisualExecutor: ComputerUseExecuting {
         prompts.append(prompt)
         trustedUserPrompts.append(trustedUserPrompt)
         return result
+    }
+
+    func continueAfterApprovedVisualAction(
+        _ continuation: ComputerUseVisualApprovalContinuation,
+        action: ComputerUsePredictedAction,
+        tools: ComputerUseHostTools,
+        progress: @escaping (String) -> Void
+    ) async throws -> ComputerUseExecutionResult {
+        continuations.append(continuation)
+        continuationActions.append(action)
+        progress("Continuing the approved visual task…")
+        return result
+    }
+
+    func cancelVisualApprovalContinuation(
+        _ continuation: ComputerUseVisualApprovalContinuation
+    ) {
+        cancelledContinuations.append(continuation)
     }
 }

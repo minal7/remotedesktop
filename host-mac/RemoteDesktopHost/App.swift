@@ -1,5 +1,5 @@
 import AppKit
-import Combine
+import CloudKit
 import Darwin
 import Foundation
 import ServiceManagement
@@ -125,9 +125,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var setupWindowController: NSWindowController?
     private var settingsWindowController: NSWindowController?
     private var activationObserver: NSObjectProtocol?
+    private var cloudAccountObserver: NSObjectProtocol?
     private var launchPermissionTask: Task<Void, Never>?
     private var permissionRefreshTask: Task<Void, Never>?
-    private var stateObserver: AnyCancellable?
     private var terminationSignalSource: DispatchSourceSignal?
     private var terminationTask: Task<Void, Never>?
     private var terminationState: TerminationState = .idle
@@ -160,7 +160,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         popover = NSPopover()
         popover.behavior = .transient
-        popover.contentSize = NSSize(width: 340, height: 330)
+        popover.contentSize = NSSize(width: 340, height: 460)
         popover.contentViewController = NSHostingController(
             rootView: MenuContent(openSetup: { [weak self] in
                 self?.showSetupWindow()
@@ -182,6 +182,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 }
             }
 
+        cloudAccountObserver = NotificationCenter.default.addObserver(
+            forName: .CKAccountChanged,
+            object: nil,
+            queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.session.handleCloudAccountChanged()
+                }
+            }
+
         // Refresh permissions on first show so the UI reflects reality.
         session.refreshPermissions()
         configureStartAtLogin()
@@ -196,9 +205,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if let obs = activationObserver {
             NotificationCenter.default.removeObserver(obs)
         }
+        if let obs = cloudAccountObserver {
+            NotificationCenter.default.removeObserver(obs)
+        }
         cancelPermissionTasks()
-        stateObserver?.cancel()
-        clearPairingCodeFile()
         session.stop()
     }
 
@@ -434,11 +444,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func configureHeadlessMode() {
-        if stateObserver == nil {
-            stateObserver = session.$state.sink { [weak self] state in
-                self?.syncPairingCodeFile(for: state)
-            }
-        }
+        HeadlessHostSettings.removeLegacyManualPairingArtifacts()
 
         guard !HostRuntimeContext.isRunningUnitTests else { return }
         guard HeadlessHostSettings.startListeningOnLaunch else { return }
@@ -477,30 +483,4 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         Bundle.main.bundleURL.path.contains("/DerivedData/")
     }
 
-    private func syncPairingCodeFile(for state: HostSession.State) {
-        switch state {
-        case .advertising(let code):
-            writePairingCodeFile(code)
-        case .idle, .starting, .paired(_), .error(_):
-            clearPairingCodeFile()
-        }
-    }
-
-    private func writePairingCodeFile(_ code: String) {
-        guard let url = HeadlessHostSettings.pairingCodeFileURL else { return }
-        do {
-            try FileManager.default.createDirectory(
-                at: url.deletingLastPathComponent(),
-                withIntermediateDirectories: true)
-            try "\(code)\n".write(to: url, atomically: true, encoding: .utf8)
-            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
-        } catch {
-            NSLog("RemoteDesktopHost could not write pairing code file: \(error.localizedDescription)")
-        }
-    }
-
-    private func clearPairingCodeFile() {
-        guard let url = HeadlessHostSettings.pairingCodeFileURL else { return }
-        try? FileManager.default.removeItem(at: url)
-    }
 }

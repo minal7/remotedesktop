@@ -1,11 +1,16 @@
 name: Release
 
 # Builds the Windows host installer and the signed, notarized macOS host
-# app package, then attaches both to one GitHub Release.
+# app package. Tag pushes publish both to one GitHub Release. A manual
+# dispatch defaults to a non-publishing candidate build bound to the exact
+# selected commit.
 #
 # Trigger by pushing a version tag:
 #   git tag v0.2.1 && git push origin v0.2.1
-# or rerun that exact tagged commit manually from the Actions tab.
+# Build a current-source candidate without creating a release:
+#   gh workflow run release.yml --ref main -f version=0.2.1 -f publish=false
+# Rerun publishing only from an existing exact version tag:
+#   gh workflow run release.yml --ref v0.2.1 -f version=0.2.1 -f publish=true
 #
 # Required repository secrets:
 #   REMOTE_DESKTOP_CLOUDKIT_API_TOKEN       - CloudKit Web Services API token
@@ -16,9 +21,12 @@ name: Release
 #   APPLE_ID                                - Apple ID used for notarization
 #   APPLE_APP_SPECIFIC_PASSWORD             - App-specific password for APPLE_ID
 #   APPLE_TEAM_ID                           - Apple Developer Team ID
+#   WINDOWS_CERTIFICATE_PFX                 - Base64-encoded Authenticode code-signing .pfx
+#   WINDOWS_CERTIFICATE_PASSWORD            - Password for WINDOWS_CERTIFICATE_PFX
 # Optional repository variables:
 #   CLOUDKIT_ENV              - "production" (default) or "development"
 #   MACOS_CODE_SIGN_IDENTITY  - Defaults to "Developer ID Application"
+#   WINDOWS_TIMESTAMP_URL     - RFC 3161 server; defaults to DigiCert
 
 on:
   push:
@@ -30,6 +38,11 @@ on:
         description: "Version to build (without leading v), e.g. 0.2.1"
         required: true
         default: "0.2.1"
+      publish:
+        description: "Publish a GitHub Release (requires an existing exact version tag)"
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -41,6 +54,8 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       tag_name: ${{ steps.version.outputs.tag_name }}
       release_sha: ${{ steps.version.outputs.release_sha }}
+      publish: ${{ steps.version.outputs.publish }}
+      artifact_suffix: ${{ steps.version.outputs.artifact_suffix }}
 
     steps:
       - name: Checkout
@@ -53,6 +68,7 @@ jobs:
         working-directory: host-windows
         env:
           REQUESTED_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || '' }}
+          REQUESTED_PUBLISH: ${{ github.event_name == 'workflow_dispatch' && inputs.publish || false }}
         run: |
           set -euo pipefail
 
@@ -63,33 +79,71 @@ jobs:
             exit 1
           fi
 
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+          publish=false
+          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
+            if [[ "$GITHUB_REF" != refs/tags/v* ]]; then
+              echo "::error::Release push events must identify a v-prefixed version tag."
+              exit 1
+            fi
             tag="${GITHUB_REF#refs/tags/v}"
             if [[ "$tag" != "$cargo" ]]; then
               echo "::error::Tag v$tag does not match Cargo.toml version $cargo. Bump host-windows/Cargo.toml and commit Cargo.lock before tagging."
               exit 1
             fi
-          elif [[ -n "$REQUESTED_VERSION" && "$REQUESTED_VERSION" != "$cargo" ]]; then
-            echo "::error::Requested version $REQUESTED_VERSION does not match Cargo.toml version $cargo."
+            publish=true
+          elif [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            if [[ -z "$REQUESTED_VERSION" || "$REQUESTED_VERSION" != "$cargo" ]]; then
+              echo "::error::Requested version $REQUESTED_VERSION does not match Cargo.toml version $cargo."
+              exit 1
+            fi
+            case "$REQUESTED_PUBLISH" in
+              true)
+                publish=true
+                ;;
+              false|"")
+                publish=false
+                ;;
+              *)
+                echo "::error::publish must be the boolean true or false."
+                exit 1
+                ;;
+            esac
+          else
+            echo "::error::Unsupported release workflow event: $GITHUB_EVENT_NAME"
             exit 1
           fi
 
           expected_tag="v$cargo"
-          release_sha="$(git rev-parse HEAD)"
-          tag_sha="$(git rev-list -n 1 "$expected_tag" 2>/dev/null || true)"
-          if [[ -z "$tag_sha" ]]; then
-            echo "::error::$expected_tag must already exist. Push the version tag before publishing or manually rerunning a release."
+          release_sha="$(git rev-parse HEAD | tr '[:upper:]' '[:lower:]')"
+          event_sha="$(printf '%s' "$GITHUB_SHA" | tr '[:upper:]' '[:lower:]')"
+          if [[ ! "$release_sha" =~ ^[0-9a-f]{40}$ || "$release_sha" != "$event_sha" ]]; then
+            echo "::error::Checkout commit $release_sha does not match immutable event commit $event_sha."
             exit 1
           fi
-          if [[ "$tag_sha" != "$release_sha" ]]; then
-            echo "::error::$expected_tag points to $tag_sha, but this run checked out $release_sha. Dispatch the workflow from the tagged commit."
-            exit 1
+
+          if [[ "$publish" == "true" ]]; then
+            tag_sha="$(git rev-list -n 1 "$expected_tag" 2>/dev/null || true)"
+            if [[ -z "$tag_sha" ]]; then
+              echo "::error::$expected_tag must already exist before publishing."
+              exit 1
+            fi
+            if [[ "$tag_sha" != "$release_sha" ]]; then
+              echo "::error::$expected_tag points to $tag_sha, but this run checked out $release_sha. Dispatch publishing from the tagged commit."
+              exit 1
+            fi
+            artifact_suffix=""
+            mode="published release"
+          else
+            artifact_suffix="-$release_sha"
+            mode="non-publishing candidate"
           fi
 
           echo "version=$cargo" >> "$GITHUB_OUTPUT"
           echo "tag_name=$expected_tag" >> "$GITHUB_OUTPUT"
           echo "release_sha=$release_sha" >> "$GITHUB_OUTPUT"
-          echo "Building version $cargo from tagged commit $release_sha"
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+          echo "artifact_suffix=$artifact_suffix" >> "$GITHUB_OUTPUT"
+          echo "Building version $cargo as a $mode from exact commit $release_sha"
 
   validate-windows:
     runs-on: windows-latest
@@ -101,6 +155,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ needs.resolve-version.outputs.release_sha }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
@@ -135,6 +191,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ needs.resolve-version.outputs.release_sha }}
 
       - name: Validate Xcode 26 toolchain
         run: |
@@ -228,6 +286,8 @@ jobs:
     needs:
       - resolve-version
       - validate-windows
+    env:
+      WINDOWS_SIGNING_STORE_NAME: RemoteDesktopSigning-${{ github.run_id }}-${{ github.run_attempt }}
     defaults:
       run:
         shell: pwsh
@@ -235,6 +295,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ needs.resolve-version.outputs.release_sha }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
@@ -253,32 +315,277 @@ jobs:
           REMOTE_DESKTOP_CLOUDKIT_ENV: ${{ vars.CLOUDKIT_ENV || 'production' }}
         run: cargo build --release --locked
 
+      - name: Resolve fail-closed Windows signing policy
+        id: windows-signing
+        env:
+          PUBLISH: ${{ needs.resolve-version.outputs.publish }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_CERTIFICATE_PFX: ${{ secrets.WINDOWS_CERTIFICATE_PFX }}
+        run: |
+          $hasPfx = -not [string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_PFX)
+          $hasPassword = -not [string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_PASSWORD)
+          if ($hasPfx -ne $hasPassword) {
+            throw "WINDOWS_CERTIFICATE_PFX and WINDOWS_CERTIFICATE_PASSWORD must be configured together."
+          }
+          if (-not $hasPfx) {
+            if ($env:PUBLISH -eq "true") {
+              throw "Published Windows releases require Authenticode secrets WINDOWS_CERTIFICATE_PFX and WINDOWS_CERTIFICATE_PASSWORD."
+            }
+            "configured=false" >> $env:GITHUB_OUTPUT
+            Write-Host "No Windows candidate will be packaged or uploaded because Authenticode signing is not configured."
+            exit 0
+          }
+
+          $certificatePath = Join-Path $env:RUNNER_TEMP "windows-code-signing.pfx"
+          try {
+            [IO.File]::WriteAllBytes(
+              $certificatePath,
+              [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_PFX))
+          } catch {
+            throw "WINDOWS_CERTIFICATE_PFX is not valid base64: $($_.Exception.Message)"
+          }
+          $securePassword = ConvertTo-SecureString `
+            $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          if ($env:WINDOWS_SIGNING_STORE_NAME -notmatch '^RemoteDesktopSigning-[0-9]+-[0-9]+$') {
+            throw "The isolated Windows signing store name is invalid."
+          }
+          $storePath = "Cert:\CurrentUser\$($env:WINDOWS_SIGNING_STORE_NAME)"
+          if (Test-Path -LiteralPath $storePath) {
+            throw "The isolated Windows signing store already exists."
+          }
+          $storeMarkerPath = Join-Path $env:RUNNER_TEMP "windows-signing-store.created"
+          if (Test-Path -LiteralPath $storeMarkerPath) {
+            throw "The isolated Windows signing store ownership marker already exists."
+          }
+          [IO.File]::WriteAllText(
+            $storeMarkerPath,
+            $env:WINDOWS_SIGNING_STORE_NAME,
+            [Text.UTF8Encoding]::new($false))
+          $store = [Security.Cryptography.X509Certificates.X509Store]::new(
+            $env:WINDOWS_SIGNING_STORE_NAME,
+            [Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser)
+          try {
+            $store.Open(
+              [Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+          } finally {
+            $store.Dispose()
+          }
+          try {
+            $imported = @(Import-PfxCertificate `
+              -FilePath $certificatePath `
+              -CertStoreLocation $storePath `
+              -Password $securePassword `
+              -Exportable:$false)
+          } finally {
+            if (Test-Path -LiteralPath $certificatePath -PathType Leaf) {
+              Remove-Item -LiteralPath $certificatePath -Force
+            }
+          }
+          $codeSigning = @($imported | Where-Object {
+            $_.HasPrivateKey -and
+            ($_.EnhancedKeyUsageList.ObjectId.Value -contains "1.3.6.1.5.5.7.3.3")
+          })
+          if ($codeSigning.Count -ne 1) {
+            throw "The Windows PFX must contain exactly one private-key certificate with the Code Signing EKU."
+          }
+          $certificate = $codeSigning[0]
+          $now = Get-Date
+          if ($certificate.NotBefore -gt $now -or $certificate.NotAfter -le $now) {
+            throw "The Windows code-signing certificate is not currently valid."
+          }
+          "configured=true" >> $env:GITHUB_OUTPUT
+          "thumbprint=$($certificate.Thumbprint.ToUpperInvariant())" >> $env:GITHUB_OUTPUT
+
+      - name: Sign Windows host executable
+        if: steps.windows-signing.outputs.configured == 'true'
+        working-directory: host-windows
+        env:
+          SIGNING_THUMBPRINT: ${{ steps.windows-signing.outputs.thumbprint }}
+          TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL || 'http://timestamp.digicert.com' }}
+        run: |
+          $signtool = Get-ChildItem `
+            "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          if (-not $signtool) { throw "Windows SDK signtool.exe was not found." }
+          $exe = "target\release\remote-desktop-host.exe"
+          & $signtool.FullName sign `
+            /s $env:WINDOWS_SIGNING_STORE_NAME `
+            /sha1 $env:SIGNING_THUMBPRINT `
+            /fd SHA256 `
+            /td SHA256 `
+            /tr $env:TIMESTAMP_URL `
+            $exe
+          if ($LASTEXITCODE -ne 0) {
+            throw "Authenticode signing failed for $exe with exit code $LASTEXITCODE."
+          }
+
       - name: Verify executable
         working-directory: host-windows
+        env:
+          EXPECTED_THUMBPRINT: ${{ steps.windows-signing.outputs.thumbprint }}
+          SIGNING_CONFIGURED: ${{ steps.windows-signing.outputs.configured }}
         run: |
-          $exe = "target/release/remote-desktop-host.exe"
+          $exe = "target\release\remote-desktop-host.exe"
           if (-not (Test-Path $exe)) { throw "Build did not produce $exe" }
           Get-Item $exe | Select-Object Name, Length, VersionInfo
 
+          if ($env:SIGNING_CONFIGURED -eq "true") {
+            $signature = Get-AuthenticodeSignature -LiteralPath $exe
+            if ($signature.Status -ne "Valid") {
+              throw "The Windows host signature is not valid: $($signature.Status) $($signature.StatusMessage)"
+            }
+            if ($signature.SignerCertificate.Thumbprint -ne $env:EXPECTED_THUMBPRINT) {
+              throw "The Windows host was signed by an unexpected certificate."
+            }
+            if (-not $signature.TimeStamperCertificate) {
+              throw "The Windows host signature is missing its RFC 3161 timestamp."
+            }
+            $signtool = Get-ChildItem `
+              "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+              Sort-Object FullName -Descending |
+              Select-Object -First 1
+            & $signtool.FullName verify /pa /all /v /tw $exe
+            if ($LASTEXITCODE -ne 0) {
+              throw "Authenticode verification failed for $exe with exit code $LASTEXITCODE."
+            }
+          } elseif ((Get-AuthenticodeSignature -LiteralPath $exe).Status -eq "Valid") {
+            throw "An unconfigured candidate unexpectedly acquired an untracked signature."
+          }
+
       - name: Install Inno Setup
+        if: steps.windows-signing.outputs.configured == 'true'
         run: choco install innosetup --no-progress -y
 
       - name: Build installer
+        if: steps.windows-signing.outputs.configured == 'true'
         working-directory: host-windows/packaging
+        env:
+          ARTIFACT_SUFFIX: ${{ needs.resolve-version.outputs.artifact_suffix }}
         run: |
           $v = "${{ needs.resolve-version.outputs.version }}"
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DMyAppVersion=$v" installer.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE" }
+
+          if ($env:ARTIFACT_SUFFIX) {
+            $source = "..\dist\RemoteDesktopHost-Setup-$v.exe"
+            $destination = "..\dist\RemoteDesktopHost-Setup-$v$($env:ARTIFACT_SUFFIX).exe"
+            Move-Item -LiteralPath $source -Destination $destination
+          }
+
+      - name: Sign and verify Windows installer
+        if: steps.windows-signing.outputs.configured == 'true'
+        working-directory: host-windows
+        env:
+          ARTIFACT_SUFFIX: ${{ needs.resolve-version.outputs.artifact_suffix }}
+          EXPECTED_THUMBPRINT: ${{ steps.windows-signing.outputs.thumbprint }}
+          TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL || 'http://timestamp.digicert.com' }}
+          VERSION: ${{ needs.resolve-version.outputs.version }}
+        run: |
+          $installer = "dist\RemoteDesktopHost-Setup-$($env:VERSION)$($env:ARTIFACT_SUFFIX).exe"
+          if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) {
+            throw "Installer build did not produce $installer"
+          }
+          $signtool = Get-ChildItem `
+            "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          if (-not $signtool) { throw "Windows SDK signtool.exe was not found." }
+          & $signtool.FullName sign `
+            /s $env:WINDOWS_SIGNING_STORE_NAME `
+            /sha1 $env:EXPECTED_THUMBPRINT `
+            /fd SHA256 `
+            /td SHA256 `
+            /tr $env:TIMESTAMP_URL `
+            $installer
+          if ($LASTEXITCODE -ne 0) {
+            throw "Authenticode signing failed for $installer with exit code $LASTEXITCODE."
+          }
+          $signature = Get-AuthenticodeSignature -LiteralPath $installer
+          if ($signature.Status -ne "Valid") {
+            throw "The Windows installer signature is not valid: $($signature.Status) $($signature.StatusMessage)"
+          }
+          if ($signature.SignerCertificate.Thumbprint -ne $env:EXPECTED_THUMBPRINT) {
+            throw "The Windows installer was signed by an unexpected certificate."
+          }
+          if (-not $signature.TimeStamperCertificate) {
+            throw "The Windows installer signature is missing its RFC 3161 timestamp."
+          }
+          & $signtool.FullName verify /pa /all /v /tw $installer
+          if ($LASTEXITCODE -ne 0) {
+            throw "Authenticode verification failed for $installer with exit code $LASTEXITCODE."
+          }
+
+      - name: Create Windows candidate provenance
+        if: needs.resolve-version.outputs.publish == 'false' && steps.windows-signing.outputs.configured == 'true'
+        working-directory: host-windows
+        env:
+          ARTIFACT_SUFFIX: ${{ needs.resolve-version.outputs.artifact_suffix }}
+          RELEASE_SHA: ${{ needs.resolve-version.outputs.release_sha }}
+          VERSION: ${{ needs.resolve-version.outputs.version }}
+        run: |
+          $artifactName = "RemoteDesktopHost-Setup-$($env:VERSION)$($env:ARTIFACT_SUFFIX).exe"
+          $artifactPath = Join-Path "dist" $artifactName
+          if (-not (Test-Path -LiteralPath $artifactPath -PathType Leaf)) {
+            throw "Candidate build did not produce $artifactPath"
+          }
+          $artifactHash = (Get-FileHash -LiteralPath $artifactPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          $provenance = [ordered]@{
+            schema_version = 1
+            artifact_kind = "candidate"
+            source_commit = $env:RELEASE_SHA
+            version = $env:VERSION
+            artifact = $artifactName
+            sha256 = $artifactHash
+            workflow_run_id = $env:GITHUB_RUN_ID
+            workflow_run_attempt = $env:GITHUB_RUN_ATTEMPT
+          } | ConvertTo-Json
+          $provenancePath = "dist\RemoteDesktopHost-Windows-$($env:VERSION)$($env:ARTIFACT_SUFFIX).provenance.json"
+          Set-Content -LiteralPath $provenancePath -Value $provenance -Encoding utf8 -NoNewline
 
       - name: List artifacts
+        if: steps.windows-signing.outputs.configured == 'true'
         working-directory: host-windows
         run: Get-ChildItem dist
 
-      - name: Upload Windows installer
+      - name: Upload Windows release installer
+        if: needs.resolve-version.outputs.publish == 'true' && steps.windows-signing.outputs.configured == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: windows-installer
           path: host-windows/dist/RemoteDesktopHost-Setup-${{ needs.resolve-version.outputs.version }}.exe
           if-no-files-found: error
+
+      - name: Upload SHA-bound Windows candidate
+        if: needs.resolve-version.outputs.publish == 'false' && steps.windows-signing.outputs.configured == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-installer-${{ needs.resolve-version.outputs.release_sha }}
+          path: |
+            host-windows/dist/RemoteDesktopHost-Setup-${{ needs.resolve-version.outputs.version }}-${{ needs.resolve-version.outputs.release_sha }}.exe
+            host-windows/dist/RemoteDesktopHost-Windows-${{ needs.resolve-version.outputs.version }}-${{ needs.resolve-version.outputs.release_sha }}.provenance.json
+          if-no-files-found: error
+
+      - name: Remove imported Windows signing material
+        if: always()
+        run: |
+          $certificatePath = Join-Path $env:RUNNER_TEMP "windows-code-signing.pfx"
+          if (Test-Path -LiteralPath $certificatePath -PathType Leaf) {
+            Remove-Item -LiteralPath $certificatePath -Force
+          }
+
+          $storeMarkerPath = Join-Path $env:RUNNER_TEMP "windows-signing-store.created"
+          if (Test-Path -LiteralPath $storeMarkerPath -PathType Leaf) {
+            $ownedStoreName = [IO.File]::ReadAllText($storeMarkerPath)
+            if ($ownedStoreName -ne $env:WINDOWS_SIGNING_STORE_NAME) {
+              throw "Refusing to remove a Windows certificate store without a matching ownership marker."
+            }
+            $storePath = "Cert:\CurrentUser\$ownedStoreName"
+            if (Test-Path -LiteralPath $storePath) {
+              Remove-Item -LiteralPath $storePath -Recurse -Force
+            }
+            Remove-Item -LiteralPath $storeMarkerPath -Force
+          }
 
   build-mac:
     runs-on: macos-15
@@ -288,6 +595,7 @@ jobs:
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
       VERSION: ${{ needs.resolve-version.outputs.version }}
+      RELEASE_SHA: ${{ needs.resolve-version.outputs.release_sha }}
       MACOS_CODE_SIGN_IDENTITY: ${{ vars.MACOS_CODE_SIGN_IDENTITY || 'Developer ID Application' }}
       XCODEGEN_SHA256: 0c90f4d28ca57335f9fa78cf5bf6dabfe20a232036dabe36de2eef79cb7c0878
       XCODEGEN_VERSION: 2.45.3
@@ -295,6 +603,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ needs.resolve-version.outputs.release_sha }}
 
       - name: Validate Xcode 26 toolchain
         run: |
@@ -421,8 +731,28 @@ jobs:
           set -euo pipefail
 
           archive_path="$PWD/host-mac/build/RemoteDesktopHost.xcarchive"
+          source_info_plist="$PWD/host-mac/RemoteDesktopHost/Info.plist"
           rm -rf "$archive_path" "$PWD/host-mac/dist"
           mkdir -p "$PWD/host-mac/dist"
+
+          # This target supplies its own Info.plist, so INFOPLIST_KEY_* build
+          # settings are not an authoritative provenance input. Stamp only the
+          # ephemeral CI checkout before signing, then verify the sealed result.
+          if /usr/bin/plutil -extract RemoteDesktopSourceCommit raw -o - \
+              "$source_info_plist" >/dev/null 2>&1; then
+            echo "::error::RemoteDesktopSourceCommit must be stamped only by this release workflow."
+            exit 1
+          fi
+          /usr/bin/plutil -insert RemoteDesktopSourceCommit \
+            -string "$RELEASE_SHA" \
+            "$source_info_plist"
+          stamped_source_commit="$(/usr/bin/plutil \
+            -extract RemoteDesktopSourceCommit raw -o - "$source_info_plist" \
+            2>/dev/null | tr '[:upper:]' '[:lower:]' || true)"
+          if [[ "$stamped_source_commit" != "$RELEASE_SHA" ]]; then
+            echo "::error::Could not stamp exact source provenance into the macOS build input."
+            exit 1
+          fi
 
           xcodebuild archive \
             -project host-mac/RemoteDesktopHost.xcodeproj \
@@ -448,6 +778,13 @@ jobs:
           fi
 
           codesign --verify --deep --strict --verbose=2 "$app_path"
+          artifact_source_commit="$(/usr/bin/plutil \
+            -extract RemoteDesktopSourceCommit raw -o - "$app_path/Contents/Info.plist" \
+            2>/dev/null | tr '[:upper:]' '[:lower:]' || true)"
+          if [[ "$artifact_source_commit" != "$RELEASE_SHA" ]]; then
+            echo "::error::Signed macOS source provenance is '$artifact_source_commit', expected '$RELEASE_SHA'."
+            exit 1
+          fi
 
       - name: Validate macOS distribution signature
         env:
@@ -547,25 +884,80 @@ jobs:
           xcrun stapler staple "$app_path"
           xcrun stapler validate "$app_path"
           spctl --assess --type execute --verbose=4 "$app_path"
+          /bin/bash ./host-mac/scripts/verify_host_bundle_trust.sh \
+            --configuration Release \
+            --expected-source-commit "$RELEASE_SHA" \
+            "$app_path"
 
       - name: Package macOS app
+        env:
+          ARTIFACT_SUFFIX: ${{ needs.resolve-version.outputs.artifact_suffix }}
         run: |
           set -euo pipefail
 
           app_path="$PWD/host-mac/build/RemoteDesktopHost.xcarchive/Products/Applications/RemoteDesktopHost.app"
-          package_path="$PWD/host-mac/dist/RemoteDesktopHost-macOS-$VERSION.zip"
+          package_path="$PWD/host-mac/dist/RemoteDesktopHost-macOS-$VERSION$ARTIFACT_SUFFIX.zip"
 
           /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$app_path" "$package_path"
           ls -lh "$package_path"
 
-      - name: Upload macOS app package
+      - name: Create macOS candidate provenance
+        if: needs.resolve-version.outputs.publish == 'false'
+        env:
+          ARTIFACT_SUFFIX: ${{ needs.resolve-version.outputs.artifact_suffix }}
+        run: |
+          set -euo pipefail
+
+          artifact_name="RemoteDesktopHost-macOS-$VERSION$ARTIFACT_SUFFIX.zip"
+          artifact_path="$PWD/host-mac/dist/$artifact_name"
+          provenance_path="$PWD/host-mac/dist/RemoteDesktopHost-macOS-$VERSION$ARTIFACT_SUFFIX.provenance.json"
+          if [[ ! -f "$artifact_path" ]]; then
+            echo "::error::Candidate build did not produce $artifact_path"
+            exit 1
+          fi
+          artifact_sha256="$(shasum -a 256 "$artifact_path" | awk '{print $1}')"
+          ARTIFACT_NAME="$artifact_name" \
+          ARTIFACT_SHA256="$artifact_sha256" \
+          PROVENANCE_PATH="$provenance_path" \
+          python3 - <<'PY'
+          import json
+          import os
+
+          payload = {
+              "schema_version": 1,
+              "artifact_kind": "candidate",
+              "source_commit": os.environ["RELEASE_SHA"],
+              "version": os.environ["VERSION"],
+              "artifact": os.environ["ARTIFACT_NAME"],
+              "sha256": os.environ["ARTIFACT_SHA256"],
+              "workflow_run_id": os.environ["GITHUB_RUN_ID"],
+              "workflow_run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+          }
+          with open(os.environ["PROVENANCE_PATH"], "x", encoding="utf-8") as handle:
+              json.dump(payload, handle, sort_keys=True, separators=(",", ":"))
+              handle.write("\n")
+          PY
+
+      - name: Upload macOS release app package
+        if: needs.resolve-version.outputs.publish == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: macos-app
           path: host-mac/dist/RemoteDesktopHost-macOS-${{ needs.resolve-version.outputs.version }}.zip
           if-no-files-found: error
 
+      - name: Upload SHA-bound notarized macOS candidate
+        if: needs.resolve-version.outputs.publish == 'false'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: macos-app-${{ needs.resolve-version.outputs.release_sha }}
+          path: |
+            host-mac/dist/RemoteDesktopHost-macOS-${{ needs.resolve-version.outputs.version }}-${{ needs.resolve-version.outputs.release_sha }}.zip
+            host-mac/dist/RemoteDesktopHost-macOS-${{ needs.resolve-version.outputs.version }}-${{ needs.resolve-version.outputs.release_sha }}.provenance.json
+          if-no-files-found: error
+
   release:
+    if: needs.resolve-version.outputs.publish == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write

@@ -266,7 +266,7 @@ final class ComputerUseLocalLifecycleSimulatorLiveE2ETests: XCTestCase {
             "The shipped app or live Mac screen disappeared after lifecycle completion.")
 
         let evidence = XCTAttachment(string: """
-        OUTCOME: PASS
+        OUTCOME: unable to complete
         APP FIRST: ordinary request -> shipped host brought Safari foreground
         FIRST TAKEOVER: shipped Take control -> paused UI boundary
         DIRECT INPUT: reported iOS keyboard route -> WebRTC -> inert Safari fixture proof

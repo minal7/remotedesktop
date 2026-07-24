@@ -1,7 +1,7 @@
 # RemoteDesktop Mac host
 
-Menu bar agent that waits for an iPad/iPhone client to pair with a
-6-digit code, then streams the main display (plus system audio) and
+Menu bar agent that automatically pairs with an iPad/iPhone on the same Apple
+Account, then streams the main display (plus system audio) and
 injects input events received over the wire.
 
 ## Why this isn't an App Store app
@@ -26,10 +26,10 @@ xcodegen generate
 open RemoteDesktopHost.xcodeproj
 ```
 
-Because signaling is CloudKit-backed, open the target's Signing &
-Capabilities pane once and make sure Xcode is using your Apple
-Developer team with Automatically manage signing enabled. The target's
-iCloud capability should include CloudKit for container
+Because discovery, enrollment, setup lifecycle, and remote-control signaling
+are CloudKit-backed, open the target's Signing & Capabilities pane once and
+make sure Xcode is using your Apple Developer team with Automatically manage
+signing enabled. The target's iCloud capability should include CloudKit for container
 `iCloud.com.threadmark.remotedesktop`.
 
 The generated target builds as a `LSUIElement` menu bar app. Debug builds use
@@ -44,24 +44,48 @@ The GitHub `Release` workflow builds the macOS target as a signed,
 notarized app archive and attaches `RemoteDesktopHost-macOS-<version>.zip`
 beside the Windows installer. Configure the macOS signing and notarization
 secrets listed at the top of `.github/workflows/release.yml` before pushing
-a `v<version>` tag.
+a `v<version>` tag. A Release artifact used by the installer or live acceptance
+must carry the exact 40-character revision in the code-signed
+`RemoteDesktopSourceCommit` Info.plist key. `CFBundleVersion` is a CI build
+number and is deliberately not treated as source provenance.
 
 ## CLI install and headless setup
 
-For a developer Mac mini or other screenless host, build and install from SSH:
+For a developer Mac mini or other screenless host, a local Apple Development
+build is explicitly a Debug-only diagnostic install:
 
 ```sh
 cd host-mac
-./scripts/install_host.sh --headless --start-at-login --launch --request-permissions --ssh-permission-report
+REMOTE_DESKTOP_APPLE_CONFIGURATION=Debug \
+REMOTE_DESKTOP_HOST_CONFIGURATION=Debug \
+REMOTE_DESKTOP_IOS_CONFIGURATION=Debug \
+./scripts/install_host.sh --debug --headless --start-at-login --launch \
+  --request-permissions --ssh-permission-report
+```
+
+Release installation consumes a prebuilt, notarized Developer ID app from the
+exact clean checkout instead of silently rebuilding an Apple Development app:
+
+```sh
+cd /path/to/remotedesktop
+SOURCE_COMMIT="$(git rev-parse HEAD)"
+host-mac/scripts/install_host.sh \
+  --host-artifact "/absolute/path/RemoteDesktopHost.app" \
+  --expected-source-commit "$SOURCE_COMMIT" \
+  --headless --start-at-login --launch \
+  --request-permissions --ssh-permission-report
 ```
 
 The script installs `RemoteDesktopHost.app` into `/Applications`, enables a
-per-user LaunchAgent when requested, starts listening on launch in headless
-mode, and writes the current pairing code to:
-
-```sh
-~/Library/Application Support/RemoteDesktopHost/pairing-code.txt
-```
+per-user LaunchAgent when requested, and starts listening on launch in
+headless mode. Release fails before changing the installed app unless the
+artifact is signed by Developer ID team `V9AX39SPJD`, uses hardened runtime
+and secure timestamps throughout, has only the reviewed Production CloudKit
+container/service, omits task-debugging and APS entitlements, carries matching
+signed source provenance, has a stapled notarization ticket, and passes
+Gatekeeper. The installed executable is hash-compared with the verified
+artifact and the installed bundle is verified again. Signed-in iPhone and iPad
+clients discover and pair with it automatically; no pairing file is written.
 
 You can check host readiness from the installed app binary:
 
@@ -84,18 +108,34 @@ delegates ScreenCapture approval to managed standard users; Screen Recording
 cannot be silently granted by a local SSH script. Mac audio is optional; users
 who enable it must approve Microphone themselves.
 
+## Computer Use transport boundary
+
+The host uses private CloudKit only for bounded discovery, same-account
+enrollment and encrypted credential exchange, remote-control SDP/ICE
+signaling, and Computer Use setup requests/progress. After enrollment, the
+account-bound LAN TLS broker is the only accepted transport for
+natural-language prompts, conversation context, task status/results,
+pause/resume/cancel controls, and approval requests/responses. There is no
+CloudKit fallback for those messages: a missing, unreachable, or
+unauthenticated broker fails closed before the host receives a task.
+
+WebRTC remains a separate visual sidecar for live screen pixels, host audio,
+and direct input. All planning, policy validation, Foundation Models
+inference, OS-Atlas visual grounding, and action execution remain on the Mac.
+
 ## What works today
 
 - Menu bar icon + popover (SwiftUI inside `NSHostingController`)
-- Generates a random 6-digit pairing code on "Start listening"
+- Generates a short-lived private routing binding on "Start listening"; it is
+  retained only for deployed CloudKit/wire compatibility and is never shown
+  or entered
 - Publishes and refreshes its pairing advertisement in the user's private
   CloudKit database
 - Long-polls CloudKit signaling envelopes and negotiates `offer` / `answer` / `ice` / `bye`
 - TCC permission preflight (Screen Recording + Accessibility) with
   deep-links to System Settings
 - CLI permission check/request commands plus a scriptable installer for
-  `/Applications`, LaunchAgent startup, headless auto-listen, and pairing-code
-  file export.
+  `/Applications`, LaunchAgent startup, and headless auto-listen.
 - Optional Microphone entitlement + permission preflight for the host audio
   bridge. LiveKitWebRTC's macOS audio engine still relies on the
   recording path to publish the ScreenCaptureKit system-audio feed,
@@ -128,9 +168,10 @@ who enable it must approve Microphone themselves.
   use Apple's on-device model to select one typed semantic action and bounded
   arguments. OS-Atlas-Pro-4B grounds pointer targets, and the host composes,
   validates, approves, and executes the native action.
-  iOS sends one idempotent setup request over the existing private CloudKit
-  signaling record; the host streams the helper download, model download,
-  verification, and runtime-loading progress back to the device row.
+  iOS sends one idempotent request through the bounded setup lifecycle; the
+  host streams the helper download, model download, verification, and
+  runtime-loading progress back to the device row. Setup is the only
+  Computer Use lifecycle permitted on CloudKit.
 - Versioned model installation in Application Support with Apple-silicon,
   8 GiB memory, free-space, byte-size, and streaming SHA-256 checks before an
   atomic receipt is activated. An 8–15 GiB Mac uses a 4,096-token compact
@@ -189,6 +230,13 @@ no legal document or executable is fetched during model setup.
 The acceptance runners keep hidden component evidence separate from visible
 product behavior:
 
+The strict signed Release sequence—automatic same-account enrollment,
+authenticated LAN TLS prompt, host-local planning/grounding, any required
+approval, and typed terminal result—still requires a fresh end-to-end run on
+the signed-in iPhone Air Simulator. The component and UI tests below establish
+their individual contracts; they are not a substitute for that pending release
+acceptance result.
+
 - `host-mac/scripts/run_mcp_acceptance.py` validates the pinned helper identity,
   inventory, host policy, and schemas, then issues real stdio JSON-RPC
   `tools/call` requests for all 29 exposed sidecar operations. A no-Dock
@@ -211,9 +259,10 @@ product behavior:
   every read-only operation. A separate Contacts-to-Mail test proves that a
   detailed send request consumes the contact result, stops at the exact Mail
   approval, and invokes Mail only after approval.
-- Visible login takeover, exact email-send confirmation, approvals, progress,
-  and results run through `RemoteDesktopLiveE2E` on an iOS Simulator, so the
-  shipped app and only the task-relevant Mac surface are what the user sees.
+- The `RemoteDesktopLiveE2E` suite is the acceptance path for visible login
+  takeover, exact email-send confirmation, approvals, progress, and results on
+  an iOS Simulator. Its final signed Release transport run is pending, so no
+  live result is claimed here.
 - `host-mac/scripts/run_doordash_takeover_resume_simulator_live_e2e.py`
   runs only the continuous Release-Simulator DoorDash acceptance through
   direct `xcodebuild`, preserving the person-handled macOS consent, private

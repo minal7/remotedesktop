@@ -3,7 +3,7 @@ import Foundation
 /// The small, user-facing capability contract published beside each host.
 /// A host is only selectable for AI Computer Use when its local model runtime
 /// is genuinely ready; installing a model file alone is not enough.
-public struct ComputerUseCapability: Equatable, Sendable {
+public struct ComputerUseCapability: Codable, Equatable, Sendable {
     public enum State: String, Codable, Sendable {
         case unavailable
         case setupRequired
@@ -47,10 +47,10 @@ public struct ComputerUseCapability: Equatable, Sendable {
 ///
 /// This record is intentionally a discovery hint rather than an
 /// authentication mechanism. It contains only the host's opaque per-install
-/// identifier and the small AI readiness value already advertised through
-/// private CloudKit. Pairing, setup requests, and task control continue to go
-/// through CloudKit; no credentials, model URLs, prompts, or user data belong
-/// in this record.
+/// identifier, a non-secret fingerprint for selecting a previously enrolled
+/// local TLS credential, the non-secret internal session routing binding, and
+/// the small AI readiness value. The credential itself, model URLs, prompts,
+/// and user data never belong in Bonjour.
 public struct LocalHostBonjourMetadata: Equatable, Sendable {
     public static let currentVersion = 1
     public static let maximumTXTRecordBytes = 512
@@ -59,10 +59,20 @@ public struct LocalHostBonjourMetadata: Equatable, Sendable {
     public let version: Int
     public let senderID: String
     public let computerUseCapability: ComputerUseCapability
+    /// SHA-256 fingerprint of the local TLS PSK. This is safe to advertise:
+    /// it selects a Keychain item but cannot authenticate or decrypt traffic.
+    public let localCredentialID: String?
+    /// Legacy six-digit session routing value carried in TXT so the Bonjour
+    /// service's visible display name never exposes a code-like suffix. It is
+    /// not an authenticator and is accepted only after exact private-CloudKit
+    /// host matching.
+    public let routingBinding: String?
 
     public init?(
         senderID: String,
-        computerUseCapability: ComputerUseCapability
+        computerUseCapability: ComputerUseCapability,
+        localCredentialID: String? = nil,
+        routingBinding: String? = nil
     ) {
         guard let senderID = Self.validatedSenderID(senderID) else {
             return nil
@@ -75,17 +85,39 @@ public struct LocalHostBonjourMetadata: Equatable, Sendable {
         self.computerUseCapability = ComputerUseCapability(
             state: computerUseCapability.state,
             detail: detail)
+        if let localCredentialID {
+            guard Self.isValidCredentialID(localCredentialID) else {
+                return nil
+            }
+            self.localCredentialID = localCredentialID
+        } else {
+            self.localCredentialID = nil
+        }
+        if let routingBinding {
+            guard Self.isValidRoutingBinding(routingBinding) else {
+                return nil
+            }
+            self.routingBinding = routingBinding
+        } else {
+            self.routingBinding = nil
+        }
     }
 
     /// Encodes one bounded DNS-SD TXT record. Short keys keep the complete
     /// record comfortably below multicast DNS packet limits.
     public func txtRecordData() -> Data {
-        let values: [String: Data] = [
+        var values: [String: Data] = [
             "v": Data(String(version).utf8),
             "sid": Data(senderID.utf8),
             "cu": Data(computerUseCapability.state.rawValue.utf8),
             "cud": Data(computerUseCapability.detail.utf8),
         ]
+        if let localCredentialID {
+            values["lci"] = Data(localCredentialID.utf8)
+        }
+        if let routingBinding {
+            values["rb"] = Data(routingBinding.utf8)
+        }
         return NetService.data(fromTXTRecord: values)
     }
 
@@ -111,11 +143,35 @@ public struct LocalHostBonjourMetadata: Equatable, Sendable {
             return nil
         }
 
+        let localCredentialID: String?
+        if values["lci"] != nil {
+            guard let value = decodedString(values["lci"], maximumBytes: 64),
+                  isValidCredentialID(value) else {
+                return nil
+            }
+            localCredentialID = value
+        } else {
+            localCredentialID = nil
+        }
+
+        let routingBinding: String?
+        if values["rb"] != nil {
+            guard let value = decodedString(values["rb"], maximumBytes: 6),
+                  isValidRoutingBinding(value) else {
+                return nil
+            }
+            routingBinding = value
+        } else {
+            routingBinding = nil
+        }
+
         return Self(
             senderID: senderID,
             computerUseCapability: ComputerUseCapability(
                 state: state,
-                detail: detail))
+                detail: detail),
+            localCredentialID: localCredentialID,
+            routingBinding: routingBinding)
     }
 
     private static func decodedString(
@@ -139,6 +195,18 @@ public struct LocalHostBonjourMetadata: Equatable, Sendable {
         // Preserve the exact Keychain value: CloudKit target matching is
         // string-exact even though UUID parsing itself is case-insensitive.
         return value
+    }
+
+    private static func isValidCredentialID(_ value: String) -> Bool {
+        value.utf8.count == 64 && value.utf8.allSatisfy { byte in
+            (byte >= 0x30 && byte <= 0x39)
+                || (byte >= 0x61 && byte <= 0x66)
+        }
+    }
+
+    private static func isValidRoutingBinding(_ value: String) -> Bool {
+        value.utf8.count == 6
+            && value.utf8.allSatisfy { $0 >= 0x30 && $0 <= 0x39 }
     }
 
     private static func sanitizedDetail(_ value: String) -> String {
@@ -171,6 +239,68 @@ public struct LocalHostBonjourMetadata: Equatable, Sendable {
 /// ships with this protocol generation is installed and verified. Repeating a
 /// request with the same `idempotencyKey` must report the existing install
 /// instead of starting a second download.
+public enum ComputerUseSetupIdentifierPolicy {
+    public static let maximumSenderIDBytes = 64
+    public static let maximumSessionIDBytes = 96
+    public static let maximumRequestIDBytes = 64
+    public static let maximumIdempotencyKeyBytes = 64
+    public static let maximumEncodedRequestBodyBytes = 512
+
+    public static func isValidSenderID(_ value: String) -> Bool {
+        isBoundedOpaqueIdentifier(
+            value,
+            maximumBytes: maximumSenderIDBytes)
+    }
+
+    public static func isValidSessionID(_ value: String) -> Bool {
+        isBoundedOpaqueIdentifier(
+            value,
+            maximumBytes: maximumSessionIDBytes)
+    }
+
+    public static func isValidRequestID(_ value: String) -> Bool {
+        isBoundedOpaqueIdentifier(
+            value,
+            maximumBytes: maximumRequestIDBytes)
+    }
+
+    public static func isValidIdempotencyKey(_ value: String) -> Bool {
+        isBoundedOpaqueIdentifier(
+            value,
+            maximumBytes: maximumIdempotencyKeyBytes)
+    }
+
+    public static func isValidRoute(
+        senderID: String,
+        sessionID: String,
+        requestID: String
+    ) -> Bool {
+        isValidSenderID(senderID)
+            && isValidSessionID(sessionID)
+            && isValidRequestID(requestID)
+    }
+
+    /// Setup identifiers are opaque compatibility tokens, not display text.
+    /// Restricting them to a small ASCII alphabet prevents control characters,
+    /// Unicode confusables, and attacker-amplified retained strings while
+    /// preserving UUIDs and the deployed `setup-<UUID>` session shape.
+    private static func isBoundedOpaqueIdentifier(
+        _ value: String,
+        maximumBytes: Int
+    ) -> Bool {
+        let bytes = value.utf8
+        guard !bytes.isEmpty, bytes.count <= maximumBytes else { return false }
+        return bytes.allSatisfy { byte in
+            (byte >= 0x30 && byte <= 0x39)
+                || (byte >= 0x41 && byte <= 0x5A)
+                || (byte >= 0x61 && byte <= 0x7A)
+                || byte == 0x2D
+                || byte == 0x2E
+                || byte == 0x5F
+        }
+    }
+}
+
 public struct ComputerUseSetupRequest: Codable, Equatable, Sendable {
     /// v2 adds the verified local MCP helper to the mobile-triggered setup.
     public static let currentIdempotencyKey = "computer-use-setup-v2"
@@ -187,11 +317,32 @@ public struct ComputerUseSetupRequest: Codable, Equatable, Sendable {
     }
 
     public func encodedBody() throws -> String {
-        try encodeComputerUseBody(self)
+        guard ComputerUseSetupIdentifierPolicy.isValidRequestID(requestID),
+              ComputerUseSetupIdentifierPolicy.isValidIdempotencyKey(
+                idempotencyKey) else {
+            throw ComputerUsePayloadError.invalidIdentifier
+        }
+        let body = try encodeComputerUseBody(self)
+        guard body.utf8.count <= ComputerUseSetupIdentifierPolicy
+                .maximumEncodedRequestBodyBytes else {
+            throw ComputerUsePayloadError.payloadTooLarge
+        }
+        return body
     }
 
     public static func decodeBody(_ body: String) throws -> Self {
-        try decodeComputerUseBody(body, as: Self.self)
+        guard body.utf8.count <= ComputerUseSetupIdentifierPolicy
+                .maximumEncodedRequestBodyBytes else {
+            throw ComputerUsePayloadError.payloadTooLarge
+        }
+        let request = try decodeComputerUseBody(body, as: Self.self)
+        guard ComputerUseSetupIdentifierPolicy.isValidRequestID(
+                request.requestID),
+              ComputerUseSetupIdentifierPolicy.isValidIdempotencyKey(
+                request.idempotencyKey) else {
+            throw ComputerUsePayloadError.invalidIdentifier
+        }
+        return request
     }
 }
 
@@ -623,7 +774,7 @@ public struct ComputerUsePromptRequest: Codable, Equatable, Sendable {
 /// CloudKit envelope used by the computer-use control plane. Screen video
 /// remains on WebRTC; prompts and lifecycle controls use the same private
 /// CloudKit container as pairing so they work without a new service.
-public struct ComputerUseEnvelope: Identifiable, Equatable, Sendable {
+public struct ComputerUseEnvelope: Codable, Identifiable, Equatable, Sendable {
     public enum Kind: String, Codable, Sendable {
         case prompt
         case assistant
@@ -684,4 +835,6 @@ private func decodeComputerUseBody<T: Decodable>(_ body: String, as type: T.Type
 
 private enum ComputerUsePayloadError: Error {
     case invalidUTF8
+    case invalidIdentifier
+    case payloadTooLarge
 }

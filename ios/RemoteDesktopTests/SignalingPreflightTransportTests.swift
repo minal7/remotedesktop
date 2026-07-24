@@ -34,7 +34,7 @@ final class SignalingPreflightTransportTests: XCTestCase {
         transport.onDisplay = { display = $0 }
 
         try await transport.connect(pairingCode: "123456")
-        let snapshot = await channel.snapshot()
+        let snapshot = channel.snapshot()
 
         XCTAssertEqual(snapshot.claimCount, 1)
         XCTAssertEqual(snapshot.sent.count, 1)

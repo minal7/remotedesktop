@@ -37,10 +37,16 @@ use credentials::CredentialStore;
 use input::InputInjector;
 use protocol::HostInfo;
 use signaling::{
-    advertisement_refresh_interval, new_pairing_code, HostSignalingClient, HostSignalingOptions,
+    advertisement_refresh_interval, new_routing_binding, HostSignalingClient, HostSignalingOptions,
     Kind, SignalingEnvelope,
 };
 use webrtc_host::WebRtcHost;
+
+const LOCAL_SERVICE_TYPE: &str = "_remotedesktop._tcp.local.";
+const LOCAL_SERVICE_PORT: u16 = 9;
+const BONJOUR_SCHEMA_VERSION: &str = "1";
+const WINDOWS_COMPUTER_USE_STATE: &str = "unavailable";
+const WINDOWS_COMPUTER_USE_DETAIL: &str = "AI Computer Use is not enabled";
 
 fn main() -> Result<()> {
     let _ = dotenvy::dotenv();
@@ -342,7 +348,11 @@ async fn setup(state: &SharedState) -> Result<ControllerDeps> {
         config.auth_callback_url()
     );
 
-    let credentials = CredentialStore::new();
+    let credentials = CredentialStore::new(
+        &config.cloudkit.container_identifier,
+        config.cloudkit.environment.as_str(),
+    )
+    .context("couldn't initialize account-scoped Windows credential storage")?;
     let cloudkit = CloudKitClient::new(config.cloudkit.clone(), credentials.clone());
     let authenticator = AppleIdAuthenticator::new(
         cloudkit.clone(),
@@ -389,44 +399,32 @@ async fn run_host(state: SharedState, shutdown: Arc<Notify>, deps: ControllerDep
     let mdns = mdns_sd::ServiceDaemon::new().ok();
 
     loop {
-        let code = new_pairing_code();
+        let routing_binding = new_routing_binding();
         let mut signaling = HostSignalingClient::new(
             cloudkit.clone(),
             HostSignalingOptions {
-                code,
+                routing_binding,
                 sender_id: sender_id.clone(),
                 host_name: host_name.clone(),
                 stale_record_seconds: config.stale_record_seconds,
+                container_identifier: config.cloudkit.container_identifier.clone(),
+                environment: config.cloudkit.environment.as_str().to_string(),
             },
         );
 
         signaling.claim().await?;
-        app_state::set_status(
-            &state,
-            HostStatus::Advertising {
-                code: signaling.code().to_string(),
-            },
-        );
-        info!("advertising Windows host code={}", signaling.code());
+        app_state::set_status(&state, HostStatus::Advertising);
+        info!("advertising Windows host");
 
-        let instance_name = format!("{} [{}]", host_name, signaling.code());
-        let service_type = "_remotedesktop._tcp.local.";
-        let fullname = format!("{}.{}", instance_name, service_type);
+        let mut registered_fullname = None;
         if let Some(mdns) = &mdns {
-            let host_name_local = format!("{}.local.", host_name.replace(" ", "-"));
-            let properties: [(&str, &str); 0] = [];
-            match mdns_sd::ServiceInfo::new(
-                service_type,
-                &instance_name,
-                &host_name_local,
-                "0.0.0.0",
-                9,
-                &properties[..],
-            ) {
+            match local_service_info(&host_name, &sender_id, signaling.routing_binding()) {
                 Ok(info) => {
-                    let info = info.enable_addr_auto();
+                    let fullname = info.get_fullname().to_string();
                     if let Err(error) = mdns.register(info) {
                         warn!("mDNS registration failed: {error:#}");
+                    } else {
+                        registered_fullname = Some(fullname);
                     }
                 }
                 Err(error) => {
@@ -447,7 +445,7 @@ async fn run_host(state: SharedState, shutdown: Arc<Notify>, deps: ControllerDep
             .await;
         session.shutdown_peer().await;
 
-        if let Some(mdns) = &mdns {
+        if let (Some(mdns), Some(fullname)) = (&mdns, registered_fullname) {
             let _ = mdns.unregister(&fullname);
         }
 
@@ -460,6 +458,44 @@ async fn run_host(state: SharedState, shutdown: Arc<Notify>, deps: ControllerDep
             LoopExit::Shutdown => return Ok(()),
         }
     }
+}
+
+/// Builds the nearby discovery hint without putting the internal routing
+/// binding in the browser-visible DNS-SD instance name. The TXT record mirrors
+/// the version-1 metadata consumed by iOS; private CloudKit matching remains
+/// the authority for whether the row can be connected.
+fn local_service_info(
+    host_name: &str,
+    sender_id: &str,
+    routing_binding: &str,
+) -> Result<mdns_sd::ServiceInfo> {
+    anyhow::ensure!(
+        sender_id.len() == 36 && uuid::Uuid::parse_str(sender_id).is_ok(),
+        "Windows host sender ID is not a canonical UUID"
+    );
+    anyhow::ensure!(
+        routing_binding.len() == 6 && routing_binding.bytes().all(|byte| byte.is_ascii_digit()),
+        "Windows host routing binding is malformed"
+    );
+
+    let host_name_local = format!("{}.local.", host_name.replace(' ', "-"));
+    let properties = [
+        ("v", BONJOUR_SCHEMA_VERSION),
+        ("sid", sender_id),
+        ("cu", WINDOWS_COMPUTER_USE_STATE),
+        ("cud", WINDOWS_COMPUTER_USE_DETAIL),
+        ("rb", routing_binding),
+    ];
+    mdns_sd::ServiceInfo::new(
+        LOCAL_SERVICE_TYPE,
+        host_name,
+        &host_name_local,
+        "0.0.0.0",
+        LOCAL_SERVICE_PORT,
+        &properties[..],
+    )
+    .context("couldn't build Windows host Bonjour metadata")
+    .map(mdns_sd::ServiceInfo::enable_addr_auto)
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -584,7 +620,7 @@ impl Session {
     /// short-lived). Without this the host gets stuck polling forever
     /// with a stale token, visible to the user as "Windows host never
     /// appears". On success we return `Restart` so the outer loop builds
-    /// a fresh `HostSignalingClient` with a new pairing code and the
+    /// a fresh `HostSignalingClient` with a new internal routing binding and the
     /// renewed token; on failure we surface the error so the UI shows
     /// what went wrong instead of looping silently.
     async fn handle_auth_lost(
@@ -858,4 +894,41 @@ fn windows_version_label() -> String {
 
 fn string_payload<'a>(payload: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
     payload.get(key).and_then(Value::as_str)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SENDER_ID: &str = "4f5f0acf-6e50-4e12-aa0b-59754254d42d";
+
+    #[test]
+    fn nearby_instance_name_never_displays_internal_routing_binding() {
+        let info = local_service_info("Office PC", SENDER_ID, "123456").unwrap();
+
+        assert_eq!(info.get_fullname(), "Office PC._remotedesktop._tcp.local.");
+        assert!(!info.get_fullname().contains("123456"));
+        assert_eq!(info.get_property_val_str("rb"), Some("123456"));
+    }
+
+    #[test]
+    fn nearby_txt_metadata_matches_ios_version_one_schema() {
+        let info = local_service_info("Office PC", SENDER_ID, "654321").unwrap();
+
+        assert_eq!(info.get_property_val_str("v"), Some("1"));
+        assert_eq!(info.get_property_val_str("sid"), Some(SENDER_ID));
+        assert_eq!(info.get_property_val_str("cu"), Some("unavailable"));
+        assert_eq!(
+            info.get_property_val_str("cud"),
+            Some("AI Computer Use is not enabled")
+        );
+        assert_eq!(info.get_property_val_str("rb"), Some("654321"));
+    }
+
+    #[test]
+    fn nearby_metadata_rejects_noncanonical_internal_values() {
+        assert!(local_service_info("Office PC", "not-a-uuid", "123456").is_err());
+        assert!(local_service_info("Office PC", SENDER_ID, "12 456").is_err());
+        assert!(local_service_info("Office PC", SENDER_ID, "1234567").is_err());
+    }
 }

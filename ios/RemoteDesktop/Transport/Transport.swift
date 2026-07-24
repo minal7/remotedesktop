@@ -45,7 +45,7 @@ enum TransportError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .badPairingCode:  return "Pairing code not recognized."
+        case .badPairingCode:  return "That computer is no longer available through your Apple Account."
         case .hostUnavailable: return "Your computer isn't reachable right now."
         case .negotiationFailed(let m): return "Connection failed: \(m)"
         case .disconnected(let m): return "Disconnected: \(m)"

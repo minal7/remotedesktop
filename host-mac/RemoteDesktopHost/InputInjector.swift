@@ -61,7 +61,7 @@ final class InputInjector: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         guard ifAllowed() else {
-            releaseHeldInput()
+            releaseHeldInputLocked()
             return false
         }
         switch message {
@@ -87,8 +87,19 @@ final class InputInjector: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         let interrupted = closeGate()
-        if interrupted { releaseHeldInput() }
+        if interrupted { releaseHeldInputLocked() }
         return interrupted
+    }
+
+    /// Releases every pointer button and key owned by the current remote-input
+    /// stream even when no AI action is presently inside the automation gate.
+    /// A visual-sidecar transport can disappear while the person is dragging
+    /// or holding a key; relying only on AI cancellation would leave that
+    /// native input latched on the Mac.
+    func releaseHeldInput() {
+        lock.lock()
+        defer { lock.unlock() }
+        releaseHeldInputLocked()
     }
 
     // MARK: - Pointer
@@ -231,7 +242,7 @@ final class InputInjector: @unchecked Sendable {
         for character in s {
             lock.lock()
             guard ifAllowed() else {
-                releaseHeldInput()
+                releaseHeldInputLocked()
                 lock.unlock()
                 return false
             }
@@ -251,7 +262,9 @@ final class InputInjector: @unchecked Sendable {
         return true
     }
 
-    private func releaseHeldInput() {
+    /// Caller must hold `lock` so releases cannot interleave with another
+    /// direct or automated injection.
+    private func releaseHeldInputLocked() {
         if prevButtons & 0b001 != 0 {
             post(mouse: .leftMouseUp, at: lastPointer, button: .left)
         }

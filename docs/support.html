@@ -47,26 +47,39 @@
     <li>On your Mac or Windows computer, download and install the free host app from our
       <a href="https://github.com/minal7/remotedesktop/releases">downloads page</a>.</li>
     <li>Sign the computer in to the <strong>same Apple Account</strong> as your iPhone or iPad.</li>
-    <li>Open the host app — it shows a 6-digit pairing code.</li>
-    <li>Open Remote Desktop on your device and enter that code. You're connected.</li>
+    <li>Open the host app and leave it listening.</li>
+    <li>Open Remote Desktop on your device. Your computer appears automatically; choose it to connect.</li>
   </ol>
 
   <h2>Frequently asked questions</h2>
 
   <h3>Why can't my device find my computer?</h3>
   <p>Both devices must be signed in to the <strong>same Apple Account</strong>. Double-check the
-  iCloud account on each, and make sure the host app is open and showing a code.</p>
+  iCloud account on each, make sure the host app is open, and keep both devices online while
+  automatic pairing finishes.</p>
 
-  <h3>The pairing code isn't working.</h3>
-  <p>The host generates a new code whenever it starts listening, including after a connection
-  ends. Stop and start the listener, or restart the host app, to get a fresh code. The
-  five-minute interval applies only to ignoring stale CloudKit signaling records; while the
-  host is listening, it refreshes the current code's advertisement.</p>
+  <h3>My computer says it is ready, but the device is still pairing.</h3>
+  <p>Keep the host open and confirm both devices use the same Apple Account. Automatic pairing
+  uses the account's private CloudKit database and normally finishes without any code or copied
+  secret. Restarting the host refreshes its private advertisement if it became stale.</p>
 
   <h3>The connection won't establish.</h3>
   <p>For the most reliable connection, put your device and your computer on the
   <strong>same Wi-Fi network</strong>. Some restrictive or public networks block the direct
   connection the app needs.</p>
+
+  <h3>Does an AI task go through iCloud?</h3>
+  <p>No. CloudKit can help your devices discover and enroll each other, negotiate a remote
+  screen, and report AI component setup progress. After enrollment, prompts, conversation,
+  task status and results, controls, and approvals use only the authenticated local-network
+  connection to your Mac. If that secure local channel is unavailable, the task stops instead
+  of falling back to CloudKit. Screen pixels and direct input use the separate WebRTC
+  connection, while planning and visual grounding stay on the Mac.</p>
+
+  <h3>Is local AI Computer Use fully release-validated?</h3>
+  <p>It is a beta feature. The strict automatic-enrollment and local task-channel implementation
+  has automated coverage, but its final signed Release end-to-end acceptance is still pending.
+  The app must report an unavailable local channel rather than silently changing transports.</p>
 
   <h3>What permissions does the host app need?</h3>
   <p>On macOS, the host app needs <strong>Screen Recording</strong> and <strong>Accessibility</strong>

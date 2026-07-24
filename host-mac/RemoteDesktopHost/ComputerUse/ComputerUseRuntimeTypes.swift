@@ -2,6 +2,14 @@ import CoreGraphics
 import CoreImage
 import Foundation
 
+/// Opaque, task-scoped authority to resume the exact visual execution that
+/// produced an approval request. The nonce prevents a delayed or duplicate
+/// approval response from being applied to a later visual session.
+struct ComputerUseVisualApprovalContinuation: Equatable, Sendable {
+    let taskID: String
+    let nonce: UUID
+}
+
 /// A screen image paired with the global-display coordinates used by the
 /// intervention-safe input injector.
 struct ComputerUseScreenObservation {

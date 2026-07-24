@@ -107,6 +107,10 @@ struct SessionView: View {
                 KeyboardCapture()
                     .frame(width: 0, height: 0)
             }
+
+            if session.isCloudAccountRevalidationPending {
+                accountRevalidationShield
+            }
         }
         .statusBarHidden(!shouldShowChrome)
         .persistentSystemOverlays(.hidden)
@@ -127,6 +131,21 @@ struct SessionView: View {
             hideTask?.cancel()
             specialKeysIdleTask?.cancel()
         }
+    }
+
+    private var accountRevalidationShield: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            VStack(spacing: 12) {
+                ProgressView()
+                    .tint(.white)
+                Text("Verifying Apple Account…")
+                    .font(.headline)
+                    .foregroundStyle(.white)
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Verifying Apple Account")
     }
 
     // MARK: - Left-edge swipe strip

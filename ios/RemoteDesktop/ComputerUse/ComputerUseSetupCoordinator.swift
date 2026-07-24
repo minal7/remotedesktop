@@ -1,3 +1,4 @@
+import CloudKit
 import Foundation
 
 protocol ComputerUseSetupChannel: Sendable {
@@ -16,6 +17,81 @@ protocol ComputerUseSetupChannel: Sendable {
 
 extension CloudKitComputerUseChannel: ComputerUseSetupChannel {}
 
+private actor UnavailableComputerUseSetupChannel:
+    ComputerUseSetupChannel {
+    private let message: String
+
+    init(message: String) {
+        self.message = message
+    }
+
+    func send(
+        kind: ComputerUseEnvelope.Kind,
+        body: String,
+        to explicitTargetID: String?,
+        sessionID explicitSessionID: String?,
+        messageID explicitMessageID: String?
+    ) async throws -> ComputerUseEnvelope {
+        throw SignalingError.transport(message)
+    }
+
+    func poll() async throws -> [ComputerUseEnvelope] {
+        throw SignalingError.transport(message)
+    }
+
+    func acknowledge(_ envelopes: [ComputerUseEnvelope]) async throws {
+        throw SignalingError.transport(message)
+    }
+}
+
+private actor AccountBoundComputerUseSetupChannel:
+    ComputerUseSetupChannel {
+    private let base: any ComputerUseSetupChannel
+    private let accountBinding: CloudKitAccountBinding
+    private var hasValidatedBinding = false
+
+    init(
+        base: any ComputerUseSetupChannel,
+        accountBinding: CloudKitAccountBinding
+    ) {
+        self.base = base
+        self.accountBinding = accountBinding
+    }
+
+    @discardableResult
+    func send(
+        kind: ComputerUseEnvelope.Kind,
+        body: String,
+        to explicitTargetID: String?,
+        sessionID explicitSessionID: String?,
+        messageID explicitMessageID: String?
+    ) async throws -> ComputerUseEnvelope {
+        try await validateBindingIfNeeded()
+        return try await base.send(
+            kind: kind,
+            body: body,
+            to: explicitTargetID,
+            sessionID: explicitSessionID,
+            messageID: explicitMessageID)
+    }
+
+    func poll() async throws -> [ComputerUseEnvelope] {
+        try await validateBindingIfNeeded()
+        return try await base.poll()
+    }
+
+    func acknowledge(_ envelopes: [ComputerUseEnvelope]) async throws {
+        try await validateBindingIfNeeded()
+        try await base.acknowledge(envelopes)
+    }
+
+    private func validateBindingIfNeeded() async throws {
+        guard !hasValidatedBinding else { return }
+        try await LocalCloudAccountBindingPolicy.validate(accountBinding)
+        hasValidatedBinding = true
+    }
+}
+
 @MainActor
 final class ComputerUseSetupCoordinator: ObservableObject {
     enum State: Equatable {
@@ -32,35 +108,128 @@ final class ComputerUseSetupCoordinator: ObservableObject {
         _ sessionID: String
     ) -> any ComputerUseSetupChannel
 
-    @Published private var statesByHostID: [String: State] = [:]
+    private struct HostAccountKey: Hashable {
+        let hostID: String
+        let accountBindingRawValue: String?
+
+        init?(host: LocalHostAdvertisement) {
+            guard let hostID = host.senderID, !hostID.isEmpty else {
+                return nil
+            }
+            self.hostID = hostID
+            self.accountBindingRawValue = host.accountBinding?.rawValue
+        }
+    }
+
+    @Published private var statesByHostKey: [HostAccountKey: State] = [:]
 
     private struct SetupTaskContext {
         let pairingCode: String
+        let routeIdentity: String
         let requestID: String
         let task: Task<Void, Never>
     }
 
     private let channelFactory: ChannelFactory
-    private var tasksByHostID: [String: SetupTaskContext] = [:]
+    private let hasAuthenticatedRoute: (LocalHostAdvertisement) -> Bool
+    private let accountChangeNotificationCenter: NotificationCenter
+    private var accountChangeObserver: NSObjectProtocol?
+    private var tasksByHostKey: [HostAccountKey: SetupTaskContext] = [:]
     private static let setupTimeout: Duration = .seconds(6 * 60 * 60)
     private static let requestRefreshInterval: Duration = .seconds(30)
 
-    init(channelFactory: @escaping ChannelFactory = { host, sessionID in
-        CloudKitComputerUseChannel(
-            containerIdentifier: Config.cloudKitContainerIdentifier,
-            pairingCode: host.code,
-            sessionID: sessionID,
-            senderID: DeviceIdentity.get(),
-            targetID: host.senderID)
-    }) {
+    init(
+        hasAuthenticatedRoute: @escaping (LocalHostAdvertisement) -> Bool =
+            ComputerUseSetupCoordinator.defaultHasAuthenticatedRoute,
+        accountChangeNotificationCenter: NotificationCenter = .default,
+        channelFactory: @escaping ChannelFactory = { host, sessionID in
+            let senderID = DeviceIdentity.get()
+            guard !senderID.isEmpty else {
+                return UnavailableComputerUseSetupChannel(
+                    message: "Secure device identity is unavailable. Unlock this device and try again.")
+            }
+            if let endpoint = host.localEndpoint,
+               endpoint.isValid,
+               let hostID = host.senderID,
+               let credentialID = host.localCredentialID,
+               let accountBinding = host.accountBinding,
+               let credential = LocalComputerUseCredentialStore()
+                .clientCredential(
+                    hostID: hostID,
+                    credentialID: credentialID,
+                    accountBinding: accountBinding) {
+                let local = LocalComputerUseBrokerClient(
+                    endpoint: endpoint,
+                    credential: credential,
+                    pairingCode: host.code,
+                    sessionID: sessionID,
+                    senderID: senderID,
+                    targetID: hostID)
+                return AccountBoundComputerUseSetupChannel(
+                    base: local,
+                    accountBinding: accountBinding)
+            }
+            return CloudKitComputerUseChannel(
+                containerIdentifier: Config.cloudKitContainerIdentifier,
+                pairingCode: host.code,
+                sessionID: sessionID,
+                senderID: senderID,
+                targetID: host.senderID)
+        }
+    ) {
         self.channelFactory = channelFactory
+        self.hasAuthenticatedRoute = hasAuthenticatedRoute
+        self.accountChangeNotificationCenter = accountChangeNotificationCenter
+        accountChangeObserver = accountChangeNotificationCenter.addObserver(
+            forName: NSNotification.Name.CKAccountChanged,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                LocalCloudAccountBindingPolicy.invalidateForAccountChange()
+                self?.cancelAllSetups()
+            }
+        }
+    }
+
+    deinit {
+        if let accountChangeObserver {
+            accountChangeNotificationCenter.removeObserver(accountChangeObserver)
+        }
+    }
+
+    /// Keeps the original single trailing-closure construction source
+    /// compatible while the designated initializer also accepts a route
+    /// authentication policy for focused tests.
+    convenience init(channelFactory: @escaping ChannelFactory) {
+        self.init(
+            hasAuthenticatedRoute: Self.defaultHasAuthenticatedRoute,
+            accountChangeNotificationCenter: .default,
+            channelFactory: channelFactory)
+    }
+
+    private nonisolated static func defaultHasAuthenticatedRoute(
+        _ host: LocalHostAdvertisement
+    ) -> Bool {
+        if host.hasAuthenticatedCloudMatch { return true }
+        guard let endpoint = host.localEndpoint,
+              endpoint.isValid,
+              let hostID = host.senderID,
+              let credentialID = host.localCredentialID,
+              let accountBinding = host.accountBinding else {
+            return false
+        }
+        return LocalComputerUseCredentialStore().clientCredential(
+            hostID: hostID,
+            credentialID: credentialID,
+            accountBinding: accountBinding) != nil
     }
 
     func state(for host: LocalHostAdvertisement) -> State {
-        guard let hostID = host.senderID, !hostID.isEmpty else {
+        guard let key = HostAccountKey(host: host) else {
             return .unavailable
         }
-        if let state = statesByHostID[hostID] {
+        if let state = statesByHostKey[key] {
             return state
         }
 
@@ -80,50 +249,69 @@ final class ComputerUseSetupCoordinator: ObservableObject {
     /// channel. If setup was already running when iOS reopened, the same
     /// idempotent request resumes monitoring instead of starting over.
     func reconcile(hosts: [LocalHostAdvertisement]) {
-        for host in hosts {
-            guard let hostID = host.senderID, !hostID.isEmpty else { continue }
+        let keyedHosts = hosts.compactMap { host -> (HostAccountKey, LocalHostAdvertisement)? in
+            guard let key = HostAccountKey(host: host) else { return nil }
+            return (key, host)
+        }
+        let liveKeys = Set(keyedHosts.map(\.0))
 
-            if let active = tasksByHostID[hostID],
-               active.pairingCode != host.code {
+        // An empty list is the account-invalidated state published by
+        // discovery. Stop every suspended poll before it can mutate or send
+        // for the previous Apple Account.
+        for key in tasksByHostKey.keys.filter({ !liveKeys.contains($0) }) {
+            tasksByHostKey.removeValue(forKey: key)?.task.cancel()
+        }
+        statesByHostKey = statesByHostKey.filter { liveKeys.contains($0.key) }
+
+        for (key, host) in keyedHosts {
+
+            var shouldRecreateTask = false
+            if let active = tasksByHostKey[key],
+               (active.pairingCode != host.code
+                || active.routeIdentity != routeIdentity(for: host)) {
                 active.task.cancel()
-                tasksByHostID.removeValue(forKey: hostID)
-                statesByHostID.removeValue(forKey: hostID)
+                tasksByHostKey.removeValue(forKey: key)
+                statesByHostKey.removeValue(forKey: key)
+                shouldRecreateTask = true
             }
 
             switch host.computerUseCapability.state {
             case .ready, .busy, .paused:
-                tasksByHostID.removeValue(forKey: hostID)?.task.cancel()
-                statesByHostID[hostID] = .ready
+                tasksByHostKey.removeValue(forKey: key)?.task.cancel()
+                statesByHostKey[key] = .ready
 
             case .installing:
-                switch statesByHostID[hostID] {
-                case nil, .unavailable, .setupRequired:
-                    statesByHostID[hostID] = .installing(
+                if !isFailure(statesByHostKey[key]),
+                   tasksByHostKey[key] == nil {
+                    statesByHostKey[key] = .installing(
                         .waiting(detail: host.computerUseCapability.detail))
-                    startSetup(for: host)
-                case .requesting, .installing, .ready, .failed:
-                    break
+                    if hasAuthenticatedRoute(host) {
+                        startSetup(for: host)
+                    }
                 }
 
             case .setupRequired:
                 // Keep direct progress while a same-pairing-code request is
                 // active; the coarse advertisement can lag by one refresh.
-                if tasksByHostID[hostID] == nil,
-                   !isFailure(statesByHostID[hostID]) {
-                    statesByHostID[hostID] = .setupRequired
+                if tasksByHostKey[key] == nil,
+                   !isFailure(statesByHostKey[key]) {
+                    statesByHostKey[key] = .setupRequired
+                    if shouldRecreateTask, hasAuthenticatedRoute(host) {
+                        startSetup(for: host)
+                    }
                 }
 
             case .unavailable:
-                tasksByHostID.removeValue(forKey: hostID)?.task.cancel()
-                statesByHostID[hostID] = .unavailable
+                tasksByHostKey.removeValue(forKey: key)?.task.cancel()
+                statesByHostKey[key] = .unavailable
             }
         }
     }
 
     func startSetup(for host: LocalHostAdvertisement) {
-        guard let hostID = host.senderID,
-              !hostID.isEmpty,
-              tasksByHostID[hostID] == nil else {
+        guard let key = HostAccountKey(host: host),
+              hasAuthenticatedRoute(host),
+              tasksByHostKey[key] == nil else {
             return
         }
 
@@ -137,29 +325,53 @@ final class ComputerUseSetupCoordinator: ObservableObject {
         let request = ComputerUseSetupRequest()
         let sessionID = "setup-\(request.requestID)"
         let channel = channelFactory(host, sessionID)
-        statesByHostID[hostID] = .requesting
+        statesByHostKey[key] = .requesting
 
         let task = Task { [weak self] in
             guard let self else { return }
             await self.performSetup(
-                hostID: hostID,
+                key: key,
                 request: request,
                 channel: channel)
         }
-        tasksByHostID[hostID] = SetupTaskContext(
+        tasksByHostKey[key] = SetupTaskContext(
             pairingCode: host.code,
+            routeIdentity: routeIdentity(for: host),
             requestID: request.requestID,
             task: task)
     }
 
+    private func routeIdentity(
+        for host: LocalHostAdvertisement
+    ) -> String {
+        if let endpoint = host.localEndpoint,
+           endpoint.isValid,
+           let hostID = host.senderID,
+           let credentialID = host.localCredentialID,
+           let accountBinding = host.accountBinding,
+           LocalComputerUseCredentialStore().clientCredential(
+                hostID: hostID,
+                credentialID: credentialID,
+                accountBinding: accountBinding) != nil {
+            return "local|\(hostID)|\(credentialID)|\(accountBinding.rawValue)|\(endpoint.host):\(endpoint.port)|\(host.code)"
+        }
+        if host.hasAuthenticatedCloudMatch {
+            return "cloud|\(host.senderID ?? "none")|\(host.accountBinding?.rawValue ?? "none")|\(host.code)"
+        }
+        let endpoint = host.localEndpoint.map {
+            "\($0.host):\($0.port)"
+        } ?? "none"
+        return "unavailable|\(host.senderID ?? "none")|\(host.localCredentialID ?? "none")|\(endpoint)|\(host.code)"
+    }
+
     private func performSetup(
-        hostID: String,
+        key: HostAccountKey,
         request: ComputerUseSetupRequest,
         channel: any ComputerUseSetupChannel
     ) async {
         defer {
-            if tasksByHostID[hostID]?.requestID == request.requestID {
-                tasksByHostID[hostID] = nil
+            if tasksByHostKey[key]?.requestID == request.requestID {
+                tasksByHostKey[key] = nil
             }
         }
 
@@ -171,9 +383,11 @@ final class ComputerUseSetupCoordinator: ObservableObject {
                 to: nil,
                 sessionID: nil,
                 messageID: request.requestID)
-            guard !Task.isCancelled else { return }
+            guard isCurrentSetup(key: key, requestID: request.requestID) else {
+                return
+            }
 
-            statesByHostID[hostID] = .installing(ComputerUseSetupProgress(
+            statesByHostKey[key] = .installing(ComputerUseSetupProgress(
                 requestID: request.requestID,
                 idempotencyKey: request.idempotencyKey,
                 phase: .queued,
@@ -186,9 +400,19 @@ final class ComputerUseSetupCoordinator: ObservableObject {
                 let envelopes: [ComputerUseEnvelope]
                 do {
                     envelopes = try await channel.poll()
+                    guard isCurrentSetup(
+                        key: key,
+                        requestID: request.requestID) else {
+                        return
+                    }
                 } catch is CancellationError {
                     return
                 } catch {
+                    guard isCurrentSetup(
+                        key: key,
+                        requestID: request.requestID) else {
+                        return
+                    }
                     // Installation continues on the Mac. A brief iCloud or
                     // network outage must not turn a multi-gigabyte download
                     // into a false terminal failure on iOS.
@@ -197,7 +421,17 @@ final class ComputerUseSetupCoordinator: ObservableObject {
                         body: body,
                         channel: channel,
                         nextRefresh: nextRequestRefresh)
+                    guard isCurrentSetup(
+                        key: key,
+                        requestID: request.requestID) else {
+                        return
+                    }
                     try await Task.sleep(for: .seconds(2))
+                    guard isCurrentSetup(
+                        key: key,
+                        requestID: request.requestID) else {
+                        return
+                    }
                     continue
                 }
                 for envelope in envelopes where envelope.kind == .setupProgress {
@@ -213,22 +447,22 @@ final class ComputerUseSetupCoordinator: ObservableObject {
 
                     switch progress.phase {
                     case .ready:
-                        statesByHostID[hostID] = .ready
+                        statesByHostKey[key] = .ready
                         try? await channel.acknowledge(envelopes)
                         return
                     case .failed:
-                        statesByHostID[hostID] = .failed(
+                        statesByHostKey[key] = .failed(
                             progress.errorMessage ?? progress.detail)
                         try? await channel.acknowledge(envelopes)
                         return
                     case .queued, .downloadingModel, .installingPackages, .verifying:
                         let current: ComputerUseSetupProgress?
-                        if case .installing(let value) = statesByHostID[hostID] {
+                        if case .installing(let value) = statesByHostKey[key] {
                             current = value
                         } else {
                             current = nil
                         }
-                        statesByHostID[hostID] = .installing(
+                        statesByHostKey[key] = .installing(
                             ComputerUseSetupProgressPolicy.merge(
                                 current: current,
                                 incoming: progress))
@@ -236,6 +470,11 @@ final class ComputerUseSetupCoordinator: ObservableObject {
                 }
 
                 try? await channel.acknowledge(envelopes)
+                guard isCurrentSetup(
+                    key: key,
+                    requestID: request.requestID) else {
+                    return
+                }
 
                 // The stable record is periodically recreated after the host
                 // acknowledges it. If the Mac app restarts mid-download, the
@@ -246,17 +485,25 @@ final class ComputerUseSetupCoordinator: ObservableObject {
                     body: body,
                     channel: channel,
                     nextRefresh: nextRequestRefresh)
+                guard isCurrentSetup(
+                    key: key,
+                    requestID: request.requestID) else {
+                    return
+                }
 
                 try await Task.sleep(for: .seconds(1))
             }
-            if !Task.isCancelled {
-                statesByHostID[hostID] = .failed(
+            if isCurrentSetup(key: key, requestID: request.requestID) {
+                statesByHostKey[key] = .failed(
                     "Setup is taking longer than expected. Check the Mac host, then tap Retry.")
             }
         } catch is CancellationError {
             return
         } catch {
-            statesByHostID[hostID] = .failed(
+            guard isCurrentSetup(key: key, requestID: request.requestID) else {
+                return
+            }
+            statesByHostKey[key] = .failed(
                 (error as? LocalizedError)?.errorDescription
                     ?? "Couldn't set up AI: \(error.localizedDescription)")
         }
@@ -277,6 +524,20 @@ final class ComputerUseSetupCoordinator: ObservableObject {
             sessionID: nil,
             messageID: request.requestID)
         return now.advanced(by: Self.requestRefreshInterval)
+    }
+
+    private func isCurrentSetup(
+        key: HostAccountKey,
+        requestID: String
+    ) -> Bool {
+        !Task.isCancelled
+            && tasksByHostKey[key]?.requestID == requestID
+    }
+
+    private func cancelAllSetups() {
+        tasksByHostKey.values.forEach { $0.task.cancel() }
+        tasksByHostKey.removeAll()
+        statesByHostKey.removeAll()
     }
 
     private func isFailure(_ state: State?) -> Bool {
@@ -316,6 +577,8 @@ enum ComputerUseSetupProgressPolicy {
 enum ComputerUseRowAction: Equatable {
     case hidden
     case unavailable(String)
+    case pairingLocal
+    case retryLocalPairing(String)
     case setup
     case progress(ComputerUseSetupProgress)
     case useAI
@@ -323,7 +586,8 @@ enum ComputerUseRowAction: Equatable {
 
     static func resolve(
         host: LocalHostAdvertisement,
-        state: ComputerUseSetupCoordinator.State
+        state: ComputerUseSetupCoordinator.State,
+        localPromptReady: Bool
     ) -> ComputerUseRowAction {
         guard host.senderID?.isEmpty == false else {
             return .unavailable(
@@ -341,6 +605,10 @@ enum ComputerUseRowAction: Equatable {
         case .installing(let progress):
             return .progress(progress)
         case .ready:
+            guard localPromptReady else {
+                return .unavailable(
+                    "Secure local AI pairing is still finishing. Keep Remote Desktop Host open on the Mac and try again.")
+            }
             return .useAI
         case .failed(let message):
             return .retry(message)

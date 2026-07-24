@@ -18,31 +18,44 @@ Latest host release: [v0.2.0](https://github.com/minal7/remotedesktop/releases/t
 
 ```
 ┌────────────────┐                                    ┌─────────────────┐
-│  iOS client    │ ── SDP / ICE via CloudKit ───────▶ │  Host agent     │
-│  (iPad/iPhone) │ ◀── SDP / ICE via CloudKit ──────  │  (Mac / Windows)│
+│  iOS client    │ ── bounded CloudKit lifecycle ────▶ │  Host agent     │
+│  (iPad/iPhone) │ ◀── discovery / enrollment / SDP ─  │  (Mac / Windows)│
 └───────┬────────┘                                    └────────┬────────┘
         │                                                      │
         │   ─── WebRTC peer connection (STUN-only) ──────────▶ │
         │                                                      │
         │  ◀──  video (H.264)  ── audio (Opus)  ── input (DataChannel)─│
+        │                                                      │
+        │   ═══ prompt / controls via authenticated LAN TLS ═▶ │
+        │  ◀══ status / result / approval via same broker ═══  │
 ```
 
 - **Transport:** WebRTC. Video track (H.264) for screen, audio track (Opus)
-  for host audio, reliable-ordered data channel for input events + control
-  messages.
-- **Signaling:** CloudKit. SDP/ICE exchange goes through each user's own
-  iCloud private database, polled on a ~2 s cadence during an active session.
-  No server to operate and $0 cost at any scale — each user's signaling
-  traffic lives in their own iCloud quota. (The original Cloudflare Worker is
-  deprecated; see `signaling/DEPRECATED.md`.)
+  for host audio, and a reliable-ordered data channel for direct input and
+  remote-screen protocol messages.
+- **CloudKit lifecycle:** the user's private database is limited to host
+  discovery, same-account enrollment and encrypted credential exchange,
+  remote-control SDP/ICE signaling, and Computer Use setup requests/progress.
+  Each class has a bounded validity window, query budget, and cleanup state.
+  The original Cloudflare Worker is deprecated; see
+  `signaling/DEPRECATED.md`.
+- **Computer Use task channel:** after enrollment, the natural-language
+  prompt, bounded conversation context, task progress/status/result,
+  pause/resume/cancel controls, and approval requests/responses travel only
+  over the authenticated LAN TLS broker. That traffic does not fall back to
+  CloudKit; if the broker cannot be authenticated or reached, the task fails
+  closed without being submitted.
 - **NAT traversal:** STUN-only (public STUN list delivered via a CloudKit
   `ICEConfig` record). No TURN — if ICE can't connect within a timeout, the
   client surfaces a "try the same Wi-Fi" error.
-- **Pairing model:** same-iCloud only. The iPad/iPhone and the host must be
-  signed into the same iCloud account. A 6-digit numeric code shown on the
-  host is typed into the client. A new code is generated whenever the host
-  listener starts, including after a disconnect. Five minutes is the stale
-  CloudKit-record window; a listening host refreshes its current advertisement.
+- **Pairing model:** automatic and same-Apple-Account only. The iPad/iPhone and
+  host sign in to the same Apple Account; the client discovers the host in the
+  account's private CloudKit database and pairs without a code field or copied
+  secret. Ephemeral key agreement encrypts the LAN credential before it
+  crosses CloudKit. A short-lived internal binding still routes deployed
+  CloudKit records, but it is never shown or entered. Five minutes is the
+  discovery/signaling stale-record window; a listening host refreshes its
+  current advertisement.
 
 ## Repository layout
 
@@ -62,15 +75,18 @@ and remaining out-of-band Apple Developer portal work.
 | Component | State |
 | --- | --- |
 | Protocol spec + shared CloudKit signaling client | implemented |
-| CloudKit signaling (private-DB, same-iCloud, polling) | implemented |
+| CloudKit lifecycle (private DB, same-Apple-Account, bounded polling) | implemented |
 | iOS client — UI + WebRTC peer connection | implemented |
 | Mac host agent — capture + injection + WebRTC | implemented |
 | Windows host agent — WebRTC + capture + input + installer | implemented |
 
-WebRTC media (H.264 video, Opus audio, input over DataChannel) is wired
-end-to-end across the iOS client and both hosts. Remaining v1 work is mostly
-out-of-band Apple Developer / CloudKit Dashboard setup and on-device pairing
-validation — tracked in `PROGRESS.md`.
+WebRTC media (H.264 video, Opus audio, input over DataChannel) is wired across
+the iOS client and both hosts. Automatic same-account enrollment and the
+post-enrollment LAN TLS task channel are implemented and covered by component
+tests. A fresh signed Release macOS-host + iPhone Air Simulator run proving the
+complete enrollment, task, approval, and result path is still pending; this
+document is not that release-acceptance evidence. Remaining validation and
+out-of-band CloudKit work are tracked in `PROGRESS.md`.
 
 ## AI Computer Use
 
@@ -117,10 +133,13 @@ Automation**, then make a new request.
 
 Setup is initiated from the iPhone or iPad; passive status checks never start a
 download. One progress bar reflects the real helper and visual-model bytes,
-verification, and runtime loading returned over the existing private CloudKit
-channel. Already verified components are reused. The live screen and direct
-intervention continue over WebRTC, while planning and tool execution stay on
-the Mac. The host bundles the third-party notices for all local components.
+verification, and runtime loading. Setup request/progress is the only AI
+lifecycle allowed to use private CloudKit before the LAN broker is ready;
+already verified components are reused. Once enrolled, prompts, conversation,
+task status/results, approvals, and controls use only authenticated LAN TLS.
+The live screen and direct intervention continue over WebRTC, while planning,
+visual grounding, and tool execution stay on the Mac. The host bundles the
+third-party notices for all local components.
 The phone-triggered model setup downloads only checksum-pinned OS-Atlas Pro 4B
 GGUF data; executable inference code remains inside the signed host. The public
 upstream checkpoint is Apache-2.0 licensed and needs no API key or paid service.
@@ -129,12 +148,13 @@ upstream checkpoint is Apache-2.0 licensed and needs no API key or paid service.
 
 ### Prerequisites (CloudKit)
 
-There's no signaling server to run — signaling is CloudKit. One-time setup
-happens in the Apple Developer portal and CloudKit Dashboard (App IDs with
-iCloud, the `iCloud.com.threadmark.remotedesktop` container, queryable
-indexes, and the `ICEConfig` STUN record). The exact steps are in
-`PROGRESS.md` under "Work you need to do out-of-band". All clients must be
-signed into the **same iCloud account** to pair.
+There's no remote-control signaling server to run — discovery, enrollment,
+setup lifecycle, and SDP/ICE signaling use bounded CloudKit records. One-time
+configuration happens in the Apple Developer portal and CloudKit Dashboard
+(App IDs with iCloud, the `iCloud.com.threadmark.remotedesktop` container,
+queryable indexes, and the `ICEConfig` STUN record). The exact steps are in
+`PROGRESS.md` under "Work you need to do out-of-band". Both devices must be
+signed into the **same Apple Account** to enroll automatically.
 
 ### iOS client
 
@@ -161,14 +181,34 @@ open RemoteDesktopHost.xcodeproj
 First run will prompt for Screen Recording and Accessibility permissions,
 and for Apple ID / iCloud sign-in (same account as the client).
 
-For a screenless developer Mac mini, the host can be installed and launched
-from SSH:
+For a screenless developer Mac mini, a local Apple Development build is a
+matched Debug-only diagnostic install:
 
 ```sh
 cd host-mac
-./scripts/install_host.sh --headless --start-at-login --launch --request-permissions --ssh-permission-report
-cat ~/Library/Application\ Support/RemoteDesktopHost/pairing-code.txt
+REMOTE_DESKTOP_APPLE_CONFIGURATION=Debug \
+REMOTE_DESKTOP_HOST_CONFIGURATION=Debug \
+REMOTE_DESKTOP_IOS_CONFIGURATION=Debug \
+./scripts/install_host.sh --debug --headless --start-at-login --launch \
+  --request-permissions --ssh-permission-report
 ```
+
+A Release install must instead pass an absolute notarized Developer ID
+`RemoteDesktopHost.app` plus its exact full source commit:
+
+```sh
+SOURCE_COMMIT="$(git rev-parse HEAD)"
+host-mac/scripts/install_host.sh \
+  --host-artifact "/absolute/path/RemoteDesktopHost.app" \
+  --expected-source-commit "$SOURCE_COMMIT" \
+  --headless --start-at-login --launch
+```
+
+The Release bundle must embed that revision in its code-signed
+`RemoteDesktopSourceCommit` Info.plist key. The installer does not infer source
+provenance from a mutable filename or CI build number. The signed-in iPhone or
+iPad discovers and pairs with the host automatically; headless installs do not
+write a pairing secret to disk.
 
 The installed binary also supports `--check-permissions` and
 `--check-permissions-json`. Plain SSH cannot grant every required macOS TCC
@@ -181,7 +221,7 @@ of permission setup.
 End users install from the latest [GitHub release](https://github.com/minal7/remotedesktop/releases)
 (`RemoteDesktopHost-Setup-<version>.exe`) — a self-contained installer that
 runs without any extra setup. On first launch it opens a browser for Apple ID
-/ iCloud sign-in, then advertises a pairing code.
+/ iCloud sign-in, then advertises privately to devices on that account.
 
 To build from source you need the MSVC build tools, CMake, and a CloudKit API
 token. Full instructions (token handling, the tag-driven release workflow, and
@@ -197,8 +237,9 @@ cargo run --release
 ## App Store compliance notes
 
 - Remote-control apps are permitted (Apple App Review Guidelines 4.2.7) as
-  long as the user initiates each session to a device they own. We meet this
-  by requiring a pairing code typed into the client per session.
+  long as the user initiates each session to a device they own. The person
+  explicitly selects a computer discovered through their private Apple
+  Account and starts each session; automatic discovery does not auto-connect.
 - No private screen-capture APIs used on iOS. Host-side capture uses public
   ScreenCaptureKit (macOS 12.3+) and Windows.Graphics.Capture (Windows 10+).
 - Background execution: no `voip` background mode is used; sessions pause when

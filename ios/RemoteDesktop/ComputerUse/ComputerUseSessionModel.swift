@@ -30,8 +30,6 @@ extension ComputerUseSessionChannel {
     }
 }
 
-extension CloudKitComputerUseChannel: ComputerUseSessionChannel {}
-
 @MainActor
 final class ComputerUseSessionModel: ObservableObject {
     struct ChatMessage: Identifiable, Equatable {
@@ -58,6 +56,11 @@ final class ComputerUseSessionModel: ObservableObject {
     @Published private(set) var messages: [ChatMessage] = []
     @Published private(set) var state: State = .ready
     @Published private(set) var statusText = "Ready for a request"
+    /// Bounded, task-scoped host progress retained independently of the current
+    /// status label. A LAN poll can deliver several ordered updates together;
+    /// SwiftUI may render only the final label, but accessibility and shipped-
+    /// path acceptance must still be able to inspect every completed step.
+    @Published private(set) var taskProgressHistory: [String] = []
     @Published private(set) var retryPrompt: String?
     /// The newest machine-readable result received for the active or most
     /// recently finished request. Legacy hosts leave this `nil`.
@@ -84,6 +87,7 @@ final class ComputerUseSessionModel: ObservableObject {
     private let pairingCode: String
     private let sessionID: String
     private let pendingStore: any ComputerUsePendingPromptStoring
+    private let localAccountBinding: CloudKitAccountBinding?
     private var pollingTask: Task<Void, Never>?
     private var responseTimeoutTask: Task<Void, Never>?
     private var promptRefreshTask: Task<Void, Never>?
@@ -109,6 +113,7 @@ final class ComputerUseSessionModel: ObservableObject {
     private var approvalSubmission: ComputerUsePendingApprovalDecision?
     private var approvalResponseInFlightRequestID: String?
     private var userInterventionGuidance: String?
+    private static let maximumTaskProgressEntries = 16
 
     private struct PendingControlIntent: Equatable {
         let taskID: String
@@ -121,15 +126,16 @@ final class ComputerUseSessionModel: ObservableObject {
         pairingCode: String,
         hostID: String,
         sessionID: String? = nil,
-        senderID: String = DeviceIdentity.get(),
+        localAccountBinding: CloudKitAccountBinding? = nil,
         pendingStore: any ComputerUsePendingPromptStoring = ComputerUsePendingPromptStore.shared,
-        channel: (any ComputerUseSessionChannel)? = nil,
+        channel: any ComputerUseSessionChannel,
         responseTimeoutDuration: Duration = .seconds(20 * 60),
         promptRefreshInterval: Duration = .seconds(30)
     ) {
         let restored = pendingStore.load(
             hostID: hostID,
-            pairingCode: pairingCode)
+            pairingCode: pairingCode,
+            localAccountBinding: localAccountBinding)
         let effectiveSessionID = restored?.sessionID
             ?? sessionID
             ?? UUID().uuidString
@@ -138,15 +144,10 @@ final class ComputerUseSessionModel: ObservableObject {
         self.pairingCode = pairingCode
         self.sessionID = effectiveSessionID
         self.pendingStore = pendingStore
+        self.localAccountBinding = localAccountBinding
         self.responseTimeoutDuration = responseTimeoutDuration
         self.promptRefreshInterval = promptRefreshInterval
-        self.channel = channel ?? CloudKitComputerUseChannel(
-            containerIdentifier: Config.cloudKitContainerIdentifier,
-            pairingCode: pairingCode,
-            sessionID: effectiveSessionID,
-            senderID: senderID,
-            targetID: hostID,
-            startedAt: restored?.createdAt.addingTimeInterval(-30) ?? Date())
+        self.channel = channel
 
         if let restored {
             activePromptID = restored.messageID
@@ -263,6 +264,7 @@ final class ComputerUseSessionModel: ObservableObject {
         // unavailable. Otherwise the error below can retain a stale green
         // "Task completed" status from an unrelated request.
         latestTerminalOutcome = nil
+        taskProgressHistory.removeAll(keepingCapacity: true)
         let operationGeneration = advanceStateGeneration()
         let messageID = UUID().uuidString
         let request = ComputerUsePromptRequest(
@@ -292,7 +294,7 @@ final class ComputerUseSessionModel: ObservableObject {
             return
         }
         state = .working
-        statusText = "Sending securely through iCloud…"
+        statusText = "Sending securely to your Mac…"
         startPromptRefresh(resendImmediately: false)
 
         launchOutboundTask { model in
@@ -391,7 +393,7 @@ final class ComputerUseSessionModel: ObservableObject {
         state = .working
         statusText = "Stopping the task…"
         scheduleResponseTimeout(
-            message: "The Mac hasn’t confirmed Stop yet. Touch the live screen to keep AI paused.")
+            message: "The Mac hasn’t confirmed Stop yet. Use the Mac directly to keep AI paused.")
         sendControl(.cancel, generation: operationGeneration)
     }
 
@@ -420,6 +422,7 @@ final class ComputerUseSessionModel: ObservableObject {
             return
         }
         advanceStateGeneration()
+        latestTerminalOutcome = nil
         if approved, Self.requiresPersistentPrivacyShield(request) {
             // Set this before the approval response leaves the phone. The
             // full-card privacy backdrop is about to disappear, and Mail may
@@ -499,10 +502,10 @@ final class ComputerUseSessionModel: ObservableObject {
                 switch kind {
                 case .pause:
                     model.state = .paused
-                    model.statusText = "Couldn’t reach AI through iCloud. Touch the live screen to take control immediately."
+                    model.statusText = "Couldn’t reach AI securely. Use the Mac directly to take control immediately."
                 case .resume:
                     model.state = .paused
-                    model.statusText = "Couldn’t resume AI yet. Check iCloud and try again."
+                    model.statusText = "Couldn’t resume AI yet. Check the connection and try again."
                 case .cancel:
                     model.state = .working
                     model.statusText = "Stop is still pending. The same safe request will be retried."
@@ -648,13 +651,13 @@ final class ComputerUseSessionModel: ObservableObject {
         switch kind {
         case .pause:
             state = .paused
-            statusText = "Couldn’t safely save Pause. Touch the live screen to take control immediately."
+            statusText = "Couldn’t safely save Pause. Use the Mac directly to take control immediately."
         case .resume:
             state = .paused
             statusText = "Couldn’t safely save Resume. AI remains paused."
         case .cancel:
             state = .paused
-            statusText = "Couldn’t safely save Stop. Touch the live screen to keep AI paused."
+            statusText = "Couldn’t safely save Stop. Use the Mac directly to keep AI paused."
         default:
             break
         }
@@ -710,7 +713,7 @@ final class ComputerUseSessionModel: ObservableObject {
             } catch {
                 guard !Task.isCancelled, !isStopped else { return }
                 transportNotice = error.localizedDescription
-                statusText = "iCloud connection interrupted — retrying…"
+                statusText = "Secure connection interrupted — retrying…"
             }
 
             do {
@@ -729,6 +732,13 @@ final class ComputerUseSessionModel: ObservableObject {
                 let taskID = update?.taskID ?? activePromptID
                 guard let activePromptID,
                       taskID == activePromptID else { continue }
+                if case .approvalRequired = state {
+                    // A terminal envelope created before the approval card
+                    // cannot prove that the person authorized or canceled the
+                    // proposed effect. Keep the approval absorbing until an
+                    // exact persisted decision leaves this client.
+                    continue
+                }
                 if let appliedControlRevision = update?.appliedControlRevision {
                     guard acceptAppliedControlRevision(
                         appliedControlRevision) else { continue }
@@ -761,6 +771,7 @@ final class ComputerUseSessionModel: ObservableObject {
                     retryPrompt = nil
                     retryMessageID = nil
                     retryWireBody = nil
+                    recordTaskProgress(update.text, outcome: update.outcome)
                     applyHostStatus(update.text, outcome: update.outcome)
                 } else {
                     // Legacy raw statuses have no task identity. They may
@@ -770,6 +781,7 @@ final class ComputerUseSessionModel: ObservableObject {
                     guard shouldApplyHostStatus(
                         envelope.body,
                         appliedControlRevision: nil) else { continue }
+                    recordTaskProgress(envelope.body, outcome: nil)
                     applyHostStatus(envelope.body)
                 }
             case .approvalRequest:
@@ -817,6 +829,7 @@ final class ComputerUseSessionModel: ObservableObject {
                     // request-side classifier below.
                     isLiveScreenPrivacyShielded = true
                 }
+                latestTerminalOutcome = .userInterventionRequired
                 state = .approvalRequired(request)
                 responseTimeoutTask?.cancel()
                 responseTimeoutTask = nil
@@ -825,6 +838,26 @@ final class ComputerUseSessionModel: ObservableObject {
                  .approvalResponse:
                 break
             }
+        }
+    }
+
+    private func recordTaskProgress(
+        _ status: String,
+        outcome: ComputerUseTerminalOutcome?
+    ) {
+        guard outcome == nil else { return }
+        let bounded = String(status.trimmingCharacters(
+            in: .whitespacesAndNewlines).prefix(240))
+        guard bounded.range(
+            of: #"^Step [0-9]+: .+"#,
+            options: .regularExpression) != nil else {
+            return
+        }
+        if taskProgressHistory.last == bounded { return }
+        taskProgressHistory.append(bounded)
+        if taskProgressHistory.count > Self.maximumTaskProgressEntries {
+            taskProgressHistory.removeFirst(
+                taskProgressHistory.count - Self.maximumTaskProgressEntries)
         }
     }
 
@@ -1120,7 +1153,7 @@ final class ComputerUseSessionModel: ObservableObject {
         }
         startPromptRefresh(resendImmediately: false)
         state = .working
-        statusText = "Sending securely through iCloud…"
+        statusText = "Sending securely to your Mac…"
         launchOutboundTask { model in
             do {
                 try await model.channel.send(
@@ -1194,6 +1227,7 @@ final class ComputerUseSessionModel: ObservableObject {
             prompt: prompt,
             wireBody: wireBody,
             createdAt: createdAt,
+            localAccountBinding: localAccountBinding,
             controlRevision: nil,
             lastControlKind: nil,
             approvalDecision: nil)) else {
@@ -1227,6 +1261,7 @@ final class ComputerUseSessionModel: ObservableObject {
             prompt: prompt,
             wireBody: wireBody,
             createdAt: createdAt,
+            localAccountBinding: localAccountBinding,
             controlRevision: controlRevision == 0 ? nil : controlRevision,
             lastControlKind: lastControlKind,
             approvalDecision: approvalSubmission,
@@ -1250,7 +1285,9 @@ final class ComputerUseSessionModel: ObservableObject {
         promptRefreshTask = nil
         controlRetryTask?.cancel()
         controlRetryTask = nil
-        pendingStore.remove(hostID: hostID)
+        pendingStore.remove(
+            hostID: hostID,
+            localAccountBinding: localAccountBinding)
     }
 
     private func startPromptRefresh(resendImmediately: Bool) {

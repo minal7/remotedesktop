@@ -839,9 +839,9 @@ enum OSAtlasLlamaRuntimeError: Error, LocalizedError, Equatable {
         case .inactiveSession:
             return "The local OS-Atlas model changed while this task was running. Please retry."
         case .invalidResponse:
-            return "The local OS-Atlas model returned an invalid response, so the Mac was left untouched."
+            return "The local OS-Atlas model returned an invalid response, so no further action was performed. Any earlier completed steps remain on the Mac."
         case .invalidVisionInput:
-            return "The screenshot exceeded the safe local-model image limit, so the Mac was left untouched."
+            return "The screenshot exceeded the safe local-model image limit, so no further action was performed. Any earlier completed steps remain on the Mac."
         case .insufficientPhysicalMemory:
             return "AI Computer Use requires a Mac with at least 8 GB of memory."
         case .insufficientAvailableMemory:

@@ -174,6 +174,35 @@ then below the initial viewport. Its one **Start local quote setup** button
 only enables and focuses the local token field; this gives the installed
 OS-Atlas checkpoint a harmless visible target with an observable local effect.
 
+The full B01–B11 runner owns fixture preparation, the transactional host swap,
+the matched iPhone Air Simulator build, strict result counting, and restoration
+after a failed run. Debug may build a local Apple Development host:
+
+```sh
+REMOTE_DESKTOP_APPLE_CONFIGURATION=Debug \
+REMOTE_DESKTOP_HOST_CONFIGURATION=Debug \
+REMOTE_DESKTOP_IOS_CONFIGURATION=Debug \
+host-mac/scripts/run_local_browser_live_acceptance.sh
+```
+
+Release never rebuilds a development-signed host. It requires a notarized
+Developer ID app whose code-signed `RemoteDesktopSourceCommit` key matches the
+full commit of a clean checkout:
+
+```sh
+SOURCE_COMMIT="$(git rev-parse HEAD)"
+host-mac/scripts/run_local_browser_live_acceptance.sh \
+  --host-artifact "/absolute/path/RemoteDesktopHost.app" \
+  --expected-source-commit "$SOURCE_COMMIT"
+```
+
+Before replacing the installed host, the runner checks the Developer ID team,
+hardened runtime and secure timestamps for the app and every nested Mach-O,
+the exact Production CloudKit contract, absence of task-debugging and APS
+entitlements, the stapled notarization ticket, Gatekeeper, and signed source
+revision. It then hash-compares the installed executable with the artifact and
+repeats bundle verification.
+
 First open the fixture in Safari, make the Safari content area at least
 900 x 650 points, and leave **Start local quote setup** unclicked. Leave that
 tab loaded in the background, then foreground Calculator so the fixture and
@@ -188,42 +217,50 @@ Do not pre-focus the token field. It remains disabled until the AI clicks the
 setup button, whose local handler enables and focuses it without a network,
 form, account, or external mutation.
 
-With an AI-ready Production host running from the exact build under test,
-Screen Recording and Accessibility already granted to that signed host, and a
-booted signed-in iOS Simulator, run only the local-fixture scenario:
+With an AI-ready signed host running from the same Debug or Release
+configuration as the iOS build under test, Screen Recording and Accessibility
+already granted to that exact host, and a booted signed-in iOS Simulator, run
+only the local-fixture scenario:
 
 ```sh
 # Use the exact UDID of the booted, signed-in simulator.
 # Obtain it from: xcrun simctl list devices available
 SIMULATOR_UDID='<exact signed-in simulator UDID>'
+CONFIGURATION="${REMOTE_DESKTOP_APPLE_CONFIGURATION:-Release}"
 cd ios
 xcodebuild test \
   -project RemoteDesktop.xcodeproj \
   -scheme RemoteDesktopLiveE2E \
-  -configuration Release \
+  -configuration "$CONFIGURATION" \
   -destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" \
   -only-testing:RemoteDesktopLiveE2ETests/OSAtlasLocalFixtureSimulatorLiveE2ETests/testLocalFixtureUsesShippedHybridAppFirstNativeTypeAndScrollBeforeVisibleQuote \
+  REMOTE_DESKTOP_APPLE_CONFIGURATION="$CONFIGURATION" \
   RUN_OSATLAS_LOCAL_FIXTURE_SIMULATOR_E2E=1
 ```
 
-This is the end-to-end product route: the Release iOS UI waits for a decoded
-Mac frame, sends an ordinary request through Production CloudKit, and the
-signed host first opens Safari from the unrelated app. The always-installed
-local semantic router preserves the exact fixture token and explicit scroll
-direction, but it will not let deterministic TYPE or navigation skip an
-earlier pending pointer instruction. After Safari opens, the semantic router
-selects the visible setup control and the installed OS-Atlas checkpoint must
-return its screen-grounded click point. That click changes the button to **Local quote
-setup started**, enables and focuses the field, and only then can native exact
-typing succeed. Each deterministic navigation route runs once, then the
-updated screen and bounded history are evaluated before another action. The
-host scrolls natively until the complete quote is visible; only then can the
-focused-window OCR validator return the fixed itemized result. The test OCRs a
-Calculator-only starting frame with Safari/fixture markers absent, observes the
-requested-app open and OS-Atlas click progress, proves the click's visible
-local effect before native typing, and finally OCRs distinctive unlocked quote
-content. A model-authored answer, an in-memory intercepted action, a direct-only
-flow, or transport-only pass cannot satisfy it.
+This is the end-to-end product route for either matched configuration. CloudKit
+provides automatic same-account discovery and binding (Development for Debug,
+Production for Release); the ordinary prompt, progress, and result travel over
+the authenticated local TLS channel. B01 proves that prompt channel is ready
+independently, then requires the product's otherwise optional visual sidecar to
+reach live state with a compatible host, current display metadata, and a fresh
+decoded frame. The signed host first opens Safari from the unrelated app. The
+always-installed local semantic router preserves the exact fixture token and
+explicit scroll direction, but it will not let deterministic TYPE or navigation
+skip an earlier pending pointer instruction. After Safari opens, the semantic
+router selects the visible setup control and the installed OS-Atlas checkpoint
+must return its screen-grounded click point. That click changes the button to
+**Local quote setup started**, enables and focuses the field, and only then can
+native exact typing succeed. Each deterministic navigation route runs once,
+then the updated screen and bounded history are evaluated before another
+action. The host scrolls natively until the complete quote is visible; only
+then can the focused-window OCR validator return the fixed itemized result. The
+test OCRs a Calculator-only starting frame with Safari/fixture markers absent,
+observes the requested-app open and OS-Atlas click progress, proves the click's
+visible local effect before native typing, and finally OCRs distinctive
+unlocked quote content. A model-authored answer, an in-memory intercepted
+action, a direct-only flow, a TLS-only pass, or a stale media frame cannot
+satisfy it.
 
 ### Shipped takeover, direct-input, resume, and stop lifecycle
 

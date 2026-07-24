@@ -1,3 +1,4 @@
+import CloudKit
 import XCTest
 @testable import RemoteDesktop
 
@@ -160,6 +161,65 @@ final class ComputerUseSetupTests: XCTestCase {
             XCTAssertEqual(model.statusText, expectedStatus)
             model.stop()
         }
+    }
+
+    func test_taskProgressHistoryRetainsCoalescedStepsThroughTerminalAndResetsForNewPrompt()
+        async throws {
+        let channel = FakeComputerUseSessionChannel()
+        let model = ComputerUseSessionModel(
+            hostName: "Studio Mac",
+            pairingCode: "123456",
+            hostID: "HOST-\(UUID().uuidString)",
+            sessionID: "session-1",
+            pendingStore: InMemoryComputerUsePendingPromptStore(),
+            channel: channel)
+        defer { model.stop() }
+        model.start()
+        model.sendPrompt("Complete the local browser task")
+        let sentPrompt = await waitForSentMessage(
+            kind: .prompt,
+            channel: channel)
+        let prompt = try XCTUnwrap(sentPrompt)
+
+        let steps = [
+            "Step 1: opening Safari for the delivery quote…",
+            "Step 2: clicking the requested control…",
+            "Step 3: typing 16 characters…",
+            "Step 4: scrolling down…",
+        ]
+        for step in steps {
+            try await channel.enqueueHostEnvelope(
+                kind: .status,
+                body: ComputerUseTaskUpdate(
+                    taskID: prompt.id,
+                    text: step).encodedBody())
+        }
+        // A duplicate and generic lifecycle status must not pollute the durable
+        // step list even when they arrive in the same polling interval.
+        try await channel.enqueueHostEnvelope(
+            kind: .status,
+            body: ComputerUseTaskUpdate(
+                taskID: prompt.id,
+                text: steps.last!).encodedBody())
+        try await channel.enqueueHostEnvelope(
+            kind: .status,
+            body: ComputerUseTaskUpdate(
+                taskID: prompt.id,
+                text: "working").encodedBody())
+        try await channel.enqueueHostEnvelope(
+            kind: .assistant,
+            body: ComputerUseTaskUpdate(
+                taskID: prompt.id,
+                text: "The local browser task is complete.",
+                outcome: .taskCompleted).encodedBody())
+
+        await waitUntil { model.latestTerminalOutcome == .taskCompleted }
+        XCTAssertEqual(model.taskProgressHistory, steps)
+
+        model.sendPrompt("Start a different task")
+        XCTAssertTrue(
+            model.taskProgressHistory.isEmpty,
+            "Progress evidence must never leak from the previous task")
     }
 
     func test_newPromptPersistenceFailureClearsPreviousTerminalOutcome() async throws {
@@ -942,6 +1002,8 @@ final class ComputerUseSetupTests: XCTestCase {
 
     func test_cancelReadyAcknowledgementRetriesExactPromptUntilTerminalAssistant() async throws {
         let hostID = "HOST-\(UUID().uuidString)"
+        let accountBinding = CloudKitAccountBinding(
+            rawValue: String(repeating: "d", count: 64))!
         let store = InMemoryComputerUsePendingPromptStore()
         let channel = FakeComputerUseSessionChannel()
         let model = ComputerUseSessionModel(
@@ -949,6 +1011,7 @@ final class ComputerUseSetupTests: XCTestCase {
             pairingCode: "123456",
             hostID: hostID,
             sessionID: "session-1",
+            localAccountBinding: accountBinding,
             pendingStore: store,
             channel: channel,
             promptRefreshInterval: .milliseconds(80))
@@ -959,6 +1022,10 @@ final class ComputerUseSetupTests: XCTestCase {
             kind: .prompt,
             channel: channel)
         let prompt = try XCTUnwrap(sentPrompt)
+        XCTAssertNotNil(store.load(
+            hostID: hostID,
+            pairingCode: "123456",
+            localAccountBinding: accountBinding))
         model.stopCurrentTask()
         let sentCancel = await waitForSentMessage(
             kind: .cancel,
@@ -1022,7 +1089,10 @@ final class ComputerUseSetupTests: XCTestCase {
             attemptsAfterTerminal,
             "Terminal assistant output must stop exact-prompt recovery replay")
         XCTAssertGreaterThanOrEqual(attemptsAfterTerminal, promptAttempts)
-        XCTAssertNil(store.load(hostID: hostID, pairingCode: "123456"))
+        XCTAssertNil(store.load(
+            hostID: hostID,
+            pairingCode: "123456",
+            localAccountBinding: accountBinding))
     }
 
     func test_setupRequiredStatusTerminallyClearsActiveAndPersistedPrompt() async throws {
@@ -1243,10 +1313,17 @@ final class ComputerUseSetupTests: XCTestCase {
             if case .approvalRequired = model.state { return true }
             return false
         }
+        XCTAssertEqual(
+            model.latestTerminalOutcome,
+            .userInterventionRequired,
+            "A pending host approval is a typed user-intervention outcome")
 
         model.respondToApproval(approval, approved: false)
 
         XCTAssertEqual(model.state, .working)
+        XCTAssertNil(
+            model.latestTerminalOutcome,
+            "The intervention outcome must clear after the user makes a choice")
         XCTAssertEqual(
             model.statusText,
             "Cancellation sent — waiting for your Mac…")
@@ -1305,8 +1382,12 @@ final class ComputerUseSetupTests: XCTestCase {
                 if case .approvalRequired(approval) = model.state { return true }
                 return false
             }
+            XCTAssertEqual(
+                model.latestTerminalOutcome,
+                .userInterventionRequired)
 
             model.respondToApproval(approval, approved: approved)
+            XCTAssertNil(model.latestTerminalOutcome)
             await waitUntilAsync {
                 await channel.sendAttemptCount(kind: .approvalResponse) == 1
             }
@@ -1548,6 +1629,23 @@ final class ComputerUseSetupTests: XCTestCase {
         }
         var acknowledgedBefore = await channel.acknowledgedEnvelopeCount()
         try await channel.enqueueHostEnvelope(
+            kind: .assistant,
+            body: ComputerUseTaskUpdate(
+                taskID: prompt.id,
+                text: "Stale completion that predates approval.",
+                appliedControlRevision: 2,
+                outcome: .taskCompleted).encodedBody())
+        await waitUntilAsync {
+            await channel.acknowledgedEnvelopeCount() > acknowledgedBefore
+        }
+        XCTAssertEqual(model.state, .approvalRequired(request))
+        XCTAssertFalse(model.messages.contains {
+            $0.author == .assistant
+                && $0.text == "Stale completion that predates approval."
+        })
+
+        acknowledgedBefore = await channel.acknowledgedEnvelopeCount()
+        try await channel.enqueueHostEnvelope(
             kind: .status,
             body: ComputerUseTaskUpdate(
                 taskID: prompt.id,
@@ -1681,6 +1779,10 @@ final class ComputerUseSetupTests: XCTestCase {
         model.respondToApproval(request, approved: true)
         XCTAssertEqual(model.state, .approvalRequired(request))
         XCTAssertEqual(
+            model.latestTerminalOutcome,
+            .userInterventionRequired,
+            "A failed decision save must retain the pending intervention outcome")
+        XCTAssertEqual(
             model.statusText,
             "Couldn’t safely save your choice. No response was sent.")
         let attempts = await channel.sendAttemptCount(kind: .approvalResponse)
@@ -1710,7 +1812,7 @@ final class ComputerUseSetupTests: XCTestCase {
             await channel.sendAttemptCount(kind: .prompt) == 1
         }
         XCTAssertEqual(model.state, .working)
-        XCTAssertEqual(model.statusText, "Sending securely through iCloud…")
+        XCTAssertEqual(model.statusText, "Sending securely to your Mac…")
 
         model.stop()
         await channel.releaseBlockedSend()
@@ -1722,7 +1824,7 @@ final class ComputerUseSetupTests: XCTestCase {
         XCTAssertEqual(model.state, .working)
         XCTAssertEqual(
             model.statusText,
-            "Sending securely through iCloud…",
+            "Sending securely to your Mac…",
             "A send that returns after stop must not publish a success state")
         XCTAssertNil(model.retryPrompt)
         XCTAssertEqual(
@@ -1931,7 +2033,7 @@ final class ComputerUseSetupTests: XCTestCase {
         model.takeControl()
 
         await waitUntil {
-            model.statusText == "Couldn’t reach AI through iCloud. Touch the live screen to take control immediately."
+            model.statusText == "Couldn’t reach AI securely. Use the Mac directly to take control immediately."
         }
         XCTAssertEqual(model.state, .paused)
         let pauseAttempts = await channel.sendAttemptCount(kind: .pause)
@@ -1964,7 +2066,7 @@ final class ComputerUseSetupTests: XCTestCase {
         model.resumeAI()
 
         await waitUntil {
-            model.statusText == "Couldn’t resume AI yet. Check iCloud and try again."
+            model.statusText == "Couldn’t resume AI yet. Check the connection and try again."
         }
         XCTAssertEqual(model.state, .paused)
         let resumeAttempts = await channel.sendAttemptCount(kind: .resume)
@@ -2537,17 +2639,39 @@ final class ComputerUseSetupTests: XCTestCase {
             detail: "Downloading AI…")
 
         XCTAssertEqual(
-            ComputerUseRowAction.resolve(host: host, state: .setupRequired),
+            ComputerUseRowAction.resolve(
+                host: host,
+                state: .setupRequired,
+                localPromptReady: true),
             .setup)
         XCTAssertEqual(
-            ComputerUseRowAction.resolve(host: host, state: .installing(progress)),
+            ComputerUseRowAction.resolve(
+                host: host,
+                state: .installing(progress),
+                localPromptReady: true),
             .progress(progress))
         XCTAssertEqual(
-            ComputerUseRowAction.resolve(host: host, state: .ready),
+            ComputerUseRowAction.resolve(
+                host: host,
+                state: .ready,
+                localPromptReady: true),
             .useAI)
         XCTAssertEqual(
-            ComputerUseRowAction.resolve(host: host, state: .failed("Try again")),
+            ComputerUseRowAction.resolve(
+                host: host,
+                state: .failed("Try again"),
+                localPromptReady: true),
             .retry("Try again"))
+
+        guard case .unavailable(let message) =
+                ComputerUseRowAction.resolve(
+                    host: host,
+                    state: .ready,
+                    localPromptReady: false) else {
+            return XCTFail(
+                "Cloud readiness must not expose Use AI without a local route")
+        }
+        XCTAssertTrue(message.contains("Secure local AI pairing"))
     }
 
     func test_rowAction_explainsAIRequirementsWithoutCloudKitHostIdentity() {
@@ -2555,7 +2679,8 @@ final class ComputerUseSetupTests: XCTestCase {
 
         guard case .unavailable(let message) = ComputerUseRowAction.resolve(
             host: host,
-            state: .setupRequired) else {
+            state: .setupRequired,
+            localPromptReady: false) else {
             return XCTFail("Expected an explanatory unavailable action")
         }
         XCTAssertTrue(message.contains("same Apple Account"))
@@ -2578,11 +2703,150 @@ final class ComputerUseSetupTests: XCTestCase {
         let coordinator = ComputerUseSetupCoordinator { _, _ in channel }
         let first = makeHost(code: "123456", capability: .setupRequired)
         coordinator.startSetup(for: first)
-        await Task.yield()
+        await waitUntilAsync {
+            await channel.sentMessages().count == 1
+        }
 
         let restarted = makeHost(code: "654321", capability: .setupRequired)
         coordinator.reconcile(hosts: [restarted])
-        XCTAssertEqual(coordinator.state(for: restarted), .setupRequired)
+        await waitUntilAsync {
+            await channel.sentMessages().count == 2
+        }
+        XCTAssertNotEqual(coordinator.state(for: restarted), .setupRequired)
+    }
+
+    func test_coordinatorRecreatesActiveSetupWhenLocalRouteChanges() async {
+        let channel = FakeComputerUseSetupChannel(responseBatches: [])
+        let coordinator = ComputerUseSetupCoordinator(
+            hasAuthenticatedRoute: { _ in true },
+            channelFactory: { _, _ in channel })
+        let first = makeHost(
+            capability: .setupRequired,
+            source: .localNetwork,
+            hasAuthenticatedCloudMatch: false,
+            localEndpoint: LocalComputerUseEndpoint(
+                host: "studio-mac.local.",
+                port: 50_001),
+            localCredentialID: String(repeating: "a", count: 64))
+        coordinator.startSetup(for: first)
+        await waitUntilAsync {
+            await channel.sentMessages().count == 1
+        }
+
+        let moved = makeHost(
+            capability: .setupRequired,
+            source: .localNetwork,
+            hasAuthenticatedCloudMatch: false,
+            localEndpoint: LocalComputerUseEndpoint(
+                host: "studio-mac.local.",
+                port: 50_002),
+            localCredentialID: String(repeating: "a", count: 64))
+        coordinator.reconcile(hosts: [moved])
+
+        await waitUntilAsync {
+            await channel.sentMessages().count == 2
+        }
+    }
+
+    func test_coordinatorCancelsSetupWhenAuthenticatedHostDisappears() async {
+        let channel = FakeComputerUseSetupChannel(responseBatches: [])
+        let coordinator = ComputerUseSetupCoordinator { _, _ in channel }
+        let host = makeHost(capability: .setupRequired)
+
+        coordinator.startSetup(for: host)
+        await waitUntilAsync {
+            await channel.sentMessages().count == 1
+        }
+        XCTAssertNotEqual(coordinator.state(for: host), .setupRequired)
+
+        coordinator.reconcile(hosts: [])
+
+        XCTAssertEqual(coordinator.state(for: host), .setupRequired)
+    }
+
+    func test_coordinatorCancelsSetupImmediatelyWhenAppleAccountChanges() async {
+        let notifications = NotificationCenter()
+        let channel = FakeComputerUseSetupChannel(responseBatches: [])
+        let coordinator = ComputerUseSetupCoordinator(
+            accountChangeNotificationCenter: notifications,
+            channelFactory: { _, _ in channel })
+        let host = makeHost(capability: .setupRequired)
+
+        coordinator.startSetup(for: host)
+        await waitUntilAsync {
+            await channel.sentMessages().count == 1
+        }
+
+        notifications.post(
+            name: NSNotification.Name.CKAccountChanged,
+            object: nil)
+
+        XCTAssertEqual(coordinator.state(for: host), .setupRequired)
+    }
+
+    func test_coordinatorKeepsSameHostStateSeparateForEachAppleAccount() {
+        let accountA = CloudKitAccountBinding(
+            rawValue: String(repeating: "1", count: 64))!
+        let accountB = CloudKitAccountBinding(
+            rawValue: String(repeating: "2", count: 64))!
+        let coordinator = ComputerUseSetupCoordinator(
+            hasAuthenticatedRoute: { _ in false },
+            channelFactory: { _, _ in
+                FakeComputerUseSetupChannel(responseBatches: [])
+            })
+        let readyA = makeHost(
+            capability: .ready,
+            accountBinding: accountA)
+        let setupB = makeHost(
+            capability: .setupRequired,
+            accountBinding: accountB)
+
+        coordinator.reconcile(hosts: [readyA, setupB])
+
+        XCTAssertEqual(coordinator.state(for: readyA), .ready)
+        XCTAssertEqual(coordinator.state(for: setupB), .setupRequired)
+    }
+
+    func test_coordinatorOnlyMonitorsInstallingHostAfterRouteAuthenticates() async throws {
+        var routeIsAuthenticated = false
+        var factoryInvocationCount = 0
+        let ready = ComputerUseSetupProgress(
+            requestID: "host-installation",
+            phase: .ready,
+            fractionCompleted: 1,
+            detail: "AI Computer Use is ready")
+        let channel = FakeComputerUseSetupChannel(
+            responseBatches: [[try progressEnvelope(ready)]])
+        let coordinator = ComputerUseSetupCoordinator(
+            hasAuthenticatedRoute: { _ in routeIsAuthenticated },
+            channelFactory: { _, _ in
+                factoryInvocationCount += 1
+                return channel
+            })
+        let host = makeHost(
+            capability: ComputerUseCapability(
+                state: .installing,
+                detail: "Downloading AI on this Mac"),
+            source: .localNetwork,
+            hasAuthenticatedCloudMatch: false,
+            localEndpoint: LocalComputerUseEndpoint(
+                host: "studio-mac.local.",
+                port: 50_001),
+            localCredentialID: String(repeating: "a", count: 64))
+
+        coordinator.reconcile(hosts: [host])
+        await Task.yield()
+        XCTAssertEqual(factoryInvocationCount, 0)
+        let sentBeforeAuthentication = await channel.sentMessages()
+        XCTAssertTrue(sentBeforeAuthentication.isEmpty)
+
+        routeIsAuthenticated = true
+        coordinator.reconcile(hosts: [host])
+
+        await waitUntil { coordinator.state(for: host) == .ready }
+        XCTAssertEqual(factoryInvocationCount, 1)
+        let sentAfterAuthentication = await channel.sentMessages()
+        XCTAssertEqual(sentAfterAuthentication.count, 1)
     }
 
     func test_coordinator_sendsOneRequestForDuplicateTapsAndBecomesReady() async throws {
@@ -2952,14 +3216,23 @@ final class ComputerUseSetupTests: XCTestCase {
     private func makeHost(
         senderID: String? = "HOST-ID",
         code: String = "123456",
-        capability: ComputerUseCapability
+        capability: ComputerUseCapability,
+        source: LocalHostAdvertisement.Source = .cloudKit,
+        hasAuthenticatedCloudMatch: Bool? = nil,
+        accountBinding: CloudKitAccountBinding? = nil,
+        localEndpoint: LocalComputerUseEndpoint? = nil,
+        localCredentialID: String? = nil
     ) -> LocalHostAdvertisement {
         LocalHostAdvertisement(
             hostname: "Studio Mac",
             code: code,
-            source: .cloudKit,
+            source: source,
             senderID: senderID,
-            computerUseCapability: capability)
+            computerUseCapability: capability,
+            hasAuthenticatedCloudMatch: hasAuthenticatedCloudMatch,
+            accountBinding: accountBinding,
+            localEndpoint: localEndpoint,
+            localCredentialID: localCredentialID)
     }
 
     private func progressEnvelope(

@@ -14,9 +14,7 @@ pub enum HostStatus {
     SigningIn,
     Idle,
     Starting,
-    Advertising {
-        code: String,
-    },
+    Advertising,
     Paired {
         client: String,
     },
@@ -30,7 +28,7 @@ impl HostStatus {
             Self::SigningIn => "Signing in",
             Self::Idle => "Ready",
             Self::Starting => "Starting…",
-            Self::Advertising { .. } => "Waiting for pairing",
+            Self::Advertising => "Waiting for devices",
             Self::Paired { .. } => "Connected",
             Self::Error(_) => "Error",
         }

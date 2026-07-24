@@ -35,11 +35,12 @@ public struct SignalingEnvelope: Codable, Sendable {
 /// pair; the caller still needs to handle out-of-order arrival across pairs.
 public protocol SignalingChannel: AnyObject, Sendable {
     /// Side-specific handshake.
-    /// - Host: writes a `HostAdvertisement` record for its pairing code so
+    /// - Host: writes a `HostAdvertisement` record for its private session
+    ///   binding so
     ///   clients can discover it.
     /// - Client: queries for a matching `HostAdvertisement` and resolves the
     ///   host's `senderID`. Throws `.hostUnavailable` if no advertisement
-    ///   exists for the code, or `.signalingUnavailable` for network errors.
+    ///   exists for the binding, or `.signalingUnavailable` for network errors.
     func claim() async throws
 
     /// Sends an envelope to the peer. Fire-and-forget from the caller's
@@ -54,8 +55,7 @@ public protocol SignalingChannel: AnyObject, Sendable {
 /// Errors shared across signaling implementations. Transport-level errors
 /// (`TransportError`) wrap these at the caller boundary.
 public enum SignalingError: Error, LocalizedError {
-    /// Host isn't advertising for the supplied pairing code. Either the
-    /// code is wrong or the host was closed.
+    /// The selected host is no longer advertising to this private database.
     case hostUnavailable
     /// Client's iCloud account differs from the host's, or the user isn't
     /// signed into iCloud at all.
@@ -67,7 +67,7 @@ public enum SignalingError: Error, LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .hostUnavailable:
-            return "No computer is advertising that pairing code. Check the code on your Mac and make sure both devices are signed into the same iCloud account."
+            return "That computer is not available through your Apple Account. Make sure both devices use the same Apple Account and the Mac host is running."
         case .iCloudUnavailable(let m):
             return m
         case .transport(let m):

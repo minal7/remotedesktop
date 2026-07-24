@@ -1,10 +1,11 @@
 import CloudKit
 import Foundation
 
-/// Point-to-point CloudKit transport for computer-use prompts and state.
-/// Both apps use the user's private database, matching the existing signaling
-/// privacy model. The host may accept any session ID for its current pairing
-/// code; an iOS client scopes reads to its own session ID.
+/// Point-to-point CloudKit transport for the Computer Use setup lifecycle.
+/// Production task prompts, results, controls, and approvals use the
+/// authenticated LAN broker and are rejected on send here. The generic
+/// envelope decoder remains wire-compatible so setup callers can acknowledge
+/// and remove obsolete task records written by earlier releases.
 public actor CloudKitComputerUseChannel {
     public init(
         containerIdentifier: String,
@@ -30,6 +31,10 @@ public actor CloudKitComputerUseChannel {
         sessionID explicitSessionID: String? = nil,
         messageID explicitMessageID: String? = nil
     ) async throws -> ComputerUseEnvelope {
+        guard kind == .setupRequest || kind == .setupProgress else {
+            throw SignalingError.transport(
+                "CloudKit is available only for AI setup. Task traffic requires the authenticated local connection.")
+        }
         let destination = explicitTargetID ?? targetID
         guard let destination, !destination.isEmpty else {
             throw SignalingError.transport("The AI host could not be identified. Return to Devices and try again.")
@@ -40,6 +45,8 @@ public actor CloudKitComputerUseChannel {
         }
 
         try await ensureAccountAvailable()
+        try await prepareOwnedRecordLifecycle()
+        await cleanupExpiredOwnedRecords()
         let envelope = ComputerUseEnvelope(
             id: explicitMessageID ?? UUID().uuidString,
             senderID: senderID,
@@ -49,6 +56,10 @@ public actor CloudKitComputerUseChannel {
             kind: kind,
             body: body)
         let record = try Self.record(for: envelope)
+        try await reserveOwnedRecord(
+            record.recordID,
+            createdAt: envelope.createdAt,
+            refreshesDeadline: explicitMessageID != nil)
 
         do {
             try await saveStableRecord(record, matching: envelope)
@@ -60,6 +71,8 @@ public actor CloudKitComputerUseChannel {
 
     public func poll() async throws -> [ComputerUseEnvelope] {
         try await ensureAccountAvailable()
+        try await prepareOwnedRecordLifecycle()
+        await cleanupExpiredOwnedRecords()
         try? await flushPendingAcknowledgements()
         let cutoff = max(startedAt, Date(timeIntervalSinceNow: -Self.staleSeconds))
         let predicate = NSPredicate(
@@ -72,7 +85,10 @@ public actor CloudKitComputerUseChannel {
         let desiredKeys = [
             "senderID", "targetID", "pairingCode", "kind", "payload", "createdAt",
         ]
-        var results: [(CKRecord.ID, Result<CKRecord, Error>)] = []
+        var accumulator = BoundedCloudKitRecordAccumulator<
+            (CKRecord.ID, Result<CKRecord, Error>)>(
+                maximumObservedRecords: Self.maximumQueryRecords,
+                maximumPages: Self.maximumQueryPages)
         do {
             var response = try await retryingCloudKit {
                 try await database.records(
@@ -81,7 +97,10 @@ public actor CloudKitComputerUseChannel {
                     desiredKeys: desiredKeys,
                     resultsLimit: 100)
             }
-            results.append(contentsOf: response.matchResults)
+            try accumulator.append(
+                response.matchResults,
+                observedRecordCount: response.matchResults.count,
+                hasMore: response.queryCursor != nil)
             while let cursor = response.queryCursor {
                 response = try await retryingCloudKit {
                     try await database.records(
@@ -89,7 +108,10 @@ public actor CloudKitComputerUseChannel {
                         desiredKeys: desiredKeys,
                         resultsLimit: 100)
                 }
-                results.append(contentsOf: response.matchResults)
+                try accumulator.append(
+                    response.matchResults,
+                    observedRecordCount: response.matchResults.count,
+                    hasMore: response.queryCursor != nil)
             }
         } catch let error as CKError where error.code == .unknownItem {
             return []
@@ -97,9 +119,22 @@ public actor CloudKitComputerUseChannel {
             throw Self.userFacingError(error, operation: "check AI progress")
         }
 
+        // A private-database query may race an Apple Account transition.
+        // Never inspect or acknowledge records unless this actor is still
+        // bound to the account whose cleanup ledger it prepared.
+        try await ensureOwnedRecordLifecycleAccountCurrent()
+        if let failedRecord = accumulator.records.first(where: {
+            if case .failure = $0.1 { return true }
+            return false
+        }), case .failure(let error) = failedRecord.1 {
+            throw Self.userFacingError(
+                error,
+                operation: "read every AI progress record")
+        }
+
         var envelopes: [ComputerUseEnvelope] = []
-        for (recordID, result) in results {
-            guard !consumedRecordIDs.contains(recordID) else { continue }
+        for (recordID, result) in accumulator.records {
+            guard !pendingAcknowledgementIDs.contains(recordID) else { continue }
             guard case .success(let record) = result,
                   let envelope = Self.envelope(from: record),
                   envelope.pairingCode == pairingCode,
@@ -109,6 +144,13 @@ public actor CloudKitComputerUseChannel {
             }
             envelopes.append(envelope)
         }
+        let prospectiveIDs = pendingAcknowledgementIDs.union(envelopes.map {
+            CKRecord.ID(recordName: "WebRTCSignal-ComputerUse-\($0.id)")
+        })
+        guard prospectiveIDs.count <= Self.maximumPendingAcknowledgements else {
+            throw SignalingError.transport(
+                "Too many AI messages are waiting for iCloud cleanup. Keep both apps open and try again shortly.")
+        }
         return envelopes
     }
 
@@ -117,45 +159,53 @@ public actor CloudKitComputerUseChannel {
     /// local handling. Privileged prompts are additionally deduplicated by
     /// the host's durable task ledger.
     public func acknowledge(_ envelopes: [ComputerUseEnvelope]) async throws {
+        guard !senderID.isEmpty else {
+            throw SignalingError.transport(
+                "This device could not securely save its AI connection identity. Restart the app and try again.")
+        }
+        try await ensureAccountAvailable()
+        try await prepareOwnedRecordLifecycle()
+        try await ensureOwnedRecordLifecycleAccountCurrent()
         let ids = Set(envelopes.map {
             CKRecord.ID(recordName: "WebRTCSignal-ComputerUse-\($0.id)")
         })
         // Mark only after the caller confirms it applied the envelope. A host
         // can therefore defer a privileged prompt that arrived just before
         // the WebRTC hello authorization without losing it in this process.
-        consumedRecordIDs.formUnion(ids)
+        guard pendingAcknowledgementIDs.union(ids).count
+                <= Self.maximumPendingAcknowledgements else {
+            throw SignalingError.transport(
+                "Too many AI messages are waiting for iCloud cleanup. Keep both apps open and try again shortly.")
+        }
         pendingAcknowledgementIDs.formUnion(ids)
         try await flushPendingAcknowledgements()
     }
 
     private func flushPendingAcknowledgements() async throws {
-        let ids = Array(pendingAcknowledgementIDs)
-        for start in stride(from: 0, to: ids.count, by: 200) {
-            let end = min(start + 200, ids.count)
+        let ids = pendingAcknowledgementIDs.sorted {
+            $0.recordName < $1.recordName
+        }
+        for start in stride(from: 0, to: ids.count, by: 100) {
+            let end = min(start + 100, ids.count)
             let batch = Array(ids[start ..< end])
+            let result: Result<Void, Error>
             do {
                 try await retryingCloudKit {
                     try await delete(recordIDs: batch)
                 }
-                pendingAcknowledgementIDs.subtract(batch)
-                consumedRecordIDs.subtract(batch)
-            } catch let cloudKit as CKError
-                where Self.isIdempotentDeleteResult(cloudKit) {
-                pendingAcknowledgementIDs.subtract(batch)
-                consumedRecordIDs.subtract(batch)
-                continue
-            } catch let cloudKit as CKError where cloudKit.code == .partialFailure {
-                guard let partials = cloudKit.userInfo[CKPartialErrorsByItemIDKey]
-                    as? [CKRecord.ID: Error] else {
-                    throw cloudKit
-                }
-                let retryIDs = Set(partials.compactMap { id, error in
-                    (error as? CKError)?.code == .unknownItem ? nil : id
-                })
-                let completedIDs = Set(batch).subtracting(retryIDs)
-                pendingAcknowledgementIDs.subtract(completedIDs)
-                consumedRecordIDs.subtract(completedIDs)
-                if !retryIDs.isEmpty { throw cloudKit }
+                result = .success(())
+            } catch {
+                result = .failure(error)
+            }
+            let confirmed =
+                BoundedCloudKitDeleteAccounting.confirmedRecordIDs(
+                    in: batch,
+                    result: result)
+            pendingAcknowledgementIDs.subtract(confirmed)
+            guard confirmed.count == batch.count else {
+                if case .failure(let error) = result { throw error }
+                throw SignalingError.transport(
+                    "Some AI messages are still waiting for iCloud cleanup.")
             }
         }
     }
@@ -166,6 +216,10 @@ public actor CloudKitComputerUseChannel {
     public nonisolated static let recordType = "WebRTCSignal"
     public nonisolated static let staleSeconds: TimeInterval = 60 * 60
     private nonisolated static let stableSaveAttemptLimit = 4
+    nonisolated static let maximumQueryRecords = 1_000
+    nonisolated static let maximumQueryPages = 10
+    nonisolated static let maximumPendingAcknowledgements = 1_000
+    nonisolated static let maximumTrackedOwnedRecords = 1_024
 
     private let containerIdentifier: String
     private let pairingCode: String
@@ -173,8 +227,12 @@ public actor CloudKitComputerUseChannel {
     private let senderID: String
     private let targetID: String?
     private let startedAt: Date
-    private var consumedRecordIDs: Set<CKRecord.ID> = []
     private var pendingAcknowledgementIDs: Set<CKRecord.ID> = []
+    private let ownedRecordStore: any BoundedCloudKitOwnedRecordStore =
+        UserDefaultsBoundedCloudKitOwnedRecordStore()
+    private var ownedRecordLifecycleNamespace: String?
+    private var ownedRecordLifecycleAccountBinding: CloudKitAccountBinding?
+    private var ownedRecordLifecycle: BoundedCloudKitOwnedRecordLifecycle?
     private var cachedContainer: CKContainer?
     private var cachedDatabase: CKDatabase?
 
@@ -208,8 +266,10 @@ public actor CloudKitComputerUseChannel {
         for _ in 0 ..< Self.stableSaveAttemptLimit {
             do {
                 _ = try await retryingCloudKit {
+                    try await ensureOwnedRecordLifecycleAccountCurrent()
                     try await database.save(candidate)
                 }
+                try await ensureOwnedRecordLifecycleAccountCurrent()
                 return
             } catch let cloudKit as CKError
                 where cloudKit.code == .serverRecordChanged {
@@ -240,6 +300,10 @@ public actor CloudKitComputerUseChannel {
     }
 
     private func ensureAccountAvailable() async throws {
+        guard !senderID.isEmpty else {
+            throw SignalingError.transport(
+                "This device could not securely save its AI connection identity. Restart the app and try again.")
+        }
         try CloudKitEntitlements.validate(containerIdentifier: containerIdentifier)
         let status: CKAccountStatus
         do {
@@ -253,17 +317,207 @@ public actor CloudKitComputerUseChannel {
         }
     }
 
+    public func stopPolling() async {
+        guard let lifecycle = ownedRecordLifecycle else { return }
+        _ = await cleanupOwnedRecordIDs(
+            lifecycle.recordsForShutdownCleanup().map {
+                CKRecord.ID(recordName: $0)
+            })
+    }
+
     private func delete(recordIDs: [CKRecord.ID]) async throws {
+        try await ensureOwnedRecordLifecycleAccountCurrent()
         let operation = CKModifyRecordsOperation(
             recordsToSave: nil,
             recordIDsToDelete: recordIDs)
         operation.savePolicy = .allKeys
+        operation.isAtomic = false
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             operation.modifyRecordsResultBlock = { result in
                 continuation.resume(with: result)
             }
             database.add(operation)
         }
+        // If the account changed while the operation was in flight, retain
+        // every local acknowledgement so a later run on the original account
+        // can confirm cleanup instead of releasing the wrong ledger.
+        try await ensureOwnedRecordLifecycleAccountCurrent()
+    }
+
+    private func prepareOwnedRecordLifecycle() async throws {
+        let binding = try await currentAccountBinding()
+        if let expected = ownedRecordLifecycleAccountBinding {
+            guard binding == expected else {
+                throw SignalingError.iCloudUnavailable(
+                    "The iCloud account changed during AI setup. Start the setup again.")
+            }
+            guard ownedRecordLifecycle != nil else {
+                throw SignalingError.transport(
+                    "The AI cleanup ledger is unavailable. Restart the app and try again.")
+            }
+            return
+        }
+        let namespace = BoundedCloudKitOwnedRecordLifecycle.namespace(
+            purpose: "computer-use",
+            containerIdentifier: containerIdentifier,
+            senderID: senderID,
+            accountBinding: binding)
+        guard namespace != ownedRecordLifecycleNamespace else { return }
+
+        let lifecycle = BoundedCloudKitOwnedRecordLifecycle(
+            namespace: namespace,
+            validityWindow: Self.staleSeconds,
+            maximumEntries: Self.maximumTrackedOwnedRecords,
+            clock: { Date() },
+            store: ownedRecordStore,
+            ownsRecordName: { recordName in
+                Self.isOwnedRecordName(recordName)
+            })
+        ownedRecordLifecycleNamespace = namespace
+        ownedRecordLifecycleAccountBinding = binding
+        ownedRecordLifecycle = lifecycle
+        _ = await cleanupOwnedRecordIDs(
+            lifecycle.restorationOverflowRecordNames.map {
+                CKRecord.ID(recordName: $0)
+            })
+    }
+
+    private func reserveOwnedRecord(
+        _ recordID: CKRecord.ID,
+        createdAt: Date,
+        refreshesDeadline: Bool
+    ) async throws {
+        while var lifecycle = ownedRecordLifecycle {
+            switch lifecycle.track(
+                recordName: recordID.recordName,
+                createdAt: createdAt,
+                refreshesDeadline: refreshesDeadline) {
+            case .tracked:
+                ownedRecordLifecycle = lifecycle
+                return
+            case .retentionUnavailable:
+                ownedRecordLifecycle = lifecycle
+                throw SignalingError.transport(
+                    "The AI message could not be durably tracked for iCloud cleanup.")
+            case .cleanupRequired(let recordNames):
+                ownedRecordLifecycle = lifecycle
+                let cleaned = await cleanupOwnedRecordIDs(recordNames.map {
+                    CKRecord.ID(recordName: $0)
+                })
+                guard cleaned.count == recordNames.count else {
+                    throw SignalingError.transport(
+                        "AI messaging is waiting for iCloud cleanup. Keep both apps open and try again shortly.")
+                }
+            }
+        }
+        throw SignalingError.transport(
+            "The AI message could not be durably tracked for iCloud cleanup.")
+    }
+
+    private func cleanupExpiredOwnedRecords() async {
+        guard let lifecycle = ownedRecordLifecycle else { return }
+        _ = await cleanupOwnedRecordIDs(
+            lifecycle.recordsDueForCleanup().map {
+                CKRecord.ID(recordName: $0)
+            })
+    }
+
+    @discardableResult
+    private func cleanupOwnedRecordIDs(
+        _ recordIDs: [CKRecord.ID]
+    ) async -> Set<CKRecord.ID> {
+        let uniqueIDs = Set(recordIDs).sorted {
+            $0.recordName < $1.recordName
+        }
+        guard !uniqueIDs.isEmpty else { return [] }
+        var cleaned: Set<CKRecord.ID> = []
+        for start in stride(from: 0, to: uniqueIDs.count, by: 100) {
+            do {
+                try await ensureOwnedRecordLifecycleAccountCurrent()
+            } catch {
+                return []
+            }
+            let end = min(start + 100, uniqueIDs.count)
+            let batch = Array(uniqueIDs[start..<end])
+            let operation = CKModifyRecordsOperation(
+                recordsToSave: nil,
+                recordIDsToDelete: batch)
+            operation.savePolicy = .allKeys
+            operation.isAtomic = false
+            let result: Result<Void, Error> = await withCheckedContinuation {
+                continuation in
+                operation.modifyRecordsResultBlock = {
+                    continuation.resume(returning: $0)
+                }
+                database.add(operation)
+            }
+            do {
+                try await ensureOwnedRecordLifecycleAccountCurrent()
+            } catch {
+                return []
+            }
+            cleaned.formUnion(
+                BoundedCloudKitDeleteAccounting.confirmedRecordIDs(
+                    in: batch,
+                    result: result))
+        }
+        do {
+            try await ensureOwnedRecordLifecycleAccountCurrent()
+        } catch {
+            return []
+        }
+        if !cleaned.isEmpty, var lifecycle = ownedRecordLifecycle,
+           lifecycle.markCleaned(recordNames: cleaned.map(\.recordName)) {
+            ownedRecordLifecycle = lifecycle
+        }
+        return cleaned
+    }
+
+    private func currentAccountBinding() async throws -> CloudKitAccountBinding {
+        do {
+            try CloudKitEntitlements.validate(
+                containerIdentifier: containerIdentifier)
+            let status = try await retryingCloudKit {
+                try await container.accountStatus()
+            }
+            if let statusError = CloudKitAccountBinding.resolutionError(
+                for: status) {
+                throw statusError
+            }
+            let userRecordID = try await retryingCloudKit {
+                try await container.userRecordID()
+            }
+            return try CloudKitAccountBinding.derived(
+                containerIdentifier: containerIdentifier,
+                userRecordName: userRecordID.recordName)
+        } catch {
+            throw Self.userFacingError(
+                error,
+                operation: "verify the iCloud account for AI cleanup")
+        }
+    }
+
+    private func ensureOwnedRecordLifecycleAccountCurrent() async throws {
+        guard let expected = ownedRecordLifecycleAccountBinding else {
+            throw SignalingError.transport(
+                "The AI cleanup ledger is unavailable. Restart the app and try again.")
+        }
+        let current = try await currentAccountBinding()
+        guard current == expected else {
+            throw SignalingError.iCloudUnavailable(
+                "The iCloud account changed during AI setup. Start the setup again.")
+        }
+    }
+
+    private nonisolated static func isOwnedRecordName(
+        _ recordName: String
+    ) -> Bool {
+        let prefix = "WebRTCSignal-ComputerUse-"
+        guard recordName.hasPrefix(prefix),
+              recordName.utf8.count <= 128 else { return false }
+        let suffix = String(recordName.dropFirst(prefix.count))
+        guard let uuid = UUID(uuidString: suffix) else { return false }
+        return uuid.uuidString == suffix.uppercased()
     }
 
     private func retryingCloudKit<Value>(

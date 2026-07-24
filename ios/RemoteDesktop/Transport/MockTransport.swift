@@ -14,7 +14,7 @@ final class MockTransport: Transport {
     private let log = Logger(subsystem: "com.threadmark.remotedesktop", category: "mock")
 
     func connect(pairingCode: String, expectedHostID: String?) async throws {
-        log.debug("mock: connect code=\(pairingCode, privacy: .public)")
+        log.debug("mock: connect")
         try? await Task.sleep(for: .milliseconds(400))
 
         onHostHello?(HostHello(

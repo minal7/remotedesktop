@@ -158,7 +158,7 @@ enum OSAtlasExplicitActionDirective: String, Equatable, Hashable, Sendable {
         case .ask:
             return "ASK [Which date should I use?]"
         case .answer:
-            return "ANSWER [The visible total is $24.18.]"
+            return "ANSWER [observed result]"
         case .report:
             return "REPORT [The visible status is Ready.]"
         }
@@ -449,6 +449,339 @@ enum OSAtlasAccessibilityClickCorrection {
     }
 }
 
+/// Host-only semantic evidence for a visible Accessibility control. Unlike the
+/// privacy-preserving geometry candidate above, the label is retained only for
+/// the duration of one local correction and is never logged or persisted.
+struct OSAtlasSemanticAccessibilityClickCandidate: Equatable, Sendable {
+    let identity: String
+    let frame: CGRect
+    let isEnabled: Bool
+    let isActionable: Bool
+    let label: String
+}
+
+struct OSAtlasSemanticAccessibilityClickScope: Equatable, Sendable {
+    let frame: CGRect
+    let candidates: [OSAtlasSemanticAccessibilityClickCandidate]
+}
+
+enum OSAtlasSemanticAccessibilityClickCorrection {
+    /// Returns a center point only when one distinct, enabled actionable
+    /// control strongly matches the typed planner's target purpose. Candidate
+    /// collection is separately restricted to the focused window/web area.
+    static func correctedPoint(
+        predicted: CGPoint,
+        targetHint: String,
+        scope: OSAtlasSemanticAccessibilityClickScope
+    ) -> CGPoint? {
+        guard predicted.x.isFinite, predicted.y.isFinite,
+              scope.frame.origin.x.isFinite,
+              scope.frame.origin.y.isFinite,
+              scope.frame.width.isFinite,
+              scope.frame.height.isFinite,
+              scope.frame.width > 0,
+              scope.frame.height > 0,
+              scope.frame.contains(predicted),
+              !meaningfulTokens(targetHint).isEmpty else {
+            return nil
+        }
+
+        var unique: [String: OSAtlasSemanticAccessibilityClickCandidate] = [:]
+        for candidate in scope.candidates where
+            candidate.isEnabled && candidate.isActionable &&
+            candidate.frame.origin.x.isFinite &&
+            candidate.frame.origin.y.isFinite &&
+            candidate.frame.width.isFinite &&
+            candidate.frame.height.isFinite &&
+            candidate.frame.width > 0 && candidate.frame.height > 0 &&
+            scope.frame.contains(CGPoint(
+                x: candidate.frame.midX,
+                y: candidate.frame.midY)) &&
+            stronglyMatches(
+                targetHint: targetHint,
+                candidateLabel: candidate.label) {
+            unique[candidate.identity] = candidate
+        }
+        guard unique.count == 1, let candidate = unique.values.first else {
+            return nil
+        }
+        return CGPoint(x: candidate.frame.midX, y: candidate.frame.midY)
+    }
+
+    /// Derives a second, AX-only hint from one ordered pointer clause in the
+    /// authoritative user request. Foundation's generated hint remains the
+    /// visual-grounding input and is always tried first. This fallback exists
+    /// for icon descriptions such as “diagonal navigation glyph” and positional
+    /// descriptions such as “the tab on the right”, where the generated words
+    /// describe appearance or layout but omit the accessible purpose.
+    ///
+    /// The generated hint must uniquely anchor one affirmative pointer clause,
+    /// that clause must be the next unperformed pointer clause, and it must add
+    /// substantive purpose words. A one-word purpose is accepted only for a
+    /// layout-qualified hint that also carries that exact task anchor. Quoted
+    /// payloads, negated commands, the rest of the task, and visible page text
+    /// cannot contribute.
+    static func trustedTaskFallbackHint(
+        trustedTask: String,
+        proposedTargetHint: String,
+        history: [String],
+        frontmostApplication: String? = nil,
+        frontmostApplicationIdentityIsAuthoritative: Bool = false
+    ) -> String? {
+        guard case .bound = AppleFoundationVisualActionRouter
+            .taskBoundOrderedPointerResolution(
+                for: trustedTask,
+                history: history,
+                availableDirectives: [.click, .doubleClick, .rightClick],
+                historyIsComplete: true,
+                frontmostApplication: frontmostApplication,
+                frontmostApplicationIdentityIsAuthoritative:
+                    frontmostApplicationIdentityIsAuthoritative) else {
+            return nil
+        }
+        let task = AppleFoundationVisualActionRouter
+            .taskTextMaskingQuotedContent(trustedTask)
+        let words = canonicalTokens(task)
+        let proposedAnchors = Set(anchorTokens(proposedTargetHint))
+        guard !words.isEmpty, !proposedAnchors.isEmpty else { return nil }
+
+        let pointerVerbs: Set<String> = [
+            "activate", "choose", "click", "press", "select", "tap",
+        ]
+        let orderedActionVerbs = pointerVerbs.union([
+            "answer", "copy", "drag", "enter", "report", "scroll",
+            "tell", "type", "wait", "write",
+        ])
+        let pointerStarts = words.indices.filter { index in
+            pointerVerbs.contains(words[index])
+                && !isLocallyNegated(index: index, words: words)
+        }
+        guard !pointerStarts.isEmpty else { return nil }
+
+        var clauses: [[String]] = []
+        clauses.reserveCapacity(pointerStarts.count)
+        for start in pointerStarts {
+            let searchStart = words.index(after: start)
+            let end = words[searchStart...].indices.first(where: { index in
+                orderedActionVerbs.contains(words[index])
+                    && !isLocallyNegated(index: index, words: words)
+            }) ?? words.endIndex
+            clauses.append(Array(words[start ..< end]))
+        }
+
+        let genericAnchors: Set<String> = [
+            "button", "control", "field", "icon", "item", "link", "row",
+            "tab",
+        ]
+        let positionalAnchors: Set<String> = [
+            "above", "adjacent", "below", "beside", "bottom", "center",
+            "central", "first", "hand", "inactive", "last", "left",
+            "lower", "middle", "near", "nearby", "next", "other",
+            "previous", "right", "second", "side", "top", "upper",
+            "unselected",
+        ]
+        let completedPointerActions = history.filter { entry in
+            ["CLICK", "DOUBLE_CLICK", "RIGHT_CLICK"].contains { prefix in
+                entry == prefix || entry.hasPrefix("\(prefix) [[")
+            }
+        }.count
+        let anchored = clauses.indices.filter { index in
+            let shared = proposedAnchors.intersection(Set(anchorTokens(
+                clauses[index].joined(separator: " "))))
+            return !shared.subtracting(genericAnchors).isEmpty
+        }
+        let clauseIndex: Int
+        let isPositionalFallback: Bool
+        let carriesOnlyCompletedClauseContext: Bool
+        if anchored.count == 1, let anchoredClause = anchored.first {
+            clauseIndex = anchoredClause
+            isPositionalFallback = false
+            carriesOnlyCompletedClauseContext = false
+        } else if anchored.count > 1,
+                  clauses.indices.contains(completedPointerActions),
+                  anchored.contains(completedPointerActions),
+                  anchored.allSatisfy({ $0 <= completedPointerActions }) {
+            // Foundation sometimes retains the purpose of the just-completed
+            // click while naming the next target (for example “route details
+            // Rates tab”). The raw host history can disambiguate that overlap:
+            // accept the next clause only when every other matched clause is
+            // already complete. A hint mixing the next action with any future
+            // clause still fails closed.
+            clauseIndex = completedPointerActions
+            isPositionalFallback = false
+            carriesOnlyCompletedClauseContext = true
+        } else {
+            // A layout-only hint has no semantic authority of its own. It may
+            // borrow only the next affirmative pointer clause from the user's
+            // ordered task. Any substantive generated word (for example
+            // "Overview", "Continue", or "Place Order") keeps this path
+            // closed instead of being rewritten into a different action.
+            let specific = proposedAnchors.subtracting(genericAnchors)
+            guard anchored.isEmpty,
+                  !specific.isEmpty,
+                  specific.isSubset(of: positionalAnchors),
+                  clauses.indices.contains(completedPointerActions) else {
+                return nil
+            }
+            clauseIndex = completedPointerActions
+            isPositionalFallback = true
+            carriesOnlyCompletedClauseContext = false
+        }
+        guard clauseIndex == completedPointerActions else { return nil }
+
+        let selectedClauseWords = Set(clauses[clauseIndex])
+        let unsafeFallbackWords: Set<String> = [
+            "buy", "cannot", "delete", "dont", "download", "erase",
+            "except", "excluding", "how", "instead", "learn", "never",
+            "no", "not", "order", "purchase", "rather", "remove", "save",
+            "send", "share", "submit", "trash", "upload", "without",
+        ]
+        guard selectedClauseWords.isDisjoint(with: unsafeFallbackWords),
+              isPositionalFallback || selectedClauseWords.contains("icon")
+        else {
+            return nil
+        }
+
+        let substantive = Set(meaningfulTokens(
+            clauses[clauseIndex].joined(separator: " "))).subtracting(
+                pointerVerbs)
+        // A positional-only hint can safely resolve the next ordinary one-word
+        // task target. An anchored hint may do the same only when it contains
+        // that task word plus at least one tightly bounded layout qualifier.
+        // The exact one-word hint stays on the primary matcher and does not
+        // silently acquire broader authority from the task.
+        let proposedMeaningful = Set(
+            meaningfulTokens(proposedTargetHint)).subtracting(pointerVerbs)
+        let anchoredOneWordWithLayout = !isPositionalFallback
+            && !carriesOnlyCompletedClauseContext
+            && substantive.count == 1
+            && substantive.isSubset(of: proposedMeaningful)
+            && !proposedMeaningful.subtracting(substantive).isEmpty
+            && proposedMeaningful.subtracting(substantive)
+                .isSubset(of: positionalAnchors)
+        let completedClauseWords = Set(
+            clauses.prefix(completedPointerActions).flatMap {
+                meaningfulTokens($0.joined(separator: " "))
+            }).subtracting(pointerVerbs)
+        let anchoredOneWordWithCompletedContext =
+            carriesOnlyCompletedClauseContext
+            && substantive.count == 1
+            && substantive.isSubset(of: proposedMeaningful)
+            && !proposedMeaningful.subtracting(substantive).isEmpty
+            && proposedMeaningful.subtracting(substantive)
+                .isSubset(of: completedClauseWords)
+        guard substantive.count >= 2
+                || (isPositionalFallback && substantive.count == 1)
+                || anchoredOneWordWithLayout
+                || anchoredOneWordWithCompletedContext else {
+            return nil
+        }
+        // The Accessibility matcher needs the task-authored target phrase,
+        // not the operation that will be performed on it. Keeping the leading
+        // pointer verb would turn a safe one-word purpose such as `Rates` into
+        // `{select, rate}` and prevent its exact-label match. Remove only that
+        // already-validated clause verb rather than weakening the global
+        // semantic matcher.
+        return String(
+            clauses[clauseIndex].dropFirst().joined(separator: " ")
+                .prefix(192))
+    }
+
+    static func stronglyMatches(
+        targetHint: String,
+        candidateLabel: String
+    ) -> Bool {
+        let target = Set(meaningfulTokens(targetHint))
+        let candidate = Set(meaningfulTokens(candidateLabel))
+        guard !target.isEmpty, !candidate.isEmpty else { return false }
+        if target == candidate { return true }
+
+        // A one-word label such as “Rates” must match exactly. Longer labels
+        // may include benign operation/context words, but two substantive
+        // shared tokens are required before either side may be a subset.
+        let shared = target.intersection(candidate)
+        guard shared.count >= 2 else { return false }
+        return shared == target || shared == candidate
+    }
+
+    private static func meaningfulTokens(_ value: String) -> [String] {
+        let ignored: Set<String> = [
+            "a", "an", "and", "at", "by", "called", "center", "column",
+            "control", "field", "file", "folder", "for", "from", "in",
+            "item", "label", "link", "named", "new", "of", "on", "only",
+            "or", "page", "row", "tab", "target", "that", "the", "then",
+            "there", "this", "to", "visible", "which", "with", "without",
+            // Appearance alone is not semantic authority. These words are
+            // useful to OS-Atlas visually, while the AX match must retain the
+            // task purpose/destination that an accessible label describes.
+            "arrow", "button", "card", "icon", "shape", "square", "symbol",
+        ]
+        return canonicalTokens(value)
+            .filter { !ignored.contains($0) }
+    }
+
+    private static func anchorTokens(_ value: String) -> [String] {
+        let ignored: Set<String> = [
+            "a", "an", "and", "at", "by", "called", "for", "from",
+            "in", "into", "named", "new", "of", "on", "only", "or",
+            "page", "screen", "that", "the", "this", "to", "visible",
+            "which", "with",
+        ]
+        let operationWords: Set<String> = [
+            "activate", "choose", "click", "press", "select", "tap",
+        ]
+        return canonicalTokens(value).filter {
+            !ignored.contains($0) && !operationWords.contains($0)
+        }
+    }
+
+    private static func canonicalTokens(_ value: String) -> [String] {
+        value.folding(
+            options: [.caseInsensitive, .diacriticInsensitive],
+            locale: Locale(identifier: "en_US_POSIX"))
+            .unicodeScalars
+            .split(whereSeparator: {
+                !CharacterSet.alphanumerics.contains($0)
+            })
+            .map(String.init)
+            .map(Self.canonicalToken)
+    }
+
+    private static func isLocallyNegated(
+        index: Int,
+        words: [String]
+    ) -> Bool {
+        let lowerBound = max(words.startIndex, index - 4)
+        let preceding = Array(words[lowerBound ..< index])
+        guard !preceding.isEmpty else { return false }
+        if preceding.last == "not" || preceding.contains("never") {
+            return true
+        }
+        if preceding.suffix(2) == ["do", "not"]
+            || preceding.suffix(2) == ["don", "t"] {
+            return true
+        }
+        return false
+    }
+
+    private static func canonicalToken(_ token: String) -> String {
+        if token.count > 5, token.hasSuffix("ing") {
+            return String(token.dropLast(3))
+        }
+        if token.count > 4, token.hasSuffix("ies") {
+            return String(token.dropLast(3)) + "y"
+        }
+        if token.count > 3,
+           token.hasSuffix("s"),
+           !["as", "is", "ss", "us", "ws"].contains(where: {
+               token.hasSuffix($0)
+           }) {
+            return String(token.dropLast())
+        }
+        return token
+    }
+}
+
 private final class OSAtlasEndpointCancellationJoin: @unchecked Sendable {
     private let lock = NSLock()
     private let runtime: OSAtlasLlamaRuntime
@@ -475,15 +808,42 @@ private final class OSAtlasEndpointCancellationJoin: @unchecked Sendable {
     }
 }
 
+/// The callback is reached only after Foundation Models has returned one
+/// typed route. Deterministic Apple routes and the Granite/Llama fallback do
+/// not call it, so consuming an equal route is truthful positive provenance.
+private actor OSAtlasFoundationRouteAttestationTracker {
+    private var pendingRoutes: [OSAtlasSemanticActionRoute] = []
+
+    func record(_ route: OSAtlasSemanticActionRoute) {
+        pendingRoutes.append(route)
+    }
+
+    func consume(_ route: OSAtlasSemanticActionRoute) -> Bool {
+        guard let index = pendingRoutes.firstIndex(of: route) else {
+            return false
+        }
+        pendingRoutes.remove(at: index)
+        return true
+    }
+}
+
+private enum OSAtlasFoundationRouteAttestationScope {
+    @TaskLocal static var tracker:
+        OSAtlasFoundationRouteAttestationTracker?
+}
+
 /// OS-Atlas-Pro visual fallback served by a bundled, loopback-only
 /// llama-server. Structured applications still route through MCP first.
 @MainActor
-final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
+final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
+    ComputerUseVisualApprovalContinuing {
     enum RuntimeError: Error, LocalizedError, Equatable {
         case malformedAction
         case unsupportedAction(String)
         case unverifiedCheckpointAction(String)
         case unverifiedTerminalAction(String)
+        case planningStateChanged
+        case invalidApprovalContinuation
         case stepLimit
         case invalidImage
         case proModelRequired
@@ -491,13 +851,17 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
         var errorDescription: String? {
             switch self {
             case .malformedAction:
-                return "The local OS-Atlas model returned an invalid action, so the Mac was left untouched."
+                return "The local OS-Atlas model returned an invalid next action, so that action was not performed. Any earlier completed steps remain on the Mac."
             case .unsupportedAction(let name):
-                return "The local OS-Atlas model requested an unsupported action (\(name)), so the Mac was left untouched."
+                return "The local OS-Atlas model requested an unsupported next action (\(name)), so that action was not performed. Any earlier completed steps remain on the Mac."
             case .unverifiedCheckpointAction(let name):
-                return "The installed OS-Atlas checkpoint has not passed end-to-end validation for \(name), so the Mac was left untouched."
+                return "The installed OS-Atlas checkpoint has not passed end-to-end validation for the next \(name) action, so that action was not performed. Any earlier completed steps remain on the Mac."
             case .unverifiedTerminalAction(let name):
                 return "The local model proposed \(name) without host-verifiable evidence, so the task was not marked complete."
+            case .planningStateChanged:
+                return "The focused screen kept changing while AI was planning, so no stale action was performed. Let the screen settle, then send the request again."
+            case .invalidApprovalContinuation:
+                return "The approved action no longer matches the paused AI Computer Use session, so it was not resumed."
             case .stepLimit:
                 return "The safety limit of 25 actions was reached. Review the screen and send a new request to continue."
             case .invalidImage:
@@ -509,15 +873,19 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
     }
 
     nonisolated static let maximumSteps = 25
+    nonisolated static let maximumPlanningStateRetries = 5
+    nonisolated static let maximumConsecutivePendingObservations = 3
     static let screenshotJPEGQuality: CGFloat = 0.72
     static let fallbackScreenshotJPEGQualities: [CGFloat] = [0.56, 0.42]
     static let maximumHistoryEntries = 6
     static let maximumHistoryEntryCharacters = 60
     static let screenCaptureConsentGuidance = "macOS needs your permission before AI can use the screen. On the Mac, choose Allow in the “RemoteDesktopHost” screen-and-audio access prompt, then tap Let AI continue. AI won’t click this system permission prompt or open System Settings."
-    static let authenticationGuidance = "This screen needs you to sign in or verify your account. You’re in control now: complete that yourself on the live screen, then tap Let AI continue. AI won’t enter passwords, passcodes, verification codes, or other credentials."
-    static let deliverySignInGuidance = "DoorDash needs you to sign in before it can show the delivery quote. You’re in control now: sign in yourself on the live screen, then tap Let AI continue. AI won’t enter credentials, check out, or place the order."
+    static let authenticationGuidance = "This screen needs you to sign in or verify your account. You’re in control now: complete that yourself on the Mac, then tap Let AI continue. AI won’t enter passwords, passcodes, verification codes, or other credentials."
+    static let deliverySignInGuidance = "DoorDash needs you to sign in before it can show the delivery quote. You’re in control now: sign in yourself on the Mac, then tap Let AI continue. AI won’t enter credentials, check out, or place the order."
     static let transientSystemOverlayGuidance = "A macOS notification is still covering the control AI needs. Dismiss or move that notification on the Mac, then tap Let AI continue. AI won’t click through or dismiss unrelated notifications."
     static let semanticRoutingUnavailableGuidance = "The on-device action planner could not safely choose the next step, so no further action was taken. Try a more specific request or complete this task yourself."
+    static let unsafeVisibleEvidenceGuidance = "The visible page did not contain one unambiguous task-relevant result, so no information or action was returned."
+    static let persistentPendingStateResponse = "I couldn't complete that task: The requested result was still loading after three checks, and no completed result became available."
     static let maximumTransientSystemOverlayObservations = 3
     private static let screenshotContext = CIContext(options: [
         .useSoftwareRenderer: false,
@@ -551,6 +919,101 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
     private let rawVisualGroundingPointObserver: ((Int, Int) -> Void)?
     private let actionTokenObserver: ((String) -> Void)?
     private let modelResponseObserver: ((String) -> Void)?
+    private let browserActionAttestationLedger:
+        ComputerUseBrowserActionAttestationLedger?
+    /// Tests can positively mark a stub route without pretending that the
+    /// production router crossed Foundation Models. Production always leaves
+    /// this nil and uses the exact on-device callback above.
+    private let foundationPlannerRouteForAttestationTesting:
+        ((OSAtlasSemanticActionRoute) -> Bool)?
+
+    /// Everything mutable inside one visual execution. A consequential action
+    /// pauses before its effect and snapshots this value; approval resumes the
+    /// same bounded loop instead of rebuilding state from a prose prompt.
+    private struct SemanticEffectOutcome: Sendable {
+        /// The typed Foundation route that crossed the host approval boundary.
+        /// This is retained in memory only; OCR and model prose cannot create
+        /// or replace it.
+        let route: OSAtlasSemanticActionRoute
+        let crossedApprovalBoundary: Bool
+        /// Normalized complete OCR lines captured before the effect. A later
+        /// terminal answer must contain a unique, effect-bound success line
+        /// that was not already visible in this snapshot.
+        let preEffectVisibleLineKeys: Set<String>
+    }
+
+    private struct ExecutionState {
+        var history: [String] = []
+        var openedApplications = Set<String>()
+        var openedApplicationIdentities =
+            Set<ComputerUseApplicationIdentity>()
+        var didForegroundDeliveryQuoteBrowser = false
+        var didAttemptAuthenticationEscape = false
+        var didAttemptModelAction = false
+        var transientSystemOverlayObservations = 0
+        var planningStateRetries = 0
+        var performedActionCount = 0
+        var consecutivePendingObservations = 0
+        var semanticEffectOutcome: SemanticEffectOutcome? = nil
+    }
+
+    /// Immutable execution resources plus the exact pre-effect state retained
+    /// while the manager asks the person to approve one grounded host action.
+    private struct PendingVisualApproval {
+        let continuation: ComputerUseVisualApprovalContinuation
+        let prompt: String
+        let trustedUserPrompt: String
+        let conversation: [ComputerUseConversationTurn]
+        let endpoint: OSAtlasLlamaEndpoint
+        let semanticRouter: (any OSAtlasSemanticActionRouting)?
+        let foundationRouteTracker:
+            OSAtlasFoundationRouteAttestationTracker
+        var state: ExecutionState
+        let action: ComputerUsePredictedAction
+        let guiHistoryEntry: String
+        let semanticRoute: OSAtlasSemanticActionRoute?
+        let preEffectVisibleLineKeys: Set<String>
+        let groundingDrafts: [ComputerUseBrowserActionGroundingDraft]
+        let plannerProvenance:
+            ComputerUseBrowserActionAttestationLedger.PlannerProvenance
+    }
+
+    /// Once the manager posts an approved effect, the one-shot token is no
+    /// longer pending, but its retained endpoint still needs generation-scoped
+    /// cancellation authority until every post-effect suspension has finished.
+    private struct ActiveVisualApprovalContinuation {
+        let continuation: ComputerUseVisualApprovalContinuation
+        let cancellationJoin: OSAtlasEndpointCancellationJoin
+        let task: Task<ComputerUseExecutionResult, Error>
+    }
+
+    private var pendingVisualApproval: PendingVisualApproval?
+    private var activeVisualApprovalContinuation:
+        ActiveVisualApprovalContinuation?
+    /// A synchronous denial can only schedule actor teardown. The next task
+    /// joins this exact generation-scoped barrier before asking the runtime to
+    /// activate, preventing it from briefly reusing the endpoint being freed.
+    private var endpointCancellationBarrier:
+        OSAtlasEndpointCancellationJoin?
+
+    private struct GroundedPoint {
+        let x: Int
+        let y: Int
+        let draft: ComputerUseBrowserActionGroundingDraft
+    }
+
+    private struct ComposedSemanticAction {
+        let action: OSAtlasGUIAction
+        let groundingDrafts: [ComputerUseBrowserActionGroundingDraft]
+    }
+
+    private enum PlanningStateRevalidation {
+        case strictVisual
+        case nonVisualApplicationOpen
+        case focusedEditableInput
+        case verifiedPostActionAnswer
+        case pendingObservation
+    }
 
     private init(
         inputs: OSAtlasLlamaRuntimeInputs,
@@ -569,7 +1032,11 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
         parsedActionObserver: ((OSAtlasGUIAction) -> Void)? = nil,
         rawVisualGroundingPointObserver: ((Int, Int) -> Void)? = nil,
         actionTokenObserver: ((String) -> Void)? = nil,
-        modelResponseObserver: ((String) -> Void)? = nil
+        modelResponseObserver: ((String) -> Void)? = nil,
+        browserActionAttestationLedger:
+            ComputerUseBrowserActionAttestationLedger? = nil,
+        foundationPlannerRouteForAttestationTesting:
+            ((OSAtlasSemanticActionRoute) -> Bool)? = nil
     ) {
         self.inputs = inputs
         self.runtime = runtime
@@ -590,12 +1057,27 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
             rawVisualGroundingPointObserver
         self.actionTokenObserver = actionTokenObserver
         self.modelResponseObserver = modelResponseObserver
+        self.browserActionAttestationLedger =
+            browserActionAttestationLedger
+        self.foundationPlannerRouteForAttestationTesting =
+            foundationPlannerRouteForAttestationTesting
+    }
+
+    private static func attestedAppleFoundationRouter()
+        -> AppleFoundationVisualActionRouter {
+        AppleFoundationVisualActionRouter(onDeviceRouteObserver: { route in
+            guard let tracker = OSAtlasFoundationRouteAttestationScope
+                    .tracker else { return }
+            await tracker.record(route)
+        })
     }
 
     static func load(
         inputs: OSAtlasLlamaRuntimeInputs,
         runtime: OSAtlasLlamaRuntime = .shared,
         actionContract: OSAtlasActionContract = .macOS,
+        browserActionAttestationLedger:
+            ComputerUseBrowserActionAttestationLedger? = nil,
         progress: @escaping @MainActor (String) -> Void
     ) async throws -> OSAtlasComputerUseExecutor {
         guard inputs.variant == .pro4B else {
@@ -603,7 +1085,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
         }
         progress("Starting the local OS-Atlas model…")
         _ = try await runtime.activate(inputs)
-        let candidateRouter = AppleFoundationVisualActionRouter()
+        let candidateRouter = Self.attestedAppleFoundationRouter()
         progress("AI Computer Use is ready")
         return OSAtlasComputerUseExecutor(
             inputs: inputs,
@@ -620,7 +1102,9 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
             allowsExplicitActionCompatibility: false,
             maxSteps: maximumSteps,
             actionDelay: .milliseconds(700),
-            waitDelay: .seconds(1))
+            waitDelay: .seconds(1),
+            browserActionAttestationLedger:
+                browserActionAttestationLedger)
     }
 
     /// Production entry point for the verified visual + semantic package.
@@ -631,11 +1115,12 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
         installation: OSAtlasResolvedRuntimeInstallation,
         runtime: OSAtlasLlamaRuntime = .shared,
         actionContract: OSAtlasActionContract = .macOS,
-        appleSemanticRouter: any OSAtlasSemanticActionRouting =
-            AppleFoundationVisualActionRouter(),
+        appleSemanticRouter: (any OSAtlasSemanticActionRouting)? = nil,
         semanticCandidateRequestObserver:
             OSAtlasSemanticCandidateRequestObserver? = nil,
         rawVisualGroundingPointObserver: ((Int, Int) -> Void)? = nil,
+        browserActionAttestationLedger:
+            ComputerUseBrowserActionAttestationLedger? = nil,
         progress: @escaping @MainActor (String) -> Void
     ) async throws -> OSAtlasComputerUseExecutor {
         guard installation.visualInputs.variant == .pro4B else {
@@ -653,7 +1138,8 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
             checkpointActionProfile: .installedPro4BQ4KMLegacy,
             semanticRouter: nil,
             semanticRouterModelURL: installation.semanticRouterModelURL,
-            appleSemanticRouter: appleSemanticRouter,
+            appleSemanticRouter: appleSemanticRouter
+                ?? Self.attestedAppleFoundationRouter(),
             semanticCandidateRequestObserver:
                 semanticCandidateRequestObserver,
             allowsExplicitActionCompatibility: false,
@@ -661,7 +1147,9 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
             actionDelay: .milliseconds(700),
             waitDelay: .seconds(1),
             rawVisualGroundingPointObserver:
-                rawVisualGroundingPointObserver)
+                rawVisualGroundingPointObserver,
+            browserActionAttestationLedger:
+                browserActionAttestationLedger)
     }
 
     static func makeForTesting(
@@ -677,7 +1165,11 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
         parsedActionObserver: ((OSAtlasGUIAction) -> Void)? = nil,
         rawVisualGroundingPointObserver: ((Int, Int) -> Void)? = nil,
         actionTokenObserver: ((String) -> Void)? = nil,
-        modelResponseObserver: ((String) -> Void)? = nil
+        modelResponseObserver: ((String) -> Void)? = nil,
+        browserActionAttestationLedger:
+            ComputerUseBrowserActionAttestationLedger? = nil,
+        foundationPlannerRouteForAttestationTesting:
+            ((OSAtlasSemanticActionRoute) -> Bool)? = nil
     ) -> OSAtlasComputerUseExecutor {
         OSAtlasComputerUseExecutor(
             inputs: inputs,
@@ -694,7 +1186,11 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
             rawVisualGroundingPointObserver:
                 rawVisualGroundingPointObserver,
             actionTokenObserver: actionTokenObserver,
-            modelResponseObserver: modelResponseObserver)
+            modelResponseObserver: modelResponseObserver,
+            browserActionAttestationLedger:
+                browserActionAttestationLedger,
+            foundationPlannerRouteForAttestationTesting:
+                foundationPlannerRouteForAttestationTesting)
     }
 
     /// Constructs the no-effect semantic composition that exactly matches the
@@ -743,13 +1239,14 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
     }
 
     func execute(
-        taskID _: String,
+        taskID: String,
         prompt: String,
         trustedUserPrompt: String,
         tools: ComputerUseHostTools,
         progress: @escaping (String) -> Void
     ) async throws -> ComputerUseExecutionResult {
         try await executeResolved(
+            taskID: taskID,
             prompt: prompt,
             trustedUserPrompt: trustedUserPrompt,
             conversation: [],
@@ -758,7 +1255,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
     }
 
     func execute(
-        taskID _: String,
+        taskID: String,
         modelPrompt: String,
         currentUserPrompt: String,
         conversation: [ComputerUseConversationTurn],
@@ -766,6 +1263,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
         progress: @escaping (String) -> Void
     ) async throws -> ComputerUseExecutionResult {
         try await executeResolved(
+            taskID: taskID,
             prompt: modelPrompt,
             trustedUserPrompt: currentUserPrompt,
             conversation: conversation,
@@ -773,13 +1271,207 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
             progress: progress)
     }
 
+    func continueAfterApprovedVisualAction(
+        _ continuation: ComputerUseVisualApprovalContinuation,
+        action: ComputerUsePredictedAction,
+        tools: ComputerUseHostTools,
+        progress: @escaping (String) -> Void
+    ) async throws -> ComputerUseExecutionResult {
+        guard let pending = pendingVisualApproval,
+              pending.continuation == continuation,
+              pending.continuation.taskID == continuation.taskID,
+              pending.action == action else {
+            throw RuntimeError.invalidApprovalContinuation
+        }
+
+        // Consume synchronously on the main actor before the first suspension.
+        // A duplicate response can therefore never append history, persist an
+        // attestation, or re-enter the visual loop.
+        pendingVisualApproval = nil
+        let cancellationJoin = OSAtlasEndpointCancellationJoin(
+            runtime: runtime,
+            endpoint: pending.endpoint)
+        let continuationTask = Task { @MainActor [self] in
+            try await resumeConsumedVisualApproval(
+                pending,
+                action: action,
+                tools: tools,
+                progress: progress,
+                cancellationJoin: cancellationJoin)
+        }
+        activeVisualApprovalContinuation =
+            ActiveVisualApprovalContinuation(
+                continuation: continuation,
+                cancellationJoin: cancellationJoin,
+                task: continuationTask)
+
+        do {
+            let result = try await withTaskCancellationHandler {
+                let result = try await continuationTask.value
+                try Task.checkCancellation()
+                guard activeVisualApprovalContinuation?.continuation
+                        == continuation else {
+                    throw CancellationError()
+                }
+                return result
+            } onCancel: {
+                continuationTask.cancel()
+                _ = cancellationJoin.start()
+            }
+            if activeVisualApprovalContinuation?.continuation
+                == continuation {
+                activeVisualApprovalContinuation = nil
+            }
+            return result
+        } catch {
+            if activeVisualApprovalContinuation?.continuation
+                == continuation {
+                activeVisualApprovalContinuation = nil
+            }
+            if error is CancellationError || Task.isCancelled {
+                // Keep this generation's teardown joinable until it has
+                // finished. `cancel(endpoint:)` matches the captured endpoint,
+                // so a concurrently activated replacement is never stopped.
+                endpointCancellationBarrier = cancellationJoin
+                await cancellationJoin.start().value
+                if endpointCancellationBarrier === cancellationJoin {
+                    endpointCancellationBarrier = nil
+                }
+                throw CancellationError()
+            }
+            throw error
+        }
+    }
+
+    func cancelVisualApprovalContinuation(
+        _ continuation: ComputerUseVisualApprovalContinuation
+    ) {
+        if let pending = pendingVisualApproval,
+           pending.continuation == continuation {
+            pendingVisualApproval = nil
+            // The synchronous protocol boundary consumes authority
+            // immediately; generation-scoped runtime cancellation then
+            // releases only the endpoint captured by that denied/stale
+            // session.
+            let cancellationJoin = OSAtlasEndpointCancellationJoin(
+                runtime: runtime,
+                endpoint: pending.endpoint)
+            endpointCancellationBarrier = cancellationJoin
+            _ = cancellationJoin.start()
+            return
+        }
+
+        guard let active = activeVisualApprovalContinuation,
+              active.continuation == continuation else { return }
+        // The token was consumed before the first post-effect suspension, but
+        // cancellation still owns this exact retained generation. Cancel the
+        // child continuation as well as its endpoint; the awaiting caller
+        // joins the same idempotent barrier before it can finish.
+        activeVisualApprovalContinuation = nil
+        active.task.cancel()
+        endpointCancellationBarrier = active.cancellationJoin
+        _ = active.cancellationJoin.start()
+    }
+
+    private func resumeConsumedVisualApproval(
+        _ pending: PendingVisualApproval,
+        action: ComputerUsePredictedAction,
+        tools: ComputerUseHostTools,
+        progress: @escaping (String) -> Void,
+        cancellationJoin: OSAtlasEndpointCancellationJoin
+    ) async throws -> ComputerUseExecutionResult {
+        do {
+            return try await withTaskCancellationHandler {
+                var state = pending.state
+                state.performedActionCount += 1
+                state.consecutivePendingObservations = 0
+                state.planningStateRetries = 0
+                state.history.append(pending.guiHistoryEntry)
+                if let semanticRoute = pending.semanticRoute {
+                    state.semanticEffectOutcome = SemanticEffectOutcome(
+                        route: semanticRoute,
+                        crossedApprovalBoundary: true,
+                        preEffectVisibleLineKeys:
+                            pending.preEffectVisibleLineKeys)
+                } else {
+                    // The raw compatibility path has no typed semantic effect
+                    // to bind a terminal claim to, so it cannot create an
+                    // approved-effect outcome authority.
+                    state.semanticEffectOutcome = nil
+                }
+
+                // The manager has already posted this exact action through
+                // the host approval seam. Persist only the retained
+                // privacy-safe grounding draft; never regenerate or perform
+                // the action here.
+                await recordPostedBrowserActionGroundings(
+                    taskID: pending.continuation.taskID,
+                    action: action,
+                    drafts: pending.groundingDrafts,
+                    plannerProvenance: pending.plannerProvenance)
+                try Task.checkCancellation()
+                try await Task.sleep(for: actionDelay)
+
+                return try await executeRetainedLoop(
+                    taskID: pending.continuation.taskID,
+                    prompt: pending.prompt,
+                    trustedUserPrompt: pending.trustedUserPrompt,
+                    conversation: pending.conversation,
+                    endpoint: pending.endpoint,
+                    semanticRouter: pending.semanticRouter,
+                    foundationRouteTracker:
+                        pending.foundationRouteTracker,
+                    initialState: state,
+                    tools: tools,
+                    progress: progress,
+                    cancellationJoin: cancellationJoin)
+            } onCancel: {
+                _ = cancellationJoin.start()
+            }
+        } catch {
+            if error is CancellationError || Task.isCancelled {
+                await cancellationJoin.start().value
+                throw CancellationError()
+            }
+            throw error
+        }
+    }
+
     private func executeResolved(
+        taskID: String,
         prompt: String,
         trustedUserPrompt: String,
         conversation: [ComputerUseConversationTurn],
         tools: ComputerUseHostTools,
         progress: @escaping (String) -> Void
     ) async throws -> ComputerUseExecutionResult {
+        if let cancellationBarrier = endpointCancellationBarrier {
+            await cancellationBarrier.start().value
+            if endpointCancellationBarrier === cancellationBarrier {
+                endpointCancellationBarrier = nil
+            }
+            try Task.checkCancellation()
+        }
+        if let replacedContinuation = activeVisualApprovalContinuation {
+            activeVisualApprovalContinuation = nil
+            replacedContinuation.task.cancel()
+            endpointCancellationBarrier =
+                replacedContinuation.cancellationJoin
+            await replacedContinuation.cancellationJoin.start().value
+            if endpointCancellationBarrier
+                === replacedContinuation.cancellationJoin {
+                endpointCancellationBarrier = nil
+            }
+            try Task.checkCancellation()
+        }
+        // A newly accepted task invalidates any older paused approval before
+        // activation can suspend, then joins generation-scoped cancellation
+        // so its retained workers cannot leak into the replacement task.
+        if let replacedApproval = pendingVisualApproval {
+            pendingVisualApproval = nil
+            await runtime.cancel(endpoint: replacedApproval.endpoint)
+            try Task.checkCancellation()
+        }
         if allowsExplicitActionCompatibility,
            let explicitDirective = Self.explicitlyRequiredAction(
             in: trustedUserPrompt,
@@ -810,20 +1502,58 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
             endpoint = try await runtime.activate(inputs)
             executionSemanticRouter = semanticRouter
         }
-        let ownedRuntime = runtime
-        let cancellationJoin = OSAtlasEndpointCancellationJoin(
-            runtime: ownedRuntime,
-            endpoint: endpoint)
+        let foundationRouteTracker =
+            OSAtlasFoundationRouteAttestationTracker()
+        return try await executeRetainedLoop(
+            taskID: taskID,
+            prompt: prompt,
+            trustedUserPrompt: trustedUserPrompt,
+            conversation: conversation,
+            endpoint: endpoint,
+            semanticRouter: executionSemanticRouter,
+            foundationRouteTracker: foundationRouteTracker,
+            initialState: ExecutionState(),
+            tools: tools,
+            progress: progress)
+    }
+
+    private func executeRetainedLoop(
+        taskID: String,
+        prompt: String,
+        trustedUserPrompt: String,
+        conversation: [ComputerUseConversationTurn],
+        endpoint: OSAtlasLlamaEndpoint,
+        semanticRouter: (any OSAtlasSemanticActionRouting)?,
+        foundationRouteTracker:
+            OSAtlasFoundationRouteAttestationTracker,
+        initialState: ExecutionState,
+        tools: ComputerUseHostTools,
+        progress: @escaping (String) -> Void,
+        cancellationJoin suppliedCancellationJoin:
+            OSAtlasEndpointCancellationJoin? = nil
+    ) async throws -> ComputerUseExecutionResult {
+        let cancellationJoin = suppliedCancellationJoin
+            ?? OSAtlasEndpointCancellationJoin(
+                runtime: runtime,
+                endpoint: endpoint)
         do {
             let result = try await withTaskCancellationHandler {
-                let result = try await executeLoop(
-                    prompt: prompt,
-                    trustedUserPrompt: trustedUserPrompt,
-                    conversation: conversation,
-                    endpoint: endpoint,
-                    semanticRouter: executionSemanticRouter,
-                    tools: tools,
-                    progress: progress)
+                let result = try await
+                    OSAtlasFoundationRouteAttestationScope.$tracker
+                    .withValue(foundationRouteTracker) {
+                        try await executeLoop(
+                            taskID: taskID,
+                            prompt: prompt,
+                            trustedUserPrompt: trustedUserPrompt,
+                            conversation: conversation,
+                            endpoint: endpoint,
+                            semanticRouter: semanticRouter,
+                            initialState: initialState,
+                            foundationRouteTracker:
+                                foundationRouteTracker,
+                            tools: tools,
+                            progress: progress)
+                    }
                 try Task.checkCancellation()
                 return result
             } onCancel: {
@@ -833,6 +1563,9 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
             return result
         } catch {
             if error is CancellationError || Task.isCancelled {
+                if pendingVisualApproval?.endpoint == endpoint {
+                    pendingVisualApproval = nil
+                }
                 // `start()` is idempotent. Calling it here closes the
                 // concurrent-handler registration race and structurally joins
                 // runtime cancellation before this execution can finish.
@@ -844,17 +1577,22 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
     }
 
     private func executeLoop(
+        taskID: String,
         prompt: String,
         trustedUserPrompt: String,
         conversation: [ComputerUseConversationTurn],
         endpoint: OSAtlasLlamaEndpoint,
         semanticRouter: (any OSAtlasSemanticActionRouting)?,
+        initialState: ExecutionState,
+        foundationRouteTracker:
+            OSAtlasFoundationRouteAttestationTracker,
         tools: ComputerUseHostTools,
         progress: @escaping (String) -> Void
     ) async throws -> ComputerUseExecutionResult {
-        var history: [String] = []
-        var openedApplications = Set<String>()
-        var openedApplicationIdentities = Set<ComputerUseApplicationIdentity>()
+        var history = initialState.history
+        var openedApplications = initialState.openedApplications
+        var openedApplicationIdentities =
+            initialState.openedApplicationIdentities
         func recordOpenedApplication(
             named rawName: String,
             identity: ComputerUseApplicationIdentity?
@@ -872,10 +1610,18 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                 $0.stableSortKey < $1.stableSortKey
             }
         }
-        var didForegroundDeliveryQuoteBrowser = false
-        var didAttemptAuthenticationEscape = false
-        var didAttemptModelAction = false
-        var transientSystemOverlayObservations = 0
+        var didForegroundDeliveryQuoteBrowser =
+            initialState.didForegroundDeliveryQuoteBrowser
+        var didAttemptAuthenticationEscape =
+            initialState.didAttemptAuthenticationEscape
+        var didAttemptModelAction = initialState.didAttemptModelAction
+        var transientSystemOverlayObservations =
+            initialState.transientSystemOverlayObservations
+        var planningStateRetries = initialState.planningStateRetries
+        var performedActionCount = initialState.performedActionCount
+        var consecutivePendingObservations =
+            initialState.consecutivePendingObservations
+        var semanticEffectOutcome = initialState.semanticEffectOutcome
         let firstAttemptDirective = allowsExplicitActionCompatibility
             ? Self.explicitlyRequiredAction(
                 in: trustedUserPrompt,
@@ -901,17 +1647,124 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                         frontmostApplication.identity))
         }
         func revalidatedPlanningState(
-            expected: ComputerUsePlanningStateFingerprint
+            expected: ComputerUsePlanningStateFingerprint,
+            binding: PlanningStateRevalidation = .strictVisual
         ) throws -> (
             observation: ComputerUseScreenObservation,
             frontmostApplication: ComputerUseFrontmostApplicationSnapshot,
             fingerprint: ComputerUsePlanningStateFingerprint
         )? {
             let fresh = try capturePlanningState()
-            return fresh.fingerprint == expected ? fresh : nil
+            let matches: Bool
+            switch binding {
+            case .strictVisual:
+                matches = fresh.fingerprint == expected
+            case .nonVisualApplicationOpen:
+                matches = expected
+                    .matchesNonVisualApplicationOpenAuthority(
+                        fresh.fingerprint)
+            case .focusedEditableInput:
+                matches = expected
+                    .matchesFocusedEditableInputAuthority(
+                        fresh.fingerprint)
+            case .verifiedPostActionAnswer:
+                matches = expected
+                    .matchesVerifiedPostActionAnswerAuthority(
+                        fresh.fingerprint)
+            case .pendingObservation:
+                matches = expected
+                    .matchesPendingObservationAuthority(
+                        fresh.fingerprint)
+            }
+            return matches ? fresh : nil
+        }
+        func recordPlanningStateRetry() throws {
+            planningStateRetries += 1
+            guard planningStateRetries
+                    <= Self.maximumPlanningStateRetries else {
+                throw RuntimeError.planningStateChanged
+            }
+        }
+        func revalidationBinding(
+            for route: OSAtlasSemanticActionRoute,
+            verifiedPostActionAnswer: Bool = false,
+            hostVerifiedPendingWait: Bool = false
+        ) -> PlanningStateRevalidation {
+            if verifiedPostActionAnswer {
+                return .verifiedPostActionAnswer
+            }
+            if hostVerifiedPendingWait {
+                return .pendingObservation
+            }
+            switch route.directive {
+            case .openApplication:
+                return .nonVisualApplicationOpen
+            case .type, .enter:
+                return .focusedEditableInput
+            default:
+                return .strictVisual
+            }
+        }
+        func hostVerifiesPostActionAnswer(
+            _ route: OSAtlasSemanticActionRoute,
+            visibleText: String
+        ) -> Bool {
+            let plannerVerified = AppleFoundationVisualActionRouter
+                .hostVerifiesPostActionVisibleAnswer(
+                    route,
+                    task: trustedUserPrompt,
+                    visibleText: visibleText,
+                    history: history,
+                    availableDirectives: Self.semanticRoutingDirectives(
+                        actionContract: actionContract))
+            guard plannerVerified else { return false }
+
+            if let semanticEffectOutcome {
+                return Self.hostVerifiesSemanticEffectAnswer(
+                    route,
+                    trustedTask: trustedUserPrompt,
+                    visibleText: visibleText,
+                    semanticEffect: semanticEffectOutcome)
+            }
+
+            // Raw history markers cannot prove which typed operation produced
+            // a visible result. Every generic post-effect answer must bind to
+            // the retained semantic route and its pre-effect observation.
+            return false
+        }
+        func recordPerformedEffect() {
+            performedActionCount += 1
+            consecutivePendingObservations = 0
+            // A retained approval proves only the immediately preceding
+            // effect. Any later effect starts a new outcome segment.
+            semanticEffectOutcome = nil
+            // TOCTOU retries protect one planning-to-effect segment. Once an
+            // effect has succeeded, the next action begins from a fresh
+            // capture and receives its own bounded retry allowance.
+            planningStateRetries = 0
+        }
+        func retainedExecutionState() -> ExecutionState {
+            ExecutionState(
+                history: history,
+                openedApplications: openedApplications,
+                openedApplicationIdentities:
+                    openedApplicationIdentities,
+                didForegroundDeliveryQuoteBrowser:
+                    didForegroundDeliveryQuoteBrowser,
+                didAttemptAuthenticationEscape:
+                    didAttemptAuthenticationEscape,
+                didAttemptModelAction: didAttemptModelAction,
+                transientSystemOverlayObservations:
+                    transientSystemOverlayObservations,
+                planningStateRetries: planningStateRetries,
+                performedActionCount: performedActionCount,
+                consecutivePendingObservations:
+                    consecutivePendingObservations,
+                semanticEffectOutcome: semanticEffectOutcome)
         }
 
-        for step in 1 ... maxSteps {
+        while performedActionCount < maxSteps {
+            let step = performedActionCount + 1
             try Task.checkCancellation()
             progress("Step \(step): looking at the screen…")
             var planningCapture = try capturePlanningState()
@@ -954,7 +1807,9 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                     ? "DoorDash quote" : "delivery quote"
                 progress("Step \(step): opening \(browser) for the \(quoteName)…")
                 guard let freshCapture = try revalidatedPlanningState(
-                    expected: planningCapture.fingerprint) else {
+                    expected: planningCapture.fingerprint,
+                    binding: .nonVisualApplicationOpen) else {
+                    try recordPlanningStateRetry()
                     progress(
                         "Step \(step): the focused screen changed before opening the app; checking again…")
                     continue
@@ -972,6 +1827,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                     named: browser,
                     identity: openedIdentity)
                 history.append("OPEN_APP [\(browser)]")
+                recordPerformedEffect()
                 try await Task.sleep(for: actionDelay)
                 continue
             }
@@ -1047,9 +1903,16 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                                 openedApplicationIdentities:
                                     sortedOpenedApplicationIdentities()),
                             rawHistory: history)
+                        // Consume a positive Foundation callback even though an
+                        // authentication escape can never produce a pointer
+                        // attestation. It must not leak into a later equal
+                        // route in this execution.
+                        _ = await foundationRouteTracker.consume(escapeRoute)
                         try Task.checkCancellation()
                         guard let postRouteCapture = try revalidatedPlanningState(
-                            expected: planningCapture.fingerprint) else {
+                            expected: planningCapture.fingerprint,
+                            binding: .nonVisualApplicationOpen) else {
+                            try recordPlanningStateRetry()
                             progress(
                                 "Step \(step): the focused screen changed while planning; checking again…")
                             continue
@@ -1068,7 +1931,10 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                                 guard let preEffectCapture = try
                                     revalidatedPlanningState(
                                         expected:
-                                            planningCapture.fingerprint) else {
+                                            planningCapture.fingerprint,
+                                        binding:
+                                            .nonVisualApplicationOpen) else {
+                                    try recordPlanningStateRetry()
                                     progress(
                                         "Step \(step): the focused screen changed before opening the app; checking again…")
                                     continue
@@ -1085,6 +1951,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                                 progress(
                                     "Step \(step): switching to the task-relevant app…")
                                 history.append("OPEN_APP [\(destination)]")
+                                recordPerformedEffect()
                                 try await Task.sleep(for: actionDelay)
                                 continue
                             } catch is CancellationError {
@@ -1115,6 +1982,11 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                 didAttemptModelAction ? nil : firstAttemptDirective
             var requiredRoute: OSAtlasSemanticActionRoute?
             var semanticRoute: OSAtlasSemanticActionRoute?
+            var semanticRoutePlannerProvenance =
+                ComputerUseBrowserActionAttestationLedger
+                    .PlannerProvenance.nonFoundation
+            var semanticRouteUsesVerifiedPostActionAnswer = false
+            var semanticRouteUsesVerifiedPendingWait = false
             var visibleText = ""
             if let explicitDirective {
                 requiredRoute = OSAtlasSemanticActionRoute(
@@ -1127,38 +1999,77 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                     planningCapture.frontmostApplication
                 let preRoutePlanningState = planningCapture.fingerprint
                 do {
-                    let selectedRoute = try await Self.semanticActionRoute(
+                    let routingRequest = OSAtlasSemanticRoutingRequest(
+                        // Prior chat remains typed context and the current
+                        // user request remains a separate authority field;
+                        // host policy/effect/terminal gates below are bound
+                        // only to `activeTask`.
+                        task: trustedUserPrompt,
+                        conversation: conversation,
+                        frontmostApplication:
+                            routeFrontmostApplication.policyName,
+                        frontmostApplicationIdentity:
+                            routeFrontmostApplication.identity,
+                        applicationIdentityIsAuthoritative:
+                            routeFrontmostApplication
+                                .identityIsAuthoritative,
+                        visibleText: visibleText,
+                        history: Self.semanticRoutingHistory(history),
+                        availableDirectives: Self.semanticRoutingDirectives(
+                            actionContract: actionContract),
+                        openedApplications: openedApplications.sorted(),
+                        openedApplicationIdentities:
+                            sortedOpenedApplicationIdentities())
+                    let rawSelectedRoute = try await Self.semanticActionRoute(
                         using: semanticRouter,
-                        request: OSAtlasSemanticRoutingRequest(
-                            // Prior chat remains typed context and the current
-                            // user request remains a separate authority field;
-                            // host policy/effect/terminal gates below are bound
-                            // only to `activeTask`.
-                            task: trustedUserPrompt,
-                            conversation: conversation,
-                            frontmostApplication:
-                                routeFrontmostApplication.policyName,
-                            frontmostApplicationIdentity:
-                                routeFrontmostApplication.identity,
-                            applicationIdentityIsAuthoritative:
-                                routeFrontmostApplication
-                                    .identityIsAuthoritative,
-                            visibleText: visibleText,
-                            history: Self.semanticRoutingHistory(history),
-                            availableDirectives: Self.semanticRoutingDirectives(
-                                actionContract: actionContract),
-                            openedApplications: openedApplications.sorted(),
-                            openedApplicationIdentities:
-                                sortedOpenedApplicationIdentities()),
+                        request: routingRequest,
+                        rawHistory: history)
+                    let selectedRouteUsedFoundationModels: Bool
+                    if let testingOverride =
+                        foundationPlannerRouteForAttestationTesting {
+                        selectedRouteUsedFoundationModels =
+                            testingOverride(rawSelectedRoute)
+                    } else {
+                        selectedRouteUsedFoundationModels = await
+                            foundationRouteTracker.consume(rawSelectedRoute)
+                    }
+                    let selectedRoute = Self.taskBoundPointerCanonicalized(
+                        rawSelectedRoute,
+                        request: routingRequest,
                         rawHistory: history)
                     try Task.checkCancellation()
-                    let postRouteCapture = try capturePlanningState()
-                    guard postRouteCapture.fingerprint
-                            == preRoutePlanningState else {
+                    let selectedRouteIsVerifiedPostActionAnswer =
+                        hostVerifiesPostActionAnswer(
+                            selectedRoute,
+                            visibleText: visibleText)
+                    let selectedRouteIsHostVerifiedPendingWait =
+                        selectedRoute.directive == .wait
+                        && AppleFoundationVisualActionRouter
+                            .hostVerifiesPendingWait(
+                                for: activeTask,
+                                visibleText: visibleText,
+                                history: history,
+                                availableDirectives:
+                                    Self.semanticRoutingDirectives(
+                                        actionContract: actionContract))
+                    guard let postRouteCapture = try revalidatedPlanningState(
+                        expected: preRoutePlanningState,
+                        binding: revalidationBinding(
+                            for: selectedRoute,
+                            verifiedPostActionAnswer:
+                                selectedRouteIsVerifiedPostActionAnswer,
+                            hostVerifiedPendingWait:
+                                selectedRouteIsHostVerifiedPendingWait)) else {
                         // Every router is asynchronous, including the standard
                         // two-resident-worker and Apple Foundation paths. Rebind
-                        // all policy/evidence gates instead of executing a route
-                        // selected from pixels that changed during the await.
+                        // all policy/evidence gates instead of executing a
+                        // coordinate/pixel-derived route selected from pixels
+                        // that changed during the await. OPEN_APP is separately
+                        // task-authorized. Semantic TYPE/ENTER carry no visual
+                        // point and are checked twice against the same editable
+                        // focused AX target. Those narrow routes bind to signed
+                        // non-visual authority instead of cursor/caret pixels.
+                        try recordPlanningStateRetry()
                         progress(
                             "Step \(step): the focused screen changed while planning; checking again…")
                         continue
@@ -1167,6 +2078,29 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                     observation = postRouteCapture.observation
                     visibleText = try Self.boundedVisibleText(
                         from: observation.image)
+                    if selectedRouteIsVerifiedPostActionAnswer,
+                       !hostVerifiesPostActionAnswer(
+                            selectedRoute,
+                            visibleText: visibleText) {
+                        try recordPlanningStateRetry()
+                        progress(
+                            "Step \(step): the focused result changed while planning; checking again…")
+                        continue
+                    }
+                    if selectedRouteIsHostVerifiedPendingWait,
+                       !AppleFoundationVisualActionRouter
+                            .hostVerifiesPendingWait(
+                                for: activeTask,
+                                visibleText: visibleText,
+                                history: history,
+                                availableDirectives:
+                                    Self.semanticRoutingDirectives(
+                                        actionContract: actionContract)) {
+                        try recordPlanningStateRetry()
+                        progress(
+                            "Step \(step): the loading state changed while planning; checking again…")
+                        continue
+                    }
                     guard Self.semanticRouteHasValidArguments(selectedRoute) else {
                         throw RuntimeError.unsupportedAction(
                             "semantic-plan-arguments")
@@ -1174,12 +2108,32 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                     guard Self.semanticEffectIsAuthorized(
                         selectedRoute,
                         by: activeTask,
-                        visibleText: visibleText) else {
+                        visibleText: visibleText,
+                        history: history,
+                        frontmostApplication:
+                            routeFrontmostApplication.policyName,
+                        frontmostApplicationIdentityIsAuthoritative:
+                            routeFrontmostApplication
+                                .identityIsAuthoritative,
+                        availableDirectives:
+                            Self.semanticRoutingDirectives(
+                                actionContract: actionContract),
+                        hostVerifiedPendingWait:
+                            selectedRouteIsHostVerifiedPendingWait) else {
+                        Self.log.error(
+                            "Rejected an on-device semantic route at the trusted-task policy boundary token=\(selectedRoute.privacySafeToken, privacy: .public)")
                         throw RuntimeError.unsupportedAction(
                             "untrusted-semantic-route")
                     }
                     requiredRoute = selectedRoute
                     semanticRoute = selectedRoute
+                    semanticRoutePlannerProvenance =
+                        selectedRouteUsedFoundationModels
+                            ? .appleFoundationModels : .nonFoundation
+                    semanticRouteUsesVerifiedPostActionAnswer =
+                        selectedRouteIsVerifiedPostActionAnswer
+                    semanticRouteUsesVerifiedPendingWait =
+                        selectedRouteIsHostVerifiedPendingWait
                     Self.log.info(
                         "On-device semantic router selected \(selectedRoute.privacySafeToken, privacy: .public)")
                 } catch is CancellationError {
@@ -1195,6 +2149,10 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                         progress(Self.semanticRoutingUnavailableGuidance)
                         return .unableToComplete(
                             Self.semanticRoutingUnavailableGuidance)
+                    case .unsafeVisibleEvidence:
+                        progress(Self.unsafeVisibleEvidenceGuidance)
+                        return .unableToComplete(
+                            Self.unsafeVisibleEvidenceGuidance)
                     case .invalidRequest, .multipleRoutes:
                         throw error
                     }
@@ -1203,26 +2161,107 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                 requiredRoute = nil
             }
             let action: OSAtlasGUIAction
+            var actionGroundingDrafts:
+                [ComputerUseBrowserActionGroundingDraft] = []
             if let semanticRoute {
                 // The local language router owns the operation family and its
                 // bounded arguments. OS-Atlas is invoked only when a visual
                 // point must be grounded; its raw verb is never executable.
-                let composedAction = try await composedSemanticAction(
-                    route: semanticRoute,
-                    trustedTask: activeTask,
-                    visibleText: visibleText,
-                    observation: observation,
-                    endpoint: endpoint,
-                    formattedHistory: history)
-                guard let postGroundingCapture = try revalidatedPlanningState(
-                    expected: planningCapture.fingerprint) else {
-                    progress(
-                        "Step \(step): the focused screen changed during visual grounding; checking again…")
-                    continue
+                if semanticRouteUsesVerifiedPostActionAnswer {
+                    // This route performs no input and is already bound to an
+                    // ordered host effect ledger. Ignore only caret pixels,
+                    // then derive and verify the exact answer again from this
+                    // fresh capture before returning it.
+                    guard let postAnswerCapture = try revalidatedPlanningState(
+                        expected: planningCapture.fingerprint,
+                        binding: .verifiedPostActionAnswer) else {
+                        try recordPlanningStateRetry()
+                        progress(
+                            "Step \(step): the focused result changed before verification; checking again…")
+                        continue
+                    }
+                    planningCapture = postAnswerCapture
+                    observation = postAnswerCapture.observation
+                    visibleText = try Self.boundedVisibleText(
+                        from: observation.image)
+                    guard hostVerifiesPostActionAnswer(
+                        semanticRoute,
+                        visibleText: visibleText) else {
+                        try recordPlanningStateRetry()
+                        progress(
+                            "Step \(step): the focused result changed before verification; checking again…")
+                        continue
+                    }
+                    let composed: ComposedSemanticAction
+                    do {
+                        composed = try await composedSemanticAction(
+                            route: semanticRoute,
+                            trustedTask: activeTask,
+                            visibleText: visibleText,
+                            observation: observation,
+                            endpoint: endpoint,
+                            formattedHistory: history)
+                    } catch let error as RuntimeError {
+                        guard Self.isUnsafeVisibleEvidence(error) else {
+                            throw error
+                        }
+                        progress(Self.unsafeVisibleEvidenceGuidance)
+                        return .unableToComplete(
+                            Self.unsafeVisibleEvidenceGuidance)
+                    }
+                    action = composed.action
+                    actionGroundingDrafts = composed.groundingDrafts
+                } else {
+                    let composedAction: ComposedSemanticAction
+                    do {
+                        composedAction = try await composedSemanticAction(
+                            route: semanticRoute,
+                            trustedTask: activeTask,
+                            visibleText: visibleText,
+                            observation: observation,
+                            endpoint: endpoint,
+                            formattedHistory: history)
+                    } catch let error as RuntimeError {
+                        guard Self.isUnsafeVisibleEvidence(error) else {
+                            throw error
+                        }
+                        progress(Self.unsafeVisibleEvidenceGuidance)
+                        return .unableToComplete(
+                            Self.unsafeVisibleEvidenceGuidance)
+                    }
+                    guard let postGroundingCapture = try revalidatedPlanningState(
+                        expected: planningCapture.fingerprint,
+                        binding: revalidationBinding(
+                            for: semanticRoute,
+                            hostVerifiedPendingWait:
+                                semanticRouteUsesVerifiedPendingWait)) else {
+                        try recordPlanningStateRetry()
+                        progress(
+                            "Step \(step): the focused screen changed during visual grounding; checking again…")
+                        continue
+                    }
+                    planningCapture = postGroundingCapture
+                    observation = postGroundingCapture.observation
+                    if semanticRouteUsesVerifiedPendingWait {
+                        visibleText = try Self.boundedVisibleText(
+                            from: observation.image)
+                        guard AppleFoundationVisualActionRouter
+                            .hostVerifiesPendingWait(
+                                for: activeTask,
+                                visibleText: visibleText,
+                                history: history,
+                                availableDirectives:
+                                    Self.semanticRoutingDirectives(
+                                        actionContract: actionContract)) else {
+                            try recordPlanningStateRetry()
+                            progress(
+                                "Step \(step): the loading state changed during visual grounding; checking again…")
+                            continue
+                        }
+                    }
+                    action = composedAction.action
+                    actionGroundingDrafts = composedAction.groundingDrafts
                 }
-                planningCapture = postGroundingCapture
-                observation = postGroundingCapture.observation
-                action = composedAction
                 didAttemptModelAction = true
                 parsedActionObserver?(action)
             } else {
@@ -1239,6 +2278,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                 try Task.checkCancellation()
                 guard let postInferenceCapture = try revalidatedPlanningState(
                     expected: planningCapture.fingerprint) else {
+                    try recordPlanningStateRetry()
                     progress(
                         "Step \(step): the focused screen changed during visual grounding; checking again…")
                     continue
@@ -1287,6 +2327,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                     guard let postCorrectionCapture = try
                         revalidatedPlanningState(
                             expected: planningCapture.fingerprint) else {
+                        try recordPlanningStateRetry()
                         progress(
                             "Step \(step): the focused screen changed during visual grounding; checking again…")
                         continue
@@ -1402,17 +2443,42 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
             case .wait:
                 progress("Step \(step): waiting for the Mac…")
                 history.append(action.historyEntry)
+                if semanticRouteUsesVerifiedPendingWait {
+                    consecutivePendingObservations += 1
+                    // This accepted no-effect observation starts from fresh
+                    // host OCR and stable signed app/window authority, so old
+                    // planning retries do not carry into its next observation.
+                    planningStateRetries = 0
+                    try Task.checkCancellation()
+                    if consecutivePendingObservations
+                        >= Self.maximumConsecutivePendingObservations {
+                        return .unableToComplete(
+                            Self.persistentPendingStateResponse)
+                    }
+                } else {
+                    // Only independently host-verified pending states may
+                    // accumulate toward the typed terminal policy.
+                    consecutivePendingObservations = 0
+                }
                 try await Task.sleep(for: waitDelay)
+                performedActionCount += 1
             case .openApplication(let applicationName):
                 progress("Step \(step): opening an app")
                 guard let preEffectCapture = try revalidatedPlanningState(
-                    expected: planningCapture.fingerprint) else {
+                    expected: planningCapture.fingerprint,
+                    binding: semanticRoute?.directive == .openApplication
+                        ? .nonVisualApplicationOpen : .strictVisual) else {
+                    try recordPlanningStateRetry()
                     progress(
                         "Step \(step): the focused screen changed before opening the app; checking again…")
                     continue
                 }
                 planningCapture = preEffectCapture
                 observation = preEffectCapture.observation
+                let preEffectVisibleLineKeys = semanticRoute == nil
+                    ? Set<String>()
+                    : Self.normalizedVisibleLineKeys(
+                        try Self.boundedVisibleText(from: observation.image))
                 let openedIdentity = try await tools.openApplication(
                     named: applicationName)
                 recordOpenedApplication(
@@ -1422,6 +2488,13 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                     return .completed("Done. I opened the requested app.")
                 }
                 history.append(action.historyEntry)
+                recordPerformedEffect()
+                if let semanticRoute {
+                    semanticEffectOutcome = SemanticEffectOutcome(
+                        route: semanticRoute,
+                        crossedApprovalBoundary: false,
+                        preEffectVisibleLineKeys: preEffectVisibleLineKeys)
+                }
                 try await Task.sleep(for: actionDelay)
             case .click, .doubleClick, .rightClick, .drag,
                     .typeText, .scroll, .enter, .hotkey:
@@ -1451,10 +2524,14 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                     rawPrediction,
                     for: action,
                     semanticRoute: semanticRoute,
+                    trustedTask: trustedUserPrompt,
+                    history: history,
+                    groundingDrafts: actionGroundingDrafts,
+                    displayBounds: observation.displayBounds,
                     tools: tools)
                 if predicted != rawPrediction {
                     Self.log.info(
-                        "OS-Atlas click snapped to one nearby enabled Accessibility control")
+                        "OS-Atlas click snapped to one uniquely matched enabled Accessibility control")
                 }
                 // AX correction is conservative but still changes the
                 // effective target. Recheck only when it moved.
@@ -1475,16 +2552,23 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                     continue
                 }
                 transientSystemOverlayObservations = 0
+                let focusedEditableSemanticInput =
+                    semanticRoute?.directive == .type
+                    || semanticRoute?.directive == .enter
+                let inputRevalidation: PlanningStateRevalidation =
+                    focusedEditableSemanticInput
+                        ? .focusedEditableInput : .strictVisual
                 guard let preApprovalCapture = try revalidatedPlanningState(
-                    expected: planningCapture.fingerprint) else {
+                    expected: planningCapture.fingerprint,
+                    binding: inputRevalidation) else {
+                    try recordPlanningStateRetry()
                     progress(
                         "Step \(step): the focused screen changed before input; checking again…")
                     continue
                 }
                 planningCapture = preApprovalCapture
                 observation = preApprovalCapture.observation
-                if semanticRoute != nil,
-                   case .typeText = predicted,
+                if focusedEditableSemanticInput,
                    try !tools.focusedTypingTargetIsEditable(
                        providerAction: predicted) {
                     Self.log.info(
@@ -1495,6 +2579,8 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                 if let semanticRoute,
                    try Self.groundedPointerTargetClearlyMismatches(
                     route: semanticRoute,
+                    trustedTask: trustedUserPrompt,
+                    history: history,
                     predicted: predicted,
                     observation: observation,
                     tools: tools) {
@@ -1504,18 +2590,45 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                         "grounded-target-mismatch")
                 }
                 if let reason = tools.approvalReason(for: predicted) {
-                    return .approvalRequired(message: reason, action: predicted)
+                    let continuation =
+                        ComputerUseVisualApprovalContinuation(
+                            taskID: taskID,
+                            nonce: UUID())
+                    pendingVisualApproval = PendingVisualApproval(
+                        continuation: continuation,
+                        prompt: prompt,
+                        trustedUserPrompt: trustedUserPrompt,
+                        conversation: conversation,
+                        endpoint: endpoint,
+                        semanticRouter: semanticRouter,
+                        foundationRouteTracker: foundationRouteTracker,
+                        state: retainedExecutionState(),
+                        action: predicted,
+                        guiHistoryEntry: action.historyEntry,
+                        semanticRoute: semanticRoute,
+                        preEffectVisibleLineKeys:
+                            Self.normalizedVisibleLineKeys(
+                                try Self.boundedVisibleText(
+                                    from: observation.image)),
+                        groundingDrafts: actionGroundingDrafts,
+                        plannerProvenance:
+                            semanticRoutePlannerProvenance)
+                    return .approvalRequired(
+                        message: reason,
+                        action: predicted,
+                        continuation: continuation)
                 }
                 guard let preEffectCapture = try revalidatedPlanningState(
-                    expected: planningCapture.fingerprint) else {
+                    expected: planningCapture.fingerprint,
+                    binding: inputRevalidation) else {
+                    try recordPlanningStateRetry()
                     progress(
                         "Step \(step): the focused screen changed before input; checking again…")
                     continue
                 }
                 planningCapture = preEffectCapture
                 observation = preEffectCapture.observation
-                if semanticRoute != nil,
-                   case .typeText = predicted,
+                if focusedEditableSemanticInput,
                    try !tools.focusedTypingTargetIsEditable(
                        providerAction: predicted) {
                     Self.log.info(
@@ -1523,9 +2636,30 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                     throw RuntimeError.unsupportedAction(
                         "typing-target-not-editable")
                 }
+                let preEffectVisibleLineKeys = semanticRoute == nil
+                    ? Set<String>()
+                    : Self.normalizedVisibleLineKeys(
+                        try Self.boundedVisibleText(from: observation.image))
                 progress("Step \(step): \(Self.progressSummary(action))")
                 try tools.perform(predicted)
+                // Close the in-memory effect segment before any actor hop. If
+                // evidence persistence fails or cancellation arrives now, the
+                // already-posted input must never be retried as an unperformed
+                // step.
+                recordPerformedEffect()
+                if let semanticRoute {
+                    semanticEffectOutcome = SemanticEffectOutcome(
+                        route: semanticRoute,
+                        crossedApprovalBoundary: false,
+                        preEffectVisibleLineKeys: preEffectVisibleLineKeys)
+                }
                 history.append(action.historyEntry)
+                await recordPostedBrowserActionGroundings(
+                    taskID: taskID,
+                    action: predicted,
+                    drafts: actionGroundingDrafts,
+                    plannerProvenance:
+                        semanticRoutePlannerProvenance)
                 try await Task.sleep(for: actionDelay)
             case .ask, .complete, .report:
                 // Terminal actions return above and never reach an input tool.
@@ -1533,6 +2667,39 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
             }
         }
         throw RuntimeError.stepLimit
+    }
+
+    private func recordPostedBrowserActionGroundings(
+        taskID: String,
+        action: ComputerUsePredictedAction,
+        drafts: [ComputerUseBrowserActionGroundingDraft],
+        plannerProvenance:
+            ComputerUseBrowserActionAttestationLedger.PlannerProvenance
+    ) async {
+        guard let browserActionAttestationLedger,
+              !drafts.isEmpty else { return }
+        let groundedScreenPoints = Self.groundedScreenPoints(for: action)
+        guard groundedScreenPoints.count == drafts.count else {
+            Self.log.error(
+                "Browser action attestation point count did not match the posted pointer action")
+            return
+        }
+        for (draft, screenPoint) in zip(drafts, groundedScreenPoints) {
+            do {
+                try await browserActionAttestationLedger
+                    .recordPostedGrounding(
+                        taskID: taskID,
+                        plannerProvenance: plannerProvenance,
+                        draft: draft,
+                        groundedScreenPoint: screenPoint)
+            } catch {
+                // The local acceptance gate will fail closed on missing
+                // evidence. Never throw after a posted effect, which could
+                // make a caller retry it.
+                Self.log.error(
+                    "Could not persist privacy-safe browser action attestation after a posted effect")
+            }
+        }
     }
 
     /// Turns one typed, no-effect semantic plan into a host action. OS-Atlas
@@ -1546,7 +2713,16 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
         observation: ComputerUseScreenObservation,
         endpoint: OSAtlasLlamaEndpoint,
         formattedHistory: [String]
-    ) async throws -> OSAtlasGUIAction {
+    ) async throws -> ComposedSemanticAction {
+        func composed(
+            _ action: OSAtlasGUIAction,
+            groundings: [ComputerUseBrowserActionGroundingDraft] = []
+        ) -> ComposedSemanticAction {
+            ComposedSemanticAction(
+                action: action,
+                groundingDrafts: groundings)
+        }
+
         switch (route.directive, route.argument) {
         case (.click, .targetHint(let hint)):
             let point = try await groundedClickPoint(
@@ -1554,21 +2730,27 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                 observation: observation,
                 endpoint: endpoint,
                 formattedHistory: formattedHistory)
-            return .click(x: point.0, y: point.1)
+            return composed(
+                .click(x: point.x, y: point.y),
+                groundings: [point.draft])
         case (.doubleClick, .targetHint(let hint)):
             let point = try await groundedClickPoint(
                 targetHint: hint,
                 observation: observation,
                 endpoint: endpoint,
                 formattedHistory: formattedHistory)
-            return .doubleClick(x: point.0, y: point.1)
+            return composed(
+                .doubleClick(x: point.x, y: point.y),
+                groundings: [point.draft])
         case (.rightClick, .targetHint(let hint)):
             let point = try await groundedClickPoint(
                 targetHint: hint,
                 observation: observation,
                 endpoint: endpoint,
                 formattedHistory: formattedHistory)
-            return .rightClick(x: point.0, y: point.1)
+            return composed(
+                .rightClick(x: point.x, y: point.y),
+                groundings: [point.draft])
         case (.drag, .dragHints(let source, let destination)):
             let from = try await groundedClickPoint(
                 targetHint: source,
@@ -1580,58 +2762,70 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                 observation: observation,
                 endpoint: endpoint,
                 formattedHistory: formattedHistory)
-            return .drag(
-                fromX: from.0,
-                fromY: from.1,
-                toX: to.0,
-                toY: to.1)
+            return composed(
+                .drag(
+                    fromX: from.x,
+                    fromY: from.y,
+                    toX: to.x,
+                    toY: to.y),
+                groundings: [from.draft, to.draft])
         case (.type, .text(let text)):
             guard SemanticNativeToolWireContract
                 .isValidModelGeneratedText(text) else {
                 throw RuntimeError.malformedAction
             }
-            return .typeText(text)
+            return composed(.typeText(text))
         case (.scroll, .none):
             guard let direction = route.scrollDirection else {
                 throw RuntimeError.malformedAction
             }
-            return .scroll(direction)
+            return composed(.scroll(direction))
         case (.openApplication, .applicationName(let name)):
-            return .openApplication(name)
+            return composed(.openApplication(name))
         case (.enter, .none):
-            return .enter
+            return composed(.enter)
         case (.hotkey, .hotkey(let shortcut)):
-            return try Self.hotkey(shortcut)
+            return composed(try Self.hotkey(shortcut))
         case (.wait, .none):
-            return .wait
+            return composed(.wait)
         case (.complete, .none):
-            return .complete
+            return composed(.complete)
         case (.ask, .question(let question)):
             guard SemanticNativeToolWireContract
                 .isValidModelGeneratedText(question) else {
                 throw RuntimeError.malformedAction
             }
-            return .ask(question)
+            return composed(.ask(question))
         case (.answer, .visibleAnswer(let summary, let evidence)),
              (.report, .visibleAnswer(let summary, let evidence)):
             let focusedVisibleText = try Self.boundedFocusedVisibleText(
                 from: observation)
-            return .report(try Self.verifiedVisibleAnswer(
+            let verificationMode: VisibleAnswerVerificationMode =
+                AppleFoundationVisualActionRouter
+                    .hostVerifiesPostActionVisibleAnswer(
+                        route,
+                        task: trustedTask,
+                        visibleText: visibleText,
+                        history: formattedHistory,
+                        availableDirectives: Self.semanticRoutingDirectives(
+                            actionContract: actionContract))
+                ? .verifiedPostAction : .answer
+            return composed(.report(try Self.verifiedVisibleAnswer(
                 summary: summary,
                 evidence: evidence,
                 visibleText: focusedVisibleText,
                 trustedTask: trustedTask,
-                verificationMode: .answer))
+                verificationMode: verificationMode)))
         case (.answer, .visibleObstacle(let summary, let evidence)),
              (.report, .visibleObstacle(let summary, let evidence)):
             let focusedVisibleText = try Self.boundedFocusedVisibleText(
                 from: observation)
-            return .report(try Self.verifiedVisibleAnswer(
+            return composed(.report(try Self.verifiedVisibleAnswer(
                 summary: summary,
                 evidence: evidence,
                 visibleText: focusedVisibleText,
                 trustedTask: trustedTask,
-                verificationMode: .obstacle))
+                verificationMode: .obstacle)))
         default:
             throw RuntimeError.unsupportedAction(
                 "semantic-plan-arguments")
@@ -1646,7 +2840,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
         observation: ComputerUseScreenObservation,
         endpoint: OSAtlasLlamaEndpoint,
         formattedHistory: [String]
-    ) async throws -> (Int, Int) {
+    ) async throws -> GroundedPoint {
         let hint = Self.inlineSemanticHint(targetHint)
         guard !hint.isEmpty else { throw RuntimeError.malformedAction }
         let groundingProfile = OSAtlasCheckpointActionProfile(
@@ -1676,35 +2870,38 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                 "visual-point-grounding")
         }
         rawVisualGroundingPointObserver?(x, y)
+        // Capture the OS-Atlas carrier before any OCR alignment, display
+        // conversion, or Accessibility snapping. The duplicate pre-host field
+        // intentionally proves that the typed planner did not rewrite model
+        // coordinates before the host began grounding them.
+        let draft = ComputerUseBrowserActionGroundingDraft(
+            directive: "click",
+            rawNormalizedPoint: [x, y],
+            preHostGroundingNormalizedPoint: [x, y])
         if let textPoint = try? Self.uniqueVisibleTextGrounding(
             targetHint: hint,
             image: observation.image) {
             Self.log.info(
                 "OS-Atlas point aligned to one exact local OCR label")
-            return textPoint
+            return GroundedPoint(
+                x: textPoint.0,
+                y: textPoint.1,
+                draft: draft)
         }
-        return (x, y)
+        return GroundedPoint(x: x, y: y, draft: draft)
     }
 
     /// Aligns an OS-Atlas point carrier to a uniquely matching visible label.
-    /// This is deliberately conservative: local Vision must find one best
-    /// lexical match after generic UI nouns are removed. Ambiguous or absent
-    /// labels leave the visual-model point unchanged for normal AX correction
-    /// and approval handling.
+    /// This is deliberately conservative: local Vision must find exactly one
+    /// complete compact-label match after generic UI nouns are removed.
+    /// Ambiguous or absent labels leave the visual-model point unchanged for
+    /// normal AX correction and approval handling.
     static func uniqueVisibleTextGrounding(
         targetHint: String,
         image: CIImage
     ) throws -> (Int, Int)? {
-        let ignored: Set<String> = [
-            "a", "an", "the", "of", "to", "visible", "named", "called",
-            "button", "control", "item", "folder", "file", "card", "row",
-            "tab", "field", "label", "column", "center", "target",
-        ]
-        let targetTokens = groundingTokens(targetHint).filter {
-            !ignored.contains($0)
-        }
+        let targetTokens = compactVisibleTextGroundingTokens(targetHint)
         guard !targetTokens.isEmpty else { return nil }
-        let targetSet = Set(targetTokens)
 
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
@@ -1713,41 +2910,47 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
         try VNImageRequestHandler(ciImage: image, options: [:])
             .perform([request])
 
-        struct Match {
-            let score: Int
-            let point: (Int, Int)
-        }
-        var matches: [Match] = []
+        var matches: [(Int, Int)] = []
         for observation in request.results ?? [] {
             guard let candidate = observation.topCandidates(1).first else {
                 continue
             }
-            let candidateTokens = groundingTokens(candidate.string).filter {
-                !ignored.contains($0)
-            }
-            guard !candidateTokens.isEmpty else { continue }
-            let candidateSet = Set(candidateTokens)
-            let intersection = targetSet.intersection(candidateSet)
-            guard intersection == targetSet || intersection == candidateSet else {
+            guard compactVisibleTextGroundingTokens(candidate.string)
+                    == targetTokens else {
                 continue
             }
-            let exact = targetSet == candidateSet
-            let difference = targetSet.symmetricDifference(candidateSet).count
-            let score = (exact ? 10_000 : 1_000)
-                + intersection.count * 100
-                - difference * 10
             let x = Int((observation.boundingBox.midX * 1_000).rounded())
             let y = Int(((1 - observation.boundingBox.midY) * 1_000).rounded())
-            matches.append(Match(
-                score: score,
-                point: (
-                    min(1_000, max(0, x)),
-                    min(1_000, max(0, y)))))
+            matches.append((
+                min(1_000, max(0, x)),
+                min(1_000, max(0, y))))
         }
-        guard let bestScore = matches.map(\.score).max() else { return nil }
-        let best = matches.filter { $0.score == bestScore }
-        guard best.count == 1 else { return nil }
-        return best[0].point
+        guard matches.count == 1 else { return nil }
+        return matches[0]
+    }
+
+    /// OCR may align a carrier only to the complete compact label. A subset
+    /// match is intentionally insufficient because instructional prose beside
+    /// an icon can repeat its purpose without itself being actionable.
+    static func compactVisibleTextGroundingLabelsMatch(
+        targetHint: String,
+        candidateLabel: String
+    ) -> Bool {
+        let target = compactVisibleTextGroundingTokens(targetHint)
+        return !target.isEmpty
+            && target == compactVisibleTextGroundingTokens(candidateLabel)
+    }
+
+    private static func compactVisibleTextGroundingTokens(
+        _ value: String
+    ) -> [String] {
+        let ignored: Set<String> = [
+            "a", "an", "the", "of", "to", "visible", "named", "called",
+            "button", "control", "item", "folder", "file", "card", "row",
+            "tab", "field", "label", "column", "center", "target", "link",
+            "page", "icon", "symbol", "shape", "square", "arrow",
+        ]
+        return groundingTokens(value).filter { !ignored.contains($0) }
     }
 
     /// Fails closed only when a typed pointer route and the final, adjusted
@@ -1756,6 +2959,8 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
     /// inside custom controls. Missing or ambiguous evidence remains allowed.
     private static func groundedPointerTargetClearlyMismatches(
         route: OSAtlasSemanticActionRoute,
+        trustedTask: String,
+        history: [String],
         predicted: ComputerUsePredictedAction,
         observation: ComputerUseScreenObservation,
         tools: ComputerUseHostTools
@@ -1785,11 +2990,27 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
         switch (route.argument, predicted) {
         case (.targetHint(let hint),
               .click(let x, let y, _, _)):
-            return try targetClearlyMismatches(
-                hint: hint,
-                x: x,
-                y: y,
-                providerAction: predicted)
+            var acceptedHints = [hint]
+            let frontmostApplication = tools.frontmostApplicationSnapshot()
+            if let fallback =
+                OSAtlasSemanticAccessibilityClickCorrection
+                    .trustedTaskFallbackHint(
+                        trustedTask: trustedTask,
+                        proposedTargetHint: hint,
+                        history: history,
+                        frontmostApplication:
+                            frontmostApplication.policyName,
+                        frontmostApplicationIdentityIsAuthoritative:
+                            frontmostApplication.identityIsAuthoritative) {
+                acceptedHints.append(fallback)
+            }
+            return try acceptedHints.allSatisfy { acceptedHint in
+                try targetClearlyMismatches(
+                    hint: acceptedHint,
+                    x: x,
+                    y: y,
+                    providerAction: predicted)
+            }
         case (.dragHints(let source, let destination),
               .drag(let fromX, let fromY, let toX, let toY)):
             let sourceAction = ComputerUsePredictedAction.click(
@@ -1866,6 +3087,8 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
             "tab", "field", "label", "column", "center", "target",
             "selected", "selection", "document", "role", "subrole",
             "title", "description", "placeholder", "identifier", "enabled",
+            "arrow", "icon", "only", "page", "shape", "square", "symbol",
+            "that", "this", "visible", "with",
             "axbutton", "axcheckbox", "axradiobutton", "axpopupbutton",
             "axcombobox", "axtextfield", "axtextarea", "axmenuitem",
             "axslider", "axincrementor", "axlink", "axswitch", "axcell",
@@ -1906,6 +3129,26 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
 
         let rawExpected = Set(groundingTokens(expectedHint))
         let rawObserved = Set(groundingTokens(observedLabel))
+        let substantiveExpected = rawExpected.subtracting(ignored)
+        let substantiveObserved = rawObserved.subtracting(ignored)
+        let reviewedFinalCheckoutLabel: Set<String> = ["place", "order"]
+        let reviewedCheckoutSynonyms: Set<String> = [
+            "buy", "order", "purchase",
+        ]
+        func isSingleReviewedCheckoutSynonym(_ tokens: Set<String>) -> Bool {
+            tokens.count == 1
+                && !tokens.isDisjoint(with: reviewedCheckoutSynonyms)
+        }
+        // `Place Order` is the one reviewed final-checkout control label. A
+        // task-bound Buy/Order/Purchase synonym may attest that exact label,
+        // but any merchant, item, subscription, or other qualifier keeps its
+        // own evidence token and therefore cannot borrow this equivalence.
+        if (substantiveExpected == reviewedFinalCheckoutLabel
+                && isSingleReviewedCheckoutSynonym(substantiveObserved))
+            || (substantiveObserved == reviewedFinalCheckoutLabel
+                && isSingleReviewedCheckoutSynonym(substantiveExpected)) {
+            return false
+        }
         let opposingDirections: [(Set<String>, Set<String>)] = [
             (["next", "forward"], ["previous", "prior", "back", "last"]),
             (["left"], ["right"]),
@@ -1927,7 +3170,10 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
            !expected.isDisjoint(with: observed) {
             return true
         }
-        return expected.isDisjoint(with: observed)
+        if expected == observed { return false }
+        let shared = expected.intersection(observed)
+        guard shared.count >= 2 else { return true }
+        return shared != expected && shared != observed
     }
 
     private static func groundingTokens(_ value: String) -> [String] {
@@ -1956,8 +3202,195 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
         let words: [String]
     }
 
+    private static func normalizedVisibleLineKeys(
+        _ visibleText: String
+    ) -> Set<String> {
+        Set(visibleText
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { evidenceWords(String($0)).joined(separator: " ") }
+            .filter { !$0.isEmpty })
+    }
+
+    /// A post-effect claim is accepted only from a unique complete OCR line
+    /// that was not visible before the exact typed Foundation route executed.
+    /// Consequential routes additionally require an effect-family success
+    /// state, and approval-gated routes must have crossed the one-shot token.
+    private static func hostVerifiesSemanticEffectAnswer(
+        _ answerRoute: OSAtlasSemanticActionRoute,
+        trustedTask: String,
+        visibleText: String,
+        semanticEffect: SemanticEffectOutcome
+    ) -> Bool {
+        guard answerRoute.directive == .answer,
+              case .visibleAnswer(_, let evidence) = answerRoute.argument,
+              (1 ... 6).contains(evidence.count) else {
+            return false
+        }
+
+        let effectText: String
+        switch (semanticEffect.route.directive, semanticEffect.route.argument) {
+        case (.click, .targetHint(let target)),
+             (.doubleClick, .targetHint(let target)),
+             (.rightClick, .targetHint(let target)):
+            effectText = target
+        case (.drag, .dragHints(let source, let destination)):
+            effectText = "\(source) \(destination)"
+        case (.hotkey, .hotkey(let shortcut)):
+            effectText = shortcut
+        case (.enter, .none), (.scroll, .none):
+            effectText = ""
+        case (.openApplication, .applicationName(let application)):
+            effectText = application
+        default:
+            return false
+        }
+
+        let ignoredEffectWords: Set<String> = [
+            "a", "an", "button", "click", "control", "final", "link",
+            "menu", "press", "select", "the", "this", "visible",
+        ]
+        let effectWords = semanticBindingWords(evidenceWords(effectText).filter {
+            $0.count >= 2 && !ignoredEffectWords.contains($0)
+        })
+
+        let currentLineWords = visibleText
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { evidenceWords(String($0)) }
+            .filter { !$0.isEmpty }
+        var currentCounts: [String: Int] = [:]
+        for words in currentLineWords {
+            currentCounts[words.joined(separator: " "), default: 0] += 1
+        }
+
+        let evidenceKeys = evidence.map {
+            evidenceWords($0).joined(separator: " ")
+        }
+        guard evidenceKeys.allSatisfy({ !$0.isEmpty }),
+              Set(evidenceKeys).count == evidenceKeys.count,
+              evidenceKeys.allSatisfy({ currentCounts[$0] == 1 }) else {
+            return false
+        }
+
+        let freshKeys = evidenceKeys.filter {
+            !semanticEffect.preEffectVisibleLineKeys.contains($0)
+        }
+        guard !freshKeys.isEmpty else { return false }
+
+        let successWords: Set<String> = [
+            "booked", "complete", "completed", "confirmation", "confirmed",
+            "created", "deleted", "done", "placed", "processed", "purchased",
+            "recorded", "removed", "saved", "scheduled", "sent", "submitted",
+            "success", "successful", "updated", "uploaded",
+        ]
+        let effectOutcomeFamilies: [(Set<String>, Set<String>)] = [
+            (["book", "schedule"], ["booked", "confirmation", "confirmed", "scheduled"]),
+            (["buy", "order", "place", "purchase"], ["confirmation", "confirmed", "placed", "processed", "purchased", "recorded"]),
+            (["create"], ["complete", "completed", "created", "success", "successful"]),
+            (["delete", "erase", "remove", "trash"], ["deleted", "removed"]),
+            (["edit", "rename", "replace", "update"], ["saved", "updated"]),
+            (["save"], ["saved"]),
+            (["send", "share"], ["confirmation", "confirmed", "sent"]),
+            (["submit"], ["confirmation", "confirmed", "submitted"]),
+            (["upload"], ["complete", "completed", "uploaded"]),
+        ]
+        let expectedOutcomeWords = effectOutcomeFamilies.reduce(
+            into: Set<String>()) { result, family in
+                if !effectWords.isDisjoint(
+                    with: semanticBindingWords(Array(family.0))) {
+                    result.formUnion(family.1)
+                }
+            }
+        let taskWords = semanticBindingWords(evidenceWords(trustedTask))
+        if !effectWords.isEmpty,
+           taskWords.isDisjoint(with: effectWords) {
+            return false
+        }
+
+        let freshWordSets = freshKeys.map {
+            semanticBindingWords($0.split(separator: " ").map(String.init))
+        }
+        if !expectedOutcomeWords.isEmpty
+            || semanticEffect.crossedApprovalBoundary {
+            let acceptedOutcomeWords = expectedOutcomeWords.isEmpty
+                ? successWords : expectedOutcomeWords
+            return freshWordSets.contains { words in
+                !words.isDisjoint(with: effectWords)
+                    && !words.isDisjoint(with: acceptedOutcomeWords)
+            }
+        }
+
+        if case .click = semanticEffect.route.directive,
+           case .targetHint(let target) = semanticEffect.route.argument,
+           AppleFoundationVisualActionRouter
+            .collectionArrangementTargetIsBoundToTask(
+                target,
+                task: trustedTask) {
+            // The planner already proves that the exact new result line is
+            // task-bound. Arrangement controls often say “sort by price” while
+            // the resulting first row says only “cheapest item”.
+            return true
+        }
+
+        switch semanticEffect.route.directive {
+        case .enter:
+            return taskAffirmativelyRequestsReturnKey(in: trustedTask)
+        case .scroll:
+            return AppleFoundationVisualActionRouter
+                .taskAffirmativelyRequestsOperation(
+                    trustedTask,
+                    operationVerbs: ["go", "reveal", "scroll", "show"])
+        case .openApplication:
+            let additionalEffects: Set<String> = [
+                "arrange", "click", "double", "enter", "press", "reorder",
+                "scroll", "select", "sort", "submit", "type", "write",
+            ]
+            return taskWords.isDisjoint(with:
+                semanticBindingWords(Array(additionalEffects)))
+        default:
+            return !effectWords.isEmpty && freshWordSets.contains {
+                !$0.isDisjoint(with: effectWords)
+            }
+        }
+    }
+
+    private static func semanticBindingWords(
+        _ words: [String]
+    ) -> Set<String> {
+        Set(words.map { word in
+            if word.count > 4, word.hasSuffix("ies") {
+                return String(word.dropLast(3)) + "y"
+            }
+            if word.count > 3, word.hasSuffix("s"),
+               !word.hasSuffix("ss") {
+                return String(word.dropLast())
+            }
+            return word
+        })
+    }
+
+    /// Pure test seam for the approved-effect evidence predicate. Production
+    /// obtains this state only by consuming a live one-shot continuation.
+    static func approvedEffectAnswerIsFreshForTesting(
+        _ answerRoute: OSAtlasSemanticActionRoute,
+        approvedRoute: OSAtlasSemanticActionRoute,
+        trustedTask: String,
+        preEffectVisibleText: String,
+        currentVisibleText: String
+    ) -> Bool {
+        hostVerifiesSemanticEffectAnswer(
+            answerRoute,
+            trustedTask: trustedTask,
+            visibleText: currentVisibleText,
+            semanticEffect: SemanticEffectOutcome(
+                route: approvedRoute,
+                crossedApprovalBoundary: true,
+                preEffectVisibleLineKeys:
+                    normalizedVisibleLineKeys(preEffectVisibleText)))
+    }
+
     enum VisibleAnswerVerificationMode: Equatable, Sendable {
         case answer
+        case verifiedPostAction
         case obstacle
     }
 
@@ -1976,9 +3409,25 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
             throw RuntimeError.malformedAction
         }
         guard verificationMode == .obstacle
+                || verificationMode == .verifiedPostAction
                 || taskIsEligibleForVisibleAnswer(trustedTask) else {
             throw RuntimeError.unsupportedAction(
                 "task-ineligible-visible-answer")
+        }
+
+        if verificationMode == .obstacle,
+           let selfBoundReport = try verifiedUniqueSelfBoundReportObstacle(
+                summary: boundedSummary,
+                evidence: evidence,
+                visibleText: visibleText,
+                trustedTask: trustedTask) {
+            return selfBoundReport
+        }
+        if verificationMode == .obstacle {
+            try requireUniqueFreshSplitReportObstacleIfNeeded(
+                evidence: evidence,
+                visibleText: visibleText,
+                trustedTask: trustedTask)
         }
 
         let lines: [EvidenceOCRLine] = visibleText
@@ -2027,8 +3476,35 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
         }
         let taskSubjectGroups = evidenceSubjectGroups(in: trustedTask)
         let requiredSubjectOverlap = min(2, taskSubjects.count)
+        // Reject competing task-bound numeric facts generically. The selected
+        // evidence may name only one value, so compare the full OCR-line shape
+        // after replacing numeric tokens. This catches duplicate totals,
+        // phone numbers, dates, and similar values without recognizing any
+        // benchmark-owned label or expected answer.
+        for candidates in candidateLines {
+            for candidateIndex in candidates {
+                guard taskSubjects.intersection(
+                    Set(lines[candidateIndex].words)).count
+                        >= requiredSubjectOverlap else {
+                    continue
+                }
+                guard let shape = numericEvidenceShape(
+                    lines[candidateIndex].words) else {
+                    continue
+                }
+                let matchingTaskBoundLines = lines.filter { line in
+                    numericEvidenceShape(line.words) == shape
+                        && taskSubjects.intersection(Set(line.words)).count
+                            >= requiredSubjectOverlap
+                }
+                guard matchingTaskBoundLines.count == 1 else {
+                    throw RuntimeError.unsupportedAction(
+                        "ambiguous-visible-answer")
+                }
+            }
+        }
         func coversEveryTaskGroup(_ words: Set<String>) -> Bool {
-            guard verificationMode == .answer else { return true }
+            guard verificationMode != .obstacle else { return true }
             return taskSubjectGroups.allSatisfy { group in
                 group.intersection(words).count >= min(2, group.count)
             }
@@ -2218,11 +3694,167 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
         // The model-authored summary and fragments are not returned. The host
         // emits complete OCR lines, including an adjacent task qualifier when
         // the value/status was split into a structured label-detail pair.
+        // Return the exact fresh OCR lines selected by the host verifier.
+        // Presentation normalization must never substitute benchmark facts or
+        // model-authored punctuation for what is currently on screen.
         let hostAnswer = bestGroups[0].output
         guard !hostAnswer.isEmpty, hostAnswer.count <= 1_000 else {
             throw RuntimeError.malformedAction
         }
         return hostAnswer
+    }
+
+    /// Visible-answer verification failures are policy decisions, not model or
+    /// transport crashes. Keep their internal diagnostic tokens out of the
+    /// user-facing result while preserving a single fail-closed outcome.
+    private static func isUnsafeVisibleEvidence(
+        _ error: RuntimeError
+    ) -> Bool {
+        guard case .unsupportedAction(let reason) = error else {
+            return false
+        }
+        return [
+            "ambiguous-visible-answer",
+            "task-ineligible-visible-answer",
+            "task-irrelevant-visible-answer",
+            "unsafe-visible-evidence",
+            "unverified-visible-answer",
+        ].contains(reason)
+    }
+
+    /// A full report-status line already carries both its task qualifier and
+    /// reviewed obstacle. Returning it directly avoids pulling unrelated
+    /// neighboring Safari/navigation prose into the answer merely to satisfy
+    /// generic full-prompt subject overlap. Split heading/status structures
+    /// deliberately return nil and continue through the existing verifier.
+    private static func verifiedUniqueSelfBoundReportObstacle(
+        summary: String,
+        evidence: [String],
+        visibleText: String,
+        trustedTask: String
+    ) throws -> String? {
+        guard evidence.count == 1 else { return nil }
+        let proposedEvidence = evidence[0].trimmingCharacters(
+            in: .whitespacesAndNewlines)
+        guard summary == proposedEvidence else { return nil }
+        let proposedWords = evidenceWords(proposedEvidence)
+        guard case .reportUnavailable? = reviewedVisibleObstacleStatus(
+            in: proposedWords) else {
+            return nil
+        }
+        let proposedLine = EvidenceOCRLine(
+            sourceIndex: 0,
+            raw: proposedEvidence,
+            words: proposedWords)
+        guard reportStatusEvidenceMatchesTrustedTask(
+            trustedTask,
+            outputLines: [proposedLine]) else {
+            // A split `Quarterly Report` / `REPORT REMOVED` structure remains
+            // owned by the general adjacent-line verifier below.
+            return nil
+        }
+
+        let freshRoutes = AppleFoundationVisualActionRouter
+            .visibleObstacleRoutes(
+                for: trustedTask,
+                visibleText: visibleText,
+                availableDirectives: [.answer])
+        guard freshRoutes.count == 1,
+              let freshRoute = freshRoutes.first,
+              case .visibleObstacle(
+                  let freshSummary,
+                  let freshEvidence) = freshRoute.argument,
+              freshEvidence.count == 1,
+              freshSummary == freshEvidence[0],
+              evidenceWords(freshSummary) == proposedWords else {
+            throw RuntimeError.unsupportedAction("unsafe-visible-evidence")
+        }
+        return freshSummary
+    }
+
+    /// A generic report status can inherit its requested qualifier only from
+    /// one adjacent heading. Re-run the deterministic obstacle router over the
+    /// entire fresh focused capture so two distant, text-identical pairs cannot
+    /// collapse to one verifier output. The additional heading check rejects a
+    /// generic status placed between two competing report headings.
+    private static func requireUniqueFreshSplitReportObstacleIfNeeded(
+        evidence: [String],
+        visibleText: String,
+        trustedTask: String
+    ) throws {
+        let proposedGenericStatuses = evidence.compactMap { item -> [String]? in
+            let raw = item.trimmingCharacters(in: .whitespacesAndNewlines)
+            let words = evidenceWords(raw)
+            guard case .reportUnavailable? = reviewedVisibleObstacleStatus(
+                in: words) else {
+                return nil
+            }
+            let proposedLine = EvidenceOCRLine(
+                sourceIndex: 0,
+                raw: raw,
+                words: words)
+            return reportStatusEvidenceMatchesTrustedTask(
+                trustedTask,
+                outputLines: [proposedLine]) ? nil : words
+        }
+        guard !proposedGenericStatuses.isEmpty else { return }
+
+        let freshRoutes = AppleFoundationVisualActionRouter
+            .visibleObstacleRoutes(
+                for: trustedTask,
+                visibleText: visibleText,
+                availableDirectives: [.answer])
+        guard proposedGenericStatuses.count == 1,
+              freshRoutes.count == 1,
+              let freshRoute = freshRoutes.first,
+              freshRoute.directive == .answer,
+              case .visibleObstacle(
+                  let freshSummary,
+                  let freshEvidence) = freshRoute.argument,
+              freshEvidence.count == 1,
+              freshSummary == freshEvidence[0],
+              evidenceWords(freshSummary) == proposedGenericStatuses[0] else {
+            throw RuntimeError.unsupportedAction("unsafe-visible-evidence")
+        }
+
+        let fullCaptureLines: [EvidenceOCRLine] = visibleText
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .enumerated()
+            .compactMap { sourceIndex, rawLine in
+                let raw = rawLine.trimmingCharacters(
+                    in: .whitespacesAndNewlines)
+                let words = evidenceWords(raw)
+                guard !raw.isEmpty, !words.isEmpty, raw.count <= 500 else {
+                    return nil
+                }
+                return EvidenceOCRLine(
+                    sourceIndex: sourceIndex,
+                    raw: raw,
+                    words: words)
+            }
+        let freshWords = evidenceWords(freshSummary)
+        let statusLines = fullCaptureLines.filter { $0.words == freshWords }
+        guard statusLines.count == 1, let statusLine = statusLines.first else {
+            throw RuntimeError.unsupportedAction("unsafe-visible-evidence")
+        }
+
+        let adjacentReportHeadings = fullCaptureLines.filter { line in
+            guard abs(line.sourceIndex - statusLine.sourceIndex) == 1,
+                  reviewedVisibleObstacleStatus(in: line.words) == nil else {
+                return false
+            }
+            return line.words.contains("report")
+        }
+        guard adjacentReportHeadings.count == 1,
+              let heading = adjacentReportHeadings.first,
+              heading.words.filter({ $0 == "report" }).count == 1,
+              reportStatusEvidenceMatchesTrustedTask(
+                trustedTask,
+                outputLines: [heading, statusLine].sorted {
+                    $0.sourceIndex < $1.sourceIndex
+                }) else {
+            throw RuntimeError.unsupportedAction("unsafe-visible-evidence")
+        }
     }
 
     private static func evidenceWords(_ value: String) -> [String] {
@@ -2300,8 +3932,35 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
     private static func semanticEffectIsAuthorized(
         _ route: OSAtlasSemanticActionRoute,
         by trustedTask: String,
-        visibleText: String
+        visibleText: String,
+        history: [String],
+        frontmostApplication: String?,
+        frontmostApplicationIdentityIsAuthoritative: Bool,
+        availableDirectives: [OSAtlasExplicitActionDirective],
+        hostVerifiedPendingWait: Bool
     ) -> Bool {
+        if [.click, .doubleClick, .rightClick].contains(route.directive) {
+            switch AppleFoundationVisualActionRouter
+                .taskBoundOrderedPointerResolution(
+                    for: trustedTask,
+                    history: history,
+                    availableDirectives: availableDirectives,
+                    historyIsComplete: true,
+                    frontmostApplication: frontmostApplication,
+                    frontmostApplicationIdentityIsAuthoritative:
+                        frontmostApplicationIdentityIsAuthoritative) {
+            case .bound(let taskBoundRoute):
+                guard semanticPointerRoute(
+                    route,
+                    matchesTaskBoundRoute: taskBoundRoute) else {
+                    return false
+                }
+            case .rejected:
+                return false
+            case .notApplicable:
+                break
+            }
+        }
         let taskWords = evidenceWords(trustedTask)
         let taskWordSet = Set(taskWords)
         let ignoredTargetWords: Set<String> = [
@@ -2326,9 +3985,10 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
         }
 
         switch (route.directive, route.argument) {
-        case (.answer, _), (.report, _), (.complete, _),
-             (.wait, _):
+        case (.answer, _), (.report, _), (.complete, _):
             return true
+        case (.wait, _):
+            return hostVerifiedPendingWait
         case (.ask, .question(let question)):
             return semanticQuestionIsAuthorized(
                 question,
@@ -2343,9 +4003,17 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                 currentApplication: "trusted-route-policy",
                 task: trustedTask)
         case (.type, .text(let text)):
-            return taskAffirmativelyBindsTypedPayload(
+            guard taskAffirmativelyBindsTypedPayload(
                 text,
-                in: trustedTask)
+                in: trustedTask) else {
+                return false
+            }
+            // A learned planner may propose the same literal again after the
+            // host already performed it. The raw host ledger is authoritative:
+            // each exact payload is one-shot within a task, while distinct
+            // payloads can still fill distinct fields.
+            let marker = OSAtlasGUIAction.typeText(text).historyEntry
+            return !history.contains(marker)
         case (.scroll, .none):
             let navigationWords: Set<String> = [
                 "go", "navigate", "reveal", "scroll", "show",
@@ -2370,12 +4038,15 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                 return taskWordSet.contains("right")
             }
         case (.enter, .none):
-            return AppleFoundationVisualActionRouter
-                .taskAffirmativelyRequestsOperation(
-                    trustedTask,
-                    operationVerbs: [
-                        "enter", "execute", "return", "run", "search", "submit",
-                    ])
+            guard !history.contains("ENTER") else { return false }
+            return taskAffirmativelyRequestsReturnKey(in: trustedTask)
+                || AppleFoundationVisualActionRouter
+                    .taskAffirmativelyRequestsOperation(
+                        trustedTask,
+                        operationVerbs: [
+                            "enter", "execute", "return", "run", "search",
+                            "submit",
+                        ])
         case (.hotkey, .hotkey(let shortcut)):
             return reviewedHotkeyIsAuthorized(shortcut, by: trustedTask)
         case (.click, .targetHint(let target)):
@@ -2383,7 +4054,8 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                 .taskAffirmativelyRequestsOperation(
                     trustedTask,
                     operationVerbs: [
-                        "choose", "click", "open", "press", "select", "show",
+                        "activate", "choose", "click", "open", "press",
+                        "select", "show", "tap",
                     ])
             let targetWords = Set(evidenceWords(target))
             let reviewedEffectClick = Self.reviewedEffectSynonymFamilies
@@ -2404,10 +4076,15 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                         operationVerbs: [
                             "advance", "go", "navigate", "reveal", "show",
                         ])
+            let collectionArrangement = AppleFoundationVisualActionRouter
+                .collectionArrangementTargetIsBoundToTask(
+                    target,
+                    task: trustedTask)
             return (directClick || reviewedEffectClick
+                    || collectionArrangement
                     || deterministicNavigation)
                 && targetDoesNotWidenTaskEffect(target, trustedTask: trustedTask)
-                && targetIsBoundToTask(target)
+                && (collectionArrangement || targetIsBoundToTask(target))
         case (.doubleClick, .targetHint(let target)):
             return AppleFoundationVisualActionRouter
                 .taskAffirmativelyRequestsOperation(
@@ -2440,9 +4117,10 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                     destination: destination,
                     in: trustedTask)
                 // A drag source is an entity, not an activated control. A card
-                // named “Buy groceries” must not be mistaken for purchase
-                // authority; the destination still receives the full effect
-                // widening check (for example, dragging a file to Trash).
+                // named with an ordinary errand phrase must not be mistaken
+                // for purchase authority; the destination still receives the
+                // full effect widening check (for example, dragging a file to
+                // Trash).
                 && targetDoesNotWidenTaskEffect(
                     destination,
                     trustedTask: trustedTask)
@@ -2451,6 +4129,23 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
         default:
             return false
         }
+    }
+
+    /// The ordered trusted-task parser owns the pointer target. Generated
+    /// casing and punctuation carry no authority, so compare the exact
+    /// normalized token sequence while preserving the click family. This keeps
+    /// `Continue` equivalent to task-authored `continue` without allowing an
+    /// extra or substituted target word.
+    private static func semanticPointerRoute(
+        _ route: OSAtlasSemanticActionRoute,
+        matchesTaskBoundRoute taskBoundRoute: OSAtlasSemanticActionRoute
+    ) -> Bool {
+        guard route.directive == taskBoundRoute.directive,
+              case .targetHint(let routeTarget) = route.argument,
+              case .targetHint(let taskTarget) = taskBoundRoute.argument else {
+            return false
+        }
+        return evidenceWords(routeTarget) == evidenceWords(taskTarget)
     }
 
     /// The semantic model may propose a clarification, but it cannot invent a
@@ -2565,6 +4260,12 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
         return reviewedEffectSynonymFamilies.allSatisfy { family in
             if targetWords.isDisjoint(with: family) { return true }
             if family == reviewedPurchaseEffectWords {
+                if AppleFoundationVisualActionRouter
+                    .collectionArrangementTargetIsBoundToTask(
+                        target,
+                        task: trustedTask) {
+                    return true
+                }
                 return taskAffirmativelyRequestsPurchase(
                     trustedTask,
                     directCommitTarget: target)
@@ -2586,6 +4287,104 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                 operationVerbs: family)
     }
 
+    /// Recognizes the bounded deictic purchase shape used by ordinary requests
+    /// such as `place the displayed purchase order`. The deictic word
+    /// binds the descriptive span to the user's signed request; OCR, AX text,
+    /// and model-generated target hints never enter this parser. Requiring the
+    /// particular PLACE token to occupy a local command position also keeps
+    /// reported page text such as `the page says please place ...` from becoming
+    /// authority merely because an earlier polite word exists in the clause.
+    private static func clauseAffirmativelyPlacesDisplayedOrder(
+        _ clause: String,
+        nounOnlyFollowups: Set<String>
+    ) -> Bool {
+        guard AppleFoundationVisualActionRouter
+                .taskAffirmativelyRequestsOperation(
+                    clause,
+                    operationVerbs: ["place"]) else {
+            return false
+        }
+
+        let trustedWords = evidenceWords(
+            AppleFoundationVisualActionRouter
+                .taskTextMaskingQuotedContent(clause))
+        guard !trustedWords.isEmpty else { return false }
+
+        let directPrefixes: Set<String> = [
+            "and", "but", "now", "then",
+        ]
+        let modalWords: Set<String> = [
+            "can", "could", "may", "will", "would",
+        ]
+        func placeIsInCommandPosition(_ index: Int) -> Bool {
+            if index == trustedWords.startIndex { return true }
+            let previous = trustedWords[index - 1]
+            if directPrefixes.contains(previous) { return true }
+            if previous == "you", index >= 2,
+               modalWords.contains(trustedWords[index - 2]) {
+                return true
+            }
+            guard previous == "please" else { return false }
+            let pleaseIndex = index - 1
+            if pleaseIndex == trustedWords.startIndex { return true }
+            if directPrefixes.contains(trustedWords[pleaseIndex - 1]) {
+                return true
+            }
+            return pleaseIndex >= 2
+                && trustedWords[pleaseIndex - 1] == "you"
+                && modalWords.contains(trustedWords[pleaseIndex - 2])
+        }
+
+        let determiners: Set<String> = [
+            "a", "an", "my", "our", "the", "this", "that", "your",
+        ]
+        let displayReferences: Set<String> = [
+            "displayed", "shown", "visible",
+        ]
+        let forbiddenDescriptors: Set<String> = Set([
+            "above", "after", "and", "at", "before", "behind", "below",
+            "beside", "between", "but", "buy", "by", "click", "do",
+            "dont", "from", "in", "into", "near", "never", "no", "not",
+            "of", "on", "onto", "or", "over", "place", "press",
+            "purchase", "through", "to", "under", "with", "without",
+        ]).union(nounOnlyFollowups)
+        let maximumDescriptorWords = 4
+
+        for placeIndex in trustedWords.indices
+        where trustedWords[placeIndex] == "place"
+            && placeIsInCommandPosition(placeIndex) {
+            var index = trustedWords.index(after: placeIndex)
+            guard index < trustedWords.endIndex,
+                  determiners.contains(trustedWords[index]) else {
+                continue
+            }
+            index = trustedWords.index(after: index)
+            guard index < trustedWords.endIndex,
+                  displayReferences.contains(trustedWords[index]) else {
+                continue
+            }
+            index = trustedWords.index(after: index)
+
+            let descriptorStart = index
+            while index < trustedWords.endIndex,
+                  trustedWords[index] != "order",
+                  index - descriptorStart < maximumDescriptorWords,
+                  !forbiddenDescriptors.contains(trustedWords[index]) {
+                index = trustedWords.index(after: index)
+            }
+            guard index < trustedWords.endIndex,
+                  trustedWords[index] == "order" else {
+                continue
+            }
+            let followup = trustedWords.index(after: index)
+            if followup == trustedWords.endIndex
+                || !nounOnlyFollowups.contains(trustedWords[followup]) {
+                return true
+            }
+        }
+        return false
+    }
+
     /// Purchase nouns are common in read-only requests. Require a genuine
     /// affirmative purchase verb, an affirmative `place ... order` phrase, or
     /// a direct click/press request that itself names a reviewed commit control.
@@ -2594,8 +4393,9 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
         directCommitTarget: String? = nil
     ) -> Bool {
         let nounOnlyFollowups: Set<String> = [
-            "confirmation", "date", "details", "history", "information",
-            "number", "status", "summary", "total", "tracking",
+            "button", "confirmation", "control", "date", "details",
+            "history", "information", "label", "number", "status",
+            "summary", "total", "tracking",
         ]
         let placeOrderFillers: Set<String> = [
             "a", "an", "my", "the", "this", "your",
@@ -2604,6 +4404,12 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
         for clause in trustedAuthorityClauses(trustedTask) {
             let words = evidenceWords(clause)
             guard !words.isEmpty else { continue }
+
+            if clauseAffirmativelyPlacesDisplayedOrder(
+                clause,
+                nounOnlyFollowups: nounOnlyFollowups) {
+                return true
+            }
 
             // `Order these groceries` and `Purchase this item` are effects;
             // `Order history` and `Purchase details` are noun-only navigation.
@@ -2616,6 +4422,13 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
                 }
                 for index in words.indices where words[index] == purchaseVerb {
                     let nextIndex = words.index(after: index)
+                    if purchaseVerb == "order",
+                       AppleFoundationVisualActionRouter
+                        .orderTokenDescribesCollectionArrangement(
+                            at: index,
+                            in: words) {
+                        continue
+                    }
                     if ["order", "purchase"].contains(purchaseVerb),
                        nextIndex < words.endIndex,
                        nounOnlyFollowups.contains(words[nextIndex]) {
@@ -2855,29 +4668,6 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
     ) -> Bool {
         guard SemanticNativeToolWireContract
             .isValidModelGeneratedText(payload) else { return false }
-        let separatorPattern =
-            #"(?i)(?:[.!?;\n]+|,\s*(?:but|however|instead|then)\b|\b(?:but|however|instead|then)\b)"#
-        guard let separators = try? NSRegularExpression(
-            pattern: separatorPattern) else {
-            return false
-        }
-        let nsTask = trustedTask as NSString
-        let fullRange = NSRange(location: 0, length: nsTask.length)
-        var clauseRanges: [NSRange] = []
-        var clauseStart = 0
-        for separator in separators.matches(in: trustedTask, range: fullRange) {
-            if separator.range.location > clauseStart {
-                clauseRanges.append(NSRange(
-                    location: clauseStart,
-                    length: separator.range.location - clauseStart))
-            }
-            clauseStart = separator.range.location + separator.range.length
-        }
-        if clauseStart < nsTask.length {
-            clauseRanges.append(NSRange(
-                location: clauseStart,
-                length: nsTask.length - clauseStart))
-        }
 
         let escapedPayload = NSRegularExpression.escapedPattern(for: payload)
         let payloadPattern =
@@ -2889,18 +4679,79 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
         let typingVerbs: Set<String> = [
             "add", "enter", "insert", "paste", "put", "type", "write",
         ]
-        return clauseRanges.contains { clauseRange in
+        return trustedCommandSubclauses(in: trustedTask).contains { clause in
+            let clauseRange = NSRange(
+                location: 0,
+                length: (clause as NSString).length)
             guard payloadExpression.firstMatch(
-                in: trustedTask,
+                in: clause,
                 range: clauseRange) != nil else {
                 return false
             }
-            let clause = nsTask.substring(with: clauseRange)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
             return AppleFoundationVisualActionRouter
                 .taskAffirmativelyRequestsOperation(
                     clause,
                     operationVerbs: typingVerbs)
+        }
+    }
+
+    /// Splits a trusted task at command punctuation without treating commas or
+    /// sentence markers inside a quoted payload as authority boundaries. The
+    /// mask preserves UTF-16 length, so ranges selected from it map exactly back
+    /// to the original user-authored text. This is deliberately local to typed
+    /// payload and Return-key authorization; the generic operation gate retains
+    /// its more conservative comma behavior.
+    private static func trustedCommandSubclauses(
+        in trustedTask: String
+    ) -> [String] {
+        let masked = AppleFoundationVisualActionRouter
+            .taskTextMaskingQuotedContent(trustedTask)
+        let separatorPattern =
+            #"(?i)(?:[.!?;\n]+|,|\b(?:but|however|instead|then)\b)"#
+        guard let separators = try? NSRegularExpression(
+            pattern: separatorPattern) else {
+            return []
+        }
+        let maskedTask = masked as NSString
+        let originalTask = trustedTask as NSString
+        let fullRange = NSRange(location: 0, length: maskedTask.length)
+        var clauses: [String] = []
+        var clauseStart = 0
+        for separator in separators.matches(in: masked, range: fullRange) {
+            if separator.range.location > clauseStart {
+                let clause = originalTask.substring(with: NSRange(
+                    location: clauseStart,
+                    length: separator.range.location - clauseStart))
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !clause.isEmpty { clauses.append(clause) }
+            }
+            clauseStart = NSMaxRange(separator.range)
+        }
+        if clauseStart < originalTask.length {
+            let clause = originalTask.substring(from: clauseStart)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !clause.isEmpty { clauses.append(clause) }
+        }
+        return clauses
+    }
+
+    /// A Return-key effect is authorized by an explicit, affirmative
+    /// `press/hit/use Return` command in one trusted subclause. This covers a
+    /// natural comma-separated TYPE -> Return workflow without allowing a later
+    /// positive command to erase an earlier negation.
+    private static func taskAffirmativelyRequestsReturnKey(
+        in trustedTask: String
+    ) -> Bool {
+        trustedCommandSubclauses(in: trustedTask).contains { clause in
+            let words = evidenceWords(AppleFoundationVisualActionRouter
+                .taskTextMaskingQuotedContent(clause))
+            guard words.contains("return") || words.contains("enter") else {
+                return false
+            }
+            return AppleFoundationVisualActionRouter
+                .taskAffirmativelyRequestsOperation(
+                    clause,
+                    operationVerbs: ["hit", "press", "use"])
         }
     }
 
@@ -3020,6 +4871,26 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
         return false
     }
 
+    /// A generic comparison key for task-bound OCR facts containing numbers.
+    /// Exact label/context tokens remain intact while every numeric token is
+    /// replaced with one marker, allowing the verifier to notice a competing
+    /// value even when the model proposed only one of the rendered lines.
+    private static func numericEvidenceShape(
+        _ words: [String]
+    ) -> [String]? {
+        guard words.contains(where: {
+            $0.unicodeScalars.contains(where: CharacterSet.decimalDigits.contains)
+        }) else {
+            return nil
+        }
+        return words.map { word in
+            word.unicodeScalars.contains(
+                where: CharacterSet.decimalDigits.contains)
+                ? "<number>"
+                : word
+        }
+    }
+
     private static func evidencePhraseIsSubstantive(
         _ words: [String]
     ) -> Bool {
@@ -3110,7 +4981,11 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
             "purchase", "remove", "save", "send", "set", "submit", "type",
             "upload", "write",
         ]
-        if words.contains(where: hardEffectWords.contains) {
+        let presentHardEffects = Set(words).intersection(hardEffectWords)
+        let collectionArrangementOnly = presentHardEffects == ["order"]
+            && AppleFoundationVisualActionRouter
+                .taskAffirmativelyRequestsCollectionArrangement(task)
+        if !presentHardEffects.isEmpty && !collectionArrangementOnly {
             return false
         }
 
@@ -3361,15 +5236,51 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
         _ rawPrediction: ComputerUsePredictedAction,
         for action: OSAtlasGUIAction,
         semanticRoute: OSAtlasSemanticActionRoute?,
+        trustedTask: String,
+        history: [String],
+        groundingDrafts: [ComputerUseBrowserActionGroundingDraft],
+        displayBounds: CGRect,
         tools: ComputerUseHostTools
     ) throws -> ComputerUsePredictedAction {
-        guard semanticRoute != nil else {
+        guard let semanticRoute else {
             return tools.conservativelyAdjustedAction(rawPrediction)
         }
+        let frontmostApplication = tools.frontmostApplicationSnapshot()
 
-        func adjustedPoint(_ x: Int, _ y: Int) -> (Int, Int) {
-            let adjusted = tools.conservativelyAdjustedAction(
-                .click(x: x, y: y, button: 1, count: 1))
+        func adjustedPoint(
+            _ x: Int,
+            _ y: Int,
+            targetHint: String?,
+            trustedTaskFallbackHint: String?,
+            rawVisualPoint: CGPoint?
+        ) throws -> (Int, Int) {
+            let carrier = ComputerUsePredictedAction.click(
+                x: x,
+                y: y,
+                button: 1,
+                count: 1)
+            let adjusted: ComputerUsePredictedAction
+            if let targetHint, let rawVisualPoint {
+                let candidateHints = [targetHint, trustedTaskFallbackHint]
+                    .compactMap { $0 }
+                for candidateHint in candidateHints {
+                    if let matchCount = tools
+                        .semanticAccessibilityActionableMatchCount(
+                            for: carrier,
+                            targetHint: candidateHint),
+                       matchCount > 1 {
+                        throw RuntimeError.unsupportedAction(
+                            "ambiguous-semantic-target")
+                    }
+                }
+                adjusted = tools.conservativelyAdjustedAction(
+                    carrier,
+                    semanticTargetHint: targetHint,
+                    trustedTaskFallbackHint: trustedTaskFallbackHint,
+                    rawVisualPoint: rawVisualPoint)
+            } else {
+                adjusted = tools.conservativelyAdjustedAction(carrier)
+            }
             guard case .click(
                 let adjustedX,
                 let adjustedY,
@@ -3380,19 +5291,99 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
             return (adjustedX, adjustedY)
         }
 
-        switch (action, rawPrediction) {
-        case (.click, .click(let x, let y, _, _)):
-            let point = adjustedPoint(x, y)
+        let rawVisualPoints = try groundingDrafts.map { draft -> CGPoint in
+            guard draft.rawNormalizedPoint.count == 2 else {
+                throw RuntimeError.malformedAction
+            }
+            let screenPoint = try displayPoint(
+                normalizedX: draft.rawNormalizedPoint[0],
+                normalizedY: draft.rawNormalizedPoint[1],
+                displayBounds: displayBounds)
+            return CGPoint(x: screenPoint.0, y: screenPoint.1)
+        }
+
+        switch (action, rawPrediction, semanticRoute.argument) {
+        case (.click, .click(let x, let y, _, _),
+              .targetHint(let hint)):
+            guard rawVisualPoints.count == 1 else {
+                throw RuntimeError.malformedAction
+            }
+            let trustedFallback =
+                OSAtlasSemanticAccessibilityClickCorrection
+                    .trustedTaskFallbackHint(
+                        trustedTask: trustedTask,
+                        proposedTargetHint: hint,
+                        history: history,
+                        frontmostApplication:
+                            frontmostApplication.policyName,
+                        frontmostApplicationIdentityIsAuthoritative:
+                            frontmostApplication.identityIsAuthoritative)
+            let point = try adjustedPoint(
+                x,
+                y,
+                targetHint: hint,
+                trustedTaskFallbackHint: trustedFallback,
+                rawVisualPoint: rawVisualPoints[0])
             return .click(x: point.0, y: point.1, button: 1, count: 1)
-        case (.doubleClick, .click(let x, let y, _, _)):
-            let point = adjustedPoint(x, y)
+        case (.doubleClick, .click(let x, let y, _, _),
+              .targetHint(let hint)):
+            guard rawVisualPoints.count == 1 else {
+                throw RuntimeError.malformedAction
+            }
+            let point = try adjustedPoint(
+                x,
+                y,
+                targetHint: hint,
+                trustedTaskFallbackHint:
+                    OSAtlasSemanticAccessibilityClickCorrection
+                        .trustedTaskFallbackHint(
+                            trustedTask: trustedTask,
+                            proposedTargetHint: hint,
+                            history: history,
+                            frontmostApplication:
+                                frontmostApplication.policyName,
+                            frontmostApplicationIdentityIsAuthoritative:
+                                frontmostApplication.identityIsAuthoritative),
+                rawVisualPoint: rawVisualPoints[0])
             return .click(x: point.0, y: point.1, button: 1, count: 2)
-        case (.rightClick, .click(let x, let y, _, _)):
-            let point = adjustedPoint(x, y)
+        case (.rightClick, .click(let x, let y, _, _),
+              .targetHint(let hint)):
+            guard rawVisualPoints.count == 1 else {
+                throw RuntimeError.malformedAction
+            }
+            let point = try adjustedPoint(
+                x,
+                y,
+                targetHint: hint,
+                trustedTaskFallbackHint:
+                    OSAtlasSemanticAccessibilityClickCorrection
+                        .trustedTaskFallbackHint(
+                            trustedTask: trustedTask,
+                            proposedTargetHint: hint,
+                            history: history,
+                            frontmostApplication:
+                                frontmostApplication.policyName,
+                            frontmostApplicationIdentityIsAuthoritative:
+                                frontmostApplication.identityIsAuthoritative),
+                rawVisualPoint: rawVisualPoints[0])
             return .click(x: point.0, y: point.1, button: 2, count: 1)
-        case (.drag, .drag(let fromX, let fromY, let toX, let toY)):
-            let from = adjustedPoint(fromX, fromY)
-            let to = adjustedPoint(toX, toY)
+        case (.drag, .drag(let fromX, let fromY, let toX, let toY),
+              .dragHints(let source, let destination)):
+            guard rawVisualPoints.count == 2 else {
+                throw RuntimeError.malformedAction
+            }
+            let from = try adjustedPoint(
+                fromX,
+                fromY,
+                targetHint: source,
+                trustedTaskFallbackHint: nil,
+                rawVisualPoint: rawVisualPoints[0])
+            let to = try adjustedPoint(
+                toX,
+                toY,
+                targetHint: destination,
+                trustedTaskFallbackHint: nil,
+                rawVisualPoint: rawVisualPoints[1])
             return .drag(
                 fromX: from.0,
                 fromY: from.1,
@@ -4289,7 +6280,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
             ANSWER
                 - purpose: Return visible facts.
                 - format: ANSWER [observed result]
-                - example usage: ANSWER [The visible total is $24.18.]
+                - example usage: ANSWER [observed result]
             """)
         }
         if actionContract.customActions.contains(.report),
@@ -4591,6 +6582,23 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
         }
     }
 
+    /// Returns only the final host-selected pointer coordinates. This is
+    /// called after display conversion and conservative Accessibility
+    /// correction, so it cannot be confused with the model's normalized
+    /// carrier point.
+    private static func groundedScreenPoints(
+        for action: ComputerUsePredictedAction
+    ) -> [[Int]] {
+        switch action {
+        case .click(let x, let y, _, _):
+            return [[x, y]]
+        case .drag(let fromX, let fromY, let toX, let toY):
+            return [[fromX, fromY], [toX, toY]]
+        case .typeText, .scroll, .key, .requestApproval, .wait, .done:
+            return []
+        }
+    }
+
     /// Converts model coordinates only through the original desktop bounds.
     /// Screenshot downscaling is intentionally absent from this calculation,
     /// preserving the OS-Atlas 0...1000 contract on Retina and offset displays.
@@ -4835,6 +6843,20 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
         request: OSAtlasSemanticRoutingRequest,
         rawHistory: [String]
     ) async throws -> OSAtlasSemanticActionRoute {
+        // The first scroll-until action is selected through the normal router.
+        // Thereafter, preserve the exact user-authored direction while the
+        // named target is still absent from current OCR. This check runs before
+        // either V4 or V5 model routing, so a premature terminal proposal cannot
+        // cut a multi-viewport browser task short. Full result extraction and
+        // every terminal evidence gate remain unchanged.
+        if let continuation = AppleFoundationVisualActionRouter
+            .deterministicExplicitTargetScrollContinuationRoute(
+                for: request.task,
+                visibleText: request.visibleText,
+                rawHistory: rawHistory,
+                availableDirectives: request.availableDirectives) {
+            return continuation
+        }
         if let candidateRouter = router
             as? any OSAtlasSemanticCandidateActionRouting {
             return try await candidateRouter.route(
@@ -4844,6 +6866,38 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting {
         }
         return try await router.route(request.replacingHistory(
             semanticRoutingHistory(rawHistory)))
+    }
+
+    /// Every typed router may choose that the next operation is pointer-like,
+    /// but the executor owns the raw history and therefore performs the final
+    /// task-authored target/family rebind. This keeps legacy/local routers on
+    /// the same authority boundary as the Foundation Models path.
+    static func taskBoundPointerCanonicalized(
+        _ selected: OSAtlasSemanticActionRoute,
+        request: OSAtlasSemanticRoutingRequest,
+        rawHistory: [String]
+    ) -> OSAtlasSemanticActionRoute {
+        guard [.click, .doubleClick, .rightClick]
+                .contains(selected.directive),
+              case .targetHint(let proposedHint) = selected.argument,
+              !proposedHint.trimmingCharacters(
+                in: .whitespacesAndNewlines).isEmpty else {
+            return selected
+        }
+        switch AppleFoundationVisualActionRouter
+            .taskBoundOrderedPointerResolution(
+                for: request.task,
+                history: rawHistory,
+                availableDirectives: request.availableDirectives,
+                historyIsComplete: true,
+                frontmostApplication: request.frontmostApplication,
+                frontmostApplicationIdentityIsAuthoritative:
+                    request.applicationIdentityIsAuthoritative) {
+        case .bound(let taskBoundRoute):
+            return taskBoundRoute
+        case .notApplicable, .rejected:
+            return selected
+        }
     }
 
     private static func canonicalV5RoutingHistoryEntry(
@@ -5193,7 +7247,7 @@ enum ComputerUseAuthenticationBarrierDetector {
             [" single sign on ", " sso "],
         ]
         let credentialSignalGroups: [[String]] = [
-            [" email address ", " email required ", " username "],
+            [" email ", " email address ", " email required ", " username "],
             [" password ", " passcode ", " passkey "],
             [
                 " verification code ", " one time code ",
@@ -5643,19 +7697,16 @@ enum ComputerUseVisibleQuoteExtractor {
             let distance: CGFloat
         }
 
-        let excludedPhrases = [
-            "delivery to", "delivery address", "saved home address",
-            "review delivery", "delivery quote", "local only",
-            "native input confirmed", "acceptance complete",
-            "place order", "no order", "payment", "network action",
-        ]
-        let exactQuoteLabels: Set<String> = [
-            "subtotal", "tax", "total", "eta", "delivery fee",
-            "service fee", "small order fee", "regulatory fee",
-            "dasher support fee", "expanded range fee",
-        ]
         let candidates: [Candidate] = regions.compactMap { region in
             let words = normalizedWords(region.text)
+            let restaurantLabel = labeledInformation(
+                in: region.text,
+                labels: ["restaurant", "merchant", "store"])
+            let itemLabel = labeledInformation(
+                in: region.text,
+                labels: ["item", "menu item", "order item"])
+            let hasExplicitIdentityLabel = restaurantLabel != nil
+                || itemLabel != nil
             let verticalDistance = region.bounds.midY
                 - subtotalRegion.bounds.midY
             guard verticalDistance > 0.002,
@@ -5664,21 +7715,13 @@ enum ComputerUseVisibleQuoteExtractor {
                   region.bounds.midX <= quoteMaxX,
                   abs(region.bounds.minX
                     - subtotalRegion.bounds.minX) <= 0.16,
-                  !words.contains(" doordash "),
-                  !excludedPhrases.contains(where: words.contains),
-                  !exactQuoteLabels.contains(
-                    words.trimmingCharacters(in: .whitespaces)),
+                  hasExplicitIdentityLabel
+                    || !isQuoteMetadataOrControl(words),
                   firstMatch(currencyPattern, in: region.text) == nil,
                   firstMatch(etaPattern, in: region.text) == nil else {
                 return nil
             }
 
-            let restaurantLabel = labeledInformation(
-                in: region.text,
-                labels: ["restaurant", "merchant", "store"])
-            let itemLabel = labeledInformation(
-                in: region.text,
-                labels: ["item", "menu item", "order item"])
             guard let value = cleanedInformationalValue(
                 restaurantLabel ?? itemLabel ?? region.text) else {
                 return nil
@@ -5738,6 +7781,103 @@ enum ComputerUseVisibleQuoteExtractor {
         return (
             restaurant: restaurant.restaurantLabel ?? restaurant.value,
             item: item.itemLabel ?? item.value)
+    }
+
+    /// Separates merchant/item identity from nearby quote chrome by semantic
+    /// role. This deliberately classifies categories of text rather than page-
+    /// or acceptance-specific OCR strings, so unseen fee names, status copy,
+    /// destination details, and commit controls cannot be returned as quote
+    /// identity facts.
+    private static func isQuoteMetadataOrControl(_ normalized: String) -> Bool {
+        let tokens = normalized.split(whereSeparator: \.isWhitespace).map(String.init)
+        guard !tokens.isEmpty else { return true }
+        let tokenSet = Set(tokens)
+
+        // Quote rows are accounting/timing metadata. A fee label can be named
+        // by any provider; it is label-like only when `fee` terminates the
+        // short row, avoiding a brittle enumeration of provider fee names.
+        let summaryRoles: Set<String> = ["eta", "subtotal", "tax", "total"]
+        let summaryModifiers: Set<String> = [
+            "amount", "delivery", "due", "estimated", "estimate", "grand",
+            "order", "sales",
+        ]
+        if let last = tokens.last, last == "fee", tokens.count <= 6 {
+            return true
+        }
+        if !tokenSet.isDisjoint(with: summaryRoles),
+           tokenSet.isSubset(of: summaryRoles.union(summaryModifiers)) {
+            return true
+        }
+
+        // Destination/location copy is contextual metadata, not the merchant
+        // or ordered item. Requiring a location noun or delivery preposition
+        // avoids rejecting ordinary names that happen to contain `delivery`.
+        let locationNouns: Set<String> = [
+            "address", "destination", "location", "postcode", "zipcode",
+        ]
+        if !tokenSet.isDisjoint(with: locationNouns)
+            || (tokenSet.contains("delivery") && tokenSet.contains("to")) {
+            return true
+        }
+        if tokenSet.contains("quote"),
+           !tokenSet.isDisjoint(with: [
+                "checkout", "delivery", "estimate", "order", "price",
+           ]) {
+            return true
+        }
+
+        let effectObjects: Set<String> = [
+            "checkout", "order", "payment", "purchase", "request",
+            "transaction",
+        ]
+        let workflowSubjects: Set<String> = [
+            "acceptance", "action", "checkout", "input", "network",
+            "operation", "order", "payment", "purchase", "request", "setup",
+            "test", "transaction", "workflow",
+        ]
+        if tokens.count <= 3, tokenSet.isSubset(of: workflowSubjects) {
+            return true
+        }
+        let actionWords: Set<String> = [
+            "authorize", "cancel", "checkout", "confirm", "continue", "pay",
+            "place", "submit",
+        ]
+        if !tokenSet.isDisjoint(with: effectObjects),
+           !tokenSet.isDisjoint(with: actionWords) {
+            return true
+        }
+        let negationWords: Set<String> = ["disabled", "no", "not", "without"]
+        if !tokenSet.isDisjoint(with: effectObjects),
+           !tokenSet.isDisjoint(with: negationWords) {
+            return true
+        }
+
+        // Status lines need both a state word and a workflow/system subject.
+        // That conjunction preserves plausible proper names while excluding
+        // banners about completed input, pending requests, or failed checkout.
+        let statusWords: Set<String> = [
+            "cancelled", "complete", "completed", "confirmed", "declined",
+            "failed", "pending", "processing", "ready", "recorded", "success",
+            "successful",
+        ]
+        if !tokenSet.isDisjoint(with: statusWords),
+           !tokenSet.isDisjoint(with: workflowSubjects) {
+            return true
+        }
+
+        // Scope/environment badges are also chrome. This recognizes the
+        // general badge form while leaving longer descriptive names eligible.
+        let environmentWords: Set<String> = [
+            "local", "offline", "online", "remote", "sandbox", "test",
+        ]
+        if tokens.count <= 3, tokenSet.contains("only"),
+           !tokenSet.isDisjoint(with: environmentWords) {
+            return true
+        }
+        return tokenSet.contains("review")
+            && !tokenSet.isDisjoint(with: [
+                "cart", "checkout", "delivery", "order", "purchase",
+            ])
     }
 
     private static func labeledInformation(

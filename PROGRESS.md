@@ -10,25 +10,34 @@ forgotten between sessions — if it matters, capture it here.
 
 ```
 ┌────────────────┐                                    ┌─────────────────┐
-│  iOS client    │  ── SDP / ICE via CloudKit ──────▶ │  Host agent     │
+│  iOS client    │  ── bounded CloudKit lifecycle ──▶ │  Host agent     │
 │  (iPad/iPhone) │                                    │  (Mac / Windows)│
-│                │ ◀── SDP / ICE via CloudKit ──────  │                 │
+│                │ ◀── discovery/enrollment/SDP/setup │                 │
 └───────┬────────┘                                    └────────┬────────┘
         │                                                      │
         │   ─── WebRTC (STUN-only, TURN-less)   ─────────────▶ │
         │       video H.264 · audio Opus · DataChannel         │
+        │                                                      │
+        │   ═══ prompt / controls via authenticated LAN TLS ═▶ │
+        │  ◀══ status / result / approval via same broker ═══  │
 ```
 
-- **Signaling:** CloudKit (Private DB, same-iCloud only) — **A** in the
-  pairing-model decision. Polling-based during active sessions. No
-  CKQuerySubscription / APNs for v1; add later as an optimization.
+- **CloudKit lifecycle:** Private DB, same-Apple-Account only — **A** in the
+  pairing-model decision. Its allowlist is host discovery, automatic
+  enrollment and encrypted credential exchange, remote-control signaling, and
+  Computer Use setup request/progress. Polling is bounded by validity, page,
+  record, replay, and cleanup limits. No CKQuerySubscription / APNs for v1.
+- **Computer Use task transport:** after enrollment, authenticated LAN TLS is
+  authoritative for prompts, conversation, task status/results, controls, and
+  approvals. There is no CloudKit fallback. Live pixels/audio/direct input
+  remain WebRTC; planning, policy, and visual grounding stay on the Mac host.
 - **STUN config:** single `ICEConfig` record in the **Public** DB, delivers
   the list of public STUN URLs. Clients fetch once per session.
 - **NAT traversal:** STUN-only. If ICE doesn't reach `connected` inside a
   timeout, surface a friendly `"Can't reach your computer — try same Wi-Fi"`
   error. No TURN fallback.
-- **Cost profile:** $0 forever, any scale. Each user's signaling traffic
-  lives in their own iCloud quota; we don't operate infrastructure.
+- **Service profile:** CloudKit lifecycle traffic lives in each user's iCloud
+  quota; no developer-operated signaling or AI relay receives task content.
 
 ### Decisions already locked
 
@@ -36,16 +45,18 @@ forgotten between sessions — if it matters, capture it here.
 | - | -- | -- |
 | 1 | Team name / bundle prefix: `threadmark` → `com.threadmark.*` | ✅ |
 | 2 | CloudKit container: `iCloud.com.threadmark.remotedesktop` | ✅ |
-| 3 | Pairing model: **A** — same-iCloud only, no CKShare | ✅ |
+| 3 | Pairing model: **A** — same-Apple-Account only, no CKShare | ✅ |
 | 4 | Skip `libzt` (ZeroTier). STUN only. Fail gracefully on TURN-need. | ✅ |
 | 5 | Windows host: **Rust + Tauri** (`windows-rs`, `webrtc-rs`, `enigo`) | ✅ |
-| 6 | Signaling transport during session: **polling** (2s cadence), not push | ✅ |
+| 6 | Remote signaling/setup transport: bounded **polling**, not push | ✅ |
 
-### Why polling, not CKQuerySubscription
+### Why bounded polling, not CKQuerySubscription
 - No push entitlement needed → simpler signing, less App-ID config.
 - Push prompts the user for notification permission on first send on iOS — bad UX for a remote-control tool.
-- Polling cost during an active session ≈ 30 req/min/user, well under CloudKit's 40 req/s rate limit.
-- We only poll while a session is active. Idle clients poll zero.
+- The remote-signaling poll cadence is about 30 req/min/user and is bounded to
+  an active remote session.
+- Remote signaling polls only while a session is active; setup polling stops
+  at a terminal setup result. Idle clients poll neither channel.
 - Can add CKQuerySubscription later as an optimization without breaking the wire protocol.
 
 ---
@@ -54,17 +65,18 @@ forgotten between sessions — if it matters, capture it here.
 
 ### `WebRTCSignal` — Private DB, `_defaultZone`
 
-One record type handles the entire handshake. Records are deleted by the
-sender on session teardown; stale records filtered by `createdAt`.
+One deployed record type handles remote signaling plus the bounded enrollment
+and setup lifecycle. Senders and receivers track the records they own or apply,
+retry exact-record deletion, and reject records outside their validity window.
 
 | Field | Type | Query? | Notes |
 | -- | -- | -- | -- |
 | `senderID` | String | sortable | Per-device UUID (Keychain-persisted). |
 | `targetID` | String | **queryable**, sortable | Empty string means "advertise" (any host listening for this code). |
-| `pairingCode` | String | **queryable**, sortable | 6-digit. |
+| `pairingCode` | String | **queryable**, sortable | Ephemeral internal session binding. Never shown or entered by a person. |
 | `role` | String | sortable | `"host"` or `"client"`. |
-| `kind` | String | sortable | `"advertise" \| "offer" \| "answer" \| "ice" \| "bye"`. |
-| `payload` | String | — | JSON blob. SDP / ICE candidate dict. Opaque to CloudKit. |
+| `kind` | String | sortable | Remote signaling (`"advertise"`, `"offer"`, `"answer"`, `"ice"`, `"bye"`), versioned local-credential enrollment, or `computerUse.setupRequest` / `computerUse.setupProgress`. Ordinary AI task kinds are forbidden on CloudKit. |
+| `payload` | String | — | Bounded JSON for SDP/ICE, encrypted enrollment, or setup lifecycle data. Opaque to CloudKit. |
 | `createdAt` | Date/Time | **queryable**, sortable | Used for stale filtering + since-cursor. |
 
 **Indexes:** CloudKit auto-creates indexes for fields marked queryable in
@@ -87,50 +99,48 @@ point.
 
 ---
 
-## Pairing flow (same-iCloud model A)
+## Automatic pairing flow (same-Apple-Account model A)
 
-```
-HOST                              CLIENT
-  │                                 │
-  │ 1. generate CODE                │
-  │ 2. CK.save(WebRTCSignal{        │
-  │      kind:"advertise",          │
-  │      pairingCode:CODE,          │
-  │      targetID:"",               │
-  │      senderID: H })             │
-  │ 3. show CODE                    │
-  │                                 │ user types CODE
-  │                                 │
-  │                                 │ 4. CK.query Private DB for
-  │                                 │    kind="advertise"
-  │                                 │    pairingCode=CODE
-  │                                 │    createdAt > now-5min
-  │                                 │    → gets host senderID H
-  │                                 │
-  │                                 │ 5. CK.save(WebRTCSignal{
-  │                                 │      kind:"offer",
-  │                                 │      targetID: H,
-  │                                 │      senderID: C,
-  │                                 │      pairingCode: CODE,
-  │                                 │      payload: <SDP> })
-  │ 6. poll: targetID==H            │
-  │    → gets offer from C          │
-  │ 7. CK.save(answer)              │
-  │                                 │ 8. poll: targetID==C → gets answer
-  │ ... ICE candidates both ways ...│
-  │                                 │
-  │ 9. WebRTC "connected"           │
-  │    → delete all own records     │
-  │       for pairingCode=CODE      │
-  │                                 │ 10. delete client-side records
+```text
+HOST                                      CLIENT
+  │                                         │
+  │ Both resolve the current owner of the same private CloudKit container.
+  │ The opaque owner digest is used only to separate device-local credentials.
+  │                                         │
+  │ Publish private CloudKit advertisement  │ Discover account-owned Macs
+  │ plus nearby Bonjour route/fingerprint ─▶│ and match host + internal session
+  │                                         │
+  │◀── private-DB enrollment request ───────│ Generate ephemeral key agreement
+  │    (public key + expected fingerprint)  │
+  │                                         │
+  │ Verify current account again; encrypt   │
+  │ account-bound LAN credential ──────────▶│ Verify binding/fingerprint and
+  │                                         │ store only in device Keychain
+  │                                         │
+  │◀════════ authenticated local TLS ═══════│ Send one natural-language task
+  │       prompt / progress / typed result  │
 ```
 
-**Stale-record hygiene:** after `connected`, both sides delete their own
-`WebRTCSignal` records matching this `pairingCode`. On session close (bye),
-same cleanup. Records with `createdAt > 5min` are ignored on read.
+There is no pairing field, displayed code, copied access key, or approval step.
+The six-digit value retained in the wire format is only an ephemeral internal
+session-routing value for compatibility with the deployed CloudKit schema. It
+is not an authentication factor and is carried in bounded Bonjour TXT metadata
+rather than the visible service name. The LAN credential is encrypted in the
+private database, bound to the exact CloudKit account/container, stored as a
+non-synchronizable Keychain item, and revalidated when the Apple Account
+changes. A confirmed sign-out or restriction disables the local broker.
 
-**Dedup on read:** each side tracks `Set<CKRecord.ID>` of already-consumed
-records; keeps re-queries idempotent during the 2s poll loop.
+Remote screen sessions use the same automatically discovered internal session
+binding for their existing offer/answer/ICE exchange; the app never asks the
+person to type it.
+
+**Bounded record hygiene:** discovery, enrollment, and remote signaling records
+expire after five minutes; setup lifecycle records expire after one hour.
+Applied records are deleted by exact ID, with bounded persisted cleanup
+identity so an interrupted deletion can be retried after restart. Query pages,
+observed records, pending acknowledgements, owned records, and replay entries
+all have hard ceilings. Expired records are ignored, and hitting a ceiling
+fails closed rather than growing memory or widening a query.
 
 ---
 
@@ -143,6 +153,15 @@ records; keeps re-queries idempotent during the 2s poll loop.
 - [x] **Entitlements & project.yml** — CloudKit container on iOS and Mac.
 - [x] **DeviceIdentity** — Keychain-backed per-device UUID (iOS + Mac).
 - [x] **CloudKitSignalingClient** — conforms to `SignalingChannel`; drop-in.
+- [x] **Automatic local enrollment** — same-account CloudKit identity plus
+  Bonjour discovery, ephemeral key agreement, encrypted credential exchange,
+  and device-only Keychain storage; no manual pairing code.
+- [x] **Local Computer Use task broker** — authenticated LAN TLS carries the
+  post-enrollment prompt, conversation, task result, controls, and approvals;
+  CloudKit remains setup-only for AI.
+- [ ] **Signed Release end-to-end acceptance** — prove automatic enrollment,
+  LAN TLS prompt/result, visual WebRTC sidecar, approval routing, and
+  host-local planning/grounding on the signed-in iPhone Air Simulator.
 - [x] **ICEConfigFetcher** — reads the Public `ICEConfig` record.
 - [x] **Graceful ICE-timeout error** — 25 s deadline in `WebRTCTransport`
   surfaces `"Can't reach your computer — try putting both devices on the
@@ -163,12 +182,15 @@ records; keeps re-queries idempotent during the 2s poll loop.
    `openh264`/`audiopus` encode, `enigo` injection. Portable surface
    unit-tested on macOS; the `#[cfg(windows)]` capture seam in
    `host-windows/src/capture.rs` still needs a real Windows run.
-2. **Tauri tray/UI shell** — dropped for v1. Host is a console app
-   that prints the pairing code; protocol only *recommends* a session
-   indicator. Revisit post-v1 if a tray is wanted.
-3. **End-to-end iCloud pairing test** on real devices (out-of-band Apple
-   Developer portal work required first; see below). Now also covers
-   the Windows host: build with MSVC + CMake, `cargo run --release`.
+2. **Tauri tray/UI shell** — dropped for v1. The legacy Windows host remains a
+   console app; Apple clients now discover account-owned hosts automatically
+   and never expose a pairing-code entry surface. Revisit a Windows tray after
+   the account-discovery UX is validated there.
+3. **End-to-end signed pairing/task validation** — first match a Release Mac
+   host with the signed-in Release iPhone Air Simulator and prove automatic
+   enrollment plus the no-fallback LAN task path. Follow with physical-device
+   and Windows validation; build Windows with MSVC + CMake,
+   `cargo run --release`.
 4. **Production CloudKit schema promotion** once dev-DB records land.
 
 ## Work you (the user) need to do out-of-band
@@ -201,14 +223,17 @@ CloudKit Dashboard:
   record types when you save a novel type. Production does *not*. First
   TestFlight build will fail queries until schema is promoted in the
   Dashboard. This is documented pain, not a bug.
-- **Same-iCloud model:** a user's iPad and Mac must be signed into the
-  same iCloud account. Error state surfaces as "no hosts found for code"
-  when accounts diverge. Not a silent failure.
+- **Same-Apple-Account model:** the iPhone/iPad and Mac must be signed into the
+  same Apple Account for the app's CloudKit container. Hosts are discovered and
+  paired automatically. A different account, confirmed sign-out, or account
+  restriction fails closed without exposing a manual code fallback.
 - **iOS Simulator CloudKit quirk:** simulators signed into "Simulator
   Apple ID" sometimes fail to create subscriptions. Run on a real device
   when in doubt.
 - **Windows + CloudKit:** the Windows host uses a browser-based Apple ID
   web-auth prompt with a local loopback callback, then stores the
   CloudKit Web Auth Token in Windows Credential Manager. All subsequent
-  records are fetched via the CloudKit Web Services REST API, polled 2s.
-  There is no push channel on Windows — same polling model.
+  remote-control discovery/signaling records are fetched via the CloudKit Web
+  Services REST API. Windows AI Computer Use is not implemented, so Windows
+  does not accept AI prompts or approvals through CloudKit. There is no push
+  channel on Windows — the remote-signaling path uses the same polling model.

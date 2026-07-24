@@ -478,6 +478,7 @@ final class SemanticNativeToolWireContractTests: XCTestCase {
         let errors: [AppleFoundationVisualActionRouterError] = [
             .invalidRequest,
             .multipleRoutes,
+            .unsafeVisibleEvidence,
             .cancelled,
         ]
         for expected in errors {

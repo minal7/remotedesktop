@@ -150,25 +150,46 @@ receiver's bandwidth estimation (e.g. user chose "prioritize fluency" or
   "reason": "user" }   // "user" | "error" | "timeout" | "protocol"
 ```
 
-## Pairing code → signaling room
+## Automatic Apple-Account pairing → signaling room
 
-A pairing code is 6 digits and uniformly random. The host publishes and
-refreshes a `HostAdvertisement` containing that code and its opaque sender ID
-in the user's private CloudKit database. The client queries recent matching
-advertisements, binds to the newest host sender ID, and exchanges SDP/ICE in
-targeted `WebRTCSignal` records. Records older than 5 minutes are ignored, and
-each side removes its own records after connection or teardown.
+The host and client use the same private CloudKit database, so the client can
+discover the user's computers automatically. The person chooses a computer;
+there is no code field or copied secret. A six-digit value remains in the
+deployed `pairingCode` schema field as a short-lived internal routing binding.
+The host publishes and refreshes a `HostAdvertisement` containing that binding
+and its opaque sender ID. The client binds to the exact host sender ID and
+exchanges SDP/ICE in targeted `WebRTCSignal` records. Records older than 5
+minutes are ignored, and each side removes its own records after connection or
+teardown.
+
+For nearby local AI, the client requests the exact credential fingerprint
+advertised by the authenticated CloudKit-plus-Bonjour host. Ephemeral X25519
+keys derive an HKDF-SHA256 key, and AES-GCM seals the device-local TLS
+credential. Request, client, host, account, routing, and credential identities
+are authenticated as associated data. Only the encrypted credential crosses
+CloudKit; the receiving device stores it as a non-synchronizing,
+ThisDeviceOnly Keychain item.
 
 ## Security
 
-- CloudKit carries SDP/ICE plus the low-bandwidth AI command lifecycle in the
-  user's private database. It never carries live screen, host audio, or direct
-  input; those stay on the encrypted WebRTC peer connection. AI prompts and
-  approval values do pass through private CloudKit so the host can plan and the
-  iOS client can show the exact proposed action.
-- The pairing code is entropy for the initial handshake only. Once a
-  peer connection exists, the DTLS fingerprint in the SDP authenticates
-  all subsequent traffic — WebRTC's standard E2E encryption.
+- Private CloudKit has a strict allowlist: host discovery, same-account local
+  enrollment and encrypted credential exchange, remote-control
+  offer/answer/ICE/bye signaling, and Computer Use `setupRequest` /
+  `setupProgress`. It MUST reject ordinary AI task messages. Discovery,
+  signaling, and enrollment use five-minute validity windows; setup lifecycle
+  records use a one-hour validity window. Reads, pages, pending deletions,
+  replay state, and owned-record cleanup are bounded, and an exhausted bound
+  fails closed rather than widening the query or retaining unbounded process
+  state.
+- After local enrollment, the authenticated LAN TLS broker is the sole
+  Computer Use task transport. Natural-language prompts, conversation
+  context, task progress/status/results, pause/resume/cancel controls, and
+  approval requests/responses MUST NOT fall back to CloudKit. Loss or failure
+  of that broker ends or blocks the task without resubmitting it over another
+  channel.
+- Live screen pixels, host audio, and direct input stay on the encrypted
+  WebRTC peer connection. The private database, exact host identity, internal
+  binding, and SDP fingerprint scope that remote-control handshake.
 - Hosts SHOULD show a "session active" indicator for the duration of the
    connection. Mac: menu-bar icon turns red. Windows: system-tray icon
    turns red.
@@ -183,8 +204,14 @@ AI Computer Use deliberately separates the high-bandwidth live screen from
 the low-bandwidth command lifecycle:
 
 - WebRTC continues to carry live video, audio, and direct user input.
-- The user's private CloudKit database carries prompts, assistant responses,
-  progress, pause, resume, and cancel messages.
+- Private CloudKit carries only discovery, enrollment, remote-control
+  signaling, and setup request/progress records. Setup may complete before the
+  LAN broker is ready; it does not authorize CloudKit as an ordinary task
+  channel.
+- Once enrolled, authenticated LAN TLS carries prompts and bounded
+  conversation context, assistant responses, task progress/status/results,
+  pause/resume/cancel controls, and approval exchanges. The client exposes no
+  CloudKit fallback for this traffic.
 - The macOS host plans and executes locally. Its always-installed semantic GUI
   router handles bounded app-first, literal-entry, and unambiguous navigation
   routes before checking Apple's on-device Foundation Model for the remaining
@@ -209,52 +236,58 @@ field. New clients strip and decode that suffix; older clients keep showing the
 first line. This is the Production-schema fallback when the optional AI fields
 have not been deployed yet.
 
-Nearby Bonjour discovery keeps the legacy service name
-`Computer Name [123456]` and adds a version-1 DNS-SD TXT record with only four
-bounded keys: `v`, `sid`, `cu`, and `cud`. They carry the schema version, the
-host's opaque per-install `senderID`, capability state, and a short sanitized
-detail. iOS resolves and monitors that record so a nearby row can offer setup
-before CloudKit discovery refreshes. Invalid, oversized, or future-version TXT
-records fall back to the legacy row. TXT metadata is only a discovery hint:
-CloudKit still resolves pairing and carries every setup/control message, and a
-conflicting Bonjour identity never replaces a CloudKit identity.
+Nearby Bonjour discovery uses the computer name as its visible service name;
+it does not append or display the internal six-digit routing value. A bounded
+version-1 DNS-SD TXT record uses `v`, `sid`, `cu`, `cud`, plus optional `lci`
+and `rb` keys. These carry the schema version, opaque per-install `senderID`,
+capability state/detail, non-secret TLS credential fingerprint, and internal
+routing binding. Legacy `Computer Name [123456]` advertisements remain readable
+during upgrades. TXT metadata is only a discovery hint: iOS hides unmatched
+Bonjour rows, and an exact same-account private-CloudKit host identity must
+match before setup, connection, or Computer Use becomes available. Invalid,
+oversized, conflicting, or future-version metadata can never replace the
+CloudKit identity.
 
-Computer Use messages reuse the already-deployed `WebRTCSignal` record type
-and its existing `senderID`, `targetID`, `pairingCode`, `kind`, `payload`, and
-`createdAt` fields. `kind` is prefixed with `computerUse.`; the JSON `payload`
-contains the message ID, session ID, and body. This avoids a second Production
-schema deployment and lets older signaling clients safely ignore these
-records. All records stay in the private database and are filtered again by
-pairing code and session ID on read, then deleted only after the receiver
-explicitly acknowledges application.
-Receivers acknowledge only after applying a message. A prompt that arrives
-just before WebRTC peer authorization is left in CloudKit for a later poll,
-while the host's durable task ledger makes repeated stable prompt IDs
-at-most-once across process restarts.
+The CloudKit enrollment exchange and Computer Use setup lifecycle reuse the
+already-deployed `WebRTCSignal` record type and its existing `senderID`,
+`targetID`, `pairingCode`, `kind`, `payload`, and `createdAt` fields. Enrollment
+uses its versioned credential request/response kinds. Setup allows only
+`computerUse.setupRequest` and `computerUse.setupProgress`; the JSON `payload`
+contains the message ID, session ID, and bounded body. This avoids a second
+Production schema deployment and lets older signaling clients safely ignore
+the records.
 
-Computer Use kinds are `setupRequest`, `setupProgress`, `prompt`, `assistant`,
-`status`, `pause`, `resume`, `cancel`, `approvalRequest`, and
-`approvalResponse`. Setup requests carry an idempotency
-key; setup progress carries a user-facing phase and optional normalized
-fraction covering the signed helper bytes, visual model bytes, verification,
-and runtime loading. Reopening iOS observes the existing host installation
-instead of starting a duplicate download; capability/status reads never start
-installation by themselves. Assistant and status bodies carry their stable task
-ID, preventing a delayed replay from an older task from completing a newer chat
-request. iOS keeps one in-flight prompt/session ID in the device Keychain and
-periodically recreates the same CloudKit record until a terminal response.
+Setup records are filtered by internal routing binding and session ID, ignored
+after their one-hour validity window, and acknowledged only after application.
+Clients cap query pages/records and pending cleanup bookkeeping, persist a
+bounded set of owned record identities across restarts, and retry deletion.
+If deletion is unavailable, expired setup content remains in the user's
+private database but is no longer accepted by the protocol.
 
-Privileged prompts and lifecycle controls are accepted only from the sender ID
-bound to the active WebRTC peer; pre-pairing setup requests remain available so
-the device-row setup flow can download the model before opening a screen
-session. Before consequential external actions (such as sending, purchasing,
-deleting, changing security settings, or entering secrets), the local executor
-must stop and send an `approvalRequest`. iOS replies with a one-time scoped
-`approvalResponse`; direct iOS input or physical Mac input closes the action
-gate immediately. The host constructs approval copy from the concrete action
-and Accessibility target rather than trusting model text, fingerprints that
-target/focus and nearby screen pixels, and revalidates immediately before
-executing exactly one approved action.
+The shared `ComputerUseEnvelope` also defines `prompt`, `assistant`, `status`,
+`pause`, `resume`, `cancel`, `approvalRequest`, and `approvalResponse`, but
+those kinds are valid only on the authenticated LAN TLS broker after
+enrollment. A stable message/task ID preserves at-most-once execution and lets
+the iOS device-only Keychain recover one in-flight task without recreating a
+CloudKit prompt record. A TLS failure never changes the envelope's authorized
+transport.
+
+Setup requests carry an idempotency key; setup progress carries a user-facing
+phase and optional normalized fraction covering the signed helper bytes,
+visual-model bytes, verification, and runtime loading. Reopening iOS observes
+the existing host installation instead of starting a duplicate download;
+capability/status reads never start installation by themselves.
+
+Privileged prompts and lifecycle controls are accepted only from the
+account-enrolled sender authenticated by the LAN TLS credential. Before
+consequential external actions (such as sending, purchasing, deleting,
+changing security settings, or entering secrets), the local executor must stop
+and return an `approvalRequest` over that broker. iOS replies over the same
+broker with a one-time scoped `approvalResponse`; direct iOS input or physical
+Mac input closes the action gate immediately. The host constructs approval
+copy from the concrete action and Accessibility target rather than trusting
+model text, fingerprints that target/focus and nearby screen pixels, and
+revalidates immediately before executing exactly one approved action.
 
 Structured MCP calls follow the same rule. The planner can only propose a call;
 it cannot execute one. The host reconstructs arguments against the discovered

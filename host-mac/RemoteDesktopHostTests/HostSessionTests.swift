@@ -1,11 +1,13 @@
 import CloudKit
+import Darwin
+import Foundation
 import XCTest
 @testable import RemoteDesktopHost
 
 /// Regression tests for the permission-detection bugs that made the
 /// menu bar app unusable: Accessibility granted in System Settings
 /// but not reflected in `HostSession.permissions`, "Start listening"
-/// stuck disabled, and therefore no pairing code surfacing to iOS.
+/// stuck disabled, and therefore no private host advertisement reaching iOS.
 @MainActor
 final class HostSessionTests: XCTestCase {
 
@@ -85,7 +87,7 @@ final class HostSessionTests: XCTestCase {
 
     /// Calling `start()` while permissions are denied must leave the
     /// session in an informative error state and *not* generate a
-    /// pairing code.
+    /// private session binding.
     func test_start_whenPermissionsDenied_surfacesError() {
         let provider = MockPermissionsProvider()
         let session = makeSession(provider)
@@ -100,11 +102,11 @@ final class HostSessionTests: XCTestCase {
         }
     }
 
-    // MARK: Issue 3 — Pairing code must surface once permissions are ok
+    // MARK: Issue 3 — Listening must start once permissions are ok
 
     /// Once permissions are granted and the user clicks Start, the
-    /// session must leave `.idle` and generate a 6-digit code so the
-    /// iOS client has something to enter. We don't await the network
+    /// session must leave `.idle` and generate its internal routing binding so
+    /// iOS can discover it automatically. We don't await the network
     /// round-trip — we only assert that `.starting` is entered and
     /// that the session is no longer idle.
     func test_start_whenPermissionsGranted_leavesIdle() {
@@ -117,7 +119,7 @@ final class HostSessionTests: XCTestCase {
         session.start()
 
         XCTAssertNotEqual(session.state, .idle,
-                          "session must leave .idle so a pairing code can be generated")
+                          "session must leave .idle so an advertisement can be generated")
         if case .error(let msg) = session.state {
             XCTFail("expected non-error transition, got error: \(msg)")
         }
@@ -140,6 +142,29 @@ final class HostSessionTests: XCTestCase {
         }
         XCTAssertFalse(session.permissions.audioEnabled)
 
+        session.stop()
+    }
+
+    func test_startWithEmptyDeviceIdentityFailsBeforeAdvertising() async throws {
+        let provider = readyPermissionsProvider()
+        let session = HostSession(
+            permissionsProvider: provider,
+            validateAudioInputEntitlements: {},
+            deviceIdentityProvider: { "" },
+            allowsExternalComputerUseServices: false)
+
+        session.start()
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(1))
+        while session.state == .starting, clock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        guard case .error(let message) = session.state else {
+            return XCTFail(
+                "An empty host identity must fail before advertising; state=\(session.state)")
+        }
+        XCTAssertTrue(message.localizedCaseInsensitiveContains("identity"))
         session.stop()
     }
 
@@ -214,6 +239,89 @@ final class HostSessionTests: XCTestCase {
 
         XCTAssertTrue(shutdownReturned)
         let didFinishCleanup = await cleanupFinished.isOpen
+        XCTAssertTrue(didFinishCleanup)
+    }
+
+    func test_shutdownKeepsSessionTransportOpenUntilComputerUseTeardownFinishes() async throws {
+        let provider = readyPermissionsProvider()
+        let signalingStarted = AsyncLifecycleGate()
+        let signalingCleanupStarted = AsyncLifecycleGate()
+        let releaseSignalingCleanup = AsyncLifecycleGate()
+        let signalingCleanupFinished = AsyncLifecycleGate()
+        let executionStarted = AsyncLifecycleGate()
+        let channel = SessionTeardownOrderingComputerUseChannel()
+        let executor = SessionSuspendingComputerUseExecutor(
+            started: executionStarted)
+        let ledgerDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let ledgerURL = ledgerDirectory.appendingPathComponent("ledger.json")
+        defer { try? FileManager.default.removeItem(at: ledgerDirectory) }
+        let manager = HostComputerUseManager(
+            injector: InputInjector(),
+            executor: executor,
+            taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
+            channelFactory: { _ in channel })
+        let session = HostSession(
+            permissionsProvider: provider,
+            validateAudioInputEntitlements: {},
+            deviceIdentityProvider: { "test-device-id" },
+            computerUseManager: manager,
+            signalingRunOverride: blockingSignalingRun(
+                started: signalingStarted,
+                cleanupStarted: signalingCleanupStarted,
+                releaseCleanup: releaseSignalingCleanup,
+                cleanupFinished: signalingCleanupFinished))
+        let senderID = "F20EC3BA-677E-407A-BDFA-5E613DCA1784"
+        let prompt = ComputerUseEnvelope(
+            id: "session-shutdown-terminal",
+            senderID: senderID,
+            targetID: "EDBB4924-FBA9-4343-9B33-8A9A3D78D94D",
+            pairingCode: "123456",
+            sessionID: "SESSION-1",
+            kind: .prompt,
+            body: "Open Calculator")
+
+        session.start()
+        await signalingStarted.wait()
+        manager.start(pairingCode: prompt.pairingCode)
+        manager.authorizePeer(senderID: senderID)
+        XCTAssertTrue(manager.handle(prompt, channel: channel))
+        await executionStarted.wait()
+
+        var shutdownReturned = false
+        let shutdown = Task { @MainActor in
+            await session.shutdown()
+            shutdownReturned = true
+        }
+
+        await channel.waitForTerminalSend()
+        var cleanupBegan = await signalingCleanupStarted.isOpen
+        XCTAssertFalse(cleanupBegan)
+        XCTAssertFalse(shutdownReturned)
+
+        await channel.releaseTerminalSend()
+        await channel.waitForReadySend()
+        cleanupBegan = await signalingCleanupStarted.isOpen
+        XCTAssertFalse(cleanupBegan)
+
+        await channel.releaseReadySend()
+        await channel.waitForStopPolling()
+        cleanupBegan = await signalingCleanupStarted.isOpen
+        XCTAssertFalse(
+            cleanupBegan,
+            "session signaling/LAN teardown must remain staged until polling stops")
+
+        await channel.releaseStopPolling()
+        await signalingCleanupStarted.wait()
+        let didStopPolling = await channel.didStopPolling()
+        XCTAssertTrue(didStopPolling)
+        XCTAssertFalse(shutdownReturned)
+
+        await releaseSignalingCleanup.open()
+        await shutdown.value
+
+        XCTAssertTrue(shutdownReturned)
+        let didFinishCleanup = await signalingCleanupFinished.isOpen
         XCTAssertTrue(didFinishCleanup)
     }
 
@@ -309,6 +417,217 @@ final class HostSessionTests: XCTestCase {
         XCTAssertEqual(invocationCount, 2)
 
         await session.shutdown()
+    }
+
+    func test_cloudAccountChangeClosesSignalingBeforeComputerUseDeliveryFinishes() async throws {
+        let provider = readyPermissionsProvider()
+        let signalingStarted = AsyncLifecycleGate()
+        let signalingCleanupStarted = AsyncLifecycleGate()
+        let releaseSignalingCleanup = AsyncLifecycleGate()
+        let replacementStarted = AsyncLifecycleGate()
+        let invocationCounter = AsyncInvocationCounter()
+        let executionStarted = AsyncLifecycleGate()
+        let channel = SessionTeardownOrderingComputerUseChannel()
+        let executor = SessionSuspendingComputerUseExecutor(
+            started: executionStarted)
+        let ledgerDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let ledgerURL = ledgerDirectory.appendingPathComponent("ledger.json")
+        defer { try? FileManager.default.removeItem(at: ledgerDirectory) }
+        let manager = HostComputerUseManager(
+            injector: InputInjector(),
+            executor: executor,
+            taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
+            channelFactory: { _ in channel })
+        let session = HostSession(
+            permissionsProvider: provider,
+            validateAudioInputEntitlements: {},
+            deviceIdentityProvider: { "test-device-id" },
+            computerUseManager: manager,
+            signalingRunOverride: { _ in
+                let invocation = await invocationCounter.next()
+                if invocation == 1 {
+                    await signalingStarted.open()
+                    do {
+                        try await Task.sleep(nanoseconds: 60_000_000_000)
+                    } catch {
+                        // Account changes cancel ingress immediately.
+                    }
+                    await signalingCleanupStarted.open()
+                    await releaseSignalingCleanup.wait()
+                } else {
+                    await replacementStarted.open()
+                    do {
+                        try await Task.sleep(nanoseconds: 60_000_000_000)
+                    } catch {
+                        // Test shutdown cancels the replacement run.
+                    }
+                }
+            })
+        let senderID = "F20EC3BA-677E-407A-BDFA-5E613DCA1784"
+        let prompt = ComputerUseEnvelope(
+            id: "account-change-terminal",
+            senderID: senderID,
+            targetID: "EDBB4924-FBA9-4343-9B33-8A9A3D78D94D",
+            pairingCode: "123456",
+            sessionID: "SESSION-ACCOUNT-CHANGE",
+            kind: .prompt,
+            body: "Open Calculator")
+
+        session.start()
+        await signalingStarted.wait()
+        manager.start(pairingCode: prompt.pairingCode)
+        manager.authorizePeer(senderID: senderID)
+        XCTAssertTrue(manager.handle(prompt, channel: channel))
+        await executionStarted.wait()
+
+        session.handleCloudAccountChanged()
+        await channel.waitForTerminalSend()
+        for _ in 0 ..< 20 {
+            if await signalingCleanupStarted.isOpen { break }
+            await Task.yield()
+        }
+        let cleanupStartedBeforeDeliveryFinished =
+            await signalingCleanupStarted.isOpen
+        let replacementStartedBeforeCleanup =
+            await replacementStarted.isOpen
+        XCTAssertTrue(
+            cleanupStartedBeforeDeliveryFinished,
+            "an account change must cancel authenticated ingress before terminal delivery can finish")
+        XCTAssertFalse(
+            replacementStartedBeforeCleanup,
+            "replacement advertising must still wait for bounded cleanup")
+
+        await channel.releaseTerminalSend()
+        await channel.waitForReadySend()
+        await channel.releaseReadySend()
+        await channel.waitForStopPolling()
+        await channel.releaseStopPolling()
+        await releaseSignalingCleanup.open()
+        await replacementStarted.wait()
+
+        await session.shutdown()
+    }
+
+    func test_cloudAccountChangeRequiresPositiveResolutionBeforeCachedFallback() {
+        let session = makeSession(readyPermissionsProvider())
+        let now = Date()
+
+        session.handleCloudAccountChanged()
+
+        XCTAssertTrue(session.requiresFreshCloudAccountResolution)
+        for transient in [
+            CloudKitAccountBindingResolutionError.temporarilyUnavailable,
+            .couldNotDetermine,
+        ] {
+            XCTAssertFalse(
+                HostSession.shouldReuseConfirmedAccountBinding(
+                    after: transient,
+                    requiresFreshResolution: true,
+                    lastPositiveResolution: now,
+                    now: now))
+            XCTAssertTrue(
+                HostSession.shouldReuseConfirmedAccountBinding(
+                    after: transient,
+                    requiresFreshResolution: false,
+                    lastPositiveResolution: now,
+                    now: now))
+            XCTAssertFalse(
+                HostSession.shouldReuseConfirmedAccountBinding(
+                    after: transient,
+                    requiresFreshResolution: false,
+                    lastPositiveResolution: nil,
+                    now: now),
+                "a cold launch cannot trust a marker from an earlier process")
+            XCTAssertFalse(
+                HostSession.shouldReuseConfirmedAccountBinding(
+                    after: transient,
+                    requiresFreshResolution: false,
+                    lastPositiveResolution:
+                        now.addingTimeInterval(-(5 * 60 + 1)),
+                    now: now),
+                "the in-process transient grace period must be bounded")
+        }
+        for definitive in [
+            CloudKitAccountBindingResolutionError.noAccount,
+            .restricted,
+        ] {
+            XCTAssertFalse(
+                HostSession.shouldReuseConfirmedAccountBinding(
+                    after: definitive,
+                    requiresFreshResolution: false,
+                    lastPositiveResolution: now,
+                    now: now))
+            XCTAssertFalse(
+                HostSession.shouldReuseConfirmedAccountBinding(
+                    after: definitive,
+                    requiresFreshResolution: true,
+                    lastPositiveResolution: now,
+                    now: now))
+        }
+    }
+
+    func test_successfulClaimCannotResurrectExpiredCachedAccountBinding() {
+        let now = Date()
+
+        XCTAssertFalse(
+            HostSession.canReusePositivelyResolvedCloudAccountBinding(
+                requiresFreshResolution: false,
+                lastPositiveResolution:
+                    now.addingTimeInterval(-(5 * 60 + 1)),
+                now: now),
+            "a successful signaling claim must still force a fresh Apple Account lookup when the cached owner is expired")
+        XCTAssertTrue(
+            HostSession.canReusePositivelyResolvedCloudAccountBinding(
+                requiresFreshResolution: false,
+                lastPositiveResolution: now.addingTimeInterval(-(5 * 60)),
+                now: now),
+            "the existing bounded transient policy includes its five-minute boundary")
+    }
+
+    func test_successfulClaimCacheFenceHandlesAccountChangeAndMissedNotification() {
+        let now = Date()
+
+        XCTAssertFalse(
+            HostSession.canReusePositivelyResolvedCloudAccountBinding(
+                requiresFreshResolution: true,
+                lastPositiveResolution: now,
+                now: now),
+            "an account-change notification must require a positive lookup even when the old binding is recent")
+        XCTAssertTrue(
+            HostSession.canReusePositivelyResolvedCloudAccountBinding(
+                requiresFreshResolution: false,
+                lastPositiveResolution: now,
+                now: now),
+            "a missed notification may use only the already-established bounded in-process grace period")
+        XCTAssertFalse(
+            HostSession.canReusePositivelyResolvedCloudAccountBinding(
+                requiresFreshResolution: false,
+                lastPositiveResolution:
+                    now.addingTimeInterval(-(5 * 60 + 1)),
+                now: now),
+            "the missed-notification path must force re-resolution after the grace period")
+    }
+
+    func test_missingOrDifferentConfirmedBindingRotatesHostCredential() {
+        let accountA = CloudKitAccountBinding(
+            rawValue: String(repeating: "1", count: 64))!
+        let accountB = CloudKitAccountBinding(
+            rawValue: String(repeating: "2", count: 64))!
+
+        XCTAssertFalse(
+            HostSession.shouldRotateHostCredential(
+                confirmedBinding: accountA,
+                currentBinding: accountA))
+        XCTAssertTrue(
+            HostSession.shouldRotateHostCredential(
+                confirmedBinding: accountA,
+                currentBinding: accountB))
+        XCTAssertTrue(
+            HostSession.shouldRotateHostCredential(
+                confirmedBinding: nil,
+                currentBinding: accountA),
+            "a lost or malformed owner marker cannot revive an old credential")
     }
 
     func test_grantNextPermission_requestsScreenRecordingWithoutForcingSettings() {
@@ -458,9 +777,9 @@ final class HostSessionTests: XCTestCase {
             })
     }
 
-    /// The pairing code format is the iOS client's contract: exactly
-    /// six ASCII digits. This test protects the format generator from
-    /// drifting (e.g., a refactor that returns a UUID instead).
+    /// The deployed CloudKit schema still requires an internal six-ASCII-digit
+    /// routing binding. This protects wire compatibility; the value is never
+    /// presented for a person to enter.
     func test_newPairingCode_isSixDigits() {
         for _ in 0..<100 {
             let code = HostSession.newPairingCode()
@@ -468,6 +787,181 @@ final class HostSessionTests: XCTestCase {
             XCTAssertTrue(code.allSatisfy { $0.isASCII && $0.isNumber },
                           "code must be all digits: \(code)")
         }
+    }
+
+    func test_headlessLaunchRemovesOnlyFixedLegacyPairingCodeFile() throws {
+        try withLegacyPairingArtifactSandbox { defaults, root in
+            let legacyDirectory = root.appendingPathComponent("legacy", isDirectory: true)
+            let outsideDirectory = root.appendingPathComponent("outside", isDirectory: true)
+            try FileManager.default.createDirectory(
+                at: legacyDirectory,
+                withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(
+                at: outsideDirectory,
+                withIntermediateDirectories: true)
+            let fixedLegacyFile = legacyDirectory
+                .appendingPathComponent("pairing-code.txt")
+            let outsideSentinel = outsideDirectory.appendingPathComponent("sentinel.txt")
+            try Data("654321\n".utf8).write(to: fixedLegacyFile)
+            try Data("untouched".utf8).write(to: outsideSentinel)
+            defaults.set(
+                legacyDirectory.path + "/../outside",
+                forKey: "PairingCodeFile")
+
+            HeadlessHostSettings.removeLegacyManualPairingArtifacts(
+                defaults: defaults,
+                legacyDirectoryURL: legacyDirectory)
+
+            XCTAssertNil(defaults.object(forKey: "PairingCodeFile"))
+            XCTAssertFalse(FileManager.default.fileExists(atPath: fixedLegacyFile.path))
+            XCTAssertEqual(
+                try Data(contentsOf: outsideSentinel),
+                Data("untouched".utf8),
+                "the retired preference value must never become a deletion path")
+        }
+    }
+
+    func test_headlessLaunchMissingLegacyFileIsIdempotent() throws {
+        try withLegacyPairingArtifactSandbox { defaults, root in
+            let legacyDirectory = root.appendingPathComponent("legacy", isDirectory: true)
+            try FileManager.default.createDirectory(
+                at: legacyDirectory,
+                withIntermediateDirectories: true)
+
+            for _ in 0 ..< 2 {
+                defaults.set(root.path, forKey: "PairingCodeFile")
+                HeadlessHostSettings.removeLegacyManualPairingArtifacts(
+                    defaults: defaults,
+                    legacyDirectoryURL: legacyDirectory)
+                XCTAssertNil(defaults.object(forKey: "PairingCodeFile"))
+            }
+        }
+    }
+
+    func test_headlessLaunchRejectsSymlinkedLegacyParent() throws {
+        try withLegacyPairingArtifactSandbox { defaults, root in
+            let realDirectory = root.appendingPathComponent("real", isDirectory: true)
+            let symlinkedDirectory = root.appendingPathComponent("legacy", isDirectory: true)
+            try FileManager.default.createDirectory(
+                at: realDirectory,
+                withIntermediateDirectories: true)
+            let fixedLegacyFile = realDirectory
+                .appendingPathComponent("pairing-code.txt")
+            try Data("654321\n".utf8).write(to: fixedLegacyFile)
+            try FileManager.default.createSymbolicLink(
+                at: symlinkedDirectory,
+                withDestinationURL: realDirectory)
+            defaults.set(root.path, forKey: "PairingCodeFile")
+
+            HeadlessHostSettings.removeLegacyManualPairingArtifacts(
+                defaults: defaults,
+                legacyDirectoryURL: symlinkedDirectory)
+
+            XCTAssertNil(defaults.object(forKey: "PairingCodeFile"))
+            XCTAssertEqual(
+                try Data(contentsOf: fixedLegacyFile),
+                Data("654321\n".utf8))
+        }
+    }
+
+    func test_headlessLaunchRejectsFinalComponentSymlink() throws {
+        try withLegacyPairingArtifactSandbox { defaults, root in
+            let legacyDirectory = root.appendingPathComponent("legacy", isDirectory: true)
+            try FileManager.default.createDirectory(
+                at: legacyDirectory,
+                withIntermediateDirectories: true)
+            let outsideSentinel = root.appendingPathComponent("outside.txt")
+            let fixedLegacyFile = legacyDirectory
+                .appendingPathComponent("pairing-code.txt")
+            try Data("untouched".utf8).write(to: outsideSentinel)
+            try FileManager.default.createSymbolicLink(
+                at: fixedLegacyFile,
+                withDestinationURL: outsideSentinel)
+            defaults.set(outsideSentinel.path, forKey: "PairingCodeFile")
+
+            HeadlessHostSettings.removeLegacyManualPairingArtifacts(
+                defaults: defaults,
+                legacyDirectoryURL: legacyDirectory)
+
+            XCTAssertNil(defaults.object(forKey: "PairingCodeFile"))
+            XCTAssertEqual(
+                try FileManager.default.destinationOfSymbolicLink(
+                    atPath: fixedLegacyFile.path),
+                outsideSentinel.path)
+            XCTAssertEqual(
+                try Data(contentsOf: outsideSentinel),
+                Data("untouched".utf8))
+        }
+    }
+
+    func test_headlessLaunchRejectsNonRegularLegacyEntry() throws {
+        try withLegacyPairingArtifactSandbox { defaults, root in
+            let legacyDirectory = root.appendingPathComponent("legacy", isDirectory: true)
+            let fixedLegacyFile = legacyDirectory
+                .appendingPathComponent("pairing-code.txt", isDirectory: true)
+            try FileManager.default.createDirectory(
+                at: fixedLegacyFile,
+                withIntermediateDirectories: true)
+            defaults.set(root.path, forKey: "PairingCodeFile")
+
+            HeadlessHostSettings.removeLegacyManualPairingArtifacts(
+                defaults: defaults,
+                legacyDirectoryURL: legacyDirectory)
+
+            var isDirectory = ObjCBool(false)
+            XCTAssertTrue(FileManager.default.fileExists(
+                atPath: fixedLegacyFile.path,
+                isDirectory: &isDirectory))
+            XCTAssertTrue(isDirectory.boolValue)
+            XCTAssertNil(defaults.object(forKey: "PairingCodeFile"))
+        }
+    }
+
+    func test_headlessLaunchRejectsHardLinkedLegacyFile() throws {
+        try withLegacyPairingArtifactSandbox { defaults, root in
+            let legacyDirectory = root.appendingPathComponent("legacy", isDirectory: true)
+            try FileManager.default.createDirectory(
+                at: legacyDirectory,
+                withIntermediateDirectories: true)
+            let fixedLegacyFile = legacyDirectory
+                .appendingPathComponent("pairing-code.txt")
+            let secondLink = root.appendingPathComponent("second-link.txt")
+            try Data("654321\n".utf8).write(to: fixedLegacyFile)
+            try FileManager.default.linkItem(at: fixedLegacyFile, to: secondLink)
+            defaults.set(secondLink.path, forKey: "PairingCodeFile")
+
+            HeadlessHostSettings.removeLegacyManualPairingArtifacts(
+                defaults: defaults,
+                legacyDirectoryURL: legacyDirectory)
+
+            XCTAssertEqual(
+                try Data(contentsOf: fixedLegacyFile),
+                Data("654321\n".utf8))
+            XCTAssertEqual(
+                try Data(contentsOf: secondLink),
+                Data("654321\n".utf8))
+            XCTAssertNil(defaults.object(forKey: "PairingCodeFile"))
+        }
+    }
+
+    func test_legacyPairingCodeValidationRejectsWrongOwner() {
+        var fileStatus = stat()
+        fileStatus.st_mode = S_IFREG | S_IRUSR | S_IWUSR
+        fileStatus.st_uid = Darwin.geteuid()
+        fileStatus.st_nlink = 1
+        var directoryStatus = stat()
+        directoryStatus.st_mode = S_IFDIR | S_IRWXU
+        directoryStatus.st_uid = Darwin.geteuid()
+
+        XCTAssertTrue(HeadlessHostSettings.legacyPairingCodeFileCanBeRemoved(fileStatus))
+        XCTAssertFalse(HeadlessHostSettings.legacyPairingCodeFileCanBeRemoved(
+            fileStatus,
+            expectedOwnerID: Darwin.geteuid() &+ 1))
+        XCTAssertTrue(HeadlessHostSettings.legacyPairingCodeDirectoryCanBeUsed(
+            directoryStatus))
+        XCTAssertFalse(HeadlessHostSettings.legacyPairingCodeDirectoryCanBeUsed(
+            directoryStatus,
+            expectedOwnerID: Darwin.geteuid() &+ 1))
     }
 
     func test_advertisementRefreshInterval_refreshesBeforeStaleCutoff() {
@@ -511,6 +1005,27 @@ final class HostSessionTests: XCTestCase {
         XCTAssertEqual(decoded.senderID, senderID)
         XCTAssertEqual(decoded.computerUseCapability.state, .installing)
         XCTAssertEqual(decoded.computerUseCapability.detail, "Downloading AI 42%")
+    }
+
+    func test_bonjourServiceNameDoesNotExposeInternalRoutingBinding() throws {
+        let senderID = "8A2269A1-A94C-4FA2-BD63-BEAEEA79A97A"
+        let metadata = try XCTUnwrap(LocalHostBonjourMetadata(
+            senderID: senderID,
+            computerUseCapability: .ready,
+            routingBinding: "123456"))
+        let values = NetService.dictionary(
+            fromTXTRecord: metadata.txtRecordData())
+
+        XCTAssertEqual(
+            LocalHostAdvertisementName.serviceName(
+                hostname: "Studio Mac",
+                code: "123456"),
+            "Studio Mac")
+        XCTAssertEqual(String(data: try XCTUnwrap(values["rb"]), encoding: .utf8), "123456")
+        XCTAssertFalse(
+            LocalHostAdvertisementName.serviceName(
+                hostname: "Studio Mac",
+                code: "123456").contains("123456"))
     }
 
     func test_bonjourMetadata_rejectsInvalidIdentityAndOversizedRecords() {
@@ -926,43 +1441,71 @@ final class HostSessionTests: XCTestCase {
         XCTAssertFalse(CloudKitSignalingClient.isTransientCloudKitError(unrelated))
     }
 
+    func test_cloudKitSignalingPollBoundsRejectIncompleteCursorPrefix() throws {
+        var accumulator = BoundedCloudKitRecordAccumulator<Int>(
+            maximumObservedRecords:
+                CloudKitSignalingClient.maximumQueryRecords,
+            maximumPages: CloudKitSignalingClient.maximumQueryPages)
+        for page in 0..<(CloudKitSignalingClient.maximumQueryPages - 1) {
+            try accumulator.append(
+                Array((page * 50)..<((page + 1) * 50)),
+                observedRecordCount: 50,
+                hasMore: true)
+        }
+        XCTAssertThrowsError(try accumulator.append(
+            Array(450..<500),
+            observedRecordCount: 50,
+            hasMore: true)) { error in
+            XCTAssertEqual(
+                error as? BoundedCloudKitRecordError,
+                .queryLimitExceeded)
+        }
+        XCTAssertEqual(accumulator.observedRecordCount, 450)
+    }
+
     func test_cloudKitHostDefersICEUntilOfferAndKeepsSameBatchSenderRecords() async throws {
         let client = CloudKitSignalingClient(
             containerIdentifier: HostConfig.cloudKitContainerIdentifier,
             code: "123456",
             role: .host,
             senderID: "HOST-ID")
+        let base = Date()
         let earlyICE = try signalingRecord(
             name: "ice-a",
             senderID: "CLIENT-A",
             kind: .ice,
-            payload: ["candidate": "candidate-a"])
+            payload: ["candidate": "candidate-a"],
+            createdAt: base)
 
-        let beforeOffer = await client.consumePollRecords([earlyICE])
+        let beforeOffer = try await client.consumePollRecords([earlyICE])
         XCTAssertTrue(beforeOffer.isEmpty)
 
         let offer = try signalingRecord(
             name: "offer-a",
             senderID: "CLIENT-A",
             kind: .offer,
-            payload: ["sdp": "offer-sdp"])
+            payload: ["sdp": "offer-sdp"],
+            createdAt: base.addingTimeInterval(2))
         let otherSenderICE = try signalingRecord(
             name: "ice-b",
             senderID: "CLIENT-B",
             kind: .ice,
-            payload: ["candidate": "candidate-b"])
+            payload: ["candidate": "candidate-b"],
+            createdAt: base.addingTimeInterval(3))
         let otherSenderOffer = try signalingRecord(
             name: "offer-b",
             senderID: "CLIENT-B",
             kind: .offer,
-            payload: ["sdp": "other-offer"])
+            payload: ["sdp": "other-offer"],
+            createdAt: base.addingTimeInterval(4))
         let earlyBye = try signalingRecord(
             name: "bye-a",
             senderID: "CLIENT-A",
             kind: .bye,
-            payload: ["reason": "unbound"])
+            payload: ["reason": "unbound"],
+            createdAt: base.addingTimeInterval(1))
 
-        let accepted = await client.consumePollRecords([
+        let accepted = try await client.consumePollRecords([
             earlyICE,
             earlyBye,
             offer,
@@ -973,7 +1516,7 @@ final class HostSessionTests: XCTestCase {
         XCTAssertEqual(accepted.map(\.kind), [.ice, .offer])
         XCTAssertEqual(accepted.map(\.senderID), ["CLIENT-A", "CLIENT-A"])
         XCTAssertEqual(accepted.first?.payload["candidate"], "candidate-a")
-        let replay = await client.consumePollRecords([
+        let replay = try await client.consumePollRecords([
             earlyICE,
             earlyBye,
             offer,
@@ -981,6 +1524,84 @@ final class HostSessionTests: XCTestCase {
             otherSenderOffer,
         ])
         XCTAssertTrue(replay.isEmpty)
+    }
+
+    func test_cloudKitPollRejectsPerRecordFailureBeforeReplayMutation() async throws {
+        let client = CloudKitSignalingClient(
+            containerIdentifier: HostConfig.cloudKitContainerIdentifier,
+            code: "123456",
+            role: .host,
+            senderID: "HOST-ID")
+        let offer = try signalingRecord(
+            name: "offer-a",
+            senderID: "CLIENT-A",
+            kind: .offer,
+            payload: ["sdp": "offer-sdp"],
+            createdAt: Date(timeIntervalSinceReferenceDate: 2_000))
+        let failedID = CKRecord.ID(recordName: "unavailable-record")
+        let partialBatch: [(CKRecord.ID, Result<CKRecord, Error>)] = [
+            (offer.recordID, .success(offer)),
+            (
+                failedID,
+                .failure(NSError(
+                    domain: CKErrorDomain,
+                    code: CKError.Code.networkFailure.rawValue))
+            ),
+        ]
+
+        do {
+            _ = try await client.consumePollQueryResults(partialBatch)
+            XCTFail("one per-record failure must reject the complete query batch")
+        } catch {
+            // Expected. The successful prefix must remain unconsumed.
+        }
+
+        let retry = try await client.consumePollQueryResults([
+            (offer.recordID, .success(offer)),
+        ])
+        XCTAssertEqual(retry.map(\.kind), [.offer])
+        XCTAssertEqual(retry.map(\.senderID), ["CLIENT-A"])
+    }
+
+    func test_cloudKitEqualTimestampOffersUseRecordNameTotalOrder() async throws {
+        let timestamp = Date(timeIntervalSinceReferenceDate: 3_000)
+        let firstByName = try signalingRecord(
+            name: "offer-a",
+            senderID: "CLIENT-A",
+            kind: .offer,
+            payload: ["sdp": "offer-a"],
+            createdAt: timestamp)
+        let lastByName = try signalingRecord(
+            name: "offer-z",
+            senderID: "CLIENT-Z",
+            kind: .offer,
+            payload: ["sdp": "offer-z"],
+            createdAt: timestamp)
+
+        let reverseInputClient = CloudKitSignalingClient(
+            containerIdentifier: HostConfig.cloudKitContainerIdentifier,
+            code: "123456",
+            role: .host,
+            senderID: "HOST-ID")
+        let forwardInputClient = CloudKitSignalingClient(
+            containerIdentifier: HostConfig.cloudKitContainerIdentifier,
+            code: "123456",
+            role: .host,
+            senderID: "HOST-ID")
+
+        let fromReverse = try await reverseInputClient.consumePollRecords([
+            lastByName,
+            firstByName,
+        ])
+        let fromForward = try await forwardInputClient.consumePollRecords([
+            firstByName,
+            lastByName,
+        ])
+
+        XCTAssertEqual(fromReverse.map(\.senderID), ["CLIENT-A"])
+        XCTAssertEqual(fromForward.map(\.senderID), ["CLIENT-A"])
+        XCTAssertEqual(fromReverse.first?.payload["sdp"], "offer-a")
+        XCTAssertEqual(fromForward.first?.payload["sdp"], "offer-a")
     }
 
     func test_cloudKitHostOfferBindingIsAtomicAndRejectsSecondSender() async {
@@ -1020,9 +1641,13 @@ final class HostSessionTests: XCTestCase {
             CloudKitSignalingClient.selectedHostSenderID(
                 from: [first, second],
                 expectedTargetID: "HOST-C"))
-        XCTAssertEqual(
+        XCTAssertNil(
             CloudKitSignalingClient.selectedHostSenderID(
                 from: [first, second],
+                expectedTargetID: nil))
+        XCTAssertEqual(
+            CloudKitSignalingClient.selectedHostSenderID(
+                from: [first],
                 expectedTargetID: nil),
             "HOST-A")
     }
@@ -1069,7 +1694,8 @@ final class HostSessionTests: XCTestCase {
         name: String,
         senderID: String,
         kind: SignalingEnvelope.Kind,
-        payload: [String: String]
+        payload: [String: String],
+        createdAt: Date = Date()
     ) throws -> CKRecord {
         let record = CKRecord(
             recordType: "WebRTCSignal",
@@ -1081,7 +1707,7 @@ final class HostSessionTests: XCTestCase {
         record["kind"] = kind.rawValue as CKRecordValue
         record["payload"] = try XCTUnwrap(
             String(data: payloadData, encoding: .utf8)) as CKRecordValue
-        record["createdAt"] = Date() as CKRecordValue
+        record["createdAt"] = createdAt as CKRecordValue
         return record
     }
 
@@ -1097,6 +1723,125 @@ final class HostSessionTests: XCTestCase {
         }
         body(defaults)
     }
+
+    private func withLegacyPairingArtifactSandbox(
+        _ body: (UserDefaults, URL) throws -> Void
+    ) throws {
+        let suiteName = "RemoteDesktopHostTests.LegacyPairing.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: root,
+            withIntermediateDirectories: true)
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+            try? FileManager.default.removeItem(at: root)
+        }
+        try body(defaults, root)
+    }
+}
+
+@MainActor
+private final class SessionSuspendingComputerUseExecutor: ComputerUseExecuting {
+    let isReady = true
+    let runtimeName = "Session teardown test runtime"
+    private let started: AsyncLifecycleGate
+
+    init(started: AsyncLifecycleGate) {
+        self.started = started
+    }
+
+    func execute(
+        prompt: String,
+        tools: ComputerUseHostTools,
+        progress: @escaping (String) -> Void
+    ) async throws -> ComputerUseExecutionResult {
+        await started.open()
+        try await Task.sleep(for: .seconds(60))
+        return .completed("Unexpected completion")
+    }
+}
+
+private actor SessionTeardownOrderingComputerUseChannel:
+    HostComputerUseChannel
+{
+    private let terminalSendStarted = AsyncLifecycleGate()
+    private let releaseTerminal = AsyncLifecycleGate()
+    private let readySendStarted = AsyncLifecycleGate()
+    private let releaseReady = AsyncLifecycleGate()
+    private let stopPollingStarted = AsyncLifecycleGate()
+    private let releaseStop = AsyncLifecycleGate()
+    private var pollingStopped = false
+
+    func send(
+        kind: ComputerUseEnvelope.Kind,
+        body: String,
+        to explicitTargetID: String?,
+        sessionID explicitSessionID: String?,
+        messageID explicitMessageID: String?
+    ) async throws -> ComputerUseEnvelope {
+        if kind == .assistant,
+           let update = try? ComputerUseTaskUpdate.decodeBody(body),
+           update.outcome == .unableToComplete {
+            await terminalSendStarted.open()
+            await releaseTerminal.wait()
+        } else if kind == .status,
+                  let update = try? ComputerUseTaskUpdate.decodeBody(body),
+                  update.text == "ready" {
+            await readySendStarted.open()
+            await releaseReady.wait()
+        }
+        return ComputerUseEnvelope(
+            id: explicitMessageID ?? UUID().uuidString,
+            senderID: "EDBB4924-FBA9-4343-9B33-8A9A3D78D94D",
+            targetID: explicitTargetID
+                ?? "F20EC3BA-677E-407A-BDFA-5E613DCA1784",
+            pairingCode: "123456",
+            sessionID: explicitSessionID ?? "SESSION-1",
+            kind: kind,
+            body: body)
+    }
+
+    func poll() async throws -> [ComputerUseEnvelope] {
+        try await Task.sleep(for: .seconds(60))
+        return []
+    }
+
+    func acknowledge(_ envelopes: [ComputerUseEnvelope]) async throws {}
+
+    func stopPolling() async {
+        await stopPollingStarted.open()
+        await releaseStop.wait()
+        pollingStopped = true
+    }
+
+    func waitForTerminalSend() async {
+        await terminalSendStarted.wait()
+    }
+
+    func releaseTerminalSend() async {
+        await releaseTerminal.open()
+    }
+
+    func waitForReadySend() async {
+        await readySendStarted.wait()
+    }
+
+    func releaseReadySend() async {
+        await releaseReady.open()
+    }
+
+    func waitForStopPolling() async {
+        await stopPollingStarted.wait()
+    }
+
+    func releaseStopPolling() async {
+        await releaseStop.open()
+    }
+
+    func didStopPolling() -> Bool { pollingStopped }
 }
 
 private actor AsyncLifecycleGate {

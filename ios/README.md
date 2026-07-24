@@ -1,7 +1,8 @@
 # RemoteDesktop iOS client
 
-SwiftUI app for iPad and iPhone with CloudKit pairing, live WebRTC screen and
-audio playback, direct remote input, and the AI Computer Use chat experience.
+SwiftUI app for iPad and iPhone with CloudKit-assisted automatic enrollment,
+live WebRTC screen and audio playback, direct remote input, and the local AI
+Computer Use chat experience.
 
 Computer Use is MCP-first on the Mac host. Apple's local Foundation Model plans
 within a reviewed surface of seven read-only helper operations plus the host's
@@ -90,10 +91,32 @@ does not declare Location access. Its media transceivers are receive-only,
 audio uses the playback session category, and it never records, stores, or
 transmits the iPhone/iPad camera or microphone.
 
+## Computer Use transport boundary
+
+CloudKit is the bounded bootstrap and setup plane: it may carry discovery,
+same-account enrollment and encrypted credential exchange, remote-control
+SDP/ICE signaling, and Computer Use setup requests/progress. Once enrollment
+has installed the account-bound credential, the app opens an authenticated LAN
+TLS broker for every natural-language prompt, bounded conversation context,
+task status/result, pause/resume/cancel control, and approval exchange. Those
+messages never fall back to CloudKit. If the TLS broker cannot be authenticated
+or reached, the app must stop and report that the local AI channel is
+unavailable without submitting the task elsewhere.
+
+Live pixels, host audio, and direct input remain on the separate WebRTC
+connection. Planning, policy enforcement, visual grounding, and execution
+remain on the Mac host; the iOS app is the prompt, approval, status, and visible
+intervention surface.
+
+The transport split is implemented and covered by component tests. Fresh
+signed end-to-end acceptance of automatic enrollment followed by an ordinary
+prompt over LAN TLS is still pending for both matched Debug/Debug and
+Release/Release configurations.
+
 ## What works today
 
-- Enter a 6-digit pairing code and complete a real signaling round-trip
-  with the Mac host before the session transitions to connected.
+- Discover Macs through the signed-in Apple Account and complete automatic,
+  encrypted local pairing with no code or copied-secret entry.
 - Indirect pointer on iPad (trackpad, Magic Mouse, Pencil hover):
   absolute-position pointer events + indirect scroll + right/middle
   click via `UIEvent.buttonMask`.
@@ -109,7 +132,8 @@ transmits the iPhone/iPad camera or microphone.
   both connected, per the project's UX contract.
 - AI setup initiated beside each compatible Mac. One progress bar covers real
   helper/model download bytes, verification, and runtime loading; setup is
-  resumable and idempotent over CloudKit and reuses verified components.
+  resumable and idempotent. Its bounded setup lifecycle may use CloudKit and
+  reuses verified components; ordinary task traffic may not use that channel.
 - A live-screen-plus-chat view, with Apple Foundation Models planning typed MCP
   calls first and OS-Atlas-Pro-4B reserved for typed visual-point grounding and
   the production delivery workflow's pointer targets. If no typed route is
@@ -125,7 +149,7 @@ transmits the iPhone/iPad camera or microphone.
 
 ## App Store compliance checklist (tracked in top-level README)
 
-- ✅ Pairing code entered per session → user-initiated
+- ✅ Computer selected and session started by the user after private-account discovery
 - ✅ No private APIs
 - ✅ `NSLocalNetworkUsageDescription` present
 - ⬜ App Review notes explaining remote-control behavior (add before

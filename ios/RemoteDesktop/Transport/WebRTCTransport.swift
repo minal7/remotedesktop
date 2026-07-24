@@ -25,6 +25,19 @@ enum RemoteAudioSessionPolicy {
 
 @MainActor
 final class WebRTCTransport: NSObject, VideoRenderingTransport {
+    enum MediaPolicy: Equatable {
+        /// Ordinary remote-control sessions retain host-system-audio playback.
+        case remoteSession
+        /// The optional local Computer Use companion carries pixels and direct
+        /// person input only. AI traffic remains on TLS and host audio is not
+        /// negotiated or played.
+        case computerUseVisualSidecar
+
+        fileprivate var receivesHostAudio: Bool {
+            self == .remoteSession && Config.enableHostAudio
+        }
+    }
+
     var onHostHello: (@MainActor (HostHello) -> Void)?
     var onDisplay: (@MainActor (DisplayInfo) -> Void)?
     var onFirstVideoFrame: (@MainActor () -> Void)?
@@ -34,6 +47,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
     private let factory: RTCPeerConnectionFactory
     private let signalingFactory: (String, String?) -> any SignalingChannel
     private let iceConfigProvider: @Sendable () async -> ICEConfig
+    private let mediaPolicy: MediaPolicy
     private let iceConnectTimeout: Duration = .seconds(25)
     private let connectionRecoveryTimeout: Duration = .seconds(12)
     private let mutedSystemVolumeThreshold: Float = 0.0625
@@ -59,14 +73,16 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
     private var didReportDisconnect = false
     private var pendingRemoteICECandidates: [RTCIceCandidate] = []
     private var loggedPendingRemoteICE = false
-    private var systemOutputVolume: Float = AVAudioSession.sharedInstance().outputVolume
+    private var systemOutputVolume: Float = 1
     private var appliedRemoteAudioGain: Double?
 
     init(
         signalingFactory: ((String, String?) -> any SignalingChannel)? = nil,
-        iceConfigProvider: (@Sendable () async -> ICEConfig)? = nil
+        iceConfigProvider: (@Sendable () async -> ICEConfig)? = nil,
+        mediaPolicy: MediaPolicy = .remoteSession
     ) {
         RTCInitializeSSL()
+        self.mediaPolicy = mediaPolicy
         self.factory = RTCPeerConnectionFactory(
             audioDeviceModuleType: .platformDefault,
             bypassVoiceProcessing: true,
@@ -88,14 +104,18 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
             self.iceConfigProvider = { await fetcher.get() }
         }
         super.init()
-        let audioSession = RTCAudioSession.sharedInstance()
-        systemOutputVolume = audioSession.outputVolume
-        audioSession.add(self)
-        configureAudioSession()
+        if mediaPolicy.receivesHostAudio {
+            let audioSession = RTCAudioSession.sharedInstance()
+            systemOutputVolume = audioSession.outputVolume
+            audioSession.add(self)
+            configureAudioSession()
+        }
     }
 
     deinit {
-        RTCAudioSession.sharedInstance().remove(self)
+        if mediaPolicy.receivesHostAudio {
+            RTCAudioSession.sharedInstance().remove(self)
+        }
     }
 
     func connect(pairingCode: String, expectedHostID: String?) async throws {
@@ -117,7 +137,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         let iceConfig = await iceConfigProvider()
         let peerConnection = try makePeerConnection(iceConfig: iceConfig)
         self.peerConnection = peerConnection
-        if Config.enableHostAudio {
+        if mediaPolicy.receivesHostAudio {
             addReceiveOnlyTransceiver(of: .audio, on: peerConnection)
         }
         addReceiveOnlyTransceiver(of: .video, on: peerConnection)
@@ -502,7 +522,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
     }
 
     private func adoptRemoteAudioTrack(_ track: RTCAudioTrack) {
-        guard Config.enableHostAudio else {
+        guard mediaPolicy.receivesHostAudio else {
             log.info("ignoring remote audio track because host audio is disabled")
             return
         }

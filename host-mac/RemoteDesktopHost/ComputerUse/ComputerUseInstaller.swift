@@ -1377,10 +1377,7 @@ actor ComputerUseInstaller {
     }
 
     private func preflight(rootPin: ManagedRootPin) throws {
-        #if !arch(arm64)
-        throw InstallError.unsupportedProcessor
-        #endif
-
+        #if arch(arm64)
         try rootPin.validate()
         try validateManifest()
 
@@ -1406,6 +1403,9 @@ actor ComputerUseInstaller {
             forModelBytes: max(0, totalBytes - reusableBytes),
             at: capacityProbeURL)
         try rootPin.validate()
+        #else
+        throw InstallError.unsupportedProcessor
+        #endif
     }
 
     nonisolated static func nearestExistingAncestor(

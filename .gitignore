@@ -69,3 +69,6 @@ x86/
 
 # Claude Code local worktrees (must not be committed)
 .claude/worktrees/
+
+# Local XcodeBuildMCP workspace selection
+.xcodebuildmcp/

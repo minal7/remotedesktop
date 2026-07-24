@@ -47,12 +47,16 @@ protocol MCPApprovalContinuing: AnyObject {
 /// applications that do not expose an appropriate structured operation.
 /// No remote inference or API credential is used by this executor.
 @MainActor
-final class MCPFirstComputerUseExecutor: ComputerUseTaskAwareExecuting, MCPApprovalContinuing {
+final class MCPFirstComputerUseExecutor:
+    ComputerUseTaskAwareExecuting,
+    MCPApprovalContinuing,
+    ComputerUseVisualApprovalContinuing {
     enum ExecutorError: Error, LocalizedError, Equatable {
         case requiredToolsMissing
         case tooManySteps
         case approvalStateChanged
         case structuredToolFailed(String)
+        case visualApprovalContinuationUnavailable
         case calculatorClearNotVerified
         case calculatorResultNotVerified(String)
 
@@ -66,6 +70,8 @@ final class MCPFirstComputerUseExecutor: ComputerUseTaskAwareExecuting, MCPAppro
                 return "The approved Mac action no longer matches the pending task."
             case .structuredToolFailed(let message):
                 return message
+            case .visualApprovalContinuationUnavailable:
+                return "The local visual executor cannot resume this approved action."
             case .calculatorClearNotVerified:
                 return "Calculator could not be verified as cleared, so the task was stopped."
             case .calculatorResultNotVerified(let expected):
@@ -414,18 +420,6 @@ final class MCPFirstComputerUseExecutor: ComputerUseTaskAwareExecuting, MCPAppro
             return .completed("Done. I opened \(applicationName).")
         }
 
-        // A live delivery quote has no planner-visible structured operation:
-        // the approved MCP surface intentionally exposes neither browser
-        // navigation nor checkout controls. Route it directly to the verified
-        // visual executor so Apple Intelligence cannot probe an unrelated
-        // local app (for example Reminders) before eventually falling back.
-        if Self.isPureDeliveryQuoteReadRequest(trustedUserPrompt) {
-            Self.log.info(
-                "Routed delivery quote directly to local visual computer use")
-            progress("Using visual control for this delivery quote…")
-            return try await executeVisualFallback()
-        }
-
         guard planner.availability() == .available else {
             if let mailResult = try await routeMailWithoutPlanner(
                 taskID: taskID,
@@ -539,6 +533,35 @@ final class MCPFirstComputerUseExecutor: ComputerUseTaskAwareExecuting, MCPAppro
         } onCancel: { [clientPool] in
             Task { await clientPool.cancel(processGeneration: generation) }
         }
+    }
+
+    /// Preserve the visual executor's typed, process-local continuation even
+    /// when this hybrid wrapper selected the fallback path. Approval resume is
+    /// deliberately not an ordinary execute call: re-entering the structured
+    /// planner could lose the visual ledger or repeat the approved action.
+    func continueAfterApprovedVisualAction(
+        _ continuation: ComputerUseVisualApprovalContinuation,
+        action: ComputerUsePredictedAction,
+        tools: ComputerUseHostTools,
+        progress: @escaping (String) -> Void
+    ) async throws -> ComputerUseExecutionResult {
+        guard let visualContinuation = visualFallback
+            as? any ComputerUseVisualApprovalContinuing else {
+            throw ExecutorError.visualApprovalContinuationUnavailable
+        }
+        return try await visualContinuation
+            .continueAfterApprovedVisualAction(
+                continuation,
+                action: action,
+                tools: tools,
+                progress: progress)
+    }
+
+    func cancelVisualApprovalContinuation(
+        _ continuation: ComputerUseVisualApprovalContinuation
+    ) {
+        (visualFallback as? any ComputerUseVisualApprovalContinuing)?
+            .cancelVisualApprovalContinuation(continuation)
     }
 
     func cancelMCPWork() {
@@ -1851,35 +1874,6 @@ final class MCPFirstComputerUseExecutor: ComputerUseTaskAwareExecuting, MCPAppro
         default:
             return false
         }
-    }
-
-    /// The fast visual quote route is read-only. Model conversation history is
-    /// never considered, and any unnegated follow-on effect keeps the request
-    /// on structured planning/approval instead of bypassing it.
-    private static func isPureDeliveryQuoteReadRequest(_ prompt: String) -> Bool {
-        guard OSAtlasComputerUseExecutor.isDeliveryQuoteTask(prompt) else {
-            return false
-        }
-        let effectPrompt: String
-        if let regex = try? NSRegularExpression(
-            pattern: #"(?i)\bcheck\s+out\b"#) {
-            effectPrompt = regex.stringByReplacingMatches(
-                in: prompt,
-                range: NSRange(prompt.startIndex..., in: prompt),
-                withTemplate: "checkout")
-        } else {
-            effectPrompt = prompt
-        }
-        let followUpEffectWords: Set<String> = [
-            "add", "buy", "checkout", "compose", "copy", "create", "draft",
-            "email", "message", "order", "pay", "place", "post", "purchase",
-            "save", "send", "share", "store", "submit", "text", "upload",
-            "write",
-        ]
-        return !AppleFoundationVisualActionRouter
-            .taskAffirmativelyRequestsOperation(
-                effectPrompt,
-                operationVerbs: followUpEffectWords)
     }
 
     private static func explicitlyRequestedReadDomains(
