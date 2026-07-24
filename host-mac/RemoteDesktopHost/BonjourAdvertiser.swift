@@ -1,10 +1,33 @@
 import Foundation
 
+protocol BonjourServicePublishing: AnyObject {
+    func setTXTRecord(_ recordData: Data?) -> Bool
+    func publish(options: NetService.Options)
+    func stop()
+}
+
+extension NetService: BonjourServicePublishing {}
+
+typealias BonjourServiceFactory = (
+    _ domain: String,
+    _ type: String,
+    _ name: String,
+    _ port: Int32
+) -> any BonjourServicePublishing
+
 final class BonjourAdvertiser: NSObject {
-    private var service: NetService?
+    private let serviceFactory: BonjourServiceFactory
+    private var service: (any BonjourServicePublishing)?
     private var localCredentialID: String?
     private var routingBinding: String?
     private(set) var publishedMetadata: LocalHostBonjourMetadata?
+
+    init(serviceFactory: @escaping BonjourServiceFactory = {
+        NetService(domain: $0, type: $1, name: $2, port: $3)
+    }) {
+        self.serviceFactory = serviceFactory
+        super.init()
+    }
 
     func publish(
         hostname: String,
@@ -16,10 +39,11 @@ final class BonjourAdvertiser: NSObject {
     ) {
         stop()
         let advertisedName = LocalHostAdvertisementName.serviceName(hostname: hostname, code: code)
-        let service = NetService(domain: "local.",
-                                 type: LocalHostAdvertisementName.serviceType,
-                                 name: advertisedName,
-                                 port: port)
+        let service = serviceFactory(
+            "local.",
+            LocalHostAdvertisementName.serviceType,
+            advertisedName,
+            port)
         if let metadata = LocalHostBonjourMetadata(
             senderID: senderID,
             computerUseCapability: computerUseCapability,
@@ -30,7 +54,7 @@ final class BonjourAdvertiser: NSObject {
         }
         self.localCredentialID = localCredentialID
         routingBinding = code
-        service.publish()
+        service.publish(options: [])
         self.service = service
     }
 

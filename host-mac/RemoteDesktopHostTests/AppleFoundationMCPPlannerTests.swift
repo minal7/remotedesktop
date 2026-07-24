@@ -3679,8 +3679,11 @@ final class AppleFoundationMCPPlannerTests: XCTestCase {
             "After one deterministic scroll, the installed model must evaluate the updated screen instead of repeating the action")
     }
 
-    @available(macOS 26.0, *)
     func testDynamicBridgeMapsClosedNestedSchema() throws {
+        guard #available(macOS 26.0, *) else {
+            throw XCTSkip("Foundation Models runtime tests require macOS 26 or newer.")
+        }
+
         let schema: MCPJSONValue = .object([
             "type": .string("object"),
             "additionalProperties": .bool(false),
@@ -3720,8 +3723,11 @@ final class AppleFoundationMCPPlannerTests: XCTestCase {
         XCTAssertTrue(description.contains("\"send\""))
     }
 
-    @available(macOS 26.0, *)
     func testDynamicBridgeRejectsOpenEndedArguments() throws {
+        guard #available(macOS 26.0, *) else {
+            throw XCTSkip("Foundation Models runtime tests require macOS 26 or newer.")
+        }
+
         let schema: MCPJSONValue = .object([
             "type": .string("object"),
             "additionalProperties": .bool(true),
@@ -3738,8 +3744,11 @@ final class AppleFoundationMCPPlannerTests: XCTestCase {
         }
     }
 
-    @available(macOS 26.0, *)
     func testUnconstrainedAXValueIsNarrowedToBoundedScalars() throws {
+        guard #available(macOS 26.0, *) else {
+            throw XCTSkip("Foundation Models runtime tests require macOS 26 or newer.")
+        }
+
         let schema: MCPJSONValue = .object([
             "type": .string("object"),
             "additionalProperties": .bool(false),
@@ -3934,8 +3943,11 @@ final class AppleFoundationMCPPlannerTests: XCTestCase {
         XCTAssertNil(recovered)
     }
 
-    @available(macOS 26.0, *)
     func testFoundationToolCallbackOnlyRecordsExactProposal() async throws {
+        guard #available(macOS 26.0, *) else {
+            throw XCTSkip("Foundation Models runtime tests require macOS 26 or newer.")
+        }
+
         let mailSchema: MCPJSONValue = .object([
             "type": .string("object"),
             "additionalProperties": .bool(false),
@@ -3992,8 +4004,11 @@ final class AppleFoundationMCPPlannerTests: XCTestCase {
         ])
     }
 
-    @available(macOS 26.0, *)
     func testDuplicateServerToolNamesReceiveUniqueModelAliases() throws {
+        guard #available(macOS 26.0, *) else {
+            throw XCTSkip("Foundation Models runtime tests require macOS 26 or newer.")
+        }
+
         let first = try MCPAllowedTool(
             serverID: "one",
             processGeneration: 1,

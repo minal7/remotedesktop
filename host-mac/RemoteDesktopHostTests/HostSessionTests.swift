@@ -1055,17 +1055,34 @@ final class HostSessionTests: XCTestCase {
 
     func test_bonjourAdvertiserPublishesAndRefreshesComputerUseCapability() throws {
         let senderID = "8A2269A1-A94C-4FA2-BD63-BEAEEA79A97A"
-        let advertiser = BonjourAdvertiser()
+        let credentialID = String(repeating: "a", count: 64)
+        let service = FakeBonjourService()
+        let advertiser = BonjourAdvertiser { domain, type, name, port in
+            XCTAssertEqual(domain, "local.")
+            XCTAssertEqual(type, LocalHostAdvertisementName.serviceType)
+            XCTAssertEqual(name, "Remote Desktop Host Tests")
+            XCTAssertEqual(port, 9)
+            return service
+        }
         defer { advertiser.stop() }
 
         advertiser.publish(
             hostname: "Remote Desktop Host Tests",
             code: "654321",
             senderID: senderID,
-            computerUseCapability: .setupRequired)
+            computerUseCapability: .setupRequired,
+            localCredentialID: credentialID)
         XCTAssertEqual(
             advertiser.publishedMetadata?.computerUseCapability,
             .setupRequired)
+        XCTAssertTrue(service.didPublish)
+        let initiallyPublished = try XCTUnwrap(
+            service.txtRecords.first.flatMap {
+                LocalHostBonjourMetadata.decode(txtRecordData: $0)
+            })
+        XCTAssertEqual(initiallyPublished.senderID, senderID)
+        XCTAssertEqual(initiallyPublished.routingBinding, "654321")
+        XCTAssertEqual(initiallyPublished.localCredentialID, credentialID)
 
         let installing = ComputerUseCapability(
             state: .installing,
@@ -1076,6 +1093,25 @@ final class HostSessionTests: XCTestCase {
         XCTAssertEqual(
             advertiser.publishedMetadata?.computerUseCapability,
             installing)
+        XCTAssertEqual(service.txtRecords.count, 2)
+        let refreshed = try XCTUnwrap(
+            service.txtRecords.last.flatMap {
+                LocalHostBonjourMetadata.decode(txtRecordData: $0)
+            })
+        XCTAssertEqual(refreshed.senderID, senderID)
+        XCTAssertEqual(refreshed.routingBinding, "654321")
+        XCTAssertEqual(refreshed.localCredentialID, credentialID)
+        XCTAssertEqual(refreshed.computerUseCapability, installing)
+
+        service.acceptsTXTRecords = false
+        XCTAssertFalse(advertiser.update(
+            senderID: senderID,
+            computerUseCapability: .ready))
+        XCTAssertEqual(
+            advertiser.publishedMetadata?.computerUseCapability,
+            installing,
+            "a failed DNS-SD write must not claim unpublished capability")
+        XCTAssertEqual(service.txtRecords.count, 2)
     }
 
     func test_hostNameCapabilityFallback_roundTripsWithoutNewCloudKitFields() {
@@ -1738,6 +1774,24 @@ final class HostSessionTests: XCTestCase {
         }
         try body(defaults, root)
     }
+}
+
+private final class FakeBonjourService: BonjourServicePublishing {
+    private(set) var didPublish = false
+    private(set) var txtRecords: [Data] = []
+    var acceptsTXTRecords = true
+
+    func setTXTRecord(_ recordData: Data?) -> Bool {
+        guard acceptsTXTRecords, let recordData else { return false }
+        txtRecords.append(recordData)
+        return true
+    }
+
+    func publish(options _: NetService.Options) {
+        didPublish = true
+    }
+
+    func stop() {}
 }
 
 @MainActor
