@@ -10,7 +10,31 @@ final class ComputerUseSourceBoundTextModelAcceptanceTests: XCTestCase {
         let id: String; let prompt: String; let fields: [String]; let expectedDisposition: String
         let allowedPlans: [[Edit]]?
     }
-    private struct Edit: Codable, Equatable { let field: Int; let mode: String; let value: String }
+    private struct Edit: Codable, Equatable {
+        let field: Int
+        let mode: String
+        let value: String?
+        let sourceField: Int?
+        init(field: Int, mode: String, value: String? = nil, sourceField: Int? = nil) {
+            self.field = field; self.mode = mode; self.value = value; self.sourceField = sourceField
+        }
+        static func == (left: Self, right: Self) -> Bool {
+            guard left.field == right.field, left.mode == right.mode, left.sourceField == right.sourceField else { return false }
+            switch (left.value, right.value) {
+            case (nil, nil): return true
+            case (.some(let a), .some(let b)): return a.utf8.elementsEqual(b.utf8)
+            default: return false
+            }
+        }
+    }
+
+    func testOperationOracleDistinguishesCopiedSourcesLiteralPayloadsAndExactBytes() {
+        let copy = Edit(field: 1, mode: "replaceAll", sourceField: 0)
+        XCTAssertNotEqual(copy, Edit(field: 1, mode: "replaceAll", value: "f1"))
+        XCTAssertNotEqual(copy, Edit(field: 1, mode: "replaceAll", sourceField: 2))
+        XCTAssertNotEqual(Edit(field: 1, mode: "replaceAll", value: "e\u{301}"), Edit(field: 1, mode: "replaceAll", value: "é"))
+        XCTAssertEqual(copy, Edit(field: 1, mode: "replaceAll", sourceField: 0))
+    }
 
     func testSignedRuntimeCompilesTheExactCorpusWithoutDesktopEffects() async throws {
         let environment = ProcessInfo.processInfo.environment
@@ -21,6 +45,7 @@ final class ComputerUseSourceBoundTextModelAcceptanceTests: XCTestCase {
         let corpusURL = URL(fileURLWithPath: try XCTUnwrap(environment["SOURCE_BOUND_TEXT_CORPUS"]))
         let reportURL = URL(fileURLWithPath: try XCTUnwrap(environment["SOURCE_BOUND_TEXT_REPORT"]))
         let contract = try XCTUnwrap(ComputerUseLocalTextGoalPlanner.Contract(rawValue: environment["SOURCE_BOUND_TEXT_CONTRACT"] ?? "source-bound-v3"))
+        let allowFieldCopy = environment["SOURCE_BOUND_TEXT_ALLOW_FIELD_COPY"] == "1"
         guard !FileManager.default.fileExists(atPath: reportURL.path) else { throw Failure.invalidInput }
         let data = try Data(contentsOf: corpusURL)
         let corpusHash = Self.sha(data)
@@ -28,8 +53,17 @@ final class ComputerUseSourceBoundTextModelAcceptanceTests: XCTestCase {
         let corpus = try JSONDecoder().decode(Corpus.self, from: data)
         guard corpus.schemaVersion == 1, (1...128).contains(corpus.cases.count),
               Set(corpus.cases.map(\.id)).count == corpus.cases.count,
-              corpus.cases.allSatisfy({ (1...16).contains($0.fields.count) && ["supported", "unsupported", "clarification"].contains($0.expectedDisposition)
-                  && ($0.expectedDisposition == "supported" ? !($0.allowedPlans ?? []).isEmpty : $0.allowedPlans == nil) }) else { throw Failure.invalidInput }
+              corpus.cases.allSatisfy({ item in
+                  (1...16).contains(item.fields.count) && ["supported", "unsupported", "clarification"].contains(item.expectedDisposition)
+                  && (item.expectedDisposition == "supported" ? !(item.allowedPlans ?? []).isEmpty : item.allowedPlans == nil)
+                  && (item.allowedPlans ?? []).allSatisfy { plan in
+                      (1...8).contains(plan.count) && plan.allSatisfy { edit in
+                          item.fields.indices.contains(edit.field) && ComputerUseTextEditMode(rawValue: edit.mode) != nil
+                          && (edit.value != nil) != (edit.sourceField != nil)
+                          && (edit.sourceField.map { item.fields.indices.contains($0) } ?? true)
+                      }
+                  }
+              }) else { throw Failure.invalidInput }
         let receipt = try await ComputerUseInstaller.nativeText().install { _ in }
         let directory = try OSAtlasVisualExecutorLoader.bundledRuntimeDirectoryURL(in: .main)
         let inputs = try OSAtlasRuntimeInputResolver(manifest: .nativeTextV2).resolveNativeText(
@@ -42,8 +76,8 @@ final class ComputerUseSourceBoundTextModelAcceptanceTests: XCTestCase {
                 "corpusSHA256": corpusHash, "runtimeBinarySHA256": runtimeHash,
                 "modelSHA256FromVerifiedManifest": ComputerUseArtifactManifest.nativeTextV2.modelArtifacts[0].sha256,
                 "expectedCaseIDs": corpus.cases.map(\.id), "cases": rows,
-                "oracle": "exact-disposition-and-complete-allowed-edit-sequences-including-count-mode-target-payload-and-order",
-                "desktopEffects": false, "quotedCommandFastPath": false]
+                "oracle": "exact-disposition-and-complete-operation-sequences-including-count-mode-target-payload-origin-exact-bytes-and-order",
+                "desktopEffects": false, "quotedCommandFastPath": false, "allowFieldCopy": allowFieldCopy]
             try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys]).write(to: reportURL, options: .atomic)
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: reportURL.path)
         }
@@ -61,13 +95,25 @@ final class ComputerUseSourceBoundTextModelAcceptanceTests: XCTestCase {
                             selection: NSRange(location: 0, length: 0), isEditable: true, isSecure: false))
                     }
                     let result = try await runtime.proposeNativeText(endpoint: endpoint, prompt: item.prompt, fields: fields,
-                        contract: contract, inspectProposal: { recorder.record($0) })
+                        contract: contract, allowFieldCopy: allowFieldCopy, inspectProposal: { recorder.record($0) })
                     let disposition: String
                     var edits: [Edit] = []
                     switch result {
                     case .unsupported: disposition = "unsupported"
                     case .clarification: disposition = "clarification"
-                    case .fieldOperations: throw Failure.invalidInput
+                    case .fieldOperations(let operations, let unchanged):
+                        disposition = "supported"
+                        for operation in operations {
+                            let index = try XCTUnwrap(fields.firstIndex(where: { $0.snapshot.targetID == operation.targetID }))
+                            switch operation {
+                            case .enterText(let edit): edits.append(.init(field: index, mode: edit.mode.rawValue, value: edit.text))
+                            case .copyField(let sourceID, _, let mode):
+                                let source = try XCTUnwrap(fields.firstIndex(where: { $0.snapshot.targetID == sourceID }))
+                                edits.append(.init(field: index, mode: mode.rawValue, sourceField: source))
+                            }
+                        }
+                        let edited = Set(operations.map(\.targetID))
+                        guard Set(unchanged) == Set(fields.map { $0.snapshot.targetID }).subtracting(edited) else { throw Failure.missingConstraint }
                     case .edits(let proposed, let unchanged):
                         disposition = "supported"
                         for edit in proposed {

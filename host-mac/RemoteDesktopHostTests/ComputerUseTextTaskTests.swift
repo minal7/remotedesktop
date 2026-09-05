@@ -3,6 +3,39 @@ import XCTest
 
 @MainActor
 final class ComputerUseTextTaskTests: XCTestCase {
+    func testMatchingCopyValuesCannotProveAnUnsentAttemptOrARecoveredDispatch() async throws {
+        let fields = [field("origin", "same"), field("destination", "same")]
+        let contract = try ComputerUseTextTaskContract(taskID: "copy-noop", prompt: "Copy Origin to Destination", fields: fields,
+            operations: [.copyField(sourceTargetID: "origin", targetID: "destination", mode: .replaceAll)])
+        let values = Dictionary(uniqueKeysWithValues: fields.map { ($0.snapshot.targetID, $0.snapshot) })
+        for previouslyVerified in [false, true] {
+            let journal = ComputerUseTextStepJournal(taskID: contract.taskID, promptDigest: contract.promptDigest,
+                contractDigest: contract.contractDigest, stepIDs: contract.steps.map(\.id), statuses: [previouslyVerified ? .verified : .attempted])
+            let recovered = try ComputerUseTextTask(contract: contract, recovered: journal, read: { values[$0] },
+                apply: { _, _ in XCTFail("Unproven copied input cannot be retried") }, persist: { _ in }, mayAct: { true })
+            do { try await recovered.run(); XCTFail("A matching value is not a dispatch receipt") }
+            catch { XCTAssertEqual(error as? ComputerUseTextTaskError, previouslyVerified ? .incompleteOutcome : .uncertainEffect) }
+        }
+    }
+
+    func testIndependentCopyReceiptReconcilesLostCompletionWithoutRepeatingNoOpInput() async throws {
+        let fields = [field("origin", "same"), field("destination", "same")]
+        let contract = try ComputerUseTextTaskContract(taskID: "copy-receipt", prompt: "Copy Origin to Destination", fields: fields,
+            operations: [.copyField(sourceTargetID: "origin", targetID: "destination", mode: .replaceAll)])
+        let values = Dictionary(uniqueKeysWithValues: fields.map { ($0.snapshot.targetID, $0.snapshot) })
+        var receipts = Set<String>(), calls = 0
+        let first = try ComputerUseTextTask(contract: contract, read: { values[$0] }, apply: { _, _ in XCTFail("Use bound copy adapter") },
+            applyCopyWithIdentity: { _, _, _, operationID in
+                calls += 1; receipts.insert(operationID); throw CancellationError()
+            }, didDispatchCopy: { receipts.contains($0) }, persist: { _ in }, mayAct: { true })
+        do { try await first.run(); XCTFail("The callback was lost") } catch is CancellationError {}
+        let recovered = try ComputerUseTextTask(contract: contract, recovered: first.journal, read: { values[$0] },
+            apply: { _, _ in XCTFail("Receipt must prevent replay") }, didDispatchCopy: { receipts.contains($0) },
+            persist: { _ in }, mayAct: { true })
+        try await recovered.run()
+        XCTAssertEqual(calls, 1); XCTAssertEqual(recovered.journal.statuses, [.verified])
+    }
+
     func testCopiedValuesFollowEarlierStepsAndKeepSourceProvenanceAcrossReplay() async throws {
         let fields = [field("origin", "private seed"), field("destination", "old")]
         let contract = try ComputerUseTextTaskContract(taskID: "copy-chain", prompt: "Replace, copy and append", fields: fields,

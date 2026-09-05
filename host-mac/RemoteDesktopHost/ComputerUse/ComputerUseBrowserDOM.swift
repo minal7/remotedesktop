@@ -1,7 +1,7 @@
 import Foundation
 import WebKit
 
-enum ComputerUseBrowserDOMCommand: String { case fields, read, edit }
+enum ComputerUseBrowserDOMCommand: String { case fields, read, edit, receipt }
 
 struct ComputerUseBrowserDOMReply: Decodable {
     struct Field: Decodable {
@@ -28,7 +28,7 @@ enum ComputerUseBrowserDOM {
       const encoder = new TextEncoder();
       const nonce = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), n => n.toString(16).padStart(2, '0')).join('');
       let documentID = nonce(), root = null, nextID = 0;
-      const bindings = new Map(), operations = new Set();
+      const bindings = new Map(), operations = new Map();
       const protectedTypes = new Set(['password', 'hidden', 'file']);
       const textTypes = new Set(['text', 'search', 'url', 'tel', 'email']);
       const identityAttributes = new Set(['id', 'name', 'type', 'form', 'action', 'method', 'enctype', 'target', 'disabled', 'readonly', 'hidden', 'inert', 'aria-hidden', 'aria-label', 'aria-labelledby', 'placeholder', 'autocomplete']);
@@ -155,6 +155,10 @@ enum ComputerUseBrowserDOM {
         if (!root || doc !== document) return reply('stale');
         if (command === 'fields') return fields();
         if (args.documentID !== documentID) return reply('stale');
+        if (command === 'receipt') {
+          if (typeof args.operationID !== 'string' || args.operationID.length !== 64) return reply('unsupported');
+          return reply(operations.get(args.operationID) === 'dispatched' ? 'dispatched' : 'unproven');
+        }
         const binding = bindings.get(args.id), current = binding && snapshot(binding);
         if (!current) return reply('stale');
         if (command === 'read') return reply('ok', [current]);
@@ -177,11 +181,12 @@ enum ComputerUseBrowserDOM {
         if (encoder.encode(expected).length > 1048576 || expected !== args.after) return reply('unsupported');
         // The dispatcher persisted its attempt before this call. This second
         // one-use boundary also prevents a lost callback from repeating input.
-        operations.add(args.operationID);
+        operations.set(args.operationID, 'attempted');
         try {
           valueSetters[kind(binding.element)].call(binding.element, expected);
           if (current.selectionStart >= 0) binding.element.setSelectionRange(start + args.payload.length, start + args.payload.length);
           binding.element.dispatchEvent(new InputEvent('input', {bubbles: true, composed: true, inputType: 'insertText', data: args.payload}));
+          operations.set(args.operationID, 'dispatched');
           return reply('attempted');
         } catch (_) { return reply('uncertain'); }
       }
@@ -233,6 +238,15 @@ final class ComputerUseBrowserTextTarget {
         guard reply.status == "ok", reply.documentID == documentID,
               let fields = reply.fields, fields.count == 1, fields[0].id == id else { return nil }
         return try snapshot(fields[0], targetID: targetID)
+    }
+
+    func didDispatchCopy(operationID: String) async throws -> Bool {
+        try validate()
+        guard let documentID else { return false }
+        let reply = try await browser.callDOM(.receipt, arguments: ["documentID": documentID, "operationID": operationID], document: document)
+        try validate()
+        guard reply.documentID == documentID else { throw ComputerUseBrowserError.pageChanged }
+        return reply.status == "dispatched"
     }
 
     func apply(_ edit: ComputerUseTextPlanEdit, expected: ComputerUseTextSnapshot, operationID: String,

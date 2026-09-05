@@ -1,0 +1,101 @@
+{
+  "schemaVersion": 1,
+  "scope": "First hand-authored typed field-copy capability corpus, frozen before any inference; full operation order and payload origin required; not general computer-use qualification; preselected batch 1/4 to bound temporary host storage",
+  "cases": [
+    {
+      "id": "C01",
+      "prompt": "Copy the current value of Title into Tag.",
+      "fields": [
+        "Title",
+        "Tag"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "sourceField": 0
+          }
+        ]
+      ]
+    },
+    {
+      "id": "C02",
+      "prompt": "Make Backup match Notes.",
+      "fields": [
+        "Notes",
+        "Backup"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "sourceField": 0
+          }
+        ]
+      ]
+    },
+    {
+      "id": "C03",
+      "prompt": "Append the contents of Draft to Notes.",
+      "fields": [
+        "Draft",
+        "Notes"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 1,
+            "mode": "append",
+            "sourceField": 0
+          }
+        ]
+      ]
+    },
+    {
+      "id": "C04",
+      "prompt": "Insert the value from Code at the caret in Notes.",
+      "fields": [
+        "Code",
+        "Notes"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 1,
+            "mode": "insert",
+            "sourceField": 0
+          }
+        ]
+      ]
+    },
+    {
+      "id": "C05",
+      "prompt": "Put \"blue\" in Title, then copy Title to Tag.",
+      "fields": [
+        "Title",
+        "Tag"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "value": "blue"
+          },
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "sourceField": 0
+          }
+        ]
+      ]
+    }
+  ]
+}

@@ -5,9 +5,17 @@
     "RemoteDesktopHostTests/ComputerUseTaskExecutionTests",
     "RemoteDesktopHostTests/ComputerUseBrowserDOMTests",
     "RemoteDesktopHostTests/ComputerUseLocalTextGoalPlannerTests",
-    "RemoteDesktopHostTests/ComputerUseSourceBoundTextPlanTests"
+    "RemoteDesktopHostTests/ComputerUseSourceBoundTextPlanTests",
+    "RemoteDesktopHostTests/ComputerUseFieldCopyPlanTests",
+    "RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testNativeTextAndVisualShareOneLifecycleAndRejectCrossModelOrStaleRequests",
+    "RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testRuntimeTextPlannerUsesFrozenContractAndHostOwnedLiteral",
+    "RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testNativeTextContextOverflowStopsBeforeCompletion",
+    "RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testNativeTextCancellationReleasesModelLeaseBeforeVisualReplacement",
+    "RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testNativeTextFailedReadinessRemovesPrivateCredentialAndRejectsUnknownModel",
+    "RemoteDesktopHostTests/ComputerUseSourceBoundTextModelAcceptanceTests/testOperationOracleDistinguishesCopiedSourcesLiteralPayloadsAndExactBytes"
   ],
   "expectedTests": [
+    "RemoteDesktopHostTests/ComputerUseBrowserDOMTests/testBrowserCopyReceiptDistinguishesUnsentNoOpFromCancelledDeliveredInput",
     "RemoteDesktopHostTests/ComputerUseBrowserDOMTests/testCancellationAndDeadlineKeepInFlightScriptOwnedUntilItsCallbackWithoutReplay",
     "RemoteDesktopHostTests/ComputerUseBrowserDOMTests/testChangedOrReplacedCopySourceRejectsBeforeDestinationInput",
     "RemoteDesktopHostTests/ComputerUseBrowserDOMTests/testCopyUsesBoundSourceBytesAndCannotSubstituteLiteralOrReplayOperation",
@@ -23,6 +31,12 @@
     "RemoteDesktopHostTests/ComputerUseBrowserDOMTests/testNativeExecutorUsesDOMFieldsRetainsItsPlanAndChecksUneditedFields",
     "RemoteDesktopHostTests/ComputerUseBrowserDOMTests/testQuotedTargetNameCannotBecomeAnIntermediateInputThroughTheProductionTextExecutor",
     "RemoteDesktopHostTests/ComputerUseBrowserDOMTests/testRemovedAndReinsertedSameObjectCannotReviveItsOldHandle",
+    "RemoteDesktopHostTests/ComputerUseFieldCopyPlanTests/testCopyAndSuppliedPayloadsRemainDifferentTypesThroughOrderedCompilation",
+    "RemoteDesktopHostTests/ComputerUseFieldCopyPlanTests/testCopySchemaAndExactBudgetNeverExposeExistingValuesOrRegenerateLiterals",
+    "RemoteDesktopHostTests/ComputerUseFieldCopyPlanTests/testFallbackAcceptsOnlyAWholeCopyPlanOrADeclineAndHonorsCancellation",
+    "RemoteDesktopHostTests/ComputerUseFieldCopyPlanTests/testFallbackPreservesPrimaryEditsClarificationAndErrorsWithoutAnotherPlannerCall",
+    "RemoteDesktopHostTests/ComputerUseFieldCopyPlanTests/testMalformedMixedInventedAndUnmentionedCopyReferencesCannotBecomeInput",
+    "RemoteDesktopHostTests/ComputerUseFieldCopyPlanTests/testQuotedSourceLabelsAndAmbiguousSourcesHaveDistinctOutcomes",
     "RemoteDesktopHostTests/ComputerUseLocalTextGoalPlannerTests/testAmbiguousLabelsCannotBeResolvedByChoosingAnOpaqueID",
     "RemoteDesktopHostTests/ComputerUseLocalTextGoalPlannerTests/testExactPayloadsOrderedStepsAndUneditedFieldsRemainHostOwned",
     "RemoteDesktopHostTests/ComputerUseLocalTextGoalPlannerTests/testInvalidOrExcessiveTokenCountsPreventInference",
@@ -35,6 +49,7 @@
     "RemoteDesktopHostTests/ComputerUseLocalTextGoalPlannerTests/testTransportCancellationClosesAnIncompleteResponse",
     "RemoteDesktopHostTests/ComputerUseLocalTextGoalPlannerTests/testTransportStopsOversizedBodiesBeforeEOFIncludingChunkedResponses",
     "RemoteDesktopHostTests/ComputerUseLocalTextGoalPlannerTests/testTruncatedOrWrongModelResponseIsRejectedEvenWithValidJSON",
+    "RemoteDesktopHostTests/ComputerUseSourceBoundTextModelAcceptanceTests/testOperationOracleDistinguishesCopiedSourcesLiteralPayloadsAndExactBytes",
     "RemoteDesktopHostTests/ComputerUseSourceBoundTextPlanTests/testAmbiguousLabelsAndUnboundBackReferencesCannotChooseAnArbitraryField",
     "RemoteDesktopHostTests/ComputerUseSourceBoundTextPlanTests/testCandidateRequestRetainsExactBudgetAndStrictEnvelopeWithoutExposingValues",
     "RemoteDesktopHostTests/ComputerUseSourceBoundTextPlanTests/testCoverageCorrectionCanDeclineWholeMixedGoalWithoutReturningItsTextPrefix",
@@ -72,8 +87,10 @@
     "RemoteDesktopHostTests/ComputerUseTextTaskTests/testCopiedValuesFollowEarlierStepsAndKeepSourceProvenanceAcrossReplay",
     "RemoteDesktopHostTests/ComputerUseTextTaskTests/testCopyPreflightRejectsMissingProtectedAndOversizedSourcesAndRetainsSelfCopy",
     "RemoteDesktopHostTests/ComputerUseTextTaskTests/testCopySourceIdentityAndPayloadOriginCannotBeSubstitutedInRecovery",
+    "RemoteDesktopHostTests/ComputerUseTextTaskTests/testIndependentCopyReceiptReconcilesLostCompletionWithoutRepeatingNoOpInput",
     "RemoteDesktopHostTests/ComputerUseTextTaskTests/testLiteralCatalogPreservesMultipleExactValuesAndRejectsInventedText",
     "RemoteDesktopHostTests/ComputerUseTextTaskTests/testLiteralReferencesCannotAliasUnquotedUserTextOrFakeMarkers",
+    "RemoteDesktopHostTests/ComputerUseTextTaskTests/testMatchingCopyValuesCannotProveAnUnsentAttemptOrARecoveredDispatch",
     "RemoteDesktopHostTests/ComputerUseTextTaskTests/testMissingSelectionCannotBecomeAnInventedCaretAfterEarlierEdit",
     "RemoteDesktopHostTests/ComputerUseTextTaskTests/testOrderedEditsOnSameFieldUseTheirOwnPreconditions",
     "RemoteDesktopHostTests/ComputerUseTextTaskTests/testPartialDeliveryIsUncertainAndNeverRetried",
@@ -84,6 +101,11 @@
     "RemoteDesktopHostTests/ComputerUseTextTaskTests/testRequirementCoverageRejectsMissingNegationActionOrPayloadReference",
     "RemoteDesktopHostTests/ComputerUseTextTaskTests/testResumeReconcilesDeliveredEditWithoutDuplicatingIt",
     "RemoteDesktopHostTests/ComputerUseTextTaskTests/testSamePayloadInTwoFieldsHasDistinctStepsAndVerifiesBoth",
-    "RemoteDesktopHostTests/ComputerUseTextTaskTests/testTakeoverDuringJournalWritePreventsInput"
+    "RemoteDesktopHostTests/ComputerUseTextTaskTests/testTakeoverDuringJournalWritePreventsInput",
+    "RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testNativeTextAndVisualShareOneLifecycleAndRejectCrossModelOrStaleRequests",
+    "RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testNativeTextCancellationReleasesModelLeaseBeforeVisualReplacement",
+    "RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testNativeTextContextOverflowStopsBeforeCompletion",
+    "RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testNativeTextFailedReadinessRemovesPrivateCredentialAndRejectsUnknownModel",
+    "RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testRuntimeTextPlannerUsesFrozenContractAndHostOwnedLiteral"
   ]
 }

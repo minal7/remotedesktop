@@ -76,10 +76,11 @@ struct ComputerUseNativeTextRuntimeInputs: Equatable, Sendable {
 struct ComputerUseRuntimeTextGoalPlanner: ComputerUseTextGoalPlanning {
     let inputs: ComputerUseNativeTextRuntimeInputs
     var runtime: OSAtlasLlamaRuntime = .shared
+    var allowFieldCopy = false
 
     func propose(prompt: String, fields: [ComputerUseTextField]) async throws -> ComputerUseTextGoalProposal {
         let endpoint = try await runtime.activateNativeText(inputs)
-        return try await runtime.proposeNativeText(endpoint: endpoint, prompt: prompt, fields: fields)
+        return try await runtime.proposeNativeText(endpoint: endpoint, prompt: prompt, fields: fields, allowFieldCopy: allowFieldCopy)
     }
 }
 
@@ -1244,6 +1245,7 @@ actor OSAtlasLlamaRuntime {
         prompt: String,
         fields: [ComputerUseTextField],
         contract: ComputerUseLocalTextGoalPlanner.Contract = .candidateV2,
+        allowFieldCopy: Bool = false,
         inspectProposal: (@Sendable (Data) -> Void)? = nil
     ) async throws -> ComputerUseTextGoalProposal {
         let lease = try await acquireModelAccessLease()
@@ -1253,13 +1255,18 @@ actor OSAtlasLlamaRuntime {
             throw OSAtlasLlamaRuntimeError.inactiveSession
         }
         do {
+            guard !allowFieldCopy || contract == .candidateV2 else { throw ComputerUseLocalTextPlanError.invalidResponse }
             try validateResources(minimumReclaimableBytes:
                 server.resourceProfile.minimumInferenceMemoryBytes)
-            let planner = ComputerUseLocalTextGoalPlanner(
-                connection: try ComputerUseTextModelConnection(
-                    baseURL: endpoint.baseURL, bearerToken: endpoint.bearerToken,
-                    modelAlias: ComputerUseNativeTextRuntimeInputs.modelAlias),
+            let connection = try ComputerUseTextModelConnection(baseURL: endpoint.baseURL, bearerToken: endpoint.bearerToken,
+                modelAlias: ComputerUseNativeTextRuntimeInputs.modelAlias)
+            let primary = ComputerUseLocalTextGoalPlanner(connection: connection,
                 transport: server.transport, contract: contract, inspectProposal: inspectProposal)
+            let planner: any ComputerUseTextGoalPlanning = allowFieldCopy
+                ? ComputerUseFieldCopyFallbackPlanner(primary: primary,
+                    fieldCopy: ComputerUseLocalTextGoalPlanner(connection: connection, transport: server.transport,
+                        contract: .fieldCopyV7, inspectProposal: inspectProposal))
+                : primary
             let proposal = try await withTaskCancellationHandler {
                 try await planner.propose(prompt: prompt, fields: fields)
             } onCancel: {

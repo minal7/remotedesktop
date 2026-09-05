@@ -1,0 +1,108 @@
+{
+  "schemaVersion": 1,
+  "status": "frozen-before-first-managed-model-copy-evaluation",
+  "sourceBaseCommit": "8379804",
+  "productionDefaultUnchanged": true,
+  "composition": "candidate-v2; only an unsupported outcome may enter field-copy-v7; one shared runtime lease, no primary-error/clarification fallback",
+  "fieldCopyInstructionBytes": 2937,
+  "fieldCopyInstructionSHA256": "99e88eba33f6e59d10f00c1b8b1395606eb5450471aaaf7f123adfd1569cb53a",
+  "primaryInstructionSHA256": "f2c43600e2302139c363d0d210d6e2d2fdf12a76abaaa4b52327bc59bb06666b",
+  "modelSHA256": "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
+  "runtime": "llama.cpp b9992 / 6eddde06a",
+  "contextTokens": 4096,
+  "maximumOutputTokensPerStage": 1024,
+  "reasoningTokensPerStage": 512,
+  "exactInputLimitPerStage": 3008,
+  "maximumPlannerStages": 2,
+  "desktopEffects": false,
+  "quotedCommandFastPath": false,
+  "corpus": "host-mac/AcceptanceFixtures/native-field-copy-v7-regressions.json",
+  "corpusSHA256": "ce97937dff008fdf916c7ec8d1c8798bf955f45d137664f0b006b5b8c4e74bc8",
+  "caseIDs": [
+    "C01",
+    "C02",
+    "C03",
+    "C04",
+    "C05",
+    "C06",
+    "C07",
+    "C08",
+    "C09",
+    "C10",
+    "C11",
+    "C12",
+    "C13",
+    "C14",
+    "C15",
+    "C16",
+    "C17",
+    "C18",
+    "C19",
+    "C20"
+  ],
+  "batches": [
+    {
+      "path": "host-mac/AcceptanceFixtures/native-field-copy-v7-batch-1.json",
+      "sha256": "8ef0f015beeb1c10cfde7c97791c89e30d3c36a896ba3cdb1c0dff6562573d57",
+      "caseIDs": [
+        "C01",
+        "C02",
+        "C03",
+        "C04",
+        "C05"
+      ]
+    },
+    {
+      "path": "host-mac/AcceptanceFixtures/native-field-copy-v7-batch-2.json",
+      "sha256": "de4e7b15c7872b20329f55411795e3c8b99c26dad71af4e0f964e494fe8383e2",
+      "caseIDs": [
+        "C06",
+        "C07",
+        "C08",
+        "C09",
+        "C10"
+      ]
+    },
+    {
+      "path": "host-mac/AcceptanceFixtures/native-field-copy-v7-batch-3.json",
+      "sha256": "3103c9198ec51c71c4e32d460132517c27d98401af687de10aa658466fdb1cd6",
+      "caseIDs": [
+        "C11",
+        "C12",
+        "C13",
+        "C14",
+        "C15"
+      ]
+    },
+    {
+      "path": "host-mac/AcceptanceFixtures/native-field-copy-v7-batch-4.json",
+      "sha256": "dfe3500e71f3295f144e4fe5971f718db270777188c38f98fd761c325f53d717",
+      "caseIDs": [
+        "C16",
+        "C17",
+        "C18",
+        "C19",
+        "C20"
+      ]
+    }
+  ],
+  "sha256": {
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFieldCopyPlan.swift": "490d5e73fb9e10df8e5c0f2f19b1f6ed9d6a68f49ec9adf8c9a9f79ccdd9d345",
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseLocalTextGoalPlanner.swift": "a3d4a7ad0ed9072f4d4df0684c3c1fb196cf078f822c5f5a5b889b2ee79dce3f",
+    "host-mac/RemoteDesktopHost/ComputerUse/OSAtlasLlamaRuntime.swift": "c40c0e0cbb87c652e065fe21b0547f684a3a666f73ed21356e9b45e24c93278b",
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseTextGoalPlanner.swift": "b4ad1cc4ff2da1f8ec08a3253e6a923b021c194650d1ac7219e904c25a8a0215",
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseTextTask.swift": "ae2d4ec97e5718579a4d06d42cae3b678ab6a9d3d9e7c4920cc1bb2bd3a62133",
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseBrowserDOM.swift": "02f90e1c51042b2b319bb295fad12e2e667eaf48a387309df37c0010407d10ca",
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseNativeTextExecutor.swift": "c417f144f9347a5b9ad0629250cf9a9a328025c6b16e1ba806326c7f9d27f8db",
+    "host-mac/RemoteDesktopHostTests/ComputerUseFieldCopyPlanTests.swift": "6093d2135dfbc346afaef9047f7a495afd3c1966c39ab102e06edb97392ef26c",
+    "host-mac/RemoteDesktopHostTests/ComputerUseSourceBoundTextModelAcceptanceTests.swift": "af73de3b96c3eeb581a3c28b374ad7f156749043ae492509a2fb45ca7bd591fd",
+    "host-mac/RemoteDesktopHostTests/ComputerUseTextTaskTests.swift": "66675bd695796203e12d16d98101d3de30bc0481b170907cfcccf60b9896da3c",
+    "host-mac/RemoteDesktopHostTests/ComputerUseBrowserDOMTests.swift": "22c42444fea7fe34d54a36824a5c10285b8aa86a9210392c08479e08cadf6c80"
+  },
+  "oracle": "Complete typed operation vectors: literal payload bytes versus current-value source field identity, target, mode, count and order. This is initial hand-authored capability qualification, not general natural-language or release proof.",
+  "limitations": [
+    "Copy capability supports whole current values from observed eligible fields, optionally mixed with supplied text.",
+    "Generated writing, transformations, selected-value copies and copied-value conditions require separate capability/constraint work.",
+    "Mention presence is a reference check; semantic interpretation still requires actual-model qualification."
+  ]
+}

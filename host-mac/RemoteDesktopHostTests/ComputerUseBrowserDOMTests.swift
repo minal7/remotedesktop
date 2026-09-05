@@ -3,6 +3,49 @@ import XCTest
 
 @MainActor
 final class ComputerUseBrowserDOMTests: XCTestCase {
+    func testBrowserCopyReceiptDistinguishesUnsentNoOpFromCancelledDeliveredInput() async throws {
+        var running: Task<Void, Error>?
+        let fixture = try await DOMFixture(body: """
+            <label>Origin<input value="same"></label><label>Destination<input id="target" value="same"></label>
+            <script>document.querySelector('#target').addEventListener('input', () => {
+              fetch('/input-event'); const until = performance.now() + 150; while (performance.now() < until) {}
+            });</script>
+            """, domScriptDidDispatch: { if $0 == .edit { running?.cancel() } })
+        defer { fixture.close() }
+        let fields = try await fixture.target.fields()
+        let contract = try ComputerUseTextTaskContract(taskID: "copy-noop", prompt: "Copy Origin to Destination", fields: fields,
+            operations: [.copyField(sourceTargetID: fields[0].snapshot.targetID, targetID: fields[1].snapshot.targetID, mode: .replaceAll)],
+            unchangedTargetIDs: [fields[0].snapshot.targetID])
+        func task(recovered: ComputerUseTextStepJournal? = nil) throws -> ComputerUseTextTask {
+            try .init(contract: contract, recovered: recovered, read: { try await fixture.target.read(targetID: $0) },
+                apply: { _, _ in XCTFail("Copy needs its bound source") },
+                applyCopyWithIdentity: { edit, before, source, operationID in
+                    try await fixture.target.apply(edit, expected: before, operationID: operationID, copySource: source)
+                }, didDispatchCopy: { try await fixture.target.didDispatchCopy(operationID: $0) },
+                persist: { _ in }, mayAct: { true })
+        }
+        let unsent = ComputerUseTextStepJournal(taskID: contract.taskID, promptDigest: contract.promptDigest,
+            contractDigest: contract.contractDigest, stepIDs: contract.steps.map(\.id), statuses: [.attempted])
+        do { try await task(recovered: unsent).run(); XCTFail("The matching initial value cannot prove dispatch") }
+        catch { XCTAssertEqual(error as? ComputerUseTextTaskError, .uncertainEffect) }
+        XCTAssertEqual(fixture.server.count("/input-event"), 0)
+        let delivered = try task()
+        running = Task { try await delivered.run() }
+        do { try await running!.value; XCTFail("The dispatched call is cancelled before its callback") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        try await fixture.wait { fixture.server.count("/input-event") == 1 }
+        let deadline = ContinuousClock.now + .seconds(5)
+        while true {
+            do { _ = try await fixture.target.read(targetID: fields[1].snapshot.targetID); break }
+            catch ComputerUseBrowserError.busy {
+                guard ContinuousClock.now < deadline else { throw ComputerUseBrowserError.documentUnresponsive }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+        }
+        try await task(recovered: delivered.journal).run()
+        XCTAssertEqual(fixture.server.count("/input-event"), 1, "Reconstruction uses the document receipt, not another input event")
+    }
+
     func testCopyUsesBoundSourceBytesAndCannotSubstituteLiteralOrReplayOperation() async throws {
         let fixture = try await DOMFixture(body: """
             <label>Origin<textarea>  東京\ne\u{301} 😀  </textarea></label><label>Destination<textarea></textarea></label>
