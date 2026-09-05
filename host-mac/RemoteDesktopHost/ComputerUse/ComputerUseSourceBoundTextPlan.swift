@@ -5,7 +5,7 @@ import Foundation
 /// before a flat text plan can acquire execution authority.
 enum ComputerUseSourceBoundTextPlan {
     static func makeRequest(connection: ComputerUseTextModelConnection, catalog: ComputerUseTextPayloadCatalog,
-                            fields: [ComputerUseTextField]) throws -> URLRequest {
+                            fields: [ComputerUseTextField], sourceFirst: Bool = false) throws -> URLRequest {
         var request = try ComputerUseLocalTextGoalPlanner(connection: connection, contract: .candidateV2)
             .makeRequest(catalog: catalog, fields: fields)
         guard let data = request.httpBody,
@@ -31,8 +31,26 @@ enum ComputerUseSourceBoundTextPlan {
         body["messages"] = [["role": "system", "content": instructions],
                             ["role": "user", "content": try ComputerUseLocalTextGoalPlanner.context(
                                 catalog: catalog, fields: fields, includeQuotedFieldMatches: true)]]
-        request.httpBody = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
+        if sourceFirst { request.httpBody = Data(try orderedJSON(body).utf8) }
+        else { request.httpBody = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys]) }
         return request
+    }
+
+    /// llama.cpp's schema grammar emits object properties in declaration order.
+    /// Alphabetically sorting this schema asks for edits before their source
+    /// and intent. Keep deterministic bytes while declaring evidence first.
+    private static func orderedJSON(_ value: Any) throws -> String {
+        if let object = value as? [String: Any] {
+            let order = ["source", "kind", "preserve", "edits", "fieldID", "target", "mode", "value"]
+            let keys = object.keys.sorted { left, right in
+                let l = order.firstIndex(of: left) ?? order.count
+                let r = order.firstIndex(of: right) ?? order.count
+                return l == r ? left < right : l < r
+            }
+            return "{" + (try keys.map { try orderedJSON($0) + ":" + orderedJSON(object[$0]!) }).joined(separator: ",") + "}"
+        }
+        if let array = value as? [Any] { return "[" + (try array.map(orderedJSON)).joined(separator: ",") + "]" }
+        return String(decoding: try JSONSerialization.data(withJSONObject: value, options: [.fragmentsAllowed, .withoutEscapingSlashes]), as: UTF8.self)
     }
 
     private struct Requirement {

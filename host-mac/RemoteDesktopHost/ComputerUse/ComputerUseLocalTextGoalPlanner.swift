@@ -49,6 +49,7 @@ struct ComputerUseLocalTextGoalPlanner: ComputerUseTextGoalPlanning {
         case frozenV1 = "frozen-v1"
         case candidateV2 = "candidate-v2"
         case sourceBoundV3 = "source-bound-v3"
+        case sourceBoundV4 = "source-bound-v4"
     }
     static let contextTokens = 4_096
     static let outputTokens = 1_024
@@ -90,8 +91,9 @@ struct ComputerUseLocalTextGoalPlanner: ComputerUseTextGoalPlanning {
     }
 
     func makeRequest(catalog: ComputerUseTextPayloadCatalog, fields: [ComputerUseTextField]) throws -> URLRequest {
-        if contract == .sourceBoundV3 {
-            return try ComputerUseSourceBoundTextPlan.makeRequest(connection: connection, catalog: catalog, fields: fields)
+        if contract == .sourceBoundV3 || contract == .sourceBoundV4 {
+            return try ComputerUseSourceBoundTextPlan.makeRequest(connection: connection, catalog: catalog, fields: fields,
+                sourceFirst: contract == .sourceBoundV4)
         }
         let fieldIDs = fields.indices.map { "f\($0 + 1)" }
         let schema: [String: Any] = [
@@ -183,7 +185,7 @@ struct ComputerUseLocalTextGoalPlanner: ComputerUseTextGoalPlanning {
             if let refusal = message["refusal"], refusal != .null && refusal != .string("") {
                 throw ComputerUseLocalTextPlanError.invalidResponse
             }
-            if contract == .sourceBoundV3 {
+            if contract == .sourceBoundV3 || contract == .sourceBoundV4 {
                 return try ComputerUseSourceBoundTextPlan.decode(content: content, catalog: catalog, fields: fields)
             }
             var parser = StrictSemanticJSONParser(content)

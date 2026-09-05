@@ -3,6 +3,24 @@ import XCTest
 @testable import RemoteDesktopHost
 
 final class ComputerUseSourceBoundTextPlanTests: XCTestCase {
+    func testSourceFirstSchemaChangesDeclarationOrderWithoutChangingInstructionsOrConstraints() throws {
+        let connection = try ComputerUseTextModelConnection(baseURL: URL(string: "http://127.0.0.1:49123")!,
+            bearerToken: "fictional-test-token", modelAlias: "test-native")
+        let catalog = try ComputerUseTextPayloadCatalog(#"Set "Origin" to "Paris"."#)
+        let before = try ComputerUseLocalTextGoalPlanner(connection: connection, contract: .sourceBoundV3).makeRequest(catalog: catalog, fields: fields)
+        let after = try ComputerUseLocalTextGoalPlanner(connection: connection, contract: .sourceBoundV4).makeRequest(catalog: catalog, fields: fields)
+        let oldData = try XCTUnwrap(before.httpBody), newData = try XCTUnwrap(after.httpBody)
+        let oldObject = try XCTUnwrap(JSONSerialization.jsonObject(with: oldData) as? NSDictionary)
+        let newObject = try XCTUnwrap(JSONSerialization.jsonObject(with: newData) as? NSDictionary)
+        XCTAssertEqual(oldObject, newObject, "Only declaration ordering may change in this comparison")
+        let text = String(decoding: newData, as: UTF8.self)
+        XCTAssertTrue(text.contains(#""properties":{"source":{"type":"string"},"kind":"#))
+        XCTAssertTrue(String(decoding: oldData, as: UTF8.self).contains(#""properties":{"edits":"#))
+        XCTAssertNotEqual(oldData, newData)
+        XCTAssertEqual(after.httpBody, try ComputerUseLocalTextGoalPlanner(connection: connection, contract: .sourceBoundV4)
+            .makeRequest(catalog: catalog, fields: fields).httpBody, "The ordered wire contract remains deterministic")
+    }
+
     private var fields: [ComputerUseTextField] {
         ["Origin", "Destination"].enumerated().map { index, label in
             .init(label: label, snapshot: .init(targetID: "target-\(index)", value: "private existing text",
