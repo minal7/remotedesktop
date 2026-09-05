@@ -1,0 +1,232 @@
+{
+  "status": "passed",
+  "modelSHA256": "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
+  "runtimeSHA256": "dc8acab3939ab889fb944951bada4dc67e7a4eab5576f01469d67e4f3279b552",
+  "configuration": {
+    "backend": "llama",
+    "contract": "candidate-v2",
+    "reasoning": "on",
+    "reasoningBudget": 512,
+    "maximumOutputTokens": 1024,
+    "contextTokens": 4096,
+    "temperature": 0,
+    "topP": 1,
+    "topK": 0,
+    "parallelSlots": 1,
+    "cacheRAMMiB": 0,
+    "CPUThreads": 4,
+    "GPURequestedLayers": 99
+  },
+  "plannerSourceSHA256": "997b5fe3d19e196db131a36a2313bc3c3dbb532687d8f21d720afee1ce811d99",
+  "scope": "proposals-only",
+  "runtimeOwner": true,
+  "runtimeOwnerSourceSHA256": "3a4efc48b8ffed8f1f4eb7ece341e30374468ac070577377c85af14c42fa4a11",
+  "corpusSHA256": "846b06a7b3524ec5803022d110805ec5614fa56f153238a792c01290b04e67f4",
+  "testExitCode": 0,
+  "proposalPassed": 14,
+  "proposalTotal": 14,
+  "verifiedTestMethods": [
+    "testOptInLocalTextProposalCorpus"
+  ],
+  "elapsedSeconds": 148.20417279200046,
+  "proposals": [
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": "origin",
+          "mode": "replaceAll",
+          "payloadBytes": 13
+        },
+        {
+          "field": "destination",
+          "mode": "replaceAll",
+          "payloadBytes": 13
+        }
+      ],
+      "id": "N01",
+      "passed": true,
+      "seconds": 11.868713708332507
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": "origin",
+          "mode": "replaceAll",
+          "payloadBytes": 5
+        },
+        {
+          "field": "destination",
+          "mode": "replaceAll",
+          "payloadBytes": 5
+        }
+      ],
+      "id": "N02",
+      "passed": true,
+      "seconds": 10.92607241665246
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": "origin",
+          "mode": "append",
+          "payloadBytes": 14
+        }
+      ],
+      "id": "N03",
+      "passed": true,
+      "seconds": 11.0309881666617
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": "destination",
+          "mode": "replaceAll",
+          "payloadBytes": 20
+        }
+      ],
+      "id": "N04",
+      "passed": true,
+      "seconds": 10.788537374988664
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": "origin",
+          "mode": "replaceAll",
+          "payloadBytes": 7
+        },
+        {
+          "field": "origin",
+          "mode": "append",
+          "payloadBytes": 9
+        }
+      ],
+      "id": "N05",
+      "passed": true,
+      "seconds": 11.85090970832971
+    },
+    {
+      "disposition": "unsupported",
+      "id": "N06",
+      "passed": true,
+      "seconds": 10.838124916655943
+    },
+    {
+      "disposition": "unsupported",
+      "id": "N07",
+      "passed": true,
+      "seconds": 4.787534666684223
+    },
+    {
+      "disposition": "clarification",
+      "id": "N08",
+      "passed": true,
+      "seconds": 10.190756916679675
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": "origin",
+          "mode": "replaceAll",
+          "payloadBytes": 2000
+        }
+      ],
+      "id": "N13",
+      "passed": true,
+      "seconds": 11.072929583344376
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": "destination",
+          "mode": "replaceAll",
+          "payloadBytes": 6
+        }
+      ],
+      "id": "N14",
+      "passed": true,
+      "seconds": 10.485165666672401
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": "origin",
+          "mode": "replaceAll",
+          "payloadBytes": 4
+        },
+        {
+          "field": "destination",
+          "mode": "replaceAll",
+          "payloadBytes": 6
+        }
+      ],
+      "id": "N12",
+      "passed": true,
+      "seconds": 7.533123833331047
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": "destination",
+          "mode": "replaceAll",
+          "payloadBytes": 11
+        },
+        {
+          "field": "destination",
+          "mode": "replaceAll",
+          "payloadBytes": 6
+        }
+      ],
+      "id": "R15",
+      "passed": true,
+      "seconds": 11.003638125024736
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": "destination",
+          "mode": "replaceAll",
+          "payloadBytes": 6
+        }
+      ],
+      "id": "R16",
+      "passed": true,
+      "seconds": 10.629613083321601
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": "origin",
+          "mode": "replaceAll",
+          "payloadBytes": 7
+        },
+        {
+          "field": "destination",
+          "mode": "replaceAll",
+          "payloadBytes": 4
+        }
+      ],
+      "id": "R17",
+      "passed": true,
+      "seconds": 11.61665545834694
+    }
+  ],
+  "sourceParentCommit": "9a706a4",
+  "evidenceSHA256": {
+    "remotedesktop-native-owned-runtime-regression.json": "19ab33bb004b4c96435d6f93ee92d67931f11724b71089df0aed266d76254292",
+    "remotedesktop-native-owned-runtime-regression.proposals.json": "ed6c2aaafa6abf7b3375b12cbe96156e32fa4f5b1202a1420b28c3ca82cab705",
+    "remotedesktop-native-owned-runtime-regression.xunit.xml": "8835f4d1c938b49bec7c2401d994b12c4f650b54908dd58b531ce40dff0e3964",
+    "remotedesktop-native-owned-runtime-regression.log": "7471ca474acc4bc0dcccaceb5eb4e3a6c5d195703d643ce3f4afcb6d35f4b37d"
+  }
+}

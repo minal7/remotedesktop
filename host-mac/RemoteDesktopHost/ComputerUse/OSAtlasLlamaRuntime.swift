@@ -60,9 +60,33 @@ struct OSAtlasLlamaRuntimeInputs: Equatable, Sendable {
     }
 }
 
+/// Resolved data-only text installation and signed bundled executable. Model
+/// checksum and executable trust remain the installer's responsibility.
+struct ComputerUseNativeTextRuntimeInputs: Equatable, Sendable {
+    static let modelAlias = "native-form-planner-v2"
+    let modelURL: URL
+    let llamaServerURL: URL
+
+    init(modelURL: URL, llamaServerURL: URL) {
+        self.modelURL = modelURL.standardizedFileURL
+        self.llamaServerURL = llamaServerURL.standardizedFileURL
+    }
+}
+
+struct ComputerUseRuntimeTextGoalPlanner: ComputerUseTextGoalPlanning {
+    let inputs: ComputerUseNativeTextRuntimeInputs
+    var runtime: OSAtlasLlamaRuntime = .shared
+
+    func propose(prompt: String, fields: [ComputerUseTextField]) async throws -> ComputerUseTextGoalProposal {
+        let endpoint = try await runtime.activateNativeText(inputs)
+        return try await runtime.proposeNativeText(endpoint: endpoint, prompt: prompt, fields: fields)
+    }
+}
+
 struct OSAtlasLlamaEndpoint: Equatable, Sendable {
     let generation: UInt64
-    let variant: OSAtlasModelVariant
+    /// Nil for the independent text planner; never label it as OS-Atlas.
+    let variant: OSAtlasModelVariant?
     let baseURL: URL
     let bearerToken: String
 }
@@ -368,13 +392,27 @@ struct OSAtlasLlamaRouterPreset: Equatable, Sendable {
 /// launch configuration so the launcher can verify the file immediately
 /// before executing llama-server, then the lifecycle owner deletes it only
 /// after the full process tree has exited.
-struct OSAtlasLlamaRouterPresetFile: Equatable, Sendable {
+typealias OSAtlasLlamaRouterPresetFile = OSAtlasLlamaPrivateFile
+
+struct OSAtlasLlamaPrivateFile: Equatable, Sendable {
     let directoryURL: URL
     let fileURL: URL
     let expectedContents: Data
 
     static func create(_ preset: OSAtlasLlamaRouterPreset) throws -> Self {
         try preset.validate()
+        return try create(bytes: Data(preset.contents.utf8), fileName: "models.ini")
+    }
+
+    static func authentication(token: String) throws -> Self {
+        guard (16...256).contains(token.utf8.count),
+              token.unicodeScalars.allSatisfy({ (33...126).contains($0.value) }) else {
+            throw OSAtlasLlamaRuntimeError.invalidLocalInstallation
+        }
+        return try create(bytes: Data(token.utf8), fileName: "api-key")
+    }
+
+    private static func create(bytes: Data, fileName: String) throws -> Self {
         let fileManager = FileManager.default
         let directory = fileManager.temporaryDirectory
             .appendingPathComponent(
@@ -385,8 +423,7 @@ struct OSAtlasLlamaRouterPresetFile: Equatable, Sendable {
                 at: directory,
                 withIntermediateDirectories: false,
                 attributes: [.posixPermissions: 0o700])
-            let file = directory.appendingPathComponent("models.ini")
-            let bytes = Data(preset.contents.utf8)
+            let file = directory.appendingPathComponent(fileName)
             try bytes.write(to: file, options: .atomic)
             try fileManager.setAttributes(
                 [.posixPermissions: 0o600],
@@ -458,11 +495,12 @@ struct OSAtlasLlamaLaunchConfiguration: Equatable, Sendable {
     let executableURL: URL
     let workingDirectoryURL: URL
     let modelFirstSplitURL: URL
-    let multimodalProjectorURL: URL
+    let multimodalProjectorURL: URL?
     let port: UInt16
     let bearerToken: String
     let resourceProfile: OSAtlasLlamaResourceProfile
     let routerPresetFile: OSAtlasLlamaRouterPresetFile?
+    let authenticationFile: OSAtlasLlamaPrivateFile?
 
     init(
         executableURL: URL,
@@ -481,6 +519,7 @@ struct OSAtlasLlamaLaunchConfiguration: Equatable, Sendable {
         self.bearerToken = bearerToken
         self.resourceProfile = resourceProfile
         routerPresetFile = nil
+        authenticationFile = nil
     }
 
     init(
@@ -501,9 +540,38 @@ struct OSAtlasLlamaLaunchConfiguration: Equatable, Sendable {
         self.bearerToken = bearerToken
         self.resourceProfile = resourceProfile
         self.routerPresetFile = routerPresetFile
+        authenticationFile = nil
+    }
+
+    init(nativeTextInputs: ComputerUseNativeTextRuntimeInputs,
+         port: UInt16, bearerToken: String,
+         authenticationFile: OSAtlasLlamaPrivateFile) {
+        executableURL = nativeTextInputs.llamaServerURL
+        workingDirectoryURL = nativeTextInputs.llamaServerURL.deletingLastPathComponent()
+        modelFirstSplitURL = nativeTextInputs.modelURL
+        multimodalProjectorURL = nil
+        self.port = port
+        self.bearerToken = bearerToken
+        resourceProfile = .compact
+        routerPresetFile = nil
+        self.authenticationFile = authenticationFile
     }
 
     var arguments: [String] {
+        if let authenticationFile {
+            // The measured Qwen3.5 form configuration, without a projector or
+            // visual template. Its credential remains in an owner-only file.
+            return [
+                "--model", modelFirstSplitURL.path,
+                "--alias", ComputerUseNativeTextRuntimeInputs.modelAlias,
+                "--host", Self.host, "--port", String(port),
+                "--api-key-file", authenticationFile.fileURL.path,
+                "--offline", "--no-ui", "--no-mmproj", "--log-disable",
+                "--parallel", "1", "--ctx-size", "4096", "--cache-ram", "0",
+                "--threads", "4", "--threads-batch", "4", "--n-gpu-layers", "99",
+                "--jinja", "--reasoning", "on", "--reasoning-budget", "512",
+            ]
+        }
         if let routerPresetFile {
             return [
                 "--host", Self.host,
@@ -519,7 +587,7 @@ struct OSAtlasLlamaLaunchConfiguration: Equatable, Sendable {
         }
         return [
             "--model", modelFirstSplitURL.path,
-            "--mmproj", multimodalProjectorURL.path,
+            "--mmproj", multimodalProjectorURL!.path,
             "--alias", OSAtlasLlamaServedModel.visualGrounder.rawValue,
             "--host", Self.host,
             "--port", String(port),
@@ -775,7 +843,7 @@ struct OSAtlasProcessTreeController: Sendable {
     }
 }
 
-protocol OSAtlasLlamaHTTPTransport: Sendable {
+protocol OSAtlasLlamaHTTPTransport: ComputerUseTextModelTransport {
     func health(baseURL: URL, bearerToken: String) async throws -> Bool
     func modelIsHealthy(
         baseURL: URL,
@@ -860,15 +928,23 @@ actor OSAtlasLlamaRuntime {
 
     private enum RuntimeInputs: Equatable, Sendable {
         case visual(OSAtlasLlamaRuntimeInputs)
+        case nativeText(ComputerUseNativeTextRuntimeInputs)
         case router(
             visual: OSAtlasLlamaRuntimeInputs,
             semanticModelURL: URL)
 
-        var visual: OSAtlasLlamaRuntimeInputs {
+        var visual: OSAtlasLlamaRuntimeInputs? {
             switch self {
             case .visual(let inputs), .router(let inputs, _):
                 return inputs
+            case .nativeText:
+                return nil
             }
+        }
+
+        var nativeText: ComputerUseNativeTextRuntimeInputs? {
+            if case .nativeText(let inputs) = self { return inputs }
+            return nil
         }
 
         var isRouter: Bool {
@@ -889,6 +965,7 @@ actor OSAtlasLlamaRuntime {
         let process: any OSAtlasLlamaServerProcess
         let transport: any OSAtlasLlamaHTTPTransport
         let routerPresetFile: OSAtlasLlamaRouterPresetFile?
+        let authenticationFile: OSAtlasLlamaPrivateFile?
         var residentModels: Set<OSAtlasLlamaServedModel>
         /// Monotonically changes whenever the router's physically resident
         /// worker set changes. Executors use this as an optimistic-concurrency
@@ -981,6 +1058,12 @@ actor OSAtlasLlamaRuntime {
         try await activateResolved(.visual(inputs))
     }
 
+    func activateNativeText(
+        _ inputs: ComputerUseNativeTextRuntimeInputs
+    ) async throws -> OSAtlasLlamaEndpoint {
+        try await activateResolved(.nativeText(inputs))
+    }
+
     /// Starts one b9992 router process with exactly two generated presets.
     /// Autoload is disabled: standard hosts explicitly load both fixed workers,
     /// while compact hosts load visual first and switch one worker on demand.
@@ -996,11 +1079,14 @@ actor OSAtlasLlamaRuntime {
     private func activateResolved(
         _ inputs: RuntimeInputs
     ) async throws -> OSAtlasLlamaEndpoint {
-        let visualInputs = inputs.visual
-        guard visualInputs.variant == .pro4B else {
-            throw OSAtlasLlamaRuntimeError.proModelRequired
+        if let visualInputs = inputs.visual {
+            guard visualInputs.variant == .pro4B else {
+                throw OSAtlasLlamaRuntimeError.proModelRequired
+            }
+            try Self.validateLocalInputs(visualInputs)
+        } else if let textInputs = inputs.nativeText {
+            try Self.validateNativeTextInputs(textInputs)
         }
-        try Self.validateLocalInputs(visualInputs)
         if let semanticModelURL = inputs.semanticModelURL {
             try Self.validateSemanticModelURL(semanticModelURL)
         }
@@ -1098,7 +1184,7 @@ actor OSAtlasLlamaRuntime {
         prompt: String,
         jpegData: Data
     ) async throws -> String {
-        guard active?.endpoint == endpoint else {
+        guard active?.endpoint == endpoint, active?.inputs.visual != nil else {
             throw OSAtlasLlamaRuntimeError.inactiveSession
         }
         let modelAccessLease = try await acquireModelAccessLease()
@@ -1147,6 +1233,46 @@ actor OSAtlasLlamaRuntime {
                 try await stopActiveServerUnserialized()
             }
             throw OSAtlasLlamaRuntimeError.invalidResponse
+        }
+    }
+
+    /// Holds the owner's model lease across template/tokenization, inference
+    /// and strict decoding. Callers supply a goal and field snapshot, never a
+    /// raw model request or a second independently owned server.
+    func proposeNativeText(
+        endpoint: OSAtlasLlamaEndpoint,
+        prompt: String,
+        fields: [ComputerUseTextField]
+    ) async throws -> ComputerUseTextGoalProposal {
+        let lease = try await acquireModelAccessLease()
+        defer { releaseModelAccessLease(lease) }
+        guard let server = active, server.endpoint == endpoint,
+              server.inputs.nativeText != nil else {
+            throw OSAtlasLlamaRuntimeError.inactiveSession
+        }
+        do {
+            try validateResources(minimumReclaimableBytes:
+                server.resourceProfile.minimumInferenceMemoryBytes)
+            let planner = ComputerUseLocalTextGoalPlanner(
+                connection: try ComputerUseTextModelConnection(
+                    baseURL: endpoint.baseURL, bearerToken: endpoint.bearerToken,
+                    modelAlias: ComputerUseNativeTextRuntimeInputs.modelAlias),
+                transport: server.transport, contract: .candidateV2)
+            let proposal = try await withTaskCancellationHandler {
+                try await planner.propose(prompt: prompt, fields: fields)
+            } onCancel: {
+                Task { await self.cancel(endpoint: endpoint) }
+            }
+            try Task.checkCancellation()
+            guard active?.endpoint == endpoint else {
+                throw OSAtlasLlamaRuntimeError.inactiveSession
+            }
+            return proposal
+        } catch {
+            if active?.endpoint == endpoint {
+                try await stopActiveServerUnserialized()
+            }
+            throw error
         }
     }
 
@@ -1478,11 +1604,11 @@ actor OSAtlasLlamaRuntime {
             }
         case .replace(let inputs):
             var pendingPresetFile: OSAtlasLlamaRouterPresetFile?
+            var pendingAuthenticationFile: OSAtlasLlamaPrivateFile?
             do {
                 try await stopActiveServerUnserialized()
                 try validateActivation(epoch: expectedActivationEpoch)
-                let resourceProfile = try resourceProfileForLaunch()
-                let visualInputs = inputs.visual
+                let resourceProfile = try resourceProfileForLaunch(nativeText: inputs.nativeText != nil)
                 let port = try portProvider.availableLoopbackPort()
                 let token = tokenProvider.bearerToken()
                 guard !token.isEmpty else {
@@ -1492,7 +1618,14 @@ actor OSAtlasLlamaRuntime {
                     string: "http://\(OSAtlasLlamaLaunchConfiguration.host):\(port)")!
                 try Self.validateLoopbackEndpoint(baseURL)
                 let configuration: OSAtlasLlamaLaunchConfiguration
-                if let semanticModelURL = inputs.semanticModelURL {
+                if let textInputs = inputs.nativeText {
+                    let authentication = try OSAtlasLlamaPrivateFile.authentication(token: token)
+                    pendingAuthenticationFile = authentication
+                    configuration = OSAtlasLlamaLaunchConfiguration(
+                        nativeTextInputs: textInputs, port: port, bearerToken: token,
+                        authenticationFile: authentication)
+                } else if let visualInputs = inputs.visual,
+                          let semanticModelURL = inputs.semanticModelURL {
                     let presetFile = try OSAtlasLlamaRouterPresetFile.create(
                         OSAtlasLlamaRouterPreset(
                             visualModelFirstSplitURL:
@@ -1512,7 +1645,7 @@ actor OSAtlasLlamaRuntime {
                         bearerToken: token,
                         resourceProfile: resourceProfile,
                         routerPresetFile: presetFile)
-                } else {
+                } else if let visualInputs = inputs.visual {
                     configuration = OSAtlasLlamaLaunchConfiguration(
                         executableURL: visualInputs.llamaServerURL,
                         workingDirectoryURL: visualInputs.runtimeDirectoryURL,
@@ -1522,13 +1655,15 @@ actor OSAtlasLlamaRuntime {
                         port: port,
                         bearerToken: token,
                         resourceProfile: resourceProfile)
+                } else {
+                    throw OSAtlasLlamaRuntimeError.invalidLocalInstallation
                 }
                 let transport = transportMaker.makeTransport()
                 let process = try await launcher.launch(configuration: configuration)
                 nextGeneration &+= 1
                 let endpoint = OSAtlasLlamaEndpoint(
                     generation: nextGeneration,
-                    variant: visualInputs.variant,
+                    variant: inputs.visual?.variant,
                     baseURL: baseURL,
                     bearerToken: token)
                 active = ActiveServer(
@@ -1538,11 +1673,13 @@ actor OSAtlasLlamaRuntime {
                     process: process,
                     transport: transport,
                     routerPresetFile: pendingPresetFile,
-                    residentModels: inputs.isRouter
+                    authenticationFile: pendingAuthenticationFile,
+                    residentModels: inputs.isRouter || inputs.nativeText != nil
                         ? []
                         : [.visualGrounder],
                     residencyGeneration: inputs.isRouter ? 0 : 1)
                 pendingPresetFile = nil
+                pendingAuthenticationFile = nil
                 try validateActivation(epoch: expectedActivationEpoch)
                 try await waitUntilReady(endpoint: endpoint, transport: transport)
                 if inputs.isRouter {
@@ -1575,6 +1712,7 @@ actor OSAtlasLlamaRuntime {
                 return .success
             } catch is CancellationError {
                 pendingPresetFile?.remove()
+                pendingAuthenticationFile?.remove()
                 do {
                     try await stopActiveServerUnserialized()
                 } catch {
@@ -1583,6 +1721,7 @@ actor OSAtlasLlamaRuntime {
                 return .cancelled
             } catch let error as OSAtlasLlamaRuntimeError {
                 pendingPresetFile?.remove()
+                pendingAuthenticationFile?.remove()
                 do {
                     try await stopActiveServerUnserialized()
                 } catch {
@@ -1591,6 +1730,7 @@ actor OSAtlasLlamaRuntime {
                 return .failure(error)
             } catch {
                 pendingPresetFile?.remove()
+                pendingAuthenticationFile?.remove()
                 do {
                     try await stopActiveServerUnserialized()
                 } catch {
@@ -1701,13 +1841,16 @@ actor OSAtlasLlamaRuntime {
         lifecycleTransition?.task.cancel()
     }
 
-    private func resourceProfileForLaunch() throws -> OSAtlasLlamaResourceProfile {
+    private func resourceProfileForLaunch(nativeText: Bool = false) throws -> OSAtlasLlamaResourceProfile {
         let snapshot = try resourceSnapshot()
-        guard let profile = OSAtlasLlamaResourceProfile.select(
+        guard let hardwareProfile = OSAtlasLlamaResourceProfile.select(
             physicalMemoryBytes: snapshot.physicalMemoryBytes
         ) else {
             throw OSAtlasLlamaRuntimeError.insufficientPhysicalMemory
         }
+        // Text always uses the measured 4K context and a single 4 GiB process
+        // ceiling. This budget is not a claim of physical 8 GiB qualification.
+        let profile: OSAtlasLlamaResourceProfile = nativeText ? .compact : hardwareProfile
         guard snapshot.reclaimableMemoryBytes >= profile.minimumLaunchMemoryBytes else {
             throw OSAtlasLlamaRuntimeError.insufficientAvailableMemory
         }
@@ -1763,6 +1906,7 @@ actor OSAtlasLlamaRuntime {
             }
         }.value
         server.routerPresetFile?.remove()
+        server.authenticationFile?.remove()
 
         // Caller cancellation is handled after the old process is gone and
         // therefore never poisons the runtime. Only a cleanup operation that
@@ -1791,6 +1935,16 @@ actor OSAtlasLlamaRuntime {
                 .lowercased().contains("00001-of-"),
               inputs.multimodalProjectorURL.lastPathComponent
                 .lowercased().contains("f16") else {
+            throw OSAtlasLlamaRuntimeError.invalidLocalInstallation
+        }
+    }
+
+    private static func validateNativeTextInputs(_ inputs: ComputerUseNativeTextRuntimeInputs) throws {
+        try validateSemanticModelURL(inputs.modelURL)
+        guard inputs.modelURL.lastPathComponent == "Qwen3.5-4B-Q4_K_M.gguf",
+              inputs.llamaServerURL.isFileURL,
+              inputs.llamaServerURL.lastPathComponent == "llama-server",
+              !inputs.llamaServerURL.path.contains("\0") else {
             throw OSAtlasLlamaRuntimeError.invalidLocalInstallation
         }
     }
@@ -2672,6 +2826,13 @@ private struct FoundationOSAtlasLlamaServerLauncher: OSAtlasLlamaServerLaunching
             do {
                 try presetFile.verify()
             } catch {
+                throw OSAtlasLlamaRuntimeError.invalidLocalInstallation
+            }
+        }
+
+        if let authentication = configuration.authenticationFile {
+            try authentication.verify()
+            guard authentication.expectedContents == Data(configuration.bearerToken.utf8) else {
                 throw OSAtlasLlamaRuntimeError.invalidLocalInstallation
             }
         }

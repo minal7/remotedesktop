@@ -19,7 +19,13 @@
     "RemoteDesktopHostTests/ComputerUseObservationWorkerTests",
     "RemoteDesktopHostTests/ComputerUseTextTaskTests",
     "RemoteDesktopHostTests/ComputerUseTextStepStoreTests",
-    "RemoteDesktopHostTests/ComputerUseLocalTextGoalPlannerTests"
+    "RemoteDesktopHostTests/ComputerUseLocalTextGoalPlannerTests",
+    "RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testNativeTextAndVisualShareOneLifecycleAndRejectCrossModelOrStaleRequests",
+    "RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testNativeTextCancellationReleasesModelLeaseBeforeVisualReplacement",
+    "RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testNativeTextContextOverflowStopsBeforeCompletion",
+    "RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testNativeTextFailedReadinessRemovesPrivateCredentialAndRejectsUnknownModel",
+    "RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testNativeTextLaunchUsesPrivateCredentialAndMeasuredSingleModelBudget",
+    "RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testRuntimeTextPlannerUsesFrozenContractAndHostOwnedLiteral"
   ],
   "expectedTests": [
     "RemoteDesktopHostTests/ComputerUseLiteralPayloadTests/testAmbiguousMultipleQuotesAreNotSilentlyAssignedToTheWrongField",
@@ -243,6 +249,12 @@
     "RemoteDesktopHostTests/OSAtlasComputerUseExecutorTests/testVisualApprovalContinuationRejectsWrongAndDuplicateAuthority",
     "RemoteDesktopHostTests/OSAtlasComputerUseExecutorTests/testVisualGroundingRevalidatesAgainImmediatelyBeforeInput",
     "RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testCompletionRequestIsAuthenticatedLoopbackOnlyAndDeterministic",
-    "RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testLaunchArgumentsPinLoopbackAuthNoLogsAndInferenceBudget"
+    "RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testLaunchArgumentsPinLoopbackAuthNoLogsAndInferenceBudget",
+    "RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testNativeTextAndVisualShareOneLifecycleAndRejectCrossModelOrStaleRequests",
+    "RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testNativeTextCancellationReleasesModelLeaseBeforeVisualReplacement",
+    "RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testNativeTextContextOverflowStopsBeforeCompletion",
+    "RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testNativeTextFailedReadinessRemovesPrivateCredentialAndRejectsUnknownModel",
+    "RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testNativeTextLaunchUsesPrivateCredentialAndMeasuredSingleModelBudget",
+    "RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testRuntimeTextPlannerUsesFrozenContractAndHostOwnedLiteral"
   ]
 }

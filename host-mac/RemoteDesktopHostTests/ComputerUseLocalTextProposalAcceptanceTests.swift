@@ -16,11 +16,31 @@ final class ComputerUseLocalTextProposalAcceptanceTests: XCTestCase {
         let connectionFile = try XCTUnwrap(environment["COMPUTER_USE_TEXT_MODEL_CONNECTION_FILE"])
         let connectionObject = try XCTUnwrap(JSONSerialization.jsonObject(
             with: Data(contentsOf: URL(fileURLWithPath: connectionFile))) as? [String: String])
-        let connection = try ComputerUseTextModelConnection(
-            baseURL: XCTUnwrap(URL(string: XCTUnwrap(connectionObject["baseURL"]))),
-            bearerToken: XCTUnwrap(connectionObject["bearerToken"]), modelAlias: XCTUnwrap(connectionObject["modelAlias"]))
-        let contract = try XCTUnwrap(ComputerUseLocalTextGoalPlanner.Contract(rawValue: connectionObject["contract"] ?? "frozen-v1"))
-        let planner = ComputerUseLocalTextGoalPlanner(connection: connection, contract: contract)
+        if connectionObject["runtimeOwner"] == "1" {
+            let runtime = OSAtlasLlamaRuntime()
+            let inputs = ComputerUseNativeTextRuntimeInputs(
+                modelURL: URL(fileURLWithPath: try XCTUnwrap(connectionObject["modelPath"])),
+                llamaServerURL: URL(fileURLWithPath: try XCTUnwrap(connectionObject["serverPath"])))
+            do {
+                try await runCorpus(corpusPath, environment: environment,
+                                    planner: ComputerUseRuntimeTextGoalPlanner(inputs: inputs, runtime: runtime))
+            } catch {
+                await runtime.shutdown()
+                throw error
+            }
+            await runtime.shutdown()
+        } else {
+            let connection = try ComputerUseTextModelConnection(
+                baseURL: XCTUnwrap(URL(string: XCTUnwrap(connectionObject["baseURL"]))),
+                bearerToken: XCTUnwrap(connectionObject["bearerToken"]), modelAlias: XCTUnwrap(connectionObject["modelAlias"]))
+            let contract = try XCTUnwrap(ComputerUseLocalTextGoalPlanner.Contract(rawValue: connectionObject["contract"] ?? "frozen-v1"))
+            let planner = ComputerUseLocalTextGoalPlanner(connection: connection, contract: contract)
+            try await runCorpus(corpusPath, environment: environment, planner: planner)
+        }
+    }
+
+    private func runCorpus(_ corpusPath: String, environment: [String: String],
+                           planner: any ComputerUseTextGoalPlanning) async throws {
         let data = try Data(contentsOf: URL(fileURLWithPath: corpusPath))
         guard data.count <= 1_024 * 1_024 else { throw CorpusError.invalidCorpus }
         let corpus = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])

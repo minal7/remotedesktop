@@ -121,7 +121,10 @@ def main():
     parser.add_argument("--faults-only", action="store_true", help="Diagnose the six fault/resume scenarios per fixture; does not qualify the ten regression goals")
     parser.add_argument("--contract", choices=["frozen-v1", "candidate-v2"], default="frozen-v1")
     parser.add_argument("--proposal-corpus", type=Path, help="Run this corpus through the Swift planner without any desktop effects")
+    parser.add_argument("--runtime-owner", action="store_true", help="Run proposal corpus through the Swift production runtime owner, including launch and teardown")
     args = parser.parse_args()
+    if args.runtime_owner and (args.proposal_corpus is None or args.contract != "candidate-v2"):
+        parser.error("--runtime-owner requires --proposal-corpus and --contract candidate-v2")
     if args.proposal_corpus is not None and args.faults_only:
         parser.error("--proposal-corpus and --faults-only are separate qualification scopes")
     os.umask(0o077)
@@ -152,6 +155,8 @@ def main():
                "configuration": dict(manifest["configuration"], contract=args.contract),
                "plannerSourceSHA256": hashlib.sha256((ROOT / "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseLocalTextGoalPlanner.swift").read_bytes()).hexdigest(),
                "scope": "proposals-only" if corpus_path is not None else ("faults-only" if args.faults_only else "regression-and-faults")}
+    summary["runtimeOwner"] = args.runtime_owner
+    summary["runtimeOwnerSourceSHA256"] = hashlib.sha256((ROOT / "host-mac/RemoteDesktopHost/ComputerUse/OSAtlasLlamaRuntime.swift").read_bytes()).hexdigest()
     if corpus_path is not None:
         summary["corpusSHA256"] = hashlib.sha256(corpus_path.read_bytes()).hexdigest()
     server = tests = None
@@ -171,19 +176,24 @@ def main():
                            if not name.startswith(("LLAMA_", "HF_"))}
             environment["HF_HUB_OFFLINE"] = "1"
             with log_path.open("w") as log:
-                server = subprocess.Popen([
-                    str(binary), "--model", str(model), "--host", "127.0.0.1", "--port", str(port),
-                    "--alias", alias, "--api-key-file", str(key_file), "--offline", "--no-ui",
-                    "--no-mmproj", "--log-disable", "--parallel", "1", "--ctx-size", "4096",
-                    "--cache-ram", "0", "--threads", "4", "--threads-batch", "4",
-                    "--n-gpu-layers", "99", "--jinja", "--reasoning", "on", "--reasoning-budget", "512",
-                ], env=environment, stdout=log, stderr=log, start_new_session=True)
-                children.append(server)
-                ready(server, base_url, alias, key)
-                summary["startupSeconds"] = time.monotonic() - started
                 connection_file = directory / "connection.json"
-                private_file(connection_file, json.dumps({"baseURL": base_url, "bearerToken": key, "modelAlias": alias,
-                                                          "contract": args.contract}))
+                if args.runtime_owner:
+                    private_file(connection_file, json.dumps({"runtimeOwner": "1", "modelPath": str(model),
+                                                               "serverPath": str(binary), "contract": args.contract}))
+                else:
+                    server = subprocess.Popen([
+                        str(binary), "--model", str(model), "--host", "127.0.0.1", "--port", str(port),
+                        "--alias", alias, "--api-key-file", str(key_file), "--offline", "--no-ui",
+                        "--no-mmproj", "--log-disable", "--parallel", "1", "--ctx-size", "4096",
+                        "--cache-ram", "0", "--threads", "4", "--threads-batch", "4",
+                        "--n-gpu-layers", "99", "--jinja", "--reasoning", "on", "--reasoning-budget", "512",
+                    ], env=environment, stdout=log, stderr=log, start_new_session=True)
+                    children.append(server)
+                    ready(server, base_url, alias, key)
+                    summary["startupSeconds"] = time.monotonic() - started
+                    connection_file = directory / "connection.json"
+                    private_file(connection_file, json.dumps({"baseURL": base_url, "bearerToken": key, "modelAlias": alias,
+                                                              "contract": args.contract}))
                 environment["RUN_NATIVE_TEXT_GOALS_LOCAL_ACCEPTANCE"] = "1"
                 environment["COMPUTER_USE_TEXT_GOALS_FAULTS_ONLY"] = "1" if args.faults_only else "0"
                 environment["COMPUTER_USE_TEXT_MODEL_CONNECTION_FILE"] = str(connection_file)
@@ -191,7 +201,8 @@ def main():
                 if corpus_path is not None:
                     environment["COMPUTER_USE_TEXT_PROPOSAL_CORPUS"] = str(corpus_path)
                     environment["COMPUTER_USE_TEXT_PROPOSAL_REPORT"] = str(proposal_path)
-                print(f"Local planner {args.contract} ready; running {summary['scope']}.", flush=True)
+                print(f"Local planner {args.contract}; running {summary['scope']} via "
+                      f"{'Swift runtime owner' if args.runtime_owner else 'fixture server'}.", flush=True)
                 tests = subprocess.Popen(["/bin/bash", str(ROOT / "host-mac/scripts/run_text_edit_acceptance.sh"),
                                           "--local-proposals-only" if corpus_path is not None else "--local-goals-only"],
                                          env=environment, cwd=ROOT, start_new_session=True)

@@ -4,7 +4,7 @@ Companion to [the detailed audit](</Users/michael/Documents/ChatGPT/remote deskt
 
 **Phase 1 · Make evidence trustworthy and define the supported product**
 
-- [x] **F29:** Replace the stale expected count of 138 with reviewed test-identifier discovery/validation. The baseline selected 167 methods; the reviewed selection now includes 222 with the repair regressions. Exact source/result checks are implemented: 112 Python tests pass; the signed 119-method text/runtime checkpoint and 12-method contract-v2 follow-up were verified by exact ID. The full OCR-dependent gate remains failing.
+- [x] **F29:** Replace the stale expected count of 138 with reviewed test-identifier discovery/validation. The baseline selected 167 methods; the reviewed selection now includes 228 with the repair regressions. Exact source/result checks are implemented: 112 Python tests pass; signed text/runtime checkpoints and the 70-method native runtime follow-up were verified by exact ID. The full OCR-dependent gate remains failing.
 - [ ] **F29:** Split current visual-only package acceptance from future V4/V5 semantic-package qualification. Current acceptance must test the currently shipped manifest and router.
 - [ ] **F30:** Extract a testable Mac core module for policy, task state, wire contracts, parsers, and model adapters. Execute its tests on every PR without privileged-host provisioning.
 - [ ] **F18:** Specify supported OS, Apple Intelligence availability, languages, task families, and degraded modes. Replace ambiguous overall readiness with capability readiness.
@@ -137,6 +137,8 @@ Only then broaden capabilities and evaluate whether an additional model pays for
 
 
 **Work log**
+
+- 2026-09-04: Added the text model to the existing process owner with typed inputs, a private credential file, a single inference lease, model switching and generation rejection. All 70 runtime/planner tests pass both in SwiftPM and the signed host. The production runtime owner also passed 14/14 real-model proposal regressions, including its actual launch and shutdown. Normal executor composition, model packaging and capability readiness remain open.
 
 - 2026-09-04: Frozen contract v2 at `a4a01b9` passed its first 20-case held-out v3 proposal corpus (14 supported, three unsupported, three clarification), followed by all 32 actual-model AppKit/WebKit scenarios. Results are retained in `native-text-v2-heldout-v3-results.json` and `native-text-v2-complete-results.json` beside the audit. Production package/runtime/readiness integration and broader qualification remain open; this does not close the release gate.
 
