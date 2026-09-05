@@ -149,3 +149,9 @@ python3 host-mac/scripts/run_native_text_model_acceptance.py \
 ```
 
 Use a fresh report path for each run. `--faults-only` runs only the six interruption/recovery scenarios per fixture and cannot qualify the ten non-fault regression goals. The controlled form capability remains a candidate: these fixtures do not establish application-wide task interpretation, browser ownership, document generations, low-memory behavior, production installation, or mobile transport readiness.
+
+## Next contract: frozen evaluation boundary
+
+The 20-case [held-out v3 corpus](../../../host-mac/AcceptanceFixtures/native-text-goals-heldout-v3.json) is frozen before implementing contract v2, at source checkpoint `d918784`. SHA-256: `d3fd472a1b82e6f9f03cdee054a27bc2a29c535a877af18a0b5d552e73c3eafb`. It is **unrun**. This is another self-authored capability test set, not an external representative benchmark.
+
+The next revision addresses two contract defects rather than increasing inference budget: internal focus/selection/readback steps must be distinguished from additional user-requested outcomes, and a quoted field name must remain resolvable after the host replaces quoted spans with exact-payload references. Neither issue justifies enabling the current candidate or changing a failed expected outcome. The frozen v1 instruction and results remain available for comparison.
