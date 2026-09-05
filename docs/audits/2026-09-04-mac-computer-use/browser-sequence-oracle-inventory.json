@@ -1,0 +1,8 @@
+{
+  "selectors": [
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserModelAcceptanceTests/testIndependentSequenceOracleRejectsExtraWrongTargetReorderedAndNormalizedIntermediateStates"
+  ],
+  "expectedTests": [
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserModelAcceptanceTests/testIndependentSequenceOracleRejectsExtraWrongTargetReorderedAndNormalizedIntermediateStates"
+  ]
+}

@@ -1,0 +1,381 @@
+{
+  "cases": [
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 0,
+          "mode": "replaceAll",
+          "value": "San Francisco"
+        },
+        {
+          "field": 1,
+          "mode": "replaceAll",
+          "value": "San Francisco"
+        }
+      ],
+      "elapsedSeconds": 14.507781708351104,
+      "id": "N01",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"requirements\":[{\"source\":\"Set both Origin and Destination to San Francisco.\",\"kind\":\"edits\",\"preserve\":[],\"edits\":[{\"fieldID\":\"f1\",\"target\":\"Origin\",\"mode\":\"replaceAll\",\"value\":\"San Francisco\"},{\"fieldID\":\"f2\",\"target\":\"Destination\",\"mode\":\"replaceAll\",\"value\":\"San Francisco\"}]}]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"requirements\":[{\"source\":\"Set both Origin and Destination to San Francisco.\",\"kind\":\"edits\",\"preserve\":[],\"edits\":[{\"fieldID\":\"f1\",\"target\":\"Origin\",\"mode\":\"replaceAll\",\"value\":\"San Francisco\"},{\"fieldID\":\"f2\",\"target\":\"Destination\",\"mode\":\"replaceAll\",\"value\":\"San Francisco\"}]}]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 0,
+          "mode": "replaceAll",
+          "value": "Tokyo"
+        },
+        {
+          "field": 1,
+          "mode": "replaceAll",
+          "value": "Kyoto"
+        }
+      ],
+      "elapsedSeconds": 14.023256583313923,
+      "id": "N02",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"requirements\":[{\"source\":\"Please replace the Origin with Tokyo and\",\"kind\":\"edits\",\"preserve\":[],\"edits\":[{\"fieldID\":\"f1\",\"target\":\"Origin\",\"mode\":\"replaceAll\",\"value\":\"Tokyo\"}]},{\"source\":\"the Destination with Kyoto.\",\"kind\":\"edits\",\"preserve\":[],\"edits\":[{\"fieldID\":\"f2\",\"target\":\"Destination\",\"mode\":\"replaceAll\",\"value\":\"Kyoto\"}]}]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"requirements\":[{\"source\":\"Please replace the Origin with Tokyo and\",\"kind\":\"edits\",\"preserve\":[],\"edits\":[{\"fieldID\":\"f1\",\"target\":\"Origin\",\"mode\":\"replaceAll\",\"value\":\"Tokyo\"}]},{\"source\":\"the Destination with Kyoto.\",\"kind\":\"edits\",\"preserve\":[],\"edits\":[{\"fieldID\":\"f2\",\"target\":\"Destination\",\"mode\":\"replaceAll\",\"value\":\"Kyoto\"}]}]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 0,
+          "mode": "append",
+          "value": " — confirmed"
+        }
+      ],
+      "elapsedSeconds": 25.925045416661305,
+      "id": "N03",
+      "modelResponses": 2,
+      "proposal": {
+        "content": "{\"requirements\":[{\"source\":\"Append [exact quoted payload p1] to Origin.\",\"kind\":\"edits\",\"preserve\":[],\"edits\":[{\"fieldID\":\"f1\",\"target\":\"Origin\",\"mode\":\"append\",\"value\":\"p1\"}]},{\"source\":\"Leave Destination alone.\",\"kind\":\"constraint\",\"preserve\":[{\"fieldID\":\"f2\",\"target\":\"Destination\"}],\"edits\":[]}]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"requirements\":[{\"source\":\"Append [exact quoted payload p1] to Origin.\",\"kind\":\"edits\",\"preserve\":[],\"edits\":[{\"fieldID\":\"f1\",\"target\":\"Origin\",\"mode\":\"append\",\"value\":\"p1\"}]}]}",
+          "finishReason": "stop"
+        },
+        {
+          "content": "{\"requirements\":[{\"source\":\"Append [exact quoted payload p1] to Origin.\",\"kind\":\"edits\",\"preserve\":[],\"edits\":[{\"fieldID\":\"f1\",\"target\":\"Origin\",\"mode\":\"append\",\"value\":\"p1\"}]},{\"source\":\"Leave Destination alone.\",\"kind\":\"constraint\",\"preserve\":[{\"fieldID\":\"f2\",\"target\":\"Destination\"}],\"edits\":[]}]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 1,
+          "mode": "replaceAll",
+          "value": "  東京 é 😀\n  "
+        }
+      ],
+      "elapsedSeconds": 12.803245916671585,
+      "id": "N04",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"requirements\":[{\"source\":\"Put [exact quoted payload p1] in Destination exactly as written.\",\"kind\":\"edits\",\"preserve\":[],\"edits\":[{\"fieldID\":\"f2\",\"target\":\"Destination\",\"mode\":\"replaceAll\",\"value\":\"p1\"}]}]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"requirements\":[{\"source\":\"Put [exact quoted payload p1] in Destination exactly as written.\",\"kind\":\"edits\",\"preserve\":[],\"edits\":[{\"fieldID\":\"f2\",\"target\":\"Destination\",\"mode\":\"replaceAll\",\"value\":\"p1\"}]}]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 0,
+          "mode": "replaceAll",
+          "value": "Seattle"
+        },
+        {
+          "field": 0,
+          "mode": "append",
+          "value": " / Tacoma"
+        }
+      ],
+      "elapsedSeconds": 13.99082800000906,
+      "id": "N05",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"requirements\":[{\"source\":\"Replace Origin with [exact quoted payload p1],\",\"kind\":\"edits\",\"preserve\":[],\"edits\":[{\"fieldID\":\"f1\",\"target\":\"Origin\",\"mode\":\"replaceAll\",\"value\":\"p1\"}]},{\"source\":\"then append [exact quoted payload p2] to it.\",\"kind\":\"edits\",\"preserve\":[],\"edits\":[{\"fieldID\":\"f1\",\"target\":\"it\",\"mode\":\"append\",\"value\":\"p2\"}]}]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"requirements\":[{\"source\":\"Replace Origin with [exact quoted payload p1],\",\"kind\":\"edits\",\"preserve\":[],\"edits\":[{\"fieldID\":\"f1\",\"target\":\"Origin\",\"mode\":\"replaceAll\",\"value\":\"p1\"}]},{\"source\":\"then append [exact quoted payload p2] to it.\",\"kind\":\"edits\",\"preserve\":[],\"edits\":[{\"fieldID\":\"f1\",\"target\":\"it\",\"mode\":\"append\",\"value\":\"p2\"}]}]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "unsupported",
+      "edits": [],
+      "elapsedSeconds": 13.249340249982197,
+      "id": "N06",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"requirements\":[{\"source\":\"Fill Origin with Boston,\",\"kind\":\"edits\",\"preserve\":[],\"edits\":[{\"fieldID\":\"f1\",\"target\":\"Origin\",\"mode\":\"replaceAll\",\"value\":\"Boston\"}]},{\"source\":\"and send the form.\",\"kind\":\"other\",\"preserve\":[],\"edits\":[]}]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"requirements\":[{\"source\":\"Fill Origin with Boston,\",\"kind\":\"edits\",\"preserve\":[],\"edits\":[{\"fieldID\":\"f1\",\"target\":\"Origin\",\"mode\":\"replaceAll\",\"value\":\"Boston\"}]},{\"source\":\"and send the form.\",\"kind\":\"other\",\"preserve\":[],\"edits\":[]}]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "unsupported",
+      "edits": [],
+      "elapsedSeconds": 12.253185499983374,
+      "id": "N07",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"requirements\":[{\"source\":\"Write a poem in Destination.\",\"kind\":\"other\",\"preserve\":[],\"edits\":[]}]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"requirements\":[{\"source\":\"Write a poem in Destination.\",\"kind\":\"other\",\"preserve\":[],\"edits\":[]}]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "clarification",
+      "edits": [],
+      "elapsedSeconds": 12.242920416669222,
+      "id": "N08",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"requirements\":[{\"source\":\"Change City to Portland.\",\"kind\":\"clarification\",\"preserve\":[],\"edits\":[]}]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"requirements\":[{\"source\":\"Change City to Portland.\",\"kind\":\"clarification\",\"preserve\":[],\"edits\":[]}]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 0,
+          "mode": "replaceAll",
+          "value": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        }
+      ],
+      "elapsedSeconds": 13.327687916666036,
+      "id": "N13",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"requirements\":[{\"source\":\"Put the following exact quoted text in Origin: [exact quoted payload p1]\", \"kind\": \"edits\", \"preserve\": [], \"edits\": [{\"fieldID\": \"f1\", \"target\": \"Origin\", \"mode\": \"replaceAll\", \"value\": \"p1\"}]}]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"requirements\":[{\"source\":\"Put the following exact quoted text in Origin: [exact quoted payload p1]\", \"kind\": \"edits\", \"preserve\": [], \"edits\": [{\"fieldID\": \"f1\", \"target\": \"Origin\", \"mode\": \"replaceAll\", \"value\": \"p1\"}]}]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 1,
+          "mode": "replaceAll",
+          "value": "Austin"
+        }
+      ],
+      "elapsedSeconds": 13.200447708339198,
+      "id": "N14",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"requirements\":[{\"source\":\"Do not change Origin.\",\"kind\":\"constraint\",\"preserve\":[{\"fieldID\":\"f1\",\"target\":\"Origin\"}],\"edits\":[]},{\"source\":\"Replace Destination with Austin.\",\"kind\":\"edits\",\"preserve\":[],\"edits\":[{\"fieldID\":\"f2\",\"target\":\"Destination\",\"mode\":\"replaceAll\",\"value\":\"Austin\"}]}]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"requirements\":[{\"source\":\"Do not change Origin.\",\"kind\":\"constraint\",\"preserve\":[{\"fieldID\":\"f1\",\"target\":\"Origin\"}],\"edits\":[]},{\"source\":\"Replace Destination with Austin.\",\"kind\":\"edits\",\"preserve\":[],\"edits\":[{\"fieldID\":\"f2\",\"target\":\"Destination\",\"mode\":\"replaceAll\",\"value\":\"Austin\"}]}]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 0,
+          "mode": "replaceAll",
+          "value": "Oslo"
+        },
+        {
+          "field": 1,
+          "mode": "replaceAll",
+          "value": "Bergen"
+        }
+      ],
+      "elapsedSeconds": 13.995370999997249,
+      "id": "N12",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"requirements\":[{\"source\":\"Set Origin to Oslo\",\"kind\":\"edits\",\"preserve\":[],\"edits\":[{\"fieldID\":\"f1\",\"target\":\"Origin\",\"mode\":\"replaceAll\",\"value\":\"Oslo\"}]},{\"source\":\"and Destination to Bergen.\",\"kind\":\"edits\",\"preserve\":[],\"edits\":[{\"fieldID\":\"f2\",\"target\":\"Destination\",\"mode\":\"replaceAll\",\"value\":\"Bergen\"}]}]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"requirements\":[{\"source\":\"Set Origin to Oslo\",\"kind\":\"edits\",\"preserve\":[],\"edits\":[{\"fieldID\":\"f1\",\"target\":\"Origin\",\"mode\":\"replaceAll\",\"value\":\"Oslo\"}]},{\"source\":\"and Destination to Bergen.\",\"kind\":\"edits\",\"preserve\":[],\"edits\":[{\"fieldID\":\"f2\",\"target\":\"Destination\",\"mode\":\"replaceAll\",\"value\":\"Bergen\"}]}]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 1,
+          "mode": "replaceAll",
+          "value": "Berlin"
+        }
+      ],
+      "elapsedSeconds": 13.223520958330482,
+      "id": "R15",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"requirements\":[{\"source\":\"Set [exact quoted payload p1] to [exact quoted payload p2].\",\"kind\":\"edits\",\"preserve\":[],\"edits\":[{\"fieldID\":\"f2\",\"target\":\"p1\",\"mode\":\"replaceAll\",\"value\":\"p2\"}]}]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"requirements\":[{\"source\":\"Set [exact quoted payload p1] to [exact quoted payload p2].\",\"kind\":\"edits\",\"preserve\":[],\"edits\":[{\"fieldID\":\"f2\",\"target\":\"p1\",\"mode\":\"replaceAll\",\"value\":\"p2\"}]}]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 1,
+          "mode": "replaceAll",
+          "value": "Origin"
+        }
+      ],
+      "elapsedSeconds": 13.086771999980556,
+      "id": "R16",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"requirements\":[{\"source\":\"Put [exact quoted payload p1] in Destination.\",\"kind\":\"edits\",\"preserve\":[],\"edits\":[{\"fieldID\":\"f2\",\"target\":\"Destination\",\"mode\":\"replaceAll\",\"value\":\"p1\"}]}]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"requirements\":[{\"source\":\"Put [exact quoted payload p1] in Destination.\",\"kind\":\"edits\",\"preserve\":[],\"edits\":[{\"fieldID\":\"f2\",\"target\":\"Destination\",\"mode\":\"replaceAll\",\"value\":\"p1\"}]}]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 0,
+          "mode": "replaceAll",
+          "value": "Tallinn"
+        },
+        {
+          "field": 1,
+          "mode": "replaceAll",
+          "value": "Riga"
+        }
+      ],
+      "elapsedSeconds": 14.6529170833237,
+      "id": "R17",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"requirements\":[{\"source\":\"Set [exact quoted payload p1] to [exact quoted payload p2],\",\"kind\":\"edits\",\"preserve\":[],\"edits\":[{\"fieldID\":\"f1\",\"target\":\"p1\",\"mode\":\"replaceAll\",\"value\":\"p2\"}]},{\"source\":\"and [exact quoted payload p3] to [exact quoted payload p4].\",\"kind\":\"edits\",\"preserve\":[],\"edits\":[{\"fieldID\":\"f2\",\"target\":\"p3\",\"mode\":\"replaceAll\",\"value\":\"p4\"}]}]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"requirements\":[{\"source\":\"Set [exact quoted payload p1] to [exact quoted payload p2],\",\"kind\":\"edits\",\"preserve\":[],\"edits\":[{\"fieldID\":\"f1\",\"target\":\"p1\",\"mode\":\"replaceAll\",\"value\":\"p2\"}]},{\"source\":\"and [exact quoted payload p3] to [exact quoted payload p4].\",\"kind\":\"edits\",\"preserve\":[],\"edits\":[{\"fieldID\":\"f2\",\"target\":\"p3\",\"mode\":\"replaceAll\",\"value\":\"p4\"}]}]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    }
+  ],
+  "contract": "source-bound-v6",
+  "corpusSHA256": "5aa2c8ffda2a66cf2a188472c16aa4cac9c4d8ecc83e760787564a68942a2f0b",
+  "desktopEffects": false,
+  "expectedCaseIDs": [
+    "N01",
+    "N02",
+    "N03",
+    "N04",
+    "N05",
+    "N06",
+    "N07",
+    "N08",
+    "N13",
+    "N14",
+    "N12",
+    "R15",
+    "R16",
+    "R17"
+  ],
+  "modelSHA256FromVerifiedManifest": "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
+  "oracle": "exact-disposition-and-complete-allowed-edit-sequences-including-count-mode-target-payload-and-order",
+  "quotedCommandFastPath": false,
+  "runtimeBinarySHA256": "28f854414bca4810b41ffab960c0656c82acc943877ecd1ef35f0cf3b5056be7",
+  "schemaVersion": 1,
+  "scope": "known-regressions-with-complete-edit-sequence-oracle",
+  "sourceCommit": "0950c15",
+  "xcresult": "/tmp/remotedesktop-source-bound-model-v6-first.xcresult",
+  "notEnabledInProduction": true,
+  "rawReportSHA256": "7bbb043ae53a16d4ae63bb5799066b20016391cd79eeec9262f47b0f14580871",
+  "classification": "14/14 complete-plan known regressions passed. One coverage correction for N03; 15 model responses total. No desktop effects or fast path."
+}

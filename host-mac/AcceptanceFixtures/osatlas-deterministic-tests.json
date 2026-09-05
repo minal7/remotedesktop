@@ -55,7 +55,8 @@
     "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests",
     "RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests/testExplicitBrowserNavigationUsesOwnedContextWithAppleAndVisualUnavailable",
     "RemoteDesktopHostTests/ComputerUseBrowserDOMTests",
-    "RemoteDesktopHostTests/ComputerUseSourceBoundTextPlanTests"
+    "RemoteDesktopHostTests/ComputerUseSourceBoundTextPlanTests",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserModelAcceptanceTests/testIndependentSequenceOracleRejectsExtraWrongTargetReorderedAndNormalizedIntermediateStates"
   ],
   "expectedTests": [
     "RemoteDesktopHostTests/ComputerUseBrowserDOMTests/testCancellationAndDeadlineKeepInFlightScriptOwnedUntilItsCallbackWithoutReplay",
@@ -116,6 +117,7 @@
     "RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testVisualSetupFailureKeepsNewlyInstalledNativeAndMacToolsAvailable",
     "RemoteDesktopHostTests/ComputerUseObservationWorkerTests/testBlockingObservationLeavesMainActorResponsiveAndTimesOut",
     "RemoteDesktopHostTests/ComputerUseObservationWorkerTests/testCancellationReturnsWithoutWaitingForBlockedNativeCall",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserModelAcceptanceTests/testIndependentSequenceOracleRejectsExtraWrongTargetReorderedAndNormalizedIntermediateStates",
     "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testCancelledNavigationAndLateResponseCannotAcquireAReceipt",
     "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testDeadlineAndOwnershipLossStopPendingLoadWithoutSuccess",
     "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testHTTPFailureDoesNotProduceSuccessReceipt",

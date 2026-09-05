@@ -5,6 +5,27 @@ import XCTest
 
 @MainActor
 final class ComputerUseOwnedBrowserModelAcceptanceTests: XCTestCase {
+    func testIndependentSequenceOracleRejectsExtraWrongTargetReorderedAndNormalizedIntermediateStates() throws {
+        let edits: [[String: Any]] = [["field": 0, "mode": "replaceAll", "value": "e\u{301}"],
+                                     ["field": 0, "mode": "append", "value": " / checked"]]
+        let expected = try Self.expectedSequence(initial: ["destination": "keep"], edits: edits)
+        let before = ["origin": "", "destination": "keep", "target": ""]
+        let first = ["origin": "e\u{301}", "destination": "keep", "target": "origin"]
+        let last = ["origin": "e\u{301} / checked", "destination": "keep", "target": "origin"]
+        XCTAssertTrue(Self.matches([before, first, last], expected: expected))
+        var wrongTarget = first; wrongTarget["target"] = "destination"
+        var wrongOtherField = first; wrongOtherField["destination"] = "changed"
+        var normalized = first; normalized["origin"] = "é"
+        let extra = ["origin": "Origin", "destination": "keep", "target": "origin"]
+        for actual in [[before, extra, first, last], [before, wrongTarget, last],
+                       [before, wrongOtherField, last], [before, normalized, last],
+                       [before, last, first], [before, last]] {
+            XCTAssertFalse(Self.matches(actual, expected: expected), "The entire sequence must match, not merely its final value")
+        }
+        XCTAssertThrowsError(try Self.expectedSequence(initial: [:], edits: [["field": 0, "mode": "insert", "value": "x"]]),
+                             "This browser corpus has no selection oracle for insert")
+    }
+
     func testSignedManagedLocalModelEditsOwnedBrowserThroughProductionCoordinator() async throws {
         let environment = ProcessInfo.processInfo.environment
         guard environment["RUN_SIGNED_OWNED_BROWSER_MODEL_ACCEPTANCE"] == "1" else {
@@ -22,6 +43,18 @@ final class ComputerUseOwnedBrowserModelAcceptanceTests: XCTestCase {
         let corpus = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         let cases = try XCTUnwrap(corpus["cases"] as? [[String: Any]])
         XCTAssertEqual(cases.count, 14)
+        let plansURL = URL(fileURLWithPath: try XCTUnwrap(environment["COMPUTER_USE_OWNED_BROWSER_PLAN_CORPUS"]))
+        let planData = try Data(contentsOf: plansURL)
+        let planHash = SHA256.hash(data: planData).map { String(format: "%02x", $0) }.joined()
+        guard planHash == "5aa2c8ffda2a66cf2a188472c16aa4cac9c4d8ecc83e760787564a68942a2f0b",
+              let planCorpus = try JSONSerialization.jsonObject(with: planData) as? [String: Any],
+              let planCases = planCorpus["cases"] as? [[String: Any]], planCases.count == cases.count else {
+            throw AcceptanceError.incomplete("The complete edit-sequence corpus changed")
+        }
+        let plansByID = try Dictionary(uniqueKeysWithValues: planCases.map { (try XCTUnwrap($0["id"] as? String), $0) })
+        guard Set(plansByID.keys) == Set(cases.compactMap { $0["id"] as? String }) else {
+            throw AcceptanceError.incomplete("Complete-plan case identifiers do not match")
+        }
         let expectedEvents = ["N01": 2, "N02": 2, "N03": 1, "N04": 1, "N05": 2, "N06": 0, "N07": 0,
                               "N08": 0, "N13": 1, "N14": 1, "N12": 2, "R15": 1, "R16": 1, "R17": 2]
         let selectedIDs = environment["COMPUTER_USE_OWNED_BROWSER_CASE_IDS"].map { Set($0.split(separator: ",").map(String.init)) }
@@ -62,7 +95,8 @@ final class ComputerUseOwnedBrowserModelAcceptanceTests: XCTestCase {
             let report: [String: Any] = ["schemaVersion": 1, "scope": "signed-owned-browser-known-form-regressions",
                 "hostBundlePath": Bundle.main.bundleURL.path, "installationVersion": receipt.installationVersion,
                 "runtimeBinarySHA256": runtimeHash, "modelSHA256FromVerifiedManifest": ComputerUseArtifactManifest.nativeTextV2.modelArtifacts[0].sha256,
-                "corpusSHA256": corpusHash, "oracle": "independent-page-input-events-and-full-form-values-received-over-loopback-http",
+                "corpusSHA256": corpusHash, "completePlanCorpusSHA256": planHash,
+                "oracle": "independent-page-input-events-with-exact-target-and-full-form-state-after-every-allowed-operation",
                 "selectedCaseIDs": cases.compactMap { $0["id"] as? String }.filter { selectedIDs?.contains($0) ?? true },
                 "cases": rows]
             try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: reportURL, options: .atomic)
@@ -88,6 +122,11 @@ final class ComputerUseOwnedBrowserModelAcceptanceTests: XCTestCase {
                     }
                     var prompt = try XCTUnwrap(item["prompt"] as? String)
                     if item["payloadRecipe"] != nil { prompt = prompt.replacingOccurrences(of: "PAYLOAD", with: "\"" + String(repeating: "x", count: 2_000) + "\"") }
+                    let planCase = try XCTUnwrap(plansByID[id])
+                    guard planCase["prompt"] as? String == prompt,
+                          planCase["fields"] as? [String] == ["Origin", "Destination"] else {
+                        throw AcceptanceError.incomplete(id + " complete-plan input mismatch")
+                    }
                     let result = try await executor.execute(taskID: runID + "-" + id, modelPrompt: prompt,
                         currentUserPrompt: prompt, conversation: [], tools: tools, progress: { _ in })
                     resultDescription = String(describing: result)
@@ -126,9 +165,17 @@ final class ComputerUseOwnedBrowserModelAcceptanceTests: XCTestCase {
                             throw AcceptanceError.incomplete(id + " independently observed " + name)
                         }
                     }
+                    let actualSequence = states.sorted { Int($0["sequence"]!)! < Int($1["sequence"]!)! }
+                    let allowedPlans = planCase["allowedPlans"] as? [[[String: Any]]] ?? [[]]
+                    let initial = item["initial"] as? [String: String] ?? [:]
+                    let allowedSequences = try allowedPlans.map { try Self.expectedSequence(initial: initial, edits: $0) }
+                    guard allowedSequences.contains(where: { Self.matches(actualSequence, expected: $0) }) else {
+                        throw AcceptanceError.incomplete(id + " intermediate target/value sequence differs from every complete allowed plan")
+                    }
                     guard server.count("/case/" + id) == 1 else { throw AcceptanceError.incomplete(id + " navigation replay") }
                     let elapsed = ProcessInfo.processInfo.systemUptime - started
                     rows.append(["id": id, "disposition": disposition, "verified": true, "inputEvents": eventCount,
+                                 "completeOperationSequenceVerified": true, "observedFixtureStates": actualSequence,
                                  "retainedTaskReplayChecked": disposition == "completed", "elapsedSeconds": elapsed])
                     try save()
                     FileHandle.standardError.write(Data("Owned browser local model: \(id) verified in \(String(format: "%.3f", elapsed))s\n".utf8))
@@ -142,6 +189,32 @@ final class ComputerUseOwnedBrowserModelAcceptanceTests: XCTestCase {
             }
             await runtime.shutdown()
         } catch { await runtime.shutdown(); throw error }
+    }
+
+    private static func expectedSequence(initial: [String: String], edits: [[String: Any]]) throws -> [[String: String]] {
+        var value = ["origin": initial["origin"] ?? "", "destination": initial["destination"] ?? "", "target": ""]
+        var states = [value]
+        for edit in edits {
+            guard let field = edit["field"] as? Int, (0...1).contains(field),
+                  let payload = edit["value"] as? String, let mode = edit["mode"] as? String,
+                  ["replaceAll", "append"].contains(mode) else {
+                throw AcceptanceError.incomplete("Invalid operation in frozen browser corpus")
+            }
+            let name = ["origin", "destination"][field]
+            value[name] = mode == "append" ? value[name]! + payload : payload
+            value["target"] = name
+            states.append(value)
+        }
+        return states
+    }
+
+    private static func matches(_ actual: [[String: String]], expected: [[String: String]]) -> Bool {
+        actual.count == expected.count && zip(actual, expected).allSatisfy { observed, wanted in
+            ["origin", "destination", "target"].allSatisfy { key in
+                guard let value = observed[key], let target = wanted[key] else { return false }
+                return value.utf8.elementsEqual(target.utf8)
+            }
+        }
     }
 
     private static func states(_ server: OwnedBrowserHTTPFixture, id: String) -> [[String: String]] {
@@ -169,10 +242,10 @@ final class ComputerUseOwnedBrowserModelAcceptanceTests: XCTestCase {
         </main><script>
         const originField = document.getElementById('origin'), destinationField = document.getElementById('destination');
         let sequence = 0;
-        function report() { fetch('/state?' + new URLSearchParams({case:'\(id)',sequence:String(sequence),origin:originField.value,destination:destinationField.value})); }
+        function report(target = '') { fetch('/state?' + new URLSearchParams({case:'\(id)',sequence:String(sequence),target,origin:originField.value,destination:destinationField.value})); }
         for (const field of [originField,destinationField]) {
           field.setSelectionRange(field.value.length,field.value.length);
-          field.addEventListener('input', () => { sequence++; report(); });
+          field.addEventListener('input', () => { sequence++; report(field.id); });
         }
         report();
         </script></body></html>
