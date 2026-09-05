@@ -12,7 +12,7 @@ struct ComputerUseVisualApprovalContinuation: Equatable, Sendable {
 
 /// A screen image paired with the global-display coordinates used by the
 /// intervention-safe input injector.
-struct ComputerUseScreenObservation {
+struct ComputerUseScreenObservation: Sendable {
     let image: CIImage
     let displayBounds: CGRect
     /// Global Accessibility bounds for the focused window captured with this

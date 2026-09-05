@@ -3745,9 +3745,7 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
         }
 
         if let quoted = exactDoubleQuotedText(in: task) {
-            return .init(
-                directive: .type,
-                argument: .text(quoted))
+            return literalTextRoute(quoted, task: task)
         }
 
         let expression: NSRegularExpression
@@ -4622,7 +4620,7 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
         }
         if selected.directive == .type,
            let quoted = exactDoubleQuotedText(in: request.task) {
-            return .init(directive: .type, argument: .text(quoted))
+            return literalTextRoute(quoted, task: request.task)
         }
         if selected.directive == .ask,
            case .question(let proposedQuestion) = selected.argument,
@@ -4720,21 +4718,17 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
     }
 
     private static func exactDoubleQuotedText(in task: String) -> String? {
-        for delimiters in [("“", "”"), ("\"", "\"")] {
-            guard let opening = task.range(of: delimiters.0),
-                  let closing = task.range(
-                    of: delimiters.1,
-                    range: opening.upperBound ..< task.endIndex) else {
-                continue
-            }
-            let value = task[opening.upperBound ..< closing.lowerBound]
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            if SemanticNativeToolWireContract
-                .isValidModelGeneratedText(value) {
-                return value
-            }
+        ComputerUseLiteralPayload.singleQuotedPayload(in: task)?.text
+    }
+
+    private static func literalTextRoute(_ text: String, task: String) -> OSAtlasSemanticActionRoute {
+        if SemanticNativeToolWireContract.isValidModelGeneratedText(text) {
+            return .init(directive: .type, argument: .text(text))
         }
-        return nil
+        guard let payload = ComputerUseLiteralPayload.singleQuotedPayload(in: task) else {
+            return .init(directive: .ask, argument: .question("Which exact text should I enter?"))
+        }
+        return .init(directive: .type, argument: .literalTextReference(payload.id))
     }
 
     /// An ASK is safe only when its requested field is bound to the trusted
@@ -5239,7 +5233,7 @@ private extension AppleFoundationVisualActionRouter {
         Call exactly one provided routing tool. A routing tool only records the operation family; it cannot execute, click, type, open an app, or contact an MCP server.
         Fill every required routing-tool argument from the authoritative user task and current visible text. Target hints identify the specific visible control or item; they are never coordinates. For an icon-only control, retain the control's task purpose or destination words in target_hint; never describe only its shape, color, or glyph. Preserve user-provided text exactly. Visible answers must include a concise summary and one or more supporting facts. Each evidence item must copy exactly one complete visible-screen line, without its line number; never paraphrase evidence, add connector words, or combine separate lines. The summary may concisely restate only those exact evidence lines.
         Choose the most specific operation. Never substitute a normal click for opening a file/folder, a context menu, a drag, text entry, Return, a shortcut, waiting, asking, answering, completion, scrolling, or opening the task-relevant app.
-        Application selection is the highest-priority rule: if the user explicitly names an app, or the task clearly belongs to an app different from the current frontmost app, always choose open_application before any interaction in the unrelated app. Never choose open_application when the task-relevant app is already the current frontmost application; interact in that app instead. In particular, open a visible Finder item with double_click when Finder is already frontmost. Do not ask for information merely because the correct app has not been opened yet.
+        Work in the current application when its visible controls support the user's request. Titles, item contents, and column labels are data, not application identities. Choose open_application when the user explicitly requests a different app or the current app cannot perform the required operation; do not switch apps merely because another app commonly handles the subject matter. Never reopen the current task-relevant app. Open a visible Finder item with double_click when Finder is already frontmost. Do not ask for information merely because an explicitly requested app has not been opened yet.
         After the task-relevant app is frontmost: if required user information is absent, choose ask_user and ask only for the exact field visibly marked missing or not provided; do not invent a second missing detail. If a direct factual question's answer is already visible, choose answer_direct_question_only. If the requested end state is visibly already satisfied, choose complete_task. If the screen is loading or updating, choose wait_for_screen.
         Requests to go, navigate, advance, show, or reveal a visible next/previous day, week, page, tab, or offscreen content are state changes, never answer_direct_question_only.
         Moving a visible item or card from one named location or column to another is always drag_item, never a scroll tool. For drag_item, item_to_move is the item being moved, not its current container; drop_destination is the named destination container or location. Copying selected content or using a keyboard shortcut is keyboard_shortcut. Opening a Finder/Desktop file or folder is double_click. Opening a context menu is right_click.

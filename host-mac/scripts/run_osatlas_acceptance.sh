@@ -7,28 +7,32 @@ SCHEME="RemoteDesktopHost"
 MODEL_FLAG="/tmp/com.threadmark.remotedesktop.osatlas-model-e2e-$(id -u)"
 LIVE_CONFIG="/tmp/com.threadmark.remotedesktop.osatlas-live-doordash-$(id -u).json"
 VERIFY_XCRESULT="$ROOT/host-mac/scripts/verify_xcresult_counts.sh"
-# The selected inventory is the complete executor suite (currently 125), two
-# pinned runtime tests, and eleven native host-input tests. Keep this exact so
-# newly added or silently omitted acceptance coverage fails closed.
-DETERMINISTIC_EXPECTED_TESTS=138
+INVENTORY_VERIFIER="$ROOT/host-mac/scripts/verify_test_inventory.py"
+DETERMINISTIC_INVENTORY="$ROOT/host-mac/AcceptanceFixtures/osatlas-deterministic-tests.json"
 RESULT_ROOT=""
 
 run_actual_model=0
+run_future_semantic_package=0
 run_live_doordash=0
 allow_visible_ui=0
 configuration="Debug"
 
 usage() {
-    /bin/echo "Usage: $0 [--configuration Debug|Release] [--actual-model] [--live-doordash --allow-visible-ui]"
+    /bin/echo "Usage: $0 [--configuration Debug|Release] [--actual-model] [--future-semantic-package] [--live-doordash --allow-visible-ui]"
     /bin/echo ""
     /bin/echo "Default: hidden deterministic OS-Atlas parser, executor, safety, and native-input tests."
-    /bin/echo "--actual-model: additionally gate the final installed Granite + OS-Atlas production package against hidden virtual screens; requires --configuration Release."
+    /bin/echo "--actual-model: gate the current installed production package and hidden model components; requires --configuration Release."
+    /bin/echo "--future-semantic-package: additionally qualify the V5 Apple/Granite/OS-Atlas composition; requires its published artifact and --configuration Release."
     /bin/echo "--live-doordash: read a prepared, visible DoorDash review page without performing input; requires --configuration Release."
 }
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --actual-model)
+            run_actual_model=1
+            ;;
+        --future-semantic-package)
+            run_future_semantic_package=1
             run_actual_model=1
             ;;
         --live-doordash)
@@ -143,6 +147,12 @@ RESULT_ROOT="$(/usr/bin/mktemp -d "/tmp/com.threadmark.remotedesktop.osatlas-acc
 # suite's `@testable import`; Release still uses its normal optimization,
 # Production CloudKit setting, and mandatory real runtime signature.
 deterministic_result="$RESULT_ROOT/deterministic.xcresult"
+selector_output="$(python3 "$INVENTORY_VERIFIER" \
+    --manifest "$DETERMINISTIC_INVENTORY" --source-root "$ROOT" --selectors)"
+deterministic_selectors=()
+while IFS= read -r selector; do
+    deterministic_selectors+=("-only-testing:$selector")
+done <<< "$selector_output"
 xcodebuild test \
     -project "$PROJECT" \
     -scheme "$SCHEME" \
@@ -152,34 +162,22 @@ xcodebuild test \
     -disableAutomaticPackageResolution \
     -onlyUsePackageVersionsFromResolvedFile \
     ENABLE_TESTABILITY=YES \
-    -only-testing:RemoteDesktopHostTests/OSAtlasComputerUseExecutorTests \
-    -only-testing:RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testCompletionRequestIsAuthenticatedLoopbackOnlyAndDeterministic \
-    -only-testing:RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testLaunchArgumentsPinLoopbackAuthNoLogsAndInferenceBudget \
-    -only-testing:RemoteDesktopHostTests/ComputerUseTests/test_visualOpenAppUsesValidatedNativeApplicationOpener \
-    -only-testing:RemoteDesktopHostTests/ComputerUseTests/test_visualOpenAppRejectsPathsAndPausedAutomationBeforeOpening \
-    -only-testing:RemoteDesktopHostTests/ComputerUseTests/test_virtualScreenAndAccessibilityContextKeepModelTestsOffTheDesktop \
-    -only-testing:RemoteDesktopHostTests/ComputerUseTests/test_computerUseDoubleClickCarriesNativeClickCount \
-    -only-testing:RemoteDesktopHostTests/ComputerUseTests/test_computerUseRightClickPostsNativeRightButtonPair \
-    -only-testing:RemoteDesktopHostTests/ComputerUseTests/test_computerUseMiddleClickPostsNativeOtherButtonPair \
-    -only-testing:RemoteDesktopHostTests/ComputerUseTests/test_computerUseEnterPostsReturnKeyDownAndUp \
-    -only-testing:RemoteDesktopHostTests/ComputerUseTests/test_computerUseCommandShiftHotkeyPostsSKeyWithModifiers \
-    -only-testing:RemoteDesktopHostTests/ComputerUseTests/test_computerUseScrollPostsRequestedDeltaExactlyOnce \
-    -only-testing:RemoteDesktopHostTests/ComputerUseTests/test_computerUseTextPreservesEmojiAndSupplementaryUnicode \
-    -only-testing:RemoteDesktopHostTests/ComputerUseTests/test_computerUseDragInterpolatesHeldPointerPath
-/bin/bash "$VERIFY_XCRESULT" \
-    "$deterministic_result" \
-    "$DETERMINISTIC_EXPECTED_TESTS" \
-    "deterministic OS-Atlas acceptance"
+    "${deterministic_selectors[@]}"
+python3 "$INVENTORY_VERIFIER" --manifest "$DETERMINISTIC_INVENTORY" \
+    --source-root "$ROOT" --result "$deterministic_result"
 
 if [[ $run_actual_model -eq 1 ]]; then
     /usr/bin/install -m 600 /dev/null "$MODEL_FLAG"
     actual_model_tests=(
-        testFinalV5ProductionPackageRoutesThroughAppleGraniteOSAtlasAndHostValidation
+        testCurrentProductionPackageRoutesNaturalLanguageToGroundedApproval
         testInstalledGrounderCompletesRegularUserMatrixWithApplePlannerUnavailableUsingOnlyClickCarriers
         testInstalledHybridUnderstandsNaturalLanguageAcrossFullActionSurfaceWithoutVisibleUI
         testActualModelNavigatesDeliveryQuoteAndValidatedLocalOCRReturnsExactFactsWithoutVisibleUI
         testActualModelCompletesMultiActionDeliveryQuoteWorkflowWithoutVisibleUI
     )
+    if [[ $run_future_semantic_package -eq 1 ]]; then
+        actual_model_tests+=(testFinalV5ProductionPackageRoutesThroughAppleGraniteOSAtlasAndHostValidation)
+    fi
     for test_name in "${actual_model_tests[@]}"; do
         wait_for_actual_model_headroom
         actual_result="$RESULT_ROOT/actual-$test_name.xcresult"

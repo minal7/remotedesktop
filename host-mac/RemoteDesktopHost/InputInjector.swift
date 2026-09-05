@@ -46,6 +46,24 @@ final class InputInjector: @unchecked Sendable {
         _ = apply(message, ifAllowed: { true })
     }
 
+    enum AutomationGateError: Error { case interrupted }
+
+    /// AX mutations use the same ownership boundary as synthesized input.
+    /// Once interruptAutomation returns, a queued AX setter cannot pass an
+    /// earlier gate check and overwrite the person's intervening input.
+    func performHostEffectIfAllowed<Value>(
+        ifAllowed: () -> Bool,
+        _ effect: () throws -> Value
+    ) throws -> Value {
+        lock.lock()
+        defer { lock.unlock() }
+        guard ifAllowed() else {
+            releaseHeldInputLocked()
+            throw AutomationGateError.interrupted
+        }
+        return try effect()
+    }
+
     /// Checks the automation gate while holding the same lock used for event
     /// injection. If a person's WebRTC input closes the gate while an AI
     /// action is queued, that queued action is dropped before it reaches

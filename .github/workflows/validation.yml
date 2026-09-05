@@ -1,7 +1,8 @@
 name: Product validation
 
 # Secret-free validation for every change that reaches main and every pull
-# request. Signed macOS host XCTest remains in the Release workflow because
+# request. The production Mac core runs without an application host. Signed
+# macOS integration XCTest remains in the Release workflow because
 # the host deliberately refuses to bundle an ad-hoc-signed llama.cpp runtime.
 # This workflow never resolves a release version, signs distribution assets,
 # packages installers, creates tags, publishes releases, or writes repository
@@ -120,6 +121,29 @@ jobs:
 
       - name: Run deterministic Computer Use harness tests
         run: python3 -m unittest discover -s host-mac/scripts/tests -p 'test_*.py'
+
+      - name: Validate reviewed Mac acceptance inventory
+        run: |
+          python3 host-mac/scripts/verify_test_inventory.py \
+            --manifest host-mac/AcceptanceFixtures/osatlas-deterministic-tests.json \
+            --source-root .
+
+      - name: Run Mac core Swift regression tests without provisioning
+        run: |
+          set -euo pipefail
+          # Keep one XCTest process: Vision has per-process initialization,
+          # and process-per-test parallelism repeatedly pays that cost.
+          swift test --force-resolved-versions --no-parallel \
+            --xunit-output "$RUNNER_TEMP/mac-core-tests.xml"
+
+      - name: Upload Mac core test results
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: mac-core-tests-${{ github.sha }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/mac-core-tests.xml
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Select an available iPhone simulator
         id: simulator

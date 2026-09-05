@@ -225,6 +225,7 @@ enum OSAtlasSemanticActionArgument: Equatable, Sendable {
     case targetHint(String)
     case dragHints(source: String, destination: String)
     case text(String)
+    case literalTextReference(String)
     case applicationName(String)
     case hotkey(String)
     case question(String)
@@ -955,6 +956,32 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
         var performedActionCount = 0
         var consecutivePendingObservations = 0
         var semanticEffectOutcome: SemanticEffectOutcome? = nil
+        /// Set before entering an input boundary and cleared only after the
+        /// complete effect is recorded. A cancelled partial effect is never
+        /// silently retried when this task resumes.
+        var effectNeedsReconciliation = false
+    }
+
+    private struct ExecutionCheckpoint {
+        let taskID: String
+        let trustedUserPrompt: String
+        var state: ExecutionState
+    }
+
+    // Retain progress, never coordinates or pending approval authority. The
+    // next execution still captures and validates a fresh screen before use.
+    private var executionCheckpoint: ExecutionCheckpoint?
+
+    private func saveCheckpoint(
+        taskID: String,
+        trustedUserPrompt: String,
+        state: ExecutionState
+    ) {
+        guard executionCheckpoint?.taskID == taskID,
+              executionCheckpoint?.trustedUserPrompt == trustedUserPrompt else {
+            return
+        }
+        executionCheckpoint?.state = state
     }
 
     /// Immutable execution resources plus the exact pre-effect state retained
@@ -1400,6 +1427,11 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
                     state.semanticEffectOutcome = nil
                 }
 
+                saveCheckpoint(
+                    taskID: pending.continuation.taskID,
+                    trustedUserPrompt: pending.trustedUserPrompt,
+                    state: state)
+
                 // The manager has already posted this exact action through
                 // the host approval seam. Persist only the retained
                 // privacy-safe grounding draft; never regenerate or perform
@@ -1472,6 +1504,18 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
             await runtime.cancel(endpoint: replacedApproval.endpoint)
             try Task.checkCancellation()
         }
+        if executionCheckpoint?.taskID != taskID
+            || executionCheckpoint?.trustedUserPrompt != trustedUserPrompt {
+            executionCheckpoint = ExecutionCheckpoint(
+                taskID: taskID,
+                trustedUserPrompt: trustedUserPrompt,
+                state: ExecutionState())
+        }
+        let initialState = executionCheckpoint?.state ?? ExecutionState()
+        if initialState.effectNeedsReconciliation {
+            return .clarificationRequired(
+                "An interrupted action may have changed the app. Check the current result and tell me what remains to do before I continue.")
+        }
         if allowsExplicitActionCompatibility,
            let explicitDirective = Self.explicitlyRequiredAction(
             in: trustedUserPrompt,
@@ -1512,7 +1556,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
             endpoint: endpoint,
             semanticRouter: executionSemanticRouter,
             foundationRouteTracker: foundationRouteTracker,
-            initialState: ExecutionState(),
+            initialState: initialState,
             tools: tools,
             progress: progress)
     }
@@ -1560,6 +1604,15 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
                 _ = cancellationJoin.start()
             }
             try Task.checkCancellation()
+            switch result {
+            case .completed, .unableToComplete, .clarificationRequired:
+                if executionCheckpoint?.taskID == taskID {
+                    executionCheckpoint = nil
+                }
+            case .userInterventionRequired, .approvalRequired,
+                    .mcpApprovalRequired:
+                break
+            }
             return result
         } catch {
             if error is CancellationError || Task.isCancelled {
@@ -1590,6 +1643,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
         progress: @escaping (String) -> Void
     ) async throws -> ComputerUseExecutionResult {
         var history = initialState.history
+        var effectNeedsReconciliation = initialState.effectNeedsReconciliation
         var openedApplications = initialState.openedApplications
         var openedApplicationIdentities =
             initialState.openedApplicationIdentities
@@ -1760,7 +1814,18 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
                 performedActionCount: performedActionCount,
                 consecutivePendingObservations:
                     consecutivePendingObservations,
-                semanticEffectOutcome: semanticEffectOutcome)
+                semanticEffectOutcome: semanticEffectOutcome,
+                effectNeedsReconciliation: effectNeedsReconciliation)
+        }
+
+        // The manager joins a cancelled execution before resuming it. Capture
+        // the exact state on every exit, including cancellation during a delay
+        // or model request, rather than trying to reconstruct it from prose.
+        defer {
+            saveCheckpoint(
+                taskID: taskID,
+                trustedUserPrompt: trustedUserPrompt,
+                state: retainedExecutionState())
         }
 
         while performedActionCount < maxSteps {
@@ -1783,8 +1848,11 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
                 return .userInterventionRequired(
                     Self.screenCaptureConsentGuidance)
             }
-            if try ComputerUseScreenCaptureConsentDetector
-                .requiresUserIntervention(from: observation.image) {
+            let consentObservation = observation
+            if try await ComputerUseObservationWorker.perform({
+                try ComputerUseScreenCaptureConsentDetector
+                    .requiresUserIntervention(from: consentObservation.image)
+            }) {
                 progress(Self.screenCaptureConsentGuidance)
                 return .userInterventionRequired(
                     Self.screenCaptureConsentGuidance)
@@ -1836,15 +1904,19 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
             // only from the focused window captured with this frame. Missing
             // Accessibility geometry fails closed instead of scanning a
             // second visible window for a plausible result.
+            let quoteObservation = observation
             if Self.isDeliveryQuoteTask(trustedUserPrompt),
-               try ComputerUseVisibleSignInWallDetector
-                    .requiresDoorDashSignIn(from: observation) {
+               try await ComputerUseObservationWorker.perform({
+                    try ComputerUseVisibleSignInWallDetector
+                        .requiresDoorDashSignIn(from: quoteObservation)
+               }) {
                 progress(Self.deliverySignInGuidance)
                 return .userInterventionRequired(Self.deliverySignInGuidance)
             }
             if Self.isDeliveryQuoteTask(trustedUserPrompt),
-               let visibleQuote = try ComputerUseVisibleQuoteExtractor.summary(
-                    from: observation),
+               let visibleQuote = try await ComputerUseObservationWorker.perform({
+                    try ComputerUseVisibleQuoteExtractor.summary(from: quoteObservation)
+               }),
                Self.visibleDeliveryQuote(
                     visibleQuote,
                     matchesRequest: trustedUserPrompt),
@@ -1993,7 +2065,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
                     directive: explicitDirective)
             } else if let semanticRouter {
                 progress("Step \(step): understanding the requested action…")
-                visibleText = try Self.boundedVisibleText(
+                visibleText = try await Self.visibleTextOffMainActor(
                     from: observation.image)
                 let routeFrontmostApplication =
                     planningCapture.frontmostApplication
@@ -2076,7 +2148,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
                     }
                     planningCapture = postRouteCapture
                     observation = postRouteCapture.observation
-                    visibleText = try Self.boundedVisibleText(
+                    visibleText = try await Self.visibleTextOffMainActor(
                         from: observation.image)
                     if selectedRouteIsVerifiedPostActionAnswer,
                        !hostVerifiesPostActionAnswer(
@@ -2182,7 +2254,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
                     }
                     planningCapture = postAnswerCapture
                     observation = postAnswerCapture.observation
-                    visibleText = try Self.boundedVisibleText(
+                    visibleText = try await Self.visibleTextOffMainActor(
                         from: observation.image)
                     guard hostVerifiesPostActionAnswer(
                         semanticRoute,
@@ -2243,7 +2315,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
                     planningCapture = postGroundingCapture
                     observation = postGroundingCapture.observation
                     if semanticRouteUsesVerifiedPendingWait {
-                        visibleText = try Self.boundedVisibleText(
+                        visibleText = try await Self.visibleTextOffMainActor(
                             from: observation.image)
                         guard AppleFoundationVisualActionRouter
                             .hostVerifiesPendingWait(
@@ -2384,7 +2456,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
             if case .ask(let question) = action {
                 let questionVisibleText: String
                 if visibleText.isEmpty {
-                    questionVisibleText = try Self.boundedVisibleText(
+                    questionVisibleText = try await Self.visibleTextOffMainActor(
                         from: observation.image)
                 } else {
                     questionVisibleText = visibleText
@@ -2407,7 +2479,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
             let hostVerifiedCompletion: Bool
             if case .complete = action,
                semanticRoute?.directive == .complete {
-                let focusedVisibleText = try Self.boundedFocusedVisibleText(
+                let focusedVisibleText = try await Self.focusedVisibleTextOffMainActor(
                     from: observation)
                 hostVerifiedCompletion = AppleFoundationVisualActionRouter
                     .hostVerifiesCompletion(
@@ -2436,6 +2508,12 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
                 for: evidenceCheckedAction,
                 step: step,
                 isHostVerifiedObstacle: isHostVerifiedObstacle) {
+                guard try revalidatedPlanningState(
+                    expected: planningCapture.fingerprint,
+                    binding: .strictVisual) != nil else {
+                    try recordPlanningStateRetry()
+                    continue
+                }
                 return terminalResult
             }
 
@@ -2478,7 +2556,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
                 let preEffectVisibleLineKeys = semanticRoute == nil
                     ? Set<String>()
                     : Self.normalizedVisibleLineKeys(
-                        try Self.boundedVisibleText(from: observation.image))
+                        try await Self.visibleTextOffMainActor(from: observation.image))
                 let openedIdentity = try await tools.openApplication(
                     named: applicationName)
                 recordOpenedApplication(
@@ -2608,7 +2686,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
                         semanticRoute: semanticRoute,
                         preEffectVisibleLineKeys:
                             Self.normalizedVisibleLineKeys(
-                                try Self.boundedVisibleText(
+                                try await Self.visibleTextOffMainActor(
                                     from: observation.image)),
                         groundingDrafts: actionGroundingDrafts,
                         plannerProvenance:
@@ -2639,9 +2717,18 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
                 let preEffectVisibleLineKeys = semanticRoute == nil
                     ? Set<String>()
                     : Self.normalizedVisibleLineKeys(
-                        try Self.boundedVisibleText(from: observation.image))
+                        try await Self.visibleTextOffMainActor(from: observation.image))
+                // OCR is asynchronous. Bind the effect again after it returns
+                // so a takeover or changed field cannot inherit old authority.
+                guard try revalidatedPlanningState(
+                    expected: planningCapture.fingerprint,
+                    binding: inputRevalidation) != nil else {
+                    try recordPlanningStateRetry()
+                    continue
+                }
                 progress("Step \(step): \(Self.progressSummary(action))")
-                try tools.perform(predicted)
+                effectNeedsReconciliation = true
+                try await tools.performVerified(predicted)
                 // Close the in-memory effect segment before any actor hop. If
                 // evidence persistence fails or cancellation arrives now, the
                 // already-posted input must never be retried as an unperformed
@@ -2654,6 +2741,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
                         preEffectVisibleLineKeys: preEffectVisibleLineKeys)
                 }
                 history.append(action.historyEntry)
+                effectNeedsReconciliation = false
                 await recordPostedBrowserActionGroundings(
                     taskID: taskID,
                     action: predicted,
@@ -2775,6 +2863,11 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
                 throw RuntimeError.malformedAction
             }
             return composed(.typeText(text))
+        case (.type, .literalTextReference(let id)):
+            guard let text = ComputerUseLiteralPayload.resolve(id, in: trustedTask) else {
+                throw RuntimeError.malformedAction
+            }
+            return composed(.typeText(text))
         case (.scroll, .none):
             guard let direction = route.scrollDirection else {
                 throw RuntimeError.malformedAction
@@ -2798,7 +2891,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
             return composed(.ask(question))
         case (.answer, .visibleAnswer(let summary, let evidence)),
              (.report, .visibleAnswer(let summary, let evidence)):
-            let focusedVisibleText = try Self.boundedFocusedVisibleText(
+            let focusedVisibleText = try await Self.focusedVisibleTextOffMainActor(
                 from: observation)
             let verificationMode: VisibleAnswerVerificationMode =
                 AppleFoundationVisualActionRouter
@@ -2818,7 +2911,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
                 verificationMode: verificationMode)))
         case (.answer, .visibleObstacle(let summary, let evidence)),
              (.report, .visibleObstacle(let summary, let evidence)):
-            let focusedVisibleText = try Self.boundedFocusedVisibleText(
+            let focusedVisibleText = try await Self.focusedVisibleTextOffMainActor(
                 from: observation)
             return composed(.report(try Self.verifiedVisibleAnswer(
                 summary: summary,
@@ -3884,6 +3977,8 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
         case (.type, .text(let value)):
             return SemanticNativeToolWireContract
                 .isValidModelGeneratedText(value)
+        case (.type, .literalTextReference(let id)):
+            return id.hasPrefix("literal-") && id.count == 72
         case (.openApplication, .applicationName(let value)):
             return (1 ... 200).contains(value.count)
                 && !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -4014,6 +4109,12 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
             // payloads can still fill distinct fields.
             let marker = OSAtlasGUIAction.typeText(text).historyEntry
             return !history.contains(marker)
+        case (.type, .literalTextReference(let id)):
+            guard let text = ComputerUseLiteralPayload.resolve(id, in: trustedTask),
+                  taskAffirmativelyBindsTypedPayload(text, in: trustedTask) else {
+                return false
+            }
+            return !history.contains(OSAtlasGUIAction.typeText(text).historyEntry)
         case (.scroll, .none):
             let navigationWords: Set<String> = [
                 "go", "navigate", "reveal", "scroll", "show",
@@ -4667,7 +4768,9 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
         in trustedTask: String
     ) -> Bool {
         guard SemanticNativeToolWireContract
-            .isValidModelGeneratedText(payload) else { return false }
+            .isValidModelGeneratedText(payload)
+                || ComputerUseLiteralPayload.singleQuotedPayload(in: trustedTask)?.text == payload
+        else { return false }
 
         let escapedPayload = NSRegularExpression.escapedPattern(for: payload)
         let payloadPattern =
@@ -6997,7 +7100,21 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
             || canonicalEntry.hasPrefix("HOTKEY [")
     }
 
-    static func boundedVisibleText(from image: CIImage) throws -> String {
+    static func visibleTextOffMainActor(from image: CIImage) async throws -> String {
+        try await ComputerUseObservationWorker.perform {
+            try boundedVisibleText(from: image)
+        }
+    }
+
+    static func focusedVisibleTextOffMainActor(
+        from observation: ComputerUseScreenObservation
+    ) async throws -> String {
+        try await ComputerUseObservationWorker.perform {
+            try boundedFocusedVisibleText(from: observation)
+        }
+    }
+
+    nonisolated static func boundedVisibleText(from image: CIImage) throws -> String {
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
         request.usesLanguageCorrection = true
@@ -7006,7 +7123,9 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
             try VNImageRequestHandler(ciImage: image, options: [:])
                 .perform([request])
         } catch {
-            throw RuntimeError.invalidImage
+            let nativeError = error as NSError
+            throw ComputerUseObservationWorker.Failure.recognitionFailed(
+                domain: nativeError.domain, code: nativeError.code)
         }
         let observations = (request.results ?? []).sorted { left, right in
             if abs(left.boundingBox.midY - right.boundingBox.midY) > 0.018 {
@@ -7033,7 +7152,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
             from: sourceLines.joined(separator: "\n"))
     }
 
-    static func boundedFocusedVisibleText(
+    nonisolated static func boundedFocusedVisibleText(
         from observation: ComputerUseScreenObservation
     ) throws -> String {
         guard let normalizedBounds = observation.normalizedFrontmostWindowBounds

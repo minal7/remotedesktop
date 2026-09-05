@@ -900,6 +900,8 @@ final class ComputerUseHostTools {
     private let approvalTargetProvider:
         ((ComputerUsePredictedAction) throws -> ComputerUseApprovalTargetSnapshot)?
     private let actionPerformer: ((ComputerUsePredictedAction) throws -> Void)?
+    private let textTarget = ComputerUseAccessibilityTextTarget()
+    private let textEditorOverride: ComputerUseTextEditor?
     /// Deterministic seam used to exercise a gate close after one low-level
     /// event has posted but before the rest of an approved action is emitted.
     /// Production leaves this nil.
@@ -934,6 +936,7 @@ final class ComputerUseHostTools {
         approvalTargetProvider:
             ((ComputerUsePredictedAction) throws -> ComputerUseApprovalTargetSnapshot)? = nil,
         actionPerformer: ((ComputerUsePredictedAction) throws -> Void)? = nil,
+        textEditor: ComputerUseTextEditor? = nil,
         approvedActionStepDidPost: (@MainActor () -> Void)? = nil,
         screenProvider: (() throws -> ComputerUseScreenObservation)? = nil,
         conservativeActionAdjustmentProvider:
@@ -974,6 +977,7 @@ final class ComputerUseHostTools {
         }
         self.approvalTargetProvider = approvalTargetProvider
         self.actionPerformer = actionPerformer
+        self.textEditorOverride = textEditor
         self.approvedActionStepDidPost = approvedActionStepDidPost
         self.screenProvider = screenProvider
         if let conservativeActionAdjustmentProvider {
@@ -1316,7 +1320,11 @@ final class ComputerUseHostTools {
             // focus. Tests that exercise AX changes inject the explicit seam.
             focusedIdentity = nil
         } else {
-            focusedIdentity = focusedElementSnapshot()?.identity
+            if let textSnapshot = try currentTextSnapshot() {
+                focusedIdentity = "text:\(textSnapshot.preconditionDigest)"
+            } else {
+                focusedIdentity = focusedElementSnapshot()?.identity
+            }
         }
         return ComputerUsePlanningStateFingerprint(
             screenDigest: try planningScreenDigest(observation),
@@ -1921,6 +1929,14 @@ final class ComputerUseHostTools {
         for action: ComputerUsePredictedAction
     ) throws -> ComputerUsePreparedApproval {
         let target = try approvalTarget(for: action)
+        var accessibilityIdentity = target.accessibilityIdentity
+        if case .typeText = action,
+           actionPerformer == nil, approvalTargetProvider == nil {
+            guard let textSnapshot = try currentTextSnapshot() else {
+                throw ToolError.approvalTargetUnavailable
+            }
+            accessibilityIdentity += "|text-state=\(textSnapshot.preconditionDigest)"
+        }
         let message = ComputerUseActionSafetyPolicy.approvalReason(
             for: action,
             accessibilityContext: target.context,
@@ -1929,7 +1945,7 @@ final class ComputerUseHostTools {
         let fingerprint = ComputerUseApprovalFingerprint(
             action: action,
             applicationID: target.applicationID,
-            accessibilityIdentity: target.accessibilityIdentity,
+            accessibilityIdentity: accessibilityIdentity,
             visualDigest: try visualDigest(around: target.visualCheckpoints))
         return ComputerUsePreparedApproval(
             message: message,
@@ -1939,12 +1955,16 @@ final class ComputerUseHostTools {
     fileprivate func performApproved(
         _ action: ComputerUsePredictedAction,
         fingerprint: ComputerUseApprovalFingerprint
-    ) throws {
+    ) async throws {
         let current = try prepareApproval(for: action).fingerprint
         guard current == fingerprint else {
             throw ToolError.approvalTargetChanged
         }
-        try perform(action, reportsPartialApprovedEffect: true)
+        if case .typeText = action {
+            try await performVerified(action)
+        } else {
+            try perform(action, reportsPartialApprovedEffect: true)
+        }
     }
 
     private struct ApprovalTarget {
@@ -2623,6 +2643,53 @@ final class ComputerUseHostTools {
 
     func perform(_ action: ComputerUsePredictedAction) throws {
         try perform(action, reportsPartialApprovedEffect: false)
+    }
+
+    private func currentTextSnapshot() throws -> ComputerUseTextSnapshot? {
+        if let textEditorOverride { return try textEditorOverride.read() }
+        return textTarget.snapshot()
+    }
+
+    func performVerified(_ action: ComputerUsePredictedAction) async throws {
+        guard case .typeText(let payload) = action else {
+            try perform(action)
+            return
+        }
+        // A virtual action performer owns its simulated effects. Production
+        // has no performer override and must confirm the real field value.
+        if actionPerformer != nil, textEditorOverride == nil {
+            try perform(action)
+            return
+        }
+        try await editFocusedText(payload, mode: .insert)
+    }
+
+    func editFocusedText(
+        _ payload: String,
+        mode: ComputerUseTextEditMode
+    ) async throws {
+        guard let snapshot = try currentTextSnapshot() else {
+            throw ComputerUseTextEditError.unavailableTarget
+        }
+        let editor = textEditorOverride ?? ComputerUseTextEditor(
+            read: { [textTarget] in textTarget.snapshot() },
+            select: { [textTarget, injector, mayAct] range in
+                try injector.performHostEffectIfAllowed(ifAllowed: mayAct) {
+                    textTarget.select(range)
+                }
+            },
+            replaceSelectedText: { [textTarget, injector, mayAct] text in
+                try injector.performHostEffectIfAllowed(ifAllowed: mayAct) {
+                    textTarget.replaceSelectedText(text)
+                }
+            },
+            postUnicode: { [injector, mayAct] text in
+                guard injector.apply(.text(text), ifAllowed: mayAct) else {
+                    throw ComputerUseTextEditError.interrupted
+                }
+            },
+            mayAct: mayAct)
+        try await editor.edit(payload, mode: mode, expected: snapshot)
     }
 
     private func perform(
@@ -5477,14 +5544,12 @@ final class HostComputerUseManager: ObservableObject {
                 return
             }
 
-            // Mark the task before entering the synchronous posting boundary.
-            // MainActor cannot service Pause or direct-intervention callbacks
-            // until the continuation reaches its first suspension. If a test
-            // seam re-enters synchronously from the poster itself, the marker
-            // still forces the honest post-effect terminal path.
+            // Mark the task before an effect can start. Text verification can
+            // suspend after delivery, so takeover during verification must
+            // retain the same honest may-have-occurred classification.
             postedApprovedVisualTaskID = context.envelope.id
             do {
-                try tools.performApproved(action, fingerprint: fingerprint)
+                try await tools.performApproved(action, fingerprint: fingerprint)
             } catch ComputerUseHostTools.ToolError.approvalTargetChanged {
                 postedApprovedVisualTaskID = nil
                 guard currentExecutionToken == executionToken else { return }
@@ -5520,11 +5585,9 @@ final class HostComputerUseManager: ObservableObject {
                 return
             }
 
-            // `performApproved` and this call are consecutive MainActor work:
-            // there is no `await`, yield, status delivery, or task hop between
-            // the successful host post and the executor consuming its exact
-            // token/history. The callee runs on this actor through its first
-            // suspension point.
+            // Consume the exact continuation only after the host action has
+            // completed its required verification. Cancellation while checking
+            // text is handled as a possibly performed effect above.
             guard currentExecutionToken == executionToken,
                   !Task.isCancelled else { return }
             do {

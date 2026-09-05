@@ -70,7 +70,16 @@ class OSAtlasAcceptanceRunnerContractTests(unittest.TestCase):
         self.assertEqual(source.count("ENABLE_TESTABILITY=YES"), 3)
         self.assertNotIn("    -configuration Debug \\\n", source)
         self.assertIn('configuration="Debug"', source)
-        self.assertIn("DETERMINISTIC_EXPECTED_TESTS=138", source)
+        self.assertNotIn("DETERMINISTIC_EXPECTED_TESTS=", source)
+        self.assertIn('"${deterministic_selectors[@]}"', source)
+        self.assertIn('--result "$deterministic_result"', source)
+
+    def test_future_package_is_a_separate_explicit_release_lane(self) -> None:
+        completed = self.run_script("--future-semantic-package")
+        self.assertEqual(completed.returncode, 2)
+        source = SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("testCurrentProductionPackageRoutesNaturalLanguageToGroundedApproval", source)
+        self.assertIn('if [[ $run_future_semantic_package -eq 1 ]]; then', source)
 
 
 if __name__ == "__main__":

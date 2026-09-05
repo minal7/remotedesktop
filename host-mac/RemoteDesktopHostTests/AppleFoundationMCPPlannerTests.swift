@@ -3641,10 +3641,26 @@ final class AppleFoundationMCPPlannerTests: XCTestCase {
 
         for row in rows {
             do {
+                // Match the host's production request shape. A name alone is
+                // deliberately insufficient authority for a reviewed app and
+                // otherwise makes a redundant launch look necessary.
+                let identity = ComputerUseApplicationIdentity.reviewedBundleIdentifiers(
+                    forApplicationNamed: row.application)?.sorted().first.flatMap { bundleID in
+                    ComputerUseApplicationIdentity(
+                        bundleIdentifier: bundleID, processIdentifier: 7_422, launchGeneration: 1,
+                        codeIdentity: ComputerUseApplicationCodeIdentity(
+                            authority: .reviewedPinned, bundleIdentifier: bundleID,
+                            canonicalBundlePath: "/Applications/\(row.application).app",
+                            canonicalExecutablePath: "/Applications/\(row.application).app/Contents/MacOS/\(row.application)",
+                            designatedRequirement: "identifier \"\(bundleID)\" and anchor apple",
+                            teamIdentifier: nil, platformIdentifier: 1))
+                }
                 let selected = try await router.route(
                     OSAtlasSemanticRoutingRequest(
                         task: row.task,
                         frontmostApplication: row.application,
+                        frontmostApplicationIdentity: identity,
+                        applicationIdentityIsAuthoritative: identity != nil,
                         visibleText: row.visibleText,
                         history: [],
                         availableDirectives: available))
