@@ -138,6 +138,8 @@ Only then broaden capabilities and evaluate whether an additional model pays for
 
 **Work log**
 
+- 2026-09-04: Frozen contract v2 at `a4a01b9` passed its first 20-case held-out v3 proposal corpus (14 supported, three unsupported, three clarification), followed by all 32 actual-model AppKit/WebKit scenarios. Results are retained in `native-text-v2-heldout-v3-results.json` and `native-text-v2-complete-results.json` beside the audit. Production package/runtime/readiness integration and broader qualification remain open; this does not close the release gate.
+
 - 2026-09-04: Began repair on codex/repair-natural-language-computer-use. Revalidated main baseline and all 31 findings.
 - 2026-09-04: Added a SwiftPM target compiling the actual Mac core and existing XCTest sources without an application host. Added PR execution using the pinned dependency lock. Extracted HostRuntimeContext and the hidden acceptance-fixture renderer. The full suite is not yet green; qualification remains in progress.
 - 2026-09-04: Implemented verified text edits with insert/replace/append semantics, AX selected-text entry, exact value readback, target/value/selection binding, Unicode chunks, and no blind retry. Implemented host references for large exact quoted literals. Twenty-one focused regressions pass, including worker cancellation/deadline checks. Native/browser integration and step-aware reconciliation are still outstanding.
