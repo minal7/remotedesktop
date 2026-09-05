@@ -2,6 +2,13 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+test_filter='ComputerUse(NativeTextIntegration|TextEditor|TextTask|TextStepStore|LiteralPayload|ObservationWorker)Tests'
+if [[ "${1:-}" == "--browser-only" ]]; then
+    test_filter='ComputerUseNativeTextIntegrationTests/testRealBrowserFieldsReceiveExactVerifiedEdits'
+elif [[ $# -gt 0 ]]; then
+    echo "Usage: $0 [--browser-only]" >&2
+    exit 2
+fi
 fixture_dir="$(mktemp -d /tmp/remotedesktop-text-fixture.XXXXXX)"
 trap 'rm -rf "$fixture_dir"' EXIT
 bundle="$fixture_dir/ComputerUseTextFixture.app"
@@ -26,4 +33,4 @@ RUN_COMPUTER_USE_NATIVE_TEXT_ACCEPTANCE=1 \
 COMPUTER_USE_TEXT_FIXTURE_EXECUTABLE="$bundle/Contents/MacOS/ComputerUseTextFixture" \
     swift test --force-resolved-versions \
     --scratch-path "${COMPUTER_USE_TEST_BUILD_PATH:-$ROOT/.build}" \
-    --filter 'ComputerUse(NativeTextIntegration|TextEditor|LiteralPayload|ObservationWorker)Tests'
+    --filter "$test_filter"

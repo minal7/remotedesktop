@@ -6,6 +6,14 @@ import XCTest
 @MainActor
 final class ComputerUseNativeTextIntegrationTests: XCTestCase {
     func testRealNativeFieldsReceiveExactVerifiedEdits() async throws {
+        try await runFixture(browser: false)
+    }
+
+    func testRealBrowserFieldsReceiveExactVerifiedEdits() async throws {
+        try await runFixture(browser: true)
+    }
+
+    private func runFixture(browser: Bool) async throws {
         guard ProcessInfo.processInfo.environment["RUN_COMPUTER_USE_NATIVE_TEXT_ACCEPTANCE"] == "1" else {
             throw XCTSkip("Use host-mac/scripts/run_text_edit_acceptance.sh on a prepared Mac")
         }
@@ -20,6 +28,7 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = [state.path]
+        if browser { process.arguments?.append("--browser") }
         try process.run()
         defer {
             if process.isRunning { process.terminate() }
@@ -32,6 +41,13 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(50))
         }
         XCTAssertEqual(NSWorkspace.shared.frontmostApplication?.processIdentifier, process.processIdentifier)
+        // WebKit publishes AX focus asynchronously after DOM focus. A visible
+        // window and loaded DOM do not yet prove editable Accessibility focus.
+        let readiness = ComputerUseAccessibilityTextTarget()
+        for _ in 0..<80 {
+            if readiness.snapshot() != nil { break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
         let injector = InputInjector()
         let tools = ComputerUseHostTools(injector: injector, mayAct: {
             NSWorkspace.shared.frontmostApplication?.processIdentifier == process.processIdentifier
@@ -39,7 +55,21 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         // The fixture reports values through its own app state, independently
         // of the Accessibility readback used by the production text editor.
         let exact = "  \nTokyo 東京 e\u{301} 👨‍👩‍👧‍👦 😀\n" + String(repeating: "x", count: 2_000) + "\n  "
-        try await tools.performVerified(.typeText(exact))
+        do {
+            try await tools.performVerified(.typeText(exact))
+        } catch {
+            if let bytes = try? Data(contentsOf: state),
+               let fields = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any] {
+                for name in ["origin", "destination"] {
+                    let value = fields[name] as? String ?? ""
+                    print("Fixture \(name): \(value.utf8.count) bytes; prefix=\(String(value.prefix(35)).debugDescription)")
+                }
+            }
+            if let value = readiness.snapshot() {
+                print("Fixture AX: \(value.value.utf8.count) bytes; prefix=\(String(value.value.prefix(35)).debugDescription)")
+            }
+            throw error
+        }
         try await verify(state, field: "origin", equals: exact)
         try await tools.editFocusedText("San Francisco", mode: .replaceAll)
         try await verify(state, field: "origin", equals: "San Francisco")
@@ -65,14 +95,42 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             replaceSelectedText: { _ in nil },
             postUnicode: { text in
                 postedChunks += 1
-                guard injector.apply(.text(text), ifAllowed: {
+                guard await injector.applyTextPaced(text, ifAllowed: {
                     NSWorkspace.shared.frontmostApplication?.processIdentifier == process.processIdentifier
                 }) else { throw ComputerUseTextEditError.interrupted }
             },
             mayAct: { NSWorkspace.shared.frontmostApplication?.processIdentifier == process.processIdentifier })
-        try await fallbackEditor.edit(exact, expected: snapshot)
+        do {
+            try await fallbackEditor.edit(exact, expected: snapshot)
+        } catch {
+            if let current = textTarget.snapshot() {
+                print("Unicode fixture result: \(current.value.utf8.count) bytes; prefix=\(String(current.value.prefix(45)).debugDescription); chunks=\(postedChunks)")
+            }
+            try await Task.sleep(for: .seconds(1))
+            if let bytes = try? Data(contentsOf: state),
+               let fields = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any] {
+                for name in ["destination", "rawDestination"] {
+                    print("Unicode after settling \(name): \((fields[name] as? String ?? "").utf8.count) bytes")
+                }
+            }
+            print("AX after settling: \(textTarget.snapshot()?.value.utf8.count ?? -1) bytes")
+            throw error
+        }
         XCTAssertGreaterThan(postedChunks, 1)
         try await verify(state, field: "destination", equals: exact)
+
+        // Whole natural-language task through real proposal, AX discovery,
+        // journaled steps and independent final-state verification.
+        if ProcessInfo.processInfo.environment["RUN_NATIVE_TEXT_GOALS_MODEL_ACCEPTANCE"] == "1" {
+            let executor = ComputerUseNativeTextExecutor(injector: injector, mayAct: {
+                NSWorkspace.shared.frontmostApplication?.processIdentifier == process.processIdentifier
+            }, journalDirectory: directory.appendingPathComponent("steps"))
+            let result = try await executor.execute(taskID: "native-form-\(browser)",
+                prompt: "Set both Origin and Destination to San Francisco.", progress: { _ in })
+            guard case .completed = result else { return XCTFail("The complete field task must verify both edits") }
+            try await verify(state, field: "origin", equals: "San Francisco")
+            try await verify(state, field: "destination", equals: "San Francisco")
+        }
 
     }
 
@@ -94,8 +152,10 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             let element = queue.removeFirst()
             visited += 1
             var value: CFTypeRef?
-            if AXUIElementCopyAttributeValue(element, kAXIdentifierAttribute as CFString, &value) == .success,
-               value as? String == id { return element }
+            for name in [kAXIdentifierAttribute as String, "AXDOMIdentifier"] {
+                if AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success,
+                   value as? String == id { return element }
+            }
             for attribute in [kAXWindowsAttribute, kAXChildrenAttribute] {
                 value = nil
                 if AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success,

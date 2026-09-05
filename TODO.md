@@ -4,7 +4,7 @@ Companion to [the detailed audit](</Users/michael/Documents/ChatGPT/remote deskt
 
 **Phase 1 · Make evidence trustworthy and define the supported product**
 
-- [x] **F29:** Replace the stale expected count of 138 with reviewed test-identifier discovery/validation. The baseline selected 167 methods; the reviewed selection now includes 190 with the new repair regressions. Implemented exact source/result identifier checks; 108 Python tests pass. A signed xcresult run remains part of release qualification.
+- [x] **F29:** Replace the stale expected count of 138 with reviewed test-identifier discovery/validation. The baseline selected 167 methods; the reviewed selection now includes 202 with the repair regressions. Exact source/result checks are implemented: 108 Python tests pass, and a signed 35-method text-core result was verified by exact ID. The full OCR-dependent gate remains failing.
 - [ ] **F29:** Split current visual-only package acceptance from future V4/V5 semantic-package qualification. Current acceptance must test the currently shipped manifest and router.
 - [ ] **F30:** Extract a testable Mac core module for policy, task state, wire contracts, parsers, and model adapters. Execute its tests on every PR without privileged-host provisioning.
 - [ ] **F18:** Specify supported OS, Apple Intelligence availability, languages, task families, and degraded modes. Replace ambiguous overall readiness with capability readiness.
@@ -27,12 +27,12 @@ Exit criterion: two fields can receive the same value, two searches can submit, 
 
 **Phase 3 · Deliver one reliable text-editing vertical slice**
 
-- [ ] **F05:** Implement TextEdit with explicit insert/replace/append mode, exact payload, target reference, initial-state requirements, and a verifier.
+- [x] **F05:** Implement TextEdit with explicit insert/replace/append mode, exact payload, target reference, initial-state requirements, and a verifier.
 - [ ] **F06:** Bind it to application/window/document generation and element identity. Validate selection/value state where appropriate.
-- [ ] **F07:** Preserve leading/trailing whitespace and newlines. Store exact text outside the model and route using payload IDs.
-- [ ] **F07:** Separate host-owned payload size from model schema limits. Support bounded chunked edits or reject unsupported lengths before input.
-- [ ] **F09:** Implement a reviewed AX value/edit action where supported; retain Unicode CGEvent entry as a fallback.
-- [ ] **F05:** Read back resulting state and classify verified, rejected, or uncertain. Never infer acceptance from event emission alone.
+- [x] **F07:** Preserve leading/trailing whitespace and newlines. Store exact text outside the model and route using payload IDs.
+- [x] **F07:** Separate host-owned payload size from model schema limits. Support bounded chunked edits or reject unsupported lengths before input.
+- [x] **F09:** Implement a reviewed AX value/edit action where supported; retain Unicode CGEvent entry as a fallback.
+- [x] **F05:** Read back resulting state and classify verified, rejected, or uncertain. Never infer acceptance from event emission alone.
 - [ ] **F08:** Move long observation/input work off the UI execution path and make input chunks cancellable.
 - [ ] **F25:** Bind exact approval to content, destination, consequence, and the current step; retain the existing one-use approval protections.
 
@@ -147,3 +147,9 @@ Only then broaden capabilities and evaluate whether an additional model pays for
 - 2026-09-04: Replaced the obsolete initial signed build attempt after cancellation with core validation. Signed app-host provisioning, exact current-package model acceptance, live text fixtures, and mobile-to-Mac qualification remain required. The installed /Applications/RemoteDesktopHost.app is version 0.2.0 (17), signed in July; it has not been replaced.
 - 2026-09-04: Real native text acceptance now passes both AX editing and actual Unicode CGEvents. A 2,000-character payload with whitespace, combining marks, emoji, and newlines matched exact UTF-8 in the independent fixture app. Replace, append, and second-field entry also passed. The combined native/unit run passed 23 tests in 4.945 s; a subsequent 23-test focused unit run passed after adding the literal path/quotation edge case. Browser and whole-executor coverage remain outstanding.
 - 2026-09-04: All 16 cases in the actual Apple semantic-routing matrix pass after the fixture-identity and app-selection repairs (12.222 s). This is routing evidence, not whole-task/grounding qualification. Details and remaining failures are in [REPAIR_VERIFICATION.md](docs/audits/2026-09-04-mac-computer-use/REPAIR_VERIFICATION.md).
+
+- 2026-09-04: Signed app-host acceptance now builds and executes all 190 selected methods, but the OCR-dependent suite fails. Cache regeneration and supported CPU/GPU probes did not establish usable accurate OCR. Acceptance result bundles are now retained on failure. A separate current-form task contract, ordered step journal, bounded exact-text planner, and frozen corpus are under implementation; their new code is not yet qualified.
+
+- 2026-09-04: Completed the core text transaction items in Phase 3. The final combined native/WebKit/component run passed 37 tests in 53.566 s. WebKit uses a verified whole-value AX setter; its selected-text setter had accepted calls without effects. The browser fixture independently verifies the page's input-event state, not only DOM or AX values. Native and browser fixtures both verified a 2,000-character Unicode fallback with per-grapheme key-down/hold/key-up timing. Earlier burst/spacing candidates failed and remain recorded; one isolated passing run was insufficient. The longer fallback took about 26.7 s per full fixture workflow.
+- 2026-09-04: Signed host text-core validation passed all 35 reviewed methods, confirmed against the real xcresult by exact identifiers with no skips. The complete reviewed inventory is now 202; the earlier full 190-method signed run had 104 passing and 86 failing methods (98 assertions/errors). It remains a failed OCR-dependent gate.
+- 2026-09-04: Added a bounded text task contract and fsync-backed step journal with independent step IDs, preconditions, final field predicates, persist-before-effect, and readback reconciliation. Seven task-state and three storage tests pass. This new goal executor is a qualification candidate and is NOT registered in normal Mac execution. Its actual-model corpus still exposes a false completion risk for a compound fill-and-send task; Phase 2 and goal-level qualification stay open.

@@ -202,6 +202,36 @@ final class ComputerUseTextEditorTests: XCTestCase {
         XCTAssertEqual(effects, 1)
     }
 
+    func testWholeValueSetterFailureNeverFallsBackToAnotherEffect() async {
+        let field = Field("original")
+        field.axSupported = true
+        var editor = field.editor
+        editor.replaceValue = { _ in field.value = "partial"; return false }
+        await assertError(.deliveryUncertain) {
+            try await editor.edit("complete", mode: .replaceAll, expected: field.snapshot)
+        }
+        XCTAssertEqual(field.axAttempts, 0)
+        XCTAssertTrue(field.posted.isEmpty)
+    }
+
+    func testPacedUnicodeTakeoverReleasesStrokeAndStartsNoFurtherKey() async {
+        let began = expectation(description: "A Unicode key started")
+        let events = PacedEventCounts()
+        let injector = InputInjector(eventPoster: { event in
+            if events.record(event.type) == 1 { began.fulfill() }
+        })
+        var allowed = true
+        let task = Task { await injector.applyTextPaced(String(repeating: "x", count: 100), ifAllowed: { allowed }) }
+        await fulfillment(of: [began], timeout: 2)
+        XCTAssertTrue(injector.interruptAutomation { allowed = false; return true })
+        let closed = events.counts
+        let completed = await task.value
+        XCTAssertFalse(completed)
+        XCTAssertEqual(events.counts.down, closed.down)
+        XCTAssertEqual(events.counts.up, closed.up)
+        XCTAssertEqual(events.counts.down, events.counts.up)
+    }
+
     private func assertError(
         _ expected: ComputerUseTextEditError,
         file: StaticString = #filePath, line: UInt = #line,
@@ -213,5 +243,21 @@ final class ComputerUseTextEditorTests: XCTestCase {
         } catch {
             XCTAssertEqual(error as? ComputerUseTextEditError, expected, file: file, line: line)
         }
+    }
+}
+
+private final class PacedEventCounts: @unchecked Sendable {
+    private let lock = NSLock()
+    private var down = 0
+    private var up = 0
+    func record(_ type: CGEventType) -> Int {
+        lock.lock(); defer { lock.unlock() }
+        if type == .keyDown { down += 1 }
+        if type == .keyUp { up += 1 }
+        return down + up
+    }
+    var counts: (down: Int, up: Int) {
+        lock.lock(); defer { lock.unlock() }
+        return (down, up)
     }
 }

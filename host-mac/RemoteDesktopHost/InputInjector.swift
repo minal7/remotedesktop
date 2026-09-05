@@ -8,8 +8,8 @@ import os
 /// it, `CGEventPost` silently drops the events. The caller should
 /// preflight via `AXIsProcessTrusted()` before handing messages here.
 ///
-/// This is a single-threaded actor — all injection goes through the
-/// same event source so the host OS sees a coherent stream.
+/// All injection is serialized through one lock and event source. Paced text
+/// yields between key transitions while retaining explicit release ownership.
 final class InputInjector: @unchecked Sendable {
     static let syntheticEventTag: Int64 = 0x52444D414349 // "RDMACI"
 
@@ -24,6 +24,7 @@ final class InputInjector: @unchecked Sendable {
     private var prevButtons: UInt8 = 0
     private var lastPointer = CGPoint.zero
     private var pressedKeys: [Int: UInt16] = [:]
+    private var pendingUnicodeStroke: (id: UUID, release: CGEvent)?
     private var lastClickButton: CGMouseButton?
     private var lastClickPosition = CGPoint.zero
     private var lastClickUptime: TimeInterval = -.infinity
@@ -250,6 +251,53 @@ final class InputInjector: @unchecked Sendable {
 
     // MARK: - Text (IME / soft keyboard fallback)
 
+    /// Verified computer use awaits this bounded stream. WebKit can drop
+    /// individual events when an entire string is posted in one synchronous
+    /// burst, even while AX reports the preceding input as delivered.
+    @MainActor
+    func applyTextPaced(_ text: String, ifAllowed: () -> Bool) async -> Bool {
+        for character in text {
+            guard !Task.isCancelled,
+                  let stroke = beginUnicodeStroke(String(character), ifAllowed: ifAllowed) else { return false }
+            do {
+                try await Task.sleep(for: .milliseconds(5))
+            } catch {
+                finishUnicodeStroke(stroke)
+                return false
+            }
+            finishUnicodeStroke(stroke)
+            guard ifAllowed(), !Task.isCancelled else { return false }
+            do { try await Task.sleep(for: .milliseconds(5)) }
+            catch { return false }
+        }
+        return true
+    }
+
+    private func beginUnicodeStroke(_ text: String, ifAllowed: () -> Bool) -> UUID? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard ifAllowed(), pendingUnicodeStroke == nil,
+              let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true),
+              let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false) else { return nil }
+        var units = Array(text.utf16)
+        down.keyboardSetUnicodeString(stringLength: units.count, unicodeString: &units)
+        up.keyboardSetUnicodeString(stringLength: units.count, unicodeString: &units)
+        down.flags = []
+        up.flags = []
+        let id = UUID()
+        pendingUnicodeStroke = (id, up)
+        post(down)
+        return id
+    }
+
+    private func finishUnicodeStroke(_ id: UUID) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let stroke = pendingUnicodeStroke, stroke.id == id else { return }
+        pendingUnicodeStroke = nil
+        post(stroke.release)
+    }
+
     private func injectText(
         _ s: String,
         ifAllowed: () -> Bool
@@ -283,6 +331,10 @@ final class InputInjector: @unchecked Sendable {
     /// Caller must hold `lock` so releases cannot interleave with another
     /// direct or automated injection.
     private func releaseHeldInputLocked() {
+        if let stroke = pendingUnicodeStroke {
+            pendingUnicodeStroke = nil
+            post(stroke.release)
+        }
         if prevButtons & 0b001 != 0 {
             post(mouse: .leftMouseUp, at: lastPointer, button: .left)
         }

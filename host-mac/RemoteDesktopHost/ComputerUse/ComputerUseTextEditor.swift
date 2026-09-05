@@ -28,7 +28,7 @@ struct ComputerUseTextSnapshot: Equatable, Sendable {
     }
 }
 
-enum ComputerUseTextEditMode: Sendable { case insert, replaceAll, append }
+enum ComputerUseTextEditMode: String, Codable, Sendable { case insert, replaceAll, append }
 
 enum ComputerUseTextEditError: Error, Equatable, LocalizedError {
     case unavailableTarget, secureTarget, invalidSelection, payloadTooLarge
@@ -61,20 +61,23 @@ enum ComputerUseTextEditError: Error, Equatable, LocalizedError {
 /// next chunk. There is deliberately no retry of a possibly delivered chunk.
 @MainActor
 struct ComputerUseTextEditor {
-    static let maximumPayloadBytes = 64 * 1_024
-    static let maximumObservedValueBytes = 1_024 * 1_024
+    nonisolated static let maximumPayloadBytes = 64 * 1_024
+    nonisolated static let maximumObservedValueBytes = 1_024 * 1_024
 
     let read: () throws -> ComputerUseTextSnapshot?
     let select: (NSRange) throws -> Bool
     /// nil means unsupported and guarantees that no setter was invoked.
     let replaceSelectedText: (String) throws -> Bool?
-    let postUnicode: (String) throws -> Void
+    let postUnicode: (String) async throws -> Void
     let mayAct: () -> Bool
     var wait: () async throws -> Void = {
         try await Task.sleep(for: .milliseconds(25))
     }
     var verificationAttempts = 12
     var chunkCharacters = 16
+    /// Optional qualified whole-value setter. nil result guarantees no setter
+    /// was invoked; a returned failure must still be verified, never retried.
+    var replaceValue: ((String) throws -> Bool?)? = nil
 
     func edit(
         _ payload: String,
@@ -107,13 +110,17 @@ struct ComputerUseTextEditor {
         guard expectedValue.utf8.count <= Self.maximumObservedValueBytes else {
             throw ComputerUseTextEditError.payloadTooLarge
         }
+        if let replaceValue, try replaceValue(expectedValue) != nil {
+            _ = try await verify(value: expectedValue, target: initial.targetID)
+            return
+        }
         var selected = initial
         if range != initial.selection {
             guard try select(range) else {
                 throw ComputerUseTextEditError.selectionUnsupported
             }
             guard let current = try read(), current.targetID == initial.targetID,
-                  current.value == initial.value, current.selection == range,
+                  current.value.utf8.elementsEqual(initial.value.utf8), current.selection == range,
                   current.isEditable, !current.isSecure else {
                 throw ComputerUseTextEditError.selectionUnsupported
             }
@@ -132,7 +139,7 @@ struct ComputerUseTextEditor {
         guard !payload.isEmpty else {
             // Deleting a selection requires a supported AX setter. Empty
             // Unicode input cannot provide evidence of deletion.
-            if expectedValue == selected.value { return }
+            if expectedValue.utf8.elementsEqual(selected.value.utf8) { return }
             throw ComputerUseTextEditError.selectionUnsupported
         }
         var remaining = payload[...]
@@ -151,7 +158,7 @@ struct ComputerUseTextEditor {
             }
             let nextValue = selected.value.replacingCharacters(in: selectionRange, with: chunk)
             let nextCaret = selected.selection.location + chunk.utf16.count
-            try postUnicode(chunk)
+            try await postUnicode(chunk)
             selected = try await verify(value: nextValue, target: initial.targetID)
             if !remaining.isEmpty,
                selected.selection != NSRange(location: nextCaret, length: 0) {

@@ -2671,7 +2671,7 @@ final class ComputerUseHostTools {
         guard let snapshot = try currentTextSnapshot() else {
             throw ComputerUseTextEditError.unavailableTarget
         }
-        let editor = textEditorOverride ?? ComputerUseTextEditor(
+        var editor = textEditorOverride ?? ComputerUseTextEditor(
             read: { [textTarget] in textTarget.snapshot() },
             select: { [textTarget, injector, mayAct] range in
                 try injector.performHostEffectIfAllowed(ifAllowed: mayAct) {
@@ -2684,11 +2684,18 @@ final class ComputerUseHostTools {
                 }
             },
             postUnicode: { [injector, mayAct] text in
-                guard injector.apply(.text(text), ifAllowed: mayAct) else {
+                guard await injector.applyTextPaced(text, ifAllowed: mayAct) else {
                     throw ComputerUseTextEditError.interrupted
                 }
             },
             mayAct: mayAct)
+        if textEditorOverride == nil {
+            editor.replaceValue = { [textTarget, injector, mayAct] value in
+                try injector.performHostEffectIfAllowed(ifAllowed: mayAct) {
+                    textTarget.replaceWebValue(value)
+                }
+            }
+        }
         try await editor.edit(payload, mode: mode, expected: snapshot)
     }
 

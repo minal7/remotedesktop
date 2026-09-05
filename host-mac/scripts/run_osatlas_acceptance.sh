@@ -80,20 +80,15 @@ fi
 
 cleanup() {
     /bin/rm -f "$MODEL_FLAG" "$LIVE_CONFIG"
-    case "$RESULT_ROOT" in
-        /tmp/com.threadmark.remotedesktop.osatlas-acceptance.*)
-            if [[ -e "$RESULT_ROOT" ]]; then
-                /usr/bin/find "$RESULT_ROOT" -depth -delete
-            fi
-            ;;
-        "")
-            ;;
-        *)
-            /bin/echo "Refusing to remove unexpected acceptance result path: $RESULT_ROOT" >&2
-            ;;
-    esac
+    # XCTest failures are diagnostic evidence. Keep the owner-only bundles
+    # after both success and failure; remove only the transient opt-in flags.
+    if [[ -n "$RESULT_ROOT" ]]; then
+        /bin/echo "Acceptance results retained at: $RESULT_ROOT" >&2
+    fi
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 cleanup
 
 reclaimable_memory_bytes() {
