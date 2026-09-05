@@ -1,0 +1,107 @@
+{
+  "cases": [
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 0,
+          "mode": "replaceAll",
+          "value": "draft"
+        },
+        {
+          "field": 0,
+          "mode": "append",
+          "value": " / checked"
+        }
+      ],
+      "elapsedSeconds": 14.142708208353724,
+      "id": "H504",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\n  \"disposition\": \"supported\",\n  \"edits\": [\n    {\n      \"fieldID\": \"f1\",\n      \"mode\": \"replaceAll\",\n      \"value\": \"p1\"\n    },\n    {\n      \"fieldID\": \"f1\",\n      \"mode\": \"append\",\n      \"value\": \"p2\"\n    }\n  ]\n}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\n  \"disposition\": \"supported\",\n  \"edits\": [\n    {\n      \"fieldID\": \"f1\",\n      \"mode\": \"replaceAll\",\n      \"value\": \"p1\"\n    },\n    {\n      \"fieldID\": \"f1\",\n      \"mode\": \"append\",\n      \"value\": \"p2\"\n    }\n  ]\n}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "unsupported",
+      "edits": [],
+      "elapsedSeconds": 5.378929583326681,
+      "id": "H515",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\n  \"disposition\": \"unsupported\",\n  \"edits\": []\n}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\n  \"disposition\": \"unsupported\",\n  \"edits\": []\n}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "unsupported",
+      "edits": [],
+      "elapsedSeconds": 11.458495166676585,
+      "id": "H516",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\n  \"disposition\": \"unsupported\",\n  \"edits\": []\n}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\n  \"disposition\": \"unsupported\",\n  \"edits\": []\n}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "clarification",
+      "edits": [],
+      "elapsedSeconds": 11.989758999989135,
+      "id": "H520",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\n      \"disposition\": \"clarification\",\n      \"edits\": []\n    }",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\n      \"disposition\": \"clarification\",\n      \"edits\": []\n    }",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": false
+    }
+  ],
+  "contract": "candidate-v2",
+  "corpusSHA256": "40a69d8ef1835ce6a7adea91ec9a252a83d50ef81b2940bbd86c3acd229b143b",
+  "desktopEffects": false,
+  "expectedCaseIDs": [
+    "H504",
+    "H515",
+    "H516",
+    "H520"
+  ],
+  "modelSHA256FromVerifiedManifest": "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
+  "oracle": "exact-disposition-and-complete-allowed-edit-sequences-including-count-mode-target-payload-and-order",
+  "quotedCommandFastPath": false,
+  "runtimeBinarySHA256": "40cc77cf253199c421a8416c654f4b351fd7d1a0fd5b0052f775863633da4bba",
+  "schemaVersion": 1,
+  "scope": "Four cases selected because experimental source-bound-v6 failed; counterfactual current candidate-v2 comparison, not independent holdout or product qualification",
+  "sourceCommit": "26fdf19",
+  "freezeCommit": "cb1b8fc",
+  "xcresult": "/tmp/remotedesktop-native-v2-failure-comparison-first.xcresult",
+  "rawReportSHA256": "2d2dfd4d5054d924b1a7868046d95f491bd2bab722d77609401d32ed147900c7",
+  "classification": "Current candidate-v2 passed three of the four cases selected from source-bound-v6 failures. It correctly resolved the pronoun and declined copying/generated writing. H520 conservatively requested clarification instead of editing the permitted value. The accepted generated-writing-as-literal error was a regression in experimental v6. Diagnostic selection, not heldout qualification. No desktop effects or quoted-command fast path."
+}
