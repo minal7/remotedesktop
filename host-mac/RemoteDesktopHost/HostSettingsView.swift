@@ -229,7 +229,7 @@ struct HostSettingsView: View {
 
     private var computerUseStatusDetail: String {
         switch session.computerUse.capability.state {
-        case .ready: return "AI Computer Use is ready on this Mac."
+        case .ready: return session.computerUse.capability.detail
         case .busy: return "AI Computer Use is working on a task."
         case .paused: return session.computerUse.capability.detail
         case .installing: return session.computerUse.capability.detail

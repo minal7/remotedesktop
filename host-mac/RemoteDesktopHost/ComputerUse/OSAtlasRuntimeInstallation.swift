@@ -363,7 +363,7 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
         receipt: ComputerUseInstallationReceipt,
         progress: @escaping @MainActor (String) -> Void
     ) async throws -> any ComputerUseExecuting {
-        let runtimeDirectoryURL = try bundledRuntimeDirectoryURL()
+        let runtimeDirectoryURL = try Self.bundledRuntimeDirectoryURL(in: bundle)
         let package = try resolver.resolveAvailablePackage(
             receipt: receipt,
             runtimeDirectoryURL: runtimeDirectoryURL,
@@ -390,7 +390,7 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
         await runtime.shutdown()
     }
 
-    private func bundledRuntimeDirectoryURL() throws -> URL {
+    static func bundledRuntimeDirectoryURL(in bundle: Bundle) throws -> URL {
         var candidates: [URL] = []
         if let resourceURL = bundle.resourceURL {
             candidates.append(resourceURL.appendingPathComponent(

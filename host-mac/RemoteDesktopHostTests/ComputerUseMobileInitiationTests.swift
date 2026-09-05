@@ -4,6 +4,94 @@ import XCTest
 
 @MainActor
 final class ComputerUseMobileInitiationTests: XCTestCase {
+    func testInstalledNativeFormsActivateWithoutHelperVisualModelOrDownloads() async throws {
+        let fixture = try makeFixture(markerPresent: false)
+        defer { try? FileManager.default.removeItem(at: fixture.parent) }
+        let nativeInstaller = MobileInitiationModelInstaller(receipt: nativeReceipt, alreadyInstalled: true)
+        let visualInstaller = MobileInitiationModelInstaller(receipt: mobileInitiationModelReceipt())
+        let helper = MobileInitiationMacControlInstaller(status: .notInstalled)
+        let visual = MobileInitiationVisualLoader()
+        var nativeLoads = 0
+        let manager = HostComputerUseManager(injector: InputInjector(), installer: visualInstaller,
+            nativeTextInstaller: nativeInstaller, nativeTextLoader: { receipt, _, _ in
+                XCTAssertEqual(receipt.modelVariant, .nativeText4B)
+                nativeLoads += 1
+                return ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in .completed("verified") })
+            }, macControlInstaller: helper, visualExecutorLoader: visual,
+            taskLedger: ComputerUseTaskLedger(fileURL: fixture.ledger),
+            channelFactory: { _ in MobileInitiationTestChannel() })
+        await waitUntil { manager.capability.state == .ready }
+        XCTAssertEqual(nativeLoads, 1)
+        XCTAssertTrue(manager.needsAdditionalSetup)
+        XCTAssertTrue(manager.capability.detail.contains("Form editing"))
+        XCTAssertEqual(visual.loadCount, 0)
+        let nativeInstalls = await nativeInstaller.installCallCount()
+        let visualInstalls = await visualInstaller.installCallCount()
+        let helperInstalls = await helper.installCallCount()
+        XCTAssertEqual(nativeInstalls + visualInstalls + helperInstalls, 0)
+        await manager.shutdown()
+    }
+
+    func testDesktopSetupFailurePreservesVerifiedNativeCapability() async throws {
+        let fixture = try makeFixture(markerPresent: false)
+        defer { try? FileManager.default.removeItem(at: fixture.parent) }
+        let nativeInstaller = MobileInitiationModelInstaller(receipt: nativeReceipt)
+        let helper = MobileInitiationMacControlInstaller(status: .notInstalled)
+        let channel = MobileInitiationTestChannel()
+        let manager = HostComputerUseManager(injector: InputInjector(),
+            installer: MobileInitiationModelInstaller(receipt: mobileInitiationModelReceipt()),
+            nativeTextInstaller: nativeInstaller, nativeTextLoader: { _, _, _ in
+                ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in .completed("verified") })
+            }, macControlInstaller: helper, visualExecutorLoader: MobileInitiationVisualLoader(throwsLoadFailure: true),
+            taskLedger: ComputerUseTaskLedger(fileURL: fixture.ledger), channelFactory: { _ in channel })
+        manager.start(pairingCode: "123456")
+        await waitForStatusCheck(helper)
+        XCTAssertTrue(manager.handle(try setupEnvelope(requestID: "native-partial"), channel: channel))
+        let progress = await waitForSetupProgress(channel: channel, terminalPhase: .failed)
+        XCTAssertTrue(progress.contains { $0.phase == .failed })
+        XCTAssertEqual(manager.capability.state, .ready)
+        XCTAssertTrue(manager.needsAdditionalSetup)
+        let nativeInstalls = await nativeInstaller.installCallCount()
+        XCTAssertEqual(nativeInstalls, 1)
+        let activations = await nativeInstaller.recordedSuccessfulActivations()
+        XCTAssertEqual(activations, [nativeReceipt])
+        let fractions = progress.compactMap(\.fractionCompleted)
+        for (earlier, later) in zip(fractions, fractions.dropFirst()) { XCTAssertLessThanOrEqual(earlier, later) }
+        await manager.shutdown()
+    }
+
+    func testInstalledNativeAndDesktopPackagesComposeWithoutEagerVisualLoad() async throws {
+        let fixture = try makeFixture(markerPresent: false)
+        defer { try? FileManager.default.removeItem(at: fixture.parent) }
+        let helper = MobileInitiationMacControlInstaller(status: .ready(mobileInitiationMacControlReceipt))
+        let visual = MobileInitiationVisualLoader()
+        var coordinator: ComputerUseCapabilityExecutor?
+        let manager = HostComputerUseManager(injector: InputInjector(),
+            installer: MobileInitiationModelInstaller(receipt: mobileInitiationModelReceipt(), alreadyInstalled: true),
+            nativeTextInstaller: MobileInitiationModelInstaller(receipt: nativeReceipt, alreadyInstalled: true),
+            nativeTextLoader: { _, _, _ in
+                let result = ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in nil })
+                coordinator = result
+                return result
+            }, macControlInstaller: helper, visualExecutorLoader: visual,
+            executorComposer: { _, fallback in fallback }, taskLedger: ComputerUseTaskLedger(fileURL: fixture.ledger),
+            channelFactory: { _ in MobileInitiationTestChannel() })
+        await waitUntil { manager.capability.state == .ready }
+        XCTAssertEqual(visual.loadCount, 0)
+        XCTAssertFalse(manager.needsAdditionalSetup)
+        let executor = try XCTUnwrap(coordinator)
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { false })
+        _ = try await executor.execute(taskID: "desktop", prompt: "Open an app.",
+            trustedUserPrompt: "Open an app.", tools: tools, progress: { _ in })
+        XCTAssertEqual(visual.loadCount, 1)
+        await manager.shutdown()
+    }
+
+    private var nativeReceipt: ComputerUseInstallationReceipt {
+        ComputerUseInstallationReceipt(installationVersion: ComputerUseArtifactManifest.nativeTextV2.installationVersion,
+            modelVariant: .nativeText4B, modelDirectory: "/test/native-text", installedAt: Date(timeIntervalSince1970: 0))
+    }
+
     func testMobileRequestInstallsModelActivatesOSAtlasAndPublishesContinuousProgress() async throws {
         let fixture = try makeFixture(markerPresent: false)
         defer { try? FileManager.default.removeItem(at: fixture.parent) }
@@ -656,16 +744,18 @@ private actor MobileInitiationMacControlInstaller: MacControlMCPProvisioning {
 
 private actor MobileInitiationModelInstaller: ComputerUseModelProvisioning {
     private let receipt: ComputerUseInstallationReceipt
+    private let alreadyInstalled: Bool
     private var installs = 0
     private var clearedMarkers = 0
     private var successfulActivations: [ComputerUseInstallationReceipt] = []
     private var failedActivations: [ComputerUseInstallationReceipt] = []
 
-    init(receipt: ComputerUseInstallationReceipt) {
+    init(receipt: ComputerUseInstallationReceipt, alreadyInstalled: Bool = false) {
         self.receipt = receipt
+        self.alreadyInstalled = alreadyInstalled
     }
 
-    func currentInstallation() -> ComputerUseInstallationReceipt? { nil }
+    func currentInstallation() -> ComputerUseInstallationReceipt? { alreadyInstalled ? receipt : nil }
 
     func interruptedInstallationExists() -> Bool { false }
 

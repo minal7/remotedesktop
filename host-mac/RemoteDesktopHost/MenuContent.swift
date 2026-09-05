@@ -217,7 +217,7 @@ private struct ComputerUseHostSection: View {
     private var supportingText: String? {
         switch manager.capability.state {
         case .ready:
-            return nil
+            return manager.capability.detail
         case .busy, .paused:
             return manager.capability.detail
         case .installing:

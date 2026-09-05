@@ -1064,6 +1064,10 @@ final class ComputerUseHostTools {
             identityIsAuthoritative: identity?.codeIdentity != nil)
     }
 
+    func makeNativeTextExecutor(planner: any ComputerUseTextGoalPlanning) -> ComputerUseNativeTextExecutor {
+        ComputerUseNativeTextExecutor(injector: injector, mayAct: mayAct, planner: planner)
+    }
+
     /// Checks whether a transient macOS notification owns the exact pointer
     /// target. Waiting and re-observing is safer than sending the intended
     /// click through an unrelated overlay or dismissing that overlay without
@@ -3090,6 +3094,9 @@ extension ComputerUseInstaller: ComputerUseModelProvisioning {}
 protocol ComputerUseExecuting: AnyObject {
     var isReady: Bool { get }
     var runtimeName: String { get }
+    var requiresMacControlHelper: Bool { get }
+    var hasAdditionalSetup: Bool { get }
+    var readyDetail: String { get }
     func execute(
         prompt: String,
         tools: ComputerUseHostTools,
@@ -3140,6 +3147,10 @@ protocol ComputerUseVisualApprovalContinuing: AnyObject {
 }
 
 extension ComputerUseExecuting {
+    var requiresMacControlHelper: Bool { true }
+    var hasAdditionalSetup: Bool { false }
+    var readyDetail: String { "AI Computer Use is ready" }
+
     func execute(
         taskID: String,
         modelPrompt: String,
@@ -3178,6 +3189,10 @@ typealias ComputerUseExecutorComposer = @MainActor @Sendable (
     MacControlMCPInstallationReceipt,
     any ComputerUseExecuting
 ) async throws -> any ComputerUseExecuting
+
+typealias ComputerUseNativeTextLoader = @MainActor @Sendable (
+    ComputerUseInstallationReceipt, ComputerUseHostTools, @escaping (String) -> Void
+) async throws -> ComputerUseCapabilityExecutor
 
 /// Bounded monitor set for one setup generation. iOS refreshes its idempotent
 /// setup request while monitoring, so an active recipient renews its lease.
@@ -3330,11 +3345,21 @@ final class HostComputerUseManager: ObservableObject {
     @Published private(set) var modelState: ModelState = .downloadRequired
     @Published private(set) var activity: Activity = .idle
 
+    private var executorIsReady: Bool {
+        guard let executor, executor.isReady else { return false }
+        return !executor.requiresMacControlHelper || macControlReceipt != nil
+    }
+
+    var needsAdditionalSetup: Bool {
+        executor?.hasAdditionalSetup == true
+            || (nativeTextInstaller != nil && !(executor is ComputerUseCapabilityExecutor))
+    }
+
     var capability: ComputerUseCapability {
-        if macControlReceipt != nil, executor?.isReady == true {
+        if executorIsReady {
             switch activity {
             case .idle:
-                return .ready
+                return ComputerUseCapability(state: .ready, detail: executor?.readyDetail ?? "AI Computer Use is ready")
             case .working:
                 return ComputerUseCapability(
                     state: .busy,
@@ -3358,12 +3383,12 @@ final class HostComputerUseManager: ObservableObject {
                 state: .setupRequired,
                 detail: modelStateDetail)
         case .ready:
-            guard macControlReceipt != nil else {
+            guard executorIsReady else {
                 return ComputerUseCapability(
                     state: .setupRequired,
                     detail: "Set up Mac control")
             }
-            return .ready
+            return ComputerUseCapability(state: .ready, detail: executor?.readyDetail ?? "AI Computer Use is ready")
         }
     }
 
@@ -3455,6 +3480,8 @@ final class HostComputerUseManager: ObservableObject {
     private let tools: ComputerUseHostTools
     private let actionGate: ComputerUseActionGate
     private let installer: any ComputerUseModelProvisioning
+    private let nativeTextInstaller: (any ComputerUseModelProvisioning)?
+    private let nativeTextLoader: ComputerUseNativeTextLoader
     private let macControlInstaller: any MacControlMCPProvisioning
     private let visualExecutorLoader: any ComputerUseVisualExecutorLoading
     private let executorComposer: ComputerUseExecutorComposer
@@ -3530,6 +3557,8 @@ final class HostComputerUseManager: ObservableObject {
         injector: InputInjector,
         executor: (any ComputerUseExecuting)? = nil,
         installer: (any ComputerUseModelProvisioning)? = nil,
+        nativeTextInstaller: (any ComputerUseModelProvisioning)? = nil,
+        nativeTextLoader: ComputerUseNativeTextLoader? = nil,
         macControlInstaller: (any MacControlMCPProvisioning)? = nil,
         visualExecutorLoader: (any ComputerUseVisualExecutorLoading)? = nil,
         executorComposer: ComputerUseExecutorComposer? = nil,
@@ -3564,6 +3593,10 @@ final class HostComputerUseManager: ObservableObject {
             screenProvider: screenProvider,
             accessibilityContextProvider: accessibilityContextProvider)
         self.installer = installer ?? ComputerUseInstaller()
+        self.nativeTextInstaller = nativeTextInstaller
+        self.nativeTextLoader = nativeTextLoader ?? { receipt, tools, progress in
+            try await ComputerUseNativeTextExecutorLoader.load(receipt: receipt, tools: tools, progress: progress)
+        }
         self.macControlInstaller = macControlInstaller ?? MacControlMCPInstaller()
         self.visualExecutorLoader = visualExecutorLoader
             ?? OSAtlasVisualExecutorLoader()
@@ -3585,7 +3618,7 @@ final class HostComputerUseManager: ObservableObject {
 
     func refreshModelState() {
         guard allowsExternalServices, !isShuttingDown else { return }
-        if macControlReceipt != nil, let executor, executor.isReady {
+        if executorIsReady, let executor {
             modelState = .ready(runtimeName: executor.runtimeName)
             return
         }
@@ -3593,6 +3626,17 @@ final class HostComputerUseManager: ObservableObject {
         let task = Task { [weak self] in
             guard let self else { return }
             defer { modelCheckTask = nil }
+            if let nativeTextInstaller {
+                let receipt = await nativeTextInstaller.currentInstallation()
+                guard !Task.isCancelled, !isShuttingDown else { return }
+                if let receipt {
+                    beginNativeTextActivation(of: receipt)
+                    return
+                }
+                let interrupted = await nativeTextInstaller.interruptedInstallationExists()
+                guard !Task.isCancelled, !isShuttingDown else { return }
+                if interrupted { startSetupPipeline(); return }
+            }
             let helperStatus = await macControlInstaller.durableStatus()
             guard !Task.isCancelled, !isShuttingDown else { return }
             switch helperStatus {
@@ -4884,11 +4928,11 @@ final class HostComputerUseManager: ObservableObject {
             return
         }
 
-        if macControlReceipt != nil, executor?.isReady == true {
+        if executorIsReady, !needsAdditionalSetup {
             publishSetupProgress(
                 phase: .ready,
                 fraction: 1,
-                detail: "AI Computer Use is ready")
+                detail: executor?.readyDetail ?? "AI Computer Use is ready")
             return
         }
         if let currentSetupProgress {
@@ -4915,7 +4959,21 @@ final class HostComputerUseManager: ObservableObject {
             guard let self else { return }
             defer { setupTask = nil }
             var activationReceipt: ComputerUseInstallationReceipt?
+            var nativeExecutor: ComputerUseCapabilityExecutor?
             do {
+                if let nativeTextInstaller {
+                    let receipt = try await nativeTextInstaller.install { [weak self] update in
+                        self?.consumeInstallerUpdate(update, nativeText: true)
+                    }
+                    try Task.checkCancellation()
+                    nativeExecutor = try await nativeTextLoader(receipt, tools) { [weak self] detail in
+                        self?.consumeProvisioningProgress(phase: .installingPackages,
+                            candidateFraction: 0.45, detail: detail, minimumPublishDelta: 0.005, forcePublish: false)
+                    }
+                    try Task.checkCancellation()
+                    try await nativeTextInstaller.recordRuntimeActivationSuccess(for: receipt)
+                    executor = nativeExecutor
+                }
                 let helperReceipt = try await macControlInstaller.install { [weak self] update in
                     self?.consumeMacControlInstallerUpdate(update)
                 }
@@ -4933,7 +4991,7 @@ final class HostComputerUseManager: ObservableObject {
                     phase: .installingPackages,
                     fraction: 0.98,
                     detail: "Loading the on-device AI…")
-                executor = nil
+                if nativeExecutor == nil { executor = nil }
                 let loaded = try await visualExecutorLoader.load(
                     receipt: receipt,
                     progress: { [weak self] detail in
@@ -4950,29 +5008,37 @@ final class HostComputerUseManager: ObservableObject {
                 let hybrid = try await executorComposer(helperReceipt, loaded)
                 try Task.checkCancellation()
                 try await installer.recordRuntimeActivationSuccess(for: receipt)
-                executor = hybrid
-                modelState = .ready(runtimeName: hybrid.runtimeName)
+                if let nativeExecutor {
+                    configureDesktopFactory(nativeExecutor, receipt: receipt, helperReceipt: helperReceipt)
+                    (hybrid as? any MCPApprovalContinuing)?.cancelMCPWork()
+                    executor = nativeExecutor
+                } else {
+                    executor = hybrid
+                }
+                modelState = .ready(runtimeName: executor?.runtimeName ?? hybrid.runtimeName)
                 publishSetupProgress(
                     phase: .ready,
                     fraction: 1,
-                    detail: "AI Computer Use is ready")
+                    detail: executor?.readyDetail ?? "AI Computer Use is ready")
             } catch is CancellationError {
                 await visualExecutorLoader.deactivate()
-                executor = nil
+                executor = nativeExecutor
                 if let activationReceipt {
                     try? await installer.restorePreviousInstallation(
                         afterFailedActivationOf: activationReceipt)
                 }
-                modelState = .downloadRequired
+                modelState = nativeExecutor.map { .ready(runtimeName: $0.runtimeName) } ?? .downloadRequired
                 publishSetupProgress(
                     phase: .failed,
                     fraction: nil,
                     detail: "Setup stopped",
-                    errorMessage: "Setup stopped before AI Computer Use was activated. Tap Retry to continue.")
+                    errorMessage: nativeExecutor == nil
+                        ? "Setup stopped before AI Computer Use was activated. Tap Retry to continue."
+                        : "Form editing is ready. Additional desktop setup stopped; tap Retry to finish it.")
                 return
             } catch {
                 await visualExecutorLoader.deactivate()
-                executor = nil
+                executor = nativeExecutor
                 if let activationReceipt {
                     try? await installer.restorePreviousInstallation(
                         afterFailedActivationOf: activationReceipt)
@@ -4980,12 +5046,68 @@ final class HostComputerUseManager: ObservableObject {
                 await installer.clearInterruptedInstallationMarker()
                 let message = (error as? LocalizedError)?.errorDescription
                     ?? error.localizedDescription
-                modelState = .error(message)
+                modelState = nativeExecutor.map { .ready(runtimeName: $0.runtimeName) } ?? .error(message)
                 publishSetupProgress(
                     phase: .failed,
                     fraction: nil,
                     detail: "Setup needs attention",
                     errorMessage: message)
+            }
+        }
+    }
+
+    private func configureDesktopFactory(_ native: ComputerUseCapabilityExecutor,
+        receipt: ComputerUseInstallationReceipt, helperReceipt: MacControlMCPInstallationReceipt) {
+        native.setDesktopFactory { [visualExecutorLoader, executorComposer, installer] progress in
+            var composed: (any ComputerUseExecuting)?
+            do {
+                let visual = try await visualExecutorLoader.load(receipt: receipt, progress: progress)
+                try Task.checkCancellation()
+                let result = try await executorComposer(helperReceipt, visual)
+                composed = result
+                try Task.checkCancellation()
+                try await installer.recordRuntimeActivationSuccess(for: receipt)
+                return result
+            } catch {
+                (composed as? any MCPApprovalContinuing)?.cancelMCPWork()
+                await visualExecutorLoader.deactivate()
+                throw error
+            }
+        }
+    }
+
+    private func beginNativeTextActivation(of receipt: ComputerUseInstallationReceipt) {
+        guard allowsExternalServices, !isShuttingDown, setupTask == nil else { return }
+        modelState = .installing(detail: "Loading local form editing…", fraction: nil)
+        setupTask = Task { [weak self] in
+            guard let self else { return }
+            defer { setupTask = nil }
+            do {
+                let native = try await nativeTextLoader(receipt, tools) { [weak self] detail in
+                    self?.consumeRuntimeActivationUpdate(detail)
+                }
+                try Task.checkCancellation()
+                // Passive checks never download the optional desktop package.
+                // A missing helper or visual model leaves form editing usable.
+                if case .ready(let helper) = await macControlInstaller.durableStatus() {
+                    macControlReceipt = helper
+                    if let visualReceipt = await installer.currentInstallation() {
+                        configureDesktopFactory(native, receipt: visualReceipt, helperReceipt: helper)
+                    }
+                }
+                try Task.checkCancellation()
+                try await nativeTextInstaller?.recordRuntimeActivationSuccess(for: receipt)
+                executor = native
+                modelState = .ready(runtimeName: native.runtimeName)
+                publishSetupProgress(phase: .ready, fraction: 1, detail: native.readyDetail)
+            } catch is CancellationError {
+                await visualExecutorLoader.deactivate()
+                executor = nil
+                modelState = .downloadRequired
+            } catch {
+                await visualExecutorLoader.deactivate()
+                executor = nil
+                modelState = .error((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)
             }
         }
     }
@@ -5044,7 +5166,8 @@ final class HostComputerUseManager: ObservableObject {
     /// byte-count detail remains authoritative while the allocation prevents a
     /// 2.6 MB prerequisite from looking frozen beside the multi-GB model.
     private func consumeMacControlInstallerUpdate(_ update: MacControlMCPInstaller.Update) {
-        let candidate = Self.visibleMacControlInstallerFraction(update)
+        let base = Self.visibleMacControlInstallerFraction(update)
+        let candidate = nativeTextInstaller == nil ? base : 0.45 + 0.5 * base
         consumeProvisioningProgress(
             phase: .installingPackages,
             candidateFraction: candidate,
@@ -5053,8 +5176,12 @@ final class HostComputerUseManager: ObservableObject {
             forcePublish: update.phase == .ready)
     }
 
-    private func consumeInstallerUpdate(_ update: ComputerUseInstaller.Update) {
-        let visibleFraction = Self.visibleModelInstallerFraction(update)
+    private func consumeInstallerUpdate(_ update: ComputerUseInstaller.Update, nativeText: Bool = false) {
+        let base = Self.visibleModelInstallerFraction(update)
+        let visibleFraction = base.map { value in
+            nativeText ? value * 0.43
+                : (nativeTextInstaller == nil ? value : 0.45 + value * 0.5)
+        }
         let phase: ComputerUseSetupProgress.Phase
         switch update.phase {
         case .preparing:
@@ -5071,7 +5198,7 @@ final class HostComputerUseManager: ObservableObject {
             candidateFraction: visibleFraction,
             detail: update.detail,
             minimumPublishDelta: 0.02,
-            forcePublish: visibleFraction == 0.97)
+            forcePublish: update.phase == .ready)
     }
 
     /// Runtime activation is part of setup too. Forward its changing detail to

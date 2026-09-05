@@ -109,6 +109,7 @@ final class HostSession: ObservableObject {
         self.computerUse = computerUseManager ?? HostComputerUseManager(
             injector: injector,
             executor: computerUseExecutor,
+            nativeTextInstaller: ComputerUseInstaller.nativeText(),
             allowsExternalServices: allowsExternalComputerUseServices)
         self.permissionsProvider = permissionsProvider
         self.validateAudioInputEntitlements = validateAudioInputEntitlements

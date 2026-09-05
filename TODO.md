@@ -4,7 +4,7 @@ Companion to [the detailed audit](</Users/michael/Documents/ChatGPT/remote deskt
 
 **Phase 1 · Make evidence trustworthy and define the supported product**
 
-- [x] **F29:** Replace the stale expected count of 138 with reviewed test-identifier discovery/validation. The baseline selected 167 methods; the reviewed selection now includes 232 with the repair regressions. Exact source/result checks are implemented: 113 Python tests pass; signed text/runtime checkpoints and the 70-method native runtime follow-up were verified by exact ID. The full OCR-dependent gate remains failing.
+- [x] **F29:** Replace the stale expected count of 138 with reviewed test-identifier discovery/validation. The baseline selected 167 methods; the reviewed selection now includes 241 with the repair regressions. Exact source/result checks are implemented: 113 Python tests pass; signed text/runtime checkpoints and the 70-method native runtime follow-up were verified by exact ID. The full OCR-dependent gate remains failing.
 - [ ] **F29:** Split current visual-only package acceptance from future V4/V5 semantic-package qualification. Current acceptance must test the currently shipped manifest and router.
 - [ ] **F30:** Extract a testable Mac core module for policy, task state, wire contracts, parsers, and model adapters. Execute its tests on every PR without privileged-host provisioning.
 - [ ] **F18:** Specify supported OS, Apple Intelligence availability, languages, task families, and degraded modes. Replace ambiguous overall readiness with capability readiness.
@@ -137,6 +137,8 @@ Only then broaden capabilities and evaluate whether an additional model pays for
 
 
 **Work log**
+
+- 2026-09-04: Wired `ComputerUseCapabilityExecutor` and the native package into normal `HostSession` startup/setup. Whole form goals use only the current user's authority; desktop fallback loads a fresh model endpoint and retains task ownership on resume. Native errors do not trigger fallback. Installed native forms activate without helper/visual downloads; optional desktop setup failures preserve native readiness. Nineteen routing/setup methods passed in SwiftPM and the signed host, followed by six signed coordinator methods after cancellation hardening. Actual signed-app form execution/managed model installation and the mobile upgrade/retry flow for partial readiness remain to be qualified.
 
 - 2026-09-04: Added a separate pinned native-text model manifest, private installer root, package-specific legal files, and a resolver that requires no visual artifacts while keeping executable code inside the app bundle. Seventeen core package checks and 23 exact-ID signed package checks pass; 113 Python checks pass. A source-file read stalled one prior signed test in `open`; the source check now runs in Python and the signed check examines compiled package definitions. No broader macOS file permission was granted. The actual native model has not yet been installed into the new managed package root or wired into normal task routing.
 
