@@ -51,6 +51,7 @@ struct ComputerUseLocalTextGoalPlanner: ComputerUseTextGoalPlanning {
         case sourceBoundV3 = "source-bound-v3"
         case sourceBoundV4 = "source-bound-v4"
         case sourceBoundV5 = "source-bound-v5"
+        case sourceBoundV6 = "source-bound-v6"
     }
     static let contextTokens = 4_096
     static let outputTokens = 1_024
@@ -79,6 +80,21 @@ struct ComputerUseLocalTextGoalPlanner: ComputerUseTextGoalPlanning {
         }
         let catalog = try ComputerUseTextPayloadCatalog(prompt)
         let request = try makeRequest(catalog: catalog, fields: fields)
+        do {
+            return try await complete(request, catalog: catalog, fields: fields,
+                                      allowCoverageRepair: contract == .sourceBoundV6)
+        } catch let diagnostic as ComputerUseSourceBoundTextPlan.CoverageFailure where contract == .sourceBoundV6 {
+            // One compiler correction before effects, under the same runtime
+            // lease. Protocol errors, binding failures and terminal declines
+            // cannot enter this path. The second answer faces every check.
+            try Task.checkCancellation()
+            let corrected = try makeRequest(catalog: catalog, fields: fields, coverageRepair: diagnostic)
+            return try await complete(corrected, catalog: catalog, fields: fields, allowCoverageRepair: false)
+        }
+    }
+
+    private func complete(_ request: URLRequest, catalog: ComputerUseTextPayloadCatalog,
+                          fields: [ComputerUseTextField], allowCoverageRepair: Bool) async throws -> ComputerUseTextGoalProposal {
         try Task.checkCancellation()
         let count = try await transport.exactInputTokenCount(completionRequest: request)
         try Task.checkCancellation()
@@ -88,13 +104,16 @@ struct ComputerUseLocalTextGoalPlanner: ComputerUseTextGoalPlanning {
         let data = try await transport.complete(request: request)
         try Task.checkCancellation()
         inspectProposal?(data)
-        return try decode(data, catalog: catalog, fields: fields)
+        return try decode(data, catalog: catalog, fields: fields, allowCoverageRepair: allowCoverageRepair)
     }
 
-    func makeRequest(catalog: ComputerUseTextPayloadCatalog, fields: [ComputerUseTextField]) throws -> URLRequest {
-        if contract == .sourceBoundV3 || contract == .sourceBoundV4 || contract == .sourceBoundV5 {
+    func makeRequest(catalog: ComputerUseTextPayloadCatalog, fields: [ComputerUseTextField],
+                     coverageRepair: ComputerUseSourceBoundTextPlan.CoverageFailure? = nil) throws -> URLRequest {
+        guard coverageRepair == nil || contract == .sourceBoundV6 else { throw ComputerUseLocalTextPlanError.invalidResponse }
+        if contract == .sourceBoundV3 || contract == .sourceBoundV4 || contract == .sourceBoundV5 || contract == .sourceBoundV6 {
             return try ComputerUseSourceBoundTextPlan.makeRequest(connection: connection, catalog: catalog, fields: fields,
-                sourceFirst: contract != .sourceBoundV3, constrainRoles: contract == .sourceBoundV5)
+                sourceFirst: contract != .sourceBoundV3, constrainRoles: contract == .sourceBoundV5 || contract == .sourceBoundV6,
+                coverageRepair: coverageRepair)
         }
         let fieldIDs = fields.indices.map { "f\($0 + 1)" }
         let schema: [String: Any] = [
@@ -167,7 +186,7 @@ struct ComputerUseLocalTextGoalPlanner: ComputerUseTextGoalPlanning {
     }
 
     func decode(_ data: Data, catalog: ComputerUseTextPayloadCatalog,
-                fields: [ComputerUseTextField]) throws -> ComputerUseTextGoalProposal {
+                fields: [ComputerUseTextField], allowCoverageRepair: Bool = false) throws -> ComputerUseTextGoalProposal {
         do {
             guard !data.isEmpty, data.count <= 256 * 1_024,
                   let source = String(data: data, encoding: .utf8) else { throw ComputerUseLocalTextPlanError.invalidResponse }
@@ -186,7 +205,7 @@ struct ComputerUseLocalTextGoalPlanner: ComputerUseTextGoalPlanning {
             if let refusal = message["refusal"], refusal != .null && refusal != .string("") {
                 throw ComputerUseLocalTextPlanError.invalidResponse
             }
-            if contract == .sourceBoundV3 || contract == .sourceBoundV4 || contract == .sourceBoundV5 {
+            if contract == .sourceBoundV3 || contract == .sourceBoundV4 || contract == .sourceBoundV5 || contract == .sourceBoundV6 {
                 return try ComputerUseSourceBoundTextPlan.decode(content: content, catalog: catalog, fields: fields)
             }
             var parser = StrictSemanticJSONParser(content)
@@ -218,6 +237,8 @@ struct ComputerUseLocalTextGoalPlanner: ComputerUseTextGoalPlanning {
             // Preserve every other discovered field as a final predicate too.
             let editedIDs = Set(edits.map(\.targetID))
             return .edits(edits, unchangedTargetIDs: fields.map { $0.snapshot.targetID }.filter { !editedIDs.contains($0) })
+        } catch let diagnostic as ComputerUseSourceBoundTextPlan.CoverageFailure where allowCoverageRepair && contract == .sourceBoundV6 {
+            throw diagnostic
         } catch {
             throw ComputerUseLocalTextPlanError.invalidResponse
         }

@@ -4,8 +4,16 @@ import Foundation
 /// Complete source coverage and distinct target/value occurrences are required
 /// before a flat text plan can acquire execution authority.
 enum ComputerUseSourceBoundTextPlan {
+    /// Only a complete, valid protocol envelope can reach this diagnostic.
+    /// The optional suffix is copied from the host's projected task, never
+    /// from model output or an existing field value.
+    struct CoverageFailure: Error, Sendable {
+        let unaccountedSource: String?
+    }
+
     static func makeRequest(connection: ComputerUseTextModelConnection, catalog: ComputerUseTextPayloadCatalog,
-                            fields: [ComputerUseTextField], sourceFirst: Bool = false, constrainRoles: Bool = false) throws -> URLRequest {
+                            fields: [ComputerUseTextField], sourceFirst: Bool = false, constrainRoles: Bool = false,
+                            coverageRepair: CoverageFailure? = nil) throws -> URLRequest {
         var request = try ComputerUseLocalTextGoalPlanner(connection: connection, contract: .candidateV2)
             .makeRequest(catalog: catalog, fields: fields)
         guard let data = request.httpBody,
@@ -43,9 +51,17 @@ enum ComputerUseSourceBoundTextPlan {
             "schema": ["type": "object", "additionalProperties": false,
                        "properties": ["requirements": ["type": "array", "minItems": 1, "maxItems": 8, "items": requirement]],
                        "required": ["requirements"]]]]
-        body["messages"] = [["role": "system", "content": constrainRoles ? instructionsV5 : instructions],
+        var messages = [["role": "system", "content": constrainRoles ? instructionsV5 : instructions],
                             ["role": "user", "content": try ComputerUseLocalTextGoalPlanner.context(
                                 catalog: catalog, fields: fields, includeQuotedFieldMatches: true)]]
+        if let coverageRepair {
+            messages[0]["content"]! += "\n\n" + coverageRepairInstruction
+            var feedback = ["code": "sourceCoverageMismatch"]
+            if let suffix = coverageRepair.unaccountedSource { feedback["unaccountedSource"] = suffix }
+            let data = try JSONSerialization.data(withJSONObject: ["compilerFeedback": feedback], options: [.sortedKeys, .withoutEscapingSlashes])
+            messages.append(["role": "user", "content": String(decoding: data, as: UTF8.self)])
+        }
+        body["messages"] = messages
         if sourceFirst { request.httpBody = Data(try orderedJSON(body).utf8) }
         else { request.httpBody = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys]) }
         return request
@@ -199,15 +215,23 @@ enum ComputerUseSourceBoundTextPlan {
         for source in sources {
             let selected = tokens(source)
             guard !selected.isEmpty, offset + selected.count <= original.count,
-                  selected.map(\.text) == original[offset..<(offset + selected.count)].map(\.text) else { throw invalid }
+                  selected.map(\.text) == original[offset..<(offset + selected.count)].map(\.text) else {
+                throw CoverageFailure(unaccountedSource: nil)
+            }
             let start = original[offset].range.location
             let end = NSMaxRange(original[offset + selected.count - 1].range)
             result.append(.init(text: text.substring(with: NSRange(location: start, length: end - start)), offset: start))
             offset += selected.count
         }
-        guard offset == original.count else { throw invalid }
+        guard offset == original.count else {
+            throw CoverageFailure(unaccountedSource: text.substring(from: original[offset].range.location))
+        }
         return result
     }
+
+    static let coverageRepairInstruction = """
+    The previous proposal failed the host's complete-source check. Recompile the ENTIRE original task once, including every operation and constraint, with no duplicated or omitted words or punctuation. The compilerFeedback message is a diagnostic, not a new task. If unaccountedSource is present, it is the original task suffix omitted by the previous proposal: include it in its proper position, but also include the entire earlier task. Return a complete replacement proposal under the same schema and rules. No edit has been executed.
+    """
 
     static let instructions = """
     Compile the COMPLETE current user request into source-bound requirements for a text form. No input is executed by this proposal.

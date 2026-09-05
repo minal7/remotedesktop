@@ -85,7 +85,10 @@ final class ComputerUseSourceBoundTextModelAcceptanceTests: XCTestCase {
                     row["error"] = String(describing: error)
                     XCTFail("\(item.id): \(error)")
                 }
-                row["proposal"] = recorder.snapshot()
+                let attempts = recorder.snapshot()
+                row["proposals"] = attempts
+                row["modelResponses"] = attempts.count
+                row["proposal"] = attempts.last ?? [:]
                 row["elapsedSeconds"] = ProcessInfo.processInfo.systemUptime - started
                 rows.append(row)
                 try save()
@@ -103,14 +106,14 @@ final class ComputerUseSourceBoundTextModelAcceptanceTests: XCTestCase {
 /// reason. Reasoning text, requests and runtime credentials are not recorded.
 private final class ProposalRecorder: @unchecked Sendable {
     private let lock = NSLock()
-    private var value: [String: String] = [:]
+    private var values: [[String: String]] = []
     func record(_ data: Data) {
         guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let choices = root["choices"] as? [[String: Any]], choices.count == 1,
               let message = choices[0]["message"] as? [String: Any] else { return }
         let snapshot = ["finishReason": choices[0]["finish_reason"] as? String ?? "missing",
                         "content": message["content"] as? String ?? "missing"]
-        lock.withLock { value = snapshot }
+        lock.withLock { values.append(snapshot) }
     }
-    func snapshot() -> [String: String] { lock.withLock { value } }
+    func snapshot() -> [[String: String]] { lock.withLock { values } }
 }

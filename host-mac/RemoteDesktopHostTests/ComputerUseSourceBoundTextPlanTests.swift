@@ -3,6 +3,106 @@ import XCTest
 @testable import RemoteDesktopHost
 
 final class ComputerUseSourceBoundTextPlanTests: XCTestCase {
+    private func planner(_ transport: any ComputerUseTextModelTransport,
+                         contract: ComputerUseLocalTextGoalPlanner.Contract = .sourceBoundV6) throws -> ComputerUseLocalTextGoalPlanner {
+        try .init(connection: .init(baseURL: URL(string: "http://127.0.0.1:49123")!,
+            bearerToken: "fictional-test-token", modelAlias: "test-native"), transport: transport, contract: contract)
+    }
+
+    private func envelope(_ rows: [[String: Any]], model: String = "test-native", finish: String = "stop") throws -> Data {
+        let content = String(decoding: try JSONSerialization.data(withJSONObject: ["requirements": rows]), as: UTF8.self)
+        return try JSONSerialization.data(withJSONObject: ["model": model, "choices": [["finish_reason": finish,
+            "message": ["role": "assistant", "content": content]]]])
+    }
+
+    func testCoverageCorrectionRecompilesWholeRequestOnceWithoutExposingLiteralOrExistingValues() async throws {
+        let prompt = #"Append "private payload" to Origin. Leave Destination alone."#
+        let first = row("Append [exact quoted payload p1] to Origin.", "edits", [edit("f1", "Origin", "p1", "append")])
+        let last = row("Leave Destination alone.", "constraint", preserve: [["fieldID": "f2", "target": "Destination"]])
+        let transport = SourceBoundCorrectionTransport(responses: try [envelope([first]), envelope([first, last])])
+        let candidate = try planner(transport)
+        let result = try await candidate.propose(prompt: prompt, fields: fields)
+        XCTAssertEqual(result, .edits([.init(targetID: "target-0", mode: .append, text: "private payload")], unchangedTargetIDs: ["target-1"]))
+        let requests = await transport.requests, completed = await transport.completions
+        XCTAssertEqual(requests.count, 2); XCTAssertEqual(completed, 2)
+        XCTAssertEqual(requests[0].httpBody, try planner(transport, contract: .sourceBoundV5).makeRequest(catalog: .init(prompt), fields: fields).httpBody)
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(requests[1].httpBody)) as? [String: Any])
+        let messages = try XCTUnwrap(body["messages"] as? [[String: String]])
+        XCTAssertEqual(messages.count, 3)
+        let diagnostic = try XCTUnwrap(messages.last?["content"])
+        XCTAssertTrue(diagnostic.contains("Leave Destination alone."))
+        for request in requests {
+            let text = String(decoding: try XCTUnwrap(request.httpBody), as: UTF8.self)
+            for secret in ["private payload", "private existing text", "target-0"] { XCTAssertFalse(text.contains(secret)) }
+            XCTAssertTrue(text.contains(#""properties":{"source":{"type":"string"},"kind":"#))
+        }
+    }
+
+    func testCoverageCorrectionHasOneAttemptAndCannotBypassAnyBindingCheck() async throws {
+        let prompt = "Set Origin to Paris. Leave Destination alone."
+        let first = row("Set Origin to Paris.", "edits", [edit()])
+        let constraint = row("Leave Destination alone.", "constraint", preserve: [["fieldID": "f2", "target": "Destination"]])
+        for second in [[first], [row("Set Origin to Paris.", "edits", [edit("f1", "Origin", "Berlin")]), constraint]] {
+            let transport = SourceBoundCorrectionTransport(responses: try [envelope([first]), envelope(second)])
+            do { _ = try await planner(transport).propose(prompt: prompt, fields: fields); XCTFail("A second invalid plan must stop") }
+            catch { XCTAssertEqual(error as? ComputerUseLocalTextPlanError, .invalidResponse) }
+            let count = await transport.completions
+            XCTAssertEqual(count, 2)
+        }
+    }
+
+    func testProtocolAndBindingFailuresDoNotEnterCompilerCorrection() async throws {
+        let prompt = "Set Origin to Paris. Leave Destination alone."
+        let prefix = row("Set Origin to Paris.", "edits", [edit()])
+        let badBinding = row(prompt, "edits", [edit("f1", "Origin", "Berlin")])
+        for response in try [envelope([prefix], model: "wrong-model"), envelope([prefix], finish: "length"),
+                             envelope([badBinding]), Data("not an envelope".utf8)] {
+            let transport = SourceBoundCorrectionTransport(responses: [response])
+            do { _ = try await planner(transport).propose(prompt: prompt, fields: fields); XCTFail("Invalid proposal must stop") }
+            catch { XCTAssertEqual(error as? ComputerUseLocalTextPlanError, .invalidResponse) }
+            let count = await transport.completions
+            XCTAssertEqual(count, 1)
+        }
+        let old = SourceBoundCorrectionTransport(responses: try [envelope([prefix])])
+        do { _ = try await planner(old, contract: .sourceBoundV5).propose(prompt: prompt, fields: fields); XCTFail("v5 must not acquire retries") }
+        catch { XCTAssertEqual(error as? ComputerUseLocalTextPlanError, .invalidResponse) }
+        let count = await old.completions
+        XCTAssertEqual(count, 1)
+    }
+
+    func testCoverageCorrectionCanDeclineWholeMixedGoalWithoutReturningItsTextPrefix() async throws {
+        let prompt = "Set Origin to Paris, then submit."
+        let first = row("Set Origin to Paris,", "edits", [edit()])
+        let complete = try envelope([first, row("then submit.", "other")])
+        let transport = SourceBoundCorrectionTransport(responses: try [envelope([first]), complete])
+        let result = try await planner(transport).propose(prompt: prompt, fields: fields)
+        XCTAssertEqual(result, .unsupported)
+        let count = await transport.completions
+        XCTAssertEqual(count, 2)
+        let direct = SourceBoundCorrectionTransport(responses: [complete])
+        let decline = try await planner(direct).propose(prompt: prompt, fields: fields)
+        XCTAssertEqual(decline, .unsupported)
+        let directCount = await direct.completions
+        XCTAssertEqual(directCount, 1)
+    }
+
+    func testCoverageCorrectionChecksExactInputBudgetAndCancellationBeforeSecondInference() async throws {
+        let prompt = "Set Origin to Paris. Leave Destination alone."
+        let prefix = try envelope([row("Set Origin to Paris.", "edits", [edit()])])
+        let overflow = SourceBoundCorrectionTransport(responses: [prefix], secondTokenCount: 3_009)
+        do { _ = try await planner(overflow).propose(prompt: prompt, fields: fields); XCTFail("Correction context overflow must stop") }
+        catch { XCTAssertEqual(error as? ComputerUseLocalTextPlanError, .contextLimit) }
+        let overflowCalls = await overflow.completions, overflowTokens = await overflow.requests.count
+        XCTAssertEqual(overflowCalls, 1); XCTAssertEqual(overflowTokens, 2)
+        let cancelled = SourceBoundCorrectionTransport(responses: [prefix], cancelSecondTokenization: true)
+        let candidate = try planner(cancelled), targets = fields
+        let task = Task { try await candidate.propose(prompt: prompt, fields: targets) }
+        do { _ = try await task.value; XCTFail("Cancellation during correction tokenization must stop") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        let cancelledCalls = await cancelled.completions, cancelledTokens = await cancelled.requests.count
+        XCTAssertEqual(cancelledCalls, 1); XCTAssertEqual(cancelledTokens, 2)
+    }
+
     func testTypedRequirementsOfferOnlyTaskMentionsAndCannotAttachEditsToADecline() throws {
         let connection = try ComputerUseTextModelConnection(baseURL: URL(string: "http://127.0.0.1:49123")!,
             bearerToken: "fictional-test-token", modelAlias: "test-native")
@@ -184,4 +284,26 @@ private actor SourceBoundFixtureTransport: ComputerUseTextModelTransport {
     private(set) var completions = 0
     func exactInputTokenCount(completionRequest: URLRequest) async throws -> Int { 3_009 }
     func complete(request: URLRequest) async throws -> Data { completions += 1; return Data() }
+}
+
+private actor SourceBoundCorrectionTransport: ComputerUseTextModelTransport {
+    let responses: [Data]
+    let secondTokenCount: Int
+    let cancelSecondTokenization: Bool
+    private(set) var requests: [URLRequest] = []
+    private(set) var completions = 0
+    init(responses: [Data], secondTokenCount: Int = 300, cancelSecondTokenization: Bool = false) {
+        self.responses = responses; self.secondTokenCount = secondTokenCount
+        self.cancelSecondTokenization = cancelSecondTokenization
+    }
+    func exactInputTokenCount(completionRequest: URLRequest) async throws -> Int {
+        requests.append(completionRequest)
+        if requests.count == 2 && cancelSecondTokenization { withUnsafeCurrentTask { $0?.cancel() } }
+        return requests.count == 2 ? secondTokenCount : 300
+    }
+    func complete(request: URLRequest) async throws -> Data {
+        completions += 1
+        guard completions <= responses.count else { throw URLError(.badServerResponse) }
+        return responses[completions - 1]
+    }
 }
