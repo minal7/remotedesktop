@@ -48,6 +48,7 @@ struct ComputerUseLocalTextGoalPlanner: ComputerUseTextGoalPlanning {
     enum Contract: String, Sendable {
         case frozenV1 = "frozen-v1"
         case candidateV2 = "candidate-v2"
+        case sourceBoundV3 = "source-bound-v3"
     }
     static let contextTokens = 4_096
     static let outputTokens = 1_024
@@ -55,13 +56,16 @@ struct ComputerUseLocalTextGoalPlanner: ComputerUseTextGoalPlanning {
     let connection: ComputerUseTextModelConnection
     let transport: any ComputerUseTextModelTransport
     let contract: Contract
+    // Opt-in fixture observation only; production supplies no observer.
+    let inspectProposal: (@Sendable (Data) -> Void)?
 
     init(connection: ComputerUseTextModelConnection,
          transport: any ComputerUseTextModelTransport = URLSessionOSAtlasTransport(),
-         contract: Contract = .frozenV1) {
+         contract: Contract = .frozenV1, inspectProposal: (@Sendable (Data) -> Void)? = nil) {
         self.connection = connection
         self.transport = transport
         self.contract = contract
+        self.inspectProposal = inspectProposal
     }
 
     func propose(prompt: String, fields: [ComputerUseTextField]) async throws -> ComputerUseTextGoalProposal {
@@ -81,10 +85,14 @@ struct ComputerUseLocalTextGoalPlanner: ComputerUseTextGoalPlanning {
         }
         let data = try await transport.complete(request: request)
         try Task.checkCancellation()
+        inspectProposal?(data)
         return try decode(data, catalog: catalog, fields: fields)
     }
 
     func makeRequest(catalog: ComputerUseTextPayloadCatalog, fields: [ComputerUseTextField]) throws -> URLRequest {
+        if contract == .sourceBoundV3 {
+            return try ComputerUseSourceBoundTextPlan.makeRequest(connection: connection, catalog: catalog, fields: fields)
+        }
         let fieldIDs = fields.indices.map { "f\($0 + 1)" }
         let schema: [String: Any] = [
             "type": "object", "additionalProperties": false,
@@ -174,6 +182,9 @@ struct ComputerUseLocalTextGoalPlanner: ComputerUseTextGoalPlanning {
             }
             if let refusal = message["refusal"], refusal != .null && refusal != .string("") {
                 throw ComputerUseLocalTextPlanError.invalidResponse
+            }
+            if contract == .sourceBoundV3 {
+                return try ComputerUseSourceBoundTextPlan.decode(content: content, catalog: catalog, fields: fields)
             }
             var parser = StrictSemanticJSONParser(content)
             guard case .object(let proposal) = try parser.parse(), Set(proposal.keys) == ["disposition", "edits"],

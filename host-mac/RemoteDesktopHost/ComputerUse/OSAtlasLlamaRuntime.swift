@@ -1242,7 +1242,9 @@ actor OSAtlasLlamaRuntime {
     func proposeNativeText(
         endpoint: OSAtlasLlamaEndpoint,
         prompt: String,
-        fields: [ComputerUseTextField]
+        fields: [ComputerUseTextField],
+        contract: ComputerUseLocalTextGoalPlanner.Contract = .candidateV2,
+        inspectProposal: (@Sendable (Data) -> Void)? = nil
     ) async throws -> ComputerUseTextGoalProposal {
         let lease = try await acquireModelAccessLease()
         defer { releaseModelAccessLease(lease) }
@@ -1257,7 +1259,7 @@ actor OSAtlasLlamaRuntime {
                 connection: try ComputerUseTextModelConnection(
                     baseURL: endpoint.baseURL, bearerToken: endpoint.bearerToken,
                     modelAlias: ComputerUseNativeTextRuntimeInputs.modelAlias),
-                transport: server.transport, contract: .candidateV2)
+                transport: server.transport, contract: contract, inspectProposal: inspectProposal)
             let proposal = try await withTaskCancellationHandler {
                 try await planner.propose(prompt: prompt, fields: fields)
             } onCancel: {

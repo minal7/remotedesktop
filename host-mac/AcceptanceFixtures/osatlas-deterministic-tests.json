@@ -54,7 +54,8 @@
     "RemoteDesktopHostTests/ComputerUseTaskExecutionTests",
     "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests",
     "RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests/testExplicitBrowserNavigationUsesOwnedContextWithAppleAndVisualUnavailable",
-    "RemoteDesktopHostTests/ComputerUseBrowserDOMTests"
+    "RemoteDesktopHostTests/ComputerUseBrowserDOMTests",
+    "RemoteDesktopHostTests/ComputerUseSourceBoundTextPlanTests"
   ],
   "expectedTests": [
     "RemoteDesktopHostTests/ComputerUseBrowserDOMTests/testCancellationAndDeadlineKeepInFlightScriptOwnedUntilItsCallbackWithoutReplay",
@@ -126,6 +127,15 @@
     "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testStepJournalResumesAfterFirstPageWithoutReplayingAndContainsNoURLs",
     "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testUncertainNavigationCannotReplayOnResumeOrNewContext",
     "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testWrongTaskClosedGateAndInvalidURLCannotStartNavigation",
+    "RemoteDesktopHostTests/ComputerUseSourceBoundTextPlanTests/testAmbiguousLabelsAndUnboundBackReferencesCannotChooseAnArbitraryField",
+    "RemoteDesktopHostTests/ComputerUseSourceBoundTextPlanTests/testCandidateRequestRetainsExactBudgetAndStrictEnvelopeWithoutExposingValues",
+    "RemoteDesktopHostTests/ComputerUseSourceBoundTextPlanTests/testCrossClausePayloadAndFabricatedTargetProofsRejectBeforeEditing",
+    "RemoteDesktopHostTests/ComputerUseSourceBoundTextPlanTests/testDuplicateBindingCannotProduceExtraEditsButRepeatedClausesCan",
+    "RemoteDesktopHostTests/ComputerUseSourceBoundTextPlanTests/testExactLiteralRolesAndExplicitBackReferenceCompileOrderedEdits",
+    "RemoteDesktopHostTests/ComputerUseSourceBoundTextPlanTests/testMissingAddedReorderedAndPartialSourceTokensRejectTheWholeProposal",
+    "RemoteDesktopHostTests/ComputerUseSourceBoundTextPlanTests/testQuotedTargetOccurrenceCannotAlsoAuthorizeAnInputPayload",
+    "RemoteDesktopHostTests/ComputerUseSourceBoundTextPlanTests/testSourceSpacingNormalizationDoesNotNormalizeTheUnquotedPayload",
+    "RemoteDesktopHostTests/ComputerUseSourceBoundTextPlanTests/testUnchangedFieldProofCannotBeDroppedOrContradictedByAnEdit",
     "RemoteDesktopHostTests/ComputerUseTaskExecutionTests/testCompletedJournalCannotHideAChangedFinalOutcomeOrConstraint",
     "RemoteDesktopHostTests/ComputerUseTaskExecutionTests/testConcurrentRunAndCancelledObservationCannotDispatchLateResult",
     "RemoteDesktopHostTests/ComputerUseTaskExecutionTests/testContractRejectsMissingBindingsPredicatesOutcomesAndImpossibleDependencies",
