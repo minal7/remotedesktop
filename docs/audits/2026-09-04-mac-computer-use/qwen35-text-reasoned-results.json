@@ -1,0 +1,120 @@
+[
+  {
+    "id": "N01",
+    "seconds": 6.836147041991353,
+    "inputTokens": 456,
+    "outputTokens": 356,
+    "raw": "{\n  \"disposition\": \"supported\",\n  \"edits\": [\n    {\n      \"fieldID\": \"f1\",\n      \"mode\": \"replaceAll\",\n      \"value\": \"San Francisco\"\n    },\n    {\n      \"fieldID\": \"f2\",\n      \"mode\": \"replaceAll\",\n      \"value\": \"San Francisco\"\n    }\n  ]\n}",
+    "passed": true,
+    "schemaAccepted": true,
+    "stateLengths": {
+      "origin": 13,
+      "destination": 13
+    }
+  },
+  {
+    "id": "N02",
+    "seconds": 9.250444708013674,
+    "inputTokens": 459,
+    "outputTokens": 505,
+    "raw": "{\n  \"disposition\": \"supported\",\n  \"edits\": [\n    {\n      \"fieldID\": \"f1\",\n      \"mode\": \"replaceAll\",\n      \"value\": \"Tokyo\"\n    },\n    {\n      \"fieldID\": \"f2\",\n      \"mode\": \"replaceAll\",\n      \"value\": \"Kyoto\"\n    }\n  ]\n}",
+    "passed": true,
+    "schemaAccepted": true,
+    "stateLengths": {
+      "origin": 5,
+      "destination": 5
+    }
+  },
+  {
+    "id": "N03",
+    "seconds": 10.105394665995846,
+    "inputTokens": 464,
+    "outputTokens": 574,
+    "raw": "{\n  \"disposition\": \"supported\",\n  \"edits\": [\n    {\n      \"fieldID\": \"f1\",\n      \"mode\": \"append\",\n      \"value\": \"p1\"\n    }\n  ]\n}",
+    "passed": true,
+    "schemaAccepted": true,
+    "stateLengths": {
+      "origin": 19,
+      "destination": 5
+    }
+  },
+  {
+    "id": "N04",
+    "seconds": 5.952034540998284,
+    "inputTokens": 463,
+    "outputTokens": 328,
+    "raw": "{\n  \"disposition\": \"supported\",\n  \"edits\": [\n    {\n      \"fieldID\": \"f2\",\n      \"mode\": \"replaceAll\",\n      \"value\": \"p1\"\n    }\n  ]\n}",
+    "passed": true,
+    "schemaAccepted": true,
+    "stateLengths": {
+      "origin": 0,
+      "destination": 20
+    }
+  },
+  {
+    "id": "N05",
+    "seconds": 10.715089541015914,
+    "inputTokens": 475,
+    "outputTokens": 612,
+    "raw": "{\n      \"disposition\": \"supported\",\n      \"edits\": [\n        {\n          \"fieldID\": \"f1\",\n          \"mode\": \"replaceAll\",\n          \"value\": \"p1\"\n        },\n        {\n          \"fieldID\": \"f1\",\n          \"mode\": \"append\",\n          \"value\": \"p2\"\n        }\n      ]\n    }",
+    "passed": true,
+    "schemaAccepted": true,
+    "stateLengths": {
+      "origin": 16,
+      "destination": 0
+    }
+  },
+  {
+    "id": "N06",
+    "seconds": 9.492007832974195,
+    "inputTokens": 457,
+    "outputTokens": 542,
+    "raw": "{\n          \"disposition\": \"unsupported\",\n          \"edits\": []\n        }",
+    "passed": true,
+    "schemaAccepted": true
+  },
+  {
+    "id": "N07",
+    "seconds": 9.073014167021029,
+    "inputTokens": 453,
+    "outputTokens": 516,
+    "raw": "{\n  \"disposition\": \"unsupported\",\n  \"edits\": []\n}",
+    "passed": true,
+    "schemaAccepted": true
+  },
+  {
+    "id": "N08",
+    "seconds": 4.824831582984189,
+    "inputTokens": 452,
+    "outputTokens": 257,
+    "raw": "{\n  \"disposition\": \"clarification\",\n  \"edits\": []\n}",
+    "passed": true,
+    "schemaAccepted": true
+  },
+  {
+    "id": "N13",
+    "seconds": 4.9156872919993475,
+    "inputTokens": 465,
+    "outputTokens": 248,
+    "raw": "{\n  \"disposition\": \"supported\",\n  \"edits\": [\n    {\n      \"fieldID\": \"f1\",\n      \"mode\": \"replaceAll\",\n      \"value\": \"p1\"\n    }\n  ]\n}",
+    "passed": true,
+    "schemaAccepted": true,
+    "stateLengths": {
+      "origin": 2000,
+      "destination": 0
+    }
+  },
+  {
+    "id": "N14",
+    "seconds": 10.119649917003699,
+    "inputTokens": 457,
+    "outputTokens": 570,
+    "raw": "{\n  \"disposition\": \"supported\",\n  \"edits\": [\n    {\n      \"fieldID\": \"f2\",\n      \"mode\": \"replaceAll\",\n      \"value\": \"Austin\"\n    }\n  ]\n}",
+    "passed": true,
+    "schemaAccepted": true,
+    "stateLengths": {
+      "origin": 7,
+      "destination": 6
+    }
+  }
+]

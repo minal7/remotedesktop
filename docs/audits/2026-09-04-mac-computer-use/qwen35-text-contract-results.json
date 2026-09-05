@@ -1,0 +1,111 @@
+[
+  {
+    "id": "N01",
+    "seconds": 0.9717032090120483,
+    "inputTokens": 458,
+    "outputTokens": 20,
+    "raw": "{\n  \"disposition\": \"unsupported\",\n  \"edits\": []\n}",
+    "passed": false,
+    "schemaAccepted": true,
+    "error": "AssertionError: "
+  },
+  {
+    "id": "N02",
+    "seconds": 0.9607052080100402,
+    "inputTokens": 461,
+    "outputTokens": 20,
+    "raw": "{\n  \"disposition\": \"unsupported\",\n  \"edits\": []\n}",
+    "passed": false,
+    "schemaAccepted": true,
+    "error": "AssertionError: "
+  },
+  {
+    "id": "N03",
+    "seconds": 1.6024731250072364,
+    "inputTokens": 466,
+    "outputTokens": 56,
+    "raw": "{\n  \"disposition\": \"supported\",\n  \"edits\": [\n    {\n      \"fieldID\": \"f1\",\n      \"mode\": \"append\",\n      \"value\": \"p1\"\n    }\n  ]\n}",
+    "passed": true,
+    "schemaAccepted": true,
+    "stateLengths": {
+      "origin": 19,
+      "destination": 5
+    }
+  },
+  {
+    "id": "N04",
+    "seconds": 1.5849058750027325,
+    "inputTokens": 465,
+    "outputTokens": 56,
+    "raw": "{\n  \"disposition\": \"supported\",\n  \"edits\": [\n    {\n      \"fieldID\": \"f2\",\n      \"mode\": \"replaceAll\",\n      \"value\": \"p1\"\n    }\n  ]\n}",
+    "passed": true,
+    "schemaAccepted": true,
+    "stateLengths": {
+      "origin": 0,
+      "destination": 20
+    }
+  },
+  {
+    "id": "N05",
+    "seconds": 1.0062327080231626,
+    "inputTokens": 477,
+    "outputTokens": 20,
+    "raw": "{\n  \"disposition\": \"unsupported\",\n  \"edits\": []\n}",
+    "passed": false,
+    "schemaAccepted": true,
+    "error": "AssertionError: "
+  },
+  {
+    "id": "N06",
+    "seconds": 0.9637927919975482,
+    "inputTokens": 459,
+    "outputTokens": 20,
+    "raw": "{\n  \"disposition\": \"unsupported\",\n  \"edits\": []\n}",
+    "passed": true,
+    "schemaAccepted": true
+  },
+  {
+    "id": "N07",
+    "seconds": 0.9615824579959735,
+    "inputTokens": 455,
+    "outputTokens": 20,
+    "raw": "{\n  \"disposition\": \"unsupported\",\n  \"edits\": []\n}",
+    "passed": true,
+    "schemaAccepted": true
+  },
+  {
+    "id": "N08",
+    "seconds": 0.9621202919806819,
+    "inputTokens": 454,
+    "outputTokens": 20,
+    "raw": "{\n  \"disposition\": \"unsupported\",\n  \"edits\": []\n}",
+    "passed": false,
+    "schemaAccepted": true
+  },
+  {
+    "id": "N13",
+    "seconds": 1.5732683750102296,
+    "inputTokens": 467,
+    "outputTokens": 56,
+    "raw": "{\n  \"disposition\": \"supported\",\n  \"edits\": [\n    {\n      \"fieldID\": \"f1\",\n      \"mode\": \"replaceAll\",\n      \"value\": \"p1\"\n    }\n  ]\n}",
+    "passed": true,
+    "schemaAccepted": true,
+    "stateLengths": {
+      "origin": 2000,
+      "destination": 0
+    }
+  },
+  {
+    "id": "N14",
+    "seconds": 1.527516583999386,
+    "inputTokens": 459,
+    "outputTokens": 55,
+    "raw": "{\n  \"disposition\": \"supported\",\n  \"edits\": [\n    {\n      \"fieldID\": \"f2\",\n      \"mode\": \"replaceAll\",\n      \"value\": \"Austin\"\n    }\n  ]\n}",
+    "passed": true,
+    "schemaAccepted": true,
+    "stateLengths": {
+      "origin": 7,
+      "destination": 6
+    }
+  }
+]

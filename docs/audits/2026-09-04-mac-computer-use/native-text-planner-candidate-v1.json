@@ -1,0 +1,33 @@
+{
+  "status": "Frozen before first held-out v2 run; proposal-only candidate, not production qualification",
+  "modelRepository": "unsloth/Qwen3.5-4B-GGUF",
+  "modelRevision": "e87f176479d0855a907a41277aca2f8ee7a09523",
+  "modelFile": "Qwen3.5-4B-Q4_K_M.gguf",
+  "modelSHA256": "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
+  "modelBytes": 2740937888,
+  "runtimeVersion": "llama.cpp b9992 (6eddde06a)",
+  "runtimeSHA256": "dc8acab3939ab889fb944951bada4dc67e7a4eab5576f01469d67e4f3279b552",
+  "benchmarkSource": "host-mac/scripts/benchmark_native_text_qwen.py",
+  "benchmarkSHA256": "b4f1cc3996f54ecd536f76e4252f7f38757a3a86b2934154b130a59d51835234",
+  "configuration": {
+    "backend": "llama",
+    "contract": "typed_literals",
+    "reasoning": "on",
+    "reasoningBudget": 512,
+    "maximumOutputTokens": 1024,
+    "contextTokens": 4096,
+    "temperature": 0,
+    "topP": 1,
+    "topK": 0,
+    "parallelSlots": 1,
+    "cacheRAMMiB": 0,
+    "CPUThreads": 4,
+    "GPURequestedLayers": 99
+  },
+  "regressionPassed": 10,
+  "regressionTotal": 10,
+  "holdoutFile": "host-mac/AcceptanceFixtures/native-text-goals-heldout-v2.json",
+  "holdoutSHA256": "5811fd2bc05ff5ed8b91726312d94d0ed374187e2bb0ff2f2c5ecae06121d556",
+  "holdoutStatusAtFreeze": "Unrun",
+  "machine": "Mac14,6; 32 GiB; macOS 27.0 beta 26A5406e"
+}
