@@ -4,6 +4,197 @@ import XCTest
 
 @MainActor
 final class ComputerUseMobileInitiationTests: XCTestCase {
+    func testInstalledNativeCapabilityResumesOnlyPreviouslyStartedDesktopSetup() async throws {
+        let cases: [(MacControlMCPInstaller.DurableStatus, Bool, Bool)] = [
+            (.ready(mobileInitiationMacControlReceipt), true, true),
+            (.downloadPresent(downloadedByteCount: 100, totalByteCount: 1_000), false, true),
+            (.downloadPresent(downloadedByteCount: 0, totalByteCount: 1_000), false, false),
+            (.notInstalled, true, false),
+            (.ready(mobileInitiationMacControlReceipt), false, false),
+        ]
+        for (helperStatus, interruptedVisual, shouldResume) in cases {
+            let fixture = try makeFixture(markerPresent: false)
+            defer { try? FileManager.default.removeItem(at: fixture.parent) }
+            let nativeInstaller = MobileInitiationModelInstaller(receipt: nativeReceipt, alreadyInstalled: true)
+            let visualInstaller = MobileInitiationModelInstaller(receipt: mobileInitiationModelReceipt(),
+                interrupted: interruptedVisual)
+            let visual = MobileInitiationVisualLoader(throwsLoadFailure: true)
+            var nativeLoads = 0
+            let manager = HostComputerUseManager(injector: InputInjector(), installer: visualInstaller,
+                nativeTextInstaller: nativeInstaller, nativeTextLoader: { _, _, _ in
+                    nativeLoads += 1
+                    return ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in .completed("verified") })
+                }, macControlInstaller: MobileInitiationMacControlInstaller(status: helperStatus),
+                visualExecutorLoader: visual, taskLedger: ComputerUseTaskLedger(fileURL: fixture.ledger),
+                channelFactory: { _ in MobileInitiationTestChannel() })
+            if shouldResume { await waitUntil { visual.loadCount == 1 } }
+            await waitUntil { manager.capability.state == .ready }
+            let installs = await nativeInstaller.installCallCount()
+            XCTAssertEqual(installs, shouldResume ? 1 : 0)
+            XCTAssertEqual(nativeLoads, shouldResume ? 2 : 1)
+            XCTAssertEqual(visual.loadCount, shouldResume ? 1 : 0)
+            XCTAssertTrue(manager.needsAdditionalSetup)
+            await manager.shutdown()
+        }
+    }
+
+    func testPartialNativeActivationNeverCompletesExplicitFullSetup() async throws {
+        for requestDuringActivation in [false, true] {
+            let fixture = try makeFixture(markerPresent: false)
+            defer { try? FileManager.default.removeItem(at: fixture.parent) }
+            let nativeInstaller = MobileInitiationModelInstaller(receipt: nativeReceipt, alreadyInstalled: true)
+            let channel = MobileInitiationTestChannel()
+            var loadCount = 0
+            var releaseInitialLoad = false
+            let visual = MobileInitiationVisualLoader(throwsLoadFailure: true)
+            let manager = HostComputerUseManager(injector: InputInjector(),
+                installer: MobileInitiationModelInstaller(receipt: mobileInitiationModelReceipt()),
+                nativeTextInstaller: nativeInstaller, nativeTextLoader: { _, _, _ in
+                    loadCount += 1
+                    while !releaseInitialLoad { try await Task.sleep(for: .milliseconds(10)) }
+                    return ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in .completed("verified") })
+                }, macControlInstaller: MobileInitiationMacControlInstaller(status: .notInstalled),
+                visualExecutorLoader: visual, taskLedger: ComputerUseTaskLedger(fileURL: fixture.ledger),
+                channelFactory: { _ in channel })
+            defer { releaseInitialLoad = true; manager.stop() }
+            manager.start(pairingCode: "123456")
+            await waitUntil { loadCount == 1 }
+            if !requestDuringActivation {
+                releaseInitialLoad = true
+                await waitUntil { manager.capability.state == .ready }
+            }
+            XCTAssertTrue(manager.handle(try setupEnvelope(requestID: "finish-all-setup"), channel: channel))
+            releaseInitialLoad = true
+            let progress = await waitForSetupProgress(channel: channel)
+            XCTAssertFalse(progress.contains { $0.phase == .ready },
+                           "A partial native capability must never send terminal full-setup success")
+            XCTAssertTrue(progress.contains { $0.phase == .failed })
+            let installs = await nativeInstaller.installCallCount()
+            XCTAssertEqual(installs, 1, "The explicit request must actually enter full setup")
+            XCTAssertEqual(visual.loadCount, 1)
+            XCTAssertEqual(loadCount, 2)
+            XCTAssertEqual(manager.capability.state, .ready)
+            XCTAssertTrue(manager.needsAdditionalSetup)
+            await manager.shutdown()
+        }
+    }
+
+    func testSetupCannotReplaceRunningOrPausedNativeTask() async throws {
+        let fixture = try makeFixture(markerPresent: false)
+        defer { try? FileManager.default.removeItem(at: fixture.parent) }
+        let nativeInstaller = MobileInitiationModelInstaller(receipt: nativeReceipt)
+        let visual = MobileInitiationVisualLoader()
+        let channel = MobileInitiationTestChannel()
+        var calls = 0
+        var release = false
+        let native = ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in
+            calls += 1
+            while !release { try await Task.sleep(for: .milliseconds(10)) }
+            return .completed("verified")
+        })
+        let manager = HostComputerUseManager(injector: InputInjector(), executor: native,
+            installer: MobileInitiationModelInstaller(receipt: mobileInitiationModelReceipt()),
+            nativeTextInstaller: nativeInstaller,
+            macControlInstaller: MobileInitiationMacControlInstaller(status: .notInstalled),
+            visualExecutorLoader: visual, taskLedger: ComputerUseTaskLedger(fileURL: fixture.ledger),
+            channelFactory: { _ in channel })
+        defer { release = true; manager.stop() }
+        manager.start(pairingCode: "123456")
+        manager.authorizePeer(senderID: "IOS-PEER")
+        let prompt = nativeTestPrompt(id: "retained-native-task")
+        XCTAssertTrue(manager.handle(prompt, channel: channel))
+        await waitUntil { calls == 1 }
+        XCTAssertTrue(manager.handle(try setupEnvelope(requestID: "setup-while-running"), channel: channel))
+        let runningFailure = await waitForSetupProgress(channel: channel)
+        XCTAssertTrue(runningFailure.contains { $0.requestID == "setup-while-running" && $0.phase == .failed })
+        guard case .working = manager.activity else { return XCTFail("Setup cannot stop the active task") }
+
+        manager.userIntervened()
+        await waitUntil { manager.activity == .paused }
+        XCTAssertTrue(manager.handle(try setupEnvelope(requestID: "setup-while-paused"), channel: channel))
+        for _ in 0..<200 {
+            if await channel.setupProgress().contains(where: { $0.requestID == "setup-while-paused" }) { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let failures = await channel.setupProgress()
+        XCTAssertEqual(failures.filter { $0.phase == .failed }.count, 2)
+        XCTAssertEqual(manager.activity, .paused)
+        let installs = await nativeInstaller.installCallCount()
+        XCTAssertEqual(installs, 0)
+        XCTAssertEqual(visual.loadCount, 0)
+        XCTAssertEqual(calls, 1)
+        release = true
+        let resume = ComputerUseEnvelope(senderID: "IOS-PEER", targetID: "HOST-ID", pairingCode: "123456",
+            sessionID: "SESSION-1", kind: .resume,
+            body: try ComputerUseControlRequest(taskID: prompt.id, revision: 1).encodedBody())
+        XCTAssertTrue(manager.handle(resume, channel: channel))
+        let completed = await waitForTaskUpdate(channel: channel, taskID: prompt.id, outcome: .taskCompleted)
+        XCTAssertEqual(completed?.text, "verified")
+        XCTAssertEqual(calls, 2, "Resume must still reach the same retained coordinator")
+        await manager.shutdown()
+    }
+
+    func testNewPromptDuringAdditionalSetupIsTerminalWithoutExecutionOrLaterReplay() async throws {
+        let fixture = try makeFixture(markerPresent: false)
+        defer { try? FileManager.default.removeItem(at: fixture.parent) }
+        let nativeInstaller = MobileInitiationModelInstaller(receipt: nativeReceipt)
+        let channel = MobileInitiationTestChannel()
+        var calls = 0
+        var loadStarted = false
+        var releaseLoad = false
+        let native = ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in
+            calls += 1; return .completed("verified")
+        })
+        let manager = HostComputerUseManager(injector: InputInjector(), executor: native,
+            installer: MobileInitiationModelInstaller(receipt: mobileInitiationModelReceipt()),
+            nativeTextInstaller: nativeInstaller, nativeTextLoader: { _, _, _ in
+                loadStarted = true
+                while !releaseLoad { try await Task.sleep(for: .milliseconds(10)) }
+                return native
+            }, macControlInstaller: MobileInitiationMacControlInstaller(status: .notInstalled),
+            visualExecutorLoader: MobileInitiationVisualLoader(throwsLoadFailure: true),
+            taskLedger: ComputerUseTaskLedger(fileURL: fixture.ledger), channelFactory: { _ in channel })
+        defer { releaseLoad = true; manager.stop() }
+        manager.start(pairingCode: "123456")
+        manager.authorizePeer(senderID: "IOS-PEER")
+        XCTAssertTrue(manager.handle(try setupEnvelope(requestID: "upgrade"), channel: channel))
+        await waitUntil { loadStarted }
+        XCTAssertEqual(manager.capability.state, .installing,
+                       "Discovery must reflect that setup currently owns the executor")
+        let blocked = nativeTestPrompt(id: "prompt-during-upgrade")
+        XCTAssertTrue(manager.handle(blocked, channel: channel))
+        let rejected = await waitForTaskUpdate(channel: channel, taskID: blocked.id, outcome: .userInterventionRequired)
+        XCTAssertTrue(rejected?.text.contains("setup is still running") == true)
+        XCTAssertEqual(calls, 0)
+        releaseLoad = true
+        _ = await waitForSetupProgress(channel: channel)
+        XCTAssertEqual(manager.capability.state, .ready)
+        XCTAssertTrue(manager.handle(blocked, channel: channel))
+        XCTAssertEqual(calls, 0, "Completing setup cannot auto-run a previously rejected task ID")
+        let fresh = nativeTestPrompt(id: "new-prompt-after-upgrade")
+        XCTAssertTrue(manager.handle(fresh, channel: channel))
+        _ = await waitForTaskUpdate(channel: channel, taskID: fresh.id, outcome: .taskCompleted)
+        XCTAssertEqual(calls, 1)
+        await manager.shutdown()
+    }
+
+    private func nativeTestPrompt(id: String) -> ComputerUseEnvelope {
+        ComputerUseEnvelope(id: id, senderID: "IOS-PEER", targetID: "HOST-ID", pairingCode: "123456",
+            sessionID: "SESSION-1", kind: .prompt, body: "Set Origin to Oslo.")
+    }
+
+    private func waitForTaskUpdate(channel: MobileInitiationTestChannel, taskID: String,
+                                   outcome: ComputerUseTerminalOutcome) async -> ComputerUseTaskUpdate? {
+        for _ in 0..<200 {
+            if let update = await channel.taskUpdates().first(where: { $0.taskID == taskID && $0.outcome == outcome }) {
+                return update
+            }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        XCTFail("Timed out waiting for the exact task outcome")
+        return nil
+    }
+
     func testInstalledNativeFormsActivateWithoutHelperVisualModelOrDownloads() async throws {
         let fixture = try makeFixture(markerPresent: false)
         defer { try? FileManager.default.removeItem(at: fixture.parent) }
@@ -745,22 +936,25 @@ private actor MobileInitiationMacControlInstaller: MacControlMCPProvisioning {
 private actor MobileInitiationModelInstaller: ComputerUseModelProvisioning {
     private let receipt: ComputerUseInstallationReceipt
     private let alreadyInstalled: Bool
+    private var interrupted: Bool
     private var installs = 0
     private var clearedMarkers = 0
     private var successfulActivations: [ComputerUseInstallationReceipt] = []
     private var failedActivations: [ComputerUseInstallationReceipt] = []
 
-    init(receipt: ComputerUseInstallationReceipt, alreadyInstalled: Bool = false) {
+    init(receipt: ComputerUseInstallationReceipt, alreadyInstalled: Bool = false, interrupted: Bool = false) {
         self.receipt = receipt
         self.alreadyInstalled = alreadyInstalled
+        self.interrupted = interrupted
     }
 
     func currentInstallation() -> ComputerUseInstallationReceipt? { alreadyInstalled ? receipt : nil }
 
-    func interruptedInstallationExists() -> Bool { false }
+    func interruptedInstallationExists() -> Bool { interrupted }
 
     func clearInterruptedInstallationMarker() {
         clearedMarkers += 1
+        interrupted = false
     }
 
     func recordRuntimeActivationSuccess(
@@ -919,6 +1113,13 @@ private actor MobileInitiationTestChannel: HostComputerUseChannel {
         sent.compactMap { envelope in
             guard envelope.kind == .setupProgress else { return nil }
             return try? ComputerUseSetupProgress.decodeBody(envelope.body)
+        }
+    }
+
+    func taskUpdates() -> [ComputerUseTaskUpdate] {
+        sent.compactMap { envelope in
+            guard envelope.kind == .assistant else { return nil }
+            return try? ComputerUseTaskUpdate.decodeBody(envelope.body)
         }
     }
 

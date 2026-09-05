@@ -232,3 +232,33 @@ COMPUTER_USE_SIGNED_PACKAGE_DERIVED_DATA=/tmp/remotedesktop-repair-derived-data 
 ```
 
 The corpus copy and managed model are prerequisites on this machine; another machine must install the pinned package normally or stage independently verified data. Do not copy an installation receipt from another run. Signed live effects, mobile partial-readiness recovery, phone-to-Mac qualification, low-memory hardware and the full OCR-dependent product gate remain open.
+
+## Setup completion, partial capability readiness and task ownership
+
+The Mac previously published a terminal setup-ready update as soon as passive native activation finished. An explicit request arriving during that activation could therefore stop monitoring before desktop setup ran; a later request could receive the cached ready result immediately before the missing packages started installing. Native activation now publishes full-setup success only when the composed capabilities are complete. Requests received during partial activation enter the remaining pipeline after the activation slot clears, and stale cached ready progress cannot precede a new setup pipeline. Passive startup also retains the existing interrupted-install policy: a verified helper plus the visual install marker, or a helper download with real bytes, resumes previously initiated setup. Missing packages, a repair state and a zero-byte helper download do not initiate a new installation by themselves.
+
+Setup owns the executor/model transition. While it is active, the host advertises installing and terminally rejects new task IDs without executing them or queuing a later replay. A fresh ID can run when setup finishes. Requests to change setup while an AI task is running, paused or awaiting approval are rejected before replacing any executor. The new running/paused regression confirms that the retained coordinator still receives Resume after both rejected setup attempts. These changes preserve the previously requested task instead of allowing setup to silently replace its continuation.
+
+The client now treats direct setup progress as authoritative for an active request. A ready/busy/paused advertisement cannot prematurely finish it, and a ready advertisement cannot erase a direct failure. `checkSetup` is an explicit, authenticated request that also accepts a ready host; passive discovery still does not start a new upgrade. Ready hosts expose “Check AI setup.” If additional setup fails while an authenticated local capability remains available, the row offers both “Use AI” and retry; busy/paused hosts cannot start another setup. The status label displays the host's capability detail without parsing that English text to grant authority. Route/account changes retain the existing cancellation fences, and a changed ready-host route recreates only an already active explicit setup request.
+
+The final **18-method signed host checkpoint passed**, **1.247 test seconds**, in `/tmp/remotedesktop-signed-setup-task-exclusion-v5.xcresult`. Exact source and execution identifiers match `/tmp/remotedesktop-setup-task-exclusion-final-inventory.json`. This includes four new methods covering task/setup exclusion, no replay after setup, requests before/after partial activation, and five startup-recovery combinations. Earlier v1–v4 checkpoints are retained and overlap; their counts are not added together. These are lifecycle tests with injected model/helper/executor dependencies, not live AI accuracy or desktop effects.
+
+The client app and tests successfully built with XcodeBuildMCP for the existing iPhone 17 Pro / iOS 26.5 simulator. The first attempt failed because the generated `project.pbxproj` was absent; pinned XcodeGen 2.45.3 generated it from `ios/project.yml`. The initial build then passed in 23.100 seconds, and the final build after removing a test scheduling assumption passed in **4.507 seconds** (`/tmp/remotedesktop-ios-setup-build-v3.xcresult`). Its reusable test products are at:
+
+`/Users/michael/Library/Developer/XcodeBuildMCP/workspaces/remote-desktop-e9bb43123db4/test-products/build_sim_2026-09-05T07-22-14-285Z_pid10943_15bab70a.xctestproducts`
+
+The [20-method client inventory](../../../ios/AcceptanceFixtures/computer-use-setup-tests.json) is checked against source, but **none of those tests has executed in this checkpoint and the UI has not been inspected**. All 31 available simulators were shutdown when rechecked. The iOS debugger skill requires asking before booting one; boot authorization was requested and has not arrived. This build is not substituted for a passing client test run or phone-to-Mac qualification. The pending Mac Accessibility request remains a separate live-test prerequisite.
+
+The inventory validator now accepts an explicit test target and source directory while retaining its original host defaults. It still verifies exact method IDs, target identity, zero skips/failures and the matching result summary. Two Python regressions prove a client method cannot be sourced from or credited to the host test target. Python: **116 passed**, 1.598 seconds. Reviewed host source inventory: **247 methods**. Compact source/build/result evidence: [setup readiness results](native-text-setup-readiness-results.json).
+
+After executing the selected client methods on the approved simulator, validate its fresh result with:
+
+```sh
+python3 host-mac/scripts/verify_test_inventory.py \
+  --manifest ios/AcceptanceFixtures/computer-use-setup-tests.json \
+  --source-root . --test-target RemoteDesktopTests \
+  --test-source-directory ios/RemoteDesktopTests \
+  --result /tmp/FRESH-client-setup.xcresult
+```
+
+Independent MCP capability activation, structured capability declarations, live signed form effects, actual mobile transport, physical low-memory qualification and the full OCR-dependent product gate remain open. No installed Mac or iOS app was replaced.

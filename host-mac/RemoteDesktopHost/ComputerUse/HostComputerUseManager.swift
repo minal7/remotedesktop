@@ -3358,6 +3358,11 @@ final class HostComputerUseManager: ObservableObject {
     }
 
     var capability: ComputerUseCapability {
+        if setupTask != nil, case .installing(let detail, _) = modelState {
+            // Setup owns the executor/model transition. New tasks are held
+            // at admission even if a previously loaded capability still exists.
+            return ComputerUseCapability(state: .installing, detail: detail)
+        }
         if executorIsReady {
             switch activity {
             case .idle:
@@ -4909,6 +4914,17 @@ final class HostComputerUseManager: ObservableObject {
             return
         }
 
+        // Setup may replace the coordinator and switch the shared model owner.
+        // It cannot discard a running/paused task or an approval continuation.
+        guard activity == .idle else {
+            sendSetupProgress(ComputerUseSetupProgress(requestID: request.requestID,
+                idempotencyKey: request.idempotencyKey, phase: .failed,
+                detail: "Finish or stop the current AI task before changing setup.",
+                errorMessage: "Finish or stop the current AI task, then retry setup."),
+                replyingTo: envelope, channel: channel)
+            return
+        }
+
         let replacesFailedGeneration =
             currentSetupProgress?.phase == .failed && setupTask == nil
         let admission = setupRecipients.admit(
@@ -4937,7 +4953,7 @@ final class HostComputerUseManager: ObservableObject {
                 detail: executor?.readyDetail ?? "AI Computer Use is ready")
             return
         }
-        if let currentSetupProgress {
+        if let currentSetupProgress, currentSetupProgress.phase != .ready {
             sendSetupProgress(currentSetupProgress, replyingTo: envelope, channel: channel)
         }
         if setupTask == nil { startSetupPipeline() }
@@ -5083,15 +5099,23 @@ final class HostComputerUseManager: ObservableObject {
         modelState = .installing(detail: "Loading local form editing…", fraction: nil)
         setupTask = Task { [weak self] in
             guard let self else { return }
-            defer { setupTask = nil }
+            var finishRequestedSetup = false
+            defer {
+                setupTask = nil
+                if finishRequestedSetup, !Task.isCancelled, !isShuttingDown {
+                    startSetupPipeline()
+                }
+            }
             do {
                 let native = try await nativeTextLoader(receipt, tools) { [weak self] detail in
                     self?.consumeRuntimeActivationUpdate(detail)
                 }
                 try Task.checkCancellation()
-                // Passive checks never download the optional desktop package.
-                // A missing helper or visual model leaves form editing usable.
-                if case .ready(let helper) = await macControlInstaller.durableStatus() {
+                // Fresh missing packages remain optional. Preserve the
+                // previous startup recovery policy for an installation that
+                // was already explicitly started before this process exited.
+                let helperStatus = await macControlInstaller.durableStatus()
+                if case .ready(let helper) = helperStatus {
                     macControlReceipt = helper
                     if let visualReceipt = await installer.currentInstallation() {
                         configureDesktopFactory(native, receipt: visualReceipt, helperReceipt: helper)
@@ -5099,9 +5123,32 @@ final class HostComputerUseManager: ObservableObject {
                 }
                 try Task.checkCancellation()
                 try await nativeTextInstaller?.recordRuntimeActivationSuccess(for: receipt)
+                try Task.checkCancellation()
+                if native.hasAdditionalSetup {
+                    // Capability readiness is not completion of an explicit
+                    // full setup request. A request received during this load
+                    // must enter the remaining pipeline after its slot clears.
+                    if currentSetupProgress?.phase == .ready { currentSetupProgress = nil }
+                    let interruptedDesktopSetup: Bool
+                    switch helperStatus {
+                    case .ready:
+                        interruptedDesktopSetup = await installer.interruptedInstallationExists()
+                    case .downloadPresent(let bytes, _):
+                        interruptedDesktopSetup = bytes > 0
+                    case .notInstalled, .repairRequired:
+                        interruptedDesktopSetup = false
+                    }
+                    try Task.checkCancellation()
+                    finishRequestedSetup = interruptedDesktopSetup || !setupRecipients.activeRecipients().isEmpty
+                }
+                // Publish capability state only after every asynchronous
+                // package/recovery check has finished. Admission stays closed
+                // until this activation slot is released below.
                 executor = native
                 modelState = .ready(runtimeName: native.runtimeName)
-                publishSetupProgress(phase: .ready, fraction: 1, detail: native.readyDetail)
+                if !native.hasAdditionalSetup {
+                    publishSetupProgress(phase: .ready, fraction: 1, detail: native.readyDetail)
+                }
             } catch is CancellationError {
                 await visualExecutorLoader.deactivate()
                 executor = nil
@@ -5468,6 +5515,11 @@ final class HostComputerUseManager: ObservableObject {
                 replyingTo: envelope,
                 channel: channel,
                 outcome: .unableToComplete)
+            return
+        }
+        guard setupTask == nil else {
+            sendDurableTerminal("AI setup is still running. Wait for setup to finish, then send this as a new request.",
+                outcome: .userInterventionRequired, replyingTo: envelope, channel: channel)
             return
         }
         guard let executor, executor.isReady else {

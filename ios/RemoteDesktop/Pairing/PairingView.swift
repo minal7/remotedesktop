@@ -453,26 +453,34 @@ struct PairingView: View {
             setupProgress(progress, host: host, fillsWidth: fillsWidth)
 
         case .useAI:
-            Button {
-                connect(to: host, experience: .computerUse)
-            } label: {
-                computerUseButtonLabel(
-                    "Use AI",
-                    systemImage: "sparkles",
-                    fillsWidth: fillsWidth)
+            VStack(spacing: 8) {
+                useAIButton(host: host, fillsWidth: fillsWidth)
+                if host.computerUseCapability.state == .ready {
+                    Button("Check AI setup", systemImage: "arrow.down.circle") {
+                        computerUseSetup.checkSetup(for: host)
+                    }
+                    .font(.caption)
+                    .disabled(session.state == .connecting)
+                    .accessibilityLabel("Check and finish AI setup on \(host.accessibilityDisplayName)")
+                }
             }
-            .buttonStyle(.borderedProminent)
-            .buttonBorderShape(.roundedRectangle(radius: 14))
-            .tint(.indigo)
-            .disabled(session.state == .connecting)
-            .accessibilityLabel(
-                "Use AI Computer Use on \(host.accessibilityDisplayName)")
-            .accessibilityHint(
-                "Opens a secure local AI conversation")
+
+        case .useAIWithSetupFailure(let message):
+            VStack(spacing: 8) {
+                useAIButton(host: host, fillsWidth: fillsWidth)
+                Button("Retry additional setup", systemImage: "arrow.clockwise") {
+                    computerUseSetup.checkSetup(for: host)
+                }
+                .buttonStyle(.bordered)
+                .tint(.orange)
+                .disabled(session.state == .connecting || host.computerUseCapability.state != .ready)
+                .accessibilityLabel("Retry additional AI setup on \(host.accessibilityDisplayName)")
+                .accessibilityHint(message)
+            }
 
         case .retry(let message):
             Button {
-                computerUseSetup.startSetup(for: host)
+                computerUseSetup.checkSetup(for: host)
             } label: {
                 computerUseButtonLabel(
                     "Retry",
@@ -487,6 +495,20 @@ struct PairingView: View {
                 "Retry AI setup on \(host.accessibilityDisplayName)")
             .accessibilityHint(message)
         }
+    }
+
+    private func useAIButton(host: LocalHostAdvertisement, fillsWidth: Bool) -> some View {
+        Button {
+            connect(to: host, experience: .computerUse)
+        } label: {
+            computerUseButtonLabel("Use AI", systemImage: "sparkles", fillsWidth: fillsWidth)
+        }
+        .buttonStyle(.borderedProminent)
+        .buttonBorderShape(.roundedRectangle(radius: 14))
+        .tint(.indigo)
+        .disabled(session.state == .connecting)
+        .accessibilityLabel("Use AI Computer Use on \(host.accessibilityDisplayName)")
+        .accessibilityHint("Opens a secure local AI conversation")
     }
 
     @ViewBuilder
@@ -624,12 +646,13 @@ struct PairingView: View {
                     .foregroundStyle(.indigo)
                     .lineLimit(horizontalSizeClass == .compact ? 2 : 1)
             case .useAI:
-                Label("AI Computer Use available", systemImage: "checkmark.circle.fill")
+                Label(host.computerUseCapability.detail.isEmpty ? "AI Computer Use available" : host.computerUseCapability.detail,
+                      systemImage: "checkmark.circle.fill")
                     .foregroundStyle(.green)
                     .lineLimit(1)
                     .minimumScaleFactor(0.78)
                     .layoutPriority(1)
-            case .retry(let message):
+            case .retry(let message), .useAIWithSetupFailure(let message):
                 Label(message, systemImage: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange)
                     .lineLimit(horizontalSizeClass == .compact ? 2 : 1)

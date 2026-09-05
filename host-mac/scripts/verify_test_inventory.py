@@ -33,9 +33,13 @@ def load_manifest(path: Path) -> dict:
     return value
 
 
-def selected_source_tests(manifest: dict, root: Path) -> set[str]:
+def selected_source_tests(manifest: dict, root: Path, *,
+                          source_directory: Path = Path("host-mac/RemoteDesktopHostTests"),
+                          target: str = "RemoteDesktopHostTests") -> set[str]:
+    if not re.fullmatch(r"[A-Za-z_]\w*", target):
+        raise InventoryError("Invalid XCTest target name")
     discovered: set[str] = set()
-    for source in sorted((root / "host-mac/RemoteDesktopHostTests").glob("*.swift")):
+    for source in sorted((root / source_directory).glob("*.swift")):
         text = source.read_text()
         # XCTest methods in this target are ordinary, zero-argument Swift
         # methods, indented inside top-level XCTestCase classes. Do not use this
@@ -48,7 +52,7 @@ def selected_source_tests(manifest: dict, root: Path) -> set[str]:
                 continue
             end = boundaries[index + 1].start() if index + 1 < len(boundaries) else len(text)
             for method in re.findall(r"^    func (test\w+)\s*\(\s*\)", text[boundary.end():end], re.M):
-                identifier = f"RemoteDesktopHostTests/{match.group(1)}/{method}"
+                identifier = f"{target}/{match.group(1)}/{method}"
                 if identifier in discovered:
                     raise InventoryError(f"Duplicate source test: {identifier}")
                 discovered.add(identifier)
@@ -113,11 +117,16 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--source-root", type=Path, required=True, help="Repository root")
+    parser.add_argument("--test-source-directory", type=Path,
+                        default=Path("host-mac/RemoteDesktopHostTests"),
+                        help="Test sources relative to the repository root")
+    parser.add_argument("--test-target", default="RemoteDesktopHostTests")
     parser.add_argument("--selectors", action="store_true")
     parser.add_argument("--result", type=Path)
     args = parser.parse_args()
     manifest = load_manifest(args.manifest)
-    compare(set(manifest["expectedTests"]), selected_source_tests(manifest, args.source_root), "Source")
+    compare(set(manifest["expectedTests"]), selected_source_tests(manifest, args.source_root,
+        source_directory=args.test_source_directory, target=args.test_target), "Source")
     if args.result:
         def read(kind: str) -> dict:
             return json.loads(subprocess.check_output([

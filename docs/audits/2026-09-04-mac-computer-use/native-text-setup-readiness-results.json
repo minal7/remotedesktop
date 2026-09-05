@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 1,
+  "scope": "native-capability-setup-and-task-lifecycle",
+  "sourceBaseCommit": "5e73017",
+  "uncommittedImplementationAtRun": true,
+  "host": {
+    "result": "passed",
+    "exactMethods": 18,
+    "xcresult": "/tmp/remotedesktop-signed-setup-task-exclusion-v5.xcresult",
+    "inventory": "/tmp/remotedesktop-setup-task-exclusion-final-inventory.json",
+    "modelAndExecutorDependencies": "injected fixtures; no model downloads or live desktop effects",
+    "xcresultSummary": {
+      "result": "Passed",
+      "totalTestCount": 18,
+      "passedTests": 18,
+      "failedTests": 0,
+      "skippedTests": 0,
+      "expectedFailures": 0,
+      "startTime": 1788593167.591,
+      "finishTime": 1788593178.087
+    }
+  },
+  "client": {
+    "result": "built; tests not executed",
+    "selectedMethods": 20,
+    "inventory": "ios/AcceptanceFixtures/computer-use-setup-tests.json",
+    "buildXcresult": "/tmp/remotedesktop-ios-setup-build-v3.xcresult",
+    "buildDurationSeconds": 4.507,
+    "testProductsPath": "/Users/michael/Library/Developer/XcodeBuildMCP/workspaces/remote-desktop-e9bb43123db4/test-products/build_sim_2026-09-05T07-22-14-285Z_pid10943_15bab70a.xctestproducts",
+    "simulatorID": "5D844813-9E0C-4689-B039-AEC5D5870F44",
+    "simulator": "iPhone 17 Pro (iOS 26.5)",
+    "executionPrerequisite": "No simulator was booted. Boot approval requested under the iOS debugger skill; no approval received yet.",
+    "uiInspection": "not performed"
+  },
+  "python": {
+    "passed": 116,
+    "seconds": 1.598
+  },
+  "reviewedHostSourceMethods": 247,
+  "earlierHostRuns": [
+    "/tmp/remotedesktop-signed-setup-task-exclusion-v1.xcresult",
+    "/tmp/remotedesktop-signed-setup-task-exclusion-v2.xcresult",
+    "/tmp/remotedesktop-signed-setup-task-exclusion-v3.xcresult",
+    "/tmp/remotedesktop-signed-setup-task-exclusion-v4.xcresult"
+  ],
+  "signedFormEffects": "Still awaiting development host Accessibility permission; prior denied run remains separate evidence.",
+  "fullProductQualified": false,
+  "installedAppsReplaced": false,
+  "sha256": {
+    "host-mac/RemoteDesktopHost/ComputerUse/HostComputerUseManager.swift": "31d6f3ac304c61975ebee96bafda12c403d8ad7cc0842bfcacbbb445b6fcc46e",
+    "host-mac/RemoteDesktopHostTests/ComputerUseMobileInitiationTests.swift": "b1f9bc7db1f69cd248e188f9bf53340b5f8fed3a5b96a37cf566b78cda918113",
+    "host-mac/scripts/verify_test_inventory.py": "8149f12a112c5acbf1a56f8254bf2d50694821794c83da80574993fd4fe572db",
+    "host-mac/scripts/tests/test_verify_test_inventory.py": "ce8b55c555676315734265a7e01260640be553653f0891a0fda5a826dd0ac7f0",
+    "ios/RemoteDesktop/ComputerUse/ComputerUseSetupCoordinator.swift": "9708c6985f8c34daa0099a988ee1ce49731fe996976d15cc94adaa97f969a8e4",
+    "ios/RemoteDesktop/Pairing/PairingView.swift": "b3b7b3d3175c8c90d8cba436a64bef12fe4a52efdb1f75fb34b93c632f7c9969",
+    "ios/RemoteDesktopTests/ComputerUseSetupTests.swift": "8cb29772eca80a400dcf068f8c90bbd318673cb616bddba25caf0cb1ea141805",
+    "ios/AcceptanceFixtures/computer-use-setup-tests.json": "cffe7c0dd13703983d6d4d827d4bdadb085b0d8587834b0f1e351ba64e563c64",
+    "/tmp/remotedesktop-signed-setup-task-exclusion-v5.log": "fcdb5a43d8a16c6d6732dbe0e0edcba1946be37db6781328b275e55b0b4643f7",
+    "/tmp/remotedesktop-setup-readiness-python-final.log": "59fb9294e348525d1618d43c26e618c7b9ac2605488a39d2a145b7bc744dbd37",
+    "/Users/michael/Library/Developer/XcodeBuildMCP/workspaces/remote-desktop-e9bb43123db4/logs/build_sim_2026-09-05T07-22-14-286Z_pid10943_094ce5c9.log": "29ae38117e18b1ceec66479e855883ca7b51b612fcddf9aefac3f10d53d845b5"
+  }
+}

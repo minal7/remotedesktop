@@ -2674,6 +2674,101 @@ final class ComputerUseSetupTests: XCTestCase {
         XCTAssertTrue(message.contains("Secure local AI pairing"))
     }
 
+    func test_rowActionKeepsAvailableAIAlongsideAdditionalSetupFailure() {
+        for capability in [ComputerUseCapability.ready,
+                           ComputerUseCapability(state: .busy, detail: "Working"),
+                           ComputerUseCapability(state: .paused, detail: "Paused")] {
+            let host = makeHost(capability: capability)
+            XCTAssertEqual(ComputerUseRowAction.resolve(host: host, state: .failed("More setup failed"),
+                localPromptReady: true), .useAIWithSetupFailure("More setup failed"))
+            XCTAssertEqual(ComputerUseRowAction.resolve(host: host, state: .failed("More setup failed"),
+                localPromptReady: false), .retry("More setup failed"))
+        }
+        XCTAssertEqual(ComputerUseRowAction.resolve(host: makeHost(capability: .setupRequired),
+            state: .failed("Not installed"), localPromptReady: true), .retry("Not installed"))
+    }
+
+    func test_coordinatorDoesNotLetReadyAdvertisementFinishOrHideFailedSetup() async throws {
+        let channel = FakeComputerUseSetupChannel(responseBatches: [])
+        let coordinator = ComputerUseSetupCoordinator { _, _ in channel }
+        let starting = makeHost(capability: .setupRequired)
+        let partial = makeHost(capability: .ready)
+        coordinator.startSetup(for: starting)
+        await waitUntilAsync { await channel.sentMessages().count == 1 }
+        await waitUntil { if case .installing = coordinator.state(for: starting) { return true }; return false }
+        coordinator.reconcile(hosts: [partial])
+        guard case .installing = coordinator.state(for: partial) else {
+            return XCTFail("A ready native capability cannot finish the active setup request")
+        }
+        let failed = ComputerUseSetupProgress(requestID: "host-installation", phase: .failed,
+            detail: "Additional setup failed", errorMessage: "Additional setup failed")
+        await channel.enqueue([try progressEnvelope(failed)])
+        await waitUntil(timeoutIterations: 300) {
+            coordinator.state(for: partial) == .failed("Additional setup failed")
+        }
+        coordinator.reconcile(hosts: [partial])
+        XCTAssertEqual(coordinator.state(for: partial), .failed("Additional setup failed"))
+        let ready = ComputerUseSetupProgress(requestID: "host-installation", phase: .ready,
+            fractionCompleted: 1, detail: "All setup finished")
+        await channel.enqueue([try progressEnvelope(ready)])
+        coordinator.checkSetup(for: partial)
+        await waitUntil(timeoutIterations: 300) { coordinator.state(for: partial) == .ready }
+        let sent = await channel.sentMessages()
+        XCTAssertEqual(sent.count, 2)
+        let requests = try sent.map { try ComputerUseSetupRequest.decodeBody($0.body) }
+        XCTAssertNotEqual(requests[0].requestID, requests[1].requestID)
+        XCTAssertEqual(requests[0].idempotencyKey, requests[1].idempotencyKey)
+    }
+
+    func test_coordinatorChecksReadyHostOnlyAfterExplicitRequestAndDeduplicatesTaps() async throws {
+        let channel = FakeComputerUseSetupChannel(responseBatches: [])
+        var factoryCalls = 0
+        let coordinator = ComputerUseSetupCoordinator { _, _ in factoryCalls += 1; return channel }
+        let host = makeHost(capability: .ready)
+        coordinator.reconcile(hosts: [host])
+        coordinator.startSetup(for: host)
+        XCTAssertEqual(factoryCalls, 0, "Discovery must not start an upgrade")
+        coordinator.checkSetup(for: host)
+        coordinator.checkSetup(for: host)
+        XCTAssertEqual(factoryCalls, 1)
+        await waitUntilAsync { await channel.sentMessages().count == 1 }
+        await waitUntil { if case .installing = coordinator.state(for: host) { return true }; return false }
+        coordinator.reconcile(hosts: [host])
+        guard case .installing = coordinator.state(for: host) else {
+            return XCTFail("Direct setup progress remains authoritative")
+        }
+        coordinator.reconcile(hosts: [])
+
+        for capability in [ComputerUseCapability(state: .busy, detail: ""),
+                           ComputerUseCapability(state: .paused, detail: ""), .unavailable] {
+            coordinator.checkSetup(for: makeHost(capability: capability))
+        }
+        XCTAssertEqual(factoryCalls, 1, "Busy, paused and unavailable hosts cannot be upgraded")
+        let untrusted = ComputerUseSetupCoordinator(hasAuthenticatedRoute: { _ in false },
+            channelFactory: { _, _ in factoryCalls += 1; return channel })
+        untrusted.checkSetup(for: host)
+        XCTAssertEqual(factoryCalls, 1, "Explicit setup still requires an authenticated route")
+    }
+
+    func test_coordinatorRebindsExplicitSetupWhenReadyHostRouteChanges() async throws {
+        let channel = FakeComputerUseSetupChannel(responseBatches: [])
+        let coordinator = ComputerUseSetupCoordinator { _, _ in channel }
+        let first = makeHost(code: "123456", capability: .ready)
+        coordinator.checkSetup(for: first)
+        await waitUntilAsync { await channel.sentMessages().count == 1 }
+        let moved = makeHost(code: "654321", capability: .ready)
+        coordinator.reconcile(hosts: [moved])
+        await waitUntilAsync { await channel.sentMessages().count == 2 }
+        await waitUntil { if case .installing = coordinator.state(for: moved) { return true }; return false }
+        guard case .installing = coordinator.state(for: moved) else {
+            return XCTFail("Ready discovery must preserve the rebound explicit setup")
+        }
+        let ready = ComputerUseSetupProgress(requestID: "host-installation", phase: .ready,
+            fractionCompleted: 1, detail: "All setup finished")
+        await channel.enqueue([try progressEnvelope(ready)])
+        await waitUntil(timeoutIterations: 300) { coordinator.state(for: moved) == .ready }
+    }
+
     func test_rowAction_explainsAIRequirementsWithoutCloudKitHostIdentity() {
         let host = makeHost(senderID: nil, capability: .setupRequired)
 
@@ -3340,6 +3435,10 @@ private actor FakeComputerUseSetupChannel: ComputerUseSetupChannel {
 
     func sentMessages() -> [SentMessage] {
         sent
+    }
+
+    func enqueue(_ envelopes: [ComputerUseEnvelope]) {
+        responseBatches.append(envelopes)
     }
 }
 
