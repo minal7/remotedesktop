@@ -117,7 +117,7 @@ enum ComputerUseTextTaskError: Error, Equatable {
 }
 
 struct ComputerUseTextStepJournal: Codable, Equatable, Sendable {
-    enum Status: String, Codable, Sendable { case planned, attempted, verified, uncertain }
+    typealias Status = ComputerUseTaskStepStatus
     let taskID: String
     let promptDigest: String
     let contractDigest: String
@@ -125,17 +125,22 @@ struct ComputerUseTextStepJournal: Codable, Equatable, Sendable {
     var statuses: [Status]
 }
 
-/// Persist-before-effect, readback-after-effect. Retain this instance on pause.
-/// A possibly delivered edit is reconciled, never sent a second time merely
-/// because a model proposed it again or the previous call was interrupted.
+/// Text capability compiler/adapter for the shared transaction engine. The
+/// existing private journal format remains compatible; its contract digest
+/// already covers all exact values, selections, constraints and ordered steps.
 @MainActor
 final class ComputerUseTextTask {
     let contract: ComputerUseTextTaskContract
-    private(set) var journal: ComputerUseTextStepJournal
-    let read: (String) throws -> ComputerUseTextSnapshot?
-    let apply: (ComputerUseTextPlanEdit, ComputerUseTextSnapshot) async throws -> Void
-    let persist: (ComputerUseTextStepJournal) throws -> Void
-    let mayAct: () -> Bool
+    private let execution: ComputerUseTaskExecution
+    private let retainedPredicateIDs: Set<String>
+    var journal: ComputerUseTextStepJournal {
+        Self.textJournal(execution.journal, contract: contract)
+    }
+
+    private enum Check {
+        case value(String)
+        case selection(NSRange)
+    }
 
     init(contract: ComputerUseTextTaskContract,
          recovered: ComputerUseTextStepJournal? = nil,
@@ -144,108 +149,108 @@ final class ComputerUseTextTask {
          persist: @escaping (ComputerUseTextStepJournal) throws -> Void,
          mayAct: @escaping () -> Bool) throws {
         self.contract = contract
-        let initial = ComputerUseTextStepJournal(
-            taskID: contract.taskID, promptDigest: contract.promptDigest,
-            contractDigest: contract.contractDigest,
-            stepIDs: contract.steps.map(\.id), statuses: contract.steps.map { _ in .planned })
+        var predicates: [ComputerUseTaskContract.Predicate] = []
+        var checks: [String: Check] = [:]
+        var retained = Set<String>()
+        func predicate(_ id: String, target: String, check: Check) -> String {
+            let kind: String
+            let digest: String
+            switch check {
+            case .value(let value):
+                kind = "editable-text-value"
+                digest = ComputerUseTextTaskContract.digest(value)
+            case .selection(let range):
+                kind = "editable-text-selection"
+                digest = ComputerUseTaskContract.digest([String(range.location), String(range.length)])
+            }
+            predicates.append(.init(id: id, entityID: target, kind: kind, expectedDigest: digest))
+            checks[id] = check
+            return id
+        }
+        let invariants = contract.unchangedValues.keys.sorted().enumerated().map { index, id in
+            predicate("constraint-\(index)", target: id, check: .value(contract.unchangedValues[id]!))
+        }
+        var completedValues: [String: String] = [:]
+        var steps: [ComputerUseTaskContract.Step] = []
+        for (index, step) in contract.steps.enumerated() {
+            var preconditions = [predicate("before-\(index)", target: step.targetID, check: .value(step.before))]
+            if let selection = step.insertionSelection {
+                preconditions.append(predicate("selection-\(index)", target: step.targetID, check: .selection(selection)))
+            }
+            for (position, target) in completedValues.keys.sorted().enumerated() {
+                let id = predicate("retained-\(index)-\(position)", target: target, check: .value(completedValues[target]!))
+                retained.insert(id)
+                preconditions.append(id)
+            }
+            let after = predicate("after-\(index)", target: step.targetID, check: .value(step.after))
+            steps.append(.init(id: step.id, dependencies: step.dependency.map { [$0] } ?? [],
+                operation: .init(capabilityID: "text.edit." + step.mode.rawValue, entityID: step.targetID,
+                    payloadDigest: ComputerUseTextTaskContract.digest(step.payload), payloadVersion: 1),
+                preconditions: preconditions, postconditions: [after]))
+            completedValues[step.targetID] = step.after
+        }
+        let outcomes = contract.finalValues.keys.sorted().enumerated().map { index, id in
+            predicate("outcome-\(index)", target: id, check: .value(contract.finalValues[id]!))
+        }
+        let entities = Set(predicates.map(\.entityID)).sorted().map {
+            ComputerUseTaskContract.Entity(id: $0, authorityDigest: ComputerUseTaskContract.digest(["retained-ax-reference", $0]))
+        }
+        let compiled = try ComputerUseTaskContract(taskID: contract.taskID, promptDigest: contract.promptDigest,
+            entities: entities, predicates: predicates, steps: steps, invariants: invariants, outcomes: outcomes)
+        self.retainedPredicateIDs = retained
+        var recoveredExecution: ComputerUseTaskJournal?
         if let recovered {
-            guard recovered.taskID == initial.taskID, recovered.promptDigest == initial.promptDigest,
-                  recovered.contractDigest == initial.contractDigest,
-                  recovered.stepIDs == initial.stepIDs, recovered.statuses.count == initial.statuses.count else {
+            guard recovered.taskID == contract.taskID, recovered.promptDigest == contract.promptDigest,
+                  recovered.contractDigest == contract.contractDigest, recovered.stepIDs == contract.steps.map(\.id) else {
                 throw ComputerUseTextTaskError.journalMismatch
             }
-            // Only a verified prefix, at most one in-flight step, and a planned
-            // suffix are reachable through sequential execution.
-            var sawUnverified = false
-            for status in recovered.statuses {
-                if sawUnverified && status != .planned {
-                    throw ComputerUseTextTaskError.journalMismatch
-                }
-                if status != .verified { sawUnverified = true }
-            }
+            recoveredExecution = ComputerUseTaskJournal(taskID: recovered.taskID, promptDigest: recovered.promptDigest,
+                contractDigest: compiled.contractDigest, stepIDs: recovered.stepIDs, statuses: recovered.statuses)
         }
-        self.journal = recovered ?? initial
-        self.read = read
-        self.apply = apply
-        self.persist = persist
-        self.mayAct = mayAct
+        let compiledChecks = checks
+        let edits = Dictionary(uniqueKeysWithValues: contract.steps.map { ($0.id, $0) })
+        do {
+            execution = try ComputerUseTaskExecution(contract: compiled, recovered: recoveredExecution,
+                observe: { predicate in
+                    guard let snapshot = try read(predicate.entityID), snapshot.targetID == predicate.entityID,
+                          snapshot.isEditable, !snapshot.isSecure, let check = compiledChecks[predicate.id] else { return false }
+                    switch check {
+                    case .value(let value): return snapshot.value.utf8.elementsEqual(value.utf8)
+                    case .selection(let selection): return snapshot.selection == selection
+                    }
+                }, perform: { step, _ in
+                    guard let edit = edits[step.id], let current = try read(edit.targetID), current.targetID == edit.targetID,
+                          current.isEditable, !current.isSecure,
+                          current.value.utf8.elementsEqual(edit.before.utf8),
+                          edit.insertionSelection.map({ $0 == current.selection }) ?? true else {
+                        throw ComputerUseTextTaskError.staleTarget
+                    }
+                    try await apply(ComputerUseTextPlanEdit(targetID: edit.targetID, mode: edit.mode, text: edit.payload), current)
+                }, persist: { try persist(Self.textJournal($0, contract: contract)) },
+                assertOwnership: { guard mayAct() else { throw ComputerUseTextEditError.interrupted } })
+        } catch ComputerUseTaskExecutionError.journalMismatch {
+            throw ComputerUseTextTaskError.journalMismatch
+        }
     }
 
     func run(progress: (Int, Int) -> Void = { _, _ in }) async throws {
-        for (index, step) in contract.steps.enumerated() {
-            await Task.yield()
-            try Task.checkCancellation()
-            guard mayAct() else { throw ComputerUseTextEditError.interrupted }
-            if journal.statuses[index] == .verified { continue }
-            guard index == 0 || journal.statuses[index - 1] == .verified,
-                  let current = try read(step.targetID), current.targetID == step.targetID,
-                  current.isEditable, !current.isSecure else {
-                throw ComputerUseTextTaskError.staleTarget
-            }
-            if journal.statuses[index] != .planned {
-                // Readback can establish the exact outcome after an interrupted
-                // call, but matching the old value cannot prove no effect.
-                guard current.value.utf8.elementsEqual(step.after.utf8) else {
-                    try transition(index, to: .uncertain)
-                    throw ComputerUseTextTaskError.uncertainEffect
-                }
-                try transition(index, to: .verified)
-                continue
-            }
-            // Verify the latest completed state of each field before starting
-            // another effect, including after a pause between fields.
-            var completedValues = contract.unchangedValues
-            for prior in 0..<index where journal.statuses[prior] == .verified {
-                completedValues[contract.steps[prior].targetID] = contract.steps[prior].after
-            }
-            for (id, value) in completedValues {
-                guard let observed = try read(id), observed.targetID == id,
-                      observed.value.utf8.elementsEqual(value.utf8),
-                      observed.isEditable, !observed.isSecure else {
-                    throw ComputerUseTextTaskError.incompleteOutcome
-                }
-            }
-            guard current.value.utf8.elementsEqual(step.before.utf8),
-                  step.insertionSelection.map({ $0 == current.selection }) ?? true else {
-                throw ComputerUseTextTaskError.staleTarget
-            }
-            try transition(index, to: .attempted)
-            do {
-                try Task.checkCancellation()
-                guard mayAct() else { throw ComputerUseTextEditError.interrupted }
-                try await apply(ComputerUseTextPlanEdit(
-                    targetID: step.targetID, mode: step.mode, text: step.payload), current)
-                guard let after = try read(step.targetID), after.targetID == step.targetID,
-                      after.isEditable, !after.isSecure,
-                      after.value.utf8.elementsEqual(step.after.utf8) else {
-                    throw ComputerUseTextTaskError.uncertainEffect
-                }
-                try transition(index, to: .verified)
-                progress(index + 1, contract.steps.count)
-            } catch {
-                // The attempted marker has already reached durable storage.
-                // Preserve it if cancellation or persistence fails.
-                if !(error is CancellationError) {
-                    try? transition(index, to: .uncertain)
-                }
-                throw error
-            }
-        }
-        try Task.checkCancellation()
-        guard mayAct() else { throw ComputerUseTextEditError.interrupted }
-        for (id, value) in contract.finalValues {
-            guard let current = try read(id), current.targetID == id,
-                  current.isEditable, !current.isSecure,
-                  current.value.utf8.elementsEqual(value.utf8) else {
-                throw ComputerUseTextTaskError.incompleteOutcome
+        do { try await execution.run(progress: progress) }
+        catch let error as ComputerUseTaskExecutionError {
+            switch error {
+            case .preconditionFailed(let id):
+                throw retainedPredicateIDs.contains(id) ? ComputerUseTextTaskError.incompleteOutcome : .staleTarget
+            case .uncertainEffect: throw ComputerUseTextTaskError.uncertainEffect
+            case .incompleteOutcome: throw ComputerUseTextTaskError.incompleteOutcome
+            case .journalMismatch: throw ComputerUseTextTaskError.journalMismatch
+            case .invalidContract: throw ComputerUseTextTaskError.invalidPlan
+            case .alreadyExecuting: throw error
             }
         }
     }
 
-    private func transition(_ index: Int, to status: ComputerUseTextStepJournal.Status) throws {
-        var next = journal
-        next.statuses[index] = status
-        try persist(next)
-        journal = next
+    private static func textJournal(_ journal: ComputerUseTaskJournal,
+                                    contract: ComputerUseTextTaskContract) -> ComputerUseTextStepJournal {
+        ComputerUseTextStepJournal(taskID: journal.taskID, promptDigest: journal.promptDigest,
+            contractDigest: contract.contractDigest, stepIDs: journal.stepIDs, statuses: journal.statuses)
     }
 }

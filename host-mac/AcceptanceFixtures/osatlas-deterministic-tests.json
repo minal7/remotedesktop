@@ -50,7 +50,8 @@
     "RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testInstalledNativeAndMacToolsRouteStructuredGoalsWithoutVisualLoad",
     "RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testFailedNativeSetupPreservesPreviouslyAvailableMacTools",
     "RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testVisualSetupFailureKeepsNewlyInstalledNativeAndMacToolsAvailable",
-    "RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testFailedPassiveActivationTerminatesPendingFullSetupRequest"
+    "RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testFailedPassiveActivationTerminatesPendingFullSetupRequest",
+    "RemoteDesktopHostTests/ComputerUseTaskExecutionTests"
   ],
   "expectedTests": [
     "RemoteDesktopHostTests/ComputerUseCapabilityExecutorTests/testCancelledDesktopLoadCannotExecuteAndReleasesReturnedHelper",
@@ -99,6 +100,14 @@
     "RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testVisualSetupFailureKeepsNewlyInstalledNativeAndMacToolsAvailable",
     "RemoteDesktopHostTests/ComputerUseObservationWorkerTests/testBlockingObservationLeavesMainActorResponsiveAndTimesOut",
     "RemoteDesktopHostTests/ComputerUseObservationWorkerTests/testCancellationReturnsWithoutWaitingForBlockedNativeCall",
+    "RemoteDesktopHostTests/ComputerUseTaskExecutionTests/testCompletedJournalCannotHideAChangedFinalOutcomeOrConstraint",
+    "RemoteDesktopHostTests/ComputerUseTaskExecutionTests/testConcurrentRunAndCancelledObservationCannotDispatchLateResult",
+    "RemoteDesktopHostTests/ComputerUseTaskExecutionTests/testContractRejectsMissingBindingsPredicatesOutcomesAndImpossibleDependencies",
+    "RemoteDesktopHostTests/ComputerUseTaskExecutionTests/testFailedDurableWriteOrOwnershipLossCannotReachEffectAdapter",
+    "RemoteDesktopHostTests/ComputerUseTaskExecutionTests/testRecoveryAfterEveryDeliveredStepReconcilesWithoutRepeatingTypingOrSubmission",
+    "RemoteDesktopHostTests/ComputerUseTaskExecutionTests/testRecoveryBindsTargetGenerationPayloadVersionDependenciesConstraintsAndOutcomes",
+    "RemoteDesktopHostTests/ComputerUseTaskExecutionTests/testReturnedButUnobservedSubmissionStaysUncertainWithoutReplay",
+    "RemoteDesktopHostTests/ComputerUseTaskExecutionTests/testTwoIdenticalQueriesUseDistinctStepsAndEachSubmissionNeedsItsOwnEvidence",
     "RemoteDesktopHostTests/ComputerUseTests/test_computerUseCommandShiftHotkeyPostsSKeyWithModifiers",
     "RemoteDesktopHostTests/ComputerUseTests/test_computerUseDoubleClickCarriesNativeClickCount",
     "RemoteDesktopHostTests/ComputerUseTests/test_computerUseDragInterpolatesHeldPointerPath",
@@ -132,6 +141,7 @@
     "RemoteDesktopHostTests/ComputerUseTextStepStoreTests/testCorruptExistingJournalCannotBecomeNewTask",
     "RemoteDesktopHostTests/ComputerUseTextStepStoreTests/testSymlinkJournalIsRejected",
     "RemoteDesktopHostTests/ComputerUseTextTaskTests/testChangedEarlierFieldPreventsNextEffectAndFalseCompletion",
+    "RemoteDesktopHostTests/ComputerUseTextTaskTests/testChangedFieldDuringJournalWriteCannotReachTextMutationAdapter",
     "RemoteDesktopHostTests/ComputerUseTextTaskTests/testChangedUneditedConstraintPreventsFurtherInputAndCompletion",
     "RemoteDesktopHostTests/ComputerUseTextTaskTests/testLiteralCatalogPreservesMultipleExactValuesAndRejectsInventedText",
     "RemoteDesktopHostTests/ComputerUseTextTaskTests/testLiteralReferencesCannotAliasUnquotedUserTextOrFakeMarkers",

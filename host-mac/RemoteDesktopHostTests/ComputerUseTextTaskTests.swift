@@ -193,6 +193,18 @@ final class ComputerUseTextTaskTests: XCTestCase {
         catch { XCTAssertEqual(error as? ComputerUseTextEditError, .interrupted) }
     }
 
+    func testChangedFieldDuringJournalWriteCannotReachTextMutationAdapter() async throws {
+        let initial = field("origin")
+        var current = initial.snapshot
+        let contract = try ComputerUseTextTaskContract(taskID: "t", prompt: "Paris", fields: [initial],
+            edits: [ComputerUseTextPlanEdit(targetID: "origin", mode: .replaceAll, text: "Paris")])
+        let task = try ComputerUseTextTask(contract: contract, read: { _ in current },
+            apply: { _, _ in XCTFail("The field changed after preflight and before dispatch") },
+            persist: { _ in current = self.field("origin", "changed externally").snapshot }, mayAct: { true })
+        do { try await task.run(); XCTFail("The changed precondition must reject input") }
+        catch { XCTAssertEqual(error as? ComputerUseTextTaskError, .staleTarget) }
+    }
+
     func testRequirementCoverageRejectsMissingNegationActionOrPayloadReference() {
         let task = "Do not send. Set Origin to [exact quoted payload p1], then open Calendar."
         XCTAssertTrue(ComputerUseTextRequirementCoverage.matches(sources: [

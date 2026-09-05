@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 1,
+  "scope": "shared-task-contract-and-transaction-engine-with-production-text-adapter",
+  "sourceBaseCommit": "9cd2738",
+  "uncommittedImplementationAtRun": true,
+  "signed": {
+    "xcresult": "/tmp/remotedesktop-signed-task-core-v2.xcresult",
+    "exactMethods": 43,
+    "testSeconds": 1.46,
+    "summary": {
+      "result": "Passed",
+      "totalTestCount": 43,
+      "passedTests": 43,
+      "failedTests": 0,
+      "skippedTests": 0,
+      "expectedFailures": 0,
+      "startTime": 1788596814.036,
+      "finishTime": 1788596823.651
+    }
+  },
+  "swiftPM": {
+    "xunit": "/tmp/remotedesktop-task-core-v3.xunit.xml",
+    "exactMethods": 43,
+    "workerResultSeconds": 3.2724761660000006,
+    "initialNonWorkerLog": "/tmp/remotedesktop-task-core-v2.log",
+    "initialNonWorkerTestSeconds": 0.121,
+    "resultNote": "Initial SwiftPM invocation passed but did not emit xUnit without worker mode. One-worker rerun produced exact-ID execution evidence; overlapping runs are not summed."
+  },
+  "inventory": "docs/audits/2026-09-04-mac-computer-use/task-execution-core-inventory.json",
+  "python": {
+    "passed": 116,
+    "seconds": 1.418
+  },
+  "reviewedHostSourceMethods": 270,
+  "executionDependencies": "Controlled in-memory field/effect observations and actual private text journal implementation; no live model, browser, desktop input or phone transport.",
+  "productionWiring": "Normal native form tasks now compile into ComputerUseTaskContract and execute through ComputerUseTaskExecution. Existing text journal schema and complete original contract fingerprint remain compatible.",
+  "twoSearches": "Controlled kernel fixture with separate submitted-result receipts; not a shipped search adapter or natural-language browser result.",
+  "remaining": [
+    "Compile complete visual and structured task goals into the shared contract",
+    "Bind event postconditions to fresh result receipts and real browser/document identity",
+    "Replace visual TYPE/ENTER history guards only after equivalent task/step reconciliation is integrated",
+    "Shared typed cross-executor evidence and durable non-text adapters",
+    "Actual signed live form requalification after pending Accessibility permission",
+    "Pending simulator execution and full phone-to-Mac qualification"
+  ],
+  "fullProductQualified": false,
+  "installedAppsReplaced": false,
+  "sha256": {
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseTaskExecution.swift": "50e52ff23e15192789dc7fef641d8087122b29d557467796489d9c76df127b51",
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseTextTask.swift": "087821f2f6d3e7bf54a0bc4308182d93f231e85a406e22225138e38680a9eb03",
+    "host-mac/RemoteDesktopHostTests/ComputerUseTaskExecutionTests.swift": "00aeaed695dd7187a14de47333879dcbb58b8aeee8821d90e95a45c002262cd6",
+    "host-mac/RemoteDesktopHostTests/ComputerUseTextTaskTests.swift": "ae04f7c848750a38059be99d47a35a71c2ab70d3eb499aec3fbc7246885721a2",
+    "host-mac/RemoteDesktopHost.xcodeproj/project.pbxproj": "6e29f2effb773adb7e271e8eb4e3e1b565b2ea14d7901e53b24ff46465babe71",
+    "host-mac/AcceptanceFixtures/osatlas-deterministic-tests.json": "a12e6776db68737ebc7508e551944c1f85f49dd8f2285b6fbf4a377cd1f4b22a",
+    "docs/audits/2026-09-04-mac-computer-use/task-execution-core-inventory.json": "9385159d98437149c59a22e97347578bd5008e6eb6b7e9e1df4f5d795d1ca88b",
+    "/tmp/remotedesktop-signed-task-core-v2.log": "36f7963932fcc82cf250d6663336589a7d0f73098aa183d8ee493fb04cf230f6",
+    "/tmp/remotedesktop-task-core-v2.log": "aea6d4482435cac5f2e014c9e770202149b691275518a79780e1264418d08ed2",
+    "/tmp/remotedesktop-task-core-v3.log": "4b0a8afa86d260aac75bcf9b594ab0fc1b415597476a330433590d3a1985b23b",
+    "/tmp/remotedesktop-task-core-v3.xunit.xml": "f479f0af54794d65b8de81055d3d7672ac047e981f46384f7a5b671c66617ecd",
+    "/tmp/remotedesktop-task-core-python-v1.log": "2ed545c8ae19cd6c83f850432369dd5dfc491ab88c1addc0ae931edf715cdfd0"
+  }
+}
