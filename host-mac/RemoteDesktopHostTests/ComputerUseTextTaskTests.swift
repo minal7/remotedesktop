@@ -3,6 +3,74 @@ import XCTest
 
 @MainActor
 final class ComputerUseTextTaskTests: XCTestCase {
+    func testCompleteQuotedCommandsBindTargetAndValueRolesWithoutExtraEdits() throws {
+        let fields = [field("origin"), field("destination")]
+        let examples: [(String, [ComputerUseTextPlanEdit])] = [
+            (#"Set "Destination" to "Berlin"."#, [.init(targetID: "destination", mode: .replaceAll, text: "Berlin")]),
+            (#"Set "origin" to "Destination", and "destination" to "Origin"."#,
+             [.init(targetID: "origin", mode: .replaceAll, text: "Destination"), .init(targetID: "destination", mode: .replaceAll, text: "Origin")]),
+            (#"Please set "origin" to "Paris", then set "origin" to "Paris"."#,
+             [.init(targetID: "origin", mode: .replaceAll, text: "Paris"), .init(targetID: "origin", mode: .replaceAll, text: "Paris")]),
+            ("Set “origin” to “  東京\ne\u{301} 😀  ”.", [.init(targetID: "origin", mode: .replaceAll, text: "  東京\ne\u{301} 😀  ")]),
+            (#"Set "origin" to ""."#, [.init(targetID: "origin", mode: .replaceAll, text: "")])]
+        for (prompt, expected) in examples {
+            let result = try ComputerUseQuotedTextRequest.compile(prompt: prompt, fields: fields)
+            guard case .edits(let edits, let unchanged) = result else { return XCTFail("Complete grammar did not compile") }
+            XCTAssertEqual(edits, expected)
+            XCTAssertEqual(Set(unchanged), Set(fields.map { $0.snapshot.targetID }).subtracting(expected.map(\.targetID)))
+        }
+    }
+
+    func testQuotedCommandCompilerRejectsPartialGoalsAndClarifiesUnboundTargets() throws {
+        let fields = [field("origin"), field("destination")]
+        for prompt in [#"Set "origin" to "Paris", then submit"#, #"Do not set "origin" to "Paris""#,
+                       #"Set "missing" to "Paris", then open Calendar"#, #"Maybe set "origin" to "Paris"?"#,
+                       #"Set "origin" to "Paris" or "destination" to "Berlin""#,
+                       #"Set [exact quoted payload p1] to "Paris". "origin""#,
+                       #"Put "Origin" in Destination."#] {
+            XCTAssertNil(try ComputerUseQuotedTextRequest.compile(prompt: prompt, fields: fields), prompt)
+        }
+        XCTAssertEqual(try ComputerUseQuotedTextRequest.compile(prompt: #"Set "missing" to "Paris"."#, fields: fields), .clarification)
+        XCTAssertEqual(try ComputerUseQuotedTextRequest.compile(prompt: #"Set "origin" to "Paris"."#,
+            fields: fields + [field("ORIGIN")]), .clarification)
+    }
+
+    func testAsynchronousFinalReadCannotStartAnEditAfterCancellationOrTakeover() async throws {
+        for cancelTask in [false, true] {
+            let initial = field("origin")
+            let contract = try ComputerUseTextTaskContract(taskID: "async-read", prompt: "Set Origin to Paris", fields: [initial],
+                edits: [.init(targetID: "origin", mode: .replaceAll, text: "Paris")])
+            var allowed = true
+            var reads = 0
+            var effects = 0
+            var suspended: CheckedContinuation<ComputerUseTextSnapshot?, Never>?
+            let task = try ComputerUseTextTask(contract: contract, read: { _ in
+                reads += 1
+                if reads == 2 { return await withCheckedContinuation { suspended = $0 } }
+                return initial.snapshot
+            }, apply: { _, _ in effects += 1 }, persist: { _ in }, mayAct: { allowed })
+            let running = Task { try await task.run() }
+            while suspended == nil { await Task.yield() }
+            if cancelTask { running.cancel() } else { allowed = false }
+            suspended?.resume(returning: initial.snapshot)
+            do { try await running.value; XCTFail("A stale asynchronous read cannot authorize the next effect") }
+            catch {
+                if cancelTask { XCTAssertTrue(error is CancellationError) }
+                else { XCTAssertEqual(error as? ComputerUseTextEditError, .interrupted) }
+            }
+            XCTAssertEqual(effects, 0)
+        }
+    }
+
+    func testMissingSelectionCannotBecomeAnInventedCaretAfterEarlierEdit() throws {
+        let initial = ComputerUseTextField(label: "Email", snapshot: .init(targetID: "email", value: "old@example.invalid",
+            selection: NSRange(location: NSNotFound, length: 0), isEditable: true, isSecure: false))
+        let replacement = ComputerUseTextPlanEdit(targetID: "email", mode: .replaceAll, text: "new@example.invalid")
+        _ = try ComputerUseTextTaskContract(taskID: "replace", prompt: "Replace email", fields: [initial], edits: [replacement])
+        XCTAssertThrowsError(try ComputerUseTextTaskContract(taskID: "mixed", prompt: "Replace and insert", fields: [initial],
+            edits: [replacement, .init(targetID: "email", mode: .insert, text: "missing-caret")]))
+    }
+
     private func field(_ id: String, _ value: String = "") -> ComputerUseTextField {
         ComputerUseTextField(label: id, snapshot: ComputerUseTextSnapshot(
             targetID: id, value: value, selection: NSRange(location: value.utf16.count, length: 0),

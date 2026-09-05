@@ -289,6 +289,7 @@ final class ComputerUseOwnedBrowserVisibleAcceptanceTests: XCTestCase {
             </style></head><body><main><p>REMOTE DESKTOP · LOCAL FIXTURE</p><h1>Your AI browser</h1>
             <article><h2>Page opened</h2><p>This page comes from an isolated web server on this Mac.</p>
             <p>The window belongs to the current task. Stop releases that task's browser control.</p></article>
+            <label>Origin <input value="unchanged" oninput="fetch('/focus-edit')"></label>
             </main><script>
             fetch(sessionStorage.priorTask ? '/retained-context' : '/fresh-context');
             sessionStorage.priorTask = 'yes';
@@ -305,6 +306,29 @@ final class ComputerUseOwnedBrowserVisibleAcceptanceTests: XCTestCase {
         XCTAssertTrue(window.styleMask.contains(.resizable))
         XCTAssertEqual(window.minSize, NSSize(width: 480, height: 320))
         XCTAssertTrue(browser.validate(document))
+        XCTAssertTrue(browser.isFrontmostWindow)
+        let target = ComputerUseBrowserTextTarget(browser: browser, document: document)
+        let fields = try await target.fields()
+        let field = try XCTUnwrap(fields.first)
+        let competingWindow = NSWindow(contentRect: NSRect(x: 80, y: 80, width: 320, height: 200),
+                                       styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        competingWindow.title = "Competing local fixture"
+        competingWindow.isReleasedWhenClosed = false
+        defer { competingWindow.close() }
+        competingWindow.makeKeyAndOrderFront(nil)
+        XCTAssertTrue(NSApp.keyWindow === competingWindow)
+        XCTAssertFalse(browser.hasRequiredPresentation)
+        do {
+            try await target.apply(.init(targetID: field.snapshot.targetID, mode: .replaceAll, text: "wrong window"),
+                expected: field.snapshot, operationID: ComputerUseTaskContract.digest(["focus-loss"]))
+            XCTFail("Losing the actual key window must stop browser edits")
+        } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+        competingWindow.close()
+        window.makeKeyAndOrderFront(nil)
+        XCTAssertTrue(browser.isFrontmostWindow)
+        let unchanged = try await target.read(targetID: field.snapshot.targetID)
+        XCTAssertEqual(unchanged?.value, "unchanged")
+        XCTAssertEqual(server.count("/focus-edit"), 0)
         let initialDeadline = ContinuousClock.now + .seconds(5)
         while server.count("/fresh-context") == 0 && ContinuousClock.now < initialDeadline {
             try await Task.sleep(for: .milliseconds(10))
@@ -362,6 +386,7 @@ final class OwnedBrowserHTTPFixture: @unchecked Sendable {
     private var held: [(NWConnection, Data)] = []
     private var readyReported = false
     var requestCount: Int { lock.withLock { requests.count } }
+    var requestedPaths: [String] { lock.withLock { requests } }
     func count(_ path: String) -> Int { lock.withLock { requests.filter { $0 == path }.count } }
 
     init(routes: [String: Response] = [:]) throws {

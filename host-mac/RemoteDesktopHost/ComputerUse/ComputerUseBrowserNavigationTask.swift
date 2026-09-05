@@ -88,7 +88,7 @@ final class ComputerUseBrowserNavigationTask {
                     let operationID = contract.effectIdentity(for: contract.steps[index])
                     guard let receipt = browser.receipt(taskID: taskID, operationID: operationID),
                           receipt.requestedURL == urls[index] else { return false }
-                    return predicate.kind == "navigation-receipt" || browser.validate(receipt)
+                    return predicate.kind == "navigation-receipt" || (browser.validate(receipt) && browser.hasRequiredPresentation)
                 }, perform: { [browser] step, operationID in
                     guard let index = indices[step.id] else { throw ComputerUseTaskExecutionError.invalidContract }
                     _ = try await browser.navigate(taskID: taskID, operationID: operationID, to: urls[index])
@@ -104,6 +104,8 @@ final class ComputerUseBrowserNavigationTask {
             return .completed("Opened \(retainedURLs.count == 1 ? "the page" : "all \(retainedURLs.count) pages") in the AI browser. Current page: \(document.committedURL.absoluteString)")
         } catch is CancellationError {
             throw CancellationError()
+        } catch ComputerUseBrowserError.windowNotActive {
+            return .userInterventionRequired(ComputerUseBrowserError.windowNotActive.localizedDescription)
         } catch ComputerUseTaskExecutionError.uncertainEffect {
             return .userInterventionRequired("The browser navigation was interrupted and cannot be verified. Check the AI browser before starting a new request.")
         } catch ComputerUseTaskExecutionError.preconditionFailed {
@@ -112,6 +114,11 @@ final class ComputerUseBrowserNavigationTask {
     }
 
     func close() { browser.close() }
+
+    func textTargetIfFrontmost(taskID: String) throws -> ComputerUseBrowserTextTarget? {
+        guard browser.isFrontmostWindow else { return nil }
+        return ComputerUseBrowserTextTarget(browser: browser, document: try browser.acquireCurrentDocument(taskID: taskID))
+    }
 
     static var journalDirectory: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]

@@ -11,17 +11,20 @@ final class ComputerUseNativeTextExecutor {
     private let journalDirectory: URL
     private let planner: any ComputerUseTextGoalPlanning
     private let editOverride: ((ComputerUseTextPlanEdit, ComputerUseTextSnapshot) async throws -> Void)?
+    private let browserTargetProvider: ((String) throws -> ComputerUseBrowserTextTarget?)?
     private var retainedTask: ComputerUseTextTask?
 
     init(injector: InputInjector, mayAct: @escaping () -> Bool,
          journalDirectory: URL = ComputerUseTextStepStore.defaultDirectory,
          planner: any ComputerUseTextGoalPlanning,
-         editOverride: ((ComputerUseTextPlanEdit, ComputerUseTextSnapshot) async throws -> Void)? = nil) {
+         editOverride: ((ComputerUseTextPlanEdit, ComputerUseTextSnapshot) async throws -> Void)? = nil,
+         browserTargetProvider: ((String) throws -> ComputerUseBrowserTextTarget?)? = nil) {
         self.injector = injector
         self.mayAct = mayAct
         self.journalDirectory = journalDirectory
         self.planner = planner
         self.editOverride = editOverride
+        self.browserTargetProvider = browserTargetProvider
     }
 
     func execute(taskID: String, prompt: String,
@@ -34,10 +37,20 @@ final class ComputerUseNativeTextExecutor {
             return try await run(retainedTask, verifiedStep: verifiedStep, progress: progress)
         }
         retainedTask = nil
-        let fields = target.fields()
+        let browserTarget = try browserTargetProvider?(taskID)
+        let fields: [ComputerUseTextField]
+        if let browserTarget { fields = try await browserTarget.fields() }
+        else { fields = target.fields() }
+        let read: (String) async throws -> ComputerUseTextSnapshot? = { [target] id in
+            if let browserTarget { return try await browserTarget.read(targetID: id) }
+            return target.snapshot(targetID: id)
+        }
         guard !fields.isEmpty else { return nil }
+        try Task.checkCancellation()
         guard mayAct() else { throw ComputerUseTextEditError.interrupted }
-        let proposal = try await planner.propose(prompt: prompt, fields: fields)
+        let proposal: ComputerUseTextGoalProposal
+        if let compiled = try ComputerUseQuotedTextRequest.compile(prompt: prompt, fields: fields) { proposal = compiled }
+        else { proposal = try await planner.propose(prompt: prompt, fields: fields) }
         try Task.checkCancellation()
         guard mayAct() else { throw ComputerUseTextEditError.interrupted }
         switch proposal {
@@ -48,7 +61,7 @@ final class ComputerUseNativeTextExecutor {
             // Recheck every discovered field after inference before any focus
             // or value change. Planning observations are never effect authority.
             for field in fields {
-                guard target.snapshot(targetID: field.snapshot.targetID) == field.snapshot else {
+                guard try await read(field.snapshot.targetID) == field.snapshot else {
                     throw ComputerUseTextTaskError.staleTarget
                 }
             }
@@ -57,11 +70,14 @@ final class ComputerUseNativeTextExecutor {
                                                            unchangedTargetIDs: unchanged)
             let store = try ComputerUseTextStepStore(directory: journalDirectory)
             let task = try ComputerUseTextTask(contract: contract, recovered: store.load(taskID: taskID),
-                read: { [target] in target.snapshot(targetID: $0) },
+                read: read,
                 apply: { [weak self] edit, expected in
                     guard let self else { throw CancellationError() }
                     if let editOverride { try await editOverride(edit, expected) }
                     else { try await apply(edit, expected: expected) }
+                },
+                applyWithIdentity: browserTarget.map { target in
+                    { edit, expected, operationID in try await target.apply(edit, expected: expected, operationID: operationID) }
                 },
                 persist: { try store.save($0) }, mayAct: mayAct)
             retainedTask = task

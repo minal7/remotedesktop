@@ -77,7 +77,8 @@ struct ComputerUseTextTaskContract: Sendable {
                               insertionSelection: edit.mode == .insert ? range : nil, after: after))
             values[field.targetID] = ComputerUseTextSnapshot(
                 targetID: field.targetID, value: after,
-                selection: NSRange(location: range.location + edit.text.utf16.count, length: 0),
+                selection: field.selection.location == NSNotFound ? field.selection
+                    : NSRange(location: range.location + edit.text.utf16.count, length: 0),
                 isEditable: true, isSecure: false)
             finalValues[field.targetID] = after
         }
@@ -137,8 +138,9 @@ final class ComputerUseTextTask {
 
     init(contract: ComputerUseTextTaskContract,
          recovered: ComputerUseTextStepJournal? = nil,
-         read: @escaping (String) throws -> ComputerUseTextSnapshot?,
+         read: @escaping (String) async throws -> ComputerUseTextSnapshot?,
          apply: @escaping (ComputerUseTextPlanEdit, ComputerUseTextSnapshot) async throws -> Void,
+         applyWithIdentity: ((ComputerUseTextPlanEdit, ComputerUseTextSnapshot, String) async throws -> Void)? = nil,
          persist: @escaping (ComputerUseTextStepJournal) throws -> Void,
          mayAct: @escaping () -> Bool) throws {
         self.contract = contract
@@ -186,7 +188,7 @@ final class ComputerUseTextTask {
             predicate("outcome-\(index)", target: id, check: .value(contract.finalValues[id]!))
         }
         let entities = Set(predicates.map(\.entityID)).sorted().map {
-            ComputerUseTaskContract.Entity(id: $0, authorityDigest: ComputerUseTaskContract.digest(["retained-ax-reference", $0]))
+            ComputerUseTaskContract.Entity(id: $0, authorityDigest: ComputerUseTaskContract.digest(["retained-text-reference", $0]))
         }
         let compiled = try ComputerUseTaskContract(taskID: contract.taskID, promptDigest: contract.promptDigest,
             entities: entities, predicates: predicates, steps: steps, invariants: invariants, outcomes: outcomes)
@@ -205,20 +207,24 @@ final class ComputerUseTextTask {
         do {
             execution = try ComputerUseTaskExecution(contract: compiled, recovered: recoveredExecution,
                 observe: { predicate in
-                    guard let snapshot = try read(predicate.entityID), snapshot.targetID == predicate.entityID,
+                    guard let snapshot = try await read(predicate.entityID), snapshot.targetID == predicate.entityID,
                           snapshot.isEditable, !snapshot.isSecure, let check = compiledChecks[predicate.id] else { return false }
                     switch check {
                     case .value(let value): return snapshot.value.utf8.elementsEqual(value.utf8)
                     case .selection(let selection): return snapshot.selection == selection
                     }
-                }, perform: { step, _ in
-                    guard let edit = edits[step.id], let current = try read(edit.targetID), current.targetID == edit.targetID,
+                }, perform: { step, operationID in
+                    guard let edit = edits[step.id], let current = try await read(edit.targetID), current.targetID == edit.targetID,
                           current.isEditable, !current.isSecure,
                           current.value.utf8.elementsEqual(edit.before.utf8),
                           edit.insertionSelection.map({ $0 == current.selection }) ?? true else {
                         throw ComputerUseTextTaskError.staleTarget
                     }
-                    try await apply(ComputerUseTextPlanEdit(targetID: edit.targetID, mode: edit.mode, text: edit.payload), current)
+                    try Task.checkCancellation()
+                    guard mayAct() else { throw ComputerUseTextEditError.interrupted }
+                    let plan = ComputerUseTextPlanEdit(targetID: edit.targetID, mode: edit.mode, text: edit.payload)
+                    if let applyWithIdentity { try await applyWithIdentity(plan, current, operationID) }
+                    else { try await apply(plan, current) }
                 }, persist: { try persist(Self.textJournal($0, contract: contract)) },
                 assertOwnership: { guard mayAct() else { throw ComputerUseTextEditError.interrupted } })
         } catch ComputerUseTaskExecutionError.journalMismatch {

@@ -12,7 +12,7 @@ struct ComputerUseBrowserDocument: Equatable, Sendable {
 }
 
 enum ComputerUseBrowserError: Error, LocalizedError, Equatable {
-    case invalidURL, busy, ownershipLost, pageChanged, navigationFailed, deadlineExceeded, closed
+    case invalidURL, busy, ownershipLost, pageChanged, navigationFailed, deadlineExceeded, closed, unsupportedDocument, documentUnresponsive, windowNotActive
     var errorDescription: String? {
         switch self {
         case .invalidURL: return "The browser needs an HTTP or HTTPS URL without embedded credentials."
@@ -22,6 +22,9 @@ enum ComputerUseBrowserError: Error, LocalizedError, Equatable {
         case .navigationFailed: return "The requested page could not be opened successfully."
         case .deadlineExceeded: return "The browser did not finish opening the page before the deadline."
         case .closed: return "The AI browser window was closed."
+        case .unsupportedDocument: return "This page does not expose a complete supported text form in the AI browser."
+        case .documentUnresponsive: return "The AI browser page did not respond before the deadline. Check it before continuing."
+        case .windowNotActive: return "The AI browser is open, but another Mac window still has focus. Select the AI browser, then continue."
         }
     }
 }
@@ -41,10 +44,19 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     private let mayAct: () -> Bool
     private let presentsWindow: Bool
     private let navigationTimeout: Duration
+    private let domTimeout: Duration
+    private let domScriptDidDispatch: ((ComputerUseBrowserDOMCommand) -> Void)?
     private var browser: WKWebView?
     private var window: NSWindow?
     private var urlObservation: NSKeyValueObservation?
     private var pending: PendingNavigation?
+    private var pendingDOM: PendingDOM?
+
+    private struct PendingDOM {
+        let id: UUID
+        var continuation: CheckedContinuation<String, Error>?
+        var timeout: Task<Void, Never>?
+    }
 
     private struct PendingNavigation {
         let id: UUID
@@ -58,9 +70,12 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         var timeout: Task<Void, Never>?
     }
 
-    init(presentsWindow: Bool = true, navigationTimeout: Duration = .seconds(30), mayAct: @escaping () -> Bool) {
+    init(presentsWindow: Bool = true, navigationTimeout: Duration = .seconds(30), domTimeout: Duration = .seconds(5),
+         domScriptDidDispatch: ((ComputerUseBrowserDOMCommand) -> Void)? = nil, mayAct: @escaping () -> Bool) {
         self.presentsWindow = presentsWindow
         self.navigationTimeout = navigationTimeout
+        self.domTimeout = domTimeout
+        self.domScriptDidDispatch = domScriptDidDispatch
         self.mayAct = mayAct
     }
 
@@ -76,7 +91,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     }
 
     func claim(taskID: String) throws {
-        guard pending == nil else { throw ComputerUseBrowserError.busy }
+        guard pending == nil, pendingDOM == nil else { throw ComputerUseBrowserError.busy }
         guard mayAct(), !taskID.isEmpty else { throw ComputerUseBrowserError.ownershipLost }
         if self.taskID != taskID {
             self.taskID = taskID
@@ -87,6 +102,88 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     }
 
     func hasOwnership(taskID: String) -> Bool { self.taskID == taskID && mayAct() }
+
+    var isFrontmostWindow: Bool {
+        guard let window, window.isVisible, !window.isMiniaturized,
+              NSWorkspace.shared.frontmostApplication?.processIdentifier == ProcessInfo.processInfo.processIdentifier else { return false }
+        return NSApp.keyWindow === window
+    }
+
+    var hasRequiredPresentation: Bool { !presentsWindow || isFrontmostWindow }
+
+    /// A new current-form request may acquire the already-open owned page.
+    /// This creates an ownership token, never a new navigation receipt.
+    func acquireCurrentDocument(taskID: String) throws -> ComputerUseBrowserDocument {
+        guard pending == nil, pendingDOM == nil else { throw ComputerUseBrowserError.busy }
+        guard mayAct(), let previous = document, browser?.isLoading == false,
+              previous.generation == generation, browser?.url == previous.committedURL else { throw ComputerUseBrowserError.pageChanged }
+        try claim(taskID: taskID)
+        let current = ComputerUseBrowserDocument(contextID: contextID, taskID: taskID, generation: generation,
+            operationID: previous.operationID, requestedURL: previous.requestedURL, committedURL: previous.committedURL)
+        document = current
+        return current
+    }
+
+    func callDOM(_ command: ComputerUseBrowserDOMCommand, arguments: [String: Any],
+                 document expected: ComputerUseBrowserDocument) async throws -> ComputerUseBrowserDOMReply {
+        try Task.checkCancellation()
+        guard validate(expected), let browser else { throw ComputerUseBrowserError.pageChanged }
+        guard pendingDOM == nil else { throw ComputerUseBrowserError.busy }
+        let id = UUID()
+        let source = try await withTaskCancellationHandler {
+            do {
+                let source: String = try await withCheckedThrowingContinuation { continuation in
+                    pendingDOM = PendingDOM(id: id, continuation: continuation)
+                    pendingDOM?.timeout = Task { [weak self, domTimeout] in
+                        do { try await Task.sleep(for: domTimeout) } catch { return }
+                        self?.interruptDOM(id: id, error: ComputerUseBrowserError.documentUnresponsive)
+                    }
+                    browser.callAsyncJavaScript(ComputerUseBrowserDOM.invocation,
+                        arguments: ["command": command.rawValue, "args": arguments], in: nil, in: ComputerUseBrowserDOM.world) { [weak self] result in
+                        guard let self, let pending = pendingDOM, pending.id == id else { return }
+                        pendingDOM = nil
+                        pending.timeout?.cancel()
+                        switch result {
+                        case .success(let value):
+                            guard let source = value as? String, source.utf8.count <= 8 * 1_024 * 1_024 else {
+                                pending.continuation?.resume(throwing: ComputerUseBrowserError.unsupportedDocument)
+                                return
+                            }
+                            pending.continuation?.resume(returning: source)
+                        case .failure: pending.continuation?.resume(throwing: ComputerUseBrowserError.pageChanged)
+                        }
+                    }
+                    domScriptDidDispatch?(command)
+                }
+                try Task.checkCancellation()
+                return source
+            } catch {
+                try Task.checkCancellation()
+                throw error
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in self?.interruptDOM(id: id, error: CancellationError()) }
+        }
+        guard validate(expected) else { throw ComputerUseBrowserError.pageChanged }
+        let result = try JSONDecoder().decode(ComputerUseBrowserDOMReply.self, from: Data(source.utf8))
+        guard result.documentID.utf8.count == 32,
+              result.documentID.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else {
+            throw ComputerUseBrowserError.pageChanged
+        }
+        return result
+    }
+
+    private func interruptDOM(id: UUID, error: Error) {
+        guard var pending = pendingDOM, pending.id == id else { return }
+        let continuation = pending.continuation
+        pending.continuation = nil
+        pending.timeout?.cancel()
+        pending.timeout = nil
+        pendingDOM = pending
+        // WebKit cannot retract an already dispatched script. Keep its slot
+        // occupied until callback/close, so another task cannot overtake it.
+        continuation?.resume(throwing: error)
+    }
 
     func receipt(taskID: String, operationID: String) -> ComputerUseBrowserDocument? {
         guard hasOwnership(taskID: taskID) else { return nil }
@@ -107,7 +204,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     func navigate(taskID: String, operationID: String, to url: URL) async throws -> ComputerUseBrowserDocument {
         try Task.checkCancellation()
         guard hasOwnership(taskID: taskID) else { throw ComputerUseBrowserError.ownershipLost }
-        guard pending == nil else { throw ComputerUseBrowserError.busy }
+        guard pending == nil, pendingDOM == nil else { throw ComputerUseBrowserError.busy }
         guard receipts[operationID] == nil, receipts.count < 64, !operationID.isEmpty else {
             // An uncertain navigation is reconciled by the step engine. This
             // adapter never reissues a completed operation ID on its own.
@@ -135,8 +232,15 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
                     pending?.navigation = browser.load(URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData))
                     if pending?.navigation == nil { failPending(id: id, error: .navigationFailed) }
                 }
+                let focusDeadline = ContinuousClock.now + .seconds(2)
+                while !hasRequiredPresentation && ContinuousClock.now < focusDeadline {
+                    try Task.checkCancellation()
+                    guard hasOwnership(taskID: taskID) else { throw ComputerUseBrowserError.ownershipLost }
+                    try await Task.sleep(for: .milliseconds(25))
+                }
                 try Task.checkCancellation()
                 guard validate(result) else { throw ComputerUseBrowserError.ownershipLost }
+                guard hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
                 return result
             } catch {
                 try Task.checkCancellation()
@@ -149,6 +253,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
 
     func stop() {
         if let pending { failPending(id: pending.id, error: .ownershipLost) }
+        if let pendingDOM { interruptDOM(id: pendingDOM.id, error: ComputerUseBrowserError.ownershipLost) }
         taskID = nil
         generation &+= 1
         document = nil
@@ -166,6 +271,8 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     }
 
     private func releaseBrowser() {
+        if let pendingDOM { interruptDOM(id: pendingDOM.id, error: ComputerUseBrowserError.closed) }
+        pendingDOM = nil
         urlObservation = nil
         browser?.navigationDelegate = nil
         browser = nil
@@ -183,6 +290,8 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         if let browser { return browser }
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .nonPersistent()
+        configuration.userContentController.addUserScript(WKUserScript(source: ComputerUseBrowserDOM.source,
+            injectionTime: .atDocumentStart, forMainFrameOnly: true, in: ComputerUseBrowserDOM.world))
         let view = WKWebView(frame: NSRect(x: 0, y: 0, width: 960, height: 640), configuration: configuration)
         view.navigationDelegate = self
         urlObservation = view.observe(\.url, options: [.new]) { [weak self] _, change in
@@ -215,7 +324,11 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             self.window = window
         }
         window?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: false)
+        // Opening this window is an explicit remote-user action. Cooperative
+        // activation can be refused while another app is active, leaving no
+        // key window for the following form request. Request activation here
+        // and still verify actual foreground ownership before completion.
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     private func failPending(id: UUID, error: ComputerUseBrowserError) {

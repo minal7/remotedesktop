@@ -1070,7 +1070,10 @@ final class ComputerUseHostTools {
     func makeNativeTextExecutor(planner: any ComputerUseTextGoalPlanning,
         journalDirectory: URL = ComputerUseTextStepStore.defaultDirectory) -> ComputerUseNativeTextExecutor {
         ComputerUseNativeTextExecutor(injector: injector, mayAct: mayAct,
-            journalDirectory: journalDirectory, planner: planner)
+            journalDirectory: journalDirectory, planner: planner,
+            browserTargetProvider: { [weak self] taskID in
+                try self?.browserNavigationTask?.textTargetIfFrontmost(taskID: taskID)
+            })
     }
 
     func executeOwnedBrowserTaskIfSupported(taskID: String, prompt: String,
