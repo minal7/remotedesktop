@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "frozenBeforeRequirementCompilerAtCommit": "5db79f7",
+  "status": "Validation set reserved before implementing requirement compilation. Do not tune prompts using its results and continue calling it held out.",
+  "cases": [
+    {"id":"H01","fields":[{"id":"start","label":"Starting city"},{"id":"end","label":"Ending city"}],"prompt":"For this route, use Reykjavík as the starting city and Akureyri as the ending city.","expected":{"start":"Reykjavík","end":"Akureyri"}},
+    {"id":"H02","fields":[{"id":"subject","label":"Subject"},{"id":"message","label":"Message"}],"prompt":"Make the Subject read Quarterly update; keep the Message as it is.","initial":{"message":"draft"},"expected":{"subject":"Quarterly update","message":"draft"}},
+    {"id":"H03","fields":[{"id":"notes","label":"Notes"}],"prompt":"Add “ — ready” to the end of Notes, then add “!”.","initial":{"notes":"Draft"},"expected":{"notes":"Draft — ready!"}},
+    {"id":"H04","fields":[{"id":"label","label":"Label"}],"prompt":"Replace Label with “A” and email it to Pat.","expectedOutcome":"unsupportedWithoutEffects"},
+    {"id":"H05","fields":[{"id":"status","label":"Status"}],"prompt":"Put “draft” into Status and click Finish.","expectedOutcome":"unsupportedWithoutEffects"},
+    {"id":"H06","fields":[{"id":"category","label":"Category"}],"prompt":"Use Blue for Category, and stop before pressing Submit.","expected":{"category":"Blue"}},
+    {"id":"H07","fields":[{"id":"title","label":"Title"}],"prompt":"Do not send anything. Set Title to “Meeting notes”.","expected":{"title":"Meeting notes"}},
+    {"id":"H08","fields":[{"id":"title","label":"Title"},{"id":"notes","label":"Notes"}],"prompt":"Fill the title with “Update” and leave the rest alone.","initial":{"notes":"Keep this"},"expected":{"title":"Update","notes":"Keep this"}},
+    {"id":"H09","prompt":"Fill Origin with Boston and submit only after I approve.","expectedOutcome":"unsupportedWithoutEffects"},
+    {"id":"H10","fields":[{"id":"label","label":"Send label"}],"prompt":"Type “Go” into the Send label field.","expected":{"label":"Go"}},
+    {"id":"H11","prompt":"Copy the value from Origin to Destination.","expectedOutcome":"unsupportedWithoutEffects"},
+    {"id":"H12","fields":[{"id":"billing","label":"City"},{"id":"shipping","label":"City"}],"prompt":"Fill “Portland” into City.","expectedOutcome":"clarificationWithoutEffects"},
+    {"id":"H13","fields":[{"id":"name","label":"Name"}],"prompt":"Set Name to “  李 明  ”.","expected":{"name":"  李 明  "}},
+    {"id":"H14","fields":[{"id":"one","label":"First code"},{"id":"two","label":"Second code"}],"prompt":"Both code fields should contain X7. Don't touch anything else.","expected":{"one":"X7","two":"X7"}}
+  ]
+}

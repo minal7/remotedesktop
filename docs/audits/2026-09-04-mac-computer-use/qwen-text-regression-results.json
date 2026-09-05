@@ -1,0 +1,98 @@
+[
+  {
+    "id": "N01",
+    "seconds": 10.47054116698564,
+    "inputTokens": 319,
+    "outputTokens": 75,
+    "raw": "{\n  \"disposition\": \"supported\",\n  \"edits\": [\n    {\n      \"fieldID\": \"f1\",\n      \"mode\": \"replaceAll\",\n      \"value\": \"San Francisco\"\n    },\n    {\n      \"fieldID\": \"f2\",\n      \"mode\": \"replaceAll\",\n      \"value\": \"San Francisco\"\n    }\n  ]\n}",
+    "passed": true,
+    "stateLengths": {
+      "origin": 13,
+      "destination": 13
+    }
+  },
+  {
+    "id": "N02",
+    "seconds": 8.661532041005557,
+    "inputTokens": 322,
+    "outputTokens": 75,
+    "raw": "{\n  \"disposition\": \"supported\",\n  \"edits\": [\n    {\n      \"fieldID\": \"f1\",\n      \"mode\": \"replaceAll\",\n      \"value\": \"Tokyo\"\n    },\n    {\n      \"fieldID\": \"f2\",\n      \"mode\": \"replaceAll\",\n      \"value\": \"Kyoto\"\n    }\n  ]\n}",
+    "passed": true,
+    "stateLengths": {
+      "origin": 5,
+      "destination": 5
+    }
+  },
+  {
+    "id": "N03",
+    "seconds": 7.698954666993814,
+    "inputTokens": 325,
+    "outputTokens": 72,
+    "raw": "{\n  \"disposition\": \"supported\",\n  \"edits\": [\n    {\n      \"fieldID\": \"f1\",\n      \"mode\": \"replaceAll\",\n      \"value\": \"p1\"\n    },\n    {\n      \"fieldID\": \"f2\",\n      \"mode\": \"insert\",\n      \"value\": \"\"\n    }\n  ]\n}",
+    "passed": false,
+    "stateLengths": {
+      "origin": 14,
+      "destination": 5
+    }
+  },
+  {
+    "id": "N04",
+    "seconds": 2.107100959023228,
+    "inputTokens": 324,
+    "outputTokens": 17,
+    "raw": "{\n  \"disposition\": \"unsupported\",\n  \"edits\": []\n}",
+    "passed": false,
+    "error": "AssertionError: "
+  },
+  {
+    "id": "N05",
+    "seconds": 2.0024639170151204,
+    "inputTokens": 332,
+    "outputTokens": 17,
+    "raw": "{\n  \"disposition\": \"unsupported\",\n  \"edits\": []\n}",
+    "passed": false,
+    "error": "AssertionError: "
+  },
+  {
+    "id": "N06",
+    "seconds": 7.237096958007896,
+    "inputTokens": 320,
+    "outputTokens": 66,
+    "raw": "{\n  \"disposition\": \"supported\",\n  \"edits\": [\n    {\n      \"fieldID\": \"f1\",\n      \"mode\": \"replaceAll\",\n      \"value\": \"Boston\"\n    },\n    {\n      \"fieldID\": \"f2\",\n      \"mode\": \"unsupported\"\n    }\n  ]\n}",
+    "passed": false
+  },
+  {
+    "id": "N07",
+    "seconds": 2.225281791994348,
+    "inputTokens": 316,
+    "outputTokens": 17,
+    "raw": "{\n  \"disposition\": \"unsupported\",\n  \"edits\": []\n}",
+    "passed": true
+  },
+  {
+    "id": "N08",
+    "seconds": 2.128724999987753,
+    "inputTokens": 315,
+    "outputTokens": 17,
+    "raw": "{\n  \"disposition\": \"unsupported\",\n  \"edits\": []\n}",
+    "passed": false
+  },
+  {
+    "id": "N13",
+    "seconds": 2.015386084007332,
+    "inputTokens": 326,
+    "outputTokens": 17,
+    "raw": "{\n  \"disposition\": \"unsupported\",\n  \"edits\": []\n}",
+    "passed": false,
+    "error": "AssertionError: "
+  },
+  {
+    "id": "N14",
+    "seconds": 1.9231720000097994,
+    "inputTokens": 320,
+    "outputTokens": 17,
+    "raw": "{\n  \"disposition\": \"unsupported\",\n  \"edits\": []\n}",
+    "passed": false,
+    "error": "AssertionError: "
+  }
+]

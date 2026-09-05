@@ -50,6 +50,22 @@ final class ComputerUseTextEditorTests: XCTestCase {
         }
     }
 
+    func testSlowPreflightCannotStartMutationAfterDeadline() async throws {
+        let field = Field("old")
+        var now: TimeInterval = 0
+        var editor = ComputerUseTextEditor(
+            read: { now = 11; return field.snapshot },
+            select: { _ in XCTFail("Expired selection mutation"); return true },
+            replaceSelectedText: { _ in XCTFail("Expired text mutation"); return true },
+            postUnicode: { _ in XCTFail("Expired Unicode input") }, mayAct: { true })
+        editor.maximumDuration = 10
+        editor.uptime = { now }
+        editor.replaceValue = { _ in XCTFail("Expired whole-value mutation"); return true }
+        do { try await editor.edit("new", mode: .replaceAll, expected: field.snapshot); XCTFail("Expected deadline") }
+        catch { XCTAssertEqual(error as? ComputerUseTextEditError, .deadlineExceeded) }
+        XCTAssertEqual(field.value, "old")
+    }
+
     func testExactWhitespaceUnicodeAndLongTextSurviveVerifiedChunks() async throws {
         let payload = "  \n東京 e\u{301} 👨‍👩‍👧‍👦 😀\n" + String(repeating: "x", count: 2_000) + "\n  "
         let field = Field()
@@ -212,6 +228,19 @@ final class ComputerUseTextEditorTests: XCTestCase {
         }
         XCTAssertEqual(field.axAttempts, 0)
         XCTAssertTrue(field.posted.isEmpty)
+    }
+
+    func testTextDeadlineStopsAfterCurrentAttemptWithoutReplayingIt() async {
+        let field = Field()
+        var now: TimeInterval = 0
+        var editor = field.editor
+        editor.uptime = { now }
+        field.afterPost = { now = 61 }
+        await assertError(.deadlineExceeded) {
+            try await editor.edit(String(repeating: "x", count: 100), expected: field.snapshot)
+        }
+        XCTAssertEqual(field.posted.count, 1)
+        XCTAssertEqual(field.value.count, 16)
     }
 
     func testPacedUnicodeTakeoverReleasesStrokeAndStartsNoFurtherKey() async {

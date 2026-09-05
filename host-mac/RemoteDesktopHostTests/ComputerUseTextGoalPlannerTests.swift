@@ -39,8 +39,8 @@ final class ComputerUseTextGoalPlannerTests: XCTestCase {
             } else if item["expectedOutcome"] as? String == "clarificationWithoutEffects" {
                 XCTAssertEqual(proposal, .clarification, id)
             } else {
-                guard case .edits(let edits) = proposal else { XCTFail("\(id): expected supported complete edits"); continue }
-                let contract = try ComputerUseTextTaskContract(taskID: id, prompt: prompt, fields: fields, edits: edits)
+                guard case .edits(let edits, let unchanged) = proposal else { XCTFail("\(id): expected supported complete edits"); continue }
+                let contract = try ComputerUseTextTaskContract(taskID: id, prompt: prompt, fields: fields, edits: edits, unchangedTargetIDs: unchanged)
                 var actual = initial
                 for name in ["origin", "destination"] where actual[name] == nil { actual[name] = "" }
                 for (name, value) in contract.finalValues { actual[name] = value }

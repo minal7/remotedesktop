@@ -131,7 +131,21 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             try await verify(state, field: "origin", equals: "San Francisco")
             try await verify(state, field: "destination", equals: "San Francisco")
         }
-
+        let beforeReplacement = try XCTUnwrap(textTarget.snapshot())
+        try "replace-destination".write(to: state.appendingPathExtension("command"), atomically: true, encoding: .utf8)
+        var replaced = false
+        for _ in 0..<100 {
+            if let bytes = try? Data(contentsOf: state),
+               let value = try JSONSerialization.jsonObject(with: bytes) as? [String: Any],
+               value["generation"] as? Int == 1 { replaced = true; break }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        XCTAssertTrue(replaced, "Fixture must actually replace the control")
+        XCTAssertNil(textTarget.snapshot(targetID: beforeReplacement.targetID),
+                     "An old reference cannot target a new control with the same value, label and geometry")
+        let afterReplacement = try XCTUnwrap(textTarget.snapshot())
+        XCTAssertNotEqual(afterReplacement.targetID, beforeReplacement.targetID)
+        XCTAssertTrue(afterReplacement.value.utf8.elementsEqual(beforeReplacement.value.utf8))
     }
 
     private func verify(_ state: URL, field: String, equals expected: String) async throws {

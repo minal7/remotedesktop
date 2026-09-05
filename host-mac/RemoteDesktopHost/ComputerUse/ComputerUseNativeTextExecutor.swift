@@ -35,7 +35,7 @@ final class ComputerUseNativeTextExecutor {
         case .unsupported: return nil
         case .clarification:
             return .clarificationRequired("Which field should I edit, and what exact text should it contain?")
-        case .edits(let edits):
+        case .edits(let edits, let unchanged):
             // Recheck every discovered field after inference before any focus
             // or value change. Planning observations are never effect authority.
             for field in fields {
@@ -44,7 +44,8 @@ final class ComputerUseNativeTextExecutor {
                 }
             }
             let contract = try ComputerUseTextTaskContract(taskID: taskID, prompt: prompt,
-                                                           fields: fields, edits: edits)
+                                                           fields: fields, edits: edits,
+                                                           unchangedTargetIDs: unchanged)
             let store = try ComputerUseTextStepStore(directory: journalDirectory)
             let task = try ComputerUseTextTask(contract: contract, recovered: store.load(taskID: taskID),
                 read: { [target] in target.snapshot(targetID: $0) },

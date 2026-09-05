@@ -32,7 +32,7 @@ enum ComputerUseTextEditMode: String, Codable, Sendable { case insert, replaceAl
 
 enum ComputerUseTextEditError: Error, Equatable, LocalizedError {
     case unavailableTarget, secureTarget, invalidSelection, payloadTooLarge
-    case preconditionChanged, selectionUnsupported, deliveryUncertain, interrupted
+    case preconditionChanged, selectionUnsupported, deliveryUncertain, interrupted, deadlineExceeded
 
     var errorDescription: String? {
         switch self {
@@ -52,6 +52,8 @@ enum ComputerUseTextEditError: Error, Equatable, LocalizedError {
             return "The app did not confirm the exact text edit. Check the field before continuing; the edit was not retried."
         case .interrupted:
             return "Text entry was interrupted. Check the current field before continuing."
+        case .deadlineExceeded:
+            return "Text entry reached its time limit. Check the current field before continuing; the edit was not retried."
         }
     }
 }
@@ -75,6 +77,8 @@ struct ComputerUseTextEditor {
     }
     var verificationAttempts = 12
     var chunkCharacters = 16
+    var maximumDuration: TimeInterval = 60
+    var uptime: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
     /// Optional qualified whole-value setter. nil result guarantees no setter
     /// was invoked; a returned failure must still be verified, never retried.
     var replaceValue: ((String) throws -> Bool?)? = nil
@@ -84,6 +88,7 @@ struct ComputerUseTextEditor {
         mode: ComputerUseTextEditMode = .insert,
         expected initial: ComputerUseTextSnapshot
     ) async throws {
+        let deadline = uptime() + maximumDuration
         guard payload.utf8.count <= Self.maximumPayloadBytes,
               initial.value.utf8.count <= Self.maximumObservedValueBytes else {
             throw ComputerUseTextEditError.payloadTooLarge
@@ -94,6 +99,7 @@ struct ComputerUseTextEditor {
         guard !Task.isCancelled, mayAct() else {
             throw ComputerUseTextEditError.interrupted
         }
+        guard uptime() < deadline else { throw ComputerUseTextEditError.deadlineExceeded }
         guard try read() == initial else {
             throw ComputerUseTextEditError.preconditionChanged
         }
@@ -110,12 +116,14 @@ struct ComputerUseTextEditor {
         guard expectedValue.utf8.count <= Self.maximumObservedValueBytes else {
             throw ComputerUseTextEditError.payloadTooLarge
         }
+        try requireEffectAuthority(deadline: deadline)
         if let replaceValue, try replaceValue(expectedValue) != nil {
-            _ = try await verify(value: expectedValue, target: initial.targetID)
+            _ = try await verify(value: expectedValue, target: initial.targetID, deadline: deadline)
             return
         }
         var selected = initial
         if range != initial.selection {
+            try requireEffectAuthority(deadline: deadline)
             guard try select(range) else {
                 throw ComputerUseTextEditError.selectionUnsupported
             }
@@ -126,14 +134,12 @@ struct ComputerUseTextEditor {
             }
             selected = current
         }
-        guard !Task.isCancelled, mayAct() else {
-            throw ComputerUseTextEditError.interrupted
-        }
+        try requireEffectAuthority(deadline: deadline)
         // Prefer the reviewed AX selected-text setter when supported. An AX
         // error does not prove absence of an effect, so do not fall back after
         // invoking it; only read back and classify the outcome.
         if try replaceSelectedText(payload) != nil {
-            _ = try await verify(value: expectedValue, target: initial.targetID)
+            _ = try await verify(value: expectedValue, target: initial.targetID, deadline: deadline)
             return
         }
         guard !payload.isEmpty else {
@@ -148,6 +154,7 @@ struct ComputerUseTextEditor {
             guard !Task.isCancelled, mayAct() else {
                 throw ComputerUseTextEditError.interrupted
             }
+            guard uptime() < deadline else { throw ComputerUseTextEditError.deadlineExceeded }
             guard try read() == selected else {
                 throw ComputerUseTextEditError.deliveryUncertain
             }
@@ -158,8 +165,9 @@ struct ComputerUseTextEditor {
             }
             let nextValue = selected.value.replacingCharacters(in: selectionRange, with: chunk)
             let nextCaret = selected.selection.location + chunk.utf16.count
+            try requireEffectAuthority(deadline: deadline)
             try await postUnicode(chunk)
-            selected = try await verify(value: nextValue, target: initial.targetID)
+            selected = try await verify(value: nextValue, target: initial.targetID, deadline: deadline)
             if !remaining.isEmpty,
                selected.selection != NSRange(location: nextCaret, length: 0) {
                 throw ComputerUseTextEditError.deliveryUncertain
@@ -167,11 +175,17 @@ struct ComputerUseTextEditor {
         }
     }
 
-    private func verify(value: String, target: String) async throws -> ComputerUseTextSnapshot {
+    private func requireEffectAuthority(deadline: TimeInterval) throws {
+        guard !Task.isCancelled, mayAct() else { throw ComputerUseTextEditError.interrupted }
+        guard uptime() < deadline else { throw ComputerUseTextEditError.deadlineExceeded }
+    }
+
+    private func verify(value: String, target: String, deadline: TimeInterval) async throws -> ComputerUseTextSnapshot {
         for attempt in 0 ..< max(1, verificationAttempts) {
             guard !Task.isCancelled, mayAct() else {
                 throw ComputerUseTextEditError.interrupted
             }
+            guard uptime() < deadline else { throw ComputerUseTextEditError.deadlineExceeded }
             guard let current = try read(), current.targetID == target,
                   current.isEditable, !current.isSecure else {
                 throw ComputerUseTextEditError.deliveryUncertain

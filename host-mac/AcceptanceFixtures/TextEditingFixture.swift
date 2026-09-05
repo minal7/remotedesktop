@@ -8,9 +8,11 @@ final class FixtureDelegate: NSObject, NSApplicationDelegate, WKNavigationDelega
     let window = NSWindow(contentRect: NSRect(x: 220, y: 260, width: 640, height: 300),
                           styleMask: [.titled, .closable], backing: .buffered, defer: false)
     let origin = NSTextView(frame: .zero)
-    let destination = NSTextView(frame: .zero)
+    var destination = NSTextView(frame: .zero)
     var timer: Timer?
     var webView: WKWebView?
+    var lastCommand: String?
+    var generation = 0
 
     init(stateURL: URL) { self.stateURL = stateURL }
 
@@ -58,6 +60,7 @@ final class FixtureDelegate: NSObject, NSApplicationDelegate, WKNavigationDelega
         if webView == nil { window.makeFirstResponder(origin) }
         NSApp.activate(ignoringOtherApps: true)
         timer = Timer.scheduledTimer(withTimeInterval: 0.025, repeats: true) { [weak self] _ in
+            self?.consumeCommand()
             self?.writeState()
         }
         writeState()
@@ -75,6 +78,7 @@ final class FixtureDelegate: NSObject, NSApplicationDelegate, WKNavigationDelega
             webView.evaluateJavaScript("({...window.formState,rawOrigin:document.getElementById('origin').value,rawDestination:document.getElementById('destination').value})") { [weak self] result, _ in
                 guard let self, var state = result as? [String: Any] else { return }
                 state["pid"] = ProcessInfo.processInfo.processIdentifier
+                state["generation"] = self.generation
                 if let data = try? JSONSerialization.data(withJSONObject: state) {
                     try? data.write(to: self.stateURL, options: .atomic)
                 }
@@ -82,10 +86,47 @@ final class FixtureDelegate: NSObject, NSApplicationDelegate, WKNavigationDelega
             return
         }
         let state: [String: Any] = ["pid": ProcessInfo.processInfo.processIdentifier,
+                                    "generation": generation,
                                     "origin": origin.string,
                                     "destination": destination.string]
         guard let data = try? JSONSerialization.data(withJSONObject: state) else { return }
         try? data.write(to: stateURL, options: .atomic)
+    }
+
+    /// Test-only, fixed operation in the private fixture directory. Replacing
+    /// a control keeps its value, label and geometry so identity checks cannot
+    /// pass merely because those visible properties still match.
+    func consumeCommand() {
+        let commandURL = stateURL.appendingPathExtension("command")
+        guard let command = try? String(contentsOf: commandURL, encoding: .utf8),
+              command != lastCommand, command == "replace-destination" else { return }
+        lastCommand = command
+        if let webView {
+            webView.evaluateJavaScript("""
+                (()=>{const old=document.getElementById('destination');const next=old.cloneNode(true);
+                next.value=old.value;const start=old.selectionStart,end=old.selectionEnd;
+                next.addEventListener('input',e=>{window.formState.destination=e.target.value});
+                old.replaceWith(next);next.focus();next.setSelectionRange(start,end);return true})()
+                """) { [weak self] result, error in
+                    if error == nil, result as? Bool == true { self?.generation += 1 }
+                }
+        } else {
+            let next = NSTextView(frame: destination.frame)
+            next.string = destination.string
+            next.setAccessibilityIdentifier("destination")
+            next.setAccessibilityLabel("Destination")
+            next.font = destination.font
+            next.isRichText = false
+            next.isAutomaticQuoteSubstitutionEnabled = false
+            next.isAutomaticDashSubstitutionEnabled = false
+            next.isAutomaticTextReplacementEnabled = false
+            next.isAutomaticSpellingCorrectionEnabled = false
+            next.setSelectedRange(destination.selectedRange())
+            destination.superview?.replaceSubview(destination, with: next)
+            destination = next
+            window.makeFirstResponder(next)
+            generation += 1
+        }
     }
 }
 

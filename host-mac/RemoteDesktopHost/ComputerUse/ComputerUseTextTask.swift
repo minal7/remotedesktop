@@ -29,17 +29,26 @@ struct ComputerUseTextTaskContract: Sendable {
     let promptDigest: String
     let steps: [Step]
     let finalValues: [String: String]
+    let unchangedValues: [String: String]
+    let contractDigest: String
 
-    init(taskID: String, prompt: String, fields: [ComputerUseTextField], edits: [ComputerUseTextPlanEdit]) throws {
+    init(taskID: String, prompt: String, fields: [ComputerUseTextField], edits: [ComputerUseTextPlanEdit],
+         unchangedTargetIDs: [String] = []) throws {
         guard !taskID.isEmpty, (1...8).contains(edits.count),
-              Set(fields.map { $0.snapshot.targetID }).count == fields.count else {
+              Set(fields.map { $0.snapshot.targetID }).count == fields.count,
+              Set(unchangedTargetIDs).isSubset(of: Set(fields.map { $0.snapshot.targetID })),
+              Set(unchangedTargetIDs).isDisjoint(with: Set(edits.map(\.targetID))) else {
             throw ComputerUseTextTaskError.invalidPlan
         }
         self.taskID = taskID
         self.promptDigest = Self.digest(prompt)
         var values = Dictionary(uniqueKeysWithValues: fields.map { ($0.snapshot.targetID, $0.snapshot) })
         var steps: [Step] = []
-        var finalValues: [String: String] = [:]
+        let unchanged = Dictionary(uniqueKeysWithValues: fields.filter {
+            unchangedTargetIDs.contains($0.snapshot.targetID)
+        }.map { ($0.snapshot.targetID, $0.snapshot.value) })
+        var finalValues = unchanged
+        self.unchangedValues = unchanged
         for (index, edit) in edits.enumerated() {
             guard let field = values[edit.targetID], field.isEditable, !field.isSecure,
                   edit.text.utf8.count <= ComputerUseTextEditor.maximumPayloadBytes else {
@@ -60,8 +69,8 @@ struct ComputerUseTextTaskContract: Sendable {
             }
             // Step index distinguishes legitimate repeated operations even when
             // target, operation and payload are identical. No history strings.
-            let id = Self.digest([taskID, String(index), field.targetID, edit.mode.rawValue,
-                                  Self.digest(edit.text)].joined(separator: ":"))
+            let id = Self.framedDigest([taskID, String(index), field.targetID, edit.mode.rawValue,
+                edit.text, field.value, String(range.location), String(range.length), after])
             steps.append(Step(id: id, dependency: steps.last?.id,
                               targetID: field.targetID, mode: edit.mode, payload: edit.text,
                               before: field.value,
@@ -74,10 +83,32 @@ struct ComputerUseTextTaskContract: Sendable {
         }
         self.steps = steps
         self.finalValues = finalValues
+        // Recovery must bind the complete reviewed contract, including fields
+        // that must stay unchanged. Matching only prompt and edit IDs would
+        // allow a rebuilt plan to silently lose constraints or preconditions.
+        var identity = ["text-task-v1", taskID, self.promptDigest, String(steps.count)]
+        identity.append(contentsOf: steps.map(\.id))
+        identity.append(String(unchanged.count))
+        for id in unchanged.keys.sorted() {
+            identity.append(id)
+            identity.append(unchanged[id]!)
+        }
+        self.contractDigest = Self.framedDigest(identity)
     }
 
     static func digest(_ text: String) -> String {
         SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func framedDigest(_ values: [String]) -> String {
+        var hash = SHA256()
+        for value in values {
+            let bytes = Data(value.utf8)
+            var length = UInt64(bytes.count).bigEndian
+            withUnsafeBytes(of: &length) { hash.update(data: Data($0)) }
+            hash.update(data: bytes)
+        }
+        return hash.finalize().map { String(format: "%02x", $0) }.joined()
     }
 }
 
@@ -89,6 +120,7 @@ struct ComputerUseTextStepJournal: Codable, Equatable, Sendable {
     enum Status: String, Codable, Sendable { case planned, attempted, verified, uncertain }
     let taskID: String
     let promptDigest: String
+    let contractDigest: String
     let stepIDs: [String]
     var statuses: [Status]
 }
@@ -114,11 +146,22 @@ final class ComputerUseTextTask {
         self.contract = contract
         let initial = ComputerUseTextStepJournal(
             taskID: contract.taskID, promptDigest: contract.promptDigest,
+            contractDigest: contract.contractDigest,
             stepIDs: contract.steps.map(\.id), statuses: contract.steps.map { _ in .planned })
         if let recovered {
             guard recovered.taskID == initial.taskID, recovered.promptDigest == initial.promptDigest,
+                  recovered.contractDigest == initial.contractDigest,
                   recovered.stepIDs == initial.stepIDs, recovered.statuses.count == initial.statuses.count else {
                 throw ComputerUseTextTaskError.journalMismatch
+            }
+            // Only a verified prefix, at most one in-flight step, and a planned
+            // suffix are reachable through sequential execution.
+            var sawUnverified = false
+            for status in recovered.statuses {
+                if sawUnverified && status != .planned {
+                    throw ComputerUseTextTaskError.journalMismatch
+                }
+                if status != .verified { sawUnverified = true }
             }
         }
         self.journal = recovered ?? initial
@@ -151,7 +194,7 @@ final class ComputerUseTextTask {
             }
             // Verify the latest completed state of each field before starting
             // another effect, including after a pause between fields.
-            var completedValues: [String: String] = [:]
+            var completedValues = contract.unchangedValues
             for prior in 0..<index where journal.statuses[prior] == .verified {
                 completedValues[contract.steps[prior].targetID] = contract.steps[prior].after
             }
@@ -168,6 +211,8 @@ final class ComputerUseTextTask {
             }
             try transition(index, to: .attempted)
             do {
+                try Task.checkCancellation()
+                guard mayAct() else { throw ComputerUseTextEditError.interrupted }
                 try await apply(ComputerUseTextPlanEdit(
                     targetID: step.targetID, mode: step.mode, text: step.payload), current)
                 guard let after = try read(step.targetID), after.targetID == step.targetID,
