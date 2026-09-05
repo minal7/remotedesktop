@@ -53,36 +53,46 @@ final class ComputerUseNativeTextExecutor {
         else { proposal = try await planner.propose(prompt: prompt, fields: fields) }
         try Task.checkCancellation()
         guard mayAct() else { throw ComputerUseTextEditError.interrupted }
+        let operations: [ComputerUseTextGoalOperation]
+        let unchanged: [String]
         switch proposal {
         case .unsupported: return nil
         case .clarification:
             return .clarificationRequired("Which field should I edit, and what exact text should it contain?")
-        case .edits(let edits, let unchanged):
-            // Recheck every discovered field after inference before any focus
-            // or value change. Planning observations are never effect authority.
-            for field in fields {
-                guard try await read(field.snapshot.targetID) == field.snapshot else {
-                    throw ComputerUseTextTaskError.staleTarget
-                }
-            }
-            let contract = try ComputerUseTextTaskContract(taskID: taskID, prompt: prompt,
-                                                           fields: fields, edits: edits,
-                                                           unchangedTargetIDs: unchanged)
-            let store = try ComputerUseTextStepStore(directory: journalDirectory)
-            let task = try ComputerUseTextTask(contract: contract, recovered: store.load(taskID: taskID),
-                read: read,
-                apply: { [weak self] edit, expected in
-                    guard let self else { throw CancellationError() }
-                    if let editOverride { try await editOverride(edit, expected) }
-                    else { try await apply(edit, expected: expected) }
-                },
-                applyWithIdentity: browserTarget.map { target in
-                    { edit, expected, operationID in try await target.apply(edit, expected: expected, operationID: operationID) }
-                },
-                persist: { try store.save($0) }, mayAct: mayAct)
-            retainedTask = task
-            return try await run(task, verifiedStep: verifiedStep, progress: progress)
+        case .edits(let edits, let retained):
+            operations = edits.map(ComputerUseTextGoalOperation.enterText); unchanged = retained
+        case .fieldOperations(let requested, let retained):
+            operations = requested; unchanged = retained
         }
+        // Recheck every discovered field after inference before any focus
+        // or value change. Planning observations are never effect authority.
+        for field in fields {
+            guard try await read(field.snapshot.targetID) == field.snapshot else {
+                throw ComputerUseTextTaskError.staleTarget
+            }
+        }
+        let contract = try ComputerUseTextTaskContract(taskID: taskID, prompt: prompt,
+                                                       fields: fields, operations: operations,
+                                                       unchangedTargetIDs: unchanged)
+        let store = try ComputerUseTextStepStore(directory: journalDirectory)
+        let task = try ComputerUseTextTask(contract: contract, recovered: store.load(taskID: taskID),
+            read: read,
+            apply: { [weak self] edit, expected in
+                guard let self else { throw CancellationError() }
+                if let editOverride { try await editOverride(edit, expected) }
+                else { try await apply(edit, expected: expected) }
+            },
+            applyWithIdentity: browserTarget.map { target in
+                { edit, expected, operationID in try await target.apply(edit, expected: expected, operationID: operationID) }
+            },
+            applyCopyWithIdentity: browserTarget.map { target in
+                { edit, expected, source, operationID in
+                    try await target.apply(edit, expected: expected, operationID: operationID, copySource: source)
+                }
+            },
+            persist: { try store.save($0) }, mayAct: mayAct)
+        retainedTask = task
+        return try await run(task, verifiedStep: verifiedStep, progress: progress)
     }
 
     private func run(_ task: ComputerUseTextTask, verifiedStep: (Int, Int) -> Void,

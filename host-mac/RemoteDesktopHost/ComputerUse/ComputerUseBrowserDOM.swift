@@ -163,6 +163,13 @@ enum ComputerUseBrowserDOM {
         if (operations.size >= 64 || encoder.encode(args.payload).length > 65536) return reply('limit');
         if (current.value !== args.before || (args.mode === 'insert' &&
             (current.selectionStart !== args.selectionStart || current.selectionEnd !== args.selectionEnd))) return reply('stale');
+        // Copy authority includes the retained source object and its exact
+        // value. Validate both objects synchronously in this isolated world,
+        // before the destination setter or any page event can run.
+        if (args.copySourceID !== undefined) {
+          const sourceBinding = bindings.get(args.copySourceID), source = sourceBinding && snapshot(sourceBinding);
+          if (!source || source.value !== args.copySourceValue || source.value !== args.payload) return reply('stale');
+        }
         const start = args.mode === 'replaceAll' ? 0 : args.mode === 'append' ? current.value.length : current.selectionStart;
         const end = args.mode === 'replaceAll' ? current.value.length : args.mode === 'append' ? current.value.length : current.selectionEnd;
         if (!['replaceAll', 'append', 'insert'].includes(args.mode) || start < 0 || end < start || end > current.value.length) return reply('unsupported');
@@ -228,7 +235,8 @@ final class ComputerUseBrowserTextTarget {
         return try snapshot(fields[0], targetID: targetID)
     }
 
-    func apply(_ edit: ComputerUseTextPlanEdit, expected: ComputerUseTextSnapshot, operationID: String) async throws {
+    func apply(_ edit: ComputerUseTextPlanEdit, expected: ComputerUseTextSnapshot, operationID: String,
+               copySource: ComputerUseTextSnapshot? = nil) async throws {
         try validate()
         guard edit.targetID == expected.targetID, let documentID, let id = targets[edit.targetID],
               edit.text.utf8.count <= ComputerUseTextEditor.maximumPayloadBytes else { throw ComputerUseTextTaskError.staleTarget }
@@ -241,10 +249,17 @@ final class ComputerUseBrowserTextTarget {
         guard let textRange = Range(range, in: expected.value) else { throw ComputerUseTextEditError.invalidSelection }
         let after = expected.value.replacingCharacters(in: textRange, with: edit.text)
         guard after.utf8.count <= ComputerUseTextEditor.maximumObservedValueBytes else { throw ComputerUseTextEditError.payloadTooLarge }
-        let reply = try await browser.callDOM(.edit, arguments: ["documentID": documentID, "id": id,
+        var arguments: [String: Any] = ["documentID": documentID, "id": id,
             "operationID": operationID, "mode": edit.mode.rawValue, "payload": edit.text, "before": expected.value, "after": after,
             "selectionStart": expected.selection.location == NSNotFound ? -1 : expected.selection.location,
-            "selectionEnd": expected.selection.location == NSNotFound ? -1 : NSMaxRange(expected.selection)], document: document)
+            "selectionEnd": expected.selection.location == NSNotFound ? -1 : NSMaxRange(expected.selection)]
+        if let copySource {
+            guard let sourceID = targets[copySource.targetID], copySource.isEditable, !copySource.isSecure,
+                  copySource.value.utf8.elementsEqual(edit.text.utf8) else { throw ComputerUseTextTaskError.staleTarget }
+            arguments["copySourceID"] = sourceID
+            arguments["copySourceValue"] = copySource.value
+        }
+        let reply = try await browser.callDOM(.edit, arguments: arguments, document: document)
         try validate()
         if reply.status == "stale" { throw ComputerUseTextTaskError.staleTarget }
         guard reply.documentID == documentID else { throw ComputerUseTextEditError.deliveryUncertain }

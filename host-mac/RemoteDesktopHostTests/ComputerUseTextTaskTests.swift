@@ -3,6 +3,103 @@ import XCTest
 
 @MainActor
 final class ComputerUseTextTaskTests: XCTestCase {
+    func testCopiedValuesFollowEarlierStepsAndKeepSourceProvenanceAcrossReplay() async throws {
+        let fields = [field("origin", "private seed"), field("destination", "old")]
+        let contract = try ComputerUseTextTaskContract(taskID: "copy-chain", prompt: "Replace, copy and append", fields: fields,
+            operations: [.enterText(.init(targetID: "origin", mode: .replaceAll, text: "  e\u{301} 😀  ")),
+                         .copyField(sourceTargetID: "origin", targetID: "destination", mode: .replaceAll),
+                         .copyField(sourceTargetID: "destination", targetID: "origin", mode: .append)])
+        XCTAssertEqual(contract.steps.map(\.payload), Array(repeating: "  e\u{301} 😀  ", count: 3))
+        XCTAssertEqual(contract.steps.map { $0.copySource?.targetID }, [nil, "origin", "destination"])
+        XCTAssertEqual(contract.finalValues["origin"], "  e\u{301} 😀    e\u{301} 😀  ")
+        var state = Dictionary(uniqueKeysWithValues: fields.map { ($0.snapshot.targetID, $0.snapshot) })
+        var effects = 0
+        let task = try ComputerUseTextTask(contract: contract, read: { state[$0] }, apply: { edit, current in
+            effects += 1
+            state[edit.targetID] = self.field(edit.targetID, edit.mode == .append ? current.value + edit.text : edit.text).snapshot
+        }, persist: { journal in
+            let encoded = String(decoding: try JSONEncoder().encode(journal), as: UTF8.self)
+            XCTAssertFalse(encoded.contains("private seed")); XCTAssertFalse(encoded.contains("😀"))
+        }, mayAct: { true })
+        try await task.run(); try await task.run()
+        XCTAssertEqual(effects, 3); XCTAssertEqual(task.journal.statuses, [.verified, .verified, .verified])
+    }
+
+    func testCopySourceIdentityAndPayloadOriginCannotBeSubstitutedInRecovery() throws {
+        let fields = [field("origin", "same"), field("other", "same"), field("destination")]
+        func contract(_ source: String) throws -> ComputerUseTextTaskContract {
+            try .init(taskID: "copy-identity", prompt: "Copy the chosen source", fields: fields,
+                      operations: [.copyField(sourceTargetID: source, targetID: "destination", mode: .replaceAll)])
+        }
+        let first = try contract("origin"), second = try contract("other")
+        let literal = try ComputerUseTextTaskContract(taskID: "copy-identity", prompt: "Copy the chosen source", fields: fields,
+            edits: [.init(targetID: "destination", mode: .replaceAll, text: "same")])
+        XCTAssertEqual(first.steps[0].after, second.steps[0].after)
+        XCTAssertNotEqual(first.contractDigest, second.contractDigest)
+        XCTAssertNotEqual(first.steps[0].id, literal.steps[0].id)
+        let journal = ComputerUseTextStepJournal(taskID: first.taskID, promptDigest: first.promptDigest,
+            contractDigest: first.contractDigest, stepIDs: first.steps.map(\.id), statuses: [.verified])
+        XCTAssertThrowsError(try ComputerUseTextTask(contract: second, recovered: journal, read: { _ in nil },
+            apply: { _, _ in XCTFail("Wrong source cannot acquire recovery authority") }, persist: { _ in }, mayAct: { true }))
+    }
+
+    func testChangedCopySourceCannotReachEffectAndSourceMutationDuringInputIsUncertain() async throws {
+        for mutateDuringInput in [false, true] {
+            let fields = [field("origin", "private source"), field("destination")]
+            let contract = try ComputerUseTextTaskContract(taskID: "copy-race", prompt: "Copy Origin to Destination", fields: fields,
+                operations: [.copyField(sourceTargetID: "origin", targetID: "destination", mode: .replaceAll)])
+            var state = Dictionary(uniqueKeysWithValues: fields.map { ($0.snapshot.targetID, $0.snapshot) })
+            var effects = 0
+            let task = try ComputerUseTextTask(contract: contract, read: { state[$0] }, apply: { edit, _ in
+                effects += 1; state[edit.targetID] = self.field(edit.targetID, edit.text).snapshot
+                state["origin"] = self.field("origin", "changed during input").snapshot
+            }, persist: { journal in
+                if !mutateDuringInput && journal.statuses.contains(.attempted) {
+                    state["origin"] = self.field("origin", "changed before dispatch").snapshot
+                }
+            }, mayAct: { true })
+            do { try await task.run(); XCTFail("A changed copy source cannot produce successful completion") }
+            catch {
+                if mutateDuringInput { XCTAssertEqual(error as? ComputerUseTextTaskError, .uncertainEffect) }
+                else { XCTAssertEqual(error as? ComputerUseTextTaskError, .staleTarget) }
+            }
+            do { try await task.run(); XCTFail("Changed source cannot authorize replay") } catch {}
+            XCTAssertEqual(effects, mutateDuringInput ? 1 : 0)
+        }
+    }
+
+    func testCancellationDuringFinalCopySourceReadPreventsInput() async throws {
+        let fields = [field("origin", "private source"), field("destination")]
+        let contract = try ComputerUseTextTaskContract(taskID: "copy-cancel", prompt: "Copy Origin to Destination", fields: fields,
+            operations: [.copyField(sourceTargetID: "origin", targetID: "destination", mode: .replaceAll)])
+        let state = Dictionary(uniqueKeysWithValues: fields.map { ($0.snapshot.targetID, $0.snapshot) })
+        var attempted = false, effects = 0
+        var suspended: CheckedContinuation<ComputerUseTextSnapshot?, Never>?
+        let task = try ComputerUseTextTask(contract: contract, read: { id in
+            if attempted && id == "origin" { return await withCheckedContinuation { suspended = $0 } }
+            return state[id]
+        }, apply: { _, _ in effects += 1 }, persist: { attempted = $0.statuses.contains(.attempted) }, mayAct: { true })
+        let running = Task { try await task.run() }
+        while suspended == nil { await Task.yield() }
+        running.cancel(); suspended?.resume(returning: state["origin"])
+        do { try await running.value; XCTFail("Cancelled source read cannot dispatch input") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertEqual(effects, 0)
+    }
+
+    func testCopyPreflightRejectsMissingProtectedAndOversizedSourcesAndRetainsSelfCopy() throws {
+        let target = field("destination", "x")
+        let protected = ComputerUseTextField(label: "secret", snapshot: .init(targetID: "origin", value: "secret",
+            selection: NSRange(location: 0, length: 0), isEditable: true, isSecure: true))
+        for fields in [[target], [protected, target], [field("origin", String(repeating: "x", count: 65_537)), target]] {
+            XCTAssertThrowsError(try ComputerUseTextTaskContract(taskID: "invalid-copy", prompt: "Copy field", fields: fields,
+                operations: [.copyField(sourceTargetID: "origin", targetID: "destination", mode: .replaceAll)]))
+        }
+        let selfCopy = try ComputerUseTextTaskContract(taskID: "self-copy", prompt: "Append the field to itself", fields: [target],
+            operations: [.copyField(sourceTargetID: "destination", targetID: "destination", mode: .append)])
+        XCTAssertEqual(selfCopy.finalValues["destination"], "xx")
+    }
+
     func testCompleteQuotedCommandsBindTargetAndValueRolesWithoutExtraEdits() throws {
         let fields = [field("origin"), field("destination")]
         let examples: [(String, [ComputerUseTextPlanEdit])] = [

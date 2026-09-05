@@ -85,6 +85,7 @@ final class ComputerUseLocalTextProposalAcceptanceTests: XCTestCase {
                 case .clarification:
                     row["disposition"] = "clarification"
                     row["passed"] = outcome == "clarificationWithoutEffects"
+                case .fieldOperations: throw CorpusError.invalidCorpus
                 case .edits(let edits, let unchanged):
                     row["disposition"] = "supported"
                     let task = try ComputerUseTextTaskContract(taskID: id, prompt: prompt, fields: fields,

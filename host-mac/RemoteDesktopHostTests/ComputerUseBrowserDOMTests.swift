@@ -3,6 +3,88 @@ import XCTest
 
 @MainActor
 final class ComputerUseBrowserDOMTests: XCTestCase {
+    func testCopyUsesBoundSourceBytesAndCannotSubstituteLiteralOrReplayOperation() async throws {
+        let fixture = try await DOMFixture(body: """
+            <label>Origin<textarea>  東京\ne\u{301} 😀  </textarea></label><label>Destination<textarea></textarea></label>
+            <script>document.querySelectorAll('textarea')[1].addEventListener('input', e => fetch('/edited?value=' + encodeURIComponent(e.target.value)));</script>
+            """)
+        defer { fixture.close() }
+        let fields = try await fixture.target.fields(), source = fields[0].snapshot, target = fields[1].snapshot
+        let operationID = ComputerUseTaskContract.digest(["copy-once"])
+        do {
+            try await fixture.target.apply(.init(targetID: target.targetID, mode: .replaceAll, text: "invented"),
+                expected: target, operationID: operationID, copySource: source)
+            XCTFail("Copy reference cannot authorize substituted literal bytes")
+        } catch { XCTAssertEqual(error as? ComputerUseTextTaskError, .staleTarget) }
+        try await fixture.target.apply(.init(targetID: target.targetID, mode: .replaceAll, text: source.value),
+            expected: target, operationID: operationID, copySource: source)
+        let copied = try requireDOM(try await fixture.target.read(targetID: target.targetID))
+        XCTAssertTrue(copied.value.utf8.elementsEqual(source.value.utf8))
+        do {
+            try await fixture.target.apply(.init(targetID: target.targetID, mode: .replaceAll, text: source.value),
+                expected: copied, operationID: operationID, copySource: source)
+            XCTFail("A copy operation ID cannot replay")
+        } catch { XCTAssertEqual(error as? ComputerUseTextEditError, .deliveryUncertain) }
+        try await fixture.wait { fixture.editedValues.count == 1 }
+        XCTAssertTrue(fixture.editedValues[0].utf8.elementsEqual(source.value.utf8))
+    }
+
+    func testChangedOrReplacedCopySourceRejectsBeforeDestinationInput() async throws {
+        for change in ["source.value = 'changed';", "source.replaceWith(source.cloneNode(true));"] {
+            let fixture = try await DOMFixture(body: """
+                <label>Origin<input id="source" value="private source"></label><label>Destination<input id="target"></label>
+                <script>document.querySelector('#target').addEventListener('input', () => fetch('/input-event'));
+                fetch('/signal').then(() => { const source = document.querySelector('#source'); \(change) fetch('/changed'); });</script>
+                """, heldSignal: true)
+            defer { fixture.close() }
+            let fields = try await fixture.target.fields(), source = fields[0].snapshot, target = fields[1].snapshot
+            try await fixture.wait { fixture.server.count("/signal") == 1 }
+            fixture.server.releaseHeldResponses()
+            try await fixture.wait { fixture.server.count("/changed") == 1 }
+            do {
+                try await fixture.target.apply(.init(targetID: target.targetID, mode: .replaceAll, text: source.value),
+                    expected: target, operationID: ComputerUseTaskContract.digest(["stale-copy"]), copySource: source)
+                XCTFail("A valid destination alone cannot authorize copying a stale source")
+            } catch { XCTAssertEqual(error as? ComputerUseTextTaskError, .staleTarget) }
+            let unchanged = try requireDOM(try await fixture.target.read(targetID: target.targetID))
+            XCTAssertEqual(unchanged.value, ""); XCTAssertEqual(fixture.server.count("/input-event"), 0)
+        }
+    }
+
+    func testNativeExecutorCopiesWithoutAXInputAndDetectsSourceMutationDuringPageInput() async throws {
+        for mutatesSource in [false, true] {
+            let mutation = mutatesSource ? "document.querySelector('#source').value = 'changed by page';" : ""
+            let fixture = try await DOMFixture(body: """
+                <label>Origin<input id="source" value="private source"></label><label>Destination<input id="target"></label>
+                <script>document.querySelector('#target').addEventListener('input', e => {
+                  \(mutation) fetch('/edited?value=' + encodeURIComponent(e.target.value));
+                });</script>
+                """)
+            defer { fixture.close() }
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let planner = DOMCopyFixturePlanner()
+            let executor = ComputerUseNativeTextExecutor(injector: InputInjector(), mayAct: { true }, journalDirectory: directory,
+                planner: planner, editOverride: { _, _ in XCTFail("DOM copy cannot use AX input") },
+                browserTargetProvider: { taskID in
+                    ComputerUseBrowserTextTarget(browser: fixture.browser, document: try fixture.browser.acquireCurrentDocument(taskID: taskID), requiresFrontmost: false)
+                })
+            for _ in 0..<2 {
+                do {
+                    let result = try await executor.execute(taskID: "copy", prompt: "Copy the current Origin into Destination", progress: { _ in })
+                    if mutatesSource { XCTFail("A source changed during input cannot report completion") }
+                    else if case .completed = result {} else { XCTFail("The copy should complete") }
+                } catch {
+                    if !mutatesSource { throw error }
+                    XCTAssertTrue([ComputerUseTextTaskError.uncertainEffect, .incompleteOutcome].contains(error as? ComputerUseTextTaskError ?? .invalidPlan))
+                }
+            }
+            try await fixture.wait { fixture.editedValues.count == 1 }
+            XCTAssertEqual(fixture.editedValues, ["private source"])
+            XCTAssertEqual(planner.calls, 1)
+        }
+    }
+
     func testQuotedTargetNameCannotBecomeAnIntermediateInputThroughTheProductionTextExecutor() async throws {
         let fixture = try await DOMFixture(body: """
             <label>Destination<input></label>
@@ -322,6 +404,18 @@ private final class DOMFixturePlanner: ComputerUseTextGoalPlanning {
         let first = try XCTUnwrap(fields.first(where: { $0.label == "Origin" }))
         return .edits([.init(targetID: first.snapshot.targetID, mode: .replaceAll, text: "Paris")],
                       unchangedTargetIDs: fields.filter { $0.label != "Origin" }.map { $0.snapshot.targetID })
+    }
+}
+
+@MainActor
+private final class DOMCopyFixturePlanner: ComputerUseTextGoalPlanning {
+    var calls = 0
+    func propose(prompt: String, fields: [ComputerUseTextField]) async throws -> ComputerUseTextGoalProposal {
+        calls += 1
+        let source = try XCTUnwrap(fields.first(where: { $0.label == "Origin" }))
+        let target = try XCTUnwrap(fields.first(where: { $0.label == "Destination" }))
+        return .fieldOperations([.copyField(sourceTargetID: source.snapshot.targetID, targetID: target.snapshot.targetID, mode: .replaceAll)],
+            unchangedTargetIDs: [source.snapshot.targetID])
     }
 }
 

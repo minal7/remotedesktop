@@ -67,6 +67,7 @@ final class ComputerUseSourceBoundTextModelAcceptanceTests: XCTestCase {
                     switch result {
                     case .unsupported: disposition = "unsupported"
                     case .clarification: disposition = "clarification"
+                    case .fieldOperations: throw Failure.invalidInput
                     case .edits(let proposed, let unchanged):
                         disposition = "supported"
                         for edit in proposed {

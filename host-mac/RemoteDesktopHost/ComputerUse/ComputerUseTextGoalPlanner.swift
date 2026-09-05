@@ -5,8 +5,23 @@ import FoundationModels
 
 enum ComputerUseTextGoalProposal: Equatable, Sendable {
     case edits([ComputerUseTextPlanEdit], unchangedTargetIDs: [String] = [])
+    case fieldOperations([ComputerUseTextGoalOperation], unchangedTargetIDs: [String] = [])
     case clarification
     case unsupported
+}
+
+/// Intent-level payloads stay distinct until the host compiles a complete
+/// task. A field reference can never be interpreted as literal input text.
+enum ComputerUseTextGoalOperation: Equatable, Sendable {
+    case enterText(ComputerUseTextPlanEdit)
+    case copyField(sourceTargetID: String, targetID: String, mode: ComputerUseTextEditMode)
+
+    var targetID: String {
+        switch self {
+        case .enterText(let edit): return edit.targetID
+        case .copyField(_, let targetID, _): return targetID
+        }
+    }
 }
 
 protocol ComputerUseTextGoalPlanning: Sendable {

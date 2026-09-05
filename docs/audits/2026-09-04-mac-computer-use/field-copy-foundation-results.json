@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "scope": "Typed field-copy compiler and core/browser effect adapters; model routing not enabled",
+  "sourceBaseCommit": "0891cc0",
+  "signedResult": "/tmp/remotedesktop-field-copy-signed-v1.xcresult",
+  "signedTests": 77,
+  "signedDurationSeconds": 5.683,
+  "swiftPMResult": "/tmp/remotedesktop-field-copy-core-v1.xunit.xml",
+  "swiftPMTests": 77,
+  "swiftPMWorkerSeconds": 13.199176999999999,
+  "inventory": "field-copy-inventory.json",
+  "sourceInventory": 323,
+  "sha256": {
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseBrowserDOM.swift": "cb9c5395bd55bd9c2a39a51e7ad6bd6049d29f607699d3c731684f204654f9d7",
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseNativeTextExecutor.swift": "466b6383c684565a602c2d2e466d90054fc27bd6e78f00332b93a05cdd8cd8d1",
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseTextGoalPlanner.swift": "b4ad1cc4ff2da1f8ec08a3253e6a923b021c194650d1ac7219e904c25a8a0215",
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseTextTask.swift": "968a89d6c1896be3d632678987243753eea6fc80e6dd6cddbe738185c2bdc542",
+    "host-mac/RemoteDesktopHostTests/ComputerUseBrowserDOMTests.swift": "9dd62780c0a9c6f31696057957d6ba00027000bab16b624608dba99ba31bf37a",
+    "host-mac/RemoteDesktopHostTests/ComputerUseTextTaskTests.swift": "80651cc9df0d1a606cce360f1df0305522b28cfb32462dce7517f4556da644b7",
+    "host-mac/RemoteDesktopHostTests/ComputerUseLocalTextProposalAcceptanceTests.swift": "6726852214c55b146031a689cfa73ec1c35fc1e8591e9e0150225b9ccaf77164",
+    "host-mac/RemoteDesktopHostTests/ComputerUseSourceBoundTextModelAcceptanceTests.swift": "89cd32f8907a4d817c064fa6d9f73b4416e280a41e579bf26133e992793fe1de"
+  },
+  "limitations": [
+    "Local planner does not yet produce fieldOperations in normal composition.",
+    "A copy needs dispatch evidence as well as values when recovering an interruption; matching initial/final values cannot prove the action occurred.",
+    "Generated writing, copied-value conditions, external native AX qualification and complete product release remain open."
+  ]
+}

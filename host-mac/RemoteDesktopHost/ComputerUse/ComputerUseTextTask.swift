@@ -24,6 +24,7 @@ struct ComputerUseTextTaskContract: Sendable {
         let before: String
         let insertionSelection: NSRange?
         let after: String
+        let copySource: ComputerUseTextSnapshot?
     }
     let taskID: String
     let promptDigest: String
@@ -34,10 +35,16 @@ struct ComputerUseTextTaskContract: Sendable {
 
     init(taskID: String, prompt: String, fields: [ComputerUseTextField], edits: [ComputerUseTextPlanEdit],
          unchangedTargetIDs: [String] = []) throws {
-        guard !taskID.isEmpty, (1...8).contains(edits.count),
+        try self.init(taskID: taskID, prompt: prompt, fields: fields, operations: edits.map(ComputerUseTextGoalOperation.enterText),
+                      unchangedTargetIDs: unchangedTargetIDs)
+    }
+
+    init(taskID: String, prompt: String, fields: [ComputerUseTextField], operations: [ComputerUseTextGoalOperation],
+         unchangedTargetIDs: [String] = []) throws {
+        guard !taskID.isEmpty, (1...8).contains(operations.count),
               Set(fields.map { $0.snapshot.targetID }).count == fields.count,
               Set(unchangedTargetIDs).isSubset(of: Set(fields.map { $0.snapshot.targetID })),
-              Set(unchangedTargetIDs).isDisjoint(with: Set(edits.map(\.targetID))) else {
+              Set(unchangedTargetIDs).isDisjoint(with: Set(operations.map(\.targetID))) else {
             throw ComputerUseTextTaskError.invalidPlan
         }
         self.taskID = taskID
@@ -49,7 +56,18 @@ struct ComputerUseTextTaskContract: Sendable {
         }.map { ($0.snapshot.targetID, $0.snapshot.value) })
         var finalValues = unchanged
         self.unchangedValues = unchanged
-        for (index, edit) in edits.enumerated() {
+        for (index, operation) in operations.enumerated() {
+            let edit: ComputerUseTextPlanEdit
+            let source: ComputerUseTextSnapshot?
+            switch operation {
+            case .enterText(let literal): edit = literal; source = nil
+            case .copyField(let sourceTargetID, let targetID, let mode):
+                guard let observed = values[sourceTargetID], observed.isEditable, !observed.isSecure else {
+                    throw ComputerUseTextTaskError.invalidPlan
+                }
+                source = observed
+                edit = .init(targetID: targetID, mode: mode, text: observed.value)
+            }
             guard let field = values[edit.targetID], field.isEditable, !field.isSecure,
                   edit.text.utf8.count <= ComputerUseTextEditor.maximumPayloadBytes else {
                 throw ComputerUseTextTaskError.invalidPlan
@@ -69,12 +87,14 @@ struct ComputerUseTextTaskContract: Sendable {
             }
             // Step index distinguishes legitimate repeated operations even when
             // target, operation and payload are identical. No history strings.
-            let id = Self.framedDigest([taskID, String(index), field.targetID, edit.mode.rawValue,
-                edit.text, field.value, String(range.location), String(range.length), after])
+            var identity = [taskID, String(index), field.targetID, edit.mode.rawValue,
+                edit.text, field.value, String(range.location), String(range.length), after]
+            if let source { identity += ["copied-field-v1", source.targetID, source.value] }
+            let id = Self.framedDigest(identity)
             steps.append(Step(id: id, dependency: steps.last?.id,
                               targetID: field.targetID, mode: edit.mode, payload: edit.text,
                               before: field.value,
-                              insertionSelection: edit.mode == .insert ? range : nil, after: after))
+                              insertionSelection: edit.mode == .insert ? range : nil, after: after, copySource: source))
             values[field.targetID] = ComputerUseTextSnapshot(
                 targetID: field.targetID, value: after,
                 selection: field.selection.location == NSNotFound ? field.selection
@@ -141,6 +161,7 @@ final class ComputerUseTextTask {
          read: @escaping (String) async throws -> ComputerUseTextSnapshot?,
          apply: @escaping (ComputerUseTextPlanEdit, ComputerUseTextSnapshot) async throws -> Void,
          applyWithIdentity: ((ComputerUseTextPlanEdit, ComputerUseTextSnapshot, String) async throws -> Void)? = nil,
+         applyCopyWithIdentity: ((ComputerUseTextPlanEdit, ComputerUseTextSnapshot, ComputerUseTextSnapshot, String) async throws -> Void)? = nil,
          persist: @escaping (ComputerUseTextStepJournal) throws -> Void,
          mayAct: @escaping () -> Bool) throws {
         self.contract = contract
@@ -172,6 +193,13 @@ final class ComputerUseTextTask {
             if let selection = step.insertionSelection {
                 preconditions.append(predicate("selection-\(index)", target: step.targetID, check: .selection(selection)))
             }
+            var sourcePostconditions: [String] = []
+            if let source = step.copySource {
+                preconditions.append(predicate("copy-source-before-\(index)", target: source.targetID, check: .value(source.value)))
+                if source.targetID != step.targetID {
+                    sourcePostconditions.append(predicate("copy-source-after-\(index)", target: source.targetID, check: .value(source.value)))
+                }
+            }
             for (position, target) in completedValues.keys.sorted().enumerated() {
                 let id = predicate("retained-\(index)-\(position)", target: target, check: .value(completedValues[target]!))
                 retained.insert(id)
@@ -179,9 +207,9 @@ final class ComputerUseTextTask {
             }
             let after = predicate("after-\(index)", target: step.targetID, check: .value(step.after))
             steps.append(.init(id: step.id, dependencies: step.dependency.map { [$0] } ?? [],
-                operation: .init(capabilityID: "text.edit." + step.mode.rawValue, entityID: step.targetID,
+                operation: .init(capabilityID: (step.copySource == nil ? "text.edit." : "text.copy.") + step.mode.rawValue, entityID: step.targetID,
                     payloadDigest: ComputerUseTextTaskContract.digest(step.payload), payloadVersion: 1),
-                preconditions: preconditions, postconditions: [after]))
+                preconditions: preconditions, postconditions: [after] + sourcePostconditions))
             completedValues[step.targetID] = step.after
         }
         let outcomes = contract.finalValues.keys.sorted().enumerated().map { index, id in
@@ -223,7 +251,16 @@ final class ComputerUseTextTask {
                     try Task.checkCancellation()
                     guard mayAct() else { throw ComputerUseTextEditError.interrupted }
                     let plan = ComputerUseTextPlanEdit(targetID: edit.targetID, mode: edit.mode, text: edit.payload)
-                    if let applyWithIdentity { try await applyWithIdentity(plan, current, operationID) }
+                    if let source = edit.copySource {
+                        guard let fresh = try await read(source.targetID), fresh.targetID == source.targetID,
+                              fresh.isEditable, !fresh.isSecure, fresh.value.utf8.elementsEqual(source.value.utf8) else {
+                            throw ComputerUseTextTaskError.staleTarget
+                        }
+                        try Task.checkCancellation()
+                        guard mayAct() else { throw ComputerUseTextEditError.interrupted }
+                        if let applyCopyWithIdentity { try await applyCopyWithIdentity(plan, current, source, operationID) }
+                        else { try await apply(plan, current) }
+                    } else if let applyWithIdentity { try await applyWithIdentity(plan, current, operationID) }
                     else { try await apply(plan, current) }
                 }, persist: { try persist(Self.textJournal($0, contract: contract)) },
                 assertOwnership: { guard mayAct() else { throw ComputerUseTextEditError.interrupted } })
