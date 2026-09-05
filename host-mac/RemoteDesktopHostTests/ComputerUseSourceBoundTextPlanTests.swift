@@ -3,6 +3,38 @@ import XCTest
 @testable import RemoteDesktopHost
 
 final class ComputerUseSourceBoundTextPlanTests: XCTestCase {
+    func testTypedRequirementsOfferOnlyTaskMentionsAndCannotAttachEditsToADecline() throws {
+        let connection = try ComputerUseTextModelConnection(baseURL: URL(string: "http://127.0.0.1:49123")!,
+            bearerToken: "fictional-test-token", modelAlias: "test-native")
+        func variants(_ prompt: String) throws -> [[String: Any]] {
+            let request = try ComputerUseLocalTextGoalPlanner(connection: connection, contract: .sourceBoundV5)
+                .makeRequest(catalog: .init(prompt), fields: fields)
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
+            let format = try XCTUnwrap(body["response_format"] as? [String: Any])
+            let schema = try XCTUnwrap((format["json_schema"] as? [String: Any])?["schema"] as? [String: Any])
+            let properties = try XCTUnwrap(schema["properties"] as? [String: Any])
+            let requirements = try XCTUnwrap(properties["requirements"] as? [String: Any])
+            return try XCTUnwrap((requirements["items"] as? [String: Any])?["oneOf"] as? [[String: Any]])
+        }
+        let choices = try variants(#"Set "Destination" to "private value"."#)
+        XCTAssertEqual(choices.count, 4)
+        for choice in choices {
+            let properties = try XCTUnwrap(choice["properties"] as? [String: Any])
+            let kind = try XCTUnwrap((properties["kind"] as? [String: Any])?["const"] as? String)
+            let edits = try XCTUnwrap(properties["edits"] as? [String: Any])
+            let preserve = try XCTUnwrap(properties["preserve"] as? [String: Any])
+            if kind == "edits" {
+                let item = try XCTUnwrap(edits["items"] as? [String: Any])
+                let target = try XCTUnwrap((item["properties"] as? [String: Any])?["target"] as? [String: Any])
+                XCTAssertEqual(target["enum"] as? [String], ["p1"], "Unmentioned labels and quoted values cannot be advertised as target mentions")
+            } else { XCTAssertEqual(edits["const"] as? [String], []) }
+            if kind != "constraint" { XCTAssertEqual(preserve["const"] as? [String], []) }
+        }
+        let missing = try variants("Change City to Paris.")
+        let kinds = missing.compactMap { (($0["properties"] as? [String: Any])?["kind"] as? [String: Any])?["const"] as? String }
+        XCTAssertFalse(kinds.contains("edits"), "A task without a field mention cannot invent one from an opaque ID")
+    }
+
     func testSourceFirstSchemaChangesDeclarationOrderWithoutChangingInstructionsOrConstraints() throws {
         let connection = try ComputerUseTextModelConnection(baseURL: URL(string: "http://127.0.0.1:49123")!,
             bearerToken: "fictional-test-token", modelAlias: "test-native")

@@ -1,0 +1,232 @@
+{
+  "cases": [
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 0,
+          "mode": "replaceAll",
+          "value": "San Francisco"
+        },
+        {
+          "field": 1,
+          "mode": "replaceAll",
+          "value": "San Francisco"
+        }
+      ],
+      "elapsedSeconds": 14.2877171250002,
+      "id": "N01",
+      "proposal": {
+        "content": "{\"requirements\": [{\"source\": \"Set both Origin and Destination to San Francisco.\", \"kind\": \"edits\", \"preserve\": [], \"edits\": [{\"fieldID\": \"f1\", \"target\": \"Origin\", \"mode\": \"replaceAll\", \"value\": \"San Francisco\"}, {\"fieldID\": \"f2\", \"target\": \"Destination\", \"mode\": \"replaceAll\", \"value\": \"San Francisco\"}]}]}",
+        "finishReason": "stop"
+      },
+      "verified": true
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 0,
+          "mode": "replaceAll",
+          "value": "Tokyo"
+        },
+        {
+          "field": 1,
+          "mode": "replaceAll",
+          "value": "Kyoto"
+        }
+      ],
+      "elapsedSeconds": 13.024457958323183,
+      "id": "N02",
+      "proposal": {
+        "content": "{\"requirements\":[{\"source\":\"Please replace the Origin with Tokyo\",\"kind\":\"edits\",\"preserve\":[],\"edits\":[{\"fieldID\":\"f1\",\"target\":\"Origin\",\"mode\":\"replaceAll\",\"value\":\"Tokyo\"}]},{\"source\":\"and the Destination with Kyoto.\",\"kind\":\"edits\",\"preserve\":[],\"edits\":[{\"fieldID\":\"f2\",\"target\":\"Destination\",\"mode\":\"replaceAll\",\"value\":\"Kyoto\"}]}]}",
+        "finishReason": "stop"
+      },
+      "verified": true
+    },
+    {
+      "elapsedSeconds": 15.271325083333068,
+      "error": "invalidResponse",
+      "id": "N03",
+      "proposal": {
+        "content": "{\"requirements\": [\n        {\n            \"source\": \"Append [exact quoted payload p1] to Origin\",\n            \"kind\": \"edits\",\n            \"preserve\": [],\n            \"edits\": [\n                {\n                    \"fieldID\": \"f1\",\n                    \"target\": \"Origin\",\n                    \"mode\": \"append\",\n                    \"value\": \"p1\"\n                }\n            ]\n        },\n        {\n            \"source\": \"Leave Destination alone\",\n            \"kind\": \"constraint\",\n            \"preserve\": [\n                {\n                    \"fieldID\": \"f2\",\n                    \"target\": \"Destination\"\n                }\n            ],\n            \"edits\": []\n        }\n    ]}",
+        "finishReason": "stop"
+      },
+      "verified": false
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 1,
+          "mode": "replaceAll",
+          "value": "  東京 é 😀\n  "
+        }
+      ],
+      "elapsedSeconds": 13.295022416685242,
+      "id": "N04",
+      "proposal": {
+        "content": "{\"requirements\":[{\"source\":\"Put [exact quoted payload p1] in Destination exactly as written.\",\"kind\":\"edits\",\"preserve\":[],\"edits\":[{\"fieldID\":\"f2\",\"target\":\"Destination\",\"mode\":\"replaceAll\",\"value\":\"p1\"}]}]}",
+        "finishReason": "stop"
+      },
+      "verified": true
+    },
+    {
+      "elapsedSeconds": 13.796061000000918,
+      "error": "invalidResponse",
+      "id": "N05",
+      "proposal": {
+        "content": "{\"requirements\": [{\"source\": \"Replace Origin with [exact quoted payload p1],\", \"kind\": \"edits\", \"preserve\": [], \"edits\": [{\"fieldID\": \"f1\", \"target\": \"Origin\", \"mode\": \"replaceAll\", \"value\": \"p1\"}]}, {\"source\": \"then append [exact quoted payload p2] to it.\", \"kind\": \"edits\", \"preserve\": [], \"edits\": [{\"fieldID\": \"f1\", \"target\": \"Origin\", \"mode\": \"append\", \"value\": \"p2\"}]}]}",
+        "finishReason": "stop"
+      },
+      "verified": false
+    },
+    {
+      "elapsedSeconds": 13.651149333338253,
+      "error": "invalidResponse",
+      "id": "N06",
+      "proposal": {
+        "content": "{\"requirements\": [{\"source\": \"Fill Origin with Boston\", \"kind\": \"edits\", \"preserve\": [], \"edits\": [{\"fieldID\": \"f1\", \"target\": \"Origin\", \"mode\": \"replaceAll\", \"value\": \"Boston\"}]}]}",
+        "finishReason": "stop"
+      },
+      "verified": false
+    },
+    {
+      "elapsedSeconds": 13.285037666675635,
+      "error": "invalidResponse",
+      "id": "N07",
+      "proposal": {
+        "content": "{\"requirements\":[{\"source\":\"Write a poem in Destination.\",\"kind\":\"other\",\"preserve\":[{\"fieldID\":\"f1\",\"target\":\"Origin\"},{\"fieldID\":\"f2\",\"target\":\"Destination\"}],\"edits\":[]}]}",
+        "finishReason": "stop"
+      },
+      "verified": false
+    },
+    {
+      "disposition": "clarification",
+      "edits": [],
+      "elapsedSeconds": 12.641293583350489,
+      "id": "N08",
+      "proposal": {
+        "content": "{\"requirements\":[{\"source\":\"Change City to Portland.\",\"kind\":\"clarification\",\"preserve\":[],\"edits\":[]}]}",
+        "finishReason": "stop"
+      },
+      "verified": true
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 0,
+          "mode": "replaceAll",
+          "value": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        }
+      ],
+      "elapsedSeconds": 17.619255333323963,
+      "id": "N13",
+      "proposal": {
+        "content": "{\n        \t\t\t\t\t\t\t\t\t\t\t\t\"requirements\": [\n        \t\t\t\t\t\t\t\t\t\t\t\t{\n        \t\t\t\t\t\t\t\t\t\t\t\t\"source\": \"Put the following exact quoted text in Origin: [exact quoted payload p1]\",\n        \t\t\t\t\t\t\t\t\t\t\"kind\": \"edits\",\n        \t\t\t\t\t\t\t\t\t\"preserve\": [],\n        \t\t\t\t\t\t\t\t\t\"edits\": [\n        \t\t\t\t\t\t\t\t\t\t\t\t{\n        \t\t\t\t\t\t\t\t\t\t\t\t\"fieldID\": \"f1\",\n        \t\t\t\t\t\t\t\t\t\t\t\"target\": \"Origin\",\n        \t\t\t\t\t\t\t\t\t\"mode\": \"replaceAll\",\n        \t\t\t\t\t\t\t\"value\": \"p1\"\n        \t\t\t\t\t\t\t\t\t\t}\n        \t\t\t\t\t\t\t\t\t\t]\n        \t\t\t\t\t\t\t\t\t}\n        \t\t\t\t\t\t\t\t\t]\n        \t\t\t\t\t\t\t}",
+        "finishReason": "stop"
+      },
+      "verified": true
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 1,
+          "mode": "replaceAll",
+          "value": "Austin"
+        }
+      ],
+      "elapsedSeconds": 14.171572791645303,
+      "id": "N14",
+      "proposal": {
+        "content": "{\n          \"requirements\": [\n            {\n              \"source\": \"Do not change Origin.\",\n              \"kind\": \"constraint\",\n              \"preserve\": [{\"fieldID\": \"f1\", \"target\": \"Origin\"}],\n              \"edits\": []\n            },\n            {\n              \"source\": \"Replace Destination with Austin.\",\n              \"kind\": \"edits\",\n              \"preserve\": [],\n              \"edits\": [\n                {\n                  \"fieldID\": \"f2\",\n                  \"target\": \"Destination\",\n                  \"mode\": \"replaceAll\",\n                  \"value\": \"Austin\"\n                }\n              ]\n            }\n          ]\n        }",
+        "finishReason": "stop"
+      },
+      "verified": true
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 0,
+          "mode": "replaceAll",
+          "value": "Oslo"
+        },
+        {
+          "field": 1,
+          "mode": "replaceAll",
+          "value": "Bergen"
+        }
+      ],
+      "elapsedSeconds": 12.953942541673314,
+      "id": "N12",
+      "proposal": {
+        "content": "{\"requirements\":[{\"source\":\"Set Origin to Oslo\",\"kind\":\"edits\",\"preserve\":[],\"edits\":[{\"fieldID\":\"f1\",\"target\":\"Origin\",\"mode\":\"replaceAll\",\"value\":\"Oslo\"}]},{\"source\":\"and Destination to Bergen.\",\"kind\":\"edits\",\"preserve\":[],\"edits\":[{\"fieldID\":\"f2\",\"target\":\"Destination\",\"mode\":\"replaceAll\",\"value\":\"Bergen\"}]}]}",
+        "finishReason": "stop"
+      },
+      "verified": true
+    },
+    {
+      "elapsedSeconds": 13.72865583334351,
+      "error": "invalidResponse",
+      "id": "R15",
+      "proposal": {
+        "content": "{\n  \"requirements\": [\n    {\n      \"source\": \"Set [exact quoted payload p1] to [exact quoted payload p2].\",\n      \"kind\": \"edits\",\n      \"preserve\": [],\n      \"edits\": [\n        {\n          \"fieldID\": \"f2\",\n          \"target\": \"Set [exact quoted payload p1]\",\n          \"mode\": \"replaceAll\",\n          \"value\": \"p2\"\n        }\n      ]\n    }\n  ]\n}",
+        "finishReason": "stop"
+      },
+      "verified": false
+    },
+    {
+      "elapsedSeconds": 15.824614374985686,
+      "error": "invalidResponse",
+      "id": "R16",
+      "proposal": {
+        "content": "{\n      \"requirements\": [\n        {\n          \"source\": \"Put [exact quoted payload p1] in Destination.\",\n          \"kind\": \"edits\",\n          \"preserve\": [],\n          \"edits\": [\n            {\n              \"fieldID\": \"f2\",\n              \"target\": \"Destination\",\n              \"mode\": \"replaceAll\",\n              \"value\": \"p1\"\n            }\n          ]\n        },\n        {\n          \"source\": \"Origin\",\n          \"kind\": \"constraint\",\n          \"preserve\": [\n            {\n              \"fieldID\": \"f1\",\n              \"target\": \"Origin\"\n            }\n          ],\n          \"edits\": []\n        }\n      ]\n    }",
+        "finishReason": "stop"
+      },
+      "verified": false
+    },
+    {
+      "elapsedSeconds": 20.002587041672086,
+      "error": "invalidResponse",
+      "id": "R17",
+      "proposal": {
+        "content": "{\"requirements\": [\n          {\n            \"source\": \"Set [exact quoted payload p1]\",\n            \"kind\": \"edits\",\n            \"preserve\": [],\n            \"edits\": [\n              {\n                \"fieldID\": \"f1\",\n                \"target\": \"Origin\",\n                \"mode\": \"replaceAll\",\n                \"value\": \"p1\"\n              }\n            ]\n          },\n          {\n            \"source\": \"to [exact quoted payload p2]\",\n            \"kind\": \"edits\",\n            \"preserve\": [],\n            \"edits\": [\n              {\n                \"fieldID\": \"f1\",\n                \"target\": \"Origin\",\n                \"mode\": \"replaceAll\",\n                \"value\": \"p2\"\n              }\n            ]\n          },\n          {\n            \"source\": \"and [exact quoted payload p3]\",\n            \"kind\": \"edits\",\n            \"preserve\": [],\n            \"edits\": [\n              {\n                \"fieldID\": \"f2\",\n                \"target\": \"Destination\",\n                \"mode\": \"replaceAll\",\n                \"value\": \"p3\"\n              }\n            ]\n          },\n          {\n            \"source\": \"to [exact quoted payload p4]\",\n            \"kind\": \"edits\",\n            \"preserve\": [],\n            \"edits\": [\n              {\n                \"fieldID\": \"f2\",\n                \"target\": \"Destination\",\n                \"mode\": \"replaceAll\",\n                \"value\": \"p4\"\n              }\n            ]\n          }\n        ]}",
+        "finishReason": "stop"
+      },
+      "verified": false
+    }
+  ],
+  "contract": "source-bound-v4",
+  "corpusSHA256": "5aa2c8ffda2a66cf2a188472c16aa4cac9c4d8ecc83e760787564a68942a2f0b",
+  "desktopEffects": false,
+  "expectedCaseIDs": [
+    "N01",
+    "N02",
+    "N03",
+    "N04",
+    "N05",
+    "N06",
+    "N07",
+    "N08",
+    "N13",
+    "N14",
+    "N12",
+    "R15",
+    "R16",
+    "R17"
+  ],
+  "modelSHA256FromVerifiedManifest": "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
+  "oracle": "exact-disposition-and-complete-allowed-edit-sequences-including-count-mode-target-payload-and-order",
+  "quotedCommandFastPath": false,
+  "runtimeBinarySHA256": "06b8f53d70435fc8ee00416e100560de7282317771f3da2739892bfbc1bd147b",
+  "schemaVersion": 1,
+  "scope": "known-regressions-with-complete-edit-sequence-oracle",
+  "sourceCommit": "07bcb1e",
+  "xcresult": "/tmp/remotedesktop-source-bound-model-v4-first.xcresult",
+  "notEnabledInProduction": true,
+  "rawReportSHA256": "3cba82878bb67f46b5eb72cca8dbbe31ac63285141de68fbfe713ed5597e91e5",
+  "classification": "7/14 complete-plan regressions passed. Seven proposals rejected: omitted punctuation/operation, invalid pronoun/quoted target or fabricated preserve/source. No desktop effects. Known regressions, not held out."
+}
