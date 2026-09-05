@@ -81,6 +81,11 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
             route = .native
         }
         if route == .native {
+            if let browserResult = try await tools.executeOwnedBrowserTaskIfSupported(
+                taskID: taskID, prompt: currentUserPrompt, progress: progress) {
+                try Task.checkCancellation()
+                return browserResult
+            }
             // This receives only the current user request. Conversation and
             // assistant prose cannot supply additional native edit authority.
             let nativeResult = try await nativeExecution(taskID, currentUserPrompt, progress)

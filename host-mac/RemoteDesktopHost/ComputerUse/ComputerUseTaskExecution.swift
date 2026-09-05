@@ -122,6 +122,7 @@ struct ComputerUseTaskContract: Sendable {
 enum ComputerUseTaskStepStatus: String, Codable, Sendable { case planned, attempted, verified, uncertain }
 
 struct ComputerUseTaskJournal: Codable, Equatable, Sendable {
+    typealias Status = ComputerUseTaskStepStatus
     let taskID: String
     let promptDigest: String
     let contractDigest: String

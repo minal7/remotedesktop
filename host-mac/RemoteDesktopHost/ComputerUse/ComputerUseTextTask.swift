@@ -116,14 +116,7 @@ enum ComputerUseTextTaskError: Error, Equatable {
     case invalidPlan, staleTarget, uncertainEffect, incompleteOutcome, journalMismatch
 }
 
-struct ComputerUseTextStepJournal: Codable, Equatable, Sendable {
-    typealias Status = ComputerUseTaskStepStatus
-    let taskID: String
-    let promptDigest: String
-    let contractDigest: String
-    let stepIDs: [String]
-    var statuses: [Status]
-}
+typealias ComputerUseTextStepJournal = ComputerUseTaskJournal
 
 /// Text capability compiler/adapter for the shared transaction engine. The
 /// existing private journal format remains compatible; its contract digest

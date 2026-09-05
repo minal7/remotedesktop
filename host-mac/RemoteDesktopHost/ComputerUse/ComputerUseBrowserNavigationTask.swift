@@ -1,0 +1,120 @@
+import Foundation
+
+/// A complete, bounded URL-navigation command. A mixed request must continue
+/// to whole-goal planning without opening an unrelated partial workflow.
+enum ComputerUseBrowserNavigationRequest {
+    static func urls(in prompt: String) -> [URL]? {
+        guard prompt.utf8.count <= 32 * 1_024 else { return nil }
+        var text = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        let prefixes = ["navigate to ", "go to ", "visit ", "open "]
+        if let prefix = prefixes.first(where: { text.lowercased().hasPrefix($0) }) {
+            text.removeFirst(prefix.count)
+        } else if !text.lowercased().hasPrefix("https://") && !text.lowercased().hasPrefix("http://") {
+            return nil
+        }
+        let pattern = #"\"(https?://[^\"\s]+)\"|(https?://[^\s,]+)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return nil }
+        let source = text as NSString
+        let matches = regex.matches(in: text, range: NSRange(location: 0, length: source.length))
+        guard (1...4).contains(matches.count) else { return nil }
+        var urls: [URL] = []
+        var offset = 0
+        for (index, match) in matches.enumerated() {
+            var separator = source.substring(with: NSRange(location: offset, length: match.range.location - offset))
+                .trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if index > 0, let verb = prefixes.map({ $0.trimmingCharacters(in: .whitespaces) })
+                .first(where: { separator.hasSuffix(" " + $0) }) {
+                separator.removeLast(verb.count)
+                separator = separator.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            guard index == 0 ? separator.isEmpty : [",", "then", ", then", "and", "and then"].contains(separator) else { return nil }
+            let range = match.range(at: match.range(at: 1).location == NSNotFound ? 2 : 1)
+            guard let url = URL(string: source.substring(with: range)),
+                  let validated = ComputerUseOwnedBrowser.validatedURL(url) else { return nil }
+            urls.append(validated)
+            offset = NSMaxRange(match.range)
+        }
+        guard source.substring(from: offset).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        return urls
+    }
+}
+
+@MainActor
+final class ComputerUseBrowserNavigationTask {
+    private let browser: ComputerUseOwnedBrowser
+    private let journalDirectory: URL
+    private var execution: ComputerUseTaskExecution?
+    private var retainedURLs: [URL] = []
+
+    init(browser: ComputerUseOwnedBrowser, journalDirectory: URL) {
+        self.browser = browser
+        self.journalDirectory = journalDirectory
+    }
+
+    func execute(taskID: String, prompt: String, progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult? {
+        guard let urls = ComputerUseBrowserNavigationRequest.urls(in: prompt) else { return nil }
+        let promptDigest = ComputerUseTextTaskContract.digest(prompt)
+        if let execution, execution.contract.taskID == taskID {
+            guard execution.contract.promptDigest == promptDigest else { throw ComputerUseTaskExecutionError.journalMismatch }
+        } else {
+            try browser.claim(taskID: taskID)
+            let authority = ComputerUseTaskContract.digest([browser.contextID, taskID])
+            var predicates = [ComputerUseTaskContract.Predicate(id: "owned-context", entityID: "browser",
+                kind: "task-ownership", expectedDigest: authority)]
+            var steps: [ComputerUseTaskContract.Step] = []
+            for (index, url) in urls.enumerated() {
+                let id = ComputerUseTaskContract.digest([taskID, String(index), url.absoluteString])
+                predicates.append(.init(id: "navigation-\(index)", entityID: "browser", kind: "navigation-receipt",
+                    expectedDigest: ComputerUseTaskContract.digest([url.absoluteString])))
+                predicates.append(.init(id: "current-\(index)", entityID: "browser", kind: "current-document",
+                    expectedDigest: ComputerUseTaskContract.digest([url.absoluteString])))
+                steps.append(.init(id: id, dependencies: steps.last.map { [$0.id] } ?? [],
+                    operation: .init(capabilityID: "browser.navigate", entityID: "browser",
+                        payloadDigest: ComputerUseTaskContract.digest([url.absoluteString]), payloadVersion: 1),
+                    preconditions: index == 0 ? ["owned-context"] : ["owned-context", "current-\(index - 1)"],
+                    postconditions: ["navigation-\(index)", "current-\(index)"]))
+            }
+            let contract = try ComputerUseTaskContract(taskID: taskID, promptDigest: promptDigest,
+                entities: [.init(id: "browser", authorityDigest: authority)], predicates: predicates, steps: steps,
+                invariants: ["owned-context"],
+                outcomes: urls.indices.map { "navigation-\($0)" } + ["current-\(urls.count - 1)"])
+            let store = try ComputerUseTaskJournalStore(directory: journalDirectory)
+            let indices = Dictionary(uniqueKeysWithValues: steps.enumerated().map { ($0.element.id, $0.offset) })
+            execution = try ComputerUseTaskExecution(contract: contract, recovered: store.load(taskID: taskID),
+                observe: { [browser] predicate in
+                    if predicate.id == "owned-context" { return browser.hasOwnership(taskID: taskID) }
+                    guard let suffix = predicate.id.split(separator: "-").last, let index = Int(suffix),
+                          urls.indices.contains(index) else { return false }
+                    let operationID = contract.effectIdentity(for: contract.steps[index])
+                    guard let receipt = browser.receipt(taskID: taskID, operationID: operationID),
+                          receipt.requestedURL == urls[index] else { return false }
+                    return predicate.kind == "navigation-receipt" || browser.validate(receipt)
+                }, perform: { [browser] step, operationID in
+                    guard let index = indices[step.id] else { throw ComputerUseTaskExecutionError.invalidContract }
+                    _ = try await browser.navigate(taskID: taskID, operationID: operationID, to: urls[index])
+                }, persist: { try store.save($0) }, assertOwnership: { [browser] in
+                    guard browser.hasOwnership(taskID: taskID) else { throw ComputerUseBrowserError.ownershipLost }
+                })
+            retainedURLs = urls
+        }
+        guard let execution else { throw ComputerUseTaskExecutionError.invalidContract }
+        do {
+            try await execution.run { completed, total in progress("Opened page \(completed) of \(total)…") }
+            guard let document = browser.currentDocument(taskID: taskID) else { throw ComputerUseBrowserError.pageChanged }
+            return .completed("Opened \(retainedURLs.count == 1 ? "the page" : "all \(retainedURLs.count) pages") in the AI browser. Current page: \(document.committedURL.absoluteString)")
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch ComputerUseTaskExecutionError.uncertainEffect {
+            return .userInterventionRequired("The browser navigation was interrupted and cannot be verified. Check the AI browser before starting a new request.")
+        } catch ComputerUseTaskExecutionError.preconditionFailed {
+            return .userInterventionRequired("The AI browser page changed before the next navigation. Check it before starting a new request.")
+        }
+    }
+
+    func close() { browser.close() }
+
+    static var journalDirectory: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Remote Desktop Host/Computer Use Tasks/Browser Steps", isDirectory: true)
+    }
+}

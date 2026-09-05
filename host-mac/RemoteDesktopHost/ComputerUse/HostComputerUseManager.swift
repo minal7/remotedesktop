@@ -902,6 +902,7 @@ final class ComputerUseHostTools {
     private let actionPerformer: ((ComputerUsePredictedAction) throws -> Void)?
     private let textTarget = ComputerUseAccessibilityTextTarget()
     private let textEditorOverride: ComputerUseTextEditor?
+    private var browserNavigationTask: ComputerUseBrowserNavigationTask?
     /// Deterministic seam used to exercise a gate close after one low-level
     /// event has posted but before the rest of an approved action is emitted.
     /// Production leaves this nil.
@@ -937,6 +938,7 @@ final class ComputerUseHostTools {
             ((ComputerUsePredictedAction) throws -> ComputerUseApprovalTargetSnapshot)? = nil,
         actionPerformer: ((ComputerUsePredictedAction) throws -> Void)? = nil,
         textEditor: ComputerUseTextEditor? = nil,
+        browserNavigationTask: ComputerUseBrowserNavigationTask? = nil,
         approvedActionStepDidPost: (@MainActor () -> Void)? = nil,
         screenProvider: (() throws -> ComputerUseScreenObservation)? = nil,
         conservativeActionAdjustmentProvider:
@@ -978,6 +980,7 @@ final class ComputerUseHostTools {
         self.approvalTargetProvider = approvalTargetProvider
         self.actionPerformer = actionPerformer
         self.textEditorOverride = textEditor
+        self.browserNavigationTask = browserNavigationTask
         self.approvedActionStepDidPost = approvedActionStepDidPost
         self.screenProvider = screenProvider
         if let conservativeActionAdjustmentProvider {
@@ -1068,6 +1071,27 @@ final class ComputerUseHostTools {
         journalDirectory: URL = ComputerUseTextStepStore.defaultDirectory) -> ComputerUseNativeTextExecutor {
         ComputerUseNativeTextExecutor(injector: injector, mayAct: mayAct,
             journalDirectory: journalDirectory, planner: planner)
+    }
+
+    func executeOwnedBrowserTaskIfSupported(taskID: String, prompt: String,
+        progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult? {
+        guard ComputerUseBrowserNavigationRequest.urls(in: prompt) != nil else { return nil }
+        if browserNavigationTask == nil {
+            // App-hosted tests opt into an isolated loopback fixture explicitly;
+            // unrelated routing tests must not open websites on the user's Mac.
+            guard !HostRuntimeContext.isRunningUnitTests else { return nil }
+            browserNavigationTask = ComputerUseBrowserNavigationTask(
+                browser: ComputerUseOwnedBrowser(mayAct: mayAct),
+                journalDirectory: ComputerUseBrowserNavigationTask.journalDirectory)
+        }
+        try Task.checkCancellation()
+        guard mayAct() else { throw ToolError.paused }
+        return try await browserNavigationTask?.execute(taskID: taskID, prompt: prompt, progress: progress)
+    }
+
+    func closeOwnedBrowser() {
+        browserNavigationTask?.close()
+        browserNavigationTask = nil
     }
 
     /// Checks whether a transient macOS notification owns the exact pointer
@@ -4022,6 +4046,7 @@ final class HostComputerUseManager: ObservableObject {
         // trailing ready status, or channel poll shutdown is still pending.
         await pendingTransportTeardown.value
 
+        tools.closeOwnedBrowser()
         await visualExecutorLoader.deactivate()
         executor = nil
     }

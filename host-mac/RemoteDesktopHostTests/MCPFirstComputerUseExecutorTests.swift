@@ -3,6 +3,34 @@ import XCTest
 
 @MainActor
 final class MCPFirstComputerUseExecutorTests: XCTestCase {
+    func testExplicitBrowserNavigationUsesOwnedContextWithAppleAndVisualUnavailable() async throws {
+        let server = try OwnedBrowserHTTPFixture()
+        let base = try await server.start()
+        defer { server.stop() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let browserTask = ComputerUseBrowserNavigationTask(
+            browser: ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true }), journalDirectory: directory)
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true }, browserNavigationTask: browserTask)
+        defer { tools.closeOwnedBrowser() }
+        let planner = StubMCPPlanner(mode: .unavailable)
+        let pool = StubMCPClientPool(tools: [try makeMailTool()])
+        let executor = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/test/helper"),
+            visualFallback: ComputerUseDeferredVisualExecutor(), planner: planner, clientPool: pool)
+        defer { executor.cancelMCPWork() }
+        let current = "Open \(base.appendingPathComponent("current")) then \(base.appendingPathComponent("current"))"
+        for _ in 0..<2 {
+            let result = try await executor.execute(taskID: "browser", modelPrompt: "Open \(base.appendingPathComponent("history"))",
+                currentUserPrompt: current, conversation: [], tools: tools, progress: { _ in })
+            guard case .completed = result else { return XCTFail("The explicit browser goal must not require either local model") }
+        }
+        XCTAssertEqual(server.count("/current"), 2)
+        XCTAssertEqual(server.count("/history"), 0)
+        XCTAssertTrue(planner.proposedToolNames.isEmpty)
+        let calls = await pool.directExecuteCount()
+        XCTAssertEqual(calls, 0, "Ambient browser MCP tools remain outside this navigation path")
+    }
+
     func testCancelledHelperActivationReleasesReturnedGenerationWithoutDiscoveringTools() async throws {
         let pool = StubMCPClientPool(tools: [try makeMailTool()], loadFault: .suspendedStart)
         let task = Task {

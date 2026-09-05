@@ -394,6 +394,12 @@ final class MCPFirstComputerUseExecutor:
         pendingApprovalState = nil
         pendingApprovalDigest = nil
 
+        if let browserResult = try await tools.executeOwnedBrowserTaskIfSupported(
+            taskID: taskID, prompt: trustedUserPrompt, progress: progress) {
+            try Task.checkCancellation()
+            return browserResult
+        }
+
         // A fully specified Mail mutation already has an exact, bounded local
         // representation. Prepare its fingerprinted approval immediately so
         // the user never waits for either local model to rediscover values the

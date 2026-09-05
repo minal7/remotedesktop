@@ -1,0 +1,91 @@
+{
+  "schemaVersion": 1,
+  "scope": "owned-browser-navigation-and-document-context",
+  "sourceBaseCommit": "2f308d3",
+  "uncommittedImplementationAtRun": true,
+  "signed": {
+    "xcresult": "/tmp/remotedesktop-owned-browser-v4.xcresult",
+    "exactMethods": 132,
+    "testSeconds": 9.909,
+    "summary": {
+      "result": "Passed",
+      "totalTestCount": 132,
+      "passedTests": 132,
+      "failedTests": 0,
+      "skippedTests": 0,
+      "expectedFailures": 0,
+      "startTime": 1788600430.609,
+      "finishTime": 1788600442.192
+    }
+  },
+  "swiftPM": {
+    "xunit": "/tmp/remotedesktop-owned-browser-core-v3.xunit.xml",
+    "exactMethods": 64,
+    "workerResultSeconds": 9.119574376,
+    "initialFailure": {
+      "xunit": "/tmp/remotedesktop-owned-browser-core-v1.xunit.xml",
+      "tests": 64,
+      "failures": 7,
+      "reason": "WebKit policy callbacks lacked the @MainActor @Sendable handler annotations required by the strict-concurrency build; the optional methods were not registered. Corrected signatures passed the same selected methods."
+    }
+  },
+  "visibleInspection": {
+    "xcresult": "/tmp/remotedesktop-owned-browser-visible-v3.xcresult",
+    "exactMethods": 1,
+    "testSeconds": 79.043,
+    "observation": "CUA inspected the full-size and 480-point compact window, including page content, URL/status and reachable Stop button. Clicking Stop released task ownership; the opt-in signed test verified invalidation and closed the window.",
+    "qualificationNote": "Manual inspection preceded the callback signature and closed-window teardown fixes. The final 132-method signed run includes the revised visible lifecycle test and independently checks a fresh session after close/reopen."
+  },
+  "python": {
+    "passed": 116,
+    "seconds": 1.488
+  },
+  "reviewedHostSourceMethods": 282,
+  "inventory": "docs/audits/2026-09-04-mac-computer-use/owned-browser-inventory.json",
+  "executionDependencies": "Actual WKWebView and an isolated HTTP server bound to IPv4 loopback, independent GET counts and controlled responses. No external browser profiles, public websites, model inference, AX input or mobile transport. Production MCP routing tests inject helper/planner dependencies.",
+  "productionWiring": "Both native-capability and helper-first coordinators route complete current-user explicit URL navigation through the host-owned browser and shared transaction engine before model work. Navigation errors cannot fall through to another effect adapter. Shutdown joins execution before closing the browser.",
+  "implemented": [
+    "One visible, private, nonpersistent WebKit context with explicit task ownership",
+    "One to four complete HTTP(S) URL-navigation steps, including repeated URLs and repeated open/visit/go-to/navigate-to verbs",
+    "Exact WKNavigation receipts with context/task/generation/operation/requested/committed URL identity",
+    "Durable attempted/verified/uncertain navigation steps and no replay on resume",
+    "Invalidation after same-URL reload, cancellation, timeout, ownership change or window close",
+    "Actual HTTP status validation and redirect destination receipt; subframes and popups cannot complete or fail an unrelated main navigation",
+    "Closing a window releases the WebKit view and its private session"
+  ],
+  "remaining": [
+    "DOM query/edit/submit operations and element generations",
+    "Actual search-result/submission postconditions, including two natural-language searches",
+    "Existing Safari/Chrome tab and signed-in account continuity",
+    "Full visual/structured whole-goal compilation and cross-adapter evidence",
+    "Signed managed-model form effects pending Accessibility approval",
+    "Pending simulator execution and phone-to-Mac qualification",
+    "Full OCR-dependent gate and physical low-memory qualification"
+  ],
+  "fullProductQualified": false,
+  "installedAppsReplaced": false,
+  "sha256": {
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseOwnedBrowser.swift": "ec39b13fc9bf240407c4b9a4eba8fda10830129bb1b0112e13deb9452f2a0cbf",
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseBrowserNavigationTask.swift": "3c1a2a3b5692b5d3313e45ca3a1999f35e92a2a2edcde0a2159494c8c7d99506",
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseCapabilityExecutor.swift": "8815990f8d5331fcb1af978667a5563f68d457d79156347b02c579575f1b167d",
+    "host-mac/RemoteDesktopHost/ComputerUse/MCPFirstComputerUseExecutor.swift": "77e68b5ab8746f55cb940835d052b06ce45e2c76f4f6fcd84bf161d06ed86c84",
+    "host-mac/RemoteDesktopHost/ComputerUse/HostComputerUseManager.swift": "ef3dbad9376b37ef930276823d309704b15b0df5969027224a7f23f429d978e7",
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseTaskExecution.swift": "2e8770f9fc028a5e454cadb76bcadb079eaf29b35386da7dfc0c902e932ce1e5",
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseTextStepStore.swift": "5186456527d0036f2335b83bde587898397b3463f085b7235f2983dd8556d520",
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseTextTask.swift": "36bd957cfe474822ff06de6131a64e758eb59b1230bf4c5fd5b83605ffaef4b7",
+    "host-mac/RemoteDesktopHostTests/ComputerUseOwnedBrowserTests.swift": "a88a7e920c7c9d76fd456753c62e6e9618a9b962e802df1d6320cd3ce0dac3ae",
+    "host-mac/RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests.swift": "184fc8ccea498a93237b0f93e075d9df1febafde8fc5824582cb2fa401f53d39",
+    "host-mac/RemoteDesktopHost.xcodeproj/project.pbxproj": "5578f1aeacb9f1f793c547a88d39ea5f749cfbf8415abcdb0bf074519e3ddc80",
+    "host-mac/AcceptanceFixtures/osatlas-deterministic-tests.json": "03986b6464a13c46b17e1042d68e83eeb50fd462f5f5a97cf2a37eb32f5b91d1",
+    "docs/audits/2026-09-04-mac-computer-use/owned-browser-inventory.json": "f08a4d2af511fb7f4895fed602a7ab73f874b63d5f9249fb71ac429477f6cd3c",
+    "/tmp/remotedesktop-owned-browser-v4.log": "b05fb7f311b38b048b1370514b46b16c5438c5436655d9adb6cd1592ebd6671f",
+    "/tmp/remotedesktop-owned-browser-v4-summary.json": "c46c628466f0c650b1d4f95c228814c4f42fe7e3fe49db050785ff47f0a4b9d7",
+    "/tmp/remotedesktop-owned-browser-core-v1.log": "de0c660bbe071c53eba01aafa0db9cf428d55c84831eea454aa2a04d13310dc4",
+    "/tmp/remotedesktop-owned-browser-core-v1.xunit.xml": "f9d7b2ec8e75595ca9ab804ad62da581743b36ea041f19e981228c8e31f2f039",
+    "/tmp/remotedesktop-owned-browser-core-v3.log": "fb6f00c3bc122e17e7ae87986df41bae9e8e9e4d559bda2426d8f5ceeb27602a",
+    "/tmp/remotedesktop-owned-browser-core-v3.xunit.xml": "2bb51fdadbf7ffb0b67ecb023a4deb8a9622d2ed5cf1d6e8e1782fce9c8c7cd6",
+    "/tmp/remotedesktop-owned-browser-visible-v3.log": "ac2f201bf4faba03d1f67a8f8bca4fce67559d7d7212dba933dd8541453f9d07",
+    "/tmp/remotedesktop-owned-browser-python-v1.log": "a4ec4275e7afb3ae02f996529d7cfcaa657436c315fd281f3bd10065ddb0022f",
+    "/tmp/remotedesktop-owned-browser-build-v6.log": "ff7f362257c377ae76f974b49e010ff612d37bfa5e282bc05312ee6fa9a38f97"
+  }
+}

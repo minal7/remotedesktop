@@ -1,9 +1,9 @@
 import Darwin
 import Foundation
 
-/// Owner-only, atomic, fsync-backed journal writes before text effects. Values,
-/// payloads and field labels are deliberately absent from this format.
-final class ComputerUseTextStepStore {
+/// Owner-only, atomic, fsync-backed journal writes before task effects. Values,
+/// payloads, URLs and field labels are deliberately absent from this format.
+final class ComputerUseTaskJournalStore {
     private let descriptor: Int32
     enum StoreError: Error { case unavailable, invalidFile }
 
@@ -22,7 +22,7 @@ final class ComputerUseTextStepStore {
 
     deinit { close(descriptor) }
 
-    func load(taskID: String) throws -> ComputerUseTextStepJournal? {
+    func load(taskID: String) throws -> ComputerUseTaskJournal? {
         let name = ComputerUseTextTaskContract.digest(taskID) + ".json"
         let fd = openat(descriptor, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
         if fd < 0 {
@@ -36,12 +36,12 @@ final class ComputerUseTextStepStore {
               (1...65_536).contains(info.st_size) else { throw StoreError.invalidFile }
         let data = try handle.readToEnd() ?? Data()
         guard data.count <= 65_536 else { throw StoreError.invalidFile }
-        let journal = try JSONDecoder().decode(ComputerUseTextStepJournal.self, from: data)
+        let journal = try JSONDecoder().decode(ComputerUseTaskJournal.self, from: data)
         guard journal.taskID == taskID else { throw StoreError.invalidFile }
         return journal
     }
 
-    func save(_ journal: ComputerUseTextStepJournal) throws {
+    func save(_ journal: ComputerUseTaskJournal) throws {
         let data = try JSONEncoder().encode(journal)
         guard data.count <= 65_536 else { throw StoreError.invalidFile }
         let temporary = ".pending-" + UUID().uuidString
@@ -60,3 +60,5 @@ final class ComputerUseTextStepStore {
             .appendingPathComponent("Remote Desktop Host/Computer Use Tasks/Text Steps", isDirectory: true)
     }
 }
+
+typealias ComputerUseTextStepStore = ComputerUseTaskJournalStore
