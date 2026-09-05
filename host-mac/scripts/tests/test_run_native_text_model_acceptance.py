@@ -42,6 +42,11 @@ class NativeModelAcceptanceTests(unittest.TestCase):
                     report.write_text('<testsuites><testsuite>' + body + '</testsuite></testsuites>')
                     with self.assertRaises(ValueError):
                         runner.verify_test_report(report)
+            proposal_name = 'testOptInLocalTextProposalCorpus'
+            report.write_text(f'<testsuites><testsuite><testcase name="{proposal_name}" /></testsuite></testsuites>')
+            self.assertEqual(runner.verify_test_report(report, proposal_only=True), [proposal_name])
+            with self.assertRaises(ValueError):
+                runner.verify_test_report(report)
 
     def test_aborted_scope_terminates_its_actual_child(self):
         child = None

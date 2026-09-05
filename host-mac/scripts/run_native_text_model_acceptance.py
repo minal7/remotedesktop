@@ -101,12 +101,13 @@ def ready(process, base_url, alias, key):
     raise TimeoutError("Local model did not become ready within 90 seconds")
 
 
-def verify_test_report(path):
-    expected = {"testRealNativeNaturalLanguageGoalsAndResume", "testRealBrowserNaturalLanguageGoalsAndResume"}
+def verify_test_report(path, proposal_only=False):
+    expected = ({"testOptInLocalTextProposalCorpus"} if proposal_only else
+                {"testRealNativeNaturalLanguageGoalsAndResume", "testRealBrowserNaturalLanguageGoalsAndResume"})
     cases = ET.parse(path).getroot().findall(".//testcase")
     names = [case.attrib.get("name") for case in cases]
     if len(names) != len(expected) or set(names) != expected:
-        raise ValueError("Native model acceptance did not execute the exact two reviewed fixtures")
+        raise ValueError("Native model acceptance did not execute the exact reviewed fixtures")
     if any(case.find(tag) is not None for case in cases for tag in ("failure", "error", "skipped")):
         raise ValueError("Native model acceptance contains a failed or skipped fixture")
     return sorted(names)
@@ -118,8 +119,20 @@ def main():
     parser.add_argument("--server-binary", type=Path, required=True)
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--faults-only", action="store_true", help="Diagnose the six fault/resume scenarios per fixture; does not qualify the ten regression goals")
+    parser.add_argument("--contract", choices=["frozen-v1", "candidate-v2"], default="frozen-v1")
+    parser.add_argument("--proposal-corpus", type=Path, help="Run this corpus through the Swift planner without any desktop effects")
     args = parser.parse_args()
+    if args.proposal_corpus is not None and args.faults_only:
+        parser.error("--proposal-corpus and --faults-only are separate qualification scopes")
     os.umask(0o077)
+    corpus_path = args.proposal_corpus.resolve(strict=True) if args.proposal_corpus is not None else None
+    expected_proposal_ids = None
+    if corpus_path is not None:
+        if corpus_path.stat().st_size > 1024 * 1024:
+            raise ValueError("Proposal corpus exceeds its size limit")
+        expected_proposal_ids = [case["id"] for case in json.loads(corpus_path.read_text())["cases"] if not case.get("fault")]
+        if not 1 <= len(expected_proposal_ids) <= 64 or len(set(expected_proposal_ids)) != len(expected_proposal_ids):
+            raise ValueError("Proposal corpus has invalid or duplicate case identifiers")
     manifest = json.loads(MANIFEST.read_text())
     model = verified_path(args.model_path, manifest["modelSHA256"], manifest["modelBytes"])
     binary = verified_path(args.server_binary, manifest["runtimeSHA256"])
@@ -128,14 +141,19 @@ def main():
     report.parent.mkdir(parents=True, exist_ok=True)
     log_path = report.with_suffix(".server.log")
     xunit_path = report.with_suffix(".xunit.xml")
-    if xunit_path.exists():
+    proposal_path = report.with_suffix(".proposals.json")
+    if xunit_path.exists() or proposal_path.exists():
         raise FileExistsError("Refusing to replace existing test evidence")
     # Refuse to overwrite evidence from a previous run.
     private_file(log_path, "")
     private_file(report, json.dumps({"status": "running"}) + "\n")
     summary = {"status": "failed", "modelSHA256": manifest["modelSHA256"],
-               "runtimeSHA256": manifest["runtimeSHA256"], "configuration": manifest["configuration"],
-               "scope": "faults-only" if args.faults_only else "regression-and-faults"}
+               "runtimeSHA256": manifest["runtimeSHA256"],
+               "configuration": dict(manifest["configuration"], contract=args.contract),
+               "plannerSourceSHA256": hashlib.sha256((ROOT / "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseLocalTextGoalPlanner.swift").read_bytes()).hexdigest(),
+               "scope": "proposals-only" if corpus_path is not None else ("faults-only" if args.faults_only else "regression-and-faults")}
+    if corpus_path is not None:
+        summary["corpusSHA256"] = hashlib.sha256(corpus_path.read_bytes()).hexdigest()
     server = tests = None
     started = time.monotonic()
     try:
@@ -164,18 +182,31 @@ def main():
                 ready(server, base_url, alias, key)
                 summary["startupSeconds"] = time.monotonic() - started
                 connection_file = directory / "connection.json"
-                private_file(connection_file, json.dumps({"baseURL": base_url, "bearerToken": key, "modelAlias": alias}))
+                private_file(connection_file, json.dumps({"baseURL": base_url, "bearerToken": key, "modelAlias": alias,
+                                                          "contract": args.contract}))
                 environment["RUN_NATIVE_TEXT_GOALS_LOCAL_ACCEPTANCE"] = "1"
                 environment["COMPUTER_USE_TEXT_GOALS_FAULTS_ONLY"] = "1" if args.faults_only else "0"
                 environment["COMPUTER_USE_TEXT_MODEL_CONNECTION_FILE"] = str(connection_file)
                 environment["COMPUTER_USE_TEST_XUNIT_REPORT"] = str(xunit_path)
-                print("Frozen local planner ready; running real native and browser goal fixtures.", flush=True)
+                if corpus_path is not None:
+                    environment["COMPUTER_USE_TEXT_PROPOSAL_CORPUS"] = str(corpus_path)
+                    environment["COMPUTER_USE_TEXT_PROPOSAL_REPORT"] = str(proposal_path)
+                print(f"Local planner {args.contract} ready; running {summary['scope']}.", flush=True)
                 tests = subprocess.Popen(["/bin/bash", str(ROOT / "host-mac/scripts/run_text_edit_acceptance.sh"),
-                                          "--local-goals-only"], env=environment, cwd=ROOT, start_new_session=True)
+                                          "--local-proposals-only" if corpus_path is not None else "--local-goals-only"],
+                                         env=environment, cwd=ROOT, start_new_session=True)
                 children.append(tests)
                 summary["testExitCode"] = tests.wait(timeout=600)
+                if corpus_path is not None:
+                    proposals = json.loads(proposal_path.read_text())
+                    if [row["id"] for row in proposals] != expected_proposal_ids:
+                        raise ValueError("Proposal results do not match every corpus case in order")
+                    summary["proposalPassed"] = sum(row["passed"] is True for row in proposals)
+                    summary["proposalTotal"] = len(proposals)
+                    if summary["testExitCode"] == 0 and summary["proposalPassed"] != summary["proposalTotal"]:
+                        raise ValueError("Passing test process did not prove every expected proposal outcome")
                 if summary["testExitCode"] == 0:
-                    summary["verifiedTestMethods"] = verify_test_report(xunit_path)
+                    summary["verifiedTestMethods"] = verify_test_report(xunit_path, proposal_only=corpus_path is not None)
                 summary["status"] = "passed" if summary["testExitCode"] == 0 else "failed"
                 return summary["testExitCode"]
     except BaseException as error:

@@ -7,8 +7,10 @@ if [[ "${1:-}" == "--browser-only" ]]; then
     test_filter='ComputerUseNativeTextIntegrationTests/testRealBrowserFieldsReceiveExactVerifiedEdits'
 elif [[ "${1:-}" == "--local-goals-only" ]]; then
     test_filter='ComputerUseNativeTextIntegrationTests/testReal(Native|Browser)NaturalLanguageGoalsAndResume'
+elif [[ "${1:-}" == "--local-proposals-only" ]]; then
+    test_filter='ComputerUseLocalTextProposalAcceptanceTests/testOptInLocalTextProposalCorpus'
 elif [[ $# -gt 0 ]]; then
-    echo "Usage: $0 [--browser-only|--local-goals-only]" >&2
+    echo "Usage: $0 [--browser-only|--local-goals-only|--local-proposals-only]" >&2
     exit 2
 fi
 fixture_dir="$(mktemp -d /tmp/remotedesktop-text-fixture.XXXXXX)"

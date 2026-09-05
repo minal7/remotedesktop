@@ -1,0 +1,49 @@
+{
+  "status": "passed",
+  "modelSHA256": "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
+  "runtimeSHA256": "dc8acab3939ab889fb944951bada4dc67e7a4eab5576f01469d67e4f3279b552",
+  "configuration": {
+    "backend": "llama",
+    "contract": "candidate-v2",
+    "reasoning": "on",
+    "reasoningBudget": 512,
+    "maximumOutputTokens": 1024,
+    "contextTokens": 4096,
+    "temperature": 0,
+    "topP": 1,
+    "topK": 0,
+    "parallelSlots": 1,
+    "cacheRAMMiB": 0,
+    "CPUThreads": 4,
+    "GPURequestedLayers": 99
+  },
+  "plannerSourceSHA256": "997b5fe3d19e196db131a36a2313bc3c3dbb532687d8f21d720afee1ce811d99",
+  "scope": "faults-only",
+  "startupSeconds": 0.8742340829921886,
+  "testExitCode": 0,
+  "verifiedTestMethods": [
+    "testRealBrowserNaturalLanguageGoalsAndResume",
+    "testRealNativeNaturalLanguageGoalsAndResume"
+  ],
+  "elapsedSeconds": 149.5960731249943,
+  "fixtureTests": [
+    {
+      "classname": "ComputerUseCoreTests.ComputerUseNativeTextIntegrationTests",
+      "name": "testRealBrowserNaturalLanguageGoalsAndResume",
+      "time": "50.999038791"
+    },
+    {
+      "classname": "ComputerUseCoreTests.ComputerUseNativeTextIntegrationTests",
+      "name": "testRealNativeNaturalLanguageGoalsAndResume",
+      "time": "50.650801041"
+    }
+  ],
+  "scenariosPerFixture": [
+    "append-pause-resume",
+    "changed-final-value-prevents-completion",
+    "cancel-during-inference",
+    "cancel-during-Unicode-no-replay",
+    "partial-delivery-no-replay",
+    "replaced-target-after-inference"
+  ]
+}

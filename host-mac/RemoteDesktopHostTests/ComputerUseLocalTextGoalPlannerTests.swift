@@ -57,6 +57,35 @@ final class ComputerUseLocalTextGoalPlannerTests: XCTestCase {
         XCTAssertEqual(calls, 1)
     }
 
+    func testQuotedFieldNamesRemainResolvableWithoutExposingOtherLiteralContents() throws {
+        let catalog = try ComputerUseTextPayloadCatalog("Set \"Destination\" to \"private exact payload\".")
+        let context = try ComputerUseLocalTextGoalPlanner.context(catalog: catalog, fields: fields(), includeQuotedFieldMatches: true)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(context.utf8)) as? [String: Any])
+        let matches = try XCTUnwrap(object["literalFieldMatches"] as? [[String: Any]])
+        XCTAssertEqual(matches.count, 1)
+        XCTAssertEqual(matches[0]["literalID"] as? String, "p1")
+        XCTAssertEqual(matches[0]["fieldIDs"] as? [String], ["f2"])
+        XCTAssertFalse(context.contains("private exact payload"))
+        XCTAssertFalse(context.contains("private existing value"))
+        let ambiguous = try ComputerUseLocalTextGoalPlanner.context(catalog: catalog,
+            fields: fields(labels: ["Destination", "destination"]), includeQuotedFieldMatches: true)
+        let ambiguousObject = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(ambiguous.utf8)) as? [String: Any])
+        let ambiguousMatches = try XCTUnwrap(ambiguousObject["literalFieldMatches"] as? [[String: Any]])
+        XCTAssertEqual(ambiguousMatches[0]["fieldIDs"] as? [String], ["f1", "f2"])
+    }
+
+    func testQuotedFieldMatchDoesNotTurnAValueIntoAnExistingValueRead() async throws {
+        let response = try envelope(#"{"disposition":"supported","edits":[{"fieldID":"f2","mode":"replaceAll","value":"p1"}]}"#)
+        let connection = try ComputerUseTextModelConnection(baseURL: URL(string: "http://127.0.0.1:49123")!,
+            bearerToken: "fictional-test-token", modelAlias: "test-native")
+        let planner = ComputerUseLocalTextGoalPlanner(connection: connection,
+            transport: FixedTextTransport(response: response), contract: .candidateV2)
+        let proposal = try await planner.propose(prompt: "Set Destination to \"Origin\".", fields: fields())
+        XCTAssertEqual(proposal, .edits([
+            ComputerUseTextPlanEdit(targetID: "private-ax-1", mode: .replaceAll, text: "Origin"),
+        ], unchangedTargetIDs: ["private-ax-0"]))
+    }
+
     func testMalformedPartialOrInventedPlansCannotBecomeEdits() throws {
         let catalog = try ComputerUseTextPayloadCatalog("Set Origin to Paris.")
         let invalid = [

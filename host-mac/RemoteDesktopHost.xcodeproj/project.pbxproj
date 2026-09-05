@@ -34,6 +34,7 @@
 		31A0659A7A8B7A8D2EAFAE1F /* ComputerUseOCRQualificationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 547D9391C75FFF219AD9FE5C /* ComputerUseOCRQualificationTests.swift */; };
 		329C35890F366BD995FDF8A7 /* PermissionsProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5AEEF525524B99DFE1BEBFDC /* PermissionsProvider.swift */; };
 		335F3049413654BA69CF7721 /* LiveKitWebRTC in Frameworks */ = {isa = PBXBuildFile; productRef = B32C5B551A8501593D407B76 /* LiveKitWebRTC */; };
+		33D89A9B195107B3E8C3D4F1 /* ComputerUseLocalTextProposalAcceptanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 85ED4FE7F360FA592A140E97 /* ComputerUseLocalTextProposalAcceptanceTests.swift */; };
 		3429236596E52F2EBF64A1A1 /* LocalComputerUseCredentials.swift in Sources */ = {isa = PBXBuildFile; fileRef = 883356287E3F636BF4AD3816 /* LocalComputerUseCredentials.swift */; };
 		36D721C5C6B2CCB4E6382C1C /* LocalComputerUseRPC.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F438D95AC83572EEB7DDCE5 /* LocalComputerUseRPC.swift */; };
 		37F053BBB872177DD6DC7615 /* MCPFoundationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C8A7FBD347C34995D3AEC37F /* MCPFoundationTests.swift */; };
@@ -191,6 +192,7 @@
 		7D98C1008558E1DAD992F9B0 /* OS-ATLAS-APACHE-2.0-LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "OS-ATLAS-APACHE-2.0-LICENSE.txt"; sourceTree = "<group>"; };
 		7DEB12F1337DC8272D20BD2A /* MacControlMCPArchiveExtractor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacControlMCPArchiveExtractor.swift; sourceTree = "<group>"; };
 		85CCC99CA7C9C57C77F670E7 /* MCPServerRegistry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPServerRegistry.swift; sourceTree = "<group>"; };
+		85ED4FE7F360FA592A140E97 /* ComputerUseLocalTextProposalAcceptanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseLocalTextProposalAcceptanceTests.swift; sourceTree = "<group>"; };
 		87C85D18EE74BFDF5C71512D /* SemanticCandidateSelectionV5.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SemanticCandidateSelectionV5.swift; sourceTree = "<group>"; };
 		87DBA79B150564718516A5FE /* FoundationMCPJSONSchemaBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FoundationMCPJSONSchemaBridge.swift; sourceTree = "<group>"; };
 		883356287E3F636BF4AD3816 /* LocalComputerUseCredentials.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalComputerUseCredentials.swift; sourceTree = "<group>"; };
@@ -326,6 +328,7 @@
 				37BA471798CCE46AB3ED62F5 /* ComputerUseLicenseComplianceTests.swift */,
 				90EAA8F6017B21F317D49D78 /* ComputerUseLiteralPayloadTests.swift */,
 				D9D50E7AFC5C0EDE2CFFC0BA /* ComputerUseLocalTextGoalPlannerTests.swift */,
+				85ED4FE7F360FA592A140E97 /* ComputerUseLocalTextProposalAcceptanceTests.swift */,
 				BC7C60E90BCD41A69C849F4B /* ComputerUseMobileInitiationTests.swift */,
 				54D37720BBBF3A87027E61FA /* ComputerUseNativeTextIntegrationTests.swift */,
 				39FE1E3654B6C097036EB8BC /* ComputerUseObservationWorkerTests.swift */,
@@ -593,6 +596,7 @@
 				62C20EC90B2BCFF0066A3538 /* ComputerUseLicenseComplianceTests.swift in Sources */,
 				DAD0589CDCA1C3CD38319701 /* ComputerUseLiteralPayloadTests.swift in Sources */,
 				ED0BA4255D0D51702FB3DBCE /* ComputerUseLocalTextGoalPlannerTests.swift in Sources */,
+				33D89A9B195107B3E8C3D4F1 /* ComputerUseLocalTextProposalAcceptanceTests.swift in Sources */,
 				BC393D0286409F0A6B367D79 /* ComputerUseMobileInitiationTests.swift in Sources */,
 				F0D6F4109ECA5C2815EB06CE /* ComputerUseNativeTextIntegrationTests.swift in Sources */,
 				31A0659A7A8B7A8D2EAFAE1F /* ComputerUseOCRQualificationTests.swift in Sources */,

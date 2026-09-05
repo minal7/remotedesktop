@@ -160,7 +160,8 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         let connection = try ComputerUseTextModelConnection(
             baseURL: XCTUnwrap(URL(string: XCTUnwrap(object["baseURL"]))),
             bearerToken: XCTUnwrap(object["bearerToken"]), modelAlias: XCTUnwrap(object["modelAlias"]))
-        let localPlanner = ComputerUseLocalTextGoalPlanner(connection: connection)
+        let contract = try XCTUnwrap(ComputerUseLocalTextGoalPlanner.Contract(rawValue: object["contract"] ?? "frozen-v1"))
+        let localPlanner = ComputerUseLocalTextGoalPlanner(connection: connection, contract: contract)
         let countedPlanner = CountingNativeTextPlanner(localPlanner)
         var allowed = true
         let mayAct = { allowed && NSWorkspace.shared.frontmostApplication?.processIdentifier == pid }
@@ -251,7 +252,7 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         let observedTransport = ObservedNativeTextTransport()
         let cancellable = ComputerUseNativeTextExecutor(injector: injector, mayAct: mayAct,
             journalDirectory: directory.appendingPathComponent("cancel-inference"),
-            planner: ComputerUseLocalTextGoalPlanner(connection: connection, transport: observedTransport))
+            planner: ComputerUseLocalTextGoalPlanner(connection: connection, transport: observedTransport, contract: contract))
         let inference = Task {
             try await cancellable.execute(taskID: "cancel-inference", prompt: "Set both Origin and Destination to Helsinki.", progress: { _ in })
         }
