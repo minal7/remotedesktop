@@ -3651,6 +3651,12 @@ final class HostComputerUseManager: ObservableObject {
                 macControlReceipt = receipt
                 if let executor, executor.isReady {
                     modelState = .ready(runtimeName: executor.runtimeName)
+                } else if nativeTextInstaller != nil {
+                    // The normal host can use the installed helper even when
+                    // neither model package has finished installing.
+                    let modelReceipt = await installer.currentInstallation()
+                    guard !Task.isCancelled, !isShuttingDown else { return }
+                    beginStructuredActivation(helperReceipt: receipt, visualReceipt: modelReceipt)
                 } else if let modelReceipt = await installer.currentInstallation() {
                     modelState = .packageFound(fileName: "Verified model installation")
                     beginActivation(of: modelReceipt)
@@ -4976,8 +4982,10 @@ final class HostComputerUseManager: ObservableObject {
         setupTask = Task { [weak self] in
             guard let self else { return }
             defer { setupTask = nil }
+            let previouslyAvailableExecutor = executor
             var activationReceipt: ComputerUseInstallationReceipt?
             var nativeExecutor: ComputerUseCapabilityExecutor?
+            var composedExecutor: (any ComputerUseExecuting)?
             do {
                 if let nativeTextInstaller {
                     let receipt = try await nativeTextInstaller.install { [weak self] update in
@@ -4990,6 +4998,7 @@ final class HostComputerUseManager: ObservableObject {
                     }
                     try Task.checkCancellation()
                     try await nativeTextInstaller.recordRuntimeActivationSuccess(for: receipt)
+                    try Task.checkCancellation()
                     executor = nativeExecutor
                 }
                 let helperReceipt = try await macControlInstaller.install { [weak self] update in
@@ -4997,6 +5006,9 @@ final class HostComputerUseManager: ObservableObject {
                 }
                 macControlReceipt = helperReceipt
                 try Task.checkCancellation()
+                if let nativeExecutor {
+                    configureDesktopFactory(nativeExecutor, receipt: nil, helperReceipt: helperReceipt)
+                }
                 let receipt = try await installer.install { [weak self] update in
                     self?.consumeInstallerUpdate(update)
                 }
@@ -5024,8 +5036,10 @@ final class HostComputerUseManager: ObservableObject {
                     fraction: 0.99,
                     detail: "Starting verified local Mac tools…")
                 let hybrid = try await executorComposer(helperReceipt, loaded)
+                composedExecutor = hybrid
                 try Task.checkCancellation()
                 try await installer.recordRuntimeActivationSuccess(for: receipt)
+                try Task.checkCancellation()
                 if let nativeExecutor {
                     configureDesktopFactory(nativeExecutor, receipt: receipt, helperReceipt: helperReceipt)
                     (hybrid as? any MCPApprovalContinuing)?.cancelMCPWork()
@@ -5039,24 +5053,26 @@ final class HostComputerUseManager: ObservableObject {
                     fraction: 1,
                     detail: executor?.readyDetail ?? "AI Computer Use is ready")
             } catch is CancellationError {
+                (composedExecutor as? any MCPApprovalContinuing)?.cancelMCPWork()
                 await visualExecutorLoader.deactivate()
-                executor = nativeExecutor
+                executor = nativeExecutor ?? previouslyAvailableExecutor
                 if let activationReceipt {
                     try? await installer.restorePreviousInstallation(
                         afterFailedActivationOf: activationReceipt)
                 }
-                modelState = nativeExecutor.map { .ready(runtimeName: $0.runtimeName) } ?? .downloadRequired
+                modelState = executor.map { .ready(runtimeName: $0.runtimeName) } ?? .downloadRequired
                 publishSetupProgress(
                     phase: .failed,
                     fraction: nil,
                     detail: "Setup stopped",
-                    errorMessage: nativeExecutor == nil
+                    errorMessage: executor == nil
                         ? "Setup stopped before AI Computer Use was activated. Tap Retry to continue."
-                        : "Form editing is ready. Additional desktop setup stopped; tap Retry to finish it.")
+                        : "Available AI tools are ready. Additional setup stopped; tap Retry to finish it.")
                 return
             } catch {
+                (composedExecutor as? any MCPApprovalContinuing)?.cancelMCPWork()
                 await visualExecutorLoader.deactivate()
-                executor = nativeExecutor
+                executor = nativeExecutor ?? previouslyAvailableExecutor
                 if let activationReceipt {
                     try? await installer.restorePreviousInstallation(
                         afterFailedActivationOf: activationReceipt)
@@ -5064,7 +5080,7 @@ final class HostComputerUseManager: ObservableObject {
                 await installer.clearInterruptedInstallationMarker()
                 let message = (error as? LocalizedError)?.errorDescription
                     ?? error.localizedDescription
-                modelState = nativeExecutor.map { .ready(runtimeName: $0.runtimeName) } ?? .error(message)
+                modelState = executor.map { .ready(runtimeName: $0.runtimeName) } ?? .error(message)
                 publishSetupProgress(
                     phase: .failed,
                     fraction: nil,
@@ -5075,23 +5091,66 @@ final class HostComputerUseManager: ObservableObject {
     }
 
     private func configureDesktopFactory(_ native: ComputerUseCapabilityExecutor,
-        receipt: ComputerUseInstallationReceipt, helperReceipt: MacControlMCPInstallationReceipt) {
-        native.setDesktopFactory { [visualExecutorLoader, executorComposer, installer] progress in
-            var composed: (any ComputerUseExecuting)?
+        receipt: ComputerUseInstallationReceipt?, helperReceipt: MacControlMCPInstallationReceipt) {
+        native.setDesktopFactory(includesVisualControl: receipt != nil) { [weak self] _ in
+            guard let self else { throw CancellationError() }
+            return try await executorComposer(helperReceipt, deferredVisualExecutor(receipt: receipt))
+        }
+    }
+
+    private func deferredVisualExecutor(receipt: ComputerUseInstallationReceipt?) -> ComputerUseDeferredVisualExecutor {
+        guard let receipt else { return ComputerUseDeferredVisualExecutor() }
+        return ComputerUseDeferredVisualExecutor(loader: { [visualExecutorLoader, installer] progress in
             do {
                 let visual = try await visualExecutorLoader.load(receipt: receipt, progress: progress)
                 try Task.checkCancellation()
-                let result = try await executorComposer(helperReceipt, visual)
-                composed = result
-                try Task.checkCancellation()
                 try await installer.recordRuntimeActivationSuccess(for: receipt)
-                return result
+                try Task.checkCancellation()
+                return visual
             } catch {
-                (composed as? any MCPApprovalContinuing)?.cancelMCPWork()
                 await visualExecutorLoader.deactivate()
                 throw error
             }
+        }, abandon: { [visualExecutorLoader] _ in await visualExecutorLoader.deactivate() })
+    }
+
+    private func beginStructuredActivation(helperReceipt: MacControlMCPInstallationReceipt,
+                                           visualReceipt: ComputerUseInstallationReceipt?) {
+        guard allowsExternalServices, !isShuttingDown, setupTask == nil else { return }
+        modelState = .installing(detail: "Starting local Mac tools…", fraction: nil)
+        setupTask = Task { [weak self] in
+            guard let self else { return }
+            var loaded: (any ComputerUseExecuting)?
+            var finishRequestedSetup = false
+            defer {
+                setupTask = nil
+                if finishRequestedSetup, !Task.isCancelled, !isShuttingDown { startSetupPipeline() }
+            }
+            do {
+                let structured = try await executorComposer(helperReceipt, deferredVisualExecutor(receipt: visualReceipt))
+                loaded = structured
+                try Task.checkCancellation()
+                let interrupted = visualReceipt == nil ? await installer.interruptedInstallationExists() : false
+                try Task.checkCancellation()
+                executor = structured
+                modelState = .ready(runtimeName: structured.runtimeName)
+                // A missing native package still needs full setup. Availability
+                // of the helper is not a terminal full-setup response.
+                if currentSetupProgress?.phase == .ready { currentSetupProgress = nil }
+                finishRequestedSetup = interrupted || !setupRecipients.activeRecipients().isEmpty
+            } catch {
+                (loaded as? any MCPApprovalContinuing)?.cancelMCPWork()
+                executor = nil
+                modelState = .error((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)
+                publishRequestedActivationFailure(error)
+            }
         }
+    }
+
+    private func publishRequestedActivationFailure(_ error: Error) {
+        guard !setupRecipients.activeRecipients().isEmpty else { return }
+        publishSetupProgress(phase: .failed, fraction: nil, detail: "Setup needs attention",
+            errorMessage: (error as? LocalizedError)?.errorDescription ?? error.localizedDescription)
     }
 
     private func beginNativeTextActivation(of receipt: ComputerUseInstallationReceipt) {
@@ -5117,9 +5176,8 @@ final class HostComputerUseManager: ObservableObject {
                 let helperStatus = await macControlInstaller.durableStatus()
                 if case .ready(let helper) = helperStatus {
                     macControlReceipt = helper
-                    if let visualReceipt = await installer.currentInstallation() {
-                        configureDesktopFactory(native, receipt: visualReceipt, helperReceipt: helper)
-                    }
+                    let visualReceipt = await installer.currentInstallation()
+                    configureDesktopFactory(native, receipt: visualReceipt, helperReceipt: helper)
                 }
                 try Task.checkCancellation()
                 try await nativeTextInstaller?.recordRuntimeActivationSuccess(for: receipt)
@@ -5153,10 +5211,12 @@ final class HostComputerUseManager: ObservableObject {
                 await visualExecutorLoader.deactivate()
                 executor = nil
                 modelState = .downloadRequired
+                publishRequestedActivationFailure(CancellationError())
             } catch {
                 await visualExecutorLoader.deactivate()
                 executor = nil
                 modelState = .error((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)
+                publishRequestedActivationFailure(error)
             }
         }
     }

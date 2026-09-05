@@ -6,6 +6,59 @@ import XCTest
 
 @MainActor
 final class ComputerUseNativeTextIntegrationTests: XCTestCase {
+    func testSignedHostMacToolsStartAndPrepareApprovalWithoutModels() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_SIGNED_INDEPENDENT_MAC_TOOLS_ACCEPTANCE"] == "1" else {
+            throw XCTSkip("Opt-in signed helper installation and real MCP protocol; no desktop or Mail effects")
+        }
+        guard Bundle.main.bundleURL.pathExtension == "app" else {
+            throw NativeTextFixtureFailure.unexpectedOutcome("Signed app-hosted test required")
+        }
+        // Install the real pinned helper in an isolated root, using the actual
+        // download, checksum, signature and notarization checks. Neither model
+        // package or inference runtime is present in this composition.
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("MacToolsIntegration-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let installer = MacControlMCPInstaller(rootDirectory: directory.appendingPathComponent("helper"))
+        let receipt = try await installer.install { update in
+            FileHandle.standardError.write(Data("Signed Mac tools: \(update.phase.rawValue)\n".utf8))
+        }
+        let installed = await installer.currentInstallation()
+        XCTAssertEqual(installed, receipt)
+        let pool = MCPClientPool(mutationLedger: MCPFileMutationCallLedger(fileURL: directory.appendingPathComponent("ledger.json")),
+            sessionFactory: { binary, generation in
+                MCPClientSession(validatedBinary: binary, processGeneration: generation,
+                    stateDirectory: directory.appendingPathComponent("state"))
+            })
+        do {
+            let executor = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: receipt.binaryPath),
+                visualFallback: ComputerUseDeferredVisualExecutor(), planner: IntegrationUnavailableMCPPlanner(), clientPool: pool)
+            XCTAssertTrue(executor.isReady)
+            XCTAssertTrue(executor.hasAdditionalSetup)
+            let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { false })
+            let prompt = "Draft an email to codex-acceptance@example.invalid with subject \"Status\" saying Everything is on schedule."
+            let result = try await executor.execute(taskID: "signed-no-models", modelPrompt: prompt,
+                currentUserPrompt: prompt, conversation: [], tools: tools, progress: { _ in })
+            guard case .mcpApprovalRequired(let prepared) = result else {
+                throw NativeTextFixtureFailure.unexpectedOutcome("The exact draft must stop at approval without effects")
+            }
+            XCTAssertEqual(prepared.call.toolName, RemoteDesktopMailMCP.toolName)
+            XCTAssertEqual(prepared.call.arguments["to"], .string("codex-acceptance@example.invalid"))
+            XCTAssertEqual(prepared.call.arguments["subject"], .string("Status"))
+            XCTAssertEqual(prepared.call.arguments["body"], .string("Everything is on schedule."))
+            XCTAssertEqual(prepared.call.arguments["send_now"], .bool(false))
+            // Never approve or call the Mail tool. Pool teardown also discards
+            // the prepared fingerprint and awaits the real sidecar's exit.
+            await pool.cancelAll()
+            do { _ = try await pool.allowedTools(); XCTFail("The sidecar must be stopped") }
+            catch MCPClientError.notRunning { }
+        } catch {
+            await pool.cancelAll()
+            throw error
+        }
+    }
+
     func testRealNativeFieldsReceiveExactVerifiedEdits() async throws {
         try await runFixture(browser: false)
     }
@@ -555,6 +608,14 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         return nil
     }
 
+}
+
+private struct IntegrationUnavailableMCPPlanner: MCPProposalPlanning {
+    func availability() -> AppleFoundationMCPPlannerAvailability { .unavailable(.modelNotReady) }
+    func propose(_ request: MCPProposalPlanningRequest) async throws -> MCPProposalPlanningResult {
+        XCTFail("This qualification must not invoke Apple inference")
+        throw AppleFoundationMCPPlannerError.unavailable(.modelNotReady)
+    }
 }
 
 private enum NativeTextFixtureFailure: Error {

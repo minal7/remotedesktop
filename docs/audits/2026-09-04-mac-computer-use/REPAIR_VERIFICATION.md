@@ -262,3 +262,29 @@ python3 host-mac/scripts/verify_test_inventory.py \
 ```
 
 Independent MCP capability activation, structured capability declarations, live signed form effects, actual mobile transport, physical low-memory qualification and the full OCR-dependent product gate remain open. No installed Mac or iOS app was replaced.
+
+
+## Independent Mac tools and deferred visual activation
+
+The normal host now activates a verified installed Mac helper even when neither model package is available. When native form editing is installed, a whole-goal decline composes the structured executor first. A deferred visual executor loads vision only if that request reaches the visual route. It preserves current-user authority, typed conversation, task identity and the same loaded approval/resume continuation. Missing vision returns an explicit unable-to-complete result with a setup action; it does not disable available Mac tools. A helper without the native package still reports additional setup is needed.
+
+Failed native installation retains previously available Mac tools. If native and helper setup succeeded before visual activation failed, both stay available and structured work does not retry the failed vision load. Requests arriving during failed passive activation now receive terminal setup failure. Helper activation checks cancellation around process start and discovery, awaits cleanup for the returned process generation, and never uses unscoped cleanup that could stop a newer generation. Explicit full setup still validates its visual runtime; deferral applies to passive activation and task routing.
+
+All **98 focused signed methods passed**, **6.871 test seconds**, in `/tmp/remotedesktop-signed-independent-tools-v3.xcresult`. Exact source and executed identifiers match [the retained inventory](independent-mac-tools-inventory.json), with no skips or failures. This includes native/helper/vision package combinations, real deterministic parsing of authenticated prompt envelopes through the production manager to exact pending approval, failure preservation, deferred-load cancellation, typed continuation and all existing selected MCP routing regressions. These tests inject package, model and MCP dependencies. Earlier 90- and 97-method checkpoints are retained and overlap; their counts are not added.
+
+A separate opt-in signed check then downloaded and installed the **actual pinned MacControlMCP 0.8.2 helper** into an isolated temporary root using the production installer. The 2,581,884-byte archive and executable matched the compiled hashes; the existing signature, hardened-runtime, universal-binary and notarization checks passed. The actual stdio helper and embedded MCP server started, exposed the reviewed tools and prepared the exact natural-language draft for approval with an explicitly unavailable Apple planner and no visual executor/model. **One exact method passed in 4.542 seconds**, `/tmp/remotedesktop-signed-independent-helper-live-v1.xcresult`. No Mail tool was executed or approved, no model was loaded, and no desktop effect was attempted. Awaited teardown discarded the approval, stopped the helper and removed the isolated test installation; no helper or llama-server remained. This is real protocol/setup evidence and deterministic proposal evidence, not a completed email, actual model inference or phone-to-Mac test.
+
+To repeat only that separate prerequisite after building the signed test host:
+
+```sh
+TEST_RUNNER_RUN_SIGNED_INDEPENDENT_MAC_TOOLS_ACCEPTANCE=1 \
+xcodebuild test-without-building \
+  -project host-mac/RemoteDesktopHost.xcodeproj -scheme RemoteDesktopHost \
+  -configuration Debug -destination 'platform=macOS' \
+  -derivedDataPath /tmp/remotedesktop-repair-derived-data \
+  -parallel-testing-enabled NO -resultBundlePath /tmp/FRESH-independent-helper.xcresult \
+  -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile \
+  -only-testing:RemoteDesktopHostTests/ComputerUseNativeTextIntegrationTests/testSignedHostMacToolsStartAndPrepareApprovalWithoutModels
+```
+
+Python checks: **116 passed**, 1.304 seconds. Reviewed deterministic source inventory: **261 methods**. Source and raw evidence hashes are in [independent capability results](independent-mac-tools-results.json). F22's model/helper dependency separation is complete. Typed capability declarations, general Apple-independent semantic tool planning, cross-executor task evidence, signed live form effects, pending client simulator tests, actual mobile transport, physical low-memory qualification and the full OCR-dependent gate remain open. The frozen form planner and installed application are unchanged.

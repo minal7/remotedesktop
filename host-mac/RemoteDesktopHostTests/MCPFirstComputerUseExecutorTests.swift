@@ -3,6 +3,103 @@ import XCTest
 
 @MainActor
 final class MCPFirstComputerUseExecutorTests: XCTestCase {
+    func testCancelledHelperActivationReleasesReturnedGenerationWithoutDiscoveringTools() async throws {
+        let pool = StubMCPClientPool(tools: [try makeMailTool()], loadFault: .suspendedStart)
+        let task = Task {
+            try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/test/helper"),
+                visualFallback: ComputerUseDeferredVisualExecutor(), clientPool: pool)
+        }
+        await pool.waitForSuspendedLoad()
+        task.cancel()
+        await pool.releaseLoad()
+        do { _ = try await task.value; XCTFail("Cancelled activation cannot publish a ready executor") }
+        catch is CancellationError { }
+        let state = await pool.loadState()
+        XCTAssertEqual(state.discoveries, 0)
+        XCTAssertEqual(state.cancelled, [1])
+        XCTAssertEqual(state.cancelAll, 0)
+    }
+
+    func testCancelledToolDiscoveryReleasesOwnedHelperBeforeReturning() async throws {
+        let pool = StubMCPClientPool(tools: [try makeMailTool()], loadFault: .suspendedTools)
+        let task = Task {
+            try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/test/helper"),
+                visualFallback: ComputerUseDeferredVisualExecutor(), clientPool: pool)
+        }
+        await pool.waitForSuspendedLoad()
+        task.cancel()
+        await pool.releaseLoad()
+        do { _ = try await task.value; XCTFail("Cancelled discovery cannot publish a ready executor") }
+        catch is CancellationError { }
+        let state = await pool.loadState()
+        XCTAssertEqual(state.discoveries, 1)
+        XCTAssertEqual(state.cancelled, [1])
+        XCTAssertEqual(state.cancelAll, 0)
+    }
+
+    func testFailedDiscoveryAndMissingToolReleaseOnlyOwnedHelperGeneration() async throws {
+        for fault in [StubMCPClientPool.LoadFault.toolsFailure, .none] {
+            let pool = StubMCPClientPool(tools: [], loadFault: fault)
+            do {
+                _ = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/test/helper"),
+                    visualFallback: ComputerUseDeferredVisualExecutor(), clientPool: pool)
+                XCTFail("An unusable helper must not become ready")
+            } catch { }
+            let state = await pool.loadState()
+            XCTAssertEqual(state.cancelled, [1])
+            XCTAssertEqual(state.cancelAll, 0, "Unscoped cleanup could stop a newer run")
+        }
+    }
+
+    func testStructuredApprovalWorksWithoutInstalledVisualModel() async throws {
+        let planner = StubMCPPlanner(mode: .draft)
+        let pool = StubMCPClientPool(tools: [try makeMailTool()], resultText: "draft created")
+        let executor = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/test/helper"),
+            visualFallback: ComputerUseDeferredVisualExecutor(), planner: planner, clientPool: pool)
+        XCTAssertTrue(executor.isReady)
+        XCTAssertTrue(executor.hasAdditionalSetup)
+        let result = try await executor.execute(taskID: "structured-only", prompt: "Draft the exact acceptance email.",
+            tools: makeHostTools(), progress: { _ in })
+        guard case .mcpApprovalRequired(let prepared) = result else { return XCTFail("Exact approval must still be required") }
+        let before = await pool.approvedExecuteCount()
+        XCTAssertEqual(before, 0)
+        let completed = try await executor.continueAfterApproval(prepared, tools: makeHostTools(), progress: { _ in })
+        XCTAssertEqual(completed, .completed("draft created"))
+        let after = await pool.approvedExecuteCount()
+        XCTAssertEqual(after, 1)
+    }
+
+    func testStructuredTaskDoesNotLoadVisualUntilFallbackActuallyExecutes() async throws {
+        var loads = 0
+        let actual = StubVisualExecutor()
+        let deferred = ComputerUseDeferredVisualExecutor(loader: { _ in loads += 1; return actual })
+        let pool = StubMCPClientPool(tools: [try makeMailTool()])
+        let structured = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/test/helper"),
+            visualFallback: deferred, planner: StubMCPPlanner(mode: .draft), clientPool: pool)
+        _ = try await structured.execute(taskID: "draft", prompt: "Draft the exact acceptance email.",
+            tools: makeHostTools(), progress: { _ in })
+        XCTAssertEqual(loads, 0)
+        let needsVisual = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/test/helper"),
+            visualFallback: deferred, planner: StubMCPPlanner(mode: .unavailable), clientPool: pool)
+        _ = try await needsVisual.execute(taskID: "visual", prompt: "Use this GUI-only app",
+            tools: makeHostTools(), progress: { _ in })
+        XCTAssertEqual(loads, 1)
+        XCTAssertEqual(actual.callCount, 1)
+    }
+
+    func testMissingVisualWithUnavailableAppleReturnsSpecificUnableOutcome() async throws {
+        let pool = StubMCPClientPool(tools: [try makeMailTool()])
+        let executor = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/test/helper"),
+            visualFallback: ComputerUseDeferredVisualExecutor(), planner: StubMCPPlanner(mode: .unavailable), clientPool: pool)
+        XCTAssertTrue(executor.isReady)
+        let result = try await executor.execute(taskID: "missing-visual", prompt: "Use this GUI-only app",
+            tools: makeHostTools(), progress: { _ in })
+        guard case .unableToComplete(let reason) = result else { return XCTFail("Missing visual capability must be explicit") }
+        XCTAssertTrue(reason.contains("visual control"))
+        let count = await pool.directExecuteCount()
+        XCTAssertEqual(count, 0)
+    }
+
     func testVisualApprovalContinuationForwardsDirectlyToFallbackWithoutPlannerOrMCP()
         async throws {
         let planner = StubMCPPlanner(mode: .clarification)
@@ -3347,24 +3444,33 @@ private final class StubMCPPlanner: MCPProposalPlanning, @unchecked Sendable {
 }
 
 private actor StubMCPClientPool: MCPClientPooling {
+    enum LoadFault { case none, suspendedStart, suspendedTools, toolsFailure }
     let tools: [MCPAllowedTool]
     let resultText: String
     let structuredContent: MCPJSONValue
     private var directCount = 0
     private var approvedCount = 0
+    private let loadFault: LoadFault
+    private var loadContinuation: CheckedContinuation<Void, Never>?
+    private var discoveries = 0
+    private var cancelledGenerations: [UInt64] = []
+    private var cancelAllCount = 0
 
     init(
         tools: [MCPAllowedTool],
         resultText: String = "email sent to codex-acceptance@example.invalid",
-        structuredContent: MCPJSONValue = .object(["ok": .bool(true)])
+        structuredContent: MCPJSONValue = .object(["ok": .bool(true)]),
+        loadFault: LoadFault = .none
     ) {
         self.tools = tools
         self.resultText = resultText
         self.structuredContent = structuredContent
+        self.loadFault = loadFault
     }
 
     func start(binaryURL: URL) async throws -> MCPProcessIdentity {
-        MCPProcessIdentity(
+        if loadFault == .suspendedStart { await withCheckedContinuation { loadContinuation = $0 } }
+        return MCPProcessIdentity(
             serverID: MCPServerRegistry.macControl.serverID,
             processGeneration: 1,
             processIdentifier: 42,
@@ -3372,7 +3478,25 @@ private actor StubMCPClientPool: MCPClientPooling {
             launchedAt: Date(timeIntervalSince1970: 1_700_000_000))
     }
 
-    func allowedTools() async throws -> [MCPAllowedTool] { tools }
+    func allowedTools() async throws -> [MCPAllowedTool] {
+        discoveries += 1
+        if loadFault == .suspendedTools { await withCheckedContinuation { loadContinuation = $0 } }
+        if loadFault == .toolsFailure { throw MCPClientError.notRunning }
+        return tools
+    }
+
+    func waitForSuspendedLoad() async {
+        for _ in 0..<200 {
+            if loadContinuation != nil { return }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        XCTFail("Timed out waiting for a suspended helper load")
+    }
+
+    func releaseLoad() { loadContinuation?.resume(); loadContinuation = nil }
+    func loadState() -> (discoveries: Int, cancelled: [UInt64], cancelAll: Int) {
+        (discoveries, cancelledGenerations, cancelAllCount)
+    }
 
     func execute(_ call: MCPToolCall) async throws -> MCPToolResult {
         directCount += 1
@@ -3397,8 +3521,8 @@ private actor StubMCPClientPool: MCPClientPooling {
         return try result()
     }
 
-    func cancelAll() async {}
-    func cancel(processGeneration: UInt64) async {}
+    func cancelAll() async { cancelAllCount += 1 }
+    func cancel(processGeneration: UInt64) async { cancelledGenerations.append(processGeneration) }
 
     func directExecuteCount() -> Int { directCount }
     func approvedExecuteCount() -> Int { approvedCount }

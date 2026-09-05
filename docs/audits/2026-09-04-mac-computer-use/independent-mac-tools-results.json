@@ -1,0 +1,81 @@
+{
+  "schemaVersion": 1,
+  "scope": "independent-native-and-structured-capabilities-with-deferred-vision",
+  "sourceBaseCommit": "bf73a65",
+  "uncommittedImplementationAtRun": true,
+  "checkpoints": {
+    "focused": {
+      "xcresult": "/tmp/remotedesktop-signed-independent-tools-v3.xcresult",
+      "summary": {
+        "result": "Passed",
+        "totalTestCount": 98,
+        "passedTests": 98,
+        "failedTests": 0,
+        "skippedTests": 0,
+        "expectedFailures": 0,
+        "startTime": 1788595664.906,
+        "finishTime": 1788595680.088
+      },
+      "testSeconds": 6.871,
+      "inventory": "docs/audits/2026-09-04-mac-computer-use/independent-mac-tools-inventory.json",
+      "dependencies": "Injected installers, pools and planners; production manager, coordinator, deterministic routing and approval state. No downloads or desktop effects."
+    },
+    "realHelper": {
+      "xcresult": "/tmp/remotedesktop-signed-independent-helper-live-v1.xcresult",
+      "summary": {
+        "result": "Passed",
+        "totalTestCount": 1,
+        "passedTests": 1,
+        "failedTests": 0,
+        "skippedTests": 0,
+        "expectedFailures": 0,
+        "startTime": 1788595697.762,
+        "finishTime": 1788595703.366
+      },
+      "testSeconds": 4.542,
+      "inventory": "/tmp/remotedesktop-independent-helper-live-inventory.json",
+      "helperVersion": "0.8.2",
+      "archiveBytes": 2581884,
+      "archiveSHA256": "1681fd2ccbf53d6fceebdaed0d5d49513637fe9929ff6eb9d1e1984ad6cb472e",
+      "executableSHA256": "402729cbf8179783466f4ba2ca1d1a2bf8ffb19cd7dee330963392afae9f4302",
+      "installation": "Isolated temporary root through production installer, removed after awaited sidecar shutdown.",
+      "scope": "Actual pinned-helper download, trust validation, real stdio and embedded MCP discovery, deterministic natural-language draft prepared for approval. No model loading, inference, Mail mutation, desktop effects or phone transport.",
+      "appleAvailability": "Explicit unavailable planner fixture; no Apple inference attempted."
+    }
+  },
+  "python": {
+    "passed": 116,
+    "seconds": 1.304
+  },
+  "reviewedHostSourceMethods": 261,
+  "overlappingEarlierFocusedRuns": [
+    "/tmp/remotedesktop-signed-independent-tools-v1.xcresult",
+    "/tmp/remotedesktop-signed-independent-tools-v2.xcresult"
+  ],
+  "liveProcessesAfterTeardown": "No test helper or llama-server remained in process inventory.",
+  "completedFinding": "F22 independent capability activation",
+  "remaining": [
+    "Typed capability declarations and full setup matrix",
+    "Live signed form effects awaiting Accessibility approval",
+    "Client setup tests awaiting requested simulator boot",
+    "Actual phone-to-Mac transport and effects",
+    "General step identity, task contracts and structured/visual evidence transfer",
+    "Physical low-memory qualification and full OCR-dependent gate"
+  ],
+  "fullProductQualified": false,
+  "installedAppsReplaced": false,
+  "sha256": {
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseCapabilityExecutor.swift": "1a83b1f6bcc21b7f33a3cc27c8d77d874055cfc11738d1b44bfb56accb856f25",
+    "host-mac/RemoteDesktopHost/ComputerUse/MCPFirstComputerUseExecutor.swift": "35a4a9639ebaf18ecb490bd0bd1bd48d9006918509e5e0d236290e176286036f",
+    "host-mac/RemoteDesktopHost/ComputerUse/HostComputerUseManager.swift": "0740184944b4897eee5e407ad5b985d14a47db6b6813c92e6b29902cd47f7198",
+    "host-mac/RemoteDesktopHostTests/ComputerUseCapabilityExecutorTests.swift": "a2ad3038e0322a28f5293f5b42637050e4336ab1ef76bae23f0034163e51747f",
+    "host-mac/RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests.swift": "5e2a1493de019ee5ebfb30f672fa8c69a842f69376c9147c50eed5e98d4485c8",
+    "host-mac/RemoteDesktopHostTests/ComputerUseMobileInitiationTests.swift": "82f7fcadb3b51c0df59bd81486a419a3cd9b3148aa89c78d4ca8001adb20198a",
+    "host-mac/RemoteDesktopHostTests/ComputerUseNativeTextIntegrationTests.swift": "4b87b8811f5a9122a51937aee495fe8d635d1f965486b63d7a436b1673c98b7e",
+    "host-mac/AcceptanceFixtures/osatlas-deterministic-tests.json": "ea3852168cf97568025655c282eac5826a4e35f6c31fe14aefd42e357949387e",
+    "docs/audits/2026-09-04-mac-computer-use/independent-mac-tools-inventory.json": "4270fb3ac9f062662b88cb504fcd85ee32d2f053f175de5d2dbe8f0552ddce7c",
+    "/tmp/remotedesktop-signed-independent-tools-v3.log": "03763a0f1b1602a9093727726c9b29c5c6c92243e1d96619b07aa7e8ded36520",
+    "/tmp/remotedesktop-signed-independent-helper-live-v1.log": "f0d69cd376c507d50cada07e6d1a011927bd09969f430806217458d89b0b7111",
+    "/tmp/remotedesktop-independent-tools-python-v1.log": "2c713a4e2a728e49e64574561b48d4873b7f60caa9173cb15b4b9e4574f749f0"
+  }
+}

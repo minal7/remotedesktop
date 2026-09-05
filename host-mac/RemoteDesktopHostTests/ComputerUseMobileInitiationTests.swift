@@ -4,6 +4,181 @@ import XCTest
 
 @MainActor
 final class ComputerUseMobileInitiationTests: XCTestCase {
+    func testInstalledMacToolsHandleNaturalLanguageWithoutModelDownloadsOrVisualLoad() async throws {
+        for visualInstalled in [false, true] {
+            let fixture = try makeFixture(markerPresent: false)
+            defer { try? FileManager.default.removeItem(at: fixture.parent) }
+            let native = MobileInitiationModelInstaller(receipt: nativeReceipt)
+            let model = MobileInitiationModelInstaller(receipt: mobileInitiationModelReceipt(), alreadyInstalled: visualInstalled)
+            let helper = MobileInitiationMacControlInstaller(status: .ready(mobileInitiationMacControlReceipt))
+            let visual = MobileInitiationVisualLoader()
+            let pool = MobileInitiationStructuredPool()
+            let channel = MobileInitiationTestChannel()
+            let manager = HostComputerUseManager(injector: InputInjector(), installer: model,
+                nativeTextInstaller: native, nativeTextLoader: { _, _, _ in
+                    XCTFail("An absent native package must not be loaded during passive activation")
+                    throw CocoaError(.fileNoSuchFile)
+                }, macControlInstaller: helper, visualExecutorLoader: visual,
+                executorComposer: { receipt, fallback in
+                    try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: receipt.binaryPath),
+                        visualFallback: fallback, planner: MobileInitiationUnavailablePlanner(), clientPool: pool)
+                }, taskLedger: ComputerUseTaskLedger(fileURL: fixture.ledger), channelFactory: { _ in channel })
+            manager.start(pairingCode: "123456")
+            await waitUntil { manager.capability.state == .ready }
+            XCTAssertTrue(manager.needsAdditionalSetup, "The missing native package still needs explicit setup")
+            XCTAssertTrue(manager.capability.detail.contains("Mac tools"))
+            await requestStructuredDraft(manager: manager, channel: channel, pool: pool)
+            let installs = await (native.installCallCount(), model.installCallCount(), helper.installCallCount())
+            XCTAssertEqual(installs.0 + installs.1 + installs.2, 0)
+            XCTAssertEqual(visual.loadCount, 0)
+            await manager.shutdown()
+        }
+    }
+
+    func testInstalledNativeAndMacToolsRouteStructuredGoalsWithoutVisualLoad() async throws {
+        for visualInstalled in [false, true] {
+            let fixture = try makeFixture(markerPresent: false)
+            defer { try? FileManager.default.removeItem(at: fixture.parent) }
+            let visual = MobileInitiationVisualLoader()
+            let pool = MobileInitiationStructuredPool()
+            let channel = MobileInitiationTestChannel()
+            var nativeCalls = 0
+            let manager = HostComputerUseManager(injector: InputInjector(),
+                installer: MobileInitiationModelInstaller(receipt: mobileInitiationModelReceipt(), alreadyInstalled: visualInstalled),
+                nativeTextInstaller: MobileInitiationModelInstaller(receipt: nativeReceipt, alreadyInstalled: true),
+                nativeTextLoader: { _, _, _ in
+                    ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in nativeCalls += 1; return nil })
+                }, macControlInstaller: MobileInitiationMacControlInstaller(status: .ready(mobileInitiationMacControlReceipt)),
+                visualExecutorLoader: visual, executorComposer: { receipt, fallback in
+                    try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: receipt.binaryPath),
+                        visualFallback: fallback, planner: MobileInitiationUnavailablePlanner(), clientPool: pool)
+                }, taskLedger: ComputerUseTaskLedger(fileURL: fixture.ledger), channelFactory: { _ in channel })
+            manager.start(pairingCode: "123456")
+            await waitUntil { manager.capability.state == .ready }
+            XCTAssertEqual(manager.needsAdditionalSetup, !visualInstalled)
+            XCTAssertTrue(manager.capability.detail.contains("Mac tools"))
+            await requestStructuredDraft(manager: manager, channel: channel, pool: pool)
+            XCTAssertEqual(nativeCalls, 1, "Native decline must route the whole current goal to Mac tools")
+            XCTAssertEqual(visual.loadCount, 0, "Structured routing cannot load vision even when its package exists")
+            await manager.shutdown()
+        }
+    }
+
+    func testFailedNativeSetupPreservesPreviouslyAvailableMacTools() async throws {
+        let fixture = try makeFixture(markerPresent: false)
+        defer { try? FileManager.default.removeItem(at: fixture.parent) }
+        let native = MobileInitiationModelInstaller(receipt: nativeReceipt, throwsInstallFailure: true)
+        let helper = MobileInitiationMacControlInstaller(status: .ready(mobileInitiationMacControlReceipt))
+        let visual = MobileInitiationVisualLoader()
+        let pool = MobileInitiationStructuredPool()
+        let channel = MobileInitiationTestChannel()
+        var compositions = 0
+        let manager = HostComputerUseManager(injector: InputInjector(),
+            installer: MobileInitiationModelInstaller(receipt: mobileInitiationModelReceipt()),
+            nativeTextInstaller: native, macControlInstaller: helper,
+            visualExecutorLoader: visual, executorComposer: { receipt, fallback in
+                compositions += 1
+                return try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: receipt.binaryPath),
+                    visualFallback: fallback, planner: MobileInitiationUnavailablePlanner(), clientPool: pool)
+            }, taskLedger: ComputerUseTaskLedger(fileURL: fixture.ledger), channelFactory: { _ in channel })
+        manager.start(pairingCode: "123456")
+        await waitUntil { manager.capability.state == .ready }
+        XCTAssertTrue(manager.handle(try setupEnvelope(requestID: "native-download-fails"), channel: channel))
+        let progress = await waitForSetupProgress(channel: channel)
+        XCTAssertFalse(progress.contains { $0.phase == .ready })
+        XCTAssertEqual(manager.capability.state, .ready)
+        XCTAssertTrue(manager.needsAdditionalSetup)
+        await requestStructuredDraft(manager: manager, channel: channel, pool: pool)
+        XCTAssertEqual(compositions, 1, "Failed setup must preserve the existing structured executor")
+        let installs = await (native.installCallCount(), helper.installCallCount())
+        XCTAssertEqual(installs.0, 1)
+        XCTAssertEqual(installs.1, 0)
+        XCTAssertEqual(visual.loadCount, 0)
+        await manager.shutdown()
+    }
+
+    func testVisualSetupFailureKeepsNewlyInstalledNativeAndMacToolsAvailable() async throws {
+        let fixture = try makeFixture(markerPresent: false)
+        defer { try? FileManager.default.removeItem(at: fixture.parent) }
+        let visual = MobileInitiationVisualLoader(throwsLoadFailure: true)
+        let pool = MobileInitiationStructuredPool()
+        let channel = MobileInitiationTestChannel()
+        let helper = MobileInitiationMacControlInstaller(status: .notInstalled)
+        let manager = HostComputerUseManager(injector: InputInjector(),
+            installer: MobileInitiationModelInstaller(receipt: mobileInitiationModelReceipt()),
+            nativeTextInstaller: MobileInitiationModelInstaller(receipt: nativeReceipt), nativeTextLoader: { _, _, _ in
+                ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in nil })
+            }, macControlInstaller: helper, visualExecutorLoader: visual, executorComposer: { receipt, fallback in
+                try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: receipt.binaryPath),
+                    visualFallback: fallback, planner: MobileInitiationUnavailablePlanner(), clientPool: pool)
+            }, taskLedger: ComputerUseTaskLedger(fileURL: fixture.ledger), channelFactory: { _ in channel })
+        manager.start(pairingCode: "123456")
+        await waitForStatusCheck(helper)
+        XCTAssertTrue(manager.handle(try setupEnvelope(requestID: "visual-load-fails"), channel: channel))
+        let progress = await waitForSetupProgress(channel: channel)
+        XCTAssertFalse(progress.contains { $0.phase == .ready })
+        XCTAssertTrue(manager.needsAdditionalSetup)
+        XCTAssertEqual(manager.capability.state, .ready)
+        XCTAssertTrue(manager.capability.detail.contains("Form editing and Mac tools"))
+        await requestStructuredDraft(manager: manager, channel: channel, pool: pool)
+        XCTAssertEqual(visual.loadCount, 1, "Structured work cannot retry the failed visual activation")
+        await manager.shutdown()
+    }
+
+    func testFailedPassiveActivationTerminatesPendingFullSetupRequest() async throws {
+        for nativeInstalled in [false, true] {
+            let fixture = try makeFixture(markerPresent: false)
+            defer { try? FileManager.default.removeItem(at: fixture.parent) }
+            let native = MobileInitiationModelInstaller(receipt: nativeReceipt, alreadyInstalled: nativeInstalled)
+            let channel = MobileInitiationTestChannel()
+            var loadStarted = false
+            var releaseLoad = false
+            let manager = HostComputerUseManager(injector: InputInjector(),
+                installer: MobileInitiationModelInstaller(receipt: mobileInitiationModelReceipt()),
+                nativeTextInstaller: native, nativeTextLoader: { _, _, _ in
+                    loadStarted = true
+                    while !releaseLoad { try await Task.sleep(for: .milliseconds(10)) }
+                    throw CocoaError(.fileReadCorruptFile)
+                }, macControlInstaller: MobileInitiationMacControlInstaller(status: .ready(mobileInitiationMacControlReceipt)),
+                visualExecutorLoader: MobileInitiationVisualLoader(), executorComposer: { _, _ in
+                    loadStarted = true
+                    while !releaseLoad { try await Task.sleep(for: .milliseconds(10)) }
+                    throw MCPFirstComputerUseExecutor.ExecutorError.requiredToolsMissing
+                }, taskLedger: ComputerUseTaskLedger(fileURL: fixture.ledger), channelFactory: { _ in channel })
+            defer { releaseLoad = true; manager.stop() }
+            manager.start(pairingCode: "123456")
+            await waitUntil { loadStarted }
+            XCTAssertTrue(manager.handle(try setupEnvelope(requestID: "request-during-activation"), channel: channel))
+            releaseLoad = true
+            let progress = await waitForSetupProgress(channel: channel)
+            XCTAssertTrue(progress.contains { $0.requestID == "request-during-activation" && $0.phase == .failed })
+            XCTAssertFalse(progress.contains { $0.phase == .ready })
+            XCTAssertEqual(manager.capability.state, .setupRequired)
+            let installs = await native.installCallCount()
+            XCTAssertEqual(installs, 0, "Failed passive activation cannot loop into unattended downloads")
+            await manager.shutdown()
+        }
+    }
+
+    private func requestStructuredDraft(manager: HostComputerUseManager, channel: MobileInitiationTestChannel,
+                                         pool: MobileInitiationStructuredPool) async {
+        manager.authorizePeer(senderID: "IOS-PEER")
+        let prompt = ComputerUseEnvelope(id: "independent-draft", senderID: "IOS-PEER", targetID: "HOST-ID",
+            pairingCode: "123456", sessionID: "SESSION-1", kind: .prompt,
+            body: "Draft an email to codex-acceptance@example.invalid with subject \"Status\" saying Everything is on schedule.")
+        XCTAssertTrue(manager.handle(prompt, channel: channel))
+        await waitUntil { if case .awaitingApproval = manager.activity { return true }; return false }
+        let calls = await pool.preparedCalls()
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(calls.first?.taskID, prompt.id)
+        XCTAssertEqual(calls.first?.arguments["to"], .string("codex-acceptance@example.invalid"))
+        XCTAssertEqual(calls.first?.arguments["subject"], .string("Status"))
+        XCTAssertEqual(calls.first?.arguments["body"], .string("Everything is on schedule."))
+        XCTAssertEqual(calls.first?.arguments["send_now"], .bool(false))
+        let effects = await pool.effectCount()
+        XCTAssertEqual(effects, 0, "No controlled or real Mail effect is authorized by preparing the proposal")
+    }
+
     func testInstalledNativeCapabilityResumesOnlyPreviouslyStartedDesktopSetup() async throws {
         let cases: [(MacControlMCPInstaller.DurableStatus, Bool, Bool)] = [
             (.ready(mobileInitiationMacControlReceipt), true, true),
@@ -936,16 +1111,19 @@ private actor MobileInitiationMacControlInstaller: MacControlMCPProvisioning {
 private actor MobileInitiationModelInstaller: ComputerUseModelProvisioning {
     private let receipt: ComputerUseInstallationReceipt
     private let alreadyInstalled: Bool
+    private let throwsInstallFailure: Bool
     private var interrupted: Bool
     private var installs = 0
     private var clearedMarkers = 0
     private var successfulActivations: [ComputerUseInstallationReceipt] = []
     private var failedActivations: [ComputerUseInstallationReceipt] = []
 
-    init(receipt: ComputerUseInstallationReceipt, alreadyInstalled: Bool = false, interrupted: Bool = false) {
+    init(receipt: ComputerUseInstallationReceipt, alreadyInstalled: Bool = false, interrupted: Bool = false,
+         throwsInstallFailure: Bool = false) {
         self.receipt = receipt
         self.alreadyInstalled = alreadyInstalled
         self.interrupted = interrupted
+        self.throwsInstallFailure = throwsInstallFailure
     }
 
     func currentInstallation() -> ComputerUseInstallationReceipt? { alreadyInstalled ? receipt : nil }
@@ -973,6 +1151,7 @@ private actor MobileInitiationModelInstaller: ComputerUseModelProvisioning {
         progress: @MainActor @Sendable @escaping (ComputerUseInstaller.Update) -> Void
     ) async throws -> ComputerUseInstallationReceipt {
         installs += 1
+        if throwsInstallFailure { throw CocoaError(.fileWriteOutOfSpace) }
         let updates: [ComputerUseInstaller.Update] = [
             .init(
                 phase: .preparing,
@@ -1006,6 +1185,46 @@ private actor MobileInitiationModelInstaller: ComputerUseModelProvisioning {
     func recordedFailedActivations() -> [ComputerUseInstallationReceipt] {
         failedActivations
     }
+}
+
+private struct MobileInitiationUnavailablePlanner: MCPProposalPlanning {
+    func availability() -> AppleFoundationMCPPlannerAvailability { .unavailable(.modelNotReady) }
+    func propose(_ request: MCPProposalPlanningRequest) async throws -> MCPProposalPlanningResult {
+        XCTFail("The unavailable Apple planner cannot be used")
+        throw AppleFoundationMCPPlannerError.unavailable(.modelNotReady)
+    }
+}
+
+private actor MobileInitiationStructuredPool: MCPClientPooling {
+    private var prepared: [MCPToolCall] = []
+    private var effects = 0
+
+    func start(binaryURL: URL) async throws -> MCPProcessIdentity {
+        MCPProcessIdentity(serverID: MCPServerRegistry.macControl.serverID, processGeneration: 1,
+            processIdentifier: 42, binaryPath: binaryURL.path, launchedAt: Date(timeIntervalSince1970: 0))
+    }
+    func allowedTools() async throws -> [MCPAllowedTool] {
+        [try MCPAllowedTool(serverID: RemoteDesktopMailMCP.serverID, processGeneration: 1,
+            toolName: RemoteDesktopMailMCP.toolName, description: RemoteDesktopMailMCP.reviewedDescription,
+            inputSchema: RemoteDesktopMailMCP.inputSchema, risk: .approvalRequired,
+            approval: MCPToolSafetyPolicy.assess(toolName: RemoteDesktopMailMCP.toolName).approval)]
+    }
+    func prepareApproval(_ call: MCPToolCall) async throws -> MCPPreparedApproval {
+        prepared.append(call)
+        return MCPPreparedApproval(call: call, fingerprint: MCPApprovalFingerprint(call: call), display: call.approvalDisplay)
+    }
+    func execute(_ call: MCPToolCall) async throws -> MCPToolResult {
+        effects += 1
+        throw MCPClientError.notRunning
+    }
+    func performApproved(_ call: MCPToolCall, fingerprint: MCPApprovalFingerprint) async throws -> MCPToolResult {
+        effects += 1
+        throw MCPClientError.notRunning
+    }
+    func cancel(processGeneration: UInt64) async { }
+    func cancelAll() async { }
+    func preparedCalls() -> [MCPToolCall] { prepared }
+    func effectCount() -> Int { effects }
 }
 
 @MainActor

@@ -260,30 +260,45 @@ final class MCPFirstComputerUseExecutor:
             clientPool: clientPool,
             binaryURL: binaryURL.standardizedFileURL,
             visualFallback: visualFallback)
+        try Task.checkCancellation()
         let identity = try await clientPool.start(binaryURL: binaryURL)
-        let tools = try await clientPool.allowedTools()
-        guard tools.contains(where: {
-            $0.toolName == RemoteDesktopMailMCP.toolName
-                && $0.serverID == RemoteDesktopMailMCP.serverID
-        }) else {
-            await clientPool.cancelAll()
-            throw ExecutorError.requiredToolsMissing
+        do {
+            try Task.checkCancellation()
+            let tools = try await clientPool.allowedTools()
+            try Task.checkCancellation()
+            guard tools.contains(where: {
+                $0.toolName == RemoteDesktopMailMCP.toolName
+                    && $0.serverID == RemoteDesktopMailMCP.serverID
+            }) else {
+                throw ExecutorError.requiredToolsMissing
+            }
+            executor.helperReady = true
+            executor.activeProcessGeneration = identity.processGeneration
+            return executor
+        } catch {
+            // A late cancellation or failed discovery owns only this start.
+            // Join its cleanup without stopping a newer generation in the pool.
+            await clientPool.cancel(processGeneration: identity.processGeneration)
+            throw error
         }
-        executor.helperReady = true
-        executor.activeProcessGeneration = identity.processGeneration
-        return executor
     }
 
     var isReady: Bool {
-        helperReady && visualFallback.isReady
+        helperReady
+    }
+
+    var hasAdditionalSetup: Bool { !visualFallback.isReady }
+    var readyDetail: String {
+        visualFallback.isReady ? "Mac tools and visual control are ready" : "Mac tools are ready; visual control needs setup"
     }
 
     var runtimeName: String {
+        let visual = visualFallback.isReady ? ", with visual control available on demand" : "; visual control needs setup"
         switch planner.availability() {
         case .available:
-            return "Apple on-device planner + local Mac tools, with OS-Atlas Pro visual fallback"
+            return "Apple on-device planner + local Mac tools" + visual
         case .unavailable:
-            return "Local deterministic tools + OS-Atlas Pro visual grounding (Apple planner unavailable)"
+            return "Local deterministic Mac tools (Apple planner unavailable)" + visual
         }
     }
 
