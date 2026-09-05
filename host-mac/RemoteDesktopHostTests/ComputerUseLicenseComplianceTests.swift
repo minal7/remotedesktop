@@ -5,6 +5,30 @@ import XCTest
 
 @MainActor
 final class ComputerUseLicenseComplianceTests: XCTestCase {
+    func testNativeTextPackageInstallsItsOwnVerifiedLegalDocumentsIndependently() async throws {
+        let fixture = try makeFixture(modelVariant: .nativeText4B)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let installer = ComputerUseInstaller(manifest: fixture.manifest, rootDirectory: fixture.root,
+            legalResourceDirectory: fixture.legalSource, legacyManifest: nil)
+        let receipt = try await installer.install { _ in }
+        XCTAssertEqual(receipt.modelVariant, .nativeText4B)
+        try assertInstalledDocumentsMatchSource(fixture)
+        for artifact in [ComputerUseArtifactManifest.osAtlasLicense, ComputerUseArtifactManifest.graniteLicense,
+                         ComputerUseArtifactManifest.modelNotice] {
+            XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.modelDirectory.appendingPathComponent(artifact.fileName).path))
+        }
+        XCTAssertNotEqual(ComputerUseInstaller.nativeTextRootDirectory, HostComputerUseManager.modelDirectoryURL)
+        for artifact in ComputerUseArtifactManifest.nativeTextV2.legalArtifacts {
+            let bytes = try Data(contentsOf: bundledURL(for: artifact))
+            XCTAssertEqual(Int64(bytes.count), artifact.byteCount)
+            XCTAssertEqual(Self.sha256(bytes), artifact.sha256)
+        }
+        let notice = try String(contentsOf: bundledURL(for: ComputerUseArtifactManifest.qwen35Notice), encoding: .utf8)
+        XCTAssertTrue(notice.contains(ComputerUseArtifactManifest.nativeTextV2.modelRevision))
+        XCTAssertTrue(notice.contains(ComputerUseArtifactManifest.nativeTextV2.modelArtifacts[0].sha256))
+        XCTAssertEqual(ComputerUseArtifactManifest.current, .legacyVisualOnly)
+    }
+
     func testBundledModelAndLlamaCPPDocumentsMatchPinnedManifest() throws {
         XCTAssertEqual(
             ComputerUseArtifactManifest.osAtlasLicenseURL.absoluteString,
@@ -127,28 +151,16 @@ final class ComputerUseLicenseComplianceTests: XCTestCase {
         }
     }
 
-    func testModelPackageHasNoPrivateAdapterOrExecutableDownloadPath() throws {
-        let hostDirectory = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-        let manifestSource = try String(
-            contentsOf: hostDirectory.appendingPathComponent(
-                "RemoteDesktopHost/ComputerUse/ComputerUseArtifactManifest.swift"),
-            encoding: .utf8)
-        let installerSource = try String(
-            contentsOf: hostDirectory.appendingPathComponent(
-                "RemoteDesktopHost/ComputerUse/ComputerUseInstaller.swift"),
-            encoding: .utf8)
-
-        for source in [manifestSource, installerSource] {
-            XCTAssertFalse(source.contains("minal7/computer-use-lora"))
-            XCTAssertFalse(source.contains("adapter_model.safetensors"))
-            XCTAssertFalse(source.contains("Qwen2.5-VL"))
+    func testModelPackagesContainOnlyPinnedGGUFDownloads() throws {
+        for manifest in [ComputerUseArtifactManifest.current, .nativeTextV2] {
+            XCTAssertFalse(manifest.modelArtifacts.isEmpty)
+            XCTAssertTrue(manifest.modelArtifacts.allSatisfy {
+                $0.fileName.hasSuffix(".gguf") && $0.downloadURL.scheme == "https"
+                    && $0.byteCount > 0 && $0.sha256.count == 64
+            })
         }
         XCTAssertEqual(ComputerUseArtifactManifest.current.modelVariant, .pro4B)
-        XCTAssertTrue(ComputerUseArtifactManifest.current.modelArtifacts.allSatisfy {
-            $0.fileName.hasSuffix(".gguf") && $0.downloadURL.scheme == "https"
-        })
+        XCTAssertEqual(ComputerUseArtifactManifest.nativeTextV2.modelArtifacts.map(\.kind), [.nativeTextPlannerModel])
     }
 
     private struct Fixture {
@@ -159,7 +171,7 @@ final class ComputerUseLicenseComplianceTests: XCTestCase {
         let receipt: ComputerUseInstallationReceipt
     }
 
-    private func makeFixture() throws -> Fixture {
+    private func makeFixture(modelVariant: ComputerUseArtifactManifest.ModelVariant = .pro4B) throws -> Fixture {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(
             "ComputerUseLicenseTests-\(UUID().uuidString)",
             isDirectory: true)
@@ -173,7 +185,10 @@ final class ComputerUseLicenseComplianceTests: XCTestCase {
                 withIntermediateDirectories: true)
         }
 
-        for artifact in ComputerUseArtifactManifest.modelLegalArtifacts {
+        let documents = modelVariant == .nativeText4B
+            ? ComputerUseArtifactManifest.nativeTextV2.legalArtifacts
+            : ComputerUseArtifactManifest.modelLegalArtifacts
+        for artifact in documents {
             try Data(contentsOf: bundledURL(for: artifact)).write(
                 to: legalSource.appendingPathComponent(artifact.fileName),
                 options: .atomic)
@@ -182,7 +197,7 @@ final class ComputerUseLicenseComplianceTests: XCTestCase {
 
         let manifest = ComputerUseArtifactManifest(
             installationVersion: "license-test-v1",
-            modelVariant: .pro4B,
+            modelVariant: modelVariant,
             modelRepository: "test/model",
             modelRevision: "test-revision",
             modelArtifacts: [.init(
@@ -210,7 +225,7 @@ final class ComputerUseLicenseComplianceTests: XCTestCase {
     }
 
     private func assertInstalledDocumentsMatchSource(_ fixture: Fixture) throws {
-        for artifact in ComputerUseArtifactManifest.modelLegalArtifacts {
+        for artifact in fixture.manifest.legalArtifacts {
             let expected = try Data(contentsOf:
                 fixture.legalSource.appendingPathComponent(artifact.fileName))
             XCTAssertEqual(

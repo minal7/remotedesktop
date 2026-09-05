@@ -17,7 +17,7 @@ final class ComputerUseTests: XCTestCase {
         XCTAssertEqual(manifest.modelVariant, .pro4B)
         XCTAssertEqual(
             ComputerUseArtifactManifest.ModelVariant.allCases,
-            [.pro4B, .base4B])
+            [.pro4B, .base4B, .nativeText4B])
         XCTAssertEqual(manifest.modelRepository, "OS-Copilot/OS-Atlas-Pro-4B")
         XCTAssertEqual(
             manifest.modelRevision,

@@ -3,6 +3,63 @@ import XCTest
 @testable import RemoteDesktopHost
 
 final class OSAtlasRuntimeInstallationTests: XCTestCase {
+    func testNativeTextReceiptResolvesWithoutVisualArtifactsAndCannotBecomeVisualPackage() throws {
+        let fixture = try makeNativeTextFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let resolver = OSAtlasRuntimeInputResolver(manifest: fixture.manifest)
+        let inputs = try resolver.resolveNativeText(receipt: fixture.receipt,
+            runtimeDirectoryURL: fixture.runtimeDirectory, enclosingBundleURL: fixture.bundleDirectory)
+        XCTAssertEqual(inputs.modelURL, fixture.modelDirectory.appendingPathComponent("Qwen3.5-4B-Q4_K_M.gguf"))
+        XCTAssertEqual(inputs.llamaServerURL, fixture.runtimeDirectory.appendingPathComponent("llama-server"))
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: fixture.modelDirectory.path),
+                       ["Qwen3.5-4B-Q4_K_M.gguf"])
+        XCTAssertThrowsError(try resolver.resolve(receipt: fixture.receipt,
+            runtimeDirectoryURL: fixture.runtimeDirectory, enclosingBundleURL: fixture.bundleDirectory)) {
+            XCTAssertEqual($0 as? OSAtlasRuntimeInstallationError, .proModelRequired)
+        }
+    }
+
+    func testNativeTextResolverRejectsStaleReceiptChangedDataSymlinksAndExternalExecutable() throws {
+        let fixture = try makeNativeTextFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let resolver = OSAtlasRuntimeInputResolver(manifest: fixture.manifest)
+        let stale = ComputerUseInstallationReceipt(installationVersion: "old", modelVariant: .nativeText4B,
+            modelDirectory: fixture.modelDirectory.path, installedAt: Date())
+        XCTAssertThrowsError(try resolver.resolveNativeText(receipt: stale,
+            runtimeDirectoryURL: fixture.runtimeDirectory, enclosingBundleURL: fixture.bundleDirectory))
+        XCTAssertThrowsError(try resolver.resolveNativeText(receipt: fixture.receipt,
+            runtimeDirectoryURL: fixture.modelDirectory, enclosingBundleURL: fixture.bundleDirectory))
+        let file = fixture.modelDirectory.appendingPathComponent("Qwen3.5-4B-Q4_K_M.gguf")
+        try Data([1]).write(to: file)
+        XCTAssertThrowsError(try resolver.resolveNativeText(receipt: fixture.receipt,
+            runtimeDirectoryURL: fixture.runtimeDirectory, enclosingBundleURL: fixture.bundleDirectory))
+        try FileManager.default.removeItem(at: file)
+        let external = fixture.root.appendingPathComponent("outside.gguf")
+        try Data([1, 2, 3]).write(to: external)
+        try FileManager.default.createSymbolicLink(at: file, withDestinationURL: external)
+        XCTAssertThrowsError(try resolver.resolveNativeText(receipt: fixture.receipt,
+            runtimeDirectoryURL: fixture.runtimeDirectory, enclosingBundleURL: fixture.bundleDirectory))
+    }
+
+    private func makeNativeTextFixture() throws -> Fixture {
+        let fixture = try makeFixture()
+        for artifact in fixture.manifest.modelArtifacts {
+            try FileManager.default.removeItem(at: fixture.modelDirectory.appendingPathComponent(artifact.fileName))
+        }
+        let fileName = "Qwen3.5-4B-Q4_K_M.gguf"
+        try Data([1, 2, 3]).write(to: fixture.modelDirectory.appendingPathComponent(fileName))
+        let manifest = ComputerUseArtifactManifest(installationVersion: "native-text-fixture", modelVariant: .nativeText4B,
+            modelRepository: "test/native-text", modelRevision: "test-revision",
+            modelArtifacts: [.init(kind: .nativeTextPlannerModel, fileName: fileName, byteCount: 3,
+                sha256: "039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81",
+                downloadURL: URL(string: "https://example.invalid/" + fileName)!)], minimumMemoryBytes: 0)
+        let receipt = ComputerUseInstallationReceipt(installationVersion: manifest.installationVersion,
+            modelVariant: .nativeText4B, modelDirectory: fixture.modelDirectory.path, installedAt: Date())
+        return Fixture(root: fixture.root, bundleDirectory: fixture.bundleDirectory,
+            runtimeDirectory: fixture.runtimeDirectory, modelDirectory: fixture.modelDirectory,
+            manifest: manifest, receipt: receipt)
+    }
+
     func testVerifiedProReceiptResolvesOnlyDataFilesAndBundledExecutable() throws {
         let fixture = try makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }

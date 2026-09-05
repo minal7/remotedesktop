@@ -12,6 +12,7 @@ struct ComputerUseArtifactManifest: Codable, Equatable, Sendable {
         /// package without allowing both models to be selected together.
         case pro4B = "os-atlas-pro-4b"
         case base4B = "os-atlas-base-4b"
+        case nativeText4B = "qwen35-native-text-4b"
     }
 
     struct DownloadableArtifact: Codable, Equatable, Sendable {
@@ -19,6 +20,7 @@ struct ComputerUseArtifactManifest: Codable, Equatable, Sendable {
             case textModelShard
             case visionProjector
             case semanticRouterModel
+            case nativeTextPlannerModel
         }
 
         let kind: Kind
@@ -39,8 +41,8 @@ struct ComputerUseArtifactManifest: Codable, Equatable, Sendable {
 
     let installationVersion: String
     let modelVariant: ModelVariant
-    /// Authoritative upstream model provenance. Downloadable artifacts below
-    /// are an immutable GGUF conversion of this exact public, ungated commit.
+    /// Pinned source repository for this package: upstream checkpoint for the
+    /// OS-Atlas conversion, conversion repository for the native text GGUF.
     let modelRepository: String
     let modelRevision: String
     /// Download order is intentional: model shards first, then the projector.
@@ -87,6 +89,34 @@ struct ComputerUseArtifactManifest: Codable, Equatable, Sendable {
     // Keep the production package unchanged until the fine-tuned semantic
     // GGUF's immutable URL, byte count, and digest are available.
     static let current = legacyVisualOnly
+
+    /// Separate installation/receipt from the visual package. The native form
+    /// planner does not require its projector, helper or Apple Intelligence.
+    static let nativeTextV2 = ComputerUseArtifactManifest(
+        installationVersion: "qwen35-4b-q4-k-m-native-text-v2-b9992",
+        modelVariant: .nativeText4B,
+        modelRepository: "unsloth/Qwen3.5-4B-GGUF",
+        modelRevision: "e87f176479d0855a907a41277aca2f8ee7a09523",
+        modelArtifacts: [DownloadableArtifact(
+            kind: .nativeTextPlannerModel,
+            fileName: "Qwen3.5-4B-Q4_K_M.gguf",
+            byteCount: 2_740_937_888,
+            sha256: "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
+            downloadURL: URL(string: "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/e87f176479d0855a907a41277aca2f8ee7a09523/Qwen3.5-4B-Q4_K_M.gguf")!)],
+        minimumMemoryBytes: 8 * 1_024 * 1_024 * 1_024)
+
+    static let qwen35License = BundledArtifact(
+        fileName: "QWEN35-APACHE-2.0-LICENSE.txt", byteCount: 11_544,
+        sha256: "bbedc3fda3305820b977265f01b8619d87570a6739de3a5582c3464840f1e57a")
+    static let qwen35Notice = BundledArtifact(
+        fileName: "QWEN35-NOTICE.txt", byteCount: 1_030,
+        sha256: "b560a5da0265ef822c3b3f4ab1c29e562fe2db4a9ca5ff10e98907a5a6aca253")
+
+    var legalArtifacts: [BundledArtifact] {
+        modelVariant == .nativeText4B
+            ? [Self.qwen35License, Self.llamaCPPLicense, Self.qwen35Notice]
+            : Self.modelLegalArtifacts
+    }
 
     static let osAtlasLicenseRevision =
         "bad08407ab54b5bf6c17a69fe1ced476b9494926"

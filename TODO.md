@@ -4,7 +4,7 @@ Companion to [the detailed audit](</Users/michael/Documents/ChatGPT/remote deskt
 
 **Phase 1 · Make evidence trustworthy and define the supported product**
 
-- [x] **F29:** Replace the stale expected count of 138 with reviewed test-identifier discovery/validation. The baseline selected 167 methods; the reviewed selection now includes 228 with the repair regressions. Exact source/result checks are implemented: 112 Python tests pass; signed text/runtime checkpoints and the 70-method native runtime follow-up were verified by exact ID. The full OCR-dependent gate remains failing.
+- [x] **F29:** Replace the stale expected count of 138 with reviewed test-identifier discovery/validation. The baseline selected 167 methods; the reviewed selection now includes 232 with the repair regressions. Exact source/result checks are implemented: 113 Python tests pass; signed text/runtime checkpoints and the 70-method native runtime follow-up were verified by exact ID. The full OCR-dependent gate remains failing.
 - [ ] **F29:** Split current visual-only package acceptance from future V4/V5 semantic-package qualification. Current acceptance must test the currently shipped manifest and router.
 - [ ] **F30:** Extract a testable Mac core module for policy, task state, wire contracts, parsers, and model adapters. Execute its tests on every PR without privileged-host provisioning.
 - [ ] **F18:** Specify supported OS, Apple Intelligence availability, languages, task families, and degraded modes. Replace ambiguous overall readiness with capability readiness.
@@ -137,6 +137,8 @@ Only then broaden capabilities and evaluate whether an additional model pays for
 
 
 **Work log**
+
+- 2026-09-04: Added a separate pinned native-text model manifest, private installer root, package-specific legal files, and a resolver that requires no visual artifacts while keeping executable code inside the app bundle. Seventeen core package checks and 23 exact-ID signed package checks pass; 113 Python checks pass. A source-file read stalled one prior signed test in `open`; the source check now runs in Python and the signed check examines compiled package definitions. No broader macOS file permission was granted. The actual native model has not yet been installed into the new managed package root or wired into normal task routing.
 
 - 2026-09-04: Added the text model to the existing process owner with typed inputs, a private credential file, a single inference lease, model switching and generation rejection. All 70 runtime/planner tests pass both in SwiftPM and the signed host. The production runtime owner also passed 14/14 real-model proposal regressions, including its actual launch and shutdown. Normal executor composition, model packaging and capability readiness remain open.
 

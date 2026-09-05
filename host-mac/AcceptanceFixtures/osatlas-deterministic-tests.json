@@ -25,9 +25,15 @@
     "RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testNativeTextContextOverflowStopsBeforeCompletion",
     "RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testNativeTextFailedReadinessRemovesPrivateCredentialAndRejectsUnknownModel",
     "RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testNativeTextLaunchUsesPrivateCredentialAndMeasuredSingleModelBudget",
-    "RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testRuntimeTextPlannerUsesFrozenContractAndHostOwnedLiteral"
+    "RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testRuntimeTextPlannerUsesFrozenContractAndHostOwnedLiteral",
+    "RemoteDesktopHostTests/OSAtlasRuntimeInstallationTests/testNativeTextReceiptResolvesWithoutVisualArtifactsAndCannotBecomeVisualPackage",
+    "RemoteDesktopHostTests/OSAtlasRuntimeInstallationTests/testNativeTextResolverRejectsStaleReceiptChangedDataSymlinksAndExternalExecutable",
+    "RemoteDesktopHostTests/ComputerUseLicenseComplianceTests/testNativeTextPackageInstallsItsOwnVerifiedLegalDocumentsIndependently",
+    "RemoteDesktopHostTests/ComputerUseLicenseComplianceTests/testModelPackagesContainOnlyPinnedGGUFDownloads"
   ],
   "expectedTests": [
+    "RemoteDesktopHostTests/ComputerUseLicenseComplianceTests/testModelPackagesContainOnlyPinnedGGUFDownloads",
+    "RemoteDesktopHostTests/ComputerUseLicenseComplianceTests/testNativeTextPackageInstallsItsOwnVerifiedLegalDocumentsIndependently",
     "RemoteDesktopHostTests/ComputerUseLiteralPayloadTests/testAmbiguousMultipleQuotesAreNotSilentlyAssignedToTheWrongField",
     "RemoteDesktopHostTests/ComputerUseLiteralPayloadTests/testLongExactTextUsesHostReferenceWithoutRelaxingModelTextLimit",
     "RemoteDesktopHostTests/ComputerUseLiteralPayloadTests/testPreservesWhitespaceNewlinesAndBackslashesExactly",
@@ -255,6 +261,8 @@
     "RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testNativeTextContextOverflowStopsBeforeCompletion",
     "RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testNativeTextFailedReadinessRemovesPrivateCredentialAndRejectsUnknownModel",
     "RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testNativeTextLaunchUsesPrivateCredentialAndMeasuredSingleModelBudget",
-    "RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testRuntimeTextPlannerUsesFrozenContractAndHostOwnedLiteral"
+    "RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testRuntimeTextPlannerUsesFrozenContractAndHostOwnedLiteral",
+    "RemoteDesktopHostTests/OSAtlasRuntimeInstallationTests/testNativeTextReceiptResolvesWithoutVisualArtifactsAndCannotBecomeVisualPackage",
+    "RemoteDesktopHostTests/OSAtlasRuntimeInstallationTests/testNativeTextResolverRejectsStaleReceiptChangedDataSymlinksAndExternalExecutable"
   ]
 }

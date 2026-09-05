@@ -1,0 +1,18 @@
+Native form text planner
+
+Qwen3.5-4B is Copyright 2026 Alibaba Cloud and licensed under Apache-2.0.
+Upstream model: https://huggingface.co/Qwen/Qwen3.5-4B
+Bundled license source (license provenance, not a claim about conversion ancestry):
+https://huggingface.co/Qwen/Qwen3.5-4B/blob/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a/LICENSE
+
+Downloaded conversion: Qwen3.5-4B-Q4_K_M.gguf from unsloth/Qwen3.5-4B-GGUF
+Immutable conversion repository revision: e87f176479d0855a907a41277aca2f8ee7a09523
+Artifact SHA-256: 00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4
+Artifact bytes: 2740937888
+https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/tree/e87f176479d0855a907a41277aca2f8ee7a09523
+The exact upstream weight commit used by the converter is not asserted here.
+The model download contains only data and does not add executable code.
+
+Inference uses bundled llama.cpp b9992, commit
+6eddde06a4f25d55d538b5d15628dcc2b6882147, licensed under the MIT License.
+See LLAMA-CPP-MIT-LICENSE.txt and QWEN35-APACHE-2.0-LICENSE.txt.

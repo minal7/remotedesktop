@@ -147,26 +147,8 @@ struct OSAtlasRuntimeInputResolver {
             }
         }
 
-        let runtimeDirectoryURL = runtimeDirectoryURL.standardizedFileURL
-        let enclosingBundleURL = enclosingBundleURL.standardizedFileURL
-        guard isDirectory(runtimeDirectoryURL),
-              contains(enclosingBundleURL, runtimeDirectoryURL) else {
-            throw OSAtlasRuntimeInstallationError.bundledRuntimeMissing
-        }
-        for fileName in Self.requiredBundledRuntimeFiles {
-            let url = runtimeDirectoryURL.appendingPathComponent(fileName)
-            guard isContainedRegularFile(url, in: runtimeDirectoryURL) else {
-                throw OSAtlasRuntimeInstallationError.bundledRuntimeIncomplete(
-                    fileName)
-            }
-        }
-
-        let llamaServerURL = runtimeDirectoryURL.appendingPathComponent(
-            "llama-server")
-        guard fileManager.isExecutableFile(atPath: llamaServerURL.path) else {
-            throw OSAtlasRuntimeInstallationError.bundledRuntimeIncomplete(
-                "llama-server")
-        }
+        let llamaServerURL = try resolveBundledExecutable(
+            runtimeDirectoryURL: runtimeDirectoryURL, enclosingBundleURL: enclosingBundleURL)
 
         return OSAtlasLlamaRuntimeInputs(
             variant: .pro4B,
@@ -243,6 +225,64 @@ struct OSAtlasRuntimeInputResolver {
         default:
             throw OSAtlasRuntimeInstallationError.invalidReceipt
         }
+    }
+
+    /// The receipt must already have passed installer checksum verification.
+    /// This stage checks current shape/containment and resolves executable code
+    /// only from the enclosing app bundle, independently of visual artifacts.
+    func resolveNativeText(
+        receipt: ComputerUseInstallationReceipt,
+        runtimeDirectoryURL: URL,
+        enclosingBundleURL: URL
+    ) throws -> ComputerUseNativeTextRuntimeInputs {
+        guard manifest.modelVariant == .nativeText4B,
+              receipt.modelVariant == .nativeText4B,
+              receipt.installationVersion == manifest.installationVersion,
+              (receipt.modelDirectory as NSString).isAbsolutePath,
+              manifest.modelArtifacts.count == 1,
+              let artifact = manifest.modelArtifacts.first,
+              artifact.kind == .nativeTextPlannerModel,
+              artifact.fileName == "Qwen3.5-4B-Q4_K_M.gguf" else {
+            throw OSAtlasRuntimeInstallationError.invalidReceipt
+        }
+        let directory = URL(fileURLWithPath: receipt.modelDirectory, isDirectory: true).standardizedFileURL
+        guard isStrictDirectory(directory) else {
+            throw OSAtlasRuntimeInstallationError.invalidReceipt
+        }
+        let model = directory.appendingPathComponent(artifact.fileName)
+        guard contains(directory, model),
+              let values = try? model.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]),
+              values.isRegularFile == true, values.isSymbolicLink != true,
+              Int64(values.fileSize ?? -1) == artifact.byteCount else {
+            throw OSAtlasRuntimeInstallationError.invalidModelArtifact(artifact.fileName)
+        }
+        return ComputerUseNativeTextRuntimeInputs(modelURL: model, llamaServerURL:
+            try resolveBundledExecutable(runtimeDirectoryURL: runtimeDirectoryURL, enclosingBundleURL: enclosingBundleURL))
+    }
+
+    private func resolveBundledExecutable(runtimeDirectoryURL: URL, enclosingBundleURL: URL) throws -> URL {
+        let runtimeDirectoryURL = runtimeDirectoryURL.standardizedFileURL
+        let enclosingBundleURL = enclosingBundleURL.standardizedFileURL
+        guard isDirectory(runtimeDirectoryURL),
+              contains(enclosingBundleURL, runtimeDirectoryURL) else {
+            throw OSAtlasRuntimeInstallationError.bundledRuntimeMissing
+        }
+        for fileName in Self.requiredBundledRuntimeFiles {
+            let url = runtimeDirectoryURL.appendingPathComponent(fileName)
+            guard isContainedRegularFile(url, in: runtimeDirectoryURL) else {
+                throw OSAtlasRuntimeInstallationError.bundledRuntimeIncomplete(
+                    fileName)
+            }
+        }
+
+        let llamaServerURL = runtimeDirectoryURL.appendingPathComponent(
+            "llama-server")
+        guard fileManager.isExecutableFile(atPath: llamaServerURL.path) else {
+            throw OSAtlasRuntimeInstallationError.bundledRuntimeIncomplete(
+                "llama-server")
+        }
+
+        return llamaServerURL
     }
 
     private func isDirectory(_ url: URL) -> Bool {
