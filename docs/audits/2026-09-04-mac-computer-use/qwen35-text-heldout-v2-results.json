@@ -1,0 +1,157 @@
+[
+  {
+    "id": "H01",
+    "seconds": 7.691552292002598,
+    "inputTokens": 472,
+    "outputTokens": 400,
+    "raw": "{\n  \"disposition\": \"supported\",\n  \"edits\": [\n    {\n      \"fieldID\": \"f1\",\n      \"mode\": \"replaceAll\",\n      \"value\": \"Reykjavík\"\n    },\n    {\n      \"fieldID\": \"f2\",\n      \"mode\": \"replaceAll\",\n      \"value\": \"Akureyri\"\n    }\n  ]\n}",
+    "passed": true,
+    "schemaAccepted": true,
+    "stateLengths": {
+      "start": 10,
+      "end": 8
+    }
+  },
+  {
+    "id": "H02",
+    "seconds": 6.272518416983075,
+    "inputTokens": 461,
+    "outputTokens": 345,
+    "raw": "{\n  \"disposition\": \"supported\",\n  \"edits\": [\n    {\n      \"fieldID\": \"f1\",\n      \"mode\": \"replaceAll\",\n      \"value\": \"Quarterly update\"\n    }\n  ]\n}",
+    "passed": true,
+    "schemaAccepted": true,
+    "stateLengths": {
+      "subject": 16,
+      "message": 5
+    }
+  },
+  {
+    "id": "H03",
+    "seconds": 10.50457733400981,
+    "inputTokens": 464,
+    "outputTokens": 602,
+    "raw": "{\n  \"disposition\": \"supported\",\n  \"edits\": [\n    {\n      \"fieldID\": \"f1\",\n      \"mode\": \"append\",\n      \"value\": \"p1\"\n    },\n    {\n      \"fieldID\": \"f1\",\n      \"mode\": \"append\",\n      \"value\": \"p2\"\n    }\n  ]\n}",
+    "passed": true,
+    "schemaAccepted": true,
+    "stateLengths": {
+      "notes": 16
+    }
+  },
+  {
+    "id": "H04",
+    "seconds": 9.357466958026635,
+    "inputTokens": 452,
+    "outputTokens": 533,
+    "raw": "{\n  \"disposition\": \"unsupported\",\n  \"edits\": []\n}",
+    "passed": true,
+    "schemaAccepted": true
+  },
+  {
+    "id": "H05",
+    "seconds": 9.39258733400493,
+    "inputTokens": 450,
+    "outputTokens": 533,
+    "raw": "{\n  \"disposition\": \"unsupported\",\n  \"edits\": []\n}",
+    "passed": true,
+    "schemaAccepted": true
+  },
+  {
+    "id": "H06",
+    "seconds": 6.306481334002456,
+    "inputTokens": 445,
+    "outputTokens": 347,
+    "raw": "{\n  \"disposition\": \"unsupported\",\n  \"edits\": []\n}",
+    "passed": false,
+    "schemaAccepted": true,
+    "error": "AssertionError: "
+  },
+  {
+    "id": "H07",
+    "seconds": 10.195021457999246,
+    "inputTokens": 452,
+    "outputTokens": 578,
+    "raw": "{\n      \"disposition\": \"supported\",\n      \"edits\": [\n        {\n          \"fieldID\": \"f1\",\n          \"mode\": \"replaceAll\",\n          \"value\": \"p1\"\n        }\n      ]\n    }",
+    "passed": true,
+    "schemaAccepted": true,
+    "stateLengths": {
+      "title": 13
+    }
+  },
+  {
+    "id": "H08",
+    "seconds": 5.7204988340090495,
+    "inputTokens": 466,
+    "outputTokens": 309,
+    "raw": "{\n  \"disposition\": \"supported\",\n  \"edits\": [\n    {\n      \"fieldID\": \"f1\",\n      \"mode\": \"replaceAll\",\n      \"value\": \"p1\"\n    }\n  ]\n}",
+    "passed": true,
+    "schemaAccepted": true,
+    "stateLengths": {
+      "title": 6,
+      "notes": 9
+    }
+  },
+  {
+    "id": "H09",
+    "seconds": 10.481000917003257,
+    "inputTokens": 458,
+    "outputTokens": 559,
+    "raw": "{\n      \"disposition\": \"unsupported\",\n      \"edits\": []\n    }",
+    "passed": true,
+    "schemaAccepted": true
+  },
+  {
+    "id": "H10",
+    "seconds": 10.200704666000092,
+    "inputTokens": 451,
+    "outputTokens": 578,
+    "raw": "{\n      \"disposition\": \"supported\",\n      \"edits\": [\n        {\n          \"fieldID\": \"f1\",\n          \"mode\": \"replaceAll\",\n          \"value\": \"p1\"\n        }\n      ]\n    }",
+    "passed": true,
+    "schemaAccepted": true,
+    "stateLengths": {
+      "label": 2
+    }
+  },
+  {
+    "id": "H11",
+    "seconds": 9.40895504198852,
+    "inputTokens": 455,
+    "outputTokens": 533,
+    "raw": "{\n  \"disposition\": \"unsupported\",\n  \"edits\": []\n}",
+    "passed": true,
+    "schemaAccepted": true
+  },
+  {
+    "id": "H12",
+    "seconds": 9.551398000010522,
+    "inputTokens": 460,
+    "outputTokens": 534,
+    "raw": "{\n  \"disposition\": \"clarification\",\n  \"edits\": []\n}",
+    "passed": true,
+    "schemaAccepted": true
+  },
+  {
+    "id": "H13",
+    "seconds": 9.796362208988285,
+    "inputTokens": 447,
+    "outputTokens": 550,
+    "raw": "{\"disposition\": \"supported\", \"edits\": [{\"fieldID\": \"f1\", \"mode\": \"replaceAll\", \"value\": \"p1\"}]}",
+    "passed": true,
+    "schemaAccepted": true,
+    "stateLengths": {
+      "name": 11
+    }
+  },
+  {
+    "id": "H14",
+    "seconds": 7.4505420830100775,
+    "inputTokens": 463,
+    "outputTokens": 416,
+    "raw": "{\n  \"disposition\": \"supported\",\n  \"edits\": [\n    {\n      \"fieldID\": \"f1\",\n      \"mode\": \"replaceAll\",\n      \"value\": \"X7\"\n    },\n    {\n      \"fieldID\": \"f2\",\n      \"mode\": \"replaceAll\",\n      \"value\": \"X7\"\n    }\n  ]\n}",
+    "passed": true,
+    "schemaAccepted": true,
+    "stateLengths": {
+      "one": 2,
+      "two": 2
+    }
+  }
+]

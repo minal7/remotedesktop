@@ -14,9 +14,9 @@ The original audit describes main at `603e79e9f877a4a1c9a0b462d8db4da06dc46cf2`.
 
 | Area | Evidence | Scope of the result |
 |---|---|---|
-| Test inventory | Exact identifier source/result validator; 108 Python tests pass; reviewed selection expanded from 167 to 202 tests | Wrong tests with the same total, skipped cases, duplicates, and inventory drift are rejected. A signed 35-method text-core subset passed exact-ID validation against a real xcresult. The full OCR-dependent selection remains failing. |
-| Text transaction | Latest focused run: 23 tests pass (0.145 s), covering Unicode/whitespace, long literals, insert/replace/append, dropped/changed input, changed targets, synchronized input ownership, and worker cancellation/deadlines | Controlled unit tests, including the production host dispatch seam. |
-| Native AX and Unicode edits | Separate AppKit fixture passed long exact text through both AX and real Unicode CGEvents, replacement, append, and second-field entry. Combined native/unit run: 23 tests pass (4.945 s) | Final values were independently read from fixture app state and compared as exact UTF-8. The fixture contains only test data and performs no external actions. |
+| Test inventory | Exact identifier source/result validator; 108 Python tests pass; reviewed selection expanded from 167 to 210 tests | Wrong tests with the same total, skipped cases, duplicates, and inventory drift are rejected. The latest signed 43-method text-core subset passed exact-ID validation against a real xcresult. The full OCR-dependent selection remains failing. |
+| Text transaction | Latest focused run: 43 tests pass (0.198 s), covering exact text, dropped/changed input, deadlines, ownership, task constraints and journal recovery | Controlled component tests, including the production host dispatch seam. |
+| Native and WebKit edits | Actual AX and Unicode input, independent application-state readback, and identical-looking field replacement. Combined suite: 45 tests pass (53.839 s) | Both fixtures verify long exact text and reject retained references to replaced controls. Only fictional local data is used. |
 | Apple local model | Read-only tool proposal passed using the installed model (1.962 s) | A real inference with no tool execution. |
 | Apple semantic routing | Initial run failed three cases. Corrected host-identity fixtures and app-selection instruction; all 16 cases passed on rerun (12.222 s) | Real local-model routing over supplied screen context. Does not prove grounding, execution, or whole-task completion. |
 
@@ -98,4 +98,24 @@ This Qwen candidate passed **3/10** current cases: N01, N02 and N07. Total infer
 
 These experiments use different schemas/prompts and are **not a controlled ranking of the underlying models**. No native effects were executed during either corpus run. Neither candidate qualifies for production; copying every word proves source coverage, not faithful meaning. A second model or a larger prompt is not accepted as a repair without measured whole-goal accuracy and operational cost.
 
-The 14-case `native-text-goals-heldout-v2.json` corpus was frozen before the requirement-coverage rewrite and remains **unrun**. Its SHA-256 is `5811fd2bc05ff5ed8b91726312d94d0ed374187e2bb0ff2f2c5ecae06121d556`. It includes different labels, phrasing, ordered edits, negation, ambiguous fields and compound requests. Once used to revise a candidate it must be relabeled as a regression set, not repeatedly presented as held-out evidence.
+The 14-case `native-text-goals-heldout-v2.json` corpus was frozen before the requirement-coverage rewrite and was unrun at that checkpoint. Its SHA-256 is `5811fd2bc05ff5ed8b91726312d94d0ed374187e2bb0ff2f2c5ecae06121d556`. It includes different labels, phrasing, ordered edits, negation, ambiguous fields and compound requests. Its first frozen-candidate run is recorded below. Once used to revise a candidate it must be relabeled as a regression set, not repeatedly presented as held-out evidence.
+
+## A bounded Qwen3.5 planner candidate
+
+The next comparison used [Qwen3.5-4B](https://huggingface.co/Qwen/Qwen3.5-4B) in the [Unsloth Q4_K_M conversion](https://huggingface.co/unsloth/Qwen3.5-4B-GGUF), revision `e87f176479d0855a907a41277aca2f8ee7a09523`. The 2,740,937,888-byte download was independently checked against SHA-256 `00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4`. It remains in the task comparison directory, not an installed product package. Only build caches created for this task were cleaned for disk headroom; source, result bundles, the user's model caches, and the installed app were preserved.
+
+The existing installed llama.cpp **b9992 / 6eddde06a** binary ran the model with an authenticated loopback endpoint, no web UI or computer-control tools, offline mode, one slot, 4,096 context tokens, and four CPU threads. The temporary server process was stopped and its credential removed after each run. These are sequential candidate experiments, not a controlled comparison of model architectures or quantization quality.
+
+| Candidate | Regression result | Inference time across 10 cases | Peak server RSS |
+|---|---|---:|---:|
+| Same baseline prompt, reasoning off, unconstrained response | 4/10 | 11.956 s | 3,192,029,184 bytes |
+| Explicit host-owned literal IDs plus constrained JSON, reasoning off | 6/10 | 12.114 s | 3,198,746,624 bytes |
+| Same typed contract, reasoning on with a 512-token budget; at most 1,024 total output tokens | 10/10 | 81.284 s | 3,257,286,656 bytes |
+
+The baseline had three `fieldId`/`fieldID` schema errors and rejected several otherwise supported requests. Explicit payload-ID availability and constrained JSON eliminated the spelling errors and enabled more literal cases, but still rejected valid requests. Enabling bounded reasoning repaired the remaining regression failures. That combined result does not establish that either change alone explains every improvement. Model reasoning text is not retained in the artifacts; only final fictional proposals, token counts, and outcomes are recorded.
+
+The selected configuration, model/runtime hashes, benchmark source hash, and corpus hash were committed at **`5d2e0e9` before the holdout was run**. See [the frozen manifest](native-text-planner-candidate-v1.json). Both source and corpus hashes remained unchanged for the first holdout run, and the 14 observed case IDs exactly matched the expected corpus.
+
+**First holdout result: 13/14 (92.9%).** Total inference was 122.330 s, median 9.401 s, maximum 10.505 s; startup 0.881 s and peak server RSS 3,256,369,152 bytes. H06 was a conservative unsupported response to a supported edit that stopped before submission. No accepted proposal had incorrect expected final field values in this sample. Results: [held-out v2 proposals](qwen35-text-heldout-v2-results.json); log `/tmp/remotedesktop-qwen35-text-heldout-v2.log`.
+
+This does **not** meet the proposed 95% gate or qualify actual app completion. It is one small, self-authored holdout within a bounded form task family, with no desktop effects. The new local candidate is not integrated into the native executor or normal app execution. Its next required checks are the real native/browser task path, interruption/recovery at each effect boundary, production package trust and resource handling, and the phone-to-Mac flow. The failed H06 expectation is preserved; it has not been weakened or used for another prompt-tuning pass.
