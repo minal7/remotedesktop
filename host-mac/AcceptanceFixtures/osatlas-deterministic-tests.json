@@ -33,7 +33,9 @@
     "RemoteDesktopHostTests/ComputerUseCapabilityExecutorTests",
     "RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testInstalledNativeFormsActivateWithoutHelperVisualModelOrDownloads",
     "RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testDesktopSetupFailurePreservesVerifiedNativeCapability",
-    "RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testInstalledNativeAndDesktopPackagesComposeWithoutEagerVisualLoad"
+    "RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testInstalledNativeAndDesktopPackagesComposeWithoutEagerVisualLoad",
+    "RemoteDesktopHostTests/ComputerUseLicenseComplianceTests/testVerifiedCompletedPackageCommitsWithMetadataSpaceAndNoDownload",
+    "RemoteDesktopHostTests/ComputerUseLicenseComplianceTests/testOnlyChecksumVerifiedCompletePackageCanUseMetadataSpaceBudget"
   ],
   "expectedTests": [
     "RemoteDesktopHostTests/ComputerUseCapabilityExecutorTests/testCancelledDesktopLoadCannotExecuteAndReleasesReturnedHelper",
@@ -276,6 +278,8 @@
     "RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testNativeTextLaunchUsesPrivateCredentialAndMeasuredSingleModelBudget",
     "RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testRuntimeTextPlannerUsesFrozenContractAndHostOwnedLiteral",
     "RemoteDesktopHostTests/OSAtlasRuntimeInstallationTests/testNativeTextReceiptResolvesWithoutVisualArtifactsAndCannotBecomeVisualPackage",
-    "RemoteDesktopHostTests/OSAtlasRuntimeInstallationTests/testNativeTextResolverRejectsStaleReceiptChangedDataSymlinksAndExternalExecutable"
+    "RemoteDesktopHostTests/OSAtlasRuntimeInstallationTests/testNativeTextResolverRejectsStaleReceiptChangedDataSymlinksAndExternalExecutable",
+    "RemoteDesktopHostTests/ComputerUseLicenseComplianceTests/testVerifiedCompletedPackageCommitsWithMetadataSpaceAndNoDownload",
+    "RemoteDesktopHostTests/ComputerUseLicenseComplianceTests/testOnlyChecksumVerifiedCompletePackageCanUseMetadataSpaceBudget"
   ]
 }

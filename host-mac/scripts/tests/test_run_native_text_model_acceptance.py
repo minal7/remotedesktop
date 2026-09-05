@@ -13,6 +13,40 @@ spec.loader.exec_module(runner)
 
 
 class NativeModelAcceptanceTests(unittest.TestCase):
+    def test_signed_shell_gate_forwards_fixture_scope_and_rejects_old_evidence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            for name in ('xcrun', 'codesign', 'xcodebuild'):
+                path = directory / name
+                body = 'exit 0\n'
+                if name == 'xcodebuild':
+                    body = ('printf "%s\\n" "$@"\n'
+                            'printf "native=%s signed=%s corpus=%s report=%s\\n" '
+                            '"$TEST_RUNNER_RUN_COMPUTER_USE_NATIVE_TEXT_ACCEPTANCE" '
+                            '"$TEST_RUNNER_RUN_SIGNED_NATIVE_PACKAGE_ACCEPTANCE" '
+                            '"$TEST_RUNNER_COMPUTER_USE_SIGNED_PACKAGE_CORPUS" '
+                            '"$TEST_RUNNER_COMPUTER_USE_SIGNED_PACKAGE_REPORT_PREFIX"\nexit 19\n')
+                path.write_text('#!/bin/sh\n' + body)
+                path.chmod(0o700)
+            prefix = directory / 'fresh result'
+            environment = dict(os.environ, PATH=str(directory) + os.pathsep + os.environ['PATH'],
+                COMPUTER_USE_SIGNED_PACKAGE_CORPUS=str(directory / 'known corpus.json'),
+                COMPUTER_USE_SIGNED_PACKAGE_REPORT_PREFIX=str(prefix),
+                COMPUTER_USE_SIGNED_PACKAGE_DERIVED_DATA=str(directory / 'signed build'))
+            command = ['/bin/bash', str(SCRIPT.with_name('run_text_edit_acceptance.sh')), '--signed-package-only']
+            result = subprocess.run(command, env=environment, capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 19, result.stderr)
+            self.assertEqual(result.stdout.count('-only-testing:'), 2)
+            self.assertIn('testSignedHostNativePackageEditsNativeFields', result.stdout)
+            self.assertIn('testSignedHostNativePackageEditsBrowserFields', result.stdout)
+            self.assertIn('native=1 signed=1 corpus=' + str(directory / 'known corpus.json'), result.stdout)
+            self.assertIn('report=' + str(prefix), result.stdout)
+            prefix.with_suffix('.xcresult').mkdir()
+            rejected = subprocess.run(command, env=environment, capture_output=True, text=True, timeout=10)
+            self.assertEqual(rejected.returncode, 2)
+            self.assertIn('Refusing to overwrite', rejected.stderr)
+            self.assertNotIn('-only-testing:', rejected.stdout)
+
     def test_default_shell_gate_runs_tests_and_preserves_their_failure(self):
         with tempfile.TemporaryDirectory() as directory:
             directory = Path(directory)

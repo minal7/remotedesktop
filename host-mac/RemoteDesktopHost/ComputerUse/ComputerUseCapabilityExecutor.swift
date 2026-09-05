@@ -148,6 +148,7 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
 enum ComputerUseNativeTextExecutorLoader {
     static func load(receipt: ComputerUseInstallationReceipt, tools: ComputerUseHostTools,
                      bundle: Bundle = .main, runtime: OSAtlasLlamaRuntime = .shared,
+                     journalDirectory: URL = ComputerUseTextStepStore.defaultDirectory,
                      progress: @escaping (String) -> Void) async throws -> ComputerUseCapabilityExecutor {
         progress("Loading local form editing…")
         let directory = try OSAtlasVisualExecutorLoader.bundledRuntimeDirectoryURL(in: bundle)
@@ -156,7 +157,9 @@ enum ComputerUseNativeTextExecutorLoader {
         let endpoint = try await runtime.activateNativeText(inputs)
         do { try Task.checkCancellation() }
         catch { await runtime.cancel(endpoint: endpoint); throw error }
-        let native = tools.makeNativeTextExecutor(planner: ComputerUseRuntimeTextGoalPlanner(inputs: inputs, runtime: runtime))
+        let native = tools.makeNativeTextExecutor(
+            planner: ComputerUseRuntimeTextGoalPlanner(inputs: inputs, runtime: runtime),
+            journalDirectory: journalDirectory)
         return ComputerUseCapabilityExecutor(native: native)
     }
 }

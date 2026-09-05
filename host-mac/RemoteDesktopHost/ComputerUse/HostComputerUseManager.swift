@@ -1064,8 +1064,10 @@ final class ComputerUseHostTools {
             identityIsAuthoritative: identity?.codeIdentity != nil)
     }
 
-    func makeNativeTextExecutor(planner: any ComputerUseTextGoalPlanning) -> ComputerUseNativeTextExecutor {
-        ComputerUseNativeTextExecutor(injector: injector, mayAct: mayAct, planner: planner)
+    func makeNativeTextExecutor(planner: any ComputerUseTextGoalPlanning,
+        journalDirectory: URL = ComputerUseTextStepStore.defaultDirectory) -> ComputerUseNativeTextExecutor {
+        ComputerUseNativeTextExecutor(injector: injector, mayAct: mayAct,
+            journalDirectory: journalDirectory, planner: planner)
     }
 
     /// Checks whether a transient macOS notification owns the exact pointer

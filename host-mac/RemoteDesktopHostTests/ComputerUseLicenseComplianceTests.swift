@@ -5,6 +5,59 @@ import XCTest
 
 @MainActor
 final class ComputerUseLicenseComplianceTests: XCTestCase {
+    func testVerifiedCompletedPackageCommitsWithMetadataSpaceAndNoDownload() async throws {
+        for staged in [false, true] {
+            let fixture = try makeFixture(modelVariant: .nativeText4B)
+            defer { try? FileManager.default.removeItem(at: fixture.root) }
+            try FileManager.default.removeItem(at: fixture.root.appendingPathComponent("active-installation.json"))
+            if staged {
+                let staging = fixture.root.appendingPathComponent("Models/.license-test-v1-staging", isDirectory: true)
+                try FileManager.default.moveItem(at: fixture.modelDirectory, to: staging)
+            }
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [RejectPackageDownload.self]
+            let session = URLSession(configuration: configuration)
+            defer { session.invalidateAndCancel() }
+            RejectPackageDownload.reset()
+            let installer = ComputerUseInstaller(manifest: fixture.manifest, rootDirectory: fixture.root,
+                legalResourceDirectory: fixture.legalSource, downloadSession: session, legacyManifest: nil,
+                operations: .init(createHardLink: { _, _ in }, availableCapacity: { _ in 128 * 1_024 * 1_024 }))
+            let before = await installer.currentInstallation()
+            XCTAssertNil(before, "Cached model bytes alone are not an installation receipt")
+            let receipt = try await installer.install { _ in }
+            XCTAssertEqual(receipt.modelDirectory, fixture.modelDirectory.path)
+            let after = await installer.currentInstallation()
+            XCTAssertEqual(after, receipt)
+            try assertInstalledDocumentsMatchSource(fixture)
+            XCTAssertEqual(RejectPackageDownload.requestCount, 0)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.root
+                .appendingPathComponent(ComputerUseInstaller.interruptedInstallationMarkerName).path))
+        }
+    }
+
+    func testOnlyChecksumVerifiedCompletePackageCanUseMetadataSpaceBudget() async throws {
+        for bytes in [Data(), Data([1]), Data([3, 2, 1]), Data([1, 2, 3])] {
+            let fixture = try makeFixture(modelVariant: .nativeText4B)
+            defer { try? FileManager.default.removeItem(at: fixture.root) }
+            try FileManager.default.removeItem(at: fixture.root.appendingPathComponent("active-installation.json"))
+            let model = fixture.modelDirectory.appendingPathComponent("model.gguf")
+            if bytes.isEmpty { try FileManager.default.removeItem(at: model) }
+            else { try bytes.write(to: model) }
+            let isComplete = bytes == Data([1, 2, 3])
+            let available: Int64 = isComplete ? ComputerUseInstaller.cachedPackageHeadroomBytes - 1 : 128 * 1_024 * 1_024
+            let installer = ComputerUseInstaller(manifest: fixture.manifest, rootDirectory: fixture.root,
+                legalResourceDirectory: fixture.legalSource, legacyManifest: nil,
+                operations: .init(createHardLink: { _, _ in }, availableCapacity: { _ in available }))
+            do { try await installer.preflight(); XCTFail("Insufficient space must reject before install") }
+            catch let error as ComputerUseInstaller.InstallError {
+                XCTAssertEqual(error, .insufficientDisk(required: isComplete
+                    ? ComputerUseInstaller.cachedPackageHeadroomBytes
+                    : ComputerUseInstaller.requiredDiskBytes(forModelBytes: 3), available: available))
+            }
+            XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.root.appendingPathComponent("active-installation.json").path))
+        }
+    }
+
     func testNativeTextPackageInstallsItsOwnVerifiedLegalDocumentsIndependently() async throws {
         let fixture = try makeFixture(modelVariant: .nativeText4B)
         defer { try? FileManager.default.removeItem(at: fixture.root) }
@@ -271,4 +324,18 @@ final class ComputerUseLicenseComplianceTests: XCTestCase {
             .map { String(format: "%02x", $0) }
             .joined()
     }
+}
+
+private final class RejectPackageDownload: URLProtocol {
+    private static let lock = NSLock()
+    private static var count = 0
+    static var requestCount: Int { lock.withLock { count } }
+    static func reset() { lock.withLock { count = 0 } }
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        Self.lock.withLock { Self.count += 1 }
+        client?.urlProtocol(self, didFailWithError: URLError(.resourceUnavailable))
+    }
+    override func stopLoading() {}
 }

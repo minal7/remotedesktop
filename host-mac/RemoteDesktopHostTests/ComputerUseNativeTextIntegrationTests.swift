@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import CryptoKit
 import XCTest
 @testable import RemoteDesktopHost
 
@@ -21,7 +22,49 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         try await runFixture(browser: true, localGoalsOnly: true)
     }
 
-    private func runFixture(browser: Bool, localGoalsOnly: Bool = false) async throws {
+    func testSignedHostNativePackageEditsNativeFields() async throws {
+        try await runFixture(browser: false, signedPackage: true)
+    }
+
+    func testSignedHostNativePackageEditsBrowserFields() async throws {
+        try await runFixture(browser: true, signedPackage: true)
+    }
+
+    func testSignedHostNativePackageInstallsAndLoads() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_SIGNED_NATIVE_PACKAGE_ACCEPTANCE"] == "1" else {
+            throw XCTSkip("Opt-in real-model package/runtime prerequisite; no desktop effects")
+        }
+        guard Bundle.main.bundleURL.pathExtension == "app" else {
+            throw NativeTextFixtureFailure.unexpectedOutcome("Signed app-hosted test required")
+        }
+        let installer = ComputerUseInstaller.nativeText()
+        let receipt = try await installer.install { update in
+            FileHandle.standardError.write(Data("Signed native package: \(update.phase.rawValue)\n".utf8))
+        }
+        let verified = await installer.currentInstallation()
+        XCTAssertEqual(verified, receipt)
+        let runtime = OSAtlasLlamaRuntime.shared
+        do {
+            // Loading needs no Accessibility authority. A false action gate
+            // prevents this prerequisite from acquiring any desktop effect.
+            let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { false })
+            let executor = try await ComputerUseNativeTextExecutorLoader.load(receipt: receipt,
+                tools: tools, progress: { _ in })
+            XCTAssertTrue(executor.isReady)
+            XCTAssertTrue(executor.hasAdditionalSetup)
+            XCTAssertFalse(executor.requiresMacControlHelper)
+            try await installer.recordRuntimeActivationSuccess(for: receipt)
+            await runtime.shutdown()
+        } catch {
+            await runtime.shutdown()
+            throw error
+        }
+    }
+
+    private func runFixture(browser: Bool, localGoalsOnly: Bool = false, signedPackage: Bool = false) async throws {
+        if signedPackage, ProcessInfo.processInfo.environment["RUN_SIGNED_NATIVE_PACKAGE_ACCEPTANCE"] != "1" {
+            throw XCTSkip("Use run_text_edit_acceptance.sh --signed-package-only with the pinned model staged")
+        }
         if localGoalsOnly, ProcessInfo.processInfo.environment["RUN_NATIVE_TEXT_GOALS_LOCAL_ACCEPTANCE"] != "1" {
             throw XCTSkip("Use run_native_text_model_acceptance.py for the real local planner and native effects")
         }
@@ -63,6 +106,11 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         let tools = ComputerUseHostTools(injector: injector, mayAct: {
             NSWorkspace.shared.frontmostApplication?.processIdentifier == process.processIdentifier
         })
+        if signedPackage {
+            try await runSignedPackageGoals(browser: browser, pid: process.processIdentifier,
+                state: state, directory: directory, tools: tools)
+            return
+        }
         if localGoalsOnly {
             try await runLocalGoals(browser: browser, pid: process.processIdentifier, state: state,
                                     directory: directory, injector: injector, tools: tools)
@@ -150,6 +198,90 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         let afterReplacement = try XCTUnwrap(textTarget.snapshot())
         XCTAssertNotEqual(afterReplacement.targetID, beforeReplacement.targetID)
         XCTAssertTrue(afterReplacement.value.utf8.elementsEqual(beforeReplacement.value.utf8))
+    }
+
+    /// Exercises the production installer, bundled runtime resolver, shared
+    /// process owner and whole-goal coordinator. The fixture's own state file
+    /// is the effect oracle; no screenshot/model output establishes success.
+    private func runSignedPackageGoals(browser: Bool, pid: pid_t, state: URL,
+                                      directory: URL, tools: ComputerUseHostTools) async throws {
+        guard Bundle.main.bundleURL.pathExtension == "app" else {
+            throw NativeTextFixtureFailure.unexpectedOutcome("Signed app-hosted test required")
+        }
+        let environment = ProcessInfo.processInfo.environment
+        let corpusURL = URL(fileURLWithPath: try XCTUnwrap(environment["COMPUTER_USE_SIGNED_PACKAGE_CORPUS"]))
+        let reportPrefix = try XCTUnwrap(environment["COMPUTER_USE_SIGNED_PACKAGE_REPORT_PREFIX"])
+        let corpusData = try Data(contentsOf: corpusURL)
+        let corpusDigest = SHA256.hash(data: corpusData).map { String(format: "%02x", $0) }.joined()
+        guard corpusDigest == "846b06a7b3524ec5803022d110805ec5614fa56f153238a792c01290b04e67f4" else {
+            throw NativeTextFixtureFailure.unexpectedOutcome("Regression corpus changed")
+        }
+        let corpus = try XCTUnwrap(JSONSerialization.jsonObject(with: corpusData) as? [String: Any])
+        let cases = try XCTUnwrap(corpus["cases"] as? [[String: Any]])
+        let reportURL = URL(fileURLWithPath: reportPrefix + (browser ? ".webkit.json" : ".appkit.json"))
+        guard !FileManager.default.fileExists(atPath: reportURL.path) else {
+            throw NativeTextFixtureFailure.unexpectedOutcome("Refusing to overwrite previous results")
+        }
+        let installer = ComputerUseInstaller.nativeText()
+        let receipt = try await installer.install { update in
+            FileHandle.standardError.write(Data("Signed native package: \(update.phase.rawValue)\n".utf8))
+        }
+        let current = await installer.currentInstallation()
+        XCTAssertEqual(current, receipt, "Only the real installer can establish package verification")
+        let runtime = OSAtlasLlamaRuntime.shared
+        do {
+            let executor = try await ComputerUseNativeTextExecutorLoader.load(receipt: receipt, tools: tools,
+                journalDirectory: directory.appendingPathComponent("signed-steps"), progress: { _ in })
+            try await installer.recordRuntimeActivationSuccess(for: receipt)
+            let runtimeDirectory = try OSAtlasVisualExecutorLoader.bundledRuntimeDirectoryURL(in: .main)
+            let runtimeData = try Data(contentsOf: runtimeDirectory.appendingPathComponent("llama-server"))
+            let runtimeDigest = SHA256.hash(data: runtimeData).map { String(format: "%02x", $0) }.joined()
+            var rows: [[String: Any]] = []
+            let runID = UUID().uuidString
+            for item in cases {
+                let id = try XCTUnwrap(item["id"] as? String)
+                let initial = item["initial"] as? [String: String] ?? [:]
+                try await resetFields(initial, pid: pid, tools: tools)
+                var prompt = try XCTUnwrap(item["prompt"] as? String)
+                if item["payloadRecipe"] != nil {
+                    prompt = prompt.replacingOccurrences(of: "PAYLOAD", with: "\"" + String(repeating: "x", count: 2_000) + "\"")
+                }
+                let started = ProcessInfo.processInfo.systemUptime
+                let result = try await executor.execute(taskID: runID + "-" + id, modelPrompt: prompt,
+                    currentUserPrompt: prompt, conversation: [], tools: tools, progress: { _ in })
+                var expected = item["expected"] as? [String: String]
+                    ?? ["origin": String(repeating: "x", count: 2_000), "destination": ""]
+                let disposition: String
+                switch item["expectedOutcome"] as? String {
+                case "unsupportedWithoutEffects":
+                    guard case .unableToComplete = result else { throw NativeTextFixtureFailure.unexpectedOutcome(id) }
+                    disposition = "unsupportedWithoutEffects"
+                    expected = ["origin": initial["origin"] ?? "", "destination": initial["destination"] ?? ""]
+                case "clarificationWithoutEffects":
+                    guard case .clarificationRequired = result else { throw NativeTextFixtureFailure.unexpectedOutcome(id) }
+                    disposition = "clarificationWithoutEffects"
+                    expected = ["origin": initial["origin"] ?? "", "destination": initial["destination"] ?? ""]
+                default:
+                    guard case .completed = result else { throw NativeTextFixtureFailure.unexpectedOutcome(id) }
+                    disposition = "completed"
+                }
+                for name in ["origin", "destination"] { try await verify(state, field: name, equals: expected[name] ?? "") }
+                let elapsed = ProcessInfo.processInfo.systemUptime - started
+                rows.append(["id": id, "disposition": disposition, "verified": true, "elapsedSeconds": elapsed])
+                let report: [String: Any] = ["schemaVersion": 1, "scope": "signed-package-known-form-regressions",
+                    "fixture": browser ? "WebKit" : "AppKit", "hostBundlePath": Bundle.main.bundleURL.path,
+                    "installationVersion": receipt.installationVersion, "runtimeBinarySHA256": runtimeDigest,
+                    "modelSHA256FromVerifiedManifest": ComputerUseArtifactManifest.nativeTextV2.modelArtifacts[0].sha256,
+                    "corpusSHA256": corpusDigest, "cases": rows]
+                try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
+                    .write(to: reportURL, options: .atomic)
+                reportGoal(browser: browser, id: id, elapsed: elapsed)
+            }
+            await runtime.shutdown()
+        } catch {
+            await runtime.shutdown()
+            throw error
+        }
     }
 
     private func runLocalGoals(browser: Bool, pid: pid_t, state: URL, directory: URL,

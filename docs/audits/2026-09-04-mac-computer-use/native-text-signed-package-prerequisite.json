@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 1,
+  "scope": "managed-native-package-and-signed-runtime-prerequisite",
+  "sourceBaseCommit": "c479de5",
+  "uncommittedImplementationAtRun": true,
+  "installerSubset": {
+    "result": "passed",
+    "exactMethods": 9,
+    "testSeconds": 0.413,
+    "xcresult": "/tmp/remotedesktop-signed-cached-package.xcresult"
+  },
+  "realSignedPackage": {
+    "result": "passed",
+    "exactMethods": 1,
+    "testSeconds": 17.414,
+    "xcresult": "/tmp/remotedesktop-signed-native-runtime-prerequisite-v1.xcresult",
+    "installationVersion": "qwen35-4b-q4-k-m-native-text-v2-b9992",
+    "modelDirectory": "/Users/michael/Library/Application Support/Remote Desktop Host/Native Text Model/Models/qwen35-4b-q4-k-m-native-text-v2-b9992",
+    "modelBytes": 2740937888,
+    "modelSHA256": "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
+    "stagingMethod": "APFS clone of previously verified GGUF; independent inode; no receipt synthesized",
+    "activation": "real native installer, real bundled loader, shared runtime; awaited shutdown",
+    "desktopEffects": false
+  },
+  "signedLiveForms": {
+    "result": "failed prerequisite",
+    "xcresult": "/tmp/remotedesktop-signed-native-live-v1.xcresult",
+    "failedMethods": 2,
+    "verifiedGoals": 0,
+    "reason": "AXIsProcessTrusted() was false in the development-signed app host",
+    "priorKnownModelResultsRemainSeparate": true
+  },
+  "python": {
+    "passed": 114,
+    "seconds": 1.198
+  },
+  "reviewedDeterministicSourceMethods": 243,
+  "signing": {
+    "authority": "Apple Development: Michael Inal (EK5M7GK4V3)",
+    "team": "V9AX39SPJD",
+    "bundle": "/tmp/remotedesktop-repair-derived-data/Build/Products/Debug/RemoteDesktopHost.app",
+    "strictDeepVerification": "passed before prerequisite rebuild"
+  },
+  "installedApplicationReplaced": false,
+  "sha256": {
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseInstaller.swift": "5f4d8c3f6056dd8fb04fa7d3f76125a9a9c1a13c4c123ba946efe48e009dbaa7",
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseCapabilityExecutor.swift": "b26e82acf697183058bd38ace65b7cf396bad9d3fb76ef787841784fa9fca104",
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseLocalTextGoalPlanner.swift": "997b5fe3d19e196db131a36a2313bc3c3dbb532687d8f21d720afee1ce811d99",
+    "host-mac/RemoteDesktopHost/ComputerUse/OSAtlasLlamaRuntime.swift": "3a4efc48b8ffed8f1f4eb7ece341e30374468ac070577377c85af14c42fa4a11",
+    "host-mac/RemoteDesktopHostTests/ComputerUseNativeTextIntegrationTests.swift": "2c45af77e3c6e1889535293c333f9196e4cabf27f620fe02e8941066d809a1e7",
+    "host-mac/scripts/run_text_edit_acceptance.sh": "8fbedb795e3736def13876069dd331e28f7713c43269fc705087f9475b821afc",
+    "/tmp/remotedesktop-repair-derived-data/Build/Products/Debug/RemoteDesktopHost.app/Contents/Resources/ComputerUseRuntime/llama-b9992/llama-server": "06992e12a67d9916f1bc66654faed597e42ff7732e98e172c3f3a18549423c96",
+    "/tmp/remotedesktop-signed-cached-package.log": "1818b442c66c5458a32aaa440e2bd9d6dd43289be9acc3d1a241b5d69b38a0d0",
+    "/tmp/remotedesktop-signed-native-live-v1.log": "3a5a123ce97e567d2e375ed7ad7070565f6f69abc171613955fe2c5267f894b2",
+    "/tmp/remotedesktop-signed-native-runtime-prerequisite-v1.log": "216dfa6de4c4b7ec3aa1864a4f2756e7cd9b8ed66ff8fe968c029cf5f1fc6a19",
+    "/tmp/remotedesktop-signed-package-python.log": "5957c1e93459c46b5eb3df3a14c58c339ce51231dc0c180eba5de1faf6d781ad",
+    "/tmp/remotedesktop-native-package-staging.json": "18ce39a89514e3e5693eeaaf41351dbd4cde3d9f0cb1b50b5001486df3cf6f34"
+  }
+}

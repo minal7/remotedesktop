@@ -20,6 +20,10 @@ actor ComputerUseInstaller {
     // treated as activation proof by this build.
     nonisolated static let deferredLegacyCleanupMarkerName = ".deferred-legacy-cleanup.json"
     nonisolated static let installationHeadroomBytes: Int64 = 1_000_000_000
+    /// A complete, checksum-verified package needs only legal files, an atomic
+    /// receipt and directory metadata. Keep margin without requiring another
+    /// model-sized allocation after an interrupted download has finished.
+    nonisolated static let cachedPackageHeadroomBytes: Int64 = 64 * 1_024 * 1_024
     private nonisolated static let processLaunchIdentifier = UUID().uuidString
 
     struct Update: Equatable, Sendable {
@@ -1405,6 +1409,17 @@ actor ComputerUseInstaller {
         let capacityProbeURL = Self.nearestExistingAncestor(
             of: rootDirectory,
             fileManager: fileManager)
+        let cachedPackageIsComplete = [activeModelComponents, stagingComponents].contains { directory in
+            manifest.modelArtifacts.allSatisfy { artifact in
+                (try? verifyReadOnly(artifact, directoryComponents: directory, rootPin: rootPin)) != nil
+            }
+        }
+        try Task.checkCancellation()
+        if cachedPackageIsComplete {
+            try ensureDiskCapacity(requiredBytes: Self.cachedPackageHeadroomBytes, at: capacityProbeURL)
+            try rootPin.validate()
+            return
+        }
         let reusableBytes = try legacyReusePlan(rootPin: rootPin)?
             .reusableByteCount ?? 0
         let totalBytes = manifest.modelArtifacts.reduce(Int64(0)) {
@@ -1829,6 +1844,10 @@ actor ComputerUseInstaller {
         at capacityProbeURL: URL
     ) throws {
         let required = Self.requiredDiskBytes(forModelBytes: modelBytes)
+        try ensureDiskCapacity(requiredBytes: required, at: capacityProbeURL)
+    }
+
+    private func ensureDiskCapacity(requiredBytes required: Int64, at capacityProbeURL: URL) throws {
         if let available = try operations.availableCapacity(capacityProbeURL),
            available < required {
             throw InstallError.insufficientDisk(
