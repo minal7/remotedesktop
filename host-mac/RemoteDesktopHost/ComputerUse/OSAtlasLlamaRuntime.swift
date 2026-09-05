@@ -2277,7 +2277,7 @@ private struct URLSessionOSAtlasTransportMaker: OSAtlasLlamaHTTPTransportMaking 
     }
 }
 
-private final class URLSessionOSAtlasTransport: OSAtlasLlamaHTTPTransport,
+final class URLSessionOSAtlasTransport: OSAtlasLlamaHTTPTransport, ComputerUseTextModelTransport,
     @unchecked Sendable {
     private struct LoadModelBody: Encodable {
         let model: String
@@ -2289,15 +2289,15 @@ private final class URLSessionOSAtlasTransport: OSAtlasLlamaHTTPTransport,
 
     private let session: URLSession
 
-    init() {
-        let configuration = URLSessionConfiguration.ephemeral
+    init(configuration: URLSessionConfiguration = .ephemeral) {
         configuration.urlCache = nil
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         configuration.httpCookieStorage = nil
         configuration.httpShouldSetCookies = false
         configuration.waitsForConnectivity = false
         configuration.connectionProxyDictionary = [:]
-        session = URLSession(configuration: configuration)
+        session = URLSession(configuration: configuration,
+                             delegate: LocalModelRedirectRejection(), delegateQueue: nil)
     }
 
     func health(baseURL: URL, bearerToken: String) async throws -> Bool {
@@ -2305,7 +2305,7 @@ private final class URLSessionOSAtlasTransport: OSAtlasLlamaHTTPTransport,
         var request = URLRequest(url: baseURL.appendingPathComponent("health"))
         request.timeoutInterval = 1
         request.setValue("Bearer \(bearerToken)", forHTTPHeaderField: "Authorization")
-        let (_, response) = try await session.data(for: request)
+        let (_, response) = try await boundedResponse(for: request, maximumBytes: 64 * 1_024)
         return (response as? HTTPURLResponse)?.statusCode == 200
     }
 
@@ -2328,7 +2328,7 @@ private final class URLSessionOSAtlasTransport: OSAtlasLlamaHTTPTransport,
         var request = URLRequest(url: url)
         request.timeoutInterval = 1
         request.setValue("Bearer \(bearerToken)", forHTTPHeaderField: "Authorization")
-        let (_, response) = try await session.data(for: request)
+        let (_, response) = try await boundedResponse(for: request, maximumBytes: 64 * 1_024)
         return (response as? HTTPURLResponse)?.statusCode == 200
     }
 
@@ -2378,7 +2378,7 @@ private final class URLSessionOSAtlasTransport: OSAtlasLlamaHTTPTransport,
             forHTTPHeaderField: "Authorization")
         request.httpBody = try JSONEncoder().encode(
             LoadModelBody(model: model.rawValue))
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await boundedResponse(for: request, maximumBytes: 64 * 1_024)
         guard (response as? HTTPURLResponse)?.statusCode == 200,
               data.count <= 64 * 1_024,
               let result = try? JSONDecoder().decode(
@@ -2399,7 +2399,7 @@ private final class URLSessionOSAtlasTransport: OSAtlasLlamaHTTPTransport,
             throw OSAtlasLlamaRuntimeError.invalidEndpoint
         }
         try OSAtlasLlamaRuntime.validateLoopbackEndpoint(baseURL)
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await boundedResponse(for: request, maximumBytes: 1_024 * 1_024)
         guard (response as? HTTPURLResponse)?.statusCode == 200,
               data.count <= 1_024 * 1_024 else {
             throw OSAtlasLlamaRuntimeError.invalidResponse
@@ -2412,8 +2412,8 @@ private final class URLSessionOSAtlasTransport: OSAtlasLlamaHTTPTransport,
     ) async throws -> Int {
         let templateRequest = try OSAtlasLlamaHTTPClient
             .makeSemanticTemplateRequest(from: completionRequest)
-        let (templateData, templateResponse) = try await session.data(
-            for: templateRequest)
+        let (templateData, templateResponse) = try await boundedResponse(
+            for: templateRequest, maximumBytes: OSAtlasLlamaHTTPClient.maximumTemplateResponseBytes)
         guard (templateResponse as? HTTPURLResponse)?.statusCode == 200,
               templateData.count
                 <= OSAtlasLlamaHTTPClient.maximumTemplateResponseBytes else {
@@ -2424,8 +2424,8 @@ private final class URLSessionOSAtlasTransport: OSAtlasLlamaHTTPTransport,
         let tokenizeRequest = try OSAtlasLlamaHTTPClient.makeTokenizeRequest(
             from: completionRequest,
             templatePrompt: prompt)
-        let (tokenData, tokenResponse) = try await session.data(
-            for: tokenizeRequest)
+        let (tokenData, tokenResponse) = try await boundedResponse(
+            for: tokenizeRequest, maximumBytes: OSAtlasLlamaHTTPClient.maximumTokenizeResponseBytes)
         guard (tokenResponse as? HTTPURLResponse)?.statusCode == 200,
               tokenData.count
                 <= OSAtlasLlamaHTTPClient.maximumTokenizeResponseBytes else {
@@ -2434,8 +2434,55 @@ private final class URLSessionOSAtlasTransport: OSAtlasLlamaHTTPTransport,
         return try OSAtlasLlamaHTTPClient.tokenCount(from: tokenData)
     }
 
+    /// Enforce the response limit while reading, including chunked responses
+    /// without a Content-Length. Collecting an unbounded body and checking its
+    /// size afterward does not establish a memory bound. Cancellation also
+    /// closes the actual request instead of merely abandoning the result.
+    private func boundedResponse(for request: URLRequest, maximumBytes: Int) async throws
+        -> (Data, URLResponse) {
+        let (bytes, response) = try await session.bytes(for: request)
+        defer { bytes.task.cancel() }
+        guard let http = response as? HTTPURLResponse else {
+            throw OSAtlasLlamaRuntimeError.invalidResponse
+        }
+        // No caller uses an error body. In particular, do not download one
+        // from a rejected redirect or failed local health endpoint.
+        guard http.statusCode == 200 else { return (Data(), response) }
+        guard response.expectedContentLength <= Int64(maximumBytes) else {
+            throw OSAtlasLlamaRuntimeError.invalidResponse
+        }
+        return try await withTaskCancellationHandler {
+            var data = Data()
+            if response.expectedContentLength > 0 {
+                data.reserveCapacity(Int(response.expectedContentLength))
+            }
+            for try await byte in bytes {
+                try Task.checkCancellation()
+                guard data.count < maximumBytes else {
+                    throw OSAtlasLlamaRuntimeError.invalidResponse
+                }
+                data.append(byte)
+            }
+            try Task.checkCancellation()
+            return (data, response)
+        } onCancel: {
+            bytes.task.cancel()
+        }
+    }
+
     func cancelAll() async {
         session.invalidateAndCancel()
+    }
+}
+
+/// Even a loopback request must never forward model inputs to a redirect.
+/// A separate stateless delegate avoids a session/transport retain cycle.
+private final class LocalModelRedirectRejection: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest,
+                    completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
+        completionHandler(nil)
     }
 }
 

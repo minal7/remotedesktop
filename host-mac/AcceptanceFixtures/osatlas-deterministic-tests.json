@@ -18,7 +18,8 @@
     "RemoteDesktopHostTests/ComputerUseLiteralPayloadTests",
     "RemoteDesktopHostTests/ComputerUseObservationWorkerTests",
     "RemoteDesktopHostTests/ComputerUseTextTaskTests",
-    "RemoteDesktopHostTests/ComputerUseTextStepStoreTests"
+    "RemoteDesktopHostTests/ComputerUseTextStepStoreTests",
+    "RemoteDesktopHostTests/ComputerUseLocalTextGoalPlannerTests"
   ],
   "expectedTests": [
     "RemoteDesktopHostTests/ComputerUseLiteralPayloadTests/testAmbiguousMultipleQuotesAreNotSilentlyAssignedToTheWrongField",
@@ -28,6 +29,16 @@
     "RemoteDesktopHostTests/ComputerUseLiteralPayloadTests/testShortQuotedRoutePreservesLeadingAndTrailingWhitespace",
     "RemoteDesktopHostTests/ComputerUseLiteralPayloadTests/testTrailingPathSeparatorAndNestedStraightQuotesRemainLiteral",
     "RemoteDesktopHostTests/ComputerUseLiteralPayloadTests/testWhitespaceOnlyLiteralIsAHostPayload",
+    "RemoteDesktopHostTests/ComputerUseLocalTextGoalPlannerTests/testAmbiguousLabelsCannotBeResolvedByChoosingAnOpaqueID",
+    "RemoteDesktopHostTests/ComputerUseLocalTextGoalPlannerTests/testExactPayloadsOrderedStepsAndUneditedFieldsRemainHostOwned",
+    "RemoteDesktopHostTests/ComputerUseLocalTextGoalPlannerTests/testInvalidOrExcessiveTokenCountsPreventInference",
+    "RemoteDesktopHostTests/ComputerUseLocalTextGoalPlannerTests/testLoopbackModelTransportNeverFollowsRedirects",
+    "RemoteDesktopHostTests/ComputerUseLocalTextGoalPlannerTests/testMalformedPartialOrInventedPlansCannotBecomeEdits",
+    "RemoteDesktopHostTests/ComputerUseLocalTextGoalPlannerTests/testModelInputMatchesFrozenContractWithoutExposingFieldValuesOrLiterals",
+    "RemoteDesktopHostTests/ComputerUseLocalTextGoalPlannerTests/testNonLoopbackOrUnscopedConnectionsAreRejectedBeforeTransport",
+    "RemoteDesktopHostTests/ComputerUseLocalTextGoalPlannerTests/testTransportCancellationClosesAnIncompleteResponse",
+    "RemoteDesktopHostTests/ComputerUseLocalTextGoalPlannerTests/testTransportStopsOversizedBodiesBeforeEOFIncludingChunkedResponses",
+    "RemoteDesktopHostTests/ComputerUseLocalTextGoalPlannerTests/testTruncatedOrWrongModelResponseIsRejectedEvenWithValidJSON",
     "RemoteDesktopHostTests/ComputerUseObservationWorkerTests/testBlockingObservationLeavesMainActorResponsiveAndTimesOut",
     "RemoteDesktopHostTests/ComputerUseObservationWorkerTests/testCancellationReturnsWithoutWaitingForBlockedNativeCall",
     "RemoteDesktopHostTests/ComputerUseTests/test_computerUseCommandShiftHotkeyPostsSKeyWithModifiers",

@@ -9,9 +9,13 @@ enum ComputerUseTextGoalProposal: Equatable, Sendable {
     case unsupported
 }
 
+protocol ComputerUseTextGoalPlanning: Sendable {
+    func propose(prompt: String, fields: [ComputerUseTextField]) async throws -> ComputerUseTextGoalProposal
+}
+
 /// A separate proposal-only capability with a small schema. It sees field
 /// labels and opaque IDs, never existing field values or arbitrary AX content.
-struct ComputerUseTextGoalPlanner {
+struct ComputerUseTextGoalPlanner: ComputerUseTextGoalPlanning {
     /// Tests may inspect proposal-only output. Production supplies no observer
     /// and never logs payloads or model-generated field data.
     var inspectProposal: (@Sendable (String) -> Void)? = nil

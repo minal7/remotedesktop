@@ -13,7 +13,18 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         try await runFixture(browser: true)
     }
 
-    private func runFixture(browser: Bool) async throws {
+    func testRealNativeNaturalLanguageGoalsAndResume() async throws {
+        try await runFixture(browser: false, localGoalsOnly: true)
+    }
+
+    func testRealBrowserNaturalLanguageGoalsAndResume() async throws {
+        try await runFixture(browser: true, localGoalsOnly: true)
+    }
+
+    private func runFixture(browser: Bool, localGoalsOnly: Bool = false) async throws {
+        if localGoalsOnly, ProcessInfo.processInfo.environment["RUN_NATIVE_TEXT_GOALS_LOCAL_ACCEPTANCE"] != "1" {
+            throw XCTSkip("Use run_native_text_model_acceptance.py for the real local planner and native effects")
+        }
         guard ProcessInfo.processInfo.environment["RUN_COMPUTER_USE_NATIVE_TEXT_ACCEPTANCE"] == "1" else {
             throw XCTSkip("Use host-mac/scripts/run_text_edit_acceptance.sh on a prepared Mac")
         }
@@ -52,6 +63,11 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         let tools = ComputerUseHostTools(injector: injector, mayAct: {
             NSWorkspace.shared.frontmostApplication?.processIdentifier == process.processIdentifier
         })
+        if localGoalsOnly {
+            try await runLocalGoals(browser: browser, pid: process.processIdentifier, state: state,
+                                    directory: directory, injector: injector, tools: tools)
+            return
+        }
         // The fixture reports values through its own app state, independently
         // of the Accessibility readback used by the production text editor.
         let exact = "  \nTokyo 東京 e\u{301} 👨‍👩‍👧‍👦 😀\n" + String(repeating: "x", count: 2_000) + "\n  "
@@ -119,18 +135,6 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         XCTAssertGreaterThan(postedChunks, 1)
         try await verify(state, field: "destination", equals: exact)
 
-        // Whole natural-language task through real proposal, AX discovery,
-        // journaled steps and independent final-state verification.
-        if ProcessInfo.processInfo.environment["RUN_NATIVE_TEXT_GOALS_MODEL_ACCEPTANCE"] == "1" {
-            let executor = ComputerUseNativeTextExecutor(injector: injector, mayAct: {
-                NSWorkspace.shared.frontmostApplication?.processIdentifier == process.processIdentifier
-            }, journalDirectory: directory.appendingPathComponent("steps"))
-            let result = try await executor.execute(taskID: "native-form-\(browser)",
-                prompt: "Set both Origin and Destination to San Francisco.", progress: { _ in })
-            guard case .completed = result else { return XCTFail("The complete field task must verify both edits") }
-            try await verify(state, field: "origin", equals: "San Francisco")
-            try await verify(state, field: "destination", equals: "San Francisco")
-        }
         let beforeReplacement = try XCTUnwrap(textTarget.snapshot())
         try "replace-destination".write(to: state.appendingPathExtension("command"), atomically: true, encoding: .utf8)
         var replaced = false
@@ -148,6 +152,245 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         XCTAssertTrue(afterReplacement.value.utf8.elementsEqual(beforeReplacement.value.utf8))
     }
 
+    private func runLocalGoals(browser: Bool, pid: pid_t, state: URL, directory: URL,
+                               injector: InputInjector, tools: ComputerUseHostTools) async throws {
+        let connectionFile = try XCTUnwrap(ProcessInfo.processInfo.environment["COMPUTER_USE_TEXT_MODEL_CONNECTION_FILE"])
+        let connectionData = try Data(contentsOf: URL(fileURLWithPath: connectionFile))
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: connectionData) as? [String: String])
+        let connection = try ComputerUseTextModelConnection(
+            baseURL: XCTUnwrap(URL(string: XCTUnwrap(object["baseURL"]))),
+            bearerToken: XCTUnwrap(object["bearerToken"]), modelAlias: XCTUnwrap(object["modelAlias"]))
+        let localPlanner = ComputerUseLocalTextGoalPlanner(connection: connection)
+        let countedPlanner = CountingNativeTextPlanner(localPlanner)
+        var allowed = true
+        let mayAct = { allowed && NSWorkspace.shared.frontmostApplication?.processIdentifier == pid }
+        let executor = ComputerUseNativeTextExecutor(injector: injector, mayAct: mayAct,
+            journalDirectory: directory.appendingPathComponent("steps"), planner: countedPlanner)
+        let corpusURL = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("AcceptanceFixtures/native-text-goals-v1.json")
+        let corpus = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: corpusURL)) as? [String: Any])
+        let cases = try XCTUnwrap(corpus["cases"] as? [[String: Any]])
+        let faultsOnly = ProcessInfo.processInfo.environment["COMPUTER_USE_TEXT_GOALS_FAULTS_ONLY"] == "1"
+        for item in cases where item["fault"] == nil && !faultsOnly {
+            let id = try XCTUnwrap(item["id"] as? String)
+            let initial = item["initial"] as? [String: String] ?? [:]
+            try await resetFields(initial, pid: pid, tools: tools)
+            var prompt = try XCTUnwrap(item["prompt"] as? String)
+            if item["payloadRecipe"] != nil {
+                prompt = prompt.replacingOccurrences(of: "PAYLOAD", with: "\"" + String(repeating: "x", count: 2_000) + "\"")
+            }
+            let started = ProcessInfo.processInfo.systemUptime
+            let result = try await executor.execute(taskID: id, prompt: prompt, progress: { _ in })
+            var expected = item["expected"] as? [String: String]
+                ?? ["origin": String(repeating: "x", count: 2_000), "destination": ""]
+            switch item["expectedOutcome"] as? String {
+            case "unsupportedWithoutEffects":
+                guard result == nil else { throw NativeTextFixtureFailure.unexpectedOutcome(id) }
+                expected = ["origin": initial["origin"] ?? "", "destination": initial["destination"] ?? ""]
+            case "clarificationWithoutEffects":
+                guard case .clarificationRequired = result else { return XCTFail("\(id): expected clarification") }
+                expected = ["origin": initial["origin"] ?? "", "destination": initial["destination"] ?? ""]
+            default:
+                guard case .completed = result else { return XCTFail("\(id): both field outcomes must be verified") }
+            }
+            for name in ["origin", "destination"] { try await verify(state, field: name, equals: expected[name] ?? "") }
+            reportGoal(browser: browser, id: id, elapsed: ProcessInfo.processInfo.systemUptime - started)
+        }
+
+        // Pausing after the first append makes a replay visibly wrong. Resume
+        // must use the retained contract without another inference.
+        try await resetFields(["origin": "A", "destination": "B"], pid: pid, tools: tools)
+        let prompt = "Append \"!\" to both Origin and Destination."
+        let beforeCalls = await countedPlanner.calls
+        do {
+            _ = try await executor.execute(taskID: "pause", prompt: prompt, verifiedStep: { complete, _ in
+                if complete == 1 { _ = injector.interruptAutomation { allowed = false; return true } }
+            }, progress: { _ in })
+            XCTFail("Expected pause between native edits")
+        } catch { XCTAssertEqual(error as? ComputerUseTextEditError, .interrupted) }
+        try await verify(state, field: "origin", equals: "A!")
+        try await verify(state, field: "destination", equals: "B")
+        allowed = true
+        let resumed = try await executor.execute(taskID: "pause", prompt: prompt, progress: { _ in })
+        guard case .completed = resumed else { return XCTFail("Resume must verify both outcomes") }
+        try await verify(state, field: "origin", equals: "A!")
+        try await verify(state, field: "destination", equals: "B!")
+        let afterCalls = await countedPlanner.calls
+        XCTAssertEqual(afterCalls, beforeCalls + 1, "Resume must not reconstruct the task with another model call")
+        reportGoal(browser: browser, id: "pause-resume", elapsed: nil)
+
+        // Both edits have happened, but completion still requires their final
+        // predicates. A user changing the first field during a pause must not
+        // be overwritten or hidden by the second field's successful edit.
+        try await resetFields([:], pid: pid, tools: tools)
+        let compound = "Set Origin to Oslo and Destination to Bergen."
+        var pausedAfterBothEdits = false
+        do {
+            let result = try await executor.execute(taskID: "changed-final", prompt: compound, verifiedStep: { complete, total in
+                if complete == total { _ = injector.interruptAutomation { allowed = false; return true } }
+            }, progress: { _ in })
+            XCTFail("N12: expected pause after both edits; actual result: \(String(describing: result))")
+        } catch {
+            pausedAfterBothEdits = error as? ComputerUseTextEditError == .interrupted
+            XCTAssertTrue(pausedAfterBothEdits, "N12: \(error)")
+        }
+        if pausedAfterBothEdits {
+            try await verify(state, field: "origin", equals: "Oslo")
+            try await verify(state, field: "destination", equals: "Bergen")
+            try await resetFields(["origin": "user changed this", "destination": "Bergen"], pid: pid, tools: tools)
+            allowed = true
+            do { _ = try await executor.execute(taskID: "changed-final", prompt: compound, progress: { _ in }); XCTFail("Changed final value must prevent completion") }
+            catch { XCTAssertEqual(error as? ComputerUseTextTaskError, .incompleteOutcome) }
+            try await verify(state, field: "origin", equals: "user changed this")
+            try await verify(state, field: "destination", equals: "Bergen")
+            reportGoal(browser: browser, id: "N12-changed-before-final-verification", elapsed: nil)
+        }
+        allowed = true
+
+        try await resetFields([:], pid: pid, tools: tools)
+        let observedTransport = ObservedNativeTextTransport()
+        let cancellable = ComputerUseNativeTextExecutor(injector: injector, mayAct: mayAct,
+            journalDirectory: directory.appendingPathComponent("cancel-inference"),
+            planner: ComputerUseLocalTextGoalPlanner(connection: connection, transport: observedTransport))
+        let inference = Task {
+            try await cancellable.execute(taskID: "cancel-inference", prompt: "Set both Origin and Destination to Helsinki.", progress: { _ in })
+        }
+        defer { inference.cancel() }
+        for _ in 0..<200 {
+            if await observedTransport.completions > 0 { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        let completionCalls = await observedTransport.completions
+        XCTAssertEqual(completionCalls, 1, "Cancellation must occur after the real completion request starts")
+        try await Task.sleep(for: .milliseconds(100))
+        let cancellationStart = ProcessInfo.processInfo.systemUptime
+        _ = injector.interruptAutomation { allowed = false; return true }
+        inference.cancel()
+        do { _ = try await inference.value; XCTFail("Cancelled inference must not produce effects") }
+        catch { XCTAssertTrue(error is CancellationError || (error as? URLError)?.code == .cancelled) }
+        let cancellationSeconds = ProcessInfo.processInfo.systemUptime - cancellationStart
+        XCTAssertLessThan(cancellationSeconds, 1)
+        try await verify(state, field: "origin", equals: "")
+        try await verify(state, field: "destination", equals: "")
+        reportGoal(browser: browser, id: "cancel-during-inference", elapsed: cancellationSeconds)
+        allowed = true
+
+        // Force the real Unicode fallback and interrupt while a key is held.
+        // The fixture must retain only a prefix and the journal must prevent a
+        // subsequent run from blindly replaying that possibly delivered edit.
+        let posted = NativeTextPostedEvents()
+        let unicodeInjector = InputInjector(eventPoster: { event in
+            posted.record(event)
+            event.post(tap: .cghidEventTap)
+        })
+        let unicodeTarget = ComputerUseAccessibilityTextTarget()
+        var stoppedDuringTyping = false
+        let unicode = ComputerUseNativeTextExecutor(injector: unicodeInjector, mayAct: mayAct,
+            journalDirectory: directory.appendingPathComponent("cancel-unicode"), planner: countedPlanner,
+            editOverride: { edit, _ in
+                let snapshot = try XCTUnwrap(unicodeTarget.snapshot())
+                let editor = ComputerUseTextEditor(read: { unicodeTarget.snapshot() },
+                    select: { unicodeTarget.select($0) }, replaceSelectedText: { _ in nil },
+                    postUnicode: { text in
+                        let interrupt = Task { @MainActor in
+                            for _ in 0..<200 {
+                                if posted.counts[0] >= 3 {
+                                    _ = unicodeInjector.interruptAutomation { allowed = false; return true }
+                                    stoppedDuringTyping = true
+                                    return
+                                }
+                                try await Task.sleep(for: .milliseconds(1))
+                            }
+                        }
+                        defer { interrupt.cancel() }
+                        let delivered = await unicodeInjector.applyTextPaced(text, ifAllowed: mayAct)
+                        try await interrupt.value
+                        guard delivered else { throw ComputerUseTextEditError.interrupted }
+                    }, mayAct: mayAct)
+                try await editor.edit(edit.text, mode: edit.mode, expected: snapshot)
+            })
+        let unicodePrompt = "Set Destination to \"" + String(repeating: "x", count: 100) + "\"."
+        do { _ = try await unicode.execute(taskID: "cancel-unicode", prompt: unicodePrompt, progress: { _ in }); XCTFail("Expected interrupted Unicode delivery") }
+        catch { XCTAssertEqual(error as? ComputerUseTextEditError, .interrupted) }
+        XCTAssertTrue(stoppedDuringTyping)
+        let postedAtStop = posted.counts
+        XCTAssertGreaterThanOrEqual(postedAtStop[0], 3)
+        XCTAssertEqual(postedAtStop[0], postedAtStop[1], "Every posted key-down must have exactly one release")
+        try await Task.sleep(for: .milliseconds(100))
+        let partialState = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: state)) as? [String: Any])
+        let prefix = try XCTUnwrap(partialState["destination"] as? String)
+        XCTAssertFalse(prefix.isEmpty, "The independent fixture must prove actual partial delivery")
+        XCTAssertLessThan(prefix.count, 100)
+        XCTAssertTrue(prefix.allSatisfy { $0 == "x" })
+        allowed = true
+        do { _ = try await unicode.execute(taskID: "cancel-unicode", prompt: unicodePrompt, progress: { _ in }); XCTFail("Partial input must be reconciled without replay") }
+        catch { XCTAssertEqual(error as? ComputerUseTextTaskError, .uncertainEffect) }
+        XCTAssertEqual(posted.counts, postedAtStop)
+        try await verify(state, field: "destination", equals: prefix)
+        try await verify(state, field: "origin", equals: "")
+        reportGoal(browser: browser, id: "cancel-during-unicode-without-replay", elapsed: nil)
+
+        // A faulted delivery adapter changes the real fixture to a partial
+        // value. Retrying the same task must reconcile it as uncertain.
+        try await resetFields([:], pid: pid, tools: tools)
+        var deliveries = 0
+        let partial = ComputerUseNativeTextExecutor(injector: injector, mayAct: mayAct,
+            journalDirectory: directory.appendingPathComponent("partial"), planner: countedPlanner,
+            editOverride: { edit, _ in
+                deliveries += 1
+                XCTAssertEqual(edit.text, "Madrid")
+                try await tools.editFocusedText("Ma", mode: .replaceAll)
+                throw ComputerUseTextEditError.deliveryUncertain
+            })
+        do { _ = try await partial.execute(taskID: "partial", prompt: "Set Destination to Madrid.", progress: { _ in }); XCTFail("Expected partial input") }
+        catch { XCTAssertEqual(error as? ComputerUseTextEditError, .deliveryUncertain) }
+        do { _ = try await partial.execute(taskID: "partial", prompt: "Set Destination to Madrid.", progress: { _ in }); XCTFail("Expected reconciliation") }
+        catch { XCTAssertEqual(error as? ComputerUseTextTaskError, .uncertainEffect) }
+        XCTAssertEqual(deliveries, 1)
+        try await verify(state, field: "origin", equals: "")
+        try await verify(state, field: "destination", equals: "Ma")
+        reportGoal(browser: browser, id: "partial-without-replay", elapsed: nil)
+
+        // Replace the actual target after inference returns and before the
+        // executor's preflight. Same label/value/geometry must not revive it.
+        try await resetFields([:], pid: pid, tools: tools)
+        let replacingPlanner = CountingNativeTextPlanner(localPlanner) {
+            try "replace-origin".write(to: state.appendingPathExtension("command"), atomically: true, encoding: .utf8)
+            for _ in 0..<100 {
+                if let data = try? Data(contentsOf: state),
+                   let stateObject = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   stateObject["generation"] as? Int == 1 { return }
+                try await Task.sleep(for: .milliseconds(25))
+            }
+            throw NativeTextFixtureFailure.replacementTimedOut
+        }
+        let stale = ComputerUseNativeTextExecutor(injector: injector, mayAct: mayAct,
+            journalDirectory: directory.appendingPathComponent("stale"), planner: replacingPlanner)
+        do { _ = try await stale.execute(taskID: "stale", prompt: "Set Origin to Lisbon.", progress: { _ in }); XCTFail("Expected stale target") }
+        catch { XCTAssertEqual(error as? ComputerUseTextTaskError, .staleTarget) }
+        try await verify(state, field: "origin", equals: "")
+        try await verify(state, field: "destination", equals: "")
+        reportGoal(browser: browser, id: "replaced-after-inference", elapsed: nil)
+    }
+
+    private func resetFields(_ values: [String: String], pid: pid_t, tools: ComputerUseHostTools) async throws {
+        let root = AXUIElementCreateApplication(pid)
+        for name in ["origin", "destination"] {
+            let element = try XCTUnwrap(findElement(id: name, root: root))
+            XCTAssertEqual(AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue), .success)
+            try await Task.sleep(for: .milliseconds(75))
+            try await tools.editFocusedText(values[name] ?? "", mode: .replaceAll)
+            var range = CFRange(location: 0, length: 0)
+            let selection = try XCTUnwrap(AXValueCreate(.cfRange, &range))
+            XCTAssertEqual(AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, selection), .success)
+        }
+    }
+
+    private func reportGoal(browser: Bool, id: String, elapsed: TimeInterval?) {
+        let duration = elapsed.map { String(format: " %.3f s", $0) } ?? ""
+        FileHandle.standardError.write(Data("Native goal \(browser ? "WebKit" : "AppKit") \(id): verified\(duration)\n".utf8))
+    }
+
     private func verify(_ state: URL, field: String, equals expected: String) async throws {
         for _ in 0 ..< 100 {
             if let bytes = try? Data(contentsOf: state),
@@ -156,7 +399,7 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
                actual.utf8.elementsEqual(expected.utf8) { return }
             try await Task.sleep(for: .milliseconds(20))
         }
-        XCTFail("The fixture app did not report the exact intended value for \(field)")
+        throw NativeTextFixtureFailure.valueDidNotMatch(field)
     }
 
     private func findElement(id: String, root: AXUIElement) -> AXUIElement? {
@@ -179,4 +422,50 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         return nil
     }
 
+}
+
+private enum NativeTextFixtureFailure: Error {
+    case replacementTimedOut, valueDidNotMatch(String), unexpectedOutcome(String)
+}
+
+private final class NativeTextPostedEvents: @unchecked Sendable {
+    private let lock = NSLock()
+    private var down = 0
+    private var up = 0
+    var counts: [Int] { lock.withLock { [down, up] } }
+    func record(_ event: CGEvent) {
+        lock.withLock {
+            if event.type == .keyDown { down += 1 }
+            if event.type == .keyUp { up += 1 }
+        }
+    }
+}
+
+private actor ObservedNativeTextTransport: ComputerUseTextModelTransport {
+    let wrapped = URLSessionOSAtlasTransport()
+    private(set) var completions = 0
+    func exactInputTokenCount(completionRequest: URLRequest) async throws -> Int {
+        try await wrapped.exactInputTokenCount(completionRequest: completionRequest)
+    }
+    func complete(request: URLRequest) async throws -> Data {
+        completions += 1
+        return try await wrapped.complete(request: request)
+    }
+}
+
+private actor CountingNativeTextPlanner: ComputerUseTextGoalPlanning {
+    let wrapped: any ComputerUseTextGoalPlanning
+    let afterProposal: @MainActor @Sendable () async throws -> Void
+    private(set) var calls = 0
+    init(_ wrapped: any ComputerUseTextGoalPlanning,
+         afterProposal: @escaping @MainActor @Sendable () async throws -> Void = {}) {
+        self.wrapped = wrapped
+        self.afterProposal = afterProposal
+    }
+    func propose(prompt: String, fields: [ComputerUseTextField]) async throws -> ComputerUseTextGoalProposal {
+        calls += 1
+        let proposal = try await wrapped.propose(prompt: prompt, fields: fields)
+        try await afterProposal()
+        return proposal
+    }
 }

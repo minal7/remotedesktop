@@ -7,7 +7,7 @@ final class FixtureDelegate: NSObject, NSApplicationDelegate, WKNavigationDelega
     let stateURL: URL
     let window = NSWindow(contentRect: NSRect(x: 220, y: 260, width: 640, height: 300),
                           styleMask: [.titled, .closable], backing: .buffered, defer: false)
-    let origin = NSTextView(frame: .zero)
+    var origin = NSTextView(frame: .zero)
     var destination = NSTextView(frame: .zero)
     var timer: Timer?
     var webView: WKWebView?
@@ -99,31 +99,33 @@ final class FixtureDelegate: NSObject, NSApplicationDelegate, WKNavigationDelega
     func consumeCommand() {
         let commandURL = stateURL.appendingPathExtension("command")
         guard let command = try? String(contentsOf: commandURL, encoding: .utf8),
-              command != lastCommand, command == "replace-destination" else { return }
+              command != lastCommand, ["replace-origin", "replace-destination"].contains(command) else { return }
         lastCommand = command
+        let id = command == "replace-origin" ? "origin" : "destination"
         if let webView {
             webView.evaluateJavaScript("""
-                (()=>{const old=document.getElementById('destination');const next=old.cloneNode(true);
+                (()=>{const id='\(id)';const old=document.getElementById(id);const next=old.cloneNode(true);
                 next.value=old.value;const start=old.selectionStart,end=old.selectionEnd;
-                next.addEventListener('input',e=>{window.formState.destination=e.target.value});
+                next.addEventListener('input',e=>{window.formState[id]=e.target.value});
                 old.replaceWith(next);next.focus();next.setSelectionRange(start,end);return true})()
                 """) { [weak self] result, error in
                     if error == nil, result as? Bool == true { self?.generation += 1 }
                 }
         } else {
-            let next = NSTextView(frame: destination.frame)
-            next.string = destination.string
-            next.setAccessibilityIdentifier("destination")
-            next.setAccessibilityLabel("Destination")
-            next.font = destination.font
+            let old = id == "origin" ? origin : destination
+            let next = NSTextView(frame: old.frame)
+            next.string = old.string
+            next.setAccessibilityIdentifier(id)
+            next.setAccessibilityLabel(id.capitalized)
+            next.font = old.font
             next.isRichText = false
             next.isAutomaticQuoteSubstitutionEnabled = false
             next.isAutomaticDashSubstitutionEnabled = false
             next.isAutomaticTextReplacementEnabled = false
             next.isAutomaticSpellingCorrectionEnabled = false
-            next.setSelectedRange(destination.selectedRange())
-            destination.superview?.replaceSubview(destination, with: next)
-            destination = next
+            next.setSelectedRange(old.selectedRange())
+            old.superview?.replaceSubview(old, with: next)
+            if id == "origin" { origin = next } else { destination = next }
             window.makeFirstResponder(next)
             generation += 1
         }
