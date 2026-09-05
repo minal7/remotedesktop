@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "contract": "candidate-v2",
+  "sourceCommit": "26fdf19",
+  "status": "frozen-before-first-baseline-comparison",
+  "corpus": "host-mac/AcceptanceFixtures/native-text-v2-source-bound-failure-comparison.json",
+  "corpusSHA256": "40a69d8ef1835ce6a7adea91ec9a252a83d50ef81b2940bbd86c3acd229b143b",
+  "caseIDs": [
+    "H504",
+    "H515",
+    "H516",
+    "H520"
+  ],
+  "selection": "Failures observed in the new source-bound-v6 corpus. This selection is diagnostic regression data, not held out.",
+  "desktopEffects": false,
+  "quotedCommandFastPath": false,
+  "systemInstructionSHA256": "f2c43600e2302139c363d0d210d6e2d2fdf12a76abaaa4b52327bc59bb06666b"
+}
