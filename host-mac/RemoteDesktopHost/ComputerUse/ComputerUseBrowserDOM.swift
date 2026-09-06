@@ -1,7 +1,7 @@
 import Foundation
 import WebKit
 
-enum ComputerUseBrowserDOMCommand: String { case fields, read, edit, receipt }
+enum ComputerUseBrowserDOMCommand: String { case fields, read, edit, receipt, reobserve }
 
 struct ComputerUseBrowserDOMReply: Decodable {
     struct Field: Decodable {
@@ -124,8 +124,17 @@ enum ComputerUseBrowserDOM {
                 selectionStart: start === null ? -1 : start,
                 selectionEnd: end === null ? -1 : end};
       }
-      function fields() {
-        bindings.clear(); operations.clear();
+      function fields(expectedIDs) {
+        let retained = null;
+        if (expectedIDs !== undefined) {
+          if (!Array.isArray(expectedIDs) || expectedIDs.length < 1 || expectedIDs.length > 16 || new Set(expectedIDs).size !== expectedIDs.length) return reply('unsupported');
+          retained = new Map();
+          for (const id of expectedIDs) {
+            const binding = bindings.get(id);
+            if (!binding || !binding.valid || retained.has(binding.element)) return reply('stale');
+            retained.set(binding.element, binding);
+          }
+        } else { bindings.clear(); operations.clear(); }
         const found = [], walkers = [doc.createTreeWalker(doc, NodeFilter.SHOW_ELEMENT)];
         let count = 0, totalBytes = 0;
         while (walkers.length) {
@@ -140,14 +149,15 @@ enum ComputerUseBrowserDOM {
           if (!editable(element)) continue;
           const {label, labels} = labelFor(element);
           if (!label || encoder.encode(label).length > 256) { bindings.clear(); return reply('unsupported'); }
-          const id = 'e' + (++nextID);
-          const binding = {id, element, form: element.form, label, labels, shape: shape(element), valid: true};
+          const binding = retained ? retained.get(element) : {id: 'e' + (++nextID), element, form: element.form, label, labels, shape: shape(element), valid: true};
+          if (!binding) return reply('stale');
           const field = snapshot(binding);
           if (!field || found.length >= 16) { bindings.clear(); return reply('limit'); }
           totalBytes += encoder.encode(field.value).length;
           if (totalBytes > 1048576) { bindings.clear(); return reply('limit'); }
-          bindings.set(id, binding); found.push(field);
+          bindings.set(binding.id, binding); found.push(field);
         }
+        if (retained && found.length !== retained.size) return reply('stale');
         return reply('ok', found);
       }
       function run(command, args) {
@@ -155,6 +165,10 @@ enum ComputerUseBrowserDOM {
         if (!root || doc !== document) return reply('stale');
         if (command === 'fields') return fields();
         if (args.documentID !== documentID) return reply('stale');
+        if (command === 'reobserve') {
+          if (!Array.isArray(args.ids)) return reply('unsupported');
+          return fields(args.ids);
+        }
         if (command === 'receipt') {
           if (typeof args.operationID !== 'string' || args.operationID.length !== 64) return reply('unsupported');
           return reply(operations.get(args.operationID) === 'dispatched' ? 'dispatched' : 'unproven');
@@ -228,6 +242,47 @@ final class ComputerUseBrowserTextTarget {
             result.append(.init(label: field.label, snapshot: try snapshot(field, targetID: id)))
         }
         return result
+    }
+
+    /// Identity of the retained form, independent of a later answer's task
+    /// ID and current field values. Re-observation still has to validate every
+    /// retained DOM object; a digest alone does not prove current membership.
+    func clarificationScope() throws -> String {
+        try validate()
+        guard let documentID, !targets.isEmpty else { throw ComputerUseBrowserError.unsupportedDocument }
+        // Browser generation also advances when ownership transfers to a new
+        // task. validate() checks that lease; the isolated document nonce and
+        // retained object IDs bind the form across an authorized transfer.
+        return ComputerUseTaskContract.digest(["owned-form-clarification-v1", document.contextID,
+            documentID] + targets.values.sorted())
+    }
+
+    /// Transfer one unchanged retained form to an explicitly claimed answer
+    /// task. This reads fresh values without rediscovering replacement objects
+    /// or clearing operation receipts. A failed transfer starts no input.
+    func continuingForClarification(taskID: String) async throws
+        -> (target: ComputerUseBrowserTextTarget, fields: [ComputerUseTextField]) {
+        try validate()
+        guard !taskID.isEmpty, taskID != document.taskID, let documentID, !targets.isEmpty else {
+            throw ComputerUseBrowserError.pageChanged
+        }
+        let nextDocument = try browser.acquireCurrentDocument(taskID: taskID)
+        let next = ComputerUseBrowserTextTarget(browser: browser, document: nextDocument, requiresFrontmost: requiresFrontmost)
+        next.documentID = documentID
+        next.targets = targets
+        let reply = try await browser.callDOM(.reobserve,
+            arguments: ["documentID": documentID, "ids": targets.values.sorted()], document: nextDocument)
+        try next.validate()
+        guard reply.status == "ok", reply.documentID == documentID, let fields = reply.fields,
+              fields.count == targets.count, Set(fields.map(\.id)) == Set(targets.values) else {
+            throw ComputerUseBrowserError.pageChanged
+        }
+        let identities = Dictionary(uniqueKeysWithValues: targets.map { ($0.value, $0.key) })
+        let refreshed = try fields.map { field -> ComputerUseTextField in
+            guard let id = identities[field.id] else { throw ComputerUseBrowserError.pageChanged }
+            return .init(label: field.label, snapshot: try next.snapshot(field, targetID: id))
+        }
+        return (next, refreshed)
     }
 
     func read(targetID: String) async throws -> ComputerUseTextSnapshot? {

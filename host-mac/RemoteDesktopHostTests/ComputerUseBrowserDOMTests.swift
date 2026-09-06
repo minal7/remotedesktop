@@ -3,6 +3,63 @@ import XCTest
 
 @MainActor
 final class ComputerUseBrowserDOMTests: XCTestCase {
+    func testClarificationTransferPreservesObjectsReadsFreshValuesAndRetiresOldTaskAuthority() async throws {
+        let fixture = try await DOMFixture(body: """
+            <label>Origin<input id="target" value="old"></label><label>Destination<input value="keep"></label>
+            <script>document.querySelector('#target').addEventListener('input', e => fetch('/edited?value=' + encodeURIComponent(e.target.value)));
+            fetch('/signal').then(() => { document.querySelector('#target').value = 'changed while answering'; fetch('/changed'); });</script>
+            """, heldSignal: true)
+        defer { fixture.close() }
+        let before = try await fixture.target.fields(), scope = try fixture.target.clarificationScope()
+        let priorOperation = ComputerUseTaskContract.digest(["completed-before-clarification"])
+        try await fixture.target.apply(.init(targetID: before[0].snapshot.targetID, mode: .replaceAll, text: "old"),
+            expected: before[0].snapshot, operationID: priorOperation)
+        try await fixture.wait { fixture.editedValues == ["old"] }
+        try await fixture.wait { fixture.server.count("/signal") == 1 }
+        fixture.server.releaseHeldResponses()
+        try await fixture.wait { fixture.server.count("/changed") == 1 }
+        let next = try await fixture.target.continuingForClarification(taskID: "answer")
+        XCTAssertEqual(next.fields.map { $0.snapshot.targetID }, before.map { $0.snapshot.targetID })
+        XCTAssertEqual(next.fields[0].snapshot.value, "changed while answering")
+        XCTAssertEqual(try next.target.clarificationScope(), scope)
+        XCTAssertEqual(fixture.editedValues, ["old"], "Refreshing a clarification must not dispatch input")
+        let receiptSurvived = try await next.target.didDispatchInput(operationID: priorOperation)
+        XCTAssertTrue(receiptSurvived, "Re-observation must not erase completed input receipts")
+        do { _ = try await fixture.target.read(targetID: before[0].snapshot.targetID); XCTFail("The old task must lose authority") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+        let current = next.fields[0].snapshot
+        try await next.target.apply(.init(targetID: current.targetID, mode: .replaceAll, text: "answer applied"),
+            expected: current, operationID: ComputerUseTaskContract.digest(["clarification-answer"]))
+        try await fixture.wait { fixture.editedValues == ["old", "answer applied"] }
+        XCTAssertEqual(fixture.editedValues.count, 2)
+    }
+
+    func testClarificationTransferRejectsChangedFieldMembershipIdentityLabelsAndDocumentRoot() async throws {
+        let changes = [
+            "field.replaceWith(field.cloneNode(true));",
+            "field.remove(); document.querySelector('#first').appendChild(field);",
+            "document.querySelector('#first').firstChild.textContent = 'Renamed';",
+            "document.body.appendChild(document.querySelector('#first').cloneNode(true));",
+            "field.style.display = 'none';",
+            "document.documentElement.replaceWith(document.documentElement.cloneNode(true));"
+        ]
+        for change in changes {
+            let fixture = try await DOMFixture(body: """
+                <label id="first">Origin<input id="target" value="old"></label><label>Destination<input value="keep"></label>
+                <script>document.querySelector('#target').addEventListener('input', () => fetch('/input-event'));
+                fetch('/signal').then(() => { const field = document.querySelector('#target'); \(change) fetch('/changed'); });</script>
+                """, heldSignal: true)
+            defer { fixture.close() }
+            _ = try await fixture.target.fields()
+            try await fixture.wait { fixture.server.count("/signal") == 1 }
+            fixture.server.releaseHeldResponses()
+            try await fixture.wait { fixture.server.count("/changed") == 1 }
+            do { _ = try await fixture.target.continuingForClarification(taskID: "answer"); XCTFail("A changed form cannot inherit the pending goal: \(change)") }
+            catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+            XCTAssertEqual(fixture.server.count("/input-event"), 0)
+        }
+    }
+
     func testLiteralNoOpReceiptReconcilesCancelledInputAndRequiresEveryRepeatedEvent() async throws {
         var running: Task<Void, Error>?
         let fixture = try await DOMFixture(body: """
