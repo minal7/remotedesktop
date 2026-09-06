@@ -56,7 +56,8 @@ struct ComputerUseTextPayloadCatalog {
     let projectedTask: String
     let projectedUserTurns: [String]
     let payloads: [String: String]
-    private let unquotedSegments: [String]
+    private let unquotedSegments: [(turn: Int, text: String)]
+    private let originalRequest: String
 
     init(_ task: String) throws {
         try self.init(userTurns: [task])
@@ -72,8 +73,8 @@ struct ComputerUseTextPayloadCatalog {
         var projections: [String] = []
         var values: [String: String] = [:]
         var nextPayloadID = 1
-        var segments: [String] = []
-        for task in userTurns {
+        var segments: [(turn: Int, text: String)] = []
+        for (turn, task) in userTurns.enumerated() {
             var projection = ""
             var cursor = task.startIndex
             var segment = ""
@@ -100,13 +101,13 @@ struct ComputerUseTextPayloadCatalog {
                 let id = "p\(nextPayloadID)"
                 nextPayloadID += 1
                 values[id] = text
-                if !segment.isEmpty { segments.append(segment); segment = "" }
+                if !segment.isEmpty { segments.append((turn, segment)); segment = "" }
                 // The position of the reference preserves which field/clause owns
                 // the literal. The model never has to reproduce its bytes.
                 projection += "[exact quoted payload \(id)]"
                 cursor = task.index(after: end)
             }
-            if !segment.isEmpty { segments.append(segment) }
+            if !segment.isEmpty { segments.append((turn, segment)) }
             projections.append(projection)
         }
         projectedUserTurns = projections
@@ -116,6 +117,7 @@ struct ComputerUseTextPayloadCatalog {
         projectedTask = projections.joined(separator: "\n")
         payloads = values
         unquotedSegments = segments
+        originalRequest = userTurns[0]
     }
 
     /// A source span must come from the user's words, not from a generated
@@ -123,8 +125,20 @@ struct ComputerUseTextPayloadCatalog {
     /// All text planners use this authority check before returning a literal.
     func resolveUnquoted(_ text: String) -> String? {
         guard !text.isEmpty, text.utf8.count <= 512,
-              unquotedSegments.contains(where: { Data($0.utf8).range(of: Data(text.utf8)) != nil }) else { return nil }
+              unquotedSegments.contains(where: { Data($0.text.utf8).range(of: Data(text.utf8)) != nil }) else { return nil }
         return text
+    }
+
+    /// Byte provenance alone cannot make the entire initial command its own
+    /// literal argument. A separate answer can supply those bytes as data.
+    /// This narrow ambiguity check does not establish roles for other spans.
+    func unquotedValueConsumesOriginalRequest(_ text: String) -> Bool {
+        let trim = CharacterSet.whitespacesAndNewlines
+        guard Data(text.trimmingCharacters(in: trim).utf8)
+                == Data(originalRequest.trimmingCharacters(in: trim).utf8) else { return false }
+        return !unquotedSegments.contains {
+            $0.turn > 0 && Data($0.text.utf8).range(of: Data(text.utf8)) != nil
+        }
     }
 
     func resolve(reference: String, userText: String, originalTask: String) -> String? {

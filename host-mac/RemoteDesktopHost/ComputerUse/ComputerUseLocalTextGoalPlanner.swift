@@ -311,6 +311,7 @@ struct ComputerUseLocalTextGoalPlanner: ComputerUseTextGoalPlanning {
             }
             guard disposition == "supported", (1...8).contains(values.count) else { throw ComputerUseLocalTextPlanError.invalidResponse }
             var edits: [ComputerUseTextPlanEdit] = []
+            var needsValueClarification = false
             for value in values {
                 guard case .object(let item) = value, Set(item.keys) == ["fieldID", "mode", "value"],
                       case .string(let id)? = item["fieldID"],
@@ -324,8 +325,12 @@ struct ComputerUseLocalTextGoalPlanner: ComputerUseTextGoalPlanning {
                 let reference = catalog.payloads[textValue] == nil ? "" : textValue
                 guard let text = catalog.resolve(reference: reference, userText: reference.isEmpty ? textValue : "",
                                                  originalTask: catalog.projectedTask) else { throw ComputerUseLocalTextPlanError.invalidResponse }
+                if reference.isEmpty && catalog.unquotedValueConsumesOriginalRequest(text) {
+                    needsValueClarification = true
+                }
                 edits.append(ComputerUseTextPlanEdit(targetID: field.snapshot.targetID, mode: mode, text: text))
             }
+            guard !needsValueClarification else { return .clarification }
             // This capability's write footprint is exactly the edited fields.
             // Preserve every other discovered field as a final predicate too.
             let editedIDs = Set(edits.map(\.targetID))

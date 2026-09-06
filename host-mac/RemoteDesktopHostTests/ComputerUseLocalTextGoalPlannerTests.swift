@@ -6,6 +6,82 @@ import XCTest
 
 @MainActor
 final class ComputerUseLocalTextGoalPlannerTests: XCTestCase {
+    func testObservedWholeInstructionProposalAsksBeforeAnyBrowserInputOrJournal() async throws {
+        var stage = "start fixture"
+        do {
+            let server = try OwnedBrowserHTTPFixture(routes: ["/form": .init(body: """
+                <!doctype html><label>Notes<input value="keep notes"></label><label>Tag<input value="keep tag"></label>
+                <script>document.querySelectorAll('input').forEach(e => e.addEventListener('input', () => fetch('/input-event')));</script>
+                """)])
+            let base = try await server.start()
+            var dispatchedEdits = 0
+            let browser = ComputerUseOwnedBrowser(presentsWindow: false, domScriptDidDispatch: {
+                if $0 == .edit { dispatchedEdits += 1 }
+            }, mayAct: { true })
+            defer { browser.close(); server.stop() }
+            stage = "navigate to form"
+            try browser.claim(taskID: "q911")
+            let document = try await browser.navigate(taskID: "q911", operationID: "open", to: base.appendingPathComponent("form"))
+            let target = ComputerUseBrowserTextTarget(browser: browser, document: document, requiresFrontmost: false)
+            let response = try envelope(#"{"disposition":"supported","edits":[{"fieldID":"f1","mode":"replaceAll","value":"Put this exact text in Notes."}]}"#)
+            let transport = FixedTextTransport(response: response)
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            stage = "construct native executor"
+            let executor = ComputerUseNativeTextExecutor(injector: InputInjector(), mayAct: { true }, journalDirectory: directory,
+                planner: try planner(transport: transport, contract: .candidateV2),
+                editOverride: { _, _ in XCTFail("Clarification cannot inject AX text") }, browserTargetProvider: { _ in target })
+            stage = "execute proposal"
+            let result = try await executor.execute(taskID: "q911", prompt: "Put this exact text in Notes.",
+                verifiedStep: { _, _ in XCTFail("No text step is authorized") }, progress: { _ in })
+            guard case .clarificationRequired = result else { return XCTFail("The observed wrong plan must become a no-effect clarification") }
+            stage = "read unchanged form"
+            let observed = try await ComputerUseBrowserTextTarget(browser: browser, document: document,
+                requiresFrontmost: false).fields()
+            XCTAssertEqual(observed.map { $0.snapshot.value }, ["keep notes", "keep tag"])
+            XCTAssertEqual(dispatchedEdits, 0); XCTAssertEqual(server.count("/input-event"), 0)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+            let completions = await transport.completions
+            XCTAssertEqual(completions, 1)
+        } catch { XCTFail("Whole-request guard fixture failed during \(stage): \(error)") }
+    }
+
+    func testWholeInitialInstructionRequiresASeparateLiteralInsteadOfBecomingInput() async throws {
+        for prompt in ["Put this exact text in Notes.", "  Put this exact text in Notes.\n", "把这段文字放入 Notes。", "Notes"] {
+            let value = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+            let content = String(decoding: try JSONSerialization.data(withJSONObject: ["disposition":"supported", "edits":[
+                ["fieldID":"f1", "mode":"replaceAll", "value":value]]]), as: UTF8.self)
+            let transport = FixedTextTransport(response: try envelope(content))
+            let result = try await planner(transport: transport, contract: .candidateV2).propose(prompt: prompt, fields: fields(labels: ["Notes", "Tag"]))
+            XCTAssertEqual(result, .clarification, "The command has no separate literal argument")
+            // Origin checking is still independent: it proves where bytes
+            // occur, while the decoder decides this plan needs clarification.
+            XCTAssertEqual(try ComputerUseTextPayloadCatalog(prompt).resolveUnquoted(value), value)
+        }
+    }
+
+    func testWholeInstructionGuardPreservesSeparateQuotedValuesAndExactAnswers() async throws {
+        let instruction = "Put this exact text in Notes."
+        let cases: [(ComputerUseUnresolvedTextGoal, String, String)] = [
+            (try .init(userRequest: "Set Notes to Oslo."), "Oslo", "Oslo"),
+            (try .init(userRequest: "Set Notes to \"" + instruction + "\"."), "p1", instruction),
+            (try ComputerUseUnresolvedTextGoal(userRequest: instruction).answering("What exact text?", with: instruction), instruction, instruction),
+            (try ComputerUseUnresolvedTextGoal(userRequest: instruction).answering("What exact text?", with: "  e\u{301} 😀\n"), "  e\u{301} 😀\n", "  e\u{301} 😀\n"),
+            (try ComputerUseUnresolvedTextGoal(userRequest: instruction).answering("What exact text?", with: "\"" + instruction + "\""), "p1", instruction)
+        ]
+        for (goal, value, expected) in cases {
+            let content = String(decoding: try JSONSerialization.data(withJSONObject: ["disposition":"supported", "edits":[
+                ["fieldID":"f1", "mode":"replaceAll", "value":value]]]), as: UTF8.self)
+            let transport = FixedTextTransport(response: try envelope(content))
+            let result = try await planner(transport: transport, contract: .candidateV2).propose(goal: goal, fields: fields(labels: ["Notes", "Tag"]))
+            guard case .edits(let edits, let unchanged) = result else { return XCTFail("A separately supplied literal should remain available") }
+            XCTAssertEqual(edits.count, 1); XCTAssertTrue(edits[0].text.utf8.elementsEqual(expected.utf8))
+            XCTAssertEqual(edits[0].targetID, "private-ax-0"); XCTAssertEqual(unchanged, ["private-ax-1"])
+        }
+        let questionOnly = try ComputerUseUnresolvedTextGoal(userRequest: instruction).answering(instruction, with: "Tag")
+        XCTAssertTrue(try ComputerUseTextPayloadCatalog(goal: questionOnly).unquotedValueConsumesOriginalRequest(instruction))
+    }
+
     func testSingleTurnGoalLeavesTheExistingRequestByteIdentical() async throws {
         let response = try envelope(#"{"disposition":"unsupported","edits":[]}"#)
         let transport = FixedTextTransport(response: response)

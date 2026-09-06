@@ -61,6 +61,65 @@ final class ComputerUseSourceBoundTextModelAcceptanceTests: XCTestCase {
         XCTAssertTrue(goal.userTurns[2].utf8.elementsEqual("  e\u{301} 😀\n  ".utf8))
     }
 
+    func testRetainedClarificationProposalsChangeOnlyTheWholeInstructionDecisionWithoutNewInference() throws {
+        struct CapturedProposal: Decodable { let content: String; let finishReason: String }
+        struct CapturedCase: Decodable {
+            let id: String; let disposition: String; let edits: [Edit]; let proposal: CapturedProposal
+        }
+        struct CapturedBatch: Decodable { let cases: [CapturedCase] }
+        let hostRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+        let corpusData = try Data(contentsOf: hostRoot.appendingPathComponent("AcceptanceFixtures/native-text-clarification-v1.json"))
+        XCTAssertEqual(Self.sha(corpusData), "6334379a54986de7f9233ba019c9644891a7569a83d939570fbd33d0a76344d5")
+        let corpus = try JSONDecoder().decode(Corpus.self, from: corpusData)
+        let audit = hostRoot.deletingLastPathComponent().appendingPathComponent("docs/audits/2026-09-04-mac-computer-use")
+        let hashes = ["63cf02a385473cba9d13cc626bfb86831f05ec98b57ee0e4a24c4f7112a98c6b",
+            "2733b419ba5d3ade6e2f6d109148c51665f9ed38ddce85d7560d05a8ab3bdbef",
+            "5ff5e0387589c3aae42c6fc3d29122652da414b613ca82ba3f41839d8c1bf811",
+            "7484e2b5ac6be4099697407a8e9cdf0d6eec76abf73233d98fd81e26f99f2ab6"]
+        var captured: [CapturedCase] = []
+        for (index, hash) in hashes.enumerated() {
+            let data = try Data(contentsOf: audit.appendingPathComponent("clarification-planner-v1-batch-\(index + 1)-first-results.json"))
+            XCTAssertEqual(Self.sha(data), hash)
+            captured += try JSONDecoder().decode(CapturedBatch.self, from: data).cases
+        }
+        XCTAssertEqual(captured.map(\.id), corpus.cases.map(\.id))
+        let planner = ComputerUseLocalTextGoalPlanner(connection: try .init(baseURL: URL(string: "http://127.0.0.1:49123")!,
+            bearerToken: "fictional-replay-token", modelAlias: "retained-proposal-replay"), contract: .candidateV2)
+        var remainingFailures: [String] = []
+        for (item, record) in zip(corpus.cases, captured) {
+            let goal = try item.clarificationGoal() ?? ComputerUseUnresolvedTextGoal(userRequest: item.prompt)
+            let fields = item.fields.enumerated().map { index, label in
+                ComputerUseTextField(label: label, snapshot: .init(targetID: "replay-field-\(index)", value: "retained",
+                    selection: NSRange(location: 0, length: 0), isEditable: true, isSecure: false))
+            }
+            // Replay only the retained structured content and finish reason.
+            // No transport call or new claim about model inference is made.
+            let envelope = try JSONSerialization.data(withJSONObject: ["model":"retained-proposal-replay", "choices":[[
+                "finish_reason":record.proposal.finishReason, "message":["role":"assistant", "content":record.proposal.content]]]])
+            let decoded = try planner.decode(envelope, catalog: ComputerUseTextPayloadCatalog(goal: goal), fields: fields)
+            let disposition: String
+            var edits: [Edit] = []
+            switch decoded {
+            case .unsupported: disposition = "unsupported"
+            case .clarification: disposition = "clarification"
+            case .fieldOperations: return XCTFail("The v2 decoder cannot introduce field copy")
+            case .edits(let proposed, let unchanged):
+                disposition = "supported"
+                edits = try proposed.map { edit in .init(field: try XCTUnwrap(fields.firstIndex(where: { $0.snapshot.targetID == edit.targetID })),
+                    mode: edit.mode.rawValue, value: edit.text) }
+                XCTAssertEqual(Set(unchanged), Set(fields.map { $0.snapshot.targetID }).subtracting(proposed.map(\.targetID)))
+            }
+            XCTAssertEqual(disposition, item.id == "Q911" ? "clarification" : record.disposition, item.id)
+            XCTAssertEqual(edits, item.id == "Q911" ? [] : record.edits, item.id)
+            if disposition != item.expectedDisposition || (disposition == "supported" && !(item.allowedPlans ?? []).contains(edits)) {
+                remainingFailures.append(item.id)
+            }
+        }
+        // The decoder repair removes the accepted bad edit, not the model's
+        // three conservative errors. Those still fail natural-language qualification.
+        XCTAssertEqual(remainingFailures, ["Q901", "Q902", "Q919"])
+    }
+
     func testSignedRuntimeCompilesTheExactCorpusWithoutDesktopEffects() async throws {
         let environment = ProcessInfo.processInfo.environment
         guard environment["RUN_SOURCE_BOUND_TEXT_MODEL_ACCEPTANCE"] == "1" else {
