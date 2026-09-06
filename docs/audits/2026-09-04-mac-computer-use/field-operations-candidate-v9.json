@@ -1,0 +1,96 @@
+{
+  "schemaVersion": 1,
+  "status": "frozen-before-v9-inference",
+  "sourceBaseCommit": "3f7f6d9",
+  "productionDefaultUnchanged": true,
+  "baseline": "field-operations-v8-results.json",
+  "baselineCandidateSourceCommit": "461e599",
+  "composition": "One field-operations-v9 call under the existing runtime lease; no fallback or quoted-command compiler.",
+  "hypothesis": "Restoring quoted field names already present in the observation preserves target/value syntax lost by marker substitution. Other quoted payloads and all observed field values remain hidden.",
+  "onlyExperimentalVariable": "Task context preserves exact quoted field names; instructions, schema, serialization order, decoder, model and sampling are unchanged from v8.",
+  "changedRequestCaseIDs": [
+    "C06",
+    "C11",
+    "R15",
+    "R16",
+    "R17",
+    "H506",
+    "H507"
+  ],
+  "byteIdenticalRequestControlCaseIDs": [
+    "C04",
+    "C20",
+    "H520"
+  ],
+  "corpus": {
+    "path": "host-mac/AcceptanceFixtures/native-field-operations-v9-context-comparison.json",
+    "sha256": "62f1e8955f8884715bd15baed0494db2c318d6b8b0dc0487ed5e537a5803aceb",
+    "caseIDs": [
+      "C06",
+      "C11",
+      "R15",
+      "R16",
+      "R17",
+      "H506",
+      "H507",
+      "C04",
+      "C20",
+      "H520"
+    ]
+  },
+  "batches": [
+    {
+      "path": "host-mac/AcceptanceFixtures/native-field-operations-v9-context-batch-1.json",
+      "sha256": "1be95777c23ea805698b6501a0e8f9a5fc6cb01bc1b9c5779ec07967bb051022",
+      "caseIDs": [
+        "C06",
+        "C11",
+        "R15",
+        "R16",
+        "R17"
+      ]
+    },
+    {
+      "path": "host-mac/AcceptanceFixtures/native-field-operations-v9-context-batch-2.json",
+      "sha256": "8afe115338b48e070e34f03b921c5d7cd9cecaf758ce5582362478111685460f",
+      "caseIDs": [
+        "H506",
+        "H507",
+        "C04",
+        "C20",
+        "H520"
+      ]
+    }
+  ],
+  "expectationsChanged": false,
+  "unifiedInstructionSHA256": "748024962f45a98ea8719523fcfa23496839a0467919d136583f12780b6d7832",
+  "modelSHA256": "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
+  "runtime": "llama.cpp b9992 / 6eddde06a",
+  "contextTokens": 4096,
+  "maximumOutputTokens": 1024,
+  "reasoningTokens": 512,
+  "exactInputLimit": 3008,
+  "temperature": 0,
+  "topP": 1,
+  "topK": 0,
+  "maximumPlannerStages": 1,
+  "desktopEffects": false,
+  "quotedCommandFastPath": false,
+  "testDiagnostics": "never: retain per-case structured proposals, stdout and xcresult assertions; omit verbose system diagnostics that caused ENOSPC in prior failed-model runs.",
+  "sha256": {
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFieldCopyPlan.swift": "9aae4becd2e46496a7f8900f32bb1a672967e0fba569b8619b0627faac26a322",
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseLocalTextGoalPlanner.swift": "cd74742dfbc076b90c5238e690fab10ec3d516426ad328a6a09fb4b841d77315",
+    "host-mac/RemoteDesktopHost/ComputerUse/OSAtlasLlamaRuntime.swift": "c40c0e0cbb87c652e065fe21b0547f684a3a666f73ed21356e9b45e24c93278b",
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseTextGoalPlanner.swift": "b4ad1cc4ff2da1f8ec08a3253e6a923b021c194650d1ac7219e904c25a8a0215",
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseTextTask.swift": "ae2d4ec97e5718579a4d06d42cae3b678ab6a9d3d9e7c4920cc1bb2bd3a62133",
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseBrowserDOM.swift": "02f90e1c51042b2b319bb295fad12e2e667eaf48a387309df37c0010407d10ca",
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseNativeTextExecutor.swift": "c417f144f9347a5b9ad0629250cf9a9a328025c6b16e1ba806326c7f9d27f8db",
+    "host-mac/RemoteDesktopHostTests/ComputerUseFieldCopyPlanTests.swift": "e21c9272145f9027c5c44cd4261f306c18b4faa3fd1ab4aefd6ccef3317db56e",
+    "host-mac/RemoteDesktopHostTests/ComputerUseSourceBoundTextModelAcceptanceTests.swift": "af73de3b96c3eeb581a3c28b374ad7f156749043ae492509a2fb45ca7bd591fd"
+  },
+  "limitations": [
+    "Selected known cases test an information-preservation hypothesis; they cannot qualify general language.",
+    "The unchanged v8 candidate already failed unquoted repetition and other cases; this context-only change is not expected to repair those.",
+    "Unseen corpus remains unrun pending regression repair."
+  ]
+}

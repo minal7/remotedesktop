@@ -27,7 +27,8 @@ struct ComputerUseFieldCopyFallbackPlanner: ComputerUseTextGoalPlanning {
 
 enum ComputerUseFieldCopyPlan {
     static func makeRequest(connection: ComputerUseTextModelConnection, catalog: ComputerUseTextPayloadCatalog,
-                            fields: [ComputerUseTextField], requiresCopy: Bool = true) throws -> URLRequest {
+                            fields: [ComputerUseTextField], requiresCopy: Bool = true,
+                            preserveQuotedFieldNames: Bool = false) throws -> URLRequest {
         var request = try ComputerUseLocalTextGoalPlanner(connection: connection, contract: .candidateV2)
             .makeRequest(catalog: catalog, fields: fields)
         guard let data = request.httpBody, var body = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
@@ -47,7 +48,7 @@ enum ComputerUseFieldCopyPlan {
         body["response_format"] = ["type": "json_schema", "json_schema": ["name": "field_copy_plan", "strict": true, "schema": schema]]
         body["messages"] = [["role": "system", "content": requiresCopy ? instructions : unifiedInstructions],
                             ["role": "user", "content": try ComputerUseLocalTextGoalPlanner.context(catalog: catalog, fields: fields,
-                                                                                                     includeQuotedFieldMatches: true)]]
+                                includeQuotedFieldMatches: true, preserveQuotedFieldNames: preserveQuotedFieldNames)]]
         request.httpBody = Data(try orderedJSON(body).utf8)
         return request
     }

@@ -54,6 +54,7 @@ struct ComputerUseLocalTextGoalPlanner: ComputerUseTextGoalPlanning {
         case sourceBoundV6 = "source-bound-v6"
         case fieldCopyV7 = "field-copy-v7"
         case fieldOperationsV8 = "field-operations-v8"
+        case fieldOperationsV9 = "field-operations-v9"
     }
     static let contextTokens = 4_096
     static let outputTokens = 1_024
@@ -112,9 +113,9 @@ struct ComputerUseLocalTextGoalPlanner: ComputerUseTextGoalPlanning {
     func makeRequest(catalog: ComputerUseTextPayloadCatalog, fields: [ComputerUseTextField],
                      coverageRepair: ComputerUseSourceBoundTextPlan.CoverageFailure? = nil) throws -> URLRequest {
         guard coverageRepair == nil || contract == .sourceBoundV6 else { throw ComputerUseLocalTextPlanError.invalidResponse }
-        if contract == .fieldCopyV7 || contract == .fieldOperationsV8 {
+        if contract == .fieldCopyV7 || contract == .fieldOperationsV8 || contract == .fieldOperationsV9 {
             return try ComputerUseFieldCopyPlan.makeRequest(connection: connection, catalog: catalog, fields: fields,
-                requiresCopy: contract == .fieldCopyV7)
+                requiresCopy: contract == .fieldCopyV7, preserveQuotedFieldNames: contract == .fieldOperationsV9)
         }
         if contract == .sourceBoundV3 || contract == .sourceBoundV4 || contract == .sourceBoundV5 || contract == .sourceBoundV6 {
             return try ComputerUseSourceBoundTextPlan.makeRequest(connection: connection, catalog: catalog, fields: fields,
@@ -159,7 +160,7 @@ struct ComputerUseLocalTextGoalPlanner: ComputerUseTextGoalPlanning {
     /// Deterministic spacing/order matches the frozen Python prototype's
     /// model-visible context. Individual strings are always JSON-encoded.
     static func context(catalog: ComputerUseTextPayloadCatalog, fields: [ComputerUseTextField],
-                        includeQuotedFieldMatches: Bool = false) throws -> String {
+                        includeQuotedFieldMatches: Bool = false, preserveQuotedFieldNames: Bool = false) throws -> String {
         func quote(_ value: String) throws -> String {
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.withoutEscapingSlashes]
@@ -172,7 +173,28 @@ struct ComputerUseLocalTextGoalPlanner: ComputerUseTextGoalPlanning {
             Int($0.dropFirst())! < Int($1.dropFirst())!
         }
         let ids = try literalIDs.map(quote).joined(separator: ", ")
-        var context = "{\"fields\": [\(labels)], \"task\": \(try quote(catalog.projectedTask)), \"literalPayloadIDs\": [\(ids)]"
+        var task = catalog.projectedTask
+        if preserveQuotedFieldNames {
+            // Keep the user's quoted name in its original syntactic position.
+            // These names already appear in the observed labels; other literal
+            // contents and all current values remain host-owned. A name match
+            // does not decide whether the quote is a reference or supplied text.
+            // Work from original ranges so inserted text is never reinterpreted
+            // as another payload marker.
+            let source = catalog.projectedTask as NSString
+            let expression = try NSRegularExpression(pattern: #"\[exact quoted payload (p\d+)\]"#)
+            var restored = "", offset = 0
+            for match in expression.matches(in: catalog.projectedTask, range: NSRange(location: 0, length: source.length)) {
+                restored += source.substring(with: NSRange(location: offset, length: match.range.location - offset))
+                let id = source.substring(with: match.range(at: 1))
+                if let literal = catalog.payloads[id], fields.contains(where: { $0.label.caseInsensitiveCompare(literal) == .orderedSame }) {
+                    restored += "\"" + literal + "\""
+                } else { restored += source.substring(with: match.range) }
+                offset = NSMaxRange(match.range)
+            }
+            task = restored + source.substring(from: offset)
+        }
+        var context = "{\"fields\": [\(labels)], \"task\": \(try quote(task)), \"literalPayloadIDs\": [\(ids)]"
         if includeQuotedFieldMatches {
             // Quotation marks alone do not distinguish a target name from a
             // value. Reveal only matches to labels already in the observation;
@@ -211,7 +233,7 @@ struct ComputerUseLocalTextGoalPlanner: ComputerUseTextGoalPlanning {
             if let refusal = message["refusal"], refusal != .null && refusal != .string("") {
                 throw ComputerUseLocalTextPlanError.invalidResponse
             }
-            if contract == .fieldCopyV7 || contract == .fieldOperationsV8 {
+            if contract == .fieldCopyV7 || contract == .fieldOperationsV8 || contract == .fieldOperationsV9 {
                 return try ComputerUseFieldCopyPlan.decode(content: content, catalog: catalog, fields: fields,
                     requiresCopy: contract == .fieldCopyV7)
             }

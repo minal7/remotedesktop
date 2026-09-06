@@ -39,7 +39,7 @@ final class ComputerUseFieldCopyPlanTests: XCTestCase {
     }
 
     func testCopySchemaAndExactBudgetNeverExposeExistingValuesOrRegenerateLiterals() async throws {
-        for contract in [ComputerUseLocalTextGoalPlanner.Contract.fieldCopyV7, .fieldOperationsV8] {
+        for contract in [ComputerUseLocalTextGoalPlanner.Contract.fieldCopyV7, .fieldOperationsV8, .fieldOperationsV9] {
         let transport = CopyOverflowTransport()
         let candidate = try planner(transport: transport, contract: contract)
         let prompt = #"Set Origin to "private supplied payload", then copy Origin to Destination."#
@@ -53,6 +53,49 @@ final class ComputerUseFieldCopyPlanTests: XCTestCase {
         let count = await transport.completions
         XCTAssertEqual(count, 0)
         }
+    }
+
+    func testQuotedNameContextPreservesSyntaxWithoutReleasingOtherPayloadsOrCurrentValues() throws {
+        let request = #"Set "Destination" to "private supplied text", then put "Origin" in Destination."#
+        let catalog = try ComputerUseTextPayloadCatalog(request)
+        let serialized = try ComputerUseLocalTextGoalPlanner.context(catalog: catalog, fields: fields,
+            includeQuotedFieldMatches: true, preserveQuotedFieldNames: true)
+        let context = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(serialized.utf8)) as? [String: Any])
+        XCTAssertEqual(context["task"] as? String,
+            #"Set "Destination" to [exact quoted payload p2], then put "Origin" in Destination."#)
+        XCTAssertEqual(context["literalPayloadIDs"] as? [String], ["p1", "p2", "p3"])
+        XCTAssertFalse(serialized.contains("private supplied text"))
+        XCTAssertFalse(serialized.contains("private hidden field value"))
+        XCTAssertFalse(serialized.contains("private-target-"))
+        XCTAssertEqual(catalog.payloads["p2"], "private supplied text")
+        XCTAssertEqual(catalog.payloads["p3"], "Origin", "A visible label can still be a supplied payload")
+        XCTAssertEqual(catalog.projectedTask,
+            "Set [exact quoted payload p1] to [exact quoted payload p2], then put [exact quoted payload p3] in Destination.")
+        let copied = try ComputerUseLocalTextGoalPlanner.context(catalog: .init(#"Copy the "Origin" field into the "Destination" field."#),
+            fields: fields, includeQuotedFieldMatches: true, preserveQuotedFieldNames: true)
+        let copyContext = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(copied.utf8)) as? [String: Any])
+        XCTAssertEqual(copyContext["task"] as? String, #"Copy the "Origin" field into the "Destination" field."#)
+    }
+
+    func testQuotedNameCandidateChangesOnlyContextAndLeavesUnmatchedRequestsByteIdentical() throws {
+        let before = try planner(contract: .fieldOperationsV8), after = try planner(contract: .fieldOperationsV9)
+        for prompt in ["Copy Origin into Destination twice.", #"Put "private literal" in Destination."#] {
+            XCTAssertEqual(try before.makeRequest(catalog: .init(prompt), fields: fields).httpBody,
+                           try after.makeRequest(catalog: .init(prompt), fields: fields).httpBody)
+        }
+        let catalog = try ComputerUseTextPayloadCatalog(#"Type the literal word "Origin" in Destination."#)
+        var left = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(before.makeRequest(catalog: catalog, fields: fields).httpBody)) as? [String: Any])
+        var right = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(after.makeRequest(catalog: catalog, fields: fields).httpBody)) as? [String: Any])
+        var leftMessages = try XCTUnwrap(left.removeValue(forKey: "messages") as? [[String: String]])
+        var rightMessages = try XCTUnwrap(right.removeValue(forKey: "messages") as? [[String: String]])
+        XCTAssertEqual(leftMessages.removeFirst(), rightMessages.removeFirst(), "Instructions must not change in this comparison")
+        XCTAssertEqual(try JSONSerialization.data(withJSONObject: left, options: [.sortedKeys]),
+                       try JSONSerialization.data(withJSONObject: right, options: [.sortedKeys]), "Schema and sampling must stay fixed")
+        XCTAssertEqual(leftMessages.count, 1); XCTAssertEqual(rightMessages.count, 1)
+        XCTAssertNotEqual(leftMessages[0]["content"], rightMessages[0]["content"])
+        let response = Data(#"{"model":"test-native","choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"{\"disposition\":\"supported\",\"operations\":[{\"fieldID\":\"f2\",\"mode\":\"replaceAll\",\"payload\":{\"kind\":\"suppliedText\",\"value\":\"p1\"}}]}"}}]}"#.utf8)
+        XCTAssertEqual(try before.decode(response, catalog: catalog, fields: fields),
+                       try after.decode(response, catalog: catalog, fields: fields), "Execution binding stays unchanged")
     }
 
     func testUnifiedPlannerRetainsLiteralAndCopiedOriginsWhenTheirBytesWouldMatch() throws {
