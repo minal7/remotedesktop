@@ -6,6 +6,137 @@ import XCTest
 
 @MainActor
 final class ComputerUseOwnedBrowserTests: XCTestCase {
+    func testPageControlsExposeSearchMetadataWithoutEnteredOrSubmissionValues() async throws {
+        let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: """
+            <form id='trip' action='/search?private-form=original' method='get'>
+              <input type='hidden' name='action' value='private-clobber'><input type='hidden' name='method'><input type='hidden' name='noValidate'>
+              <label>Departure<input type='date' min='2026-09-10' max='2026-10-10' required value='2026-09-18' name='private-departure'></label>
+              <label>Cabin<select name='private-cabin'><optgroup label='Seating'>
+                <option value='private-economy'>Economy</option><option disabled value='private-upgrade'>Upgrade</option>
+                <option hidden value='private-hidden'>Hidden choice</option>
+              </optgroup></select></label>
+              <fieldset disabled><label>Unavailable<input></label></fieldset>
+              <button formaction='/alternate?private-form=override' formmethod='post' formtarget='_blank' formenctype='text/plain' formnovalidate>Search<span style='display:none'>private-hidden-caption</span></button>
+            </form>
+            <label>City<input type='search' form='trip' value='private-city-value' name='private-city'></label>
+            <input hidden aria-label='Hidden' value='private-hidden-value'>
+            <div role='combobox' tabindex='0'>Custom city</div>
+            <script>for (const event of ['input','change','submit']) document.addEventListener(event, () => fetch('/unexpected'));</script>
+            """)])
+        let base = try await server.start()
+        defer { server.stop() }
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+        defer { browser.close() }
+        try browser.claim(taskID: "control-metadata")
+        let document = try await browser.navigate(taskID: "control-metadata", operationID: "page", to: base.appendingPathComponent("page"))
+        let evidence = try await browser.observePage(document: document)
+        let controls = evidence.page.controls
+        XCTAssertEqual(controls.map(\.label), ["Departure", "Cabin", "Unavailable", "Search", "City"])
+        let departure = try XCTUnwrap(controls.first { $0.label == "Departure" })
+        let cabin = try XCTUnwrap(controls.first { $0.label == "Cabin" })
+        let search = try XCTUnwrap(controls.first { $0.label == "Search" })
+        let city = try XCTUnwrap(controls.first { $0.label == "City" })
+        XCTAssertEqual(departure.kind, "date")
+        XCTAssertEqual(departure.constraints, ["min": "2026-09-10", "max": "2026-10-10"])
+        XCTAssertTrue(departure.required)
+        XCTAssertEqual(controls.first { $0.label == "Unavailable" }?.disabled, true)
+        XCTAssertEqual(cabin.options.map(\.label), ["Economy", "Upgrade", "Hidden choice"])
+        XCTAssertEqual(cabin.options.map(\.value), ["private-economy", "private-upgrade", "private-hidden"])
+        XCTAssertTrue(try XCTUnwrap(cabin.options.first { $0.label == "Upgrade" }).disabled)
+        XCTAssertTrue(try XCTUnwrap(cabin.options.first { $0.label == "Hidden choice" }).hidden)
+        XCTAssertEqual(cabin.options.map(\.groupLabel), ["Seating", "Seating", "Seating"])
+        XCTAssertEqual(departure.form?.id, city.form?.id, "The form owner can be outside the control's ancestors")
+        XCTAssertEqual(search.form?.id, city.form?.id)
+        XCTAssertEqual(city.form?.method, "get")
+        XCTAssertTrue(city.form?.action.hasSuffix("/search?private-form=original") == true)
+        XCTAssertEqual(city.form?.noValidate, false)
+        XCTAssertEqual(search.form?.method, "post")
+        XCTAssertTrue(search.form?.action.hasSuffix("/alternate?private-form=override") == true)
+        XCTAssertEqual(search.form?.target, "_blank")
+        XCTAssertEqual(search.form?.encoding, "text/plain")
+        XCTAssertEqual(search.form?.noValidate, true)
+        XCTAssertTrue(evidence.page.omittedControls, "An unsupported custom widget is not silently complete control coverage")
+        XCTAssertTrue(evidence.page.isWellFormed)
+        let context = try ComputerUseBrowserPlanningContext(page: evidence.page).serialized()
+        XCTAssertTrue(context.contains("\"control_kind\":\"date\""))
+        XCTAssertTrue(context.contains("Economy"))
+        XCTAssertTrue(context.contains("\"omitted_controls\":true"))
+        XCTAssertFalse(context.contains("private-"))
+        XCTAssertFalse(context.contains("2026-09-18"))
+        XCTAssertFalse(String(reflecting: controls).contains("private-"))
+        try await browser.validatePageEvidence(evidence)
+        let refreshed = try await browser.observePage(document: document)
+        XCTAssertEqual(refreshed.page.controls, controls, "Unchanged DOM objects retain their observation identities")
+        XCTAssertEqual(server.count("/unexpected"), 0)
+        XCTAssertEqual(server.count("/page"), 1)
+    }
+
+    func testPageControlsInvalidateInvisibleFormChangesAndReplacedObjects() async throws {
+        for mutation in [
+            "document.querySelector('form').action='/changed?private-token=changed';",
+            "document.querySelector('button').formAction='/changed-button';",
+            "document.querySelector('input').name='different-field';",
+            "document.querySelector('input').min='2026-09-12';",
+            "document.querySelector('option').value='different-choice';",
+            "document.querySelector('optgroup').disabled=true;",
+            "document.querySelector('input').replaceWith(document.querySelector('input').cloneNode(true));",
+            "document.querySelector('option').replaceWith(document.querySelector('option').cloneNode(true));",
+            "document.querySelector('form').replaceWith(document.querySelector('form').cloneNode(true));",
+        ] {
+            let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: """
+                <form action='/search'><label>Departure<input type='date' min='2026-09-10' name='departure'></label>
+                <label>Cabin<select><optgroup label='Seating'><option value='original-choice'>Economy</option></optgroup></select></label>
+                <button>Search</button></form>
+                <script>fetch('/change').then(() => { \(mutation) fetch('/changed'); });</script>
+                """), "/change": .init(held: true)])
+            let base = try await server.start()
+            defer { server.stop() }
+            let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+            defer { browser.close() }
+            try browser.claim(taskID: "changed-control")
+            let document = try await browser.navigate(taskID: "changed-control", operationID: "page", to: base.appendingPathComponent("page"))
+            try await waitUntil { server.count("/change") == 1 }
+            let evidence = try await browser.observePage(document: document)
+            server.releaseHeldResponses()
+            try await waitUntil { server.count("/changed") == 1 }
+            do { try await browser.validatePageEvidence(evidence); XCTFail("Changed control metadata or identity must invalidate retained page evidence") }
+            catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged, mutation) }
+            let fresh = try await browser.observePage(document: document)
+            XCTAssertNotEqual(fresh.page.controls, evidence.page.controls, mutation)
+            try await browser.validatePageEvidence(fresh)
+        }
+    }
+
+    func testPageControlsBoundCatalogsAndOmitHiddenOrProtectedWidgets() async throws {
+        let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: """
+            <label>Large<select id='large'></select></label><input type='file' aria-label='Upload'>
+            <div hidden><input aria-label='Hidden'></div><input type='password' readonly value='private-saved-password'>
+            <div id='shadow'></div><script>
+            document.querySelector('#shadow').attachShadow({mode:'open'}).innerHTML = '<label>Shadow date<input type="date"></label><span style="opacity:0"><input aria-label="Concealed"></span>';
+            for (let i=0; i<65; i++) document.querySelector('#large').append(new Option('Option '+i, 'private-option-'+i));
+            for (let i=0; i<70; i++) { const input = document.createElement('input'); input.setAttribute('aria-label','Field '+i); document.body.append(input); }
+            </script>
+            """)])
+        let base = try await server.start()
+        defer { server.stop() }
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+        defer { browser.close() }
+        try browser.claim(taskID: "bounded-controls")
+        let document = try await browser.navigate(taskID: "bounded-controls", operationID: "page", to: base.appendingPathComponent("page"))
+        let evidence = try await browser.observePage(document: document)
+        XCTAssertEqual(evidence.page.controls.count, 64)
+        XCTAssertTrue(evidence.page.controls.contains { $0.label == "Shadow date" && $0.kind == "date" })
+        XCTAssertFalse(evidence.page.controls.contains { ["Large", "Upload", "Hidden", "Concealed"].contains($0.label) })
+        XCTAssertTrue(evidence.page.truncated)
+        XCTAssertTrue(evidence.page.omittedControls)
+        XCTAssertTrue(evidence.page.isWellFormed)
+        try await browser.validatePageEvidence(evidence)
+        let context = try ComputerUseBrowserPlanningContext(page: evidence.page)
+        XCTAssertLessThanOrEqual(context.serialized().utf8.count, ComputerUseBrowserPlanningContext.maximumSerializedBytes)
+        XCTAssertTrue(context.serialized(maximumRecords: 0).contains("\"omitted_controls\":true"))
+        XCTAssertFalse(context.serialized().contains("private-"))
+    }
+
     func testPageEvidenceReadsRenderedTextAndLinksWithoutFormValuesOrEffects() async throws {
         let server = try OwnedBrowserHTTPFixture(routes: ["/results": .init(body: """
             <base href="/tickets/"><style>.hidden { display:none } .contents { display:contents }</style>

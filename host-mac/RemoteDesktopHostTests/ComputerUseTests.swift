@@ -11,9 +11,12 @@ import XCTest
 final class ComputerUseTests: XCTestCase {
     func test_browserApprovalRequiresFreshApprovalAfterInvisibleDestinationOrRootChange() async throws {
         for mutation in ["document.querySelector('a').href='/event?opaque=changed-secret';",
+                         "document.querySelector('form').action='/search?opaque=changed-secret';",
+                         "document.querySelector('button').formAction='/search?opaque=changed-secret';",
                          "document.documentElement.replaceWith(document.documentElement.cloneNode(true));"] {
             let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: """
                 <p>Review search</p><a href='/event?opaque=original-secret'>Event</a>
+                <form action='/search?opaque=original-secret'><button>Search</button></form>
                 <script>fetch('/change').then(() => { \(mutation) fetch('/changed'); });</script>
                 """), "/change": .init(held: true)])
             let base = try await server.start()

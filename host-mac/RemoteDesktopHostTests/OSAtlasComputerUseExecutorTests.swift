@@ -2898,6 +2898,7 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
         let request = try XCTUnwrap(recorded.first)
         let context = try XCTUnwrap(request.browserPageContext)
         XCTAssertTrue(context.serialized().contains("Type London."))
+        XCTAssertTrue(context.serialized().contains("\"control_kind\":\"search\""))
         XCTAssertFalse(context.serialized().contains("private-field-value"))
         XCTAssertFalse(context.serialized().contains("private-destination"))
         XCTAssertEqual(request.task, "Type \"Paris\".")

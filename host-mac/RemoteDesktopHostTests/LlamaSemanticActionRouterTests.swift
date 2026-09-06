@@ -54,7 +54,7 @@ final class LlamaSemanticActionRouterTests: XCTestCase {
         let prompts = candidates.compactMap { $0.messages.last?.content }
         var previousRecordCount = Int.max
         for prompt in prompts {
-            let line = try XCTUnwrap(prompt.split(separator: "\n").first { $0.hasPrefix("{\"version\":1,") })
+            let line = try XCTUnwrap(prompt.split(separator: "\n").first { $0.hasPrefix("{\"version\":\(ComputerUseBrowserPlanningContext.version),") })
             let root = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])
             let records = try XCTUnwrap(root["records"] as? [[String: Any]])
             XCTAssertLessThanOrEqual(records.count, previousRecordCount)
