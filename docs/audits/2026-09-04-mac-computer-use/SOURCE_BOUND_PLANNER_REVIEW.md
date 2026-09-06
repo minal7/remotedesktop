@@ -44,6 +44,8 @@ V11 tested a direct literal-text-to-payload-ID lookup in place of payload-to-fie
 
 The shared host source-byte check is a separate completed repair: generated prompt markers no longer count as actual unquoted user input. All 101 focused signed methods and all 14 current production browser regressions pass after that change. This does not close semantic authority or the broader recovery and product gates below.
 
+The clarification input evaluation subsequently exposed another accepted wrong plan in the ordinary v2 route: “Put this exact text in Notes.” became the text to type in Notes. Q911 had no supplied value, yet copying the whole instruction passed the existing source-occurrence check. The full twenty-state evaluation passed 16/20, including 9/11 answered states; [all first results are retained](clarification-planner-v1-results.json). The missing-value error precedes clarification input and cannot be blamed on the new turn representation. Target/value/command roles must remain distinct, and resolving an answer must preserve that distinction. No input was executed by this evaluation.
+
 - [x] Compile copied data from host-owned observations and preserve ordered source dependencies.
 - [x] Check retained source/destination identity and exact bytes immediately before owned-browser input.
 - [x] Require independent dispatch receipts for recovered copy operations, including equal-value/no-op copies.

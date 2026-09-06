@@ -1,0 +1,131 @@
+{
+  "allowFieldCopy" : false,
+  "cases" : [
+    {
+      "disposition" : "unsupported",
+      "edits" : [
+
+      ],
+      "elapsedSeconds" : 12.415961833321489,
+      "id" : "Q916",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\n  \"disposition\": \"unsupported\",\n  \"edits\": []\n}",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\n  \"disposition\": \"unsupported\",\n  \"edits\": []\n}",
+          "finishReason" : "stop"
+        }
+      ],
+      "userTurnCount" : 1,
+      "verified" : true
+    },
+    {
+      "disposition" : "unsupported",
+      "edits" : [
+
+      ],
+      "elapsedSeconds" : 12.119143166666618,
+      "id" : "Q917",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\n      \"disposition\": \"unsupported\",\n      \"edits\": []\n    }",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\n      \"disposition\": \"unsupported\",\n      \"edits\": []\n    }",
+          "finishReason" : "stop"
+        }
+      ],
+      "userTurnCount" : 2,
+      "verified" : true
+    },
+    {
+      "disposition" : "clarification",
+      "edits" : [
+
+      ],
+      "elapsedSeconds" : 12.68051695835311,
+      "id" : "Q918",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\n      \"disposition\": \"clarification\",\n      \"edits\": []\n    }",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\n      \"disposition\": \"clarification\",\n      \"edits\": []\n    }",
+          "finishReason" : "stop"
+        }
+      ],
+      "userTurnCount" : 1,
+      "verified" : true
+    },
+    {
+      "disposition" : "clarification",
+      "edits" : [
+
+      ],
+      "elapsedSeconds" : 12.982946416654158,
+      "id" : "Q919",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\"disposition\": \"clarification\", \"edits\": []}",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\"disposition\": \"clarification\", \"edits\": []}",
+          "finishReason" : "stop"
+        }
+      ],
+      "userTurnCount" : 2,
+      "verified" : false
+    },
+    {
+      "disposition" : "clarification",
+      "edits" : [
+
+      ],
+      "elapsedSeconds" : 12.20739545833203,
+      "id" : "Q920",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\n          \"disposition\": \"clarification\",\n          \"edits\": []\n        }",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\n          \"disposition\": \"clarification\",\n          \"edits\": []\n        }",
+          "finishReason" : "stop"
+        }
+      ],
+      "userTurnCount" : 2,
+      "verified" : true
+    }
+  ],
+  "clarificationCaseIDs" : [
+    "Q917",
+    "Q919",
+    "Q920"
+  ],
+  "contract" : "candidate-v2",
+  "corpusSHA256" : "e5b84db7908ab666a1ea9da695f437ae6b84331dd8f2d9ebd8482d9d24798c9d",
+  "desktopEffects" : false,
+  "expectedCaseIDs" : [
+    "Q916",
+    "Q917",
+    "Q918",
+    "Q919",
+    "Q920"
+  ],
+  "modelSHA256FromVerifiedManifest" : "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
+  "oracle" : "exact-disposition-and-complete-operation-sequences-including-count-mode-target-payload-origin-exact-bytes-and-order",
+  "quotedCommandFastPath" : false,
+  "runtimeBinarySHA256" : "a8c143c5b8028a8dc2f89af343f623df61d8dc01c9a1dd0f5792caddda7fbeed",
+  "schemaVersion" : 1,
+  "scope" : "First frozen explicit-clarification-input evaluation: initial requests, supplied answer states and one counterfactual constraint-retention probe. Proposal only, no desktop effects or client\/host continuation qualification. Preselected batch 4\/4."
+}

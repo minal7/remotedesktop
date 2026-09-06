@@ -1,0 +1,134 @@
+{
+  "allowFieldCopy" : false,
+  "cases" : [
+    {
+      "disposition" : "unsupported",
+      "edits" : [
+
+      ],
+      "elapsedSeconds" : 13.166899958334398,
+      "id" : "Q901",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\n      \"disposition\": \"unsupported\",\n      \"edits\": []\n    }",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\n      \"disposition\": \"unsupported\",\n      \"edits\": []\n    }",
+          "finishReason" : "stop"
+        }
+      ],
+      "userTurnCount" : 1,
+      "verified" : false
+    },
+    {
+      "disposition" : "clarification",
+      "edits" : [
+
+      ],
+      "elapsedSeconds" : 11.880696874985006,
+      "id" : "Q902",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\n      \"disposition\": \"clarification\",\n      \"edits\": []\n    }",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\n      \"disposition\": \"clarification\",\n      \"edits\": []\n    }",
+          "finishReason" : "stop"
+        }
+      ],
+      "userTurnCount" : 2,
+      "verified" : false
+    },
+    {
+      "disposition" : "clarification",
+      "edits" : [
+
+      ],
+      "elapsedSeconds" : 11.346075291687157,
+      "id" : "Q903",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\n  \"disposition\": \"clarification\",\n  \"edits\": []\n}",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\n  \"disposition\": \"clarification\",\n  \"edits\": []\n}",
+          "finishReason" : "stop"
+        }
+      ],
+      "userTurnCount" : 1,
+      "verified" : true
+    },
+    {
+      "disposition" : "supported",
+      "edits" : [
+        {
+          "field" : 0,
+          "mode" : "replaceAll",
+          "value" : "Oslo"
+        }
+      ],
+      "elapsedSeconds" : 12.352053041686304,
+      "id" : "Q904",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\n  \"disposition\": \"supported\",\n  \"edits\": [\n    {\n      \"fieldID\": \"f1\",\n      \"mode\": \"replaceAll\",\n      \"value\": \"Oslo\"\n    }\n  ]\n}",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\n  \"disposition\": \"supported\",\n  \"edits\": [\n    {\n      \"fieldID\": \"f1\",\n      \"mode\": \"replaceAll\",\n      \"value\": \"Oslo\"\n    }\n  ]\n}",
+          "finishReason" : "stop"
+        }
+      ],
+      "userTurnCount" : 2,
+      "verified" : true
+    },
+    {
+      "disposition" : "clarification",
+      "edits" : [
+
+      ],
+      "elapsedSeconds" : 11.666768458351726,
+      "id" : "Q905",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\n      \"disposition\": \"clarification\",\n      \"edits\": []\n    }",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\n      \"disposition\": \"clarification\",\n      \"edits\": []\n    }",
+          "finishReason" : "stop"
+        }
+      ],
+      "userTurnCount" : 1,
+      "verified" : true
+    }
+  ],
+  "clarificationCaseIDs" : [
+    "Q902",
+    "Q904"
+  ],
+  "contract" : "candidate-v2",
+  "corpusSHA256" : "11bb893efb07d2d2b91389928cb838ae4375382cbbda2ab85e4ce8ec0d8a2c06",
+  "desktopEffects" : false,
+  "expectedCaseIDs" : [
+    "Q901",
+    "Q902",
+    "Q903",
+    "Q904",
+    "Q905"
+  ],
+  "modelSHA256FromVerifiedManifest" : "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
+  "oracle" : "exact-disposition-and-complete-operation-sequences-including-count-mode-target-payload-origin-exact-bytes-and-order",
+  "quotedCommandFastPath" : false,
+  "runtimeBinarySHA256" : "a8c143c5b8028a8dc2f89af343f623df61d8dc01c9a1dd0f5792caddda7fbeed",
+  "schemaVersion" : 1,
+  "scope" : "First frozen explicit-clarification-input evaluation: initial requests, supplied answer states and one counterfactual constraint-retention probe. Proposal only, no desktop effects or client\/host continuation qualification. Preselected batch 1\/4."
+}
