@@ -251,25 +251,35 @@ final class InputInjector: @unchecked Sendable {
 
     // MARK: - Text (IME / soft keyboard fallback)
 
-    /// Verified computer use awaits this bounded stream. WebKit can drop
-    /// individual events when an entire string is posted in one synchronous
-    /// burst, even while AX reports the preceding input as delivered.
+    /// General paced input avoids a synchronous burst of Unicode events.
+    /// Verified editing instead admits and reads back each applyTextStroke.
     @MainActor
     func applyTextPaced(_ text: String, ifAllowed: () -> Bool) async -> Bool {
         for character in text {
-            guard !Task.isCancelled,
-                  let stroke = beginUnicodeStroke(String(character), ifAllowed: ifAllowed) else { return false }
-            do {
-                try await Task.sleep(for: .milliseconds(5))
-            } catch {
-                finishUnicodeStroke(stroke)
-                return false
-            }
-            finishUnicodeStroke(stroke)
-            guard ifAllowed(), !Task.isCancelled else { return false }
-            do { try await Task.sleep(for: .milliseconds(5)) }
-            catch { return false }
+            guard await applyTextStroke(String(character), ifAllowed: ifAllowed) else { return false }
         }
+        return true
+    }
+
+    /// Verified text editing calls this once per grapheme and reads back the
+    /// resulting value/caret before authorizing another key. The exact-state
+    /// predicate applies only before key-down; key-up always releases the key,
+    /// even though the edit has already changed that pre-effect state.
+    @MainActor
+    func applyTextStroke(_ text: String, ifAllowed: () -> Bool,
+                         beforePosting: () -> Bool = { true }) async -> Bool {
+        guard text.count == 1, !Task.isCancelled,
+              let stroke = beginUnicodeStroke(text, ifAllowed: { ifAllowed() && beforePosting() && !Task.isCancelled }) else { return false }
+        do {
+            try await Task.sleep(for: .milliseconds(5))
+        } catch {
+            finishUnicodeStroke(stroke)
+            return false
+        }
+        finishUnicodeStroke(stroke)
+        guard ifAllowed(), !Task.isCancelled else { return false }
+        do { try await Task.sleep(for: .milliseconds(5)) }
+        catch { return false }
         return true
     }
 

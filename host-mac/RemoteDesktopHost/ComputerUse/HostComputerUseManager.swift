@@ -999,7 +999,7 @@ final class ComputerUseHostTools {
     private let approvalTargetProvider:
         ((ComputerUsePredictedAction) throws -> ComputerUseApprovalTargetSnapshot)?
     private let actionPerformer: ((ComputerUsePredictedAction) throws -> Void)?
-    private let textTarget = ComputerUseAccessibilityTextTarget()
+    private let textTarget: any ComputerUseNativeTextTarget
     private let textEditorOverride: ComputerUseTextEditor?
     private var browserNavigationTask: ComputerUseBrowserNavigationTask?
     /// Deterministic seam used to exercise a gate close after one low-level
@@ -1037,6 +1037,7 @@ final class ComputerUseHostTools {
             ((ComputerUsePredictedAction) throws -> ComputerUseApprovalTargetSnapshot)? = nil,
         actionPerformer: ((ComputerUsePredictedAction) throws -> Void)? = nil,
         textEditor: ComputerUseTextEditor? = nil,
+        nativeTextTarget: (any ComputerUseNativeTextTarget)? = nil,
         browserNavigationTask: ComputerUseBrowserNavigationTask? = nil,
         approvedActionStepDidPost: (@MainActor () -> Void)? = nil,
         screenProvider: (() throws -> ComputerUseScreenObservation)? = nil,
@@ -1082,6 +1083,7 @@ final class ComputerUseHostTools {
         self.approvalTargetProvider = approvalTargetProvider
         self.actionPerformer = actionPerformer
         self.textEditorOverride = textEditor
+        self.textTarget = nativeTextTarget ?? ComputerUseAccessibilityTextTarget()
         self.browserNavigationTask = browserNavigationTask
         self.approvedActionStepDidPost = approvedActionStepDidPost
         self.screenProvider = screenProvider
@@ -2838,10 +2840,14 @@ final class ComputerUseHostTools {
             },
             postUnicode: { [textTarget, injector, mayAct] text, expected in
                 var targetChanged = false, expired = false
-                guard await injector.applyTextPaced(text, ifAllowed: {
+                guard await injector.applyTextStroke(text, ifAllowed: {
                     guard mayAct(), !Task.isCancelled else { return false }
                     guard ProcessInfo.processInfo.systemUptime < deadline else { expired = true; return false }
                     guard textTarget.snapshot()?.targetID == expected.targetID else { targetChanged = true; return false }
+                    guard ProcessInfo.processInfo.systemUptime < deadline else { expired = true; return false }
+                    return mayAct() && !Task.isCancelled
+                }, beforePosting: {
+                    guard textTarget.snapshot() == expected else { targetChanged = true; return false }
                     guard ProcessInfo.processInfo.systemUptime < deadline else { expired = true; return false }
                     return mayAct() && !Task.isCancelled
                 }) else {

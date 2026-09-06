@@ -4,6 +4,176 @@ import XCTest
 
 @MainActor
 final class ComputerUseTextEditorTests: XCTestCase {
+    func testSameFieldCaretValueAndProtectionChangesStopBeforeAnotherUnicodeStroke() async throws {
+        for route in ["native", "visual-tools"] {
+            for change in ["caret", "value", "secure", "read-only"] {
+                let fields = NativeFields(setter: .unicode), events = UnicodeStrokeEvents()
+                let injector = InputInjector(eventPoster: { events.record($0) })
+                var applied = 0, changed = false
+                fields.beforeRead = { [weak fields] in
+                    guard let fields else { return }
+                    let input = events.downTexts
+                    guard input.count > applied else { return }
+                    for text in input.dropFirst(applied) { fields.receiveUnicode(text) }
+                    applied = input.count
+                    guard !changed else { return }
+                    changed = true
+                    switch change {
+                    case "caret": fields.selections["destination"] = NSRange(location: 0, length: 0)
+                    case "value": fields.setValue("destination", "Intervening text")
+                    case "secure": fields.secureIDs.insert("destination")
+                    default: fields.readOnlyIDs.insert("destination")
+                    }
+                }
+                let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+                defer { try? FileManager.default.removeItem(at: directory) }
+                let planner = NativePlanner(operations: [.enterText(.init(targetID: "destination", mode: .replaceAll, text: "Paris"))])
+                let executor = ComputerUseNativeTextExecutor(injector: injector, mayAct: { true }, journalDirectory: directory,
+                    planner: planner, nativeTarget: fields)
+                let tools = ComputerUseHostTools(injector: injector, mayAct: { true }, nativeTextTarget: fields)
+                await assertError(.deliveryUncertain) {
+                    if route == "native" {
+                        _ = try await executor.execute(taskID: "same-field-drift", prompt: "Apply the requested form edits", progress: { _ in })
+                    } else { try await tools.editFocusedText("Paris", mode: .replaceAll) }
+                }
+                XCTAssertTrue(changed, route + "/" + change)
+                XCTAssertEqual(events.downTexts, ["P"]); XCTAssertEqual(events.upTexts, ["P"])
+                XCTAssertEqual(fields.values["destination"], change == "value" ? "Intervening text" : "P")
+                if route == "native" {
+                    do {
+                        _ = try await executor.execute(taskID: "same-field-drift", prompt: "Apply the requested form edits", progress: { _ in })
+                        XCTFail("An uncertain Unicode effect must not replay")
+                    } catch {}
+                    XCTAssertEqual(events.downTexts, ["P"]); XCTAssertEqual(events.upTexts, ["P"])
+                    let journal = try XCTUnwrap(try ComputerUseTextStepStore(directory: directory).load(taskID: "same-field-drift"))
+                    XCTAssertEqual(journal.statuses, [.uncertain]); XCTAssertEqual(planner.calls, 1)
+                }
+            }
+        }
+    }
+
+    func testUnicodeStrokeAdmissionRejectsChangedStateAndInvalidUnitsWithoutPosting() async throws {
+        let events = UnicodeStrokeEvents(), field = Field("old")
+        let injector = InputInjector(eventPoster: { events.record($0) })
+        let expected = field.snapshot
+        let accepted = await injector.applyTextStroke("x", ifAllowed: {
+            field.selection = NSRange(location: 0, length: 0)
+            return true
+        }, beforePosting: { field.snapshot == expected })
+        XCTAssertFalse(accepted); XCTAssertTrue(events.downTexts.isEmpty); XCTAssertTrue(events.upTexts.isEmpty)
+        for invalid in ["", "ab"] {
+            let accepted = await injector.applyTextStroke(invalid, ifAllowed: { true }, beforePosting: {
+                XCTFail("Reject a non-stroke before admission"); return true
+            })
+            XCTAssertFalse(accepted)
+        }
+        let cancelled = Task {
+            await injector.applyTextStroke("x", ifAllowed: { true }, beforePosting: {
+                withUnsafeCurrentTask { $0?.cancel() }
+                return true
+            })
+        }
+        let cancellationResult = await cancelled.value
+        XCTAssertFalse(cancellationResult)
+        XCTAssertTrue(events.downTexts.isEmpty); XCTAssertTrue(events.upTexts.isEmpty)
+        let grapheme = "👨‍👩‍👧‍👦"
+        let posted = await injector.applyTextStroke(grapheme, ifAllowed: { true })
+        XCTAssertTrue(posted)
+        XCTAssertEqual(events.downTexts.count, 1); XCTAssertEqual(events.upTexts.count, 1)
+        XCTAssertTrue(events.downTexts.joined().utf8.elementsEqual(grapheme.utf8))
+        XCTAssertTrue(events.upTexts.joined().utf8.elementsEqual(grapheme.utf8))
+    }
+
+    func testNativeAndVisualUnicodeDeliveryPreserveExactPayloadAndEditMode() async throws {
+        let payload = "  e\u{301} 😀 👨‍👩‍👧‍👦 東京\n  "
+        for route in ["native", "visual-tools"] {
+            for mode in [ComputerUseTextEditMode.insert, .replaceAll, .append] {
+                let fields = NativeFields(setter: .unicode), events = UnicodeStrokeEvents()
+                fields.selections["destination"] = NSRange(location: 1, length: 1)
+                let injector = InputInjector(eventPoster: { events.record($0) })
+                var applied = 0
+                fields.beforeRead = { [weak fields] in
+                    guard let fields else { return }
+                    let input = events.downTexts
+                    for text in input.dropFirst(applied) { fields.receiveUnicode(text) }
+                    applied = input.count
+                }
+                let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+                defer { try? FileManager.default.removeItem(at: directory) }
+                if route == "native" {
+                    let planner = NativePlanner(operations: [.enterText(.init(targetID: "destination", mode: mode, text: payload))])
+                    let executor = ComputerUseNativeTextExecutor(injector: injector, mayAct: { true }, journalDirectory: directory,
+                        planner: planner, nativeTarget: fields)
+                    for _ in 0..<2 {
+                        let result = try await executor.execute(taskID: "exact-strokes", prompt: "Apply the requested form edits", progress: { _ in })
+                        guard case .completed = result else { return XCTFail("The complete exact edit should verify") }
+                    }
+                    XCTAssertEqual(planner.calls, 1)
+                    let journal = try XCTUnwrap(try ComputerUseTextStepStore(directory: directory).load(taskID: "exact-strokes"))
+                    XCTAssertEqual(journal.statuses, [.verified])
+                } else {
+                    let tools = ComputerUseHostTools(injector: injector, mayAct: { true }, nativeTextTarget: fields)
+                    try await tools.editFocusedText(payload, mode: mode)
+                }
+                let expected = mode == .insert ? "o" + payload + "d" : mode == .append ? "old" + payload : payload
+                XCTAssertTrue(try XCTUnwrap(fields.values["destination"]).utf8.elementsEqual(expected.utf8), route)
+                XCTAssertTrue(events.downTexts.joined().utf8.elementsEqual(payload.utf8))
+                XCTAssertTrue(events.upTexts.joined().utf8.elementsEqual(payload.utf8))
+                XCTAssertEqual(events.downTexts.count, payload.count)
+                XCTAssertEqual(fields.selections["destination"], NSRange(location: (mode == .insert ? 1 : mode == .append ? 3 : 0) + payload.utf16.count, length: 0))
+                XCTAssertEqual(fields.values["retained"], "keep"); XCTAssertTrue(fields.edits.isEmpty)
+            }
+        }
+    }
+
+    func testVerificationReadCannotReturnSuccessAfterDeadlineTakeoverOrCancellation() async throws {
+        for reason in ["deadline", "takeover", "cancel", "context"] {
+            let field = Field("old")
+            var now: TimeInterval = 0, hasPosted = false
+            var editor = ComputerUseTextEditor(read: {
+                if hasPosted {
+                    if reason == "deadline" { now = 61 }
+                    if reason == "takeover" { field.allowed = false }
+                    if reason == "cancel" { withUnsafeCurrentTask { $0?.cancel() } }
+                }
+                return field.snapshot
+            }, select: { _, _ in XCTFail("Whole-value setter needs no selection"); return false },
+                replaceSelectedText: { _, _ in XCTFail("Do not fall back"); return nil },
+                postUnicode: { _, _ in XCTFail("Do not fall back") }, mayAct: { field.allowed })
+            editor.uptime = { now }
+            editor.replaceValue = { value, _ in field.value = value; hasPosted = true; return true }
+            editor.validateContext = {
+                if hasPosted && reason == "context" { throw ComputerUseTextTaskError.incompleteOutcome }
+            }
+            let snapshot = field.snapshot
+            let execution = Task { try await editor.edit("new", mode: .replaceAll, expected: snapshot) }
+            do { try await execution.value; XCTFail("An exact value after invalidation is not success") }
+            catch {
+                if reason == "context" { XCTAssertEqual(error as? ComputerUseTextTaskError, .incompleteOutcome) }
+                else { XCTAssertEqual(error as? ComputerUseTextEditError, reason == "deadline" ? .deadlineExceeded : .interrupted) }
+            }
+            XCTAssertTrue(hasPosted); XCTAssertEqual(field.value, "new", "Retain the effect without reporting completion")
+        }
+    }
+
+    func testUnicodeCannotAdvanceUntilThePrecedingValueAndCaretAreConfirmed() async throws {
+        let field = Field("old", selection: NSRange(location: 1, length: 1))
+        var pending: String?, waits = 0, posted: [String] = []
+        var editor = ComputerUseTextEditor(read: { field.snapshot }, select: { _, _ in false },
+            replaceSelectedText: { _, _ in nil }, postUnicode: { text, expected in
+                XCTAssertNil(pending, "No new event while an earlier one is unconfirmed")
+                XCTAssertEqual(field.snapshot, expected)
+                pending = text; posted.append(text)
+            }, mayAct: { true })
+        editor.wait = {
+            waits += 1
+            if waits.isMultiple(of: 2), let text = pending { field.insert(text); pending = nil }
+        }
+        try await editor.edit("😀x", expected: field.snapshot)
+        XCTAssertEqual(posted, ["😀", "x"]); XCTAssertNil(pending); XCTAssertEqual(waits, 4)
+        XCTAssertEqual(field.value, "o😀xd"); XCTAssertEqual(field.selection, NSRange(location: 4, length: 0))
+    }
+
     func testContextDriftBetweenTextAdaptersStopsSelectionSettersAndLaterChunks() async throws {
         for stage in ["value-probe", "selection", "selected-probe", "first-chunk"] {
             let field = Field("old")
@@ -35,7 +205,7 @@ final class ComputerUseTextEditorTests: XCTestCase {
                 "selection": ["value-probe", "selection"], "selected-probe": ["value-probe", "selection", "selected-probe"],
                 "first-chunk": ["value-probe", "selection", "selected-probe", "chunk"]]
             XCTAssertEqual(calls, try XCTUnwrap(expectedCalls[stage]))
-            XCTAssertEqual(field.value, stage == "first-chunk" ? "1234567890123456" : "old")
+            XCTAssertEqual(field.value, stage == "first-chunk" ? "1" : "old")
         }
     }
 
@@ -162,6 +332,7 @@ final class ComputerUseTextEditorTests: XCTestCase {
         let setter: Setter
         var values = ["source": "Paris", "destination": "old", "retained": "keep", "other": "free"]
         var selections: [String: NSRange] = [:]
+        var secureIDs = Set<String>(), readOnlyIDs = Set<String>()
         var focusedID = "destination", focusCalls = 0
         var edits: [String] = []
         var beforeRead: (() -> Void)?, afterFocus: (() -> Void)?, afterSelection: (() -> Void)?, afterInput: (() -> Void)?
@@ -179,7 +350,7 @@ final class ComputerUseTextEditorTests: XCTestCase {
             beforeRead?()
             guard let value = values[targetID] else { return nil }
             return .init(targetID: targetID, value: value, selection: selections[targetID] ?? NSRange(location: value.utf16.count, length: 0),
-                isEditable: true, isSecure: false)
+                isEditable: !readOnlyIDs.contains(targetID), isSecure: secureIDs.contains(targetID))
         }
         func focus(expected: ComputerUseTextSnapshot) throws -> Bool {
             guard snapshot(targetID: expected.targetID) == expected else { throw ComputerUseTextEditError.preconditionChanged }
@@ -202,6 +373,13 @@ final class ComputerUseTextEditorTests: XCTestCase {
         }
         func setValue(_ id: String, _ value: String) {
             values[id] = value; selections[id] = NSRange(location: value.utf16.count, length: 0)
+        }
+        func receiveUnicode(_ text: String) {
+            let value = values[focusedID]!
+            let selection = selections[focusedID] ?? NSRange(location: value.utf16.count, length: 0)
+            let range = Range(selection, in: value)!
+            values[focusedID] = value.replacingCharacters(in: range, with: text)
+            selections[focusedID] = NSRange(location: selection.location + text.utf16.count, length: 0)
         }
         private func require(_ expected: ComputerUseTextSnapshot) throws {
             guard snapshot() == expected else { throw ComputerUseTextEditError.preconditionChanged }
@@ -290,9 +468,9 @@ final class ComputerUseTextEditorTests: XCTestCase {
         let payload = "  \n東京 e\u{301} 👨‍👩‍👧‍👦 😀\n" + String(repeating: "x", count: 2_000) + "\n  "
         let field = Field()
         try await field.editor.edit(payload, expected: field.snapshot)
-        XCTAssertEqual(field.value, payload)
-        XCTAssertEqual(field.posted.joined(), payload)
-        XCTAssertTrue(field.posted.allSatisfy { $0.count <= 16 })
+        XCTAssertTrue(field.value.utf8.elementsEqual(payload.utf8))
+        XCTAssertTrue(field.posted.joined().utf8.elementsEqual(payload.utf8))
+        XCTAssertTrue(field.posted.allSatisfy { $0.count == 1 })
     }
 
     func testInsertReplaceAndAppendHaveDistinctVerifiedResults() async throws {
@@ -325,7 +503,7 @@ final class ComputerUseTextEditorTests: XCTestCase {
             try await field.editor.edit(String(repeating: "a", count: 80), expected: field.snapshot)
         }
         XCTAssertEqual(field.posted.count, 1)
-        XCTAssertEqual(field.value.count, 15)
+        XCTAssertTrue(field.value.isEmpty)
     }
 
     func testAutoCorrectionDivergenceIsNotReportedAsSuccess() async throws {
@@ -334,7 +512,7 @@ final class ComputerUseTextEditorTests: XCTestCase {
         await assertError(.deliveryUncertain) {
             try await field.editor.edit("literal", expected: field.snapshot)
         }
-        XCTAssertEqual(field.posted, ["literal"])
+        XCTAssertEqual(field.posted, ["l"])
     }
 
     func testPauseAfterFirstChunkStopsBeforeAnySecondChunk() async throws {
@@ -343,7 +521,7 @@ final class ComputerUseTextEditorTests: XCTestCase {
         await assertError(.interrupted) {
             try await field.editor.edit(String(repeating: "a", count: 80), expected: field.snapshot)
         }
-        XCTAssertEqual(field.value.count, 16)
+        XCTAssertEqual(field.value.count, 1)
         XCTAssertEqual(field.posted.count, 1)
     }
 
@@ -460,7 +638,7 @@ final class ComputerUseTextEditorTests: XCTestCase {
             try await editor.edit(String(repeating: "x", count: 100), expected: field.snapshot)
         }
         XCTAssertEqual(field.posted.count, 1)
-        XCTAssertEqual(field.value.count, 16)
+        XCTAssertEqual(field.value.count, 1)
     }
 
     func testPacedUnicodeTakeoverReleasesStrokeAndStartsNoFurtherKey() async {
@@ -509,4 +687,21 @@ private final class PacedEventCounts: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         return (down, up)
     }
+}
+
+private final class UnicodeStrokeEvents: @unchecked Sendable {
+    private let lock = NSLock()
+    private var down: [String] = [], up: [String] = []
+    func record(_ event: CGEvent) {
+        guard event.type == .keyDown || event.type == .keyUp else { return }
+        var count = 0, units = [UniChar](repeating: 0, count: 128)
+        units.withUnsafeMutableBufferPointer {
+            event.keyboardGetUnicodeString(maxStringLength: $0.count, actualStringLength: &count, unicodeString: $0.baseAddress)
+        }
+        let text = String(decoding: units.prefix(count), as: UTF16.self)
+        lock.lock(); defer { lock.unlock() }
+        if event.type == .keyDown { down.append(text) } else { up.append(text) }
+    }
+    var downTexts: [String] { lock.lock(); defer { lock.unlock() }; return down }
+    var upTexts: [String] { lock.lock(); defer { lock.unlock() }; return up }
 }

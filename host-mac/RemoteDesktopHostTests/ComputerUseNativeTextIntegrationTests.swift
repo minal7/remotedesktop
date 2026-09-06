@@ -210,11 +210,11 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             read: { textTarget.snapshot() },
             select: { try textTarget.select($0, expected: $1) },
             replaceSelectedText: { _, _ in nil },
-            postUnicode: { text, _ in
+            postUnicode: { text, expected in
                 postedChunks += 1
-                guard await injector.applyTextPaced(text, ifAllowed: {
+                guard await injector.applyTextStroke(text, ifAllowed: {
                     NSWorkspace.shared.frontmostApplication?.processIdentifier == process.processIdentifier
-                }) else { throw ComputerUseTextEditError.interrupted }
+                }, beforePosting: { textTarget.snapshot() == expected }) else { throw ComputerUseTextEditError.interrupted }
             },
             mayAct: { NSWorkspace.shared.frontmostApplication?.processIdentifier == process.processIdentifier })
         do {
@@ -475,22 +475,22 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             journalDirectory: directory.appendingPathComponent("cancel-unicode"), planner: countedPlanner,
             editOverride: { edit, _ in
                 let snapshot = try XCTUnwrap(unicodeTarget.snapshot())
+                let interrupt = Task { @MainActor in
+                    while !Task.isCancelled {
+                        if posted.counts[0] >= 3 {
+                            _ = unicodeInjector.interruptAutomation { allowed = false; return true }
+                            stoppedDuringTyping = true
+                            return
+                        }
+                        try await Task.sleep(for: .milliseconds(1))
+                    }
+                }
+                defer { interrupt.cancel() }
                 let editor = ComputerUseTextEditor(read: { unicodeTarget.snapshot() },
                     select: { try unicodeTarget.select($0, expected: $1) }, replaceSelectedText: { _, _ in nil },
-                    postUnicode: { text, _ in
-                        let interrupt = Task { @MainActor in
-                            for _ in 0..<200 {
-                                if posted.counts[0] >= 3 {
-                                    _ = unicodeInjector.interruptAutomation { allowed = false; return true }
-                                    stoppedDuringTyping = true
-                                    return
-                                }
-                                try await Task.sleep(for: .milliseconds(1))
-                            }
-                        }
-                        defer { interrupt.cancel() }
-                        let delivered = await unicodeInjector.applyTextPaced(text, ifAllowed: mayAct)
-                        try await interrupt.value
+                    postUnicode: { text, expected in
+                        let delivered = await unicodeInjector.applyTextStroke(text, ifAllowed: mayAct,
+                            beforePosting: { unicodeTarget.snapshot() == expected })
                         guard delivered else { throw ComputerUseTextEditError.interrupted }
                     }, mayAct: mayAct)
                 try await editor.edit(edit.text, mode: edit.mode, expected: snapshot)

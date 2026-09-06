@@ -433,7 +433,7 @@ final class ComputerUseNativeTextExecutor {
     private func apply(_ dispatch: ComputerUseTextInputDispatch) async throws {
         let edit = dispatch.edit, expected = dispatch.expected
         let deadline = ProcessInfo.processInfo.systemUptime + ComputerUseTextEditor.defaultMaximumDuration
-        // This field evolves through selection and verified chunks. Its own
+        // This field evolves through selection and verified strokes. Its own
         // current value is checked by the editor; freezing its initial value
         // here would break append, repeated edits, and self-copy.
         var required = dispatch.requiredValues.filter { $0.key != edit.targetID }
@@ -489,12 +489,11 @@ final class ComputerUseNativeTextExecutor {
             },
             postUnicode: { [self] text, expected in
                 var contextFailure: Error?
-                let delivered = await injector.applyTextPaced(text, ifAllowed: {
+                let delivered = await injector.applyTextStroke(text, ifAllowed: {
                     do {
                         try validateContext()
-                        // A paced chunk suspends between keys. Before each
-                        // key, retain the exact focused field and all other
-                        // required values; the editor verifies chunk contents.
+                        // The edit changes the destination value, so key-up
+                        // checks ownership/identity rather than its old value.
                         guard target.snapshot()?.targetID == expected.targetID else {
                             throw ComputerUseTextEditError.deliveryUncertain
                         }
@@ -503,6 +502,20 @@ final class ComputerUseNativeTextExecutor {
                         guard ProcessInfo.processInfo.systemUptime < deadline else { throw ComputerUseTextEditError.deadlineExceeded }
                         return true
                     } catch { contextFailure = error; return false }
+                }, beforePosting: {
+                    guard target.snapshot() == expected else {
+                        contextFailure = ComputerUseTextEditError.deliveryUncertain
+                        return false
+                    }
+                    guard !Task.isCancelled, mayAct() else {
+                        contextFailure = ComputerUseTextEditError.interrupted
+                        return false
+                    }
+                    guard ProcessInfo.processInfo.systemUptime < deadline else {
+                        contextFailure = ComputerUseTextEditError.deadlineExceeded
+                        return false
+                    }
+                    return true
                 })
                 guard delivered else {
                     throw contextFailure ?? ComputerUseTextEditError.interrupted

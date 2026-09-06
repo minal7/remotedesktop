@@ -62,7 +62,8 @@ enum ComputerUseTextEditError: Error, Equatable, LocalizedError {
 
 /// A small transaction over a specific editable field. An emitted event is
 /// only an attempted effect; exact readback is required before success or the
-/// next chunk. There is deliberately no retry of a possibly delivered chunk.
+/// next Unicode stroke. There is deliberately no retry of a possibly delivered
+/// stroke, even when the app has not yet exposed its resulting value.
 @MainActor
 struct ComputerUseTextEditor {
     nonisolated static let maximumPayloadBytes = 64 * 1_024
@@ -73,13 +74,14 @@ struct ComputerUseTextEditor {
     let select: (NSRange, ComputerUseTextSnapshot) throws -> Bool
     /// nil means unsupported and guarantees that no setter was invoked.
     let replaceSelectedText: (String, ComputerUseTextSnapshot) throws -> Bool?
+    /// Receives exactly one extended grapheme and its full pre-effect state.
+    /// A provider must check that state at the key-down admission boundary.
     let postUnicode: (String, ComputerUseTextSnapshot) async throws -> Void
     let mayAct: () -> Bool
     var wait: () async throws -> Void = {
         try await Task.sleep(for: .milliseconds(25))
     }
     var verificationAttempts = 12
-    var chunkCharacters = 16
     var maximumDuration: TimeInterval = ComputerUseTextEditor.defaultMaximumDuration
     var uptime: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
     /// Optional qualified whole-value setter. nil result guarantees no setter
@@ -164,8 +166,11 @@ struct ComputerUseTextEditor {
             guard try read() == selected else {
                 throw ComputerUseTextEditError.deliveryUncertain
             }
-            let chunk = String(remaining.prefix(max(1, chunkCharacters)))
-            remaining = remaining.dropFirst(chunk.count)
+            // CGEvent delivery suspends between graphemes. Reading only after
+            // a larger string lets a same-field caret/value change redirect
+            // subsequent keys before the mismatch is detected.
+            let chunk = String(remaining.prefix(1))
+            remaining = remaining.dropFirst()
             guard let selectionRange = Range(selected.selection, in: selected.value) else {
                 throw ComputerUseTextEditError.deliveryUncertain
             }
@@ -200,10 +205,15 @@ struct ComputerUseTextEditor {
                 throw ComputerUseTextEditError.interrupted
             }
             guard uptime() < deadline else { throw ComputerUseTextEditError.deadlineExceeded }
+            try validateContext()
             guard let current = try read(), current.targetID == target,
                   current.isEditable, !current.isSecure else {
                 throw ComputerUseTextEditError.deliveryUncertain
             }
+            // Context/AX reads can suspend progress or invalidate ownership.
+            // An exact value read after Stop or the deadline is not success.
+            guard !Task.isCancelled, mayAct() else { throw ComputerUseTextEditError.interrupted }
+            guard uptime() < deadline else { throw ComputerUseTextEditError.deadlineExceeded }
             // No implicit Unicode normalization: an app-specific relaxation
             // must be explicit, rather than Swift String's canonical equality.
             if current.value.utf8.elementsEqual(value.utf8) { return current }
