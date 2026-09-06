@@ -1,0 +1,139 @@
+{
+  "allowFieldCopy" : false,
+  "cases" : [
+    {
+      "disposition" : "supported",
+      "edits" : [
+        {
+          "field" : 1,
+          "mode" : "replaceAll",
+          "sourceField" : 0
+        }
+      ],
+      "elapsedSeconds" : 14.431840791658033,
+      "id" : "C06",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\n      \"disposition\": \"supported\",\n      \"operations\": [\n        {\n          \"fieldID\": \"f2\",\n          \"mode\": \"replaceAll\",\n          \"payload\": {\n            \"kind\": \"fieldValue\",\n            \"fieldID\": \"f1\"\n          }\n        }\n      ]\n    }",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\n      \"disposition\": \"supported\",\n      \"operations\": [\n        {\n          \"fieldID\": \"f2\",\n          \"mode\": \"replaceAll\",\n          \"payload\": {\n            \"kind\": \"fieldValue\",\n            \"fieldID\": \"f1\"\n          }\n        }\n      ]\n    }",
+          "finishReason" : "stop"
+        }
+      ],
+      "verified" : true
+    },
+    {
+      "elapsedSeconds" : 12.431493874988519,
+      "error" : "invalidResponse",
+      "id" : "C11",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\"disposition\":\"supported\",\"operations\":[{\"fieldID\":\"f2\",\"mode\":\"replaceAll\",\"payload\":{\"kind\":\"suppliedText\",\"value\":\"Title\"}}]}",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\"disposition\":\"supported\",\"operations\":[{\"fieldID\":\"f2\",\"mode\":\"replaceAll\",\"payload\":{\"kind\":\"suppliedText\",\"value\":\"Title\"}}]}",
+          "finishReason" : "stop"
+        }
+      ],
+      "verified" : false
+    },
+    {
+      "disposition" : "supported",
+      "edits" : [
+        {
+          "field" : 1,
+          "mode" : "replaceAll",
+          "value" : "Berlin"
+        }
+      ],
+      "elapsedSeconds" : 14.085438916663406,
+      "id" : "R15",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\n      \"disposition\": \"supported\",\n      \"operations\": [\n        {\n          \"fieldID\": \"f2\",\n          \"mode\": \"replaceAll\",\n          \"payload\": {\n            \"kind\": \"suppliedText\",\n            \"value\": \"p2\"\n          }\n        }\n      ]\n    }",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\n      \"disposition\": \"supported\",\n      \"operations\": [\n        {\n          \"fieldID\": \"f2\",\n          \"mode\": \"replaceAll\",\n          \"payload\": {\n            \"kind\": \"suppliedText\",\n            \"value\": \"p2\"\n          }\n        }\n      ]\n    }",
+          "finishReason" : "stop"
+        }
+      ],
+      "verified" : true
+    },
+    {
+      "disposition" : "supported",
+      "edits" : [
+        {
+          "field" : 1,
+          "mode" : "replaceAll",
+          "sourceField" : 0
+        }
+      ],
+      "elapsedSeconds" : 12.897503083338961,
+      "id" : "R16",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\n      \"disposition\": \"supported\",\n      \"operations\": [\n        {\n          \"fieldID\": \"f2\",\n          \"mode\": \"replaceAll\",\n          \"payload\": {\n            \"kind\": \"fieldValue\",\n            \"fieldID\": \"f1\"\n          }\n        }\n      ]\n    }",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\n      \"disposition\": \"supported\",\n      \"operations\": [\n        {\n          \"fieldID\": \"f2\",\n          \"mode\": \"replaceAll\",\n          \"payload\": {\n            \"kind\": \"fieldValue\",\n            \"fieldID\": \"f1\"\n          }\n        }\n      ]\n    }",
+          "finishReason" : "stop"
+        }
+      ],
+      "verified" : false
+    },
+    {
+      "disposition" : "supported",
+      "edits" : [
+        {
+          "field" : 0,
+          "mode" : "replaceAll",
+          "value" : "Tallinn"
+        },
+        {
+          "field" : 1,
+          "mode" : "replaceAll",
+          "value" : "Riga"
+        }
+      ],
+      "elapsedSeconds" : 12.58292083334527,
+      "id" : "R17",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\"disposition\":\"supported\",\"operations\":[{\"fieldID\":\"f1\",\"mode\":\"replaceAll\",\"payload\":{\"kind\":\"suppliedText\",\"value\":\"p2\"}},{\"fieldID\":\"f2\",\"mode\":\"replaceAll\",\"payload\":{\"kind\":\"suppliedText\",\"value\":\"p4\"}}]}",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\"disposition\":\"supported\",\"operations\":[{\"fieldID\":\"f1\",\"mode\":\"replaceAll\",\"payload\":{\"kind\":\"suppliedText\",\"value\":\"p2\"}},{\"fieldID\":\"f2\",\"mode\":\"replaceAll\",\"payload\":{\"kind\":\"suppliedText\",\"value\":\"p4\"}}]}",
+          "finishReason" : "stop"
+        }
+      ],
+      "verified" : true
+    }
+  ],
+  "contract" : "field-operations-v9",
+  "corpusSHA256" : "1be95777c23ea805698b6501a0e8f9a5fc6cb01bc1b9c5779ec07967bb051022",
+  "desktopEffects" : false,
+  "expectedCaseIDs" : [
+    "C06",
+    "C11",
+    "R15",
+    "R16",
+    "R17"
+  ],
+  "modelSHA256FromVerifiedManifest" : "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
+  "oracle" : "exact-disposition-and-complete-operation-sequences-including-count-mode-target-payload-origin-exact-bytes-and-order",
+  "quotedCommandFastPath" : false,
+  "runtimeBinarySHA256" : "5954bff2814da2ab74a9b090534d6d364d2b519fd01893961e925701f6bcea5c",
+  "schemaVersion" : 1,
+  "scope" : "Preselected context-only diagnostic: every prior v8 regression with a quotation matching a field label, plus three unchanged-request controls; not held-out or product qualification"
+}

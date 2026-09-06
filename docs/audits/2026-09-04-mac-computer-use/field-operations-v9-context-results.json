@@ -1,0 +1,367 @@
+{
+  "schemaVersion": 1,
+  "candidateSourceCommit": "3b0536a",
+  "candidate": "field-operations-candidate-v9.json",
+  "total": 10,
+  "passed": 4,
+  "baselinePassedOnSameSelectedCases": 1,
+  "modelResponses": 10,
+  "elapsedCaseSeconds": 127.56474970837007,
+  "changedRequestsPassed": 4,
+  "changedRequestsTotal": 7,
+  "failedCaseIDs": [
+    "C11",
+    "R16",
+    "H507",
+    "C04",
+    "C20",
+    "H520"
+  ],
+  "incorrectAcceptedPlanCaseIDs": [
+    "R16",
+    "H507",
+    "C20"
+  ],
+  "desktopEffects": false,
+  "productionEnabled": false,
+  "batches": [
+    {
+      "report": "field-operations-v9-context-batch-1-results.json",
+      "sha256": "3d5eb3464a76362a673ff971a7f4ce484b973618ab016d3690bb889a11d1e81a",
+      "xcresult": "/tmp/remotedesktop-quoted-context-v9-batch-1-first.xcresult",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 0,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1788654705.961,
+        "passedTests": 0,
+        "result": "Failed",
+        "skippedTests": 0,
+        "startTime": 1788654636.094,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "failed - C11: invalidResponse",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseSourceBoundTextModelAcceptanceTests/testSignedRuntimeCompilesTheExactCorpusWithoutDesktopEffects()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseSourceBoundTextModelAcceptanceTests/testSignedRuntimeCompilesTheExactCorpusWithoutDesktopEffects",
+            "testName": "testSignedRuntimeCompilesTheExactCorpusWithoutDesktopEffects()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      }
+    },
+    {
+      "report": "field-operations-v9-context-batch-2-results.json",
+      "sha256": "5be61b7ea78c306329dc016e8ea42d17c67d4c7fa87e1c19c8fba5b2d227455e",
+      "xcresult": "/tmp/remotedesktop-quoted-context-v9-batch-2-first.xcresult",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 0,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1788654772.558,
+        "passedTests": 0,
+        "result": "Failed",
+        "skippedTests": 0,
+        "startTime": 1788654708.725,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "XCTAssertTrue failed - H507: disposition or complete edit sequence did not match the independent corpus",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseSourceBoundTextModelAcceptanceTests/testSignedRuntimeCompilesTheExactCorpusWithoutDesktopEffects()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseSourceBoundTextModelAcceptanceTests/testSignedRuntimeCompilesTheExactCorpusWithoutDesktopEffects",
+            "testName": "testSignedRuntimeCompilesTheExactCorpusWithoutDesktopEffects()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      }
+    }
+  ],
+  "cases": [
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 1,
+          "mode": "replaceAll",
+          "sourceField": 0
+        }
+      ],
+      "elapsedSeconds": 14.431840791658033,
+      "id": "C06",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\n      \"disposition\": \"supported\",\n      \"operations\": [\n        {\n          \"fieldID\": \"f2\",\n          \"mode\": \"replaceAll\",\n          \"payload\": {\n            \"kind\": \"fieldValue\",\n            \"fieldID\": \"f1\"\n          }\n        }\n      ]\n    }",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\n      \"disposition\": \"supported\",\n      \"operations\": [\n        {\n          \"fieldID\": \"f2\",\n          \"mode\": \"replaceAll\",\n          \"payload\": {\n            \"kind\": \"fieldValue\",\n            \"fieldID\": \"f1\"\n          }\n        }\n      ]\n    }",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "elapsedSeconds": 12.431493874988519,
+      "error": "invalidResponse",
+      "id": "C11",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\":\"supported\",\"operations\":[{\"fieldID\":\"f2\",\"mode\":\"replaceAll\",\"payload\":{\"kind\":\"suppliedText\",\"value\":\"Title\"}}]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\":\"supported\",\"operations\":[{\"fieldID\":\"f2\",\"mode\":\"replaceAll\",\"payload\":{\"kind\":\"suppliedText\",\"value\":\"Title\"}}]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": false
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 1,
+          "mode": "replaceAll",
+          "value": "Berlin"
+        }
+      ],
+      "elapsedSeconds": 14.085438916663406,
+      "id": "R15",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\n      \"disposition\": \"supported\",\n      \"operations\": [\n        {\n          \"fieldID\": \"f2\",\n          \"mode\": \"replaceAll\",\n          \"payload\": {\n            \"kind\": \"suppliedText\",\n            \"value\": \"p2\"\n          }\n        }\n      ]\n    }",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\n      \"disposition\": \"supported\",\n      \"operations\": [\n        {\n          \"fieldID\": \"f2\",\n          \"mode\": \"replaceAll\",\n          \"payload\": {\n            \"kind\": \"suppliedText\",\n            \"value\": \"p2\"\n          }\n        }\n      ]\n    }",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 1,
+          "mode": "replaceAll",
+          "sourceField": 0
+        }
+      ],
+      "elapsedSeconds": 12.897503083338961,
+      "id": "R16",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\n      \"disposition\": \"supported\",\n      \"operations\": [\n        {\n          \"fieldID\": \"f2\",\n          \"mode\": \"replaceAll\",\n          \"payload\": {\n            \"kind\": \"fieldValue\",\n            \"fieldID\": \"f1\"\n          }\n        }\n      ]\n    }",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\n      \"disposition\": \"supported\",\n      \"operations\": [\n        {\n          \"fieldID\": \"f2\",\n          \"mode\": \"replaceAll\",\n          \"payload\": {\n            \"kind\": \"fieldValue\",\n            \"fieldID\": \"f1\"\n          }\n        }\n      ]\n    }",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": false
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 0,
+          "mode": "replaceAll",
+          "value": "Tallinn"
+        },
+        {
+          "field": 1,
+          "mode": "replaceAll",
+          "value": "Riga"
+        }
+      ],
+      "elapsedSeconds": 12.58292083334527,
+      "id": "R17",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\":\"supported\",\"operations\":[{\"fieldID\":\"f1\",\"mode\":\"replaceAll\",\"payload\":{\"kind\":\"suppliedText\",\"value\":\"p2\"}},{\"fieldID\":\"f2\",\"mode\":\"replaceAll\",\"payload\":{\"kind\":\"suppliedText\",\"value\":\"p4\"}}]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\":\"supported\",\"operations\":[{\"fieldID\":\"f1\",\"mode\":\"replaceAll\",\"payload\":{\"kind\":\"suppliedText\",\"value\":\"p2\"}},{\"fieldID\":\"f2\",\"mode\":\"replaceAll\",\"payload\":{\"kind\":\"suppliedText\",\"value\":\"p4\"}}]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 0,
+          "mode": "replaceAll",
+          "value": "Aster"
+        }
+      ],
+      "elapsedSeconds": 13.16553687499254,
+      "id": "H506",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\":\"supported\",\"operations\":[{\"fieldID\":\"f1\",\"mode\":\"replaceAll\",\"payload\":{\"kind\":\"suppliedText\",\"value\":\"p2\"}}]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\":\"supported\",\"operations\":[{\"fieldID\":\"f1\",\"mode\":\"replaceAll\",\"payload\":{\"kind\":\"suppliedText\",\"value\":\"p2\"}}]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 1,
+          "mode": "replaceAll",
+          "sourceField": 0
+        }
+      ],
+      "elapsedSeconds": 12.1575754583464,
+      "id": "H507",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\":\"supported\",\"operations\":[{\"fieldID\":\"f2\",\"mode\":\"replaceAll\",\"payload\":{\"kind\":\"fieldValue\",\"fieldID\":\"f1\"}}]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\":\"supported\",\"operations\":[{\"fieldID\":\"f2\",\"mode\":\"replaceAll\",\"payload\":{\"kind\":\"fieldValue\",\"fieldID\":\"f1\"}}]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": false
+    },
+    {
+      "disposition": "unsupported",
+      "edits": [],
+      "elapsedSeconds": 11.423410666669952,
+      "id": "C04",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\":\"unsupported\",\"operations\":[]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\":\"unsupported\",\"operations\":[]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": false
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 0,
+          "mode": "replaceAll",
+          "sourceField": 1
+        },
+        {
+          "field": 1,
+          "mode": "replaceAll",
+          "sourceField": 0
+        }
+      ],
+      "elapsedSeconds": 12.724180208344478,
+      "id": "C20",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\":\"supported\",\"operations\":[{\"fieldID\":\"f1\",\"mode\":\"replaceAll\",\"payload\":{\"kind\":\"fieldValue\",\"fieldID\":\"f2\"}},{\"fieldID\":\"f2\",\"mode\":\"replaceAll\",\"payload\":{\"kind\":\"fieldValue\",\"fieldID\":\"f1\"}}]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\":\"supported\",\"operations\":[{\"fieldID\":\"f1\",\"mode\":\"replaceAll\",\"payload\":{\"kind\":\"fieldValue\",\"fieldID\":\"f2\"}},{\"fieldID\":\"f2\",\"mode\":\"replaceAll\",\"payload\":{\"kind\":\"fieldValue\",\"fieldID\":\"f1\"}}]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": false
+    },
+    {
+      "disposition": "unsupported",
+      "edits": [],
+      "elapsedSeconds": 11.664849000022514,
+      "id": "H520",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\": \"unsupported\", \"operations\": []}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\": \"unsupported\", \"operations\": []}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": false
+    }
+  ],
+  "limitations": [
+    "Selected diagnostic, not a complete regression run or held-out qualification.",
+    "All three unchanged-request controls still fail their expected outcomes.",
+    "Quoted-target binding improves; explicit literal words matching labels still become copied field values."
+  ]
+}
