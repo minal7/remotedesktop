@@ -19,6 +19,7 @@ enum ComputerUseQuotedTextRequest {
         let mode: ComputerUseTextEditMode
         let allowsFollowingImplicitSet: Bool
         let targetFollowsPayload: Bool
+        var requiresChoice = false
     }
 
     static func compile(prompt: String, fields: [ComputerUseTextField]) throws -> ComputerUseTextGoalProposal? {
@@ -42,6 +43,9 @@ enum ComputerUseQuotedTextRequest {
         // missing early field must not discard a later unsupported operation.
         for command in commands {
             guard let target = resolve(command.target) else { return .clarification }
+            if command.requiresChoice, fields.first(where: { $0.snapshot.targetID == target })?.choices == nil {
+                return .unsupported
+            }
             switch command.payload {
             case .literal(let text):
                 operations.append(.enterText(.init(targetID: target, mode: command.mode, text: text)))
@@ -133,6 +137,12 @@ enum ComputerUseQuotedTextRequest {
 
         mutating func command(allowsImplicitSet: Bool) -> Command? {
             _ = word("please")
+            if word("choose") || word("select") {
+                guard let value = quoted(), word("in") || word("from") || word("for"),
+                      let target = field(allowPrevious: true) else { return nil }
+                return .init(target: target, payload: .literal(value), mode: .replaceAll,
+                    allowsFollowingImplicitSet: false, targetFollowsPayload: true, requiresChoice: true)
+            }
             let isSet = word("set")
             if isSet || (allowsImplicitSet && isQuoted) {
                 guard let target = field(allowPrevious: true), word("to"), let payload = self.payload() else { return nil }

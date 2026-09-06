@@ -145,6 +145,7 @@ final class ComputerUseBrowserDOMTests: XCTestCase {
             #"<input id="otpCode" name="otp" value="123456">"#,
             #"<input placeholder="Authentication code" value="123456">"#,
             #"<input autocomplete="username" value="private-login-name">"#,
+            #"<label>Account<select autocomplete="username"><option value="private-account">Saved account</option></select></label>"#,
             #"<div role="textbox" aria-label="Verification code" contenteditable>123456</div>"#,
             #"<div id="auth-shadow"></div><script>document.querySelector('#auth-shadow').attachShadow({mode:'open'}).innerHTML = '<input aria-label="Recovery code" value="private-recovery">';</script>"#,
         ]
@@ -843,6 +844,211 @@ final class ComputerUseBrowserDOMTests: XCTestCase {
         catch { XCTAssertEqual(error as? ComputerUseTextTaskError, .staleTarget) }
     }
 
+    func testChoiceFieldDecoderCannotErasePresentChoiceMetadata() throws {
+        let base: [String: Any] = ["id": "e1", "label": "Cabin", "value": "", "selectionStart": -1, "selectionEnd": -1]
+        func decode(_ additions: [String: Any]) throws -> ComputerUseBrowserDOMReply.Field {
+            let value = base.merging(additions, uniquingKeysWith: { _, new in new })
+            return try JSONDecoder().decode(ComputerUseBrowserDOMReply.Field.self, from: JSONSerialization.data(withJSONObject: value))
+        }
+        XCTAssertNil(try decode([:]).choices, "Legacy text replies retain their existing representation")
+        XCTAssertEqual(try decode(["valueKind": "single-choice", "choices": []]).choices, [])
+        for malformed: [String: Any] in [["valueKind": NSNull(), "choices": NSNull()], ["choices": []],
+            ["valueKind": "single-choice"], ["valueKind": "text", "choices": []], ["valueKind": "single-choice", "choices": NSNull()]] {
+            XCTAssertThrowsError(try decode(malformed))
+        }
+    }
+
+    func testCompiledMixedFormSelectsExactOptionsAndCopiesLabelsWithoutReplay() async throws {
+        let fixture = try await DOMFixture(body: """
+            <label>Cabin<select><option value="same-private">Economy</option><option value="same-private">Premium</option><option disabled>Premium</option></select></label>
+            <label>Summary<textarea>old</textarea></label>
+            <label>Departure<input type="date" value="2026-09-01"></label>
+            <label>Origin<input value="old"></label>
+            <label>Return<select><option>Economy</option><option value="return-private">Premium</option></select></label>
+            """ + Self.representabilityAuditScript, heldSignal: true)
+        defer { fixture.close() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let planner = DOMRepresentabilityFixturePlanner { _ in XCTFail("Compile the full explicit mixed form command"); return .unsupported }
+        let native = clarificationExecutor(fixture: fixture, planner: planner, directory: directory)
+        let executor = ComputerUseCapabilityExecutor(native: native, desktopFactory: { _ in
+            XCTFail("The compiled form goal must not fall through"); throw ComputerUseTextTaskError.invalidPlan
+        })
+        let prompt = #"Choose "Premium" from "Cabin", copy the "Cabin" field into "Summary", set "Departure" to "2026-09-12", set "Origin" to "Paris", then copy the "Summary" field into "Return"."#
+        for _ in 0..<2 {
+            let result = try await executor.execute(taskID: "mixed-choice-form", prompt: prompt, trustedUserPrompt: prompt,
+                tools: ComputerUseHostTools(injector: InputInjector(), mayAct: { true }), progress: { _ in })
+            guard case .completed = result else { return XCTFail("Every choice, copy and ordinary edit must verify") }
+        }
+        XCTAssertEqual(planner.calls, 0)
+        let journal = try XCTUnwrap(try ComputerUseTextStepStore(directory: directory).load(taskID: "mixed-choice-form"))
+        XCTAssertEqual(journal.statuses, Array(repeating: .verified, count: 5))
+        try await fixture.wait { fixture.server.count("/signal") == 1 }
+        fixture.server.releaseHeldResponses()
+        try await fixture.wait { Self.representabilityAudit(fixture) != nil }
+        let audit = try XCTUnwrap(Self.representabilityAudit(fixture))
+        XCTAssertEqual(audit["events"], "5"); XCTAssertEqual(audit["changes"], "3")
+        XCTAssertEqual(audit["order"], "input,change,input,input,change,input,input,change")
+        XCTAssertEqual(audit["selected0"], "1", "Equal submission values cannot choose the wrong option")
+        XCTAssertEqual(audit["value0"], "same-private"); XCTAssertEqual(audit["value1"], "Premium", "Copy the displayed label, never the submitted value or internal ID")
+        XCTAssertEqual(audit["value2"], "2026-09-12"); XCTAssertEqual(audit["value3"], "Paris")
+        XCTAssertEqual(audit["selected4"], "1"); XCTAssertEqual(audit["value4"], "return-private")
+    }
+
+    func testUnavailableOrAmbiguousBrowserChoiceRejectsTheCompletePlanBeforeEarlierText() async throws {
+        let cases = [("<option>Premium</option><option>Premium</option>", "Premium"),
+            ("<optgroup label='Unavailable' disabled><option>Premium</option></optgroup>", "Premium"),
+            ("<option hidden>Premium</option>", "Premium"),
+            ("<option value='private-token'>Premium</option>", "private-token")]
+        for (options, label) in cases {
+            let fixture = try await DOMFixture(body: "<label>Origin<input value='old'></label><label>Cabin<select><option>Economy</option>" + options + "</select></label>" + Self.representabilityAuditScript, heldSignal: true)
+            defer { fixture.close() }
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let planner = DOMRepresentabilityFixturePlanner { _ in XCTFail("Compile exact command roles before any proposal"); return .unsupported }
+            let executor = ComputerUseCapabilityExecutor(native: clarificationExecutor(fixture: fixture, planner: planner, directory: directory), desktopFactory: { _ in
+                XCTFail("An unresolved option cannot be routed around"); throw ComputerUseTextTaskError.invalidPlan
+            })
+            let prompt = "Set \"Origin\" to \"Paris\", then select \"\(label)\" in \"Cabin\"."
+            let result = try await executor.execute(taskID: "invalid-choice", prompt: prompt, trustedUserPrompt: prompt,
+                tools: ComputerUseHostTools(injector: InputInjector(), mayAct: { true }), progress: { _ in })
+            guard case .unableToComplete = result else { return XCTFail("A unique available label is required before any edit") }
+            XCTAssertEqual(planner.calls, 0); XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+            try await fixture.wait { fixture.server.count("/signal") == 1 }
+            fixture.server.releaseHeldResponses()
+            try await fixture.wait { Self.representabilityAudit(fixture) != nil }
+            let audit = try XCTUnwrap(Self.representabilityAudit(fixture))
+            XCTAssertEqual(audit["events"], "0"); XCTAssertEqual(audit["changes"], "0")
+            XCTAssertEqual(audit["value0"], "old"); XCTAssertEqual(audit["selected1"], "0")
+        }
+    }
+
+    func testChoiceMetadataAndOptionObjectChangesRetirePreflightEvenAfterRestoration() async throws {
+        let changes = ["o.value = 'changed'; o.value = 'private';", "o.label = 'Changed'; o.removeAttribute('label');",
+            "o.parentElement.disabled = true; o.parentElement.disabled = false;", "o.replaceWith(o.cloneNode(true));",
+            "s.append(o);", "o.hidden = true; o.hidden = false;"]
+        for change in changes {
+            let fixture = try await DOMFixture(body: """
+                <label>Cabin<select><option>Economy</option><optgroup label="Fares"><option value="private">Premium</option></optgroup></select></label>
+                <script>fetch('/signal').then(() => { const s = document.querySelector('select'), o = s.options[1]; \(change) fetch('/changed'); });</script>
+                <script>document.addEventListener('input', () => fetch('/input-event')); document.addEventListener('change', () => fetch('/change-event'));</script>
+                """, heldSignal: true)
+            defer { fixture.close() }
+            let fields = try await fixture.target.fields(), initial = try XCTUnwrap(fields.first?.snapshot)
+            let contract = try ComputerUseTextTaskContract(taskID: "choice-drift", prompt: "Select Premium", fields: fields,
+                edits: [.init(targetID: initial.targetID, mode: .replaceAll, text: "Premium")])
+            try await fixture.target.validateRepresentability(of: contract)
+            try await fixture.wait { fixture.server.count("/signal") == 1 }
+            fixture.server.releaseHeldResponses()
+            try await fixture.wait { fixture.server.count("/changed") == 1 }
+            do { try await fixture.target.validateRepresentability(of: contract); XCTFail("Option metadata and object identity belong to the retained capability") }
+            catch { XCTAssertEqual(error as? ComputerUseTextTaskError, .staleTarget) }
+            do { try await fixture.target.apply(.init(targetID: initial.targetID, mode: .replaceAll, text: contract.steps[0].payload), expected: initial, operationID: contract.steps[0].id); XCTFail("Earlier preflight cannot survive an option change") }
+            catch { XCTAssertEqual(error as? ComputerUseTextTaskError, .staleTarget) }
+            XCTAssertEqual(fixture.server.count("/input-event"), 0); XCTAssertEqual(fixture.server.count("/change-event"), 0)
+        }
+    }
+
+    func testChoiceEventInterruptionCannotProveSelectionFromEqualSubmissionValuesOrReplay() async throws {
+        let cases = [("change", "e.selectedIndex = 0;", true),
+            ("input", "e.options[1].value = 'changed';", false),
+            ("input", "document.body.insertAdjacentHTML('beforeend', '<label>Password<input type=password></label>');", false)]
+        for (event, change, completeReceipt) in cases {
+            let fixture = try await DOMFixture(body: """
+                <label>Cabin<select><option value="same">Economy</option><option value="same">Premium</option></select></label>
+                <script>document.querySelector('select').addEventListener('\(event)', event => { const e = event.target; \(change) });</script>
+                """ + Self.representabilityAuditScript, heldSignal: true)
+            defer { fixture.close() }
+            let fields = try await fixture.target.fields(), initial = try XCTUnwrap(fields.first?.snapshot)
+            let contract = try ComputerUseTextTaskContract(taskID: "choice-event-drift", prompt: "Select Premium", fields: fields,
+                edits: [.init(targetID: initial.targetID, mode: .replaceAll, text: "Premium")])
+            try await fixture.target.validateRepresentability(of: contract)
+            var dispatches = 0, operationID: String?
+            let task = try ComputerUseTextTask(contract: contract, read: { try await fixture.target.read(targetID: $0) },
+                apply: { _, _ in XCTFail("Use option operation identity") }, applyWithIdentity: { dispatch in
+                    dispatches += 1; operationID = dispatch.operationID; try await fixture.target.apply(dispatch)
+                }, didDispatchInput: { try await fixture.target.didDispatchInput(operationID: $0) }, persist: { _ in }, mayAct: { true })
+            do { try await task.run(); XCTFail("A changed option or interrupted commit cannot complete") }
+            catch {
+                if completeReceipt { XCTAssertEqual(error as? ComputerUseTextTaskError, .uncertainEffect) }
+                else if change.contains("type=password") { XCTAssertEqual(error as? ComputerUseBrowserError, .authenticationRequired) }
+                else { XCTAssertEqual(error as? ComputerUseTextEditError, .deliveryUncertain) }
+            }
+            XCTAssertEqual(task.journal.statuses, [.uncertain])
+            let receipt = try await fixture.target.didDispatchInput(operationID: XCTUnwrap(operationID))
+            XCTAssertEqual(receipt, completeReceipt)
+            do { try await task.run(); XCTFail("Neither a complete receipt nor an equal submitted value permits replay") } catch {}
+            XCTAssertEqual(dispatches, 1)
+            try await fixture.wait { fixture.server.count("/signal") == 1 }
+            fixture.server.releaseHeldResponses()
+            try await fixture.wait { Self.representabilityAudit(fixture) != nil }
+            let audit = try XCTUnwrap(Self.representabilityAudit(fixture))
+            XCTAssertEqual(audit["events"], "1"); XCTAssertEqual(audit["changes"], completeReceipt ? "1" : "0")
+        }
+    }
+
+    func testCopiedChoiceRevalidatesTheSourceOptionAfterHostReadsBeforeDestinationInput() async throws {
+        let fixture = try await DOMFixture(body: """
+            <label>Cabin<select><option>Economy</option><option selected>Premium</option></select></label><label>Summary<input value="old"></label>
+            <script>fetch('/signal').then(() => { document.querySelector('select').selectedIndex = 0; fetch('/changed'); });</script>
+            <script>document.addEventListener('input', () => fetch('/input-event'));</script>
+            """, heldSignal: true)
+        defer { fixture.close() }
+        let fields = try await fixture.target.fields()
+        let source = try XCTUnwrap(fields.first(where: { $0.label == "Cabin" }))
+        let destination = try XCTUnwrap(fields.first(where: { $0.label == "Summary" }))
+        let contract = try ComputerUseTextTaskContract(taskID: "choice-copy-race", prompt: "Copy Cabin to Summary", fields: fields,
+            operations: [.copyField(sourceTargetID: source.snapshot.targetID, targetID: destination.snapshot.targetID, mode: .replaceAll)])
+        XCTAssertEqual(contract.steps[0].payload, "Premium")
+        var dispatches = 0
+        let task = try ComputerUseTextTask(contract: contract, read: { try await fixture.target.read(targetID: $0) },
+            apply: { _, _ in XCTFail("Use retained source identity") }, applyWithIdentity: { dispatch in
+                dispatches += 1
+                try await fixture.wait { fixture.server.count("/signal") == 1 }
+                fixture.server.releaseHeldResponses()
+                try await fixture.wait { fixture.server.count("/changed") == 1 }
+                try await fixture.target.apply(dispatch)
+            }, didDispatchInput: { try await fixture.target.didDispatchInput(operationID: $0) }, persist: { _ in }, mayAct: { true })
+        do { try await task.run(); XCTFail("A new source selection cannot substitute for the copied choice") }
+        catch { XCTAssertEqual(error as? ComputerUseTextTaskError, .staleTarget) }
+        XCTAssertEqual(task.journal.statuses, [.uncertain])
+        do { try await task.run(); XCTFail("The rejected copy cannot replay") } catch {}
+        XCTAssertEqual(dispatches, 1); XCTAssertEqual(fixture.server.count("/input-event"), 0)
+        let after = try await fixture.target.read(targetID: destination.snapshot.targetID)
+        XCTAssertEqual(after?.value, "old")
+    }
+
+    func testChoiceCatalogBoundsAndEmptySelectionRemainDistinctFromAnEmptyLabelOption() async throws {
+        let fixture = try await DOMFixture(body: """
+            <label>Cabin<select><option value="private-empty-label" label=""></option><option>Economy</option></select></label>
+            <script>document.querySelector('select').selectedIndex = -1;</script>
+            """ + Self.representabilityAuditScript, heldSignal: true)
+        defer { fixture.close() }
+        let fields = try await fixture.target.fields(), first = try XCTUnwrap(fields.first)
+        XCTAssertEqual(first.snapshot.value, ""); XCTAssertEqual(first.choices?.first?.label, "")
+        let contract = try ComputerUseTextTaskContract(taskID: "empty-choice", prompt: "Select the empty label", fields: fields,
+            edits: [.init(targetID: first.snapshot.targetID, mode: .replaceAll, text: "")])
+        XCTAssertFalse(contract.steps[0].after.isEmpty, "An empty-label option still has an exact object identity")
+        try await fixture.target.validateRepresentability(of: contract)
+        try await fixture.target.apply(.init(targetID: first.snapshot.targetID, mode: .replaceAll, text: contract.steps[0].payload),
+            expected: first.snapshot, operationID: contract.steps[0].id)
+        let after = try await fixture.target.read(targetID: first.snapshot.targetID)
+        XCTAssertEqual(after?.value, first.choices?.first?.id)
+        try await fixture.wait { fixture.server.count("/signal") == 1 }
+        fixture.server.releaseHeldResponses()
+        try await fixture.wait { Self.representabilityAudit(fixture) != nil }
+        XCTAssertEqual(Self.representabilityAudit(fixture)?["selected0"], "0")
+        for counts in [[65], [50, 50, 50]] {
+            let html = counts.enumerated().map { index, count in
+                "<label>Choice \(index)<select>" + (0..<count).map { "<option>Option \($0)</option>" }.joined() + "</select></label>"
+            }.joined()
+            let bounded = try await DOMFixture(body: html)
+            defer { bounded.close() }
+            let unsupported = try await bounded.target.fieldsIfSupported()
+            XCTAssertNil(unsupported, "An incomplete catalog must not authorize a form edit")
+        }
+    }
+
     func testNativeScalarValuesPreserveExactBytesAndCommitOnceWithoutTextSelection() async throws {
         let cases: [(String, ComputerUseTextEditMode, String)] = [
             ("type='date' min='2026-09-01' max='2026-09-30' value='2026-09-01'", .replaceAll, "2026-09-12"),
@@ -1055,17 +1261,17 @@ final class ComputerUseBrowserDOMTests: XCTestCase {
 
     private static let representabilityAuditScript = """
         <script>
-        const auditFields = [...document.querySelectorAll('input,textarea')]; let inputEvents = 0, changeEvents = 0, invalidEvents = 0;
+        const auditFields = [...document.querySelectorAll('input,textarea,select')]; let inputEvents = 0, changeEvents = 0, invalidEvents = 0;
         const eventOrder = [];
         for (const e of auditFields) {
-          if (e.selectionStart !== null) e.setSelectionRange(2,2);
+          if (typeof e.selectionStart === 'number') e.setSelectionRange(2,2);
           e.addEventListener('input', () => { inputEvents++; eventOrder.push('input'); });
           e.addEventListener('change', () => { changeEvents++; eventOrder.push('change'); });
           e.addEventListener('invalid', () => invalidEvents++);
         }
         fetch('/signal').then(() => {
           const values = {events:String(inputEvents), changes:String(changeEvents), invalid:String(invalidEvents), order:eventOrder.join(',')};
-          auditFields.forEach((e,i) => { values['value'+i] = e.value; values['start'+i] = String(e.selectionStart ?? -1); values['end'+i] = String(e.selectionEnd ?? -1); });
+          auditFields.forEach((e,i) => { values['value'+i] = e.value; values['start'+i] = String(e.selectionStart ?? -1); values['end'+i] = String(e.selectionEnd ?? -1); if (e instanceof HTMLSelectElement) values['selected'+i] = String(e.selectedIndex); });
           fetch('/audit?' + new URLSearchParams(values));
         });
         </script>
@@ -1174,10 +1380,10 @@ final class ComputerUseBrowserDOMTests: XCTestCase {
         }
     }
 
-    private func clarificationExecutor(fixture: DOMFixture, planner: DOMClarificationFixturePlanner, directory: URL,
+    private func clarificationExecutor(fixture: DOMFixture, planner: any ComputerUseTextGoalPlanning, directory: URL,
                                        now: @escaping () -> Date = Date.init) -> ComputerUseNativeTextExecutor {
         ComputerUseNativeTextExecutor(injector: InputInjector(), mayAct: { true }, journalDirectory: directory,
-            planner: planner, editOverride: { _, _ in XCTFail("A retained browser answer cannot use native AX input") },
+            planner: planner, editOverride: { _, _ in XCTFail("A retained browser form cannot use native AX input") },
             browserTargetProvider: { taskID in ComputerUseBrowserTextTarget(browser: fixture.browser,
                 document: try fixture.browser.acquireCurrentDocument(taskID: taskID), requiresFrontmost: false) }, now: now)
     }

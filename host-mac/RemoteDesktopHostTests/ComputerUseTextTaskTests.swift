@@ -3,6 +3,50 @@ import XCTest
 
 @MainActor
 final class ComputerUseTextTaskTests: XCTestCase {
+    func testChoiceContractsResolveLabelsAndPreserveIdentityThroughCopiesAndRepetition() throws {
+        func choiceField(_ id: String, selected: String, choices: [(String, String)]) -> ComputerUseTextField {
+            .init(label: id, snapshot: .init(targetID: id, value: selected, selection: NSRange(location: NSNotFound, length: 0),
+                isEditable: true, isSecure: false), choices: choices.map { .init(id: $0.0, label: $0.1, disabled: false, hidden: false) })
+        }
+        let fields = [choiceField("Cabin", selected: "o1", choices: [("o1", "Economy"), ("o2", "Premium")]),
+                      field("Summary", "old"), choiceField("Return", selected: "", choices: [("o3", "Premium")])]
+        let prompt = #"Choose "Premium" from "Cabin" twice, copy the "Cabin" field into "Summary", then copy the "Summary" field into "Return"."#
+        let proposal = try XCTUnwrap(ComputerUseQuotedTextRequest.compile(prompt: prompt, fields: fields))
+        guard case .fieldOperations(let operations, let unchanged) = proposal else { return XCTFail("Compile the entire mixed sequence") }
+        let contract = try ComputerUseTextTaskContract(taskID: "choices", prompt: prompt, fields: fields, operations: operations, unchangedTargetIDs: unchanged)
+        XCTAssertEqual(contract.steps.map(\.payload), ["o2", "o2", "Premium", "o3"])
+        XCTAssertEqual(contract.steps.map(\.isChoiceSelection), [true, true, false, true])
+        XCTAssertEqual(contract.steps.map(\.after), ["o2", "o2", "Premium", "o3"])
+        XCTAssertEqual(contract.steps[2].copySource?.value, "o2", "Copy authority remains the selected object, not its presentation")
+        XCTAssertEqual(contract.steps[3].copySource?.value, "Premium")
+        XCTAssertEqual(Set(contract.steps.map(\.id)).count, 4)
+        XCTAssertEqual(contract.finalValues, ["Cabin": "o2", "Summary": "Premium", "Return": "o3"])
+        let unsupported = try ComputerUseQuotedTextRequest.compile(prompt: #"Select "Premium" in "Summary"."#, fields: fields)
+        XCTAssertEqual(unsupported, .unsupported, "Selecting an option cannot be interpreted as typing into an ordinary text field")
+        XCTAssertNil(try ComputerUseQuotedTextRequest.compile(prompt: prompt + " Then book the ticket.", fields: fields),
+            "A matched selection prefix cannot complete additional work")
+    }
+
+    func testChoiceContractsRejectAmbiguousUnavailableAndUncompiledValuesBeforeAnyStep() throws {
+        let cases: [(ComputerUseTextEditMode, String, [ComputerUseTextField.Choice])] = [
+            (.replaceAll, "Premium", [.init(id: "o1", label: "Premium", disabled: false, hidden: false), .init(id: "o2", label: "Premium", disabled: false, hidden: false)]),
+            (.replaceAll, "Premium", [.init(id: "o1", label: "Premium", disabled: true, hidden: false)]),
+            (.replaceAll, "Premium", [.init(id: "o1", label: "Premium", disabled: false, hidden: true)]),
+            (.replaceAll, "o1", [.init(id: "o1", label: "Premium", disabled: false, hidden: false)]),
+            (.append, "Premium", [.init(id: "o1", label: "Premium", disabled: false, hidden: false)]),
+            (.insert, "Premium", [.init(id: "o1", label: "Premium", disabled: false, hidden: false)])
+        ]
+        for (mode, value, choices) in cases {
+            let choice = ComputerUseTextField(label: "Cabin", snapshot: .init(targetID: "Cabin", value: "",
+                selection: NSRange(location: NSNotFound, length: 0), isEditable: true, isSecure: false), choices: choices)
+            XCTAssertThrowsError(try ComputerUseTextTaskContract(taskID: "unavailable-choice", prompt: "Controlled whole plan",
+                fields: [field("Origin", "old"), choice], edits: [.init(targetID: "Origin", mode: .replaceAll, text: "Paris"),
+                    .init(targetID: "Cabin", mode: mode, text: value)])) {
+                XCTAssertEqual($0 as? ComputerUseTextEditError, .valueNotRepresentable)
+            }
+        }
+    }
+
     func testTextTaskAcquiresRunOwnershipBeforeReadingAndReacquiresItForReplay() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

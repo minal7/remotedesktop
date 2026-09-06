@@ -371,14 +371,13 @@ final class ComputerUseNativeTextExecutor {
                   try prepared.form.scope() == prepared.scope,
                   now() < prepared.expiresAt else { throw Failure.invalidClarification }
         }
-        let contract = try ComputerUseTextTaskContract(taskID: taskID, prompt: goal.taskIdentityText,
-                                                       fields: fields, operations: operations,
-                                                       unchangedTargetIDs: unchanged)
-        if let browserTarget {
-            do { try await browserTarget.validateRepresentability(of: contract) }
-            catch ComputerUseTextEditError.valueNotRepresentable {
-                return .unableToComplete("A selected field cannot accept the exact requested value. Check its format, range or allowed increments. No fields were edited.")
-            }
+        let contract: ComputerUseTextTaskContract
+        do {
+            contract = try ComputerUseTextTaskContract(taskID: taskID, prompt: goal.taskIdentityText,
+                fields: fields, operations: operations, unchangedTargetIDs: unchanged)
+            if let browserTarget { try await browserTarget.validateRepresentability(of: contract) }
+        } catch ComputerUseTextEditError.valueNotRepresentable {
+            return .unableToComplete("A selected field cannot accept the exact requested value. Check its format, limits or available options. A choice needs one uniquely labeled available option. No fields were edited.")
         }
         try Task.checkCancellation()
         guard mayAct() else { throw ComputerUseTextEditError.interrupted }
@@ -428,13 +427,14 @@ final class ComputerUseNativeTextExecutor {
     private func run(_ task: ComputerUseTextTask, verifiedStep: (Int, Int) -> Void,
                      progress: (String) -> Void) async throws
         -> ComputerUseExecutionResult {
+        let includesChoice = task.contract.steps.contains(where: \.isChoiceSelection)
         try await task.run { complete, total in
-            progress("Verified text edit \(complete) of \(total)…")
+            progress("Verified \(includesChoice ? "form change" : "text edit") \(complete) of \(total)…")
             verifiedStep(complete, total)
         }
         // Keep the completed task for same-ID replay within this executor; the
         // host's outer durable task ledger also retains the terminal outcome.
-        return .completed("Done. I verified all \(task.contract.steps.count) requested text edits.")
+        return .completed("Done. I verified all \(task.contract.steps.count) requested \(includesChoice ? "form changes" : "text edits").")
     }
 
     private func apply(_ dispatch: ComputerUseTextInputDispatch) async throws {

@@ -2,8 +2,21 @@ import Foundation
 import CryptoKit
 
 struct ComputerUseTextField: Equatable, Sendable {
+    struct Choice: Decodable, Equatable, Sendable {
+        let id: String
+        let label: String
+        let disabled: Bool
+        let hidden: Bool
+    }
     let label: String
     let snapshot: ComputerUseTextSnapshot
+    /// A single-choice field stores an opaque selected-option ID (or "" for
+    /// no selection) in its private snapshot. Labels are proposal data only.
+    let choices: [Choice]?
+
+    init(label: String, snapshot: ComputerUseTextSnapshot, choices: [Choice]? = nil) {
+        self.label = label; self.snapshot = snapshot; self.choices = choices
+    }
 }
 
 struct ComputerUseTextPlanEdit: Equatable, Sendable {
@@ -36,6 +49,7 @@ struct ComputerUseTextTaskContract: Sendable {
         let insertionSelection: NSRange?
         let after: String
         let copySource: ComputerUseTextSnapshot?
+        let isChoiceSelection: Bool
         /// Explicit unchanged fields and the latest value of earlier edits.
         /// Destination and copy-source preconditions are carried separately.
         let requiredValues: [String: String]
@@ -63,6 +77,15 @@ struct ComputerUseTextTaskContract: Sendable {
         }
         self.taskID = taskID
         self.promptDigest = Self.digest(prompt)
+        let catalog = Dictionary(uniqueKeysWithValues: fields.map { ($0.snapshot.targetID, $0) })
+        for field in fields {
+            if let choices = field.choices {
+                guard choices.count <= 64, Set(choices.map(\.id)).count == choices.count,
+                      choices.allSatisfy({ !$0.id.isEmpty && $0.id.utf8.count <= 64 && $0.label.utf8.count <= 512 }),
+                      field.snapshot.value.isEmpty || choices.contains(where: { $0.id == field.snapshot.value }),
+                      field.snapshot.selection == NSRange(location: NSNotFound, length: 0) else { throw ComputerUseTextTaskError.invalidPlan }
+            }
+        }
         var values = Dictionary(uniqueKeysWithValues: fields.map { ($0.snapshot.targetID, $0.snapshot) })
         var steps: [Step] = []
         let unchanged = Dictionary(uniqueKeysWithValues: fields.filter {
@@ -71,7 +94,7 @@ struct ComputerUseTextTaskContract: Sendable {
         var finalValues = unchanged
         self.unchangedValues = unchanged
         for (index, operation) in operations.enumerated() {
-            let edit: ComputerUseTextPlanEdit
+            var edit: ComputerUseTextPlanEdit
             let source: ComputerUseTextSnapshot?
             switch operation {
             case .enterText(let literal): edit = literal; source = nil
@@ -80,11 +103,26 @@ struct ComputerUseTextTaskContract: Sendable {
                     throw ComputerUseTextTaskError.invalidPlan
                 }
                 source = observed
-                edit = .init(targetID: targetID, mode: mode, text: observed.value)
+                // Copy the displayed choice label, never a submission token or
+                // opaque option ID, while retaining exact source-ID authority.
+                let text: String
+                if let choices = catalog[sourceTargetID]?.choices {
+                    if observed.value.isEmpty { text = "" }
+                    else if let choice = choices.first(where: { $0.id == observed.value }) { text = choice.label }
+                    else { throw ComputerUseTextTaskError.invalidPlan }
+                } else { text = observed.value }
+                edit = .init(targetID: targetID, mode: mode, text: text)
             }
             guard let field = values[edit.targetID], field.isEditable, !field.isSecure,
                   edit.text.utf8.count <= ComputerUseTextEditor.maximumPayloadBytes else {
                 throw ComputerUseTextTaskError.invalidPlan
+            }
+            let isChoiceSelection = catalog[edit.targetID]?.choices != nil
+            if let choices = catalog[edit.targetID]?.choices {
+                guard edit.mode == .replaceAll else { throw ComputerUseTextEditError.valueNotRepresentable }
+                let matches = choices.filter { !$0.disabled && !$0.hidden && $0.label.utf8.elementsEqual(edit.text.utf8) }
+                guard matches.count == 1, let choice = matches.first else { throw ComputerUseTextEditError.valueNotRepresentable }
+                edit = .init(targetID: edit.targetID, mode: .replaceAll, text: choice.id)
             }
             let range: NSRange
             switch edit.mode {
@@ -105,6 +143,8 @@ struct ComputerUseTextTaskContract: Sendable {
             var identity = ["text-input-required-values-v3", taskID, String(index), field.targetID, edit.mode.rawValue,
                 edit.text, field.value, String(range.location), String(range.length), after]
             if let source { identity += ["copied-field-v2-dispatch-required", source.targetID, source.value] }
+            if isChoiceSelection { identity.append("native-single-choice-v1") }
+            if let source, catalog[source.targetID]?.choices != nil { identity.append("copy-displayed-choice-label-v1") }
             identity.append(String(requiredValues.count))
             for targetID in requiredValues.keys.sorted() {
                 identity += [targetID, requiredValues[targetID]!]
@@ -114,6 +154,7 @@ struct ComputerUseTextTaskContract: Sendable {
                               targetID: field.targetID, mode: edit.mode, payload: edit.text,
                               before: field.value,
                               insertionSelection: edit.mode == .insert ? range : nil, after: after, copySource: source,
+                              isChoiceSelection: isChoiceSelection,
                               requiredValues: requiredValues))
             values[field.targetID] = ComputerUseTextSnapshot(
                 targetID: field.targetID, value: after,
@@ -237,7 +278,8 @@ final class ComputerUseTextTask {
             }
             let after = predicate("after-\(index)", target: step.targetID, check: .value(step.after))
             steps.append(.init(id: step.id, dependencies: step.dependency.map { [$0] } ?? [],
-                operation: .init(capabilityID: (step.copySource == nil ? "text.edit." : "text.copy.") + step.mode.rawValue, entityID: step.targetID,
+                operation: .init(capabilityID: step.isChoiceSelection ? "browser.choice.select"
+                    : (step.copySource == nil ? "text.edit." : "text.copy.") + step.mode.rawValue, entityID: step.targetID,
                     payloadDigest: ComputerUseTextTaskContract.digest(step.payload), payloadVersion: 1),
                 preconditions: preconditions, postconditions: [after, receipt] + sourcePostconditions))
             completedValues[step.targetID] = step.after

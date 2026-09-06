@@ -260,6 +260,31 @@ struct ComputerUseBrowserDOMReply: Decodable {
         let value: String
         let selectionStart: Int
         let selectionEnd: Int
+        let valueKind: String?
+        let choices: [ComputerUseTextField.Choice]?
+
+        init(id: String, label: String, value: String, selectionStart: Int, selectionEnd: Int,
+             valueKind: String? = nil, choices: [ComputerUseTextField.Choice]? = nil) {
+            self.id = id; self.label = label; self.value = value
+            self.selectionStart = selectionStart; self.selectionEnd = selectionEnd
+            self.valueKind = valueKind; self.choices = choices
+        }
+
+        private enum CodingKeys: String, CodingKey { case id, label, value, selectionStart, selectionEnd, valueKind, choices }
+        init(from decoder: Decoder) throws {
+            let values = try decoder.container(keyedBy: CodingKeys.self)
+            let valueKind: String?, choices: [ComputerUseTextField.Choice]?
+            if values.contains(.valueKind) || values.contains(.choices) {
+                valueKind = try values.decode(String.self, forKey: .valueKind)
+                choices = try values.decode([ComputerUseTextField.Choice].self, forKey: .choices)
+                guard valueKind == "single-choice" else {
+                    throw DecodingError.dataCorruptedError(forKey: .valueKind, in: values, debugDescription: "Unsupported field value kind")
+                }
+            } else { valueKind = nil; choices = nil }
+            self.init(id: try values.decode(String.self, forKey: .id), label: try values.decode(String.self, forKey: .label),
+                value: try values.decode(String.self, forKey: .value), selectionStart: try values.decode(Int.self, forKey: .selectionStart),
+                selectionEnd: try values.decode(Int.self, forKey: .selectionEnd), valueKind: valueKind, choices: choices)
+        }
     }
     let status: String
     let documentID: String
@@ -288,9 +313,11 @@ enum ComputerUseBrowserDOM {
       const textTypes = new Set(['text', 'search', 'url', 'tel', 'email']);
       const scalarTypes = new Set(['date', 'datetime-local', 'month', 'week', 'time', 'number']);
       const scalarConstraintAttributes = new Set(['min', 'max', 'step', 'value']);
+      const choiceAttributes = new Set(['label', 'value', 'selected', 'style', 'class']);
       const identityAttributes = new Set(['id', 'name', 'type', 'multiple', 'form', 'action', 'method', 'enctype', 'target', 'disabled', 'readonly', 'hidden', 'inert', 'aria-hidden', 'aria-label', 'aria-labelledby', 'placeholder', 'autocomplete']);
       const valueGetters = [HTMLInputElement, HTMLTextAreaElement].map(c => Object.getOwnPropertyDescriptor(c.prototype, 'value').get);
       const valueSetters = [HTMLInputElement, HTMLTextAreaElement].map(c => Object.getOwnPropertyDescriptor(c.prototype, 'value').set);
+      const choiceIndex = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'selectedIndex');
       const formGetters = Object.fromEntries(['action','method','target','enctype','noValidate'].map(key =>
         [key, Object.getOwnPropertyDescriptor(HTMLFormElement.prototype, key).get]));
       const probeDocument = doc.implementation.createHTMLDocument('');
@@ -308,13 +335,16 @@ enum ComputerUseBrowserDOM {
             if (record.type === 'attributes' && identityAttributes.has(record.attributeName) && (record.target === binding.form || contains(record.target, binding.element))) binding.valid = false;
             if (record.type === 'attributes' && scalarConstraintAttributes.has(record.attributeName)
                 && record.target === binding.element && scalarTypes.has(binding.element.type)) binding.valid = false;
+            if (binding.element instanceof HTMLSelectElement && contains(binding.element, record.target)
+                && (record.type !== 'attributes' || choiceAttributes.has(record.attributeName)
+                    || identityAttributes.has(record.attributeName))) binding.valid = false;
             if (record.type !== 'attributes' && binding.labels.some(label => label === record.target || label.contains(record.target))) binding.valid = false;
           }
         }
       }
       const observer = new MutationObserver(retire);
       const observationOptions = {subtree: true, childList: true, attributes: true,
-        attributeFilter: [...identityAttributes, ...scalarConstraintAttributes], characterData: true};
+        attributeFilter: [...identityAttributes, ...scalarConstraintAttributes, ...choiceAttributes], characterData: true};
       observer.observe(doc, observationOptions);
       function synchronize() {
         retire(observer.takeRecords());
@@ -325,6 +355,7 @@ enum ComputerUseBrowserDOM {
       }
       function kind(element) {
         if (element instanceof HTMLTextAreaElement) return 1;
+        if (element instanceof HTMLSelectElement) return element.multiple ? -1 : 2;
         if (!(element instanceof HTMLInputElement) || protectedTypes.has(element.type)
             || (!textTypes.has(element.type) && !scalarTypes.has(element.type))) return -1;
         return 0;
@@ -405,7 +436,7 @@ enum ComputerUseBrowserDOM {
           if (!element) { walkers.pop(); continue; }
           if (++count > 10000) return 'limit';
           if (element.shadowRoot) walkers.push(doc.createTreeWalker(element.shadowRoot, NodeFilter.SHOW_ELEMENT));
-          const control = element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement
+          const control = element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement
             || element.getAttribute('role') === 'textbox' || element.isContentEditable;
           // Disabled/read-only controls are already excluded from all value
           // reads and edits. A saved-password display is not a login challenge.
@@ -431,9 +462,46 @@ enum ComputerUseBrowserDOM {
           for (const name of scalarConstraintAttributes) parts.push(element.getAttribute(name));
         }
         if (parts.some(value => value !== null && (value.length > 8192 || encoder.encode(value).length > 8192))) return null;
+        if (kind(element) === 2) {
+          const choices = choiceData(element);
+          if (!choices) return null;
+          parts.push(choices);
+        }
         return JSON.stringify(parts);
       }
-      function valueOf(element) { return valueGetters[kind(element)].call(element); }
+      function choiceData(element) {
+        if (element.options.length > 64) return null;
+        const result = [];
+        for (const option of element.options) {
+          const group = option.parentElement instanceof HTMLOptGroupElement ? option.parentElement : null;
+          const label = option.label, value = option.value, groupLabel = group?.label || '';
+          if (encoder.encode(label).length > 512 || encoder.encode(value).length > 2048 || encoder.encode(groupLabel).length > 256) return null;
+          const concealed = node => {
+            const style = getComputedStyle(node);
+            return node.hidden || node.inert || node.getAttribute('aria-hidden') === 'true'
+              || style.display === 'none' || style.visibility !== 'visible' || Number(style.opacity) === 0;
+          };
+          if (!pageOptionIDs.has(option)) pageOptionIDs.set(option, 'o' + (++nextPageOptionID));
+          result.push({id: pageOptionIDs.get(option), label, value, groupLabel,
+            disabled: option.disabled || !!group?.disabled, hidden: concealed(option) || !!(group && concealed(group)),
+            defaultSelected: option.defaultSelected});
+        }
+        return result;
+      }
+      function valueOf(element) {
+        if (kind(element) !== 2) return valueGetters[kind(element)].call(element);
+        const index = choiceIndex.get.call(element);
+        return index < 0 ? '' : (choiceData(element)?.[index]?.id ?? null);
+      }
+      function copiedValue(element) {
+        if (kind(element) !== 2) return valueOf(element);
+        const value = valueOf(element);
+        return value === '' ? '' : choiceData(element)?.find(choice => choice.id === value)?.label;
+      }
+      function choiceForLabel(element, label) {
+        const matches = choiceData(element)?.filter(choice => !choice.disabled && !choice.hidden && choice.label === label);
+        return matches?.length === 1 ? matches[0].id : null;
+      }
       // Ask this WebKit engine whether its native setter/getter can preserve
       // the complete result. The probe has no browsing context, is never
       // connected to the page, copies no custom-element attributes, and emits
@@ -441,6 +509,7 @@ enum ComputerUseBrowserDOM {
       function canRepresent(element, expected) {
         const index = kind(element);
         if (index < 0) return false;
+        if (index === 2) return !!choiceData(element)?.some(choice => choice.id === expected && !choice.disabled && !choice.hidden);
         const probe = probeDocument.createElement(index === 0 ? 'input' : 'textarea');
         if (index === 0) { probe.type = element.type; probe.multiple = element.multiple; }
         const scalar = index === 0 && scalarTypes.has(element.type);
@@ -465,7 +534,14 @@ enum ComputerUseBrowserDOM {
         const currentShape = shape(element);
         if (!binding.valid || !editable(element) || currentShape === null || binding.form !== element.form || binding.shape !== currentShape || binding.label !== labelFor(element).label) return null;
         const value = valueOf(element);
+        if (typeof value !== 'string') return null;
         if (encoder.encode(value).length > 1048576) return null;
+        if (kind(element) === 2) {
+          const choices = choiceData(element);
+          if (!choices) return null;
+          return {id: binding.id, label: binding.label, value, selectionStart: -1, selectionEnd: -1,
+            valueKind: 'single-choice', choices: choices.map(({id, label, disabled, hidden}) => ({id, label, disabled, hidden}))};
+        }
         const start = element.selectionStart, end = element.selectionEnd;
         // Email and scalar inputs have no browser text-selection API.
         // Replace/append remain supported; insertion needs a valid selection.
@@ -485,7 +561,7 @@ enum ComputerUseBrowserDOM {
           }
         } else { bindings.clear(); operations.clear(); }
         const found = [], walkers = [doc.createTreeWalker(doc, NodeFilter.SHOW_ELEMENT)];
-        let count = 0, totalBytes = 0;
+        let count = 0, totalBytes = 0, totalChoices = 0;
         while (walkers.length) {
           const walker = walkers[walkers.length - 1], element = walker.nextNode();
           if (!element) { walkers.pop(); continue; }
@@ -503,6 +579,8 @@ enum ComputerUseBrowserDOM {
           const field = snapshot(binding);
           if (!field || found.length >= 16) { bindings.clear(); return reply('limit'); }
           totalBytes += encoder.encode(field.value).length;
+          totalChoices += field.choices?.length || 0;
+          if (totalChoices > 128) { bindings.clear(); return reply('limit'); }
           if (totalBytes > 1048576) { bindings.clear(); return reply('limit'); }
           bindings.set(binding.id, binding); found.push(field);
         }
@@ -768,7 +846,10 @@ enum ComputerUseBrowserDOM {
         // before the destination setter or any page event can run.
         if (args.copySourceID !== undefined) {
           const sourceBinding = bindings.get(args.copySourceID), source = sourceBinding && snapshot(sourceBinding);
-          if (!source || source.value !== args.copySourceValue || source.value !== args.payload) return reply('stale');
+          if (!source || source.value !== args.copySourceValue) return reply('stale');
+          const literal = copiedValue(sourceBinding.element);
+          const payload = kind(binding.element) === 2 ? choiceForLabel(binding.element, literal) : literal;
+          if (typeof payload !== 'string' || payload !== args.payload) return reply('stale');
         }
         // These checks and the live setter run in one synchronous invocation.
         // Host reads alone cannot keep an unchanged or previously edited field
@@ -785,6 +866,8 @@ enum ComputerUseBrowserDOM {
         const start = args.mode === 'replaceAll' ? 0 : args.mode === 'append' ? current.value.length : current.selectionStart;
         const end = args.mode === 'replaceAll' ? current.value.length : args.mode === 'append' ? current.value.length : current.selectionEnd;
         if (!['replaceAll', 'append', 'insert'].includes(args.mode) || start < 0 || end < start || end > current.value.length) return reply('unsupported');
+        const choice = kind(binding.element) === 2;
+        if (choice && args.mode !== 'replaceAll') return reply('unrepresentable');
         const expected = current.value.slice(0, start) + args.payload + current.value.slice(end);
         if (encoder.encode(expected).length > 1048576 || expected !== args.after) return reply('unsupported');
         // Repeat at the actual dispatch boundary, before touching the live
@@ -792,16 +875,20 @@ enum ComputerUseBrowserDOM {
         if (!canRepresent(binding.element, expected)) return reply('unrepresentable');
         // The dispatcher persisted its attempt before this call. This second
         // one-use boundary also prevents a lost callback from repeating input.
-        const scalar = scalarTypes.has(binding.element.type), effectURL = doc.URL;
+        const scalar = scalarTypes.has(binding.element.type) || choice, effectURL = doc.URL;
         operations.set(args.operationID, 'attempted');
         try {
-          valueSetters[kind(binding.element)].call(binding.element, expected);
+          if (choice) {
+            const index = choiceData(binding.element).findIndex(option => option.id === expected);
+            if (index < 0) return reply('uncertain');
+            choiceIndex.set.call(binding.element, index);
+          } else { valueSetters[kind(binding.element)].call(binding.element, expected); }
           if (current.selectionStart >= 0) binding.element.setSelectionRange(start + args.payload.length, start + args.payload.length);
           binding.element.dispatchEvent(scalar ? new Event('input', {bubbles: true, composed: true})
             : new InputEvent('input', {bubbles: true, composed: true, inputType: 'insertText', data: args.payload}));
           if (scalar) {
             // This is a value commit, including the change notification used
-            // by native date/number forms. An input handler may replace the
+            // by native date/number/choice forms. An input handler may replace the
             // field, alter its constraints or reveal login before that tail.
             synchronize();
             if (args.documentID !== documentID || doc.URL !== effectURL) return reply('uncertain');
@@ -855,7 +942,8 @@ final class ComputerUseBrowserTextTarget {
             return nil
         }
         if reply.status == "stale" { throw ComputerUseBrowserError.pageChanged }
-        guard reply.status == "ok", let fields = reply.fields, fields.count <= 16 else {
+        guard reply.status == "ok", let fields = reply.fields, fields.count <= 16,
+              fields.reduce(0, { $0 + ($1.choices?.count ?? 0) }) <= 128 else {
             throw ComputerUseBrowserError.unsupportedDocument
         }
         documentID = reply.documentID
@@ -864,7 +952,7 @@ final class ComputerUseBrowserTextTarget {
             let id = ComputerUseTaskContract.digest([document.contextID, document.taskID, String(document.generation), reply.documentID, field.id])
             guard targets[id] == nil else { throw ComputerUseBrowserError.pageChanged }
             targets[id] = field.id
-            result.append(.init(label: field.label, snapshot: try snapshot(field, targetID: id)))
+            result.append(.init(label: field.label, snapshot: try snapshot(field, targetID: id), choices: field.choices))
         }
         return result
     }
@@ -920,7 +1008,7 @@ final class ComputerUseBrowserTextTarget {
         let identities = Dictionary(uniqueKeysWithValues: targets.map { ($0.value, $0.key) })
         let refreshed = try fields.map { field -> ComputerUseTextField in
             guard let id = identities[field.id] else { throw ComputerUseBrowserError.pageChanged }
-            return .init(label: field.label, snapshot: try snapshot(field, targetID: id))
+            return .init(label: field.label, snapshot: try snapshot(field, targetID: id), choices: field.choices)
         }
         return refreshed
     }
@@ -996,8 +1084,12 @@ final class ComputerUseBrowserTextTarget {
             "selectionStart": expected.selection.location == NSNotFound ? -1 : expected.selection.location,
             "selectionEnd": expected.selection.location == NSNotFound ? -1 : NSMaxRange(expected.selection)]
         if let copySource {
-            guard let sourceID = targets[copySource.targetID], copySource.isEditable, !copySource.isSecure,
-                  copySource.value.utf8.elementsEqual(edit.text.utf8) else { throw ComputerUseTextTaskError.staleTarget }
+            guard let sourceID = targets[copySource.targetID], copySource.isEditable, !copySource.isSecure else {
+                throw ComputerUseTextTaskError.staleTarget
+            }
+            // The isolated dispatcher validates the conversion too: selected
+            // option ID -> displayed label -> destination option ID, when
+            // applicable. Text-only copies still require identical bytes.
             arguments["copySourceID"] = sourceID
             arguments["copySourceValue"] = copySource.value
         }
@@ -1021,6 +1113,15 @@ final class ComputerUseBrowserTextTarget {
     private func snapshot(_ field: ComputerUseBrowserDOMReply.Field, targetID: String) throws -> ComputerUseTextSnapshot {
         guard !field.id.isEmpty, field.id.utf8.count <= 64, !field.label.isEmpty, field.label.utf8.count <= 256,
               field.value.utf8.count <= ComputerUseTextEditor.maximumObservedValueBytes else { throw ComputerUseBrowserError.unsupportedDocument }
+        if field.valueKind == "single-choice" {
+            guard let choices = field.choices, choices.count <= 64,
+                  Set(choices.map(\.id)).count == choices.count,
+                  choices.allSatisfy({ choice in
+                      choice.id.range(of: #"^o[1-9][0-9]*$"#, options: .regularExpression) != nil
+                          && choice.id.utf8.count <= 64 && choice.label.utf8.count <= 512
+                  }), field.value.isEmpty || choices.contains(where: { $0.id == field.value }),
+                  field.selectionStart == -1, field.selectionEnd == -1 else { throw ComputerUseBrowserError.unsupportedDocument }
+        } else if field.valueKind != nil || field.choices != nil { throw ComputerUseBrowserError.unsupportedDocument }
         let selection: NSRange
         if field.selectionStart == -1 && field.selectionEnd == -1 { selection = NSRange(location: NSNotFound, length: 0) }
         else {
