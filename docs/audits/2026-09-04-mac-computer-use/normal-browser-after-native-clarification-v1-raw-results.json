@@ -1,0 +1,393 @@
+{
+  "cases" : [
+    {
+      "completeOperationSequenceVerified" : true,
+      "disposition" : "completed",
+      "elapsedSeconds" : 10.848680749972118,
+      "id" : "N01",
+      "inputEvents" : 2,
+      "observedFixtureStates" : [
+        {
+          "case" : "N01",
+          "destination" : "",
+          "origin" : "",
+          "sequence" : "0",
+          "target" : ""
+        },
+        {
+          "case" : "N01",
+          "destination" : "",
+          "origin" : "San Francisco",
+          "sequence" : "1",
+          "target" : "origin"
+        },
+        {
+          "case" : "N01",
+          "destination" : "San Francisco",
+          "origin" : "San Francisco",
+          "sequence" : "2",
+          "target" : "destination"
+        }
+      ],
+      "retainedTaskReplayChecked" : true,
+      "verified" : true
+    },
+    {
+      "completeOperationSequenceVerified" : true,
+      "disposition" : "completed",
+      "elapsedSeconds" : 10.733911666640779,
+      "id" : "N02",
+      "inputEvents" : 2,
+      "observedFixtureStates" : [
+        {
+          "case" : "N02",
+          "destination" : "old destination",
+          "origin" : "old origin",
+          "sequence" : "0",
+          "target" : ""
+        },
+        {
+          "case" : "N02",
+          "destination" : "old destination",
+          "origin" : "Tokyo",
+          "sequence" : "1",
+          "target" : "origin"
+        },
+        {
+          "case" : "N02",
+          "destination" : "Kyoto",
+          "origin" : "Tokyo",
+          "sequence" : "2",
+          "target" : "destination"
+        }
+      ],
+      "retainedTaskReplayChecked" : true,
+      "verified" : true
+    },
+    {
+      "completeOperationSequenceVerified" : true,
+      "disposition" : "completed",
+      "elapsedSeconds" : 10.161567333358107,
+      "id" : "N03",
+      "inputEvents" : 1,
+      "observedFixtureStates" : [
+        {
+          "case" : "N03",
+          "destination" : "Kyoto",
+          "origin" : "Tokyo",
+          "sequence" : "0",
+          "target" : ""
+        },
+        {
+          "case" : "N03",
+          "destination" : "Kyoto",
+          "origin" : "Tokyo — confirmed",
+          "sequence" : "1",
+          "target" : "origin"
+        }
+      ],
+      "retainedTaskReplayChecked" : true,
+      "verified" : true
+    },
+    {
+      "completeOperationSequenceVerified" : true,
+      "disposition" : "completed",
+      "elapsedSeconds" : 10.141892208339414,
+      "id" : "N04",
+      "inputEvents" : 1,
+      "observedFixtureStates" : [
+        {
+          "case" : "N04",
+          "destination" : "",
+          "origin" : "",
+          "sequence" : "0",
+          "target" : ""
+        },
+        {
+          "case" : "N04",
+          "destination" : "  東京 é 😀\n  ",
+          "origin" : "",
+          "sequence" : "1",
+          "target" : "destination"
+        }
+      ],
+      "retainedTaskReplayChecked" : true,
+      "verified" : true
+    },
+    {
+      "completeOperationSequenceVerified" : true,
+      "disposition" : "completed",
+      "elapsedSeconds" : 10.495606124983169,
+      "id" : "N05",
+      "inputEvents" : 2,
+      "observedFixtureStates" : [
+        {
+          "case" : "N05",
+          "destination" : "",
+          "origin" : "old",
+          "sequence" : "0",
+          "target" : ""
+        },
+        {
+          "case" : "N05",
+          "destination" : "",
+          "origin" : "Seattle",
+          "sequence" : "1",
+          "target" : "origin"
+        },
+        {
+          "case" : "N05",
+          "destination" : "",
+          "origin" : "Seattle \/ Tacoma",
+          "sequence" : "2",
+          "target" : "origin"
+        }
+      ],
+      "retainedTaskReplayChecked" : true,
+      "verified" : true
+    },
+    {
+      "completeOperationSequenceVerified" : true,
+      "disposition" : "unsupportedWithoutEffects",
+      "elapsedSeconds" : 9.6008100416802336,
+      "id" : "N06",
+      "inputEvents" : 0,
+      "observedFixtureStates" : [
+        {
+          "case" : "N06",
+          "destination" : "",
+          "origin" : "",
+          "sequence" : "0",
+          "target" : ""
+        }
+      ],
+      "retainedTaskReplayChecked" : false,
+      "verified" : true
+    },
+    {
+      "completeOperationSequenceVerified" : true,
+      "disposition" : "unsupportedWithoutEffects",
+      "elapsedSeconds" : 4.6887483750178944,
+      "id" : "N07",
+      "inputEvents" : 0,
+      "observedFixtureStates" : [
+        {
+          "case" : "N07",
+          "destination" : "",
+          "origin" : "",
+          "sequence" : "0",
+          "target" : ""
+        }
+      ],
+      "retainedTaskReplayChecked" : false,
+      "verified" : true
+    },
+    {
+      "completeOperationSequenceVerified" : true,
+      "disposition" : "clarificationWithoutEffects",
+      "elapsedSeconds" : 9.3646938750171103,
+      "id" : "N08",
+      "inputEvents" : 0,
+      "observedFixtureStates" : [
+        {
+          "case" : "N08",
+          "destination" : "",
+          "origin" : "",
+          "sequence" : "0",
+          "target" : ""
+        }
+      ],
+      "retainedTaskReplayChecked" : false,
+      "verified" : true
+    },
+    {
+      "completeOperationSequenceVerified" : true,
+      "disposition" : "completed",
+      "elapsedSeconds" : 10.145085541676963,
+      "id" : "N13",
+      "inputEvents" : 1,
+      "observedFixtureStates" : [
+        {
+          "case" : "N13",
+          "destination" : "",
+          "origin" : "",
+          "sequence" : "0",
+          "target" : ""
+        },
+        {
+          "case" : "N13",
+          "destination" : "",
+          "origin" : "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "sequence" : "1",
+          "target" : "origin"
+        }
+      ],
+      "retainedTaskReplayChecked" : true,
+      "verified" : true
+    },
+    {
+      "completeOperationSequenceVerified" : true,
+      "disposition" : "completed",
+      "elapsedSeconds" : 10.126557166688144,
+      "id" : "N14",
+      "inputEvents" : 1,
+      "observedFixtureStates" : [
+        {
+          "case" : "N14",
+          "destination" : "",
+          "origin" : "Seattle",
+          "sequence" : "0",
+          "target" : ""
+        },
+        {
+          "case" : "N14",
+          "destination" : "Austin",
+          "origin" : "Seattle",
+          "sequence" : "1",
+          "target" : "destination"
+        }
+      ],
+      "retainedTaskReplayChecked" : true,
+      "verified" : true
+    },
+    {
+      "completeOperationSequenceVerified" : true,
+      "disposition" : "completed",
+      "elapsedSeconds" : 7.359724041656591,
+      "id" : "N12",
+      "inputEvents" : 2,
+      "observedFixtureStates" : [
+        {
+          "case" : "N12",
+          "destination" : "",
+          "origin" : "",
+          "sequence" : "0",
+          "target" : ""
+        },
+        {
+          "case" : "N12",
+          "destination" : "",
+          "origin" : "Oslo",
+          "sequence" : "1",
+          "target" : "origin"
+        },
+        {
+          "case" : "N12",
+          "destination" : "Bergen",
+          "origin" : "Oslo",
+          "sequence" : "2",
+          "target" : "destination"
+        }
+      ],
+      "retainedTaskReplayChecked" : true,
+      "verified" : true
+    },
+    {
+      "completeOperationSequenceVerified" : true,
+      "disposition" : "completed",
+      "elapsedSeconds" : 0.017672208312433213,
+      "id" : "R15",
+      "inputEvents" : 1,
+      "observedFixtureStates" : [
+        {
+          "case" : "R15",
+          "destination" : "",
+          "origin" : "",
+          "sequence" : "0",
+          "target" : ""
+        },
+        {
+          "case" : "R15",
+          "destination" : "Berlin",
+          "origin" : "",
+          "sequence" : "1",
+          "target" : "destination"
+        }
+      ],
+      "retainedTaskReplayChecked" : true,
+      "verified" : true
+    },
+    {
+      "completeOperationSequenceVerified" : true,
+      "disposition" : "completed",
+      "elapsedSeconds" : 10.269412000023294,
+      "id" : "R16",
+      "inputEvents" : 1,
+      "observedFixtureStates" : [
+        {
+          "case" : "R16",
+          "destination" : "",
+          "origin" : "",
+          "sequence" : "0",
+          "target" : ""
+        },
+        {
+          "case" : "R16",
+          "destination" : "Origin",
+          "origin" : "",
+          "sequence" : "1",
+          "target" : "destination"
+        }
+      ],
+      "retainedTaskReplayChecked" : true,
+      "verified" : true
+    },
+    {
+      "completeOperationSequenceVerified" : true,
+      "disposition" : "completed",
+      "elapsedSeconds" : 0.02047108332044445,
+      "id" : "R17",
+      "inputEvents" : 2,
+      "observedFixtureStates" : [
+        {
+          "case" : "R17",
+          "destination" : "",
+          "origin" : "",
+          "sequence" : "0",
+          "target" : ""
+        },
+        {
+          "case" : "R17",
+          "destination" : "",
+          "origin" : "Tallinn",
+          "sequence" : "1",
+          "target" : "origin"
+        },
+        {
+          "case" : "R17",
+          "destination" : "Riga",
+          "origin" : "Tallinn",
+          "sequence" : "2",
+          "target" : "destination"
+        }
+      ],
+      "retainedTaskReplayChecked" : true,
+      "verified" : true
+    }
+  ],
+  "completePlanCorpusSHA256" : "5aa2c8ffda2a66cf2a188472c16aa4cac9c4d8ecc83e760787564a68942a2f0b",
+  "corpusSHA256" : "846b06a7b3524ec5803022d110805ec5614fa56f153238a792c01290b04e67f4",
+  "hostBundlePath" : "\/private\/tmp\/remotedesktop-repair-derived-data\/Build\/Products\/Debug\/RemoteDesktopHost.app",
+  "installationVersion" : "qwen35-4b-q4-k-m-native-text-v2-b9992",
+  "modelSHA256FromVerifiedManifest" : "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
+  "oracle" : "independent-page-input-events-with-exact-target-and-full-form-state-after-every-allowed-operation",
+  "runtimeBinarySHA256" : "e907a2d464876abf081405703f29c92dd864aa354e9fe65574f6980454d29a9b",
+  "schemaVersion" : 1,
+  "scope" : "signed-owned-browser-known-form-regressions",
+  "selectedCaseIDs" : [
+    "N01",
+    "N02",
+    "N03",
+    "N04",
+    "N05",
+    "N06",
+    "N07",
+    "N08",
+    "N13",
+    "N14",
+    "N12",
+    "R15",
+    "R16",
+    "R17"
+  ]
+}
