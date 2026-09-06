@@ -4010,6 +4010,90 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
         return index
     }
 
+    /// Compile a trailing input count into separate occurrences before either
+    /// effect admission or terminal checking. Each occurrence keeps the exact
+    /// literal and ordinary input clause checks; no model-generated repetition
+    /// or compacted history supplies the count.
+    private static func taskBoundExpandedCommandSegments(_ task: String) -> [TaskBoundCommandSegment]? {
+        let maskedTask = taskTextMaskingQuotedContent(task)
+        let inputVerbs: Set<String> = ["add", "enter", "input", "insert", "put", "type", "write", "press"]
+        let segments = taskBoundCommandSegments(task)
+        let containsInput = segments.contains { segment in
+            taskBoundCommandWordIndex(in: segment.words, endsAsQuestion: segment.endsAsQuestion)
+                .map { inputVerbs.contains(segment.words[$0]) } == true
+        }
+        // Sentence splitting must not turn an unsupported fractional/signed
+        // frequency into an ordinary one-shot prefix and a discarded suffix.
+        if containsInput, maskedTask.range(of: #"(?i)(?:[+-]\s*\d+(?:\.\d+)?|\d+\.\d+)\s+times?\b"#,
+                            options: .regularExpression) != nil { return nil }
+        let numbers = ["one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8]
+        guard let pattern = try? NSRegularExpression(
+            pattern: #"(?i)\b(?:exactly\s+)?(once|twice|thrice|[a-z0-9]+\s+times?)\b"#) else { return nil }
+        var result: [TaskBoundCommandSegment] = []
+        var expandedInputCount = 0
+        for segment in segments {
+            guard let commandIndex = taskBoundCommandWordIndex(in: segment.words, endsAsQuestion: segment.endsAsQuestion),
+                  inputVerbs.contains(segment.words[commandIndex]) else {
+                result.append(segment)
+                continue
+            }
+            let masked = taskTextMaskingQuotedContent(segment.raw) as NSString
+            let matches = pattern.matches(in: masked as String, range: NSRange(location: 0, length: masked.length))
+            guard !matches.isEmpty else {
+                if !Set(segment.words).isDisjoint(with: ["again", "repeat", "repeatedly", "forever", "until", "times"]) {
+                    return nil
+                }
+                result.append(segment)
+                continue
+            }
+            guard matches.count == 1, let match = matches.first,
+                  !taskBoundContainsDenial(segment.words) else { return nil }
+            let countText = masked.substring(with: match.range(at: 1)).lowercased()
+            // Existing one-shot clauses allow scope/purpose after "once".
+            // Keep their original grammar instead of stripping those words.
+            if countText == "once" {
+                result.append(segment)
+                continue
+            }
+            // Inspect the actual suffix: quoted data after the count must not
+            // disappear merely because the frequency matcher masks quotes.
+            let suffix = (segment.raw as NSString).substring(from: NSMaxRange(match.range))
+                .trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard suffix.isEmpty || suffix == "please" else { return nil }
+            let count: Int?
+            switch countText {
+            case "once": count = 1
+            case "twice": count = 2
+            case "thrice": count = 3
+            default:
+                let first = countText.split(whereSeparator: \.isWhitespace).first.map(String.init) ?? ""
+                count = numbers[first] ?? Int(first)
+            }
+            guard let count, (1...8).contains(count) else { return nil }
+            let raw = (segment.raw as NSString).substring(to: match.range.location)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let words = normalizedWords(taskTextMaskingQuotedContent(raw))
+            guard let index = taskBoundCommandWordIndex(in: words, endsAsQuestion: segment.endsAsQuestion) else { return nil }
+            guard !["called", "named", "label", "labeled", "to", "into", "in", "on"].contains(words.last ?? "") else {
+                // "...field named Twice" names a target; removing Twice
+                // would drop that target and invent an input repetition.
+                return nil
+            }
+            let literalInput = taskBoundQuotedInputPayload(in: raw) != nil
+            let keySuffix = words.dropFirst(index + 1)
+            let returnInput = words[index] == "press" && ["enter", "return"].contains(keySuffix.first ?? "")
+                && keySuffix.dropFirst().allSatisfy { $0 == "key" }
+            // Counted clicks, shortcuts and target names require their own
+            // operation contracts; never reinterpret a Return button as a key.
+            guard literalInput || returnInput else { return nil }
+            expandedInputCount += count
+            guard expandedInputCount <= 32 else { return nil }
+            result.append(contentsOf: Array(repeating: TaskBoundCommandSegment(raw: raw, words: words,
+                endsAsQuestion: segment.endsAsQuestion), count: count))
+        }
+        return result
+    }
+
     private static func taskBoundContainsDenial(_ words: [String]) -> Bool {
         let denialWords: Set<String> = [
             "avoid", "except", "exclude", "excluding", "omit", "omitting",
@@ -4392,24 +4476,27 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
 
         var sawPointerWords = false
         var actions: [TaskBoundOrderedAction] = []
-        for segment in taskBoundCommandSegments(task) {
+        guard let segments = taskBoundExpandedCommandSegments(task) else { return .rejected }
+        for segment in segments {
             let words = segment.words
             let commandIndex = taskBoundCommandWordIndex(
                 in: words,
                 endsAsQuestion: segment.endsAsQuestion)
-            if terminalCheck, let commandIndex,
+            if let commandIndex,
                pointerVerbs.contains(words[commandIndex]) || orderedNonPointerVerbs[words[commandIndex]] != nil
-                || ["copy", "paste", "open", "launch", "foreground", "repeat"].contains(words[commandIndex]) {
+                || ["copy", "paste", "open", "launch", "foreground", "repeat"].contains(words[commandIndex])
+                || (["double", "right"].contains(words[commandIndex])
+                    && words.dropFirst(commandIndex + 1).first == "click") {
                 let suffix = words.last == "please" ? Array(words.dropLast()) : words
-                let countWords: Set<String> = ["two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"]
+                let countWords: Set<String> = ["zero", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "many", "several", "few"]
                 let countedRepeat = suffix.count >= 2 && suffix.last == "times"
                     && (countWords.contains(suffix[suffix.count - 2])
                         || Int(suffix[suffix.count - 2]).map({ $0 != 1 }) == true)
-                if suffix.last == "twice" || suffix.last == "again" || countedRepeat
+                if suffix.last == "twice" || suffix.last == "thrice" || suffix.last == "again" || countedRepeat
                     || words[commandIndex] == "repeat" {
-                    // The visual action grammar has no repeated-step contract
-                    // yet. One matching history entry cannot discharge an
-                    // explicit repeat; native form repeats use their compiler.
+                    // Supported input counts were expanded above. Remaining
+                    // repetition is an uncompiled barrier for every consumer,
+                    // including admission of a later input/pointer effect.
                     return .rejected
                 }
             }

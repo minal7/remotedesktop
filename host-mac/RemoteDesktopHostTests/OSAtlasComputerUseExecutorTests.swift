@@ -4785,6 +4785,9 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
 
     private func assertOrderedInputRepetitions(prematureTerminal: Bool)
         async throws {
+        let longText = String(repeating: "x", count: 1_100) + " twice 🧭 "
+        let referencedTask = "Type \"\(longText)\" twice, then press Return."
+        let literal = try XCTUnwrap(ComputerUseLiteralPayload.singleQuotedPayload(in: referencedTask))
         let cases: [(task: String, routes: [OSAtlasSemanticActionRoute], expected: [ComputerUsePredictedAction])] = [
             (
                 "Type \"ALPHA\", press Return, then type \"alpha\".",
@@ -4808,6 +4811,24 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
                 [.init(directive: .type, argument: .text("Paris")), .init(directive: .enter),
                  .init(directive: .type, argument: .text("Paris")), .init(directive: .enter)],
                 [.typeText("Paris"), .key(usage: 0x28, modifiers: 0), .typeText("Paris"), .key(usage: 0x28, modifiers: 0)]
+            ),
+            (
+                "Type \"Paris\" twice, then press Return.",
+                [.init(directive: .type, argument: .text("Paris")),
+                 .init(directive: .type, argument: .text("Paris")), .init(directive: .enter)],
+                [.typeText("Paris"), .typeText("Paris"), .key(usage: 0x28, modifiers: 0)]
+            ),
+            (
+                "Press Return three times, then type \"done\".",
+                [.init(directive: .enter), .init(directive: .enter), .init(directive: .enter),
+                 .init(directive: .type, argument: .text("done"))],
+                [.key(usage: 0x28, modifiers: 0), .key(usage: 0x28, modifiers: 0), .key(usage: 0x28, modifiers: 0), .typeText("done")]
+            ),
+            (
+                referencedTask,
+                [.init(directive: .type, argument: .literalTextReference(literal.id)),
+                 .init(directive: .type, argument: .literalTextReference(literal.id)), .init(directive: .enter)],
+                [.typeText(longText), .typeText(longText), .key(usage: 0x28, modifiers: 0)]
             ),
         ]
         for (index, testCase) in cases.enumerated() {
@@ -4849,12 +4870,48 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
             XCTAssertEqual(actions, testCase.expected, testCase.task)
             let recorded = await requests.values()
             XCTAssertEqual(recorded.count, testCase.routes.count, testCase.task)
-            if testCase.routes.count >= 3 {
-                XCTAssertTrue(recorded[1].history.contains("TYPE"))
-                XCTAssertTrue(recorded[2].history.contains("ENTER"))
+            if testCase.routes.count >= 2 {
+                let firstMarker = testCase.routes[0].directive == .type ? "TYPE" : "ENTER"
+                XCTAssertTrue(recorded[1].history.contains(firstMarker))
             }
             let runtimeEvents = await fixture.events.values()
             XCTAssertFalse(runtimeEvents.contains("complete"))
+        }
+    }
+
+    func testCountedInputCannotAdvanceEarlyOrExceedTheDeclaredCount() async throws {
+        let type = OSAtlasSemanticActionRoute(directive: .type, argument: .text("Paris"))
+        let enter = OSAtlasSemanticActionRoute(directive: .enter)
+        let cases: [(String, [OSAtlasSemanticActionRoute], [ComputerUsePredictedAction])] = [
+            ("Type \"Paris\" twice, then press Return.", [type, enter], [.typeText("Paris")]),
+            ("Type \"Paris\" twice.", [type, type, type], [.typeText("Paris"), .typeText("Paris")]),
+            ("Press Return twice, then type \"Paris\".", [enter, type], [.key(usage: 0x28, modifiers: 0)]),
+            ("Type \"Paris\" 1.5 times, then press Return.", [type], []),
+            ("Type \"Paris\" zero times, then press Return.", [type], []),
+            ("Click Search twice, then type \"Paris\".", [type], []),
+        ]
+        for (index, testCase) in cases.enumerated() {
+            let fixture = makeCorrectionRuntime(completionResponses: [], port: UInt16(43_720 + index))
+            let requests = SemanticRoutingRequestLog()
+            let executor = OSAtlasComputerUseExecutor.makeForTesting(inputs: fixture.inputs, runtime: fixture.runtime,
+                semanticRouter: StubSemanticActionRouter { request in
+                    await requests.record(request)
+                    let count = await requests.values().count
+                    return testCase.1[min(count - 1, testCase.1.count - 1)]
+                }, maxSteps: testCase.1.count)
+            var actions: [ComputerUsePredictedAction] = []
+            do {
+                _ = try await executor.execute(prompt: testCase.0,
+                    tools: correctionTestTools(accessibilityContext: "AXSearchField • Search • focused • editable=true",
+                        actionPerformer: { actions.append($0) }), progress: { _ in })
+                XCTFail("The model cannot skip, invent or round an occurrence count")
+            } catch let error as OSAtlasComputerUseExecutor.RuntimeError {
+                XCTAssertEqual(error, .unsupportedAction("untrusted-semantic-route"), testCase.0)
+            } catch { await fixture.runtime.shutdown(); throw error }
+            await fixture.runtime.shutdown()
+            XCTAssertEqual(actions, testCase.2, testCase.0)
+            let events = await fixture.events.values()
+            XCTAssertFalse(events.contains("complete"))
         }
     }
 
@@ -4893,8 +4950,9 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
     }
 
     func testRepeatedInputResumeKeepsOccurrencesAndRefusesUncertainDelivery() async throws {
-        for interruptedInsideInput in [false, true] {
-            let fixture = makeCorrectionRuntime(completionResponses: [], port: interruptedInsideInput ? 43_715 : 43_714)
+        for (interruptedInsideInput, counted) in [(false, false), (true, false), (false, true), (true, true)] {
+            let port = UInt16(43_714 + (counted ? 2 : 0) + (interruptedInsideInput ? 1 : 0))
+            let fixture = makeCorrectionRuntime(completionResponses: [], port: port)
             let requests = SemanticRoutingRequestLog()
             let executor = OSAtlasComputerUseExecutor.makeForTesting(inputs: fixture.inputs, runtime: fixture.runtime,
                 semanticRouter: StubSemanticActionRouter { request in
@@ -4903,7 +4961,7 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
                     if !interruptedInsideInput && count == 2 { throw CancellationError() }
                     return .init(directive: .type, argument: .text("repeat"))
                 }, maxSteps: 2)
-            let prompt = "Type \"repeat\", then type \"repeat\"."
+            let prompt = counted ? "Type \"repeat\" twice." : "Type \"repeat\", then type \"repeat\"."
             var actions: [ComputerUsePredictedAction] = []
             let tools = correctionTestTools(accessibilityContext: "AXSearchField • Search • focused • editable=true",
                 actionPerformer: { action in

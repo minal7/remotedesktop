@@ -3735,6 +3735,70 @@ final class AppleFoundationMCPPlannerTests: XCTestCase {
         XCTAssertEqual(resolve(.type, ["TYPE", "ENTER"]), .rejected, "Compacted planner hints are not host evidence")
     }
 
+    func testCountedInputExpandsBeforeEffectAndTerminalQueries() {
+        for (phrase, count) in [("twice", 2), ("thrice", 3), ("two times", 2), ("3 times please", 3),
+                                ("exactly eight times", 8), ("1 time", 1)] {
+            for isTyping in [false, true] {
+                let first = isTyping ? "Type \"Paris\"" : "Press Return key"
+                let next = isTyping ? "press Return" : "type \"Paris\""
+                let task = "\(first) \(phrase), then \(next)."
+                let directive: OSAtlasExplicitActionDirective = isTyping ? .type : .enter
+                let other: OSAtlasExplicitActionDirective = isTyping ? .enter : .type
+                let entry = isTyping ? "TYPE [Paris]" : "ENTER"
+                func resolve(_ choice: OSAtlasExplicitActionDirective, _ history: [String])
+                    -> AppleFoundationVisualActionRouter.TaskBoundOrderedInputResolution {
+                    AppleFoundationVisualActionRouter.taskBoundOrderedInputResolution(for: task, directive: choice,
+                        history: history, frontmostApplication: nil, frontmostApplicationIdentityIsAuthoritative: false)
+                }
+                for performed in 0..<count {
+                    let history = Array(repeating: entry, count: performed)
+                    XCTAssertEqual(resolve(directive, history), .bound(clause: first), task)
+                    XCTAssertEqual(resolve(other, history), .rejected, "The count cannot be bypassed by a later action")
+                    XCTAssertEqual(AppleFoundationVisualActionRouter.taskBoundTerminalPrerequisites(for: task, history: history),
+                        .pendingOrUnproven)
+                }
+                let history = Array(repeating: entry, count: count)
+                XCTAssertEqual(resolve(directive, history), .rejected)
+                XCTAssertEqual(resolve(other, history), .bound(clause: " " + next))
+                XCTAssertEqual(AppleFoundationVisualActionRouter.taskBoundTerminalPrerequisites(
+                    for: task, history: history + [isTyping ? "ENTER" : "TYPE [Paris]"]), .recorded)
+            }
+        }
+    }
+
+    func testCountedInputRejectsUncompiledCountsAndProtectsQuotedData() {
+        for suffix in ["again", "repeatedly", "until I say stop", "0 times", "nine times", "many times",
+                       "-2 times", "+2 times", "1.5 times", "twice in the focused field", "once twice",
+                       "into the field named Twice", "into Twice", "twice \"London\""] {
+            let task = "Type \"Paris\" \(suffix), then press Return."
+            for history in [[], ["TYPE [Paris]"]] {
+                for directive in [OSAtlasExplicitActionDirective.type, .enter] {
+                    XCTAssertEqual(AppleFoundationVisualActionRouter.taskBoundOrderedInputResolution(for: task,
+                        directive: directive, history: history, frontmostApplication: nil,
+                        frontmostApplicationIdentityIsAuthoritative: false), .rejected, task)
+                }
+                XCTAssertEqual(AppleFoundationVisualActionRouter.taskBoundTerminalPrerequisites(for: task, history: history),
+                    .pendingOrUnproven)
+            }
+        }
+        for task in ["Click Search twice, then type \"Paris\".", "Press Return button twice, then type \"Paris\".",
+                     "Double click Search thrice, then type \"Paris\".", "Right click Search several times, then type \"Paris\"."] {
+            XCTAssertEqual(AppleFoundationVisualActionRouter.taskBoundOrderedInputResolution(for: task, directive: .type,
+                history: ["CLICK [[1,2]]"], frontmostApplication: nil, frontmostApplicationIdentityIsAuthoritative: false), .rejected)
+        }
+        let literal = "twice 1.5 times again"
+        let task = "Type \"\(literal)\" twice, then press Return."
+        XCTAssertEqual(AppleFoundationVisualActionRouter.taskBoundOrderedInputResolution(for: task, directive: .type,
+            history: [OSAtlasGUIAction.typeText(literal).historyEntry], frontmostApplication: nil,
+            frontmostApplicationIdentityIsAuthoritative: false), .bound(clause: "Type \"\(literal)\""))
+        XCTAssertEqual(AppleFoundationVisualActionRouter.taskBoundOrderedInputResolution(
+            for: "Press Return once in the focused search field.", directive: .enter, history: [],
+            frontmostApplication: nil, frontmostApplicationIdentityIsAuthoritative: false),
+            .bound(clause: "Press Return once in the focused search field"))
+        XCTAssertEqual(AppleFoundationVisualActionRouter.taskBoundTerminalPrerequisites(
+            for: "What is -2 times 5?", history: []), .notApplicable)
+    }
+
     func testOrderedInputCannotDiscardUnknownOrTerminalHistoryWhenAuthorizingRepetition() {
         for directive in [OSAtlasExplicitActionDirective.type, .enter] {
             let task = directive == .type ? "Type \"repeat\", then type \"repeat\"." : "Press Return, then press Return."
