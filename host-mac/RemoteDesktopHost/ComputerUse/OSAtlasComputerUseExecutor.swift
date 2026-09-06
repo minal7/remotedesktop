@@ -4122,6 +4122,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
         hostVerifiedPendingWait: Bool
     ) -> Bool {
         var inputAuthority = trustedTask
+        var hasOrderedInputAuthority = false
         if [.type, .enter].contains(route.directive) {
             switch AppleFoundationVisualActionRouter
                 .taskBoundOrderedInputResolution(
@@ -4133,6 +4134,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
                         frontmostApplicationIdentityIsAuthoritative) {
             case .bound(let clause):
                 inputAuthority = clause
+                hasOrderedInputAuthority = true
             case .rejected:
                 return false
             case .notApplicable:
@@ -4208,18 +4210,19 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
                 in: inputAuthority) else {
                 return false
             }
-            // A learned planner may propose the same literal again after the
-            // host already performed it. The raw host ledger is authoritative:
-            // each exact payload is one-shot within a task, while distinct
-            // payloads can still fill distinct fields.
+            // Distinct requested steps may contain identical bytes. The
+            // ordered resolver consumes the exact raw effect prefix and binds
+            // only its next clause; exhausting that sequence rejects replay.
+            // Without that proof, retain the one-shot fallback restriction.
             let marker = OSAtlasGUIAction.typeText(text).historyEntry
-            return !history.contains(marker)
+            return hasOrderedInputAuthority || !history.contains(marker)
         case (.type, .literalTextReference(let id)):
             guard let text = ComputerUseLiteralPayload.resolve(id, in: trustedTask),
                   taskAffirmativelyBindsTypedPayload(text, in: inputAuthority) else {
                 return false
             }
-            return !history.contains(OSAtlasGUIAction.typeText(text).historyEntry)
+            return hasOrderedInputAuthority
+                || !history.contains(OSAtlasGUIAction.typeText(text).historyEntry)
         case (.scroll, .none):
             let navigationWords: Set<String> = [
                 "go", "navigate", "reveal", "scroll", "show",
@@ -4244,7 +4247,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
                 return taskWordSet.contains("right")
             }
         case (.enter, .none):
-            guard !history.contains("ENTER") else { return false }
+            guard hasOrderedInputAuthority || !history.contains("ENTER") else { return false }
             return taskAffirmativelyRequestsReturnKey(in: inputAuthority)
                 || AppleFoundationVisualActionRouter
                     .taskAffirmativelyRequestsOperation(

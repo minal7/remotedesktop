@@ -3710,6 +3710,46 @@ final class AppleFoundationMCPPlannerTests: XCTestCase {
             .rejected)
     }
 
+    func testOrderedRepeatedInputConsumesEveryOccurrenceAndRejectsAnExhaustedSequence() {
+        let task = "Type \"Paris\", press Return, then type \"Paris\", then press Return."
+        func resolve(_ directive: OSAtlasExplicitActionDirective, _ history: [String])
+            -> AppleFoundationVisualActionRouter.TaskBoundOrderedInputResolution {
+            AppleFoundationVisualActionRouter.taskBoundOrderedInputResolution(for: task,
+                directive: directive, history: history, frontmostApplication: nil,
+                frontmostApplicationIdentityIsAuthoritative: false)
+        }
+        let first = "TYPE [Paris]"
+        XCTAssertEqual(resolve(.type, []), .bound(clause: "Type \"Paris\""))
+        XCTAssertEqual(resolve(.type, [first]), .rejected, "A repeat cannot skip the first Return")
+        XCTAssertEqual(resolve(.enter, [first]), .bound(clause: " press Return"))
+        XCTAssertEqual(resolve(.type, [first, "ENTER"]), .bound(clause: " type \"Paris\""))
+        XCTAssertEqual(resolve(.enter, [first, "ENTER"]), .rejected, "The second Return still needs its preceding input")
+        XCTAssertEqual(resolve(.enter, [first, "ENTER", first]), .bound(clause: " press Return"))
+        for directive in [OSAtlasExplicitActionDirective.type, .enter] {
+            XCTAssertEqual(resolve(directive, [first, "ENTER", first, "ENTER"]), .rejected)
+            XCTAssertEqual(resolve(directive, [first, "ENTER", first, "ENTER", first]), .rejected)
+        }
+        XCTAssertEqual(resolve(.type, [first, "WAIT", "ENTER", "WAIT [transient system overlay]"]),
+            .bound(clause: " type \"Paris\""), "No-effect settling does not consume an input occurrence")
+        XCTAssertEqual(resolve(.type, ["TYPE [paris]", "ENTER"]), .rejected)
+        XCTAssertEqual(resolve(.type, ["TYPE", "ENTER"]), .rejected, "Compacted planner hints are not host evidence")
+    }
+
+    func testOrderedInputCannotDiscardUnknownOrTerminalHistoryWhenAuthorizingRepetition() {
+        for directive in [OSAtlasExplicitActionDirective.type, .enter] {
+            let task = directive == .type ? "Type \"repeat\", then type \"repeat\"." : "Press Return, then press Return."
+            let performed = directive == .type ? "TYPE [repeat]" : "ENTER"
+            for marker in ["UNKNOWN", "COMPLETE", "ASK [what next?]", "WAIT [unreviewed reason]", ""] {
+                for history in [[marker], [performed, marker], [marker, performed]] {
+                    XCTAssertEqual(AppleFoundationVisualActionRouter.taskBoundOrderedInputResolution(
+                        for: task, directive: directive, history: history, frontmostApplication: nil,
+                        frontmostApplicationIdentityIsAuthoritative: false), .rejected,
+                        "No unknown entry can disappear and confer another input attempt")
+                }
+            }
+        }
+    }
+
     func testOrderedTypeHistoryRequiresExactBytesAndCompletePayloadIdentity() {
         func resolve(
             _ payload: String,

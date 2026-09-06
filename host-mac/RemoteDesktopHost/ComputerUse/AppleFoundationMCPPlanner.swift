@@ -4211,8 +4211,9 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
 
     /// Returns only the next input clause, never all task text. The caller
     /// still binds the exact payload and focused target before any input.
-    /// This shares the pointer grammar and does not mint step receipts or
-    /// authorize replay of earlier TYPE/ENTER effects.
+    /// This shares the pointer grammar and consumes each exact host history
+    /// occurrence once. Identical input in a later explicit clause is a new
+    /// requested step; an exhausted/mismatched prefix cannot authorize replay.
     static func taskBoundOrderedInputResolution(
         for task: String,
         directive: OSAtlasExplicitActionDirective,
@@ -4221,6 +4222,12 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
         frontmostApplicationIdentityIsAuthoritative: Bool
     ) -> TaskBoundOrderedInputResolution {
         guard [.type, .enter].contains(directive) else { return .rejected }
+        // Unknown or terminal entries must not disappear through the shared
+        // resolver's compactMap and expose an earlier input clause again.
+        // This API requires complete host history, never model-compacted hints.
+        guard history.allSatisfy({
+            taskBoundHistoryDirective($0) != nil || $0 == "WAIT [transient system overlay]"
+        }) else { return .rejected }
         switch taskBoundOrderedActionResolution(
             for: task,
             history: history,
