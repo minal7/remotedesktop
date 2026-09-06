@@ -1,0 +1,156 @@
+{
+  "allowFieldCopy" : false,
+  "cases" : [
+    {
+      "disposition" : "supported",
+      "edits" : [
+        {
+          "field" : 0,
+          "mode" : "replaceAll",
+          "value" : "San Francisco"
+        },
+        {
+          "field" : 1,
+          "mode" : "replaceAll",
+          "value" : "San Francisco"
+        }
+      ],
+      "elapsedSeconds" : 13.479801416659029,
+      "id" : "N01",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterUnquoted\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"text\":\"San Francisco\"},{\"action\":\"enterUnquoted\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\",\"text\":\"San Francisco\"}]}",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterUnquoted\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"text\":\"San Francisco\"},{\"action\":\"enterUnquoted\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\",\"text\":\"San Francisco\"}]}",
+          "finishReason" : "stop"
+        }
+      ],
+      "verified" : true
+    },
+    {
+      "disposition" : "supported",
+      "edits" : [
+        {
+          "field" : 0,
+          "mode" : "replaceAll",
+          "value" : "Tokyo"
+        },
+        {
+          "field" : 1,
+          "mode" : "replaceAll",
+          "value" : "Kyoto"
+        }
+      ],
+      "elapsedSeconds" : 11.270271833316656,
+      "id" : "N02",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterUnquoted\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"text\":\"Tokyo\"},{\"action\":\"enterUnquoted\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\",\"text\":\"Kyoto\"}]}",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterUnquoted\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"text\":\"Tokyo\"},{\"action\":\"enterUnquoted\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\",\"text\":\"Kyoto\"}]}",
+          "finishReason" : "stop"
+        }
+      ],
+      "verified" : true
+    },
+    {
+      "disposition" : "supported",
+      "edits" : [
+        {
+          "field" : 0,
+          "mode" : "append",
+          "value" : " — confirmed"
+        }
+      ],
+      "elapsedSeconds" : 9.4886824166460428,
+      "id" : "N03",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterLiteral\",\"targetFieldID\":\"f1\",\"mode\":\"append\",\"literalID\":\"p1\"}]}",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterLiteral\",\"targetFieldID\":\"f1\",\"mode\":\"append\",\"literalID\":\"p1\"}]}",
+          "finishReason" : "stop"
+        }
+      ],
+      "verified" : true
+    },
+    {
+      "disposition" : "supported",
+      "edits" : [
+        {
+          "field" : 1,
+          "mode" : "replaceAll",
+          "value" : "  東京 é 😀\n  "
+        }
+      ],
+      "elapsedSeconds" : 11.81299866666086,
+      "id" : "N04",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterLiteral\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\",\"literalID\":\"p1\"}]}",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterLiteral\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\",\"literalID\":\"p1\"}]}",
+          "finishReason" : "stop"
+        }
+      ],
+      "verified" : true
+    },
+    {
+      "disposition" : "supported",
+      "edits" : [
+        {
+          "field" : 0,
+          "mode" : "replaceAll",
+          "value" : "Seattle"
+        },
+        {
+          "field" : 0,
+          "mode" : "append",
+          "value" : " \/ Tacoma"
+        }
+      ],
+      "elapsedSeconds" : 9.9159756249864586,
+      "id" : "N05",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterLiteral\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"literalID\":\"p1\"},{\"action\":\"enterLiteral\",\"targetFieldID\":\"f1\",\"mode\":\"append\",\"literalID\":\"p2\"}]}",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterLiteral\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"literalID\":\"p1\"},{\"action\":\"enterLiteral\",\"targetFieldID\":\"f1\",\"mode\":\"append\",\"literalID\":\"p2\"}]}",
+          "finishReason" : "stop"
+        }
+      ],
+      "verified" : true
+    }
+  ],
+  "contract" : "text-actions-v10",
+  "corpusSHA256" : "772019c3ccf821c106a4f16dc75a5ff1f6af1c0320f1771433ff654e804baff0",
+  "desktopEffects" : false,
+  "expectedCaseIDs" : [
+    "N01",
+    "N02",
+    "N03",
+    "N04",
+    "N05"
+  ],
+  "modelSHA256FromVerifiedManifest" : "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
+  "oracle" : "exact-disposition-and-complete-operation-sequences-including-count-mode-target-payload-origin-exact-bytes-and-order",
+  "quotedCommandFastPath" : false,
+  "runtimeBinarySHA256" : "597c29fa269b919c2dc5b72577be8d2ea4664ce3db3a92f5657595e4e8e37fdf",
+  "schemaVersion" : 1,
+  "scope" : "Known 54-case regression comparison for unified typed field operations v8; combines 20 copy and 34 earlier literal\/decline cases; not held-out qualification; preselected batch 5\/11"
+}

@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "candidateSourceCommit": "5988d3a",
+  "fixtureFreeze": "text-actions-v10-browser-freeze.json",
+  "buildLog": "/tmp/remotedesktop-text-actions-browser-fixture-build-v1.log",
+  "signedOracleResult": "/tmp/remotedesktop-text-actions-browser-oracle-v1.xcresult",
+  "summary": {
+    "devicesAndConfigurations": [
+      {
+        "device": {
+          "architecture": "arm64",
+          "deviceId": "00006021-000821AC02BB401E",
+          "deviceName": "My Mac",
+          "modelName": "MacBook Pro",
+          "osBuildNumber": "26A5406e",
+          "osVersion": "27.0",
+          "platform": "macOS"
+        },
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "passedTests": 1,
+        "skippedTests": 0,
+        "testPlanConfiguration": {
+          "configurationId": "1",
+          "configurationName": "Test Scheme Action"
+        }
+      }
+    ],
+    "environmentDescription": "RemoteDesktopHost \u00b7 Built with macOS 27.0",
+    "expectedFailures": 0,
+    "failedTests": 0,
+    "finishTime": 1788656932.53,
+    "passedTests": 1,
+    "result": "Passed",
+    "skippedTests": 0,
+    "startTime": 1788656930.956,
+    "statistics": [],
+    "testFailures": [],
+    "title": "Test - RemoteDesktopHost",
+    "topInsights": [],
+    "totalTestCount": 1
+  },
+  "exactSourceAndExecutedInventoryVerified": true,
+  "actualV10BrowserCasesExecuted": 0,
+  "actualHeldoutCasesExecuted": 0,
+  "reasonUnrun": "v10 retains two incorrect accepted plans and one wrong disposition in the fixed known regression corpus.",
+  "oracleChange": "None: only explicit planner-contract selection and reporting were added to the compiled fixture."
+}

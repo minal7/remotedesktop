@@ -1,0 +1,151 @@
+{
+  "allowFieldCopy" : false,
+  "cases" : [
+    {
+      "disposition" : "supported",
+      "edits" : [
+        {
+          "field" : 0,
+          "mode" : "replaceAll",
+          "value" : "Oslo"
+        },
+        {
+          "field" : 1,
+          "mode" : "replaceAll",
+          "value" : "Bergen"
+        }
+      ],
+      "elapsedSeconds" : 13.39445966668427,
+      "id" : "N12",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterUnquoted\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"text\":\"Oslo\"},{\"action\":\"enterUnquoted\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\",\"text\":\"Bergen\"}]}",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterUnquoted\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"text\":\"Oslo\"},{\"action\":\"enterUnquoted\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\",\"text\":\"Bergen\"}]}",
+          "finishReason" : "stop"
+        }
+      ],
+      "verified" : true
+    },
+    {
+      "disposition" : "supported",
+      "edits" : [
+        {
+          "field" : 1,
+          "mode" : "replaceAll",
+          "value" : "Berlin"
+        }
+      ],
+      "elapsedSeconds" : 7.3664376249944326,
+      "id" : "R15",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterLiteral\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\",\"literalID\":\"p2\"}]}",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterLiteral\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\",\"literalID\":\"p2\"}]}",
+          "finishReason" : "stop"
+        }
+      ],
+      "verified" : true
+    },
+    {
+      "disposition" : "supported",
+      "edits" : [
+        {
+          "field" : 1,
+          "mode" : "replaceAll",
+          "sourceField" : 0
+        }
+      ],
+      "elapsedSeconds" : 12.370196541683981,
+      "id" : "R16",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"copyField\",\"sourceFieldID\":\"f1\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\"}]}",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"copyField\",\"sourceFieldID\":\"f1\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\"}]}",
+          "finishReason" : "stop"
+        }
+      ],
+      "verified" : false
+    },
+    {
+      "disposition" : "supported",
+      "edits" : [
+        {
+          "field" : 0,
+          "mode" : "replaceAll",
+          "value" : "Tallinn"
+        },
+        {
+          "field" : 1,
+          "mode" : "replaceAll",
+          "value" : "Riga"
+        }
+      ],
+      "elapsedSeconds" : 12.436438125005225,
+      "id" : "R17",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterLiteral\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"literalID\":\"p2\"},{\"action\":\"enterLiteral\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\",\"literalID\":\"p4\"}]}",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterLiteral\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"literalID\":\"p2\"},{\"action\":\"enterLiteral\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\",\"literalID\":\"p4\"}]}",
+          "finishReason" : "stop"
+        }
+      ],
+      "verified" : true
+    },
+    {
+      "disposition" : "supported",
+      "edits" : [
+        {
+          "field" : 0,
+          "mode" : "replaceAll",
+          "value" : "amber"
+        }
+      ],
+      "elapsedSeconds" : 11.999133708333829,
+      "id" : "H501",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterUnquoted\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"text\":\"amber\"}]}",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterUnquoted\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"text\":\"amber\"}]}",
+          "finishReason" : "stop"
+        }
+      ],
+      "verified" : true
+    }
+  ],
+  "contract" : "text-actions-v10",
+  "corpusSHA256" : "067f0473da25e8155b7eda917a4053114edf2d945155a6faadc4a2506428141f",
+  "desktopEffects" : false,
+  "expectedCaseIDs" : [
+    "N12",
+    "R15",
+    "R16",
+    "R17",
+    "H501"
+  ],
+  "modelSHA256FromVerifiedManifest" : "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
+  "oracle" : "exact-disposition-and-complete-operation-sequences-including-count-mode-target-payload-origin-exact-bytes-and-order",
+  "quotedCommandFastPath" : false,
+  "runtimeBinarySHA256" : "597c29fa269b919c2dc5b72577be8d2ea4664ce3db3a92f5657595e4e8e37fdf",
+  "schemaVersion" : 1,
+  "scope" : "Known 54-case regression comparison for unified typed field operations v8; combines 20 copy and 34 earlier literal\/decline cases; not held-out qualification; preselected batch 7\/11"
+}

@@ -30,6 +30,9 @@ final class ComputerUseFieldOperationsBrowserAcceptanceTests: XCTestCase {
         guard Bundle.main.bundleURL.pathExtension == "app" else { throw Failure.invalidInput }
         let corpusURL = URL(fileURLWithPath: try XCTUnwrap(environment["FIELD_OPERATIONS_BROWSER_CORPUS"]))
         let reportURL = URL(fileURLWithPath: try XCTUnwrap(environment["FIELD_OPERATIONS_BROWSER_REPORT"]))
+        let contract = try XCTUnwrap(ComputerUseLocalTextGoalPlanner.Contract(rawValue:
+            environment["FIELD_OPERATIONS_BROWSER_CONTRACT"] ?? "field-operations-v8"))
+        guard [.fieldOperationsV8, .fieldOperationsV9, .textActionsV10].contains(contract) else { throw Failure.invalidInput }
         guard !FileManager.default.fileExists(atPath: reportURL.path) else { throw Failure.invalidInput }
         let data = try Data(contentsOf: corpusURL)
         let corpusHash = Self.sha(data)
@@ -62,13 +65,13 @@ final class ComputerUseFieldOperationsBrowserAcceptanceTests: XCTestCase {
         let inputs = try OSAtlasRuntimeInputResolver(manifest: .nativeTextV2).resolveNativeText(
             receipt: receipt, runtimeDirectoryURL: runtimeDirectory, enclosingBundleURL: Bundle.main.bundleURL)
         let runtime = OSAtlasLlamaRuntime.shared
-        let planner = ObservedFieldOperationsPlanner(inputs: inputs, runtime: runtime)
+        let planner = ObservedFieldOperationsPlanner(inputs: inputs, runtime: runtime, contract: contract)
         let executor = ComputerUseCapabilityExecutor(native: tools.makeNativeTextExecutor(planner: planner,
             journalDirectory: directory.appendingPathComponent("text")))
         let runtimeHash = Self.sha(try Data(contentsOf: runtimeDirectory.appendingPathComponent("llama-server")))
         var rows: [[String: Any]] = []
         func save() throws {
-            let result: [String: Any] = ["schemaVersion": 1, "scope": corpus.scope, "contract": "field-operations-v8",
+            let result: [String: Any] = ["schemaVersion": 1, "scope": corpus.scope, "contract": contract.rawValue,
                 "composition": "actual runtime candidate with production coordinator, observation, compilation, DOM effects and recovery",
                 "hostBundlePath": Bundle.main.bundleURL.path, "corpusSHA256": corpusHash,
                 "runtimeBinarySHA256": runtimeHash,
@@ -210,15 +213,18 @@ private struct FieldOperationOracle: Codable, Equatable {
 private final class ObservedFieldOperationsPlanner: ComputerUseTextGoalPlanning {
     let inputs: ComputerUseNativeTextRuntimeInputs
     let runtime: OSAtlasLlamaRuntime
+    let contract: ComputerUseLocalTextGoalPlanner.Contract
     private(set) var calls = 0
     private(set) var disposition = "none"
     private(set) var operations: [FieldOperationOracle] = []
-    init(inputs: ComputerUseNativeTextRuntimeInputs, runtime: OSAtlasLlamaRuntime) { self.inputs = inputs; self.runtime = runtime }
+    init(inputs: ComputerUseNativeTextRuntimeInputs, runtime: OSAtlasLlamaRuntime, contract: ComputerUseLocalTextGoalPlanner.Contract) {
+        self.inputs = inputs; self.runtime = runtime; self.contract = contract
+    }
     func reset() { calls = 0; disposition = "none"; operations = [] }
     func propose(prompt: String, fields: [ComputerUseTextField]) async throws -> ComputerUseTextGoalProposal {
         calls += 1
         let endpoint = try await runtime.activateNativeText(inputs)
-        let proposal = try await runtime.proposeNativeText(endpoint: endpoint, prompt: prompt, fields: fields, contract: .fieldOperationsV8)
+        let proposal = try await runtime.proposeNativeText(endpoint: endpoint, prompt: prompt, fields: fields, contract: contract)
         switch proposal {
         case .unsupported: disposition = "unsupported"
         case .clarification: disposition = "clarification"

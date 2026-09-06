@@ -1,0 +1,1830 @@
+{
+  "schemaVersion": 1,
+  "candidateSourceCommit": "5988d3a",
+  "candidate": "text-actions-candidate-v10.json",
+  "corpus": {
+    "path": "host-mac/AcceptanceFixtures/native-field-operations-v8-regressions.json",
+    "sha256": "d3bb6e32a333a27720871b2d8f48b0134075ac2d62741fa92c2522a8bff79ee9",
+    "caseIDs": [
+      "C01",
+      "C02",
+      "C03",
+      "C04",
+      "C05",
+      "C06",
+      "C07",
+      "C08",
+      "C09",
+      "C10",
+      "C11",
+      "C12",
+      "C13",
+      "C14",
+      "C15",
+      "C16",
+      "C17",
+      "C18",
+      "C19",
+      "C20",
+      "N01",
+      "N02",
+      "N03",
+      "N04",
+      "N05",
+      "N06",
+      "N07",
+      "N08",
+      "N13",
+      "N14",
+      "N12",
+      "R15",
+      "R16",
+      "R17",
+      "H501",
+      "H502",
+      "H503",
+      "H504",
+      "H505",
+      "H506",
+      "H507",
+      "H508",
+      "H509",
+      "H510",
+      "H511",
+      "H512",
+      "H513",
+      "H514",
+      "H515",
+      "H516",
+      "H517",
+      "H518",
+      "H519",
+      "H520"
+    ]
+  },
+  "total": 54,
+  "passed": 51,
+  "modelResponses": 54,
+  "elapsedCaseSeconds": 528.6405038332159,
+  "incorrectAcceptedPlanCaseIDs": [
+    "R16",
+    "H507"
+  ],
+  "conservativeFailureCaseIDs": [
+    "H517"
+  ],
+  "desktopEffects": false,
+  "v10ProductionEnabled": false,
+  "batches": [
+    {
+      "report": "text-actions-v10-batch-1-first-results.json",
+      "sha256": "8ce4a087779dd0a3360bf124ec901f64b23a4cff36aaf2bdf20b7587725890ab",
+      "xcresult": "/tmp/remotedesktop-text-actions-v10-batch-1-first.xcresult",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 0,
+            "passedTests": 1,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1788656126.951,
+        "passedTests": 1,
+        "result": "Passed",
+        "skippedTests": 0,
+        "startTime": 1788656071.903,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      }
+    },
+    {
+      "report": "text-actions-v10-batch-2-first-results.json",
+      "sha256": "e8c6ea9c594973b73d7a099d238dae3ed58e15fe06ab4e12010aa10465d8a42d",
+      "xcresult": "/tmp/remotedesktop-text-actions-v10-batch-2-first.xcresult",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 0,
+            "passedTests": 1,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1788656181.367,
+        "passedTests": 1,
+        "result": "Passed",
+        "skippedTests": 0,
+        "startTime": 1788656129.671,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      }
+    },
+    {
+      "report": "text-actions-v10-batch-3-first-results.json",
+      "sha256": "48a517dbd7b619a8487db280f7ce649543b78855074697cecf9ab993c0bac586",
+      "xcresult": "/tmp/remotedesktop-text-actions-v10-batch-3-first.xcresult",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 0,
+            "passedTests": 1,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1788656229.97,
+        "passedTests": 1,
+        "result": "Passed",
+        "skippedTests": 0,
+        "startTime": 1788656184.211,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      }
+    },
+    {
+      "report": "text-actions-v10-batch-4-first-results.json",
+      "sha256": "909853264a208902f53c2d82522ea5093aa21840c5dbca8b252c2bbd73bcfc13",
+      "xcresult": "/tmp/remotedesktop-text-actions-v10-batch-4-first.xcresult",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 0,
+            "passedTests": 1,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1788656275.236,
+        "passedTests": 1,
+        "result": "Passed",
+        "skippedTests": 0,
+        "startTime": 1788656232.88,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      }
+    },
+    {
+      "report": "text-actions-v10-batch-5-first-results.json",
+      "sha256": "16d83a98fd8fb78db7798c2273d852ca8207f15bc7ef1a07bed4572c3587d149",
+      "xcresult": "/tmp/remotedesktop-text-actions-v10-batch-5-first.xcresult",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 0,
+            "passedTests": 1,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1788656336.543,
+        "passedTests": 1,
+        "result": "Passed",
+        "skippedTests": 0,
+        "startTime": 1788656277.88,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      }
+    },
+    {
+      "report": "text-actions-v10-batch-6-first-results.json",
+      "sha256": "51f33f5463c3c82223eecae9491042d69f44aab682bfc6fb945c99263e2184d8",
+      "xcresult": "/tmp/remotedesktop-text-actions-v10-batch-6-first.xcresult",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 0,
+            "passedTests": 1,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1788656379.859,
+        "passedTests": 1,
+        "result": "Passed",
+        "skippedTests": 0,
+        "startTime": 1788656339.251,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      }
+    },
+    {
+      "report": "text-actions-v10-batch-7-first-results.json",
+      "sha256": "e7eaacffa4f02331d677092f3ed7d7f9e261ec48935ba05b4d549a0236ef8731",
+      "xcresult": "/tmp/remotedesktop-text-actions-v10-batch-7-first.xcresult",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 0,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1788656442.838,
+        "passedTests": 0,
+        "result": "Failed",
+        "skippedTests": 0,
+        "startTime": 1788656382.583,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "XCTAssertTrue failed - R16: disposition or complete edit sequence did not match the independent corpus",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseSourceBoundTextModelAcceptanceTests/testSignedRuntimeCompilesTheExactCorpusWithoutDesktopEffects()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseSourceBoundTextModelAcceptanceTests/testSignedRuntimeCompilesTheExactCorpusWithoutDesktopEffects",
+            "testName": "testSignedRuntimeCompilesTheExactCorpusWithoutDesktopEffects()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      }
+    },
+    {
+      "report": "text-actions-v10-batch-8-first-results.json",
+      "sha256": "ab5bd910907e67f2f9e0160f085baa2543733c932a58797264ff215ceadc0709",
+      "xcresult": "/tmp/remotedesktop-text-actions-v10-batch-8-first.xcresult",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 0,
+            "passedTests": 1,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1788656496.963,
+        "passedTests": 1,
+        "result": "Passed",
+        "skippedTests": 0,
+        "startTime": 1788656445.935,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      }
+    },
+    {
+      "report": "text-actions-v10-batch-9-first-results.json",
+      "sha256": "06cc771efe78ec810f8023b58d4313b66c36d1a0a74fcb6429a58ed4edf281b5",
+      "xcresult": "/tmp/remotedesktop-text-actions-v10-batch-9-first.xcresult",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 0,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1788656552.408,
+        "passedTests": 0,
+        "result": "Failed",
+        "skippedTests": 0,
+        "startTime": 1788656499.686,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "XCTAssertTrue failed - H507: disposition or complete edit sequence did not match the independent corpus",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseSourceBoundTextModelAcceptanceTests/testSignedRuntimeCompilesTheExactCorpusWithoutDesktopEffects()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseSourceBoundTextModelAcceptanceTests/testSignedRuntimeCompilesTheExactCorpusWithoutDesktopEffects",
+            "testName": "testSignedRuntimeCompilesTheExactCorpusWithoutDesktopEffects()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      }
+    },
+    {
+      "report": "text-actions-v10-batch-10-first-results.json",
+      "sha256": "56fa011740b121c5a8a3daa6cbd02c60615b0b88498b096256aa5e6053569737",
+      "xcresult": "/tmp/remotedesktop-text-actions-v10-batch-10-first.xcresult",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 0,
+            "passedTests": 1,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1788656605.367,
+        "passedTests": 1,
+        "result": "Passed",
+        "skippedTests": 0,
+        "startTime": 1788656555.302,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      }
+    },
+    {
+      "report": "text-actions-v10-batch-11-first-results.json",
+      "sha256": "2371afa9126609ab972b2cad0333508259d33cd6d3fc71fabddf0535b38a7df1",
+      "xcresult": "/tmp/remotedesktop-text-actions-v10-batch-11-first.xcresult",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 0,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1788656658.059,
+        "passedTests": 0,
+        "result": "Failed",
+        "skippedTests": 0,
+        "startTime": 1788656608.069,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "XCTAssertTrue failed - H517: disposition or complete edit sequence did not match the independent corpus",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseSourceBoundTextModelAcceptanceTests/testSignedRuntimeCompilesTheExactCorpusWithoutDesktopEffects()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseSourceBoundTextModelAcceptanceTests/testSignedRuntimeCompilesTheExactCorpusWithoutDesktopEffects",
+            "testName": "testSignedRuntimeCompilesTheExactCorpusWithoutDesktopEffects()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      }
+    }
+  ],
+  "cases": [
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 1,
+          "mode": "replaceAll",
+          "sourceField": 0
+        }
+      ],
+      "elapsedSeconds": 9.263370041648159,
+      "id": "C01",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"copyField\",\"sourceFieldID\":\"f1\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\"}]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"copyField\",\"sourceFieldID\":\"f1\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\"}]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 1,
+          "mode": "replaceAll",
+          "sourceField": 0
+        }
+      ],
+      "elapsedSeconds": 11.989083333319286,
+      "id": "C02",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"copyField\",\"sourceFieldID\":\"f1\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\"}]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"copyField\",\"sourceFieldID\":\"f1\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\"}]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 1,
+          "mode": "append",
+          "sourceField": 0
+        }
+      ],
+      "elapsedSeconds": 7.909560041676741,
+      "id": "C03",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"copyField\",\"sourceFieldID\":\"f1\",\"targetFieldID\":\"f2\",\"mode\":\"append\"}]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"copyField\",\"sourceFieldID\":\"f1\",\"targetFieldID\":\"f2\",\"mode\":\"append\"}]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 1,
+          "mode": "insert",
+          "sourceField": 0
+        }
+      ],
+      "elapsedSeconds": 10.785376124986215,
+      "id": "C04",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"copyField\",\"sourceFieldID\":\"f1\",\"targetFieldID\":\"f2\",\"mode\":\"insert\"}]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"copyField\",\"sourceFieldID\":\"f1\",\"targetFieldID\":\"f2\",\"mode\":\"insert\"}]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 0,
+          "mode": "replaceAll",
+          "value": "blue"
+        },
+        {
+          "field": 1,
+          "mode": "replaceAll",
+          "sourceField": 0
+        }
+      ],
+      "elapsedSeconds": 12.447179041657364,
+      "id": "C05",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterLiteral\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"literalID\":\"p1\"},{\"action\":\"copyField\",\"sourceFieldID\":\"f1\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\"}]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterLiteral\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"literalID\":\"p1\"},{\"action\":\"copyField\",\"sourceFieldID\":\"f1\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\"}]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 1,
+          "mode": "replaceAll",
+          "sourceField": 0
+        }
+      ],
+      "elapsedSeconds": 6.674553291639313,
+      "id": "C06",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"copyField\",\"sourceFieldID\":\"f1\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\"}]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"copyField\",\"sourceFieldID\":\"f1\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\"}]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 1,
+          "mode": "replaceAll",
+          "sourceField": 0
+        },
+        {
+          "field": 2,
+          "mode": "replaceAll",
+          "sourceField": 1
+        }
+      ],
+      "elapsedSeconds": 8.504896874976112,
+      "id": "C07",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"copyField\",\"sourceFieldID\":\"f1\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\"},{\"action\":\"copyField\",\"sourceFieldID\":\"f2\",\"targetFieldID\":\"f3\",\"mode\":\"replaceAll\"}]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"copyField\",\"sourceFieldID\":\"f1\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\"},{\"action\":\"copyField\",\"sourceFieldID\":\"f2\",\"targetFieldID\":\"f3\",\"mode\":\"replaceAll\"}]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 1,
+          "mode": "replaceAll",
+          "sourceField": 0
+        },
+        {
+          "field": 2,
+          "mode": "replaceAll",
+          "sourceField": 0
+        }
+      ],
+      "elapsedSeconds": 12.377180125011364,
+      "id": "C08",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"copyField\",\"sourceFieldID\":\"f1\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\"},{\"action\":\"copyField\",\"sourceFieldID\":\"f1\",\"targetFieldID\":\"f3\",\"mode\":\"replaceAll\"}]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"copyField\",\"sourceFieldID\":\"f1\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\"},{\"action\":\"copyField\",\"sourceFieldID\":\"f1\",\"targetFieldID\":\"f3\",\"mode\":\"replaceAll\"}]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 0,
+          "mode": "append",
+          "sourceField": 0
+        }
+      ],
+      "elapsedSeconds": 9.58271270833211,
+      "id": "C09",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"copyField\",\"sourceFieldID\":\"f1\",\"targetFieldID\":\"f1\",\"mode\":\"append\"}]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"copyField\",\"sourceFieldID\":\"f1\",\"targetFieldID\":\"f1\",\"mode\":\"append\"}]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 1,
+          "mode": "replaceAll",
+          "sourceField": 0
+        }
+      ],
+      "elapsedSeconds": 11.889608208322898,
+      "id": "C10",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"copyField\",\"sourceFieldID\":\"f1\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\"}]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"copyField\",\"sourceFieldID\":\"f1\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\"}]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 1,
+          "mode": "replaceAll",
+          "value": "Title"
+        }
+      ],
+      "elapsedSeconds": 13.784618791658431,
+      "id": "C11",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\n  \"disposition\": \"supported\",\n  \"operations\": [\n    {\n      \"action\": \"enterLiteral\",\n      \"targetFieldID\": \"f2\",\n      \"mode\": \"replaceAll\",\n      \"literalID\": \"p1\"\n    }\n  ]\n}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\n  \"disposition\": \"supported\",\n  \"operations\": [\n    {\n      \"action\": \"enterLiteral\",\n      \"targetFieldID\": \"f2\",\n      \"mode\": \"replaceAll\",\n      \"literalID\": \"p1\"\n    }\n  ]\n}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "unsupported",
+      "edits": [],
+      "elapsedSeconds": 5.393925791664515,
+      "id": "C12",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\":\"unsupported\",\"operations\":[]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\":\"unsupported\",\"operations\":[]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "unsupported",
+      "edits": [],
+      "elapsedSeconds": 5.702732958336128,
+      "id": "C13",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\":\"unsupported\",\"operations\":[]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\":\"unsupported\",\"operations\":[]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "clarification",
+      "edits": [],
+      "elapsedSeconds": 5.632298499986064,
+      "id": "C14",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\":\"clarification\",\"operations\":[]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\":\"clarification\",\"operations\":[]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "clarification",
+      "edits": [],
+      "elapsedSeconds": 12.555052333307685,
+      "id": "C15",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\n  \"disposition\": \"supported\",\n  \"operations\": [\n    {\n      \"action\": \"copyField\",\n      \"sourceFieldID\": \"f1\",\n      \"targetFieldID\": \"f3\",\n      \"mode\": \"replaceAll\"\n    }\n  ]\n}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\n  \"disposition\": \"supported\",\n  \"operations\": [\n    {\n      \"action\": \"copyField\",\n      \"sourceFieldID\": \"f1\",\n      \"targetFieldID\": \"f3\",\n      \"mode\": \"replaceAll\"\n    }\n  ]\n}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "clarification",
+      "edits": [],
+      "elapsedSeconds": 12.5649522083404,
+      "id": "C16",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\":\"clarification\",\"operations\":[]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\":\"clarification\",\"operations\":[]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "unsupported",
+      "edits": [],
+      "elapsedSeconds": 5.753888749983162,
+      "id": "C17",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\":\"unsupported\",\"operations\":[]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\":\"unsupported\",\"operations\":[]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "unsupported",
+      "edits": [],
+      "elapsedSeconds": 4.9030344166385476,
+      "id": "C18",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\":\"unsupported\",\"operations\":[]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\":\"unsupported\",\"operations\":[]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "unsupported",
+      "edits": [],
+      "elapsedSeconds": 6.0386506666836794,
+      "id": "C19",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\":\"unsupported\",\"operations\":[]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\":\"unsupported\",\"operations\":[]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 1,
+          "mode": "replaceAll",
+          "sourceField": 0
+        },
+        {
+          "field": 1,
+          "mode": "replaceAll",
+          "sourceField": 0
+        }
+      ],
+      "elapsedSeconds": 10.397038291674107,
+      "id": "C20",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"copyField\",\"sourceFieldID\":\"f1\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\"},{\"action\":\"copyField\",\"sourceFieldID\":\"f1\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\"}]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"copyField\",\"sourceFieldID\":\"f1\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\"},{\"action\":\"copyField\",\"sourceFieldID\":\"f1\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\"}]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 0,
+          "mode": "replaceAll",
+          "value": "San Francisco"
+        },
+        {
+          "field": 1,
+          "mode": "replaceAll",
+          "value": "San Francisco"
+        }
+      ],
+      "elapsedSeconds": 13.47980141665903,
+      "id": "N01",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterUnquoted\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"text\":\"San Francisco\"},{\"action\":\"enterUnquoted\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\",\"text\":\"San Francisco\"}]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterUnquoted\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"text\":\"San Francisco\"},{\"action\":\"enterUnquoted\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\",\"text\":\"San Francisco\"}]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 0,
+          "mode": "replaceAll",
+          "value": "Tokyo"
+        },
+        {
+          "field": 1,
+          "mode": "replaceAll",
+          "value": "Kyoto"
+        }
+      ],
+      "elapsedSeconds": 11.270271833316656,
+      "id": "N02",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterUnquoted\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"text\":\"Tokyo\"},{\"action\":\"enterUnquoted\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\",\"text\":\"Kyoto\"}]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterUnquoted\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"text\":\"Tokyo\"},{\"action\":\"enterUnquoted\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\",\"text\":\"Kyoto\"}]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 0,
+          "mode": "append",
+          "value": " — confirmed"
+        }
+      ],
+      "elapsedSeconds": 9.488682416646043,
+      "id": "N03",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterLiteral\",\"targetFieldID\":\"f1\",\"mode\":\"append\",\"literalID\":\"p1\"}]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterLiteral\",\"targetFieldID\":\"f1\",\"mode\":\"append\",\"literalID\":\"p1\"}]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 1,
+          "mode": "replaceAll",
+          "value": "  東京 é 😀\n  "
+        }
+      ],
+      "elapsedSeconds": 11.81299866666086,
+      "id": "N04",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterLiteral\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\",\"literalID\":\"p1\"}]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterLiteral\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\",\"literalID\":\"p1\"}]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 0,
+          "mode": "replaceAll",
+          "value": "Seattle"
+        },
+        {
+          "field": 0,
+          "mode": "append",
+          "value": " / Tacoma"
+        }
+      ],
+      "elapsedSeconds": 9.915975624986459,
+      "id": "N05",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterLiteral\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"literalID\":\"p1\"},{\"action\":\"enterLiteral\",\"targetFieldID\":\"f1\",\"mode\":\"append\",\"literalID\":\"p2\"}]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterLiteral\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"literalID\":\"p1\"},{\"action\":\"enterLiteral\",\"targetFieldID\":\"f1\",\"mode\":\"append\",\"literalID\":\"p2\"}]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "unsupported",
+      "edits": [],
+      "elapsedSeconds": 8.4789231250179,
+      "id": "N06",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\":\"unsupported\",\"operations\":[]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\":\"unsupported\",\"operations\":[]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "unsupported",
+      "edits": [],
+      "elapsedSeconds": 6.834349833341548,
+      "id": "N07",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\":\"unsupported\",\"operations\":[]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\":\"unsupported\",\"operations\":[]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "clarification",
+      "edits": [],
+      "elapsedSeconds": 4.634094458335312,
+      "id": "N08",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\":\"clarification\",\"operations\":[]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\":\"clarification\",\"operations\":[]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 0,
+          "mode": "replaceAll",
+          "value": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        }
+      ],
+      "elapsedSeconds": 6.168720916670281,
+      "id": "N13",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterLiteral\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"literalID\":\"p1\"}]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterLiteral\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"literalID\":\"p1\"}]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 1,
+          "mode": "replaceAll",
+          "value": "Austin"
+        }
+      ],
+      "elapsedSeconds": 11.828024208341958,
+      "id": "N14",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterUnquoted\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\",\"text\":\"Austin\"}]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterUnquoted\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\",\"text\":\"Austin\"}]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 0,
+          "mode": "replaceAll",
+          "value": "Oslo"
+        },
+        {
+          "field": 1,
+          "mode": "replaceAll",
+          "value": "Bergen"
+        }
+      ],
+      "elapsedSeconds": 13.39445966668427,
+      "id": "N12",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterUnquoted\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"text\":\"Oslo\"},{\"action\":\"enterUnquoted\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\",\"text\":\"Bergen\"}]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterUnquoted\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"text\":\"Oslo\"},{\"action\":\"enterUnquoted\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\",\"text\":\"Bergen\"}]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 1,
+          "mode": "replaceAll",
+          "value": "Berlin"
+        }
+      ],
+      "elapsedSeconds": 7.3664376249944326,
+      "id": "R15",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterLiteral\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\",\"literalID\":\"p2\"}]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterLiteral\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\",\"literalID\":\"p2\"}]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 1,
+          "mode": "replaceAll",
+          "sourceField": 0
+        }
+      ],
+      "elapsedSeconds": 12.370196541683981,
+      "id": "R16",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"copyField\",\"sourceFieldID\":\"f1\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\"}]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"copyField\",\"sourceFieldID\":\"f1\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\"}]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": false
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 0,
+          "mode": "replaceAll",
+          "value": "Tallinn"
+        },
+        {
+          "field": 1,
+          "mode": "replaceAll",
+          "value": "Riga"
+        }
+      ],
+      "elapsedSeconds": 12.436438125005225,
+      "id": "R17",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterLiteral\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"literalID\":\"p2\"},{\"action\":\"enterLiteral\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\",\"literalID\":\"p4\"}]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterLiteral\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"literalID\":\"p2\"},{\"action\":\"enterLiteral\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\",\"literalID\":\"p4\"}]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 0,
+          "mode": "replaceAll",
+          "value": "amber"
+        }
+      ],
+      "elapsedSeconds": 11.99913370833383,
+      "id": "H501",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterUnquoted\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"text\":\"amber\"}]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterUnquoted\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"text\":\"amber\"}]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 0,
+          "mode": "replaceAll",
+          "value": "Delta"
+        },
+        {
+          "field": 1,
+          "mode": "replaceAll",
+          "value": "47-B"
+        }
+      ],
+      "elapsedSeconds": 13.418816166667966,
+      "id": "H502",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterUnquoted\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"text\":\"Delta\"},{\"action\":\"enterUnquoted\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\",\"text\":\"47-B\"}]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterUnquoted\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"text\":\"Delta\"},{\"action\":\"enterUnquoted\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\",\"text\":\"47-B\"}]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 0,
+          "mode": "replaceAll",
+          "value": "Ghent"
+        },
+        {
+          "field": 1,
+          "mode": "replaceAll",
+          "value": "Ghent"
+        }
+      ],
+      "elapsedSeconds": 6.175091041659471,
+      "id": "H503",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterLiteral\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"literalID\":\"p1\"},{\"action\":\"enterLiteral\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\",\"literalID\":\"p1\"}]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterLiteral\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"literalID\":\"p1\"},{\"action\":\"enterLiteral\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\",\"literalID\":\"p1\"}]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 0,
+          "mode": "replaceAll",
+          "value": "draft"
+        },
+        {
+          "field": 0,
+          "mode": "append",
+          "value": " / checked"
+        }
+      ],
+      "elapsedSeconds": 7.847746291663498,
+      "id": "H504",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterLiteral\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"literalID\":\"p1\"},{\"action\":\"enterLiteral\",\"targetFieldID\":\"f1\",\"mode\":\"append\",\"literalID\":\"p2\"}]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterLiteral\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"literalID\":\"p1\"},{\"action\":\"enterLiteral\",\"targetFieldID\":\"f1\",\"mode\":\"append\",\"literalID\":\"p2\"}]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 0,
+          "mode": "append",
+          "value": " +"
+        },
+        {
+          "field": 0,
+          "mode": "append",
+          "value": " +"
+        }
+      ],
+      "elapsedSeconds": 12.327337624999927,
+      "id": "H505",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterLiteral\",\"targetFieldID\":\"f1\",\"mode\":\"append\",\"literalID\":\"p1\"},{\"action\":\"enterLiteral\",\"targetFieldID\":\"f1\",\"mode\":\"append\",\"literalID\":\"p2\"}]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterLiteral\",\"targetFieldID\":\"f1\",\"mode\":\"append\",\"literalID\":\"p1\"},{\"action\":\"enterLiteral\",\"targetFieldID\":\"f1\",\"mode\":\"append\",\"literalID\":\"p2\"}]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 0,
+          "mode": "replaceAll",
+          "value": "Aster"
+        }
+      ],
+      "elapsedSeconds": 8.569433916651178,
+      "id": "H506",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterLiteral\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"literalID\":\"p2\"}]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterLiteral\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"literalID\":\"p2\"}]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 1,
+          "mode": "replaceAll",
+          "sourceField": 0
+        }
+      ],
+      "elapsedSeconds": 13.086809916654602,
+      "id": "H507",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"copyField\",\"sourceFieldID\":\"f1\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\"}]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"copyField\",\"sourceFieldID\":\"f1\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\"}]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": false
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 1,
+          "mode": "replaceAll",
+          "value": "north"
+        }
+      ],
+      "elapsedSeconds": 6.447456499998225,
+      "id": "H508",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterLiteral\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\",\"literalID\":\"p1\"}]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterLiteral\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\",\"literalID\":\"p1\"}]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 0,
+          "mode": "replaceAll",
+          "value": "  mañana é 🧭\nline 2  "
+        }
+      ],
+      "elapsedSeconds": 6.715743416687474,
+      "id": "H509",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterLiteral\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"literalID\":\"p1\"}]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterLiteral\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"literalID\":\"p1\"}]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 0,
+          "mode": "insert",
+          "value": "• "
+        }
+      ],
+      "elapsedSeconds": 11.822881374973804,
+      "id": "H510",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterLiteral\",\"targetFieldID\":\"f1\",\"mode\":\"insert\",\"literalID\":\"p1\"}]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterLiteral\",\"targetFieldID\":\"f1\",\"mode\":\"insert\",\"literalID\":\"p1\"}]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 0,
+          "mode": "replaceAll",
+          "value": "Zürich"
+        }
+      ],
+      "elapsedSeconds": 11.961615250009345,
+      "id": "H511",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterUnquoted\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"text\":\"Zürich\"}]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterUnquoted\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"text\":\"Zürich\"}]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 0,
+          "mode": "replaceAll",
+          "value": "one"
+        },
+        {
+          "field": 0,
+          "mode": "replaceAll",
+          "value": "two"
+        }
+      ],
+      "elapsedSeconds": 13.373632625007303,
+      "id": "H512",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterLiteral\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"literalID\":\"p1\"},{\"action\":\"enterLiteral\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"literalID\":\"p2\"}]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterLiteral\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"literalID\":\"p1\"},{\"action\":\"enterLiteral\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"literalID\":\"p2\"}]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "unsupported",
+      "edits": [],
+      "elapsedSeconds": 6.985786958335666,
+      "id": "H513",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\":\"unsupported\",\"operations\":[]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\":\"unsupported\",\"operations\":[]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "unsupported",
+      "edits": [],
+      "elapsedSeconds": 11.432662833336508,
+      "id": "H514",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\":\"unsupported\",\"operations\":[]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\":\"unsupported\",\"operations\":[]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 1,
+          "mode": "replaceAll",
+          "sourceField": 0
+        }
+      ],
+      "elapsedSeconds": 8.167615541664418,
+      "id": "H515",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"copyField\",\"sourceFieldID\":\"f1\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\"}]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"copyField\",\"sourceFieldID\":\"f1\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\"}]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "unsupported",
+      "edits": [],
+      "elapsedSeconds": 7.388169291691156,
+      "id": "H516",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\":\"unsupported\",\"operations\":[]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\":\"unsupported\",\"operations\":[]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "unsupported",
+      "edits": [],
+      "elapsedSeconds": 12.64395929168677,
+      "id": "H517",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\":\"unsupported\",\"operations\":[]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\":\"unsupported\",\"operations\":[]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": false
+    },
+    {
+      "disposition": "clarification",
+      "edits": [],
+      "elapsedSeconds": 11.325842624995857,
+      "id": "H518",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterLiteral\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"literalID\":\"p1\"}]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterLiteral\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"literalID\":\"p1\"}]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "clarification",
+      "edits": [],
+      "elapsedSeconds": 11.413931958348257,
+      "id": "H519",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\":\"clarification\",\"operations\":[]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\":\"clarification\",\"operations\":[]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 0,
+          "mode": "replaceAll",
+          "value": "blue"
+        }
+      ],
+      "elapsedSeconds": 11.907750541664427,
+      "id": "H520",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterLiteral\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"literalID\":\"p2\"}]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterLiteral\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"literalID\":\"p2\"}]}",
+          "finishReason": "stop"
+        }
+      ],
+      "verified": true
+    }
+  ],
+  "limitations": [
+    "Known full regression comparison; not held-out qualification.",
+    "Two accepted wrong copies prevent enabling this planner; the missing-field disposition also fails its expected outcome.",
+    "All cases and xcresults are durable; no retries, infrastructure interruption or mid-run source changes.",
+    "The shared source-byte guard is independently qualified in the normal v2 browser path."
+  ]
+}

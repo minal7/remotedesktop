@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "status": "frozen-before-v10-browser-inference",
+  "candidate": "text-actions-candidate-v10.json",
+  "candidateSourceCommit": "5988d3a",
+  "contract": "text-actions-v10",
+  "corpus": "host-mac/AcceptanceFixtures/native-field-operations-v8-browser.json",
+  "corpusSHA256": "9a3baa1f4a6c449821237a30ac10fce6ab683a43d9cf2be6855737db68a64464",
+  "caseIDs": [
+    "B801",
+    "B802",
+    "B803",
+    "B804",
+    "B805",
+    "B806"
+  ],
+  "oracle": "Independent hand-written full value/target state after each operation plus the exact typed proposal origin and count; same-task replay must add neither model calls nor input events.",
+  "expectationsUnchanged": true,
+  "fixtureSource": "host-mac/RemoteDesktopHostTests/ComputerUseFieldOperationsBrowserAcceptanceTests.swift",
+  "fixtureSourceSHA256": "5b85943ccdce4b7b574f1106e2718dd18a35a10395a4e2ccb827d97c353f32cf",
+  "fixtureChange": "An explicit validated environment-selected planner contract replaces the v8-only hardcoding; production composition, HTML, observations, typed-operation oracle and handwritten states are unchanged.",
+  "gate": "Build this fixture only after the current frozen proposal run finishes. Actual v10 browser inference remains unrun until the model regression gate is satisfied.",
+  "limitations": [
+    "Known semantic regression phrasings, not held-out language qualification.",
+    "Controlled isolated WebKit forms; external native AX and broader pages remain separate."
+  ]
+}

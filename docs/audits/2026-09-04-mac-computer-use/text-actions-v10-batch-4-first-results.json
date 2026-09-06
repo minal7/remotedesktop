@@ -1,0 +1,130 @@
+{
+  "allowFieldCopy" : false,
+  "cases" : [
+    {
+      "disposition" : "clarification",
+      "edits" : [
+
+      ],
+      "elapsedSeconds" : 12.564952208340401,
+      "id" : "C16",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\"disposition\":\"clarification\",\"operations\":[]}",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\"disposition\":\"clarification\",\"operations\":[]}",
+          "finishReason" : "stop"
+        }
+      ],
+      "verified" : true
+    },
+    {
+      "disposition" : "unsupported",
+      "edits" : [
+
+      ],
+      "elapsedSeconds" : 5.7538887499831617,
+      "id" : "C17",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\"disposition\":\"unsupported\",\"operations\":[]}",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\"disposition\":\"unsupported\",\"operations\":[]}",
+          "finishReason" : "stop"
+        }
+      ],
+      "verified" : true
+    },
+    {
+      "disposition" : "unsupported",
+      "edits" : [
+
+      ],
+      "elapsedSeconds" : 4.9030344166385476,
+      "id" : "C18",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\"disposition\":\"unsupported\",\"operations\":[]}",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\"disposition\":\"unsupported\",\"operations\":[]}",
+          "finishReason" : "stop"
+        }
+      ],
+      "verified" : true
+    },
+    {
+      "disposition" : "unsupported",
+      "edits" : [
+
+      ],
+      "elapsedSeconds" : 6.0386506666836794,
+      "id" : "C19",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\"disposition\":\"unsupported\",\"operations\":[]}",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\"disposition\":\"unsupported\",\"operations\":[]}",
+          "finishReason" : "stop"
+        }
+      ],
+      "verified" : true
+    },
+    {
+      "disposition" : "supported",
+      "edits" : [
+        {
+          "field" : 1,
+          "mode" : "replaceAll",
+          "sourceField" : 0
+        },
+        {
+          "field" : 1,
+          "mode" : "replaceAll",
+          "sourceField" : 0
+        }
+      ],
+      "elapsedSeconds" : 10.397038291674107,
+      "id" : "C20",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"copyField\",\"sourceFieldID\":\"f1\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\"},{\"action\":\"copyField\",\"sourceFieldID\":\"f1\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\"}]}",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"copyField\",\"sourceFieldID\":\"f1\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\"},{\"action\":\"copyField\",\"sourceFieldID\":\"f1\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\"}]}",
+          "finishReason" : "stop"
+        }
+      ],
+      "verified" : true
+    }
+  ],
+  "contract" : "text-actions-v10",
+  "corpusSHA256" : "225128e5f0691a24351cf210e393001ad9b8f6ab1028d874ba7397377ca6634a",
+  "desktopEffects" : false,
+  "expectedCaseIDs" : [
+    "C16",
+    "C17",
+    "C18",
+    "C19",
+    "C20"
+  ],
+  "modelSHA256FromVerifiedManifest" : "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
+  "oracle" : "exact-disposition-and-complete-operation-sequences-including-count-mode-target-payload-origin-exact-bytes-and-order",
+  "quotedCommandFastPath" : false,
+  "runtimeBinarySHA256" : "597c29fa269b919c2dc5b72577be8d2ea4664ce3db3a92f5657595e4e8e37fdf",
+  "schemaVersion" : 1,
+  "scope" : "Known 54-case regression comparison for unified typed field operations v8; combines 20 copy and 34 earlier literal\/decline cases; not held-out qualification; preselected batch 4\/11"
+}

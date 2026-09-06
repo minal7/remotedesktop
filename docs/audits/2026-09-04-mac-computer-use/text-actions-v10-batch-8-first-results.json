@@ -1,0 +1,161 @@
+{
+  "allowFieldCopy" : false,
+  "cases" : [
+    {
+      "disposition" : "supported",
+      "edits" : [
+        {
+          "field" : 0,
+          "mode" : "replaceAll",
+          "value" : "Delta"
+        },
+        {
+          "field" : 1,
+          "mode" : "replaceAll",
+          "value" : "47-B"
+        }
+      ],
+      "elapsedSeconds" : 13.418816166667966,
+      "id" : "H502",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterUnquoted\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"text\":\"Delta\"},{\"action\":\"enterUnquoted\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\",\"text\":\"47-B\"}]}",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterUnquoted\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"text\":\"Delta\"},{\"action\":\"enterUnquoted\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\",\"text\":\"47-B\"}]}",
+          "finishReason" : "stop"
+        }
+      ],
+      "verified" : true
+    },
+    {
+      "disposition" : "supported",
+      "edits" : [
+        {
+          "field" : 0,
+          "mode" : "replaceAll",
+          "value" : "Ghent"
+        },
+        {
+          "field" : 1,
+          "mode" : "replaceAll",
+          "value" : "Ghent"
+        }
+      ],
+      "elapsedSeconds" : 6.1750910416594706,
+      "id" : "H503",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterLiteral\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"literalID\":\"p1\"},{\"action\":\"enterLiteral\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\",\"literalID\":\"p1\"}]}",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterLiteral\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"literalID\":\"p1\"},{\"action\":\"enterLiteral\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\",\"literalID\":\"p1\"}]}",
+          "finishReason" : "stop"
+        }
+      ],
+      "verified" : true
+    },
+    {
+      "disposition" : "supported",
+      "edits" : [
+        {
+          "field" : 0,
+          "mode" : "replaceAll",
+          "value" : "draft"
+        },
+        {
+          "field" : 0,
+          "mode" : "append",
+          "value" : " \/ checked"
+        }
+      ],
+      "elapsedSeconds" : 7.8477462916634977,
+      "id" : "H504",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterLiteral\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"literalID\":\"p1\"},{\"action\":\"enterLiteral\",\"targetFieldID\":\"f1\",\"mode\":\"append\",\"literalID\":\"p2\"}]}",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterLiteral\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"literalID\":\"p1\"},{\"action\":\"enterLiteral\",\"targetFieldID\":\"f1\",\"mode\":\"append\",\"literalID\":\"p2\"}]}",
+          "finishReason" : "stop"
+        }
+      ],
+      "verified" : true
+    },
+    {
+      "disposition" : "supported",
+      "edits" : [
+        {
+          "field" : 0,
+          "mode" : "append",
+          "value" : " +"
+        },
+        {
+          "field" : 0,
+          "mode" : "append",
+          "value" : " +"
+        }
+      ],
+      "elapsedSeconds" : 12.327337624999927,
+      "id" : "H505",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterLiteral\",\"targetFieldID\":\"f1\",\"mode\":\"append\",\"literalID\":\"p1\"},{\"action\":\"enterLiteral\",\"targetFieldID\":\"f1\",\"mode\":\"append\",\"literalID\":\"p2\"}]}",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterLiteral\",\"targetFieldID\":\"f1\",\"mode\":\"append\",\"literalID\":\"p1\"},{\"action\":\"enterLiteral\",\"targetFieldID\":\"f1\",\"mode\":\"append\",\"literalID\":\"p2\"}]}",
+          "finishReason" : "stop"
+        }
+      ],
+      "verified" : true
+    },
+    {
+      "disposition" : "supported",
+      "edits" : [
+        {
+          "field" : 0,
+          "mode" : "replaceAll",
+          "value" : "Aster"
+        }
+      ],
+      "elapsedSeconds" : 8.5694339166511782,
+      "id" : "H506",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterLiteral\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"literalID\":\"p2\"}]}",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterLiteral\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"literalID\":\"p2\"}]}",
+          "finishReason" : "stop"
+        }
+      ],
+      "verified" : true
+    }
+  ],
+  "contract" : "text-actions-v10",
+  "corpusSHA256" : "341bfb9ed64df9eb940fc2a2465130e6a5616166cc1461522cc570a7eda88349",
+  "desktopEffects" : false,
+  "expectedCaseIDs" : [
+    "H502",
+    "H503",
+    "H504",
+    "H505",
+    "H506"
+  ],
+  "modelSHA256FromVerifiedManifest" : "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
+  "oracle" : "exact-disposition-and-complete-operation-sequences-including-count-mode-target-payload-origin-exact-bytes-and-order",
+  "quotedCommandFastPath" : false,
+  "runtimeBinarySHA256" : "597c29fa269b919c2dc5b72577be8d2ea4664ce3db3a92f5657595e4e8e37fdf",
+  "schemaVersion" : 1,
+  "scope" : "Known 54-case regression comparison for unified typed field operations v8; combines 20 copy and 34 earlier literal\/decline cases; not held-out qualification; preselected batch 8\/11"
+}

@@ -38,6 +38,10 @@ V8 then passed only **44/54** known cases and accepted five wrong plans. Three c
 
 Follow these gates before adoption:
 
+The latest action-based candidate is v10: **51/54 known cases pass**, with two wrong accepted literal-to-copy interpretations (R16/H507) and one wrong missing-field decline (H517). The context-only v9 comparison had already repaired three quoted-target bindings. Explicit action names, literal-ID enums, and source-before-target copy arguments then repaired caret copying and repeated-copy direction. The remaining literal-name failures suggest testing the literal metadata itself: the current `literalFieldMatches` table connects a quoted payload ID directly to field IDs, which may encourage treating supplied text as an observed-value reference. A direct literal-text-to-payload-ID lookup can preserve already-visible names without implying a read. This is a hypothesis to test, not a proven cause. Also distinguish an unavailable operation from a missing argument/field in disposition instructions and retain the existing expected outcomes. Do not enable the candidate or consume the unseen corpus while these regressions remain unresolved.
+
+The shared host source-byte check is a separate completed repair: generated prompt markers no longer count as actual unquoted user input. All 101 focused signed methods and all 14 current production browser regressions pass after that change. This does not close semantic authority or the broader recovery and product gates below.
+
 - [x] Compile copied data from host-owned observations and preserve ordered source dependencies.
 - [x] Check retained source/destination identity and exact bytes immediately before owned-browser input.
 - [x] Require independent dispatch receipts for recovered copy operations, including equal-value/no-op copies.
