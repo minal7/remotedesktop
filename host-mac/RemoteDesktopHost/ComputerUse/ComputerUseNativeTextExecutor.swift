@@ -29,7 +29,7 @@ final class ComputerUseNativeTextExecutor {
         let expiryNonce: UUID
     }
     private static let clarificationQuestion = "Which field should I edit, and what exact text should it contain?"
-    private let target = ComputerUseAccessibilityTextTarget()
+    private let target: any ComputerUseNativeTextTarget
     private let injector: InputInjector
     private let mayAct: () -> Bool
     private let journalDirectory: URL
@@ -50,9 +50,11 @@ final class ComputerUseNativeTextExecutor {
          planner: any ComputerUseTextGoalPlanning,
          editOverride: ((ComputerUseTextPlanEdit, ComputerUseTextSnapshot) async throws -> Void)? = nil,
          browserTargetProvider: ((String) throws -> ComputerUseBrowserTextTarget?)? = nil,
-         now: @escaping () -> Date = Date.init, clarificationLifetime: TimeInterval = 600) {
+         now: @escaping () -> Date = Date.init, clarificationLifetime: TimeInterval = 600,
+         nativeTarget: (any ComputerUseNativeTextTarget)? = nil) {
         precondition(clarificationLifetime.isFinite && clarificationLifetime > 0 && clarificationLifetime <= 600)
         self.injector = injector
+        self.target = nativeTarget ?? ComputerUseAccessibilityTextTarget()
         self.mayAct = mayAct
         self.journalDirectory = journalDirectory
         self.planner = planner
@@ -271,13 +273,12 @@ final class ComputerUseNativeTextExecutor {
         let store = try ComputerUseTextStepStore(directory: journalDirectory)
         let task = try ComputerUseTextTask(contract: contract, recovered: store.load(taskID: taskID),
             read: read,
-            apply: { [weak self] edit, expected in
+            apply: { _, _ in throw ComputerUseTextTaskError.invalidPlan },
+            applyWithIdentity: { [weak self] dispatch in
                 guard let self else { throw CancellationError() }
-                if let editOverride { try await editOverride(edit, expected) }
-                else { try await apply(edit, expected: expected) }
-            },
-            applyWithIdentity: browserTarget.map { target in
-                { dispatch in try await target.apply(dispatch) }
+                if let browserTarget { try await browserTarget.apply(dispatch) }
+                else if let editOverride { try await editOverride(dispatch.edit, dispatch.expected) }
+                else { try await apply(dispatch) }
             },
             didDispatchInput: browserTarget.map { target in
                 { operationID in try await target.didDispatchInput(operationID: operationID) }
@@ -312,12 +313,34 @@ final class ComputerUseNativeTextExecutor {
         return .completed("Done. I verified all \(task.contract.steps.count) requested text edits.")
     }
 
-    private func apply(_ edit: ComputerUseTextPlanEdit, expected: ComputerUseTextSnapshot) async throws {
+    private func apply(_ dispatch: ComputerUseTextInputDispatch) async throws {
+        let edit = dispatch.edit, expected = dispatch.expected
+        let deadline = ProcessInfo.processInfo.systemUptime + ComputerUseTextEditor.defaultMaximumDuration
+        // This field evolves through selection and verified chunks. Its own
+        // current value is checked by the editor; freezing its initial value
+        // here would break append, repeated edits, and self-copy.
+        var required = dispatch.requiredValues.filter { $0.key != edit.targetID }
+        if let source = dispatch.copySource, source.targetID != edit.targetID { required[source.targetID] = source.value }
+        func validateContext() throws {
+            try Task.checkCancellation()
+            guard mayAct() else { throw ComputerUseTextEditError.interrupted }
+            guard ProcessInfo.processInfo.systemUptime < deadline else { throw ComputerUseTextEditError.deadlineExceeded }
+            for targetID in required.keys.sorted() {
+                guard let current = target.snapshot(targetID: targetID), current.targetID == targetID,
+                      current.isEditable, !current.isSecure, current.value.utf8.elementsEqual(required[targetID]!.utf8) else {
+                    throw ComputerUseTextTaskError.incompleteOutcome
+                }
+                try Task.checkCancellation()
+                guard mayAct() else { throw ComputerUseTextEditError.interrupted }
+                guard ProcessInfo.processInfo.systemUptime < deadline else { throw ComputerUseTextEditError.deadlineExceeded }
+            }
+        }
         guard target.snapshot(targetID: edit.targetID) == expected else {
             throw ComputerUseTextTaskError.staleTarget
         }
         let focused = try injector.performHostEffectIfAllowed(ifAllowed: mayAct) {
-            target.focus(targetID: edit.targetID)
+            try validateContext()
+            return try target.focus(expected: expected)
         }
         guard focused else { throw ComputerUseTextTaskError.staleTarget }
         var current: ComputerUseTextSnapshot?
@@ -335,19 +358,45 @@ final class ComputerUseNativeTextExecutor {
         }
         var editor = ComputerUseTextEditor(
             read: { [target] in target.snapshot() },
-            select: { [self] range in
-                try injector.performHostEffectIfAllowed(ifAllowed: mayAct) { target.select(range) }
+            select: { [self] range, expected in
+                try injector.performHostEffectIfAllowed(ifAllowed: mayAct) {
+                    try validateContext()
+                    return try target.select(range, expected: expected)
+                }
             },
-            replaceSelectedText: { [self] text in
-                try injector.performHostEffectIfAllowed(ifAllowed: mayAct) { target.replaceSelectedText(text) }
+            replaceSelectedText: { [self] text, expected in
+                try injector.performHostEffectIfAllowed(ifAllowed: mayAct) {
+                    try validateContext()
+                    return try target.replaceSelectedText(text, expected: expected)
+                }
             },
-            postUnicode: { [self] text in
-                guard await injector.applyTextPaced(text, ifAllowed: mayAct) else {
-                    throw ComputerUseTextEditError.interrupted
+            postUnicode: { [self] text, expected in
+                var contextFailure: Error?
+                let delivered = await injector.applyTextPaced(text, ifAllowed: {
+                    do {
+                        try validateContext()
+                        // A paced chunk suspends between keys. Before each
+                        // key, retain the exact focused field and all other
+                        // required values; the editor verifies chunk contents.
+                        guard target.snapshot()?.targetID == expected.targetID else {
+                            throw ComputerUseTextEditError.deliveryUncertain
+                        }
+                        try Task.checkCancellation()
+                        guard mayAct() else { throw ComputerUseTextEditError.interrupted }
+                        guard ProcessInfo.processInfo.systemUptime < deadline else { throw ComputerUseTextEditError.deadlineExceeded }
+                        return true
+                    } catch { contextFailure = error; return false }
+                })
+                guard delivered else {
+                    throw contextFailure ?? ComputerUseTextEditError.interrupted
                 }
             }, mayAct: mayAct)
-        editor.replaceValue = { [self] value in
-            try injector.performHostEffectIfAllowed(ifAllowed: mayAct) { target.replaceWebValue(value) }
+        editor.validateContext = validateContext
+        editor.replaceValue = { [self] value, expected in
+            try injector.performHostEffectIfAllowed(ifAllowed: mayAct) {
+                try validateContext()
+                return try target.replaceWebValue(value, expected: expected)
+            }
         }
         try await editor.edit(edit.text, mode: edit.mode, expected: current)
     }

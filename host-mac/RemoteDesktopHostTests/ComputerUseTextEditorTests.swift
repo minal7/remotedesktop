@@ -4,6 +4,213 @@ import XCTest
 
 @MainActor
 final class ComputerUseTextEditorTests: XCTestCase {
+    func testContextDriftBetweenTextAdaptersStopsSelectionSettersAndLaterChunks() async throws {
+        for stage in ["value-probe", "selection", "selected-probe", "first-chunk"] {
+            let field = Field("old")
+            var contextValid = true, calls: [String] = []
+            var editor = ComputerUseTextEditor(read: { field.snapshot }, select: { range, expected in
+                XCTAssertEqual(expected, field.snapshot)
+                calls.append("selection"); field.selection = range
+                if stage == "selection" { contextValid = false }
+                return true
+            }, replaceSelectedText: { _, expected in
+                XCTAssertEqual(expected, field.snapshot)
+                calls.append("selected-probe")
+                if stage == "selected-probe" { contextValid = false }
+                return nil
+            }, postUnicode: { text, expected in
+                XCTAssertEqual(expected, field.snapshot)
+                calls.append("chunk"); field.insert(text); contextValid = false
+            }, mayAct: { true })
+            editor.replaceValue = { _, expected in
+                XCTAssertEqual(expected, field.snapshot)
+                calls.append("value-probe")
+                if stage == "value-probe" { contextValid = false }
+                return nil
+            }
+            editor.validateContext = { if !contextValid { throw ComputerUseTextTaskError.incompleteOutcome } }
+            do { try await editor.edit("12345678901234567890123", mode: .replaceAll, expected: field.snapshot); XCTFail("Changed context must stop the next effect") }
+            catch { XCTAssertEqual(error as? ComputerUseTextTaskError, .incompleteOutcome) }
+            let expectedCalls: [String: [String]] = ["value-probe": ["value-probe"],
+                "selection": ["value-probe", "selection"], "selected-probe": ["value-probe", "selection", "selected-probe"],
+                "first-chunk": ["value-probe", "selection", "selected-probe", "chunk"]]
+            XCTAssertEqual(calls, try XCTUnwrap(expectedCalls[stage]))
+            XCTAssertEqual(field.value, stage == "first-chunk" ? "1234567890123456" : "old")
+        }
+    }
+
+    func testContextReadCannotRetargetAnEditOrOutliveItsDeadline() async throws {
+        for reason in ["target", "selection", "deadline", "takeover"] {
+            let field = Field("old")
+            var now: TimeInterval = 0, effects = 0
+            var editor = ComputerUseTextEditor(read: { field.snapshot }, select: { _, _ in effects += 1; return true },
+                replaceSelectedText: { _, _ in effects += 1; return true }, postUnicode: { _, _ in effects += 1 }, mayAct: { field.allowed })
+            editor.replaceValue = { _, _ in effects += 1; return true }
+            editor.uptime = { now }
+            editor.validateContext = {
+                switch reason {
+                case "target": field.id = "different-field"
+                case "selection": field.selection = NSRange(location: 0, length: 0)
+                case "deadline": now = 61
+                default: field.allowed = false
+                }
+            }
+            do { try await editor.edit("new", mode: .replaceAll, expected: field.snapshot); XCTFail("A stale context read cannot authorize a setter") }
+            catch {
+                let expected: ComputerUseTextEditError = reason == "deadline" ? .deadlineExceeded : reason == "takeover" ? .interrupted : .preconditionChanged
+                XCTAssertEqual(error as? ComputerUseTextEditError, expected)
+            }
+            XCTAssertEqual(effects, 0); XCTAssertEqual(field.value, "old")
+        }
+    }
+
+    func testNativeFocusAndSelectionSideEffectsStopLiteralAndCopyBeforeText() async throws {
+        for stage in ["focus", "selection"] {
+            for copy in [false, true] {
+                let fields = NativeFields(setter: .selected)
+                let mutate: () -> Void = { [weak fields] in fields?.setValue(copy ? "source" : "retained", "changed") }
+                if stage == "focus" { fields.afterFocus = mutate } else { fields.afterSelection = mutate }
+                let planner = NativePlanner(operations: [copy
+                    ? .copyField(sourceTargetID: "source", targetID: "destination", mode: .replaceAll)
+                    : .enterText(.init(targetID: "destination", mode: .replaceAll, text: "Paris"))])
+                let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+                defer { try? FileManager.default.removeItem(at: directory) }
+                let executor = ComputerUseNativeTextExecutor(injector: InputInjector(eventPoster: { _ in XCTFail("Unexpected Unicode event") }),
+                    mayAct: { true }, journalDirectory: directory, planner: planner, nativeTarget: fields)
+                do { _ = try await executor.execute(taskID: "native-context", prompt: "Apply the requested form edits", progress: { _ in }); XCTFail("Focus/selection changed a required value") }
+                catch { XCTAssertEqual(error as? ComputerUseTextTaskError, .incompleteOutcome) }
+                do { _ = try await executor.execute(taskID: "native-context", prompt: "Apply the requested form edits", progress: { _ in }); XCTFail("An uncertain edit must not replay") } catch {}
+                XCTAssertTrue(fields.edits.isEmpty); XCTAssertEqual(fields.values["destination"], "old")
+                XCTAssertEqual(fields.focusCalls, 1); XCTAssertEqual(planner.calls, 1)
+                let journal = try XCTUnwrap(try ComputerUseTextStepStore(directory: directory).load(taskID: "native-context"))
+                XCTAssertEqual(journal.statuses, [.uncertain])
+            }
+        }
+    }
+
+    func testNativeUnicodeStopsAtChangedFocusOrRequirementAndReleasesThePendingKey() async throws {
+        for reason in ["focus", "source", "unchanged"] {
+            let fields = NativeFields(setter: .unicode)
+            let events = PacedEventCounts()
+            let injector = InputInjector(eventPoster: { _ = events.record($0.type) })
+            var changed = false
+            fields.beforeRead = { [weak fields] in
+                guard let fields, events.counts.down > 0, !changed else { return }
+                changed = true
+                if reason == "focus" { fields.focusedID = "other" }
+                else { fields.setValue(reason == "source" ? "source" : "retained", "changed") }
+            }
+            let planner = NativePlanner(operations: [reason == "source"
+                ? .copyField(sourceTargetID: "source", targetID: "destination", mode: .replaceAll)
+                : .enterText(.init(targetID: "destination", mode: .replaceAll, text: "Paris"))])
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let executor = ComputerUseNativeTextExecutor(injector: injector, mayAct: { true }, journalDirectory: directory,
+                planner: planner, nativeTarget: fields)
+            do { _ = try await executor.execute(taskID: "native-keys", prompt: "Apply the requested form edits", progress: { _ in }); XCTFail("The first key invalidated further input") }
+            catch {
+                if reason == "focus" { XCTAssertEqual(error as? ComputerUseTextEditError, .deliveryUncertain) }
+                else { XCTAssertEqual(error as? ComputerUseTextTaskError, .incompleteOutcome) }
+            }
+            XCTAssertTrue(changed); XCTAssertEqual(events.counts.down, 1); XCTAssertEqual(events.counts.up, 1)
+            do { _ = try await executor.execute(taskID: "native-keys", prompt: "Apply the requested form edits", progress: { _ in }); XCTFail("No replay after partial Unicode input") } catch {}
+            XCTAssertEqual(events.counts.down, 1); XCTAssertEqual(events.counts.up, 1)
+            XCTAssertTrue(fields.edits.isEmpty, "Only the recorded CGEvent path was attempted")
+            let journal = try XCTUnwrap(try ComputerUseTextStepStore(directory: directory).load(taskID: "native-keys"))
+            XCTAssertEqual(journal.statuses, [.uncertain])
+        }
+    }
+
+    func testNativeDispatchPreservesTargetsAcrossCopiesRepeatedEditsAndUnrelatedReads() async throws {
+        for setter in [NativeFields.Setter.whole, .selected] {
+            let fields = NativeFields(setter: setter)
+            fields.afterInput = { [weak fields] in fields?.setValue("other", "freely changed") }
+            let planner = NativePlanner(operations: [
+                .enterText(.init(targetID: "source", mode: .replaceAll, text: "Tokyo")),
+                .copyField(sourceTargetID: "source", targetID: "destination", mode: .replaceAll),
+                .copyField(sourceTargetID: "source", targetID: "source", mode: .append),
+                .enterText(.init(targetID: "source", mode: .append, text: "!")),
+                .enterText(.init(targetID: "source", mode: .append, text: "!"))])
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let executor = ComputerUseNativeTextExecutor(injector: InputInjector(eventPoster: { _ in XCTFail("AX input must not emit keys") }),
+                mayAct: { true }, journalDirectory: directory, planner: planner, nativeTarget: fields)
+            for _ in 0..<2 {
+                let result = try await executor.execute(taskID: "native-chain", prompt: "Apply the requested form edits", progress: { _ in })
+                guard case .completed = result else { return XCTFail("Every intended native edit must verify") }
+            }
+            XCTAssertEqual(fields.edits, ["source=Tokyo", "destination=Tokyo", "source=TokyoTokyo", "source=TokyoTokyo!", "source=TokyoTokyo!!"])
+            XCTAssertEqual(fields.values, ["source": "TokyoTokyo!!", "destination": "Tokyo", "retained": "keep", "other": "freely changed"])
+            XCTAssertEqual(fields.focusCalls, 5); XCTAssertEqual(planner.calls, 1)
+            let journal = try XCTUnwrap(try ComputerUseTextStepStore(directory: directory).load(taskID: "native-chain"))
+            XCTAssertEqual(journal.statuses, Array(repeating: .verified, count: 5))
+        }
+    }
+
+    @MainActor private final class NativePlanner: ComputerUseTextGoalPlanning {
+        let operations: [ComputerUseTextGoalOperation]
+        var calls = 0
+        init(operations: [ComputerUseTextGoalOperation]) { self.operations = operations }
+        func propose(prompt: String, fields: [ComputerUseTextField]) async throws -> ComputerUseTextGoalProposal {
+            calls += 1
+            return .fieldOperations(operations, unchangedTargetIDs: ["retained"])
+        }
+    }
+
+    @MainActor private final class NativeFields: ComputerUseNativeTextTarget {
+        enum Setter: Equatable { case whole, selected, unicode }
+        let setter: Setter
+        var values = ["source": "Paris", "destination": "old", "retained": "keep", "other": "free"]
+        var selections: [String: NSRange] = [:]
+        var focusedID = "destination", focusCalls = 0
+        var edits: [String] = []
+        var beforeRead: (() -> Void)?, afterFocus: (() -> Void)?, afterSelection: (() -> Void)?, afterInput: (() -> Void)?
+        init(setter: Setter) { self.setter = setter }
+        func fields() -> [ComputerUseTextField] {
+            ["source", "destination", "retained", "other"].compactMap { id in
+                snapshot(targetID: id).map { .init(label: id.capitalized, snapshot: $0) }
+            }
+        }
+        func snapshot() -> ComputerUseTextSnapshot? {
+            beforeRead?()
+            return snapshot(targetID: focusedID)
+        }
+        func snapshot(targetID: String) -> ComputerUseTextSnapshot? {
+            beforeRead?()
+            guard let value = values[targetID] else { return nil }
+            return .init(targetID: targetID, value: value, selection: selections[targetID] ?? NSRange(location: value.utf16.count, length: 0),
+                isEditable: true, isSecure: false)
+        }
+        func focus(expected: ComputerUseTextSnapshot) throws -> Bool {
+            guard snapshot(targetID: expected.targetID) == expected else { throw ComputerUseTextEditError.preconditionChanged }
+            focusedID = expected.targetID; focusCalls += 1; afterFocus?(); return true
+        }
+        func select(_ range: NSRange, expected: ComputerUseTextSnapshot) throws -> Bool {
+            try require(expected); selections[expected.targetID] = range; afterSelection?(); return true
+        }
+        func replaceSelectedText(_ text: String, expected: ComputerUseTextSnapshot) throws -> Bool? {
+            try require(expected)
+            guard setter == .selected else { return nil }
+            guard let range = Range(expected.selection, in: expected.value) else { throw ComputerUseTextEditError.invalidSelection }
+            apply(expected.value.replacingCharacters(in: range, with: text), targetID: expected.targetID)
+            return true
+        }
+        func replaceWebValue(_ value: String, expected: ComputerUseTextSnapshot) throws -> Bool? {
+            try require(expected)
+            guard setter == .whole else { return nil }
+            apply(value, targetID: expected.targetID); return true
+        }
+        func setValue(_ id: String, _ value: String) {
+            values[id] = value; selections[id] = NSRange(location: value.utf16.count, length: 0)
+        }
+        private func require(_ expected: ComputerUseTextSnapshot) throws {
+            guard snapshot() == expected else { throw ComputerUseTextEditError.preconditionChanged }
+        }
+        private func apply(_ value: String, targetID: String) {
+            setValue(targetID, value); edits.append(targetID + "=" + value); afterInput?()
+        }
+    }
+
     func testEmptyUnicodeFallbackCannotClaimInputButSupportedSetterCan() async throws {
         for mode in [ComputerUseTextEditMode.insert, .replaceAll, .append] {
             let field = Field()
@@ -44,14 +251,14 @@ final class ComputerUseTextEditorTests: XCTestCase {
         var editor: ComputerUseTextEditor {
             var editor = ComputerUseTextEditor(
                 read: { self.snapshot },
-                select: { self.selection = $0; return true },
-                replaceSelectedText: { text in
+                select: { range, _ in self.selection = range; return true },
+                replaceSelectedText: { text, _ in
                     guard self.axSupported else { return nil }
                     self.axAttempts += 1
                     self.insert(self.delivery?(text) ?? text)
                     return true
                 },
-                postUnicode: { text in
+                postUnicode: { text, _ in
                     self.posted.append(text)
                     self.insert(self.delivery?(text) ?? text)
                     self.afterPost?()
@@ -68,12 +275,12 @@ final class ComputerUseTextEditorTests: XCTestCase {
         var now: TimeInterval = 0
         var editor = ComputerUseTextEditor(
             read: { now = 11; return field.snapshot },
-            select: { _ in XCTFail("Expired selection mutation"); return true },
-            replaceSelectedText: { _ in XCTFail("Expired text mutation"); return true },
-            postUnicode: { _ in XCTFail("Expired Unicode input") }, mayAct: { true })
+            select: { _, _ in XCTFail("Expired selection mutation"); return true },
+            replaceSelectedText: { _, _ in XCTFail("Expired text mutation"); return true },
+            postUnicode: { _, _ in XCTFail("Expired Unicode input") }, mayAct: { true })
         editor.maximumDuration = 10
         editor.uptime = { now }
-        editor.replaceValue = { _ in XCTFail("Expired whole-value mutation"); return true }
+        editor.replaceValue = { _, _ in XCTFail("Expired whole-value mutation"); return true }
         do { try await editor.edit("new", mode: .replaceAll, expected: field.snapshot); XCTFail("Expected deadline") }
         catch { XCTAssertEqual(error as? ComputerUseTextEditError, .deadlineExceeded) }
         XCTAssertEqual(field.value, "old")
@@ -235,7 +442,7 @@ final class ComputerUseTextEditorTests: XCTestCase {
         let field = Field("original")
         field.axSupported = true
         var editor = field.editor
-        editor.replaceValue = { _ in field.value = "partial"; return false }
+        editor.replaceValue = { _, _ in field.value = "partial"; return false }
         await assertError(.deliveryUncertain) {
             try await editor.edit("complete", mode: .replaceAll, expected: field.snapshot)
         }

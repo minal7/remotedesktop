@@ -1,11 +1,25 @@
 import AppKit
 import ApplicationServices
 
+/// Reads cannot choose the destination of a later mutation. Every mutation
+/// takes its own expected reference/state; stale state throws before input.
+/// A nil text-setter result means unsupported with no setter invocation.
+@MainActor
+protocol ComputerUseNativeTextTarget: AnyObject {
+    func fields() -> [ComputerUseTextField]
+    func snapshot() -> ComputerUseTextSnapshot?
+    func snapshot(targetID: String) -> ComputerUseTextSnapshot?
+    func focus(expected: ComputerUseTextSnapshot) throws -> Bool
+    func select(_ range: NSRange, expected: ComputerUseTextSnapshot) throws -> Bool
+    func replaceSelectedText(_ text: String, expected: ComputerUseTextSnapshot) throws -> Bool?
+    func replaceWebValue(_ value: String, expected: ComputerUseTextSnapshot) throws -> Bool?
+}
+
 /// Retains actual AX references instead of treating matching labels and pixel
 /// positions as element identity. References are scoped to one application
 /// launch, window, and the nearest exposed document identity.
 @MainActor
-final class ComputerUseAccessibilityTextTarget {
+final class ComputerUseAccessibilityTextTarget: ComputerUseNativeTextTarget {
     private struct Binding {
         let id: String
         let application: String
@@ -15,7 +29,6 @@ final class ComputerUseAccessibilityTextTarget {
         let documentRoot: AXUIElement
         let isWebContent: Bool
     }
-    private var binding: Binding?
     private var bindings: [Binding] = []
 
     func snapshot() -> ComputerUseTextSnapshot? {
@@ -79,8 +92,12 @@ final class ComputerUseAccessibilityTextTarget {
         return value
     }
 
-    func focus(targetID: String) -> Bool {
-        guard snapshot(targetID: targetID) != nil, let binding else { return false }
+    func focus(expected: ComputerUseTextSnapshot) throws -> Bool {
+        guard snapshot(targetID: expected.targetID) == expected,
+              let binding = bindings.first(where: { $0.id == expected.targetID }) else {
+            throw ComputerUseTextEditError.preconditionChanged
+        }
+        try Task.checkCancellation()
         return AXUIElementSetAttributeValue(
             binding.element, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success
     }
@@ -145,7 +162,7 @@ final class ComputerUseAccessibilityTextTarget {
         // pixels, and an unchanged URL do not prove current document membership.
         guard reachedWindow else { return nil }
         let document = documentParts.map { "\($0.utf8.count):\($0)" }.joined()
-        binding = bindings.first(where: {
+        var binding = bindings.first(where: {
             $0.application == application && CFEqual($0.element, element)
                 && CFEqual($0.window, window) && $0.document == document
                 && CFEqual($0.documentRoot, documentRoot)
@@ -167,8 +184,8 @@ final class ComputerUseAccessibilityTextTarget {
             isEditable: true, isSecure: false)
     }
 
-    func select(_ range: NSRange) -> Bool {
-        guard let binding, isSettable(kAXSelectedTextRangeAttribute, on: binding.element) else {
+    func select(_ range: NSRange, expected: ComputerUseTextSnapshot) throws -> Bool {
+        guard let binding = try mutationBinding(expected: expected, attribute: kAXSelectedTextRangeAttribute) else {
             return false
         }
         var cfRange = CFRange(location: range.location, length: range.length)
@@ -177,8 +194,8 @@ final class ComputerUseAccessibilityTextTarget {
             binding.element, kAXSelectedTextRangeAttribute as CFString, value) == .success
     }
 
-    func replaceSelectedText(_ text: String) -> Bool? {
-        guard let binding, isSettable(kAXSelectedTextAttribute, on: binding.element) else {
+    func replaceSelectedText(_ text: String, expected: ComputerUseTextSnapshot) throws -> Bool? {
+        guard let binding = try mutationBinding(expected: expected, attribute: kAXSelectedTextAttribute) else {
             return nil
         }
         return AXUIElementSetAttributeValue(
@@ -188,11 +205,24 @@ final class ComputerUseAccessibilityTextTarget {
     /// WebKit advertises AXSelectedText as writable but may accept it without
     /// changing a textarea. Use its whole-value capability with the editor's
     /// fully computed expected value; readback remains mandatory.
-    func replaceWebValue(_ value: String) -> Bool? {
-        guard let binding, binding.isWebContent,
-              isSettable(kAXValueAttribute, on: binding.element) else { return nil }
+    func replaceWebValue(_ value: String, expected: ComputerUseTextSnapshot) throws -> Bool? {
+        guard let binding = try mutationBinding(expected: expected, attribute: kAXValueAttribute, requiresWebContent: true) else { return nil }
         return AXUIElementSetAttributeValue(
             binding.element, kAXValueAttribute as CFString, value as CFString) == .success
+    }
+
+    /// An observation of another field must never retarget a later setter.
+    /// Resolve the explicit reference and check focus/value/selection after
+    /// capability queries, immediately before invoking its AX mutation.
+    private func mutationBinding(expected: ComputerUseTextSnapshot, attribute: String,
+                                 requiresWebContent: Bool = false) throws -> Binding? {
+        guard let binding = bindings.first(where: { $0.id == expected.targetID }) else {
+            throw ComputerUseTextEditError.preconditionChanged
+        }
+        let supported = (!requiresWebContent || binding.isWebContent) && isSettable(attribute, on: binding.element)
+        guard snapshot() == expected else { throw ComputerUseTextEditError.preconditionChanged }
+        try Task.checkCancellation()
+        return supported ? binding : nil
     }
 
     private func attribute(_ name: String, on element: AXUIElement) -> CFTypeRef? {

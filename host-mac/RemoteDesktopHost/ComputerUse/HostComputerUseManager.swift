@@ -2704,28 +2704,37 @@ final class ComputerUseHostTools {
         guard let snapshot = try currentTextSnapshot() else {
             throw ComputerUseTextEditError.unavailableTarget
         }
+        let deadline = ProcessInfo.processInfo.systemUptime + ComputerUseTextEditor.defaultMaximumDuration
         var editor = textEditorOverride ?? ComputerUseTextEditor(
             read: { [textTarget] in textTarget.snapshot() },
-            select: { [textTarget, injector, mayAct] range in
+            select: { [textTarget, injector, mayAct] range, expected in
                 try injector.performHostEffectIfAllowed(ifAllowed: mayAct) {
-                    textTarget.select(range)
+                    try textTarget.select(range, expected: expected)
                 }
             },
-            replaceSelectedText: { [textTarget, injector, mayAct] text in
+            replaceSelectedText: { [textTarget, injector, mayAct] text, expected in
                 try injector.performHostEffectIfAllowed(ifAllowed: mayAct) {
-                    textTarget.replaceSelectedText(text)
+                    try textTarget.replaceSelectedText(text, expected: expected)
                 }
             },
-            postUnicode: { [injector, mayAct] text in
-                guard await injector.applyTextPaced(text, ifAllowed: mayAct) else {
-                    throw ComputerUseTextEditError.interrupted
+            postUnicode: { [textTarget, injector, mayAct] text, expected in
+                var targetChanged = false, expired = false
+                guard await injector.applyTextPaced(text, ifAllowed: {
+                    guard mayAct(), !Task.isCancelled else { return false }
+                    guard ProcessInfo.processInfo.systemUptime < deadline else { expired = true; return false }
+                    guard textTarget.snapshot()?.targetID == expected.targetID else { targetChanged = true; return false }
+                    guard ProcessInfo.processInfo.systemUptime < deadline else { expired = true; return false }
+                    return mayAct() && !Task.isCancelled
+                }) else {
+                    if expired { throw ComputerUseTextEditError.deadlineExceeded }
+                    throw targetChanged ? ComputerUseTextEditError.deliveryUncertain : .interrupted
                 }
             },
             mayAct: mayAct)
         if textEditorOverride == nil {
-            editor.replaceValue = { [textTarget, injector, mayAct] value in
+            editor.replaceValue = { [textTarget, injector, mayAct] value, expected in
                 try injector.performHostEffectIfAllowed(ifAllowed: mayAct) {
-                    textTarget.replaceWebValue(value)
+                    try textTarget.replaceWebValue(value, expected: expected)
                 }
             }
         }

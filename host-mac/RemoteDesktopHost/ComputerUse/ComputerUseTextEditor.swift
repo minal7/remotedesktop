@@ -67,23 +67,27 @@ enum ComputerUseTextEditError: Error, Equatable, LocalizedError {
 struct ComputerUseTextEditor {
     nonisolated static let maximumPayloadBytes = 64 * 1_024
     nonisolated static let maximumObservedValueBytes = 1_024 * 1_024
+    nonisolated static let defaultMaximumDuration: TimeInterval = 60
 
     let read: () throws -> ComputerUseTextSnapshot?
-    let select: (NSRange) throws -> Bool
+    let select: (NSRange, ComputerUseTextSnapshot) throws -> Bool
     /// nil means unsupported and guarantees that no setter was invoked.
-    let replaceSelectedText: (String) throws -> Bool?
-    let postUnicode: (String) async throws -> Void
+    let replaceSelectedText: (String, ComputerUseTextSnapshot) throws -> Bool?
+    let postUnicode: (String, ComputerUseTextSnapshot) async throws -> Void
     let mayAct: () -> Bool
     var wait: () async throws -> Void = {
         try await Task.sleep(for: .milliseconds(25))
     }
     var verificationAttempts = 12
     var chunkCharacters = 16
-    var maximumDuration: TimeInterval = 60
+    var maximumDuration: TimeInterval = ComputerUseTextEditor.defaultMaximumDuration
     var uptime: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
     /// Optional qualified whole-value setter. nil result guarantees no setter
     /// was invoked; a returned failure must still be verified, never retried.
-    var replaceValue: ((String) throws -> Bool?)? = nil
+    var replaceValue: ((String, ComputerUseTextSnapshot) throws -> Bool?)? = nil
+    /// Other fields required by a task, excluding this edit's evolving value.
+    /// Native input also checks these requirements inside its effect gate.
+    var validateContext: () throws -> Void = {}
 
     func edit(
         _ payload: String,
@@ -118,15 +122,15 @@ struct ComputerUseTextEditor {
         guard expectedValue.utf8.count <= Self.maximumObservedValueBytes else {
             throw ComputerUseTextEditError.payloadTooLarge
         }
-        try requireEffectAuthority(deadline: deadline)
-        if let replaceValue, try replaceValue(expectedValue) != nil {
+        try requireEffectAuthority(expected: initial, deadline: deadline)
+        if let replaceValue, try replaceValue(expectedValue, initial) != nil {
             _ = try await verify(value: expectedValue, target: initial.targetID, deadline: deadline)
             return
         }
         var selected = initial
         if range != initial.selection {
-            try requireEffectAuthority(deadline: deadline)
-            guard try select(range) else {
+            try requireEffectAuthority(expected: initial, deadline: deadline)
+            guard try select(range, initial) else {
                 throw ComputerUseTextEditError.selectionUnsupported
             }
             guard let current = try read(), current.targetID == initial.targetID,
@@ -136,11 +140,11 @@ struct ComputerUseTextEditor {
             }
             selected = current
         }
-        try requireEffectAuthority(deadline: deadline)
+        try requireEffectAuthority(expected: selected, deadline: deadline)
         // Prefer the reviewed AX selected-text setter when supported. An AX
         // error does not prove absence of an effect, so do not fall back after
         // invoking it; only read back and classify the outcome.
-        if try replaceSelectedText(payload) != nil {
+        if try replaceSelectedText(payload, selected) != nil {
             _ = try await verify(value: expectedValue, target: initial.targetID, deadline: deadline)
             return
         }
@@ -167,8 +171,8 @@ struct ComputerUseTextEditor {
             }
             let nextValue = selected.value.replacingCharacters(in: selectionRange, with: chunk)
             let nextCaret = selected.selection.location + chunk.utf16.count
-            try requireEffectAuthority(deadline: deadline)
-            try await postUnicode(chunk)
+            try requireEffectAuthority(expected: selected, deadline: deadline, valueMayHaveChanged: true)
+            try await postUnicode(chunk, selected)
             selected = try await verify(value: nextValue, target: initial.targetID, deadline: deadline)
             if !remaining.isEmpty,
                selected.selection != NSRange(location: nextCaret, length: 0) {
@@ -177,7 +181,15 @@ struct ComputerUseTextEditor {
         }
     }
 
-    private func requireEffectAuthority(deadline: TimeInterval) throws {
+    private func requireEffectAuthority(expected: ComputerUseTextSnapshot, deadline: TimeInterval,
+                                        valueMayHaveChanged: Bool = false) throws {
+        guard !Task.isCancelled, mayAct() else { throw ComputerUseTextEditError.interrupted }
+        guard uptime() < deadline else { throw ComputerUseTextEditError.deadlineExceeded }
+        try validateContext()
+        guard try read() == expected else {
+            throw valueMayHaveChanged ? ComputerUseTextEditError.deliveryUncertain : .preconditionChanged
+        }
+        // Context and AX reads can take time or observe a revoked owner.
         guard !Task.isCancelled, mayAct() else { throw ComputerUseTextEditError.interrupted }
         guard uptime() < deadline else { throw ComputerUseTextEditError.deadlineExceeded }
     }

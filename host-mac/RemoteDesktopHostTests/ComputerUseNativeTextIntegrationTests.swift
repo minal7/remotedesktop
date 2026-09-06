@@ -208,9 +208,9 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         var postedChunks = 0
         let fallbackEditor = ComputerUseTextEditor(
             read: { textTarget.snapshot() },
-            select: { textTarget.select($0) },
-            replaceSelectedText: { _ in nil },
-            postUnicode: { text in
+            select: { try textTarget.select($0, expected: $1) },
+            replaceSelectedText: { _, _ in nil },
+            postUnicode: { text, _ in
                 postedChunks += 1
                 guard await injector.applyTextPaced(text, ifAllowed: {
                     NSWorkspace.shared.frontmostApplication?.processIdentifier == process.processIdentifier
@@ -476,8 +476,8 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             editOverride: { edit, _ in
                 let snapshot = try XCTUnwrap(unicodeTarget.snapshot())
                 let editor = ComputerUseTextEditor(read: { unicodeTarget.snapshot() },
-                    select: { unicodeTarget.select($0) }, replaceSelectedText: { _ in nil },
-                    postUnicode: { text in
+                    select: { try unicodeTarget.select($0, expected: $1) }, replaceSelectedText: { _, _ in nil },
+                    postUnicode: { text, _ in
                         let interrupt = Task { @MainActor in
                             for _ in 0..<200 {
                                 if posted.counts[0] >= 3 {
