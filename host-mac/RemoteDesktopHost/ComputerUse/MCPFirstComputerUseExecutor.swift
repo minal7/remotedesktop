@@ -265,7 +265,8 @@ final class MCPFirstComputerUseExecutor:
     private var helperReady = false
     private var activeProcessGeneration: UInt64?
     private var activeCancellationJoin: MCPGenerationCancellationJoin?
-    private var isExecuting = false
+    private var cancellationEpoch: UInt64 = 0
+    private var activeExecutionEpoch: UInt64?
     private var pendingApprovalState: PlanningState?
     private var pendingApprovalDigest: String?
 
@@ -413,9 +414,8 @@ final class MCPFirstComputerUseExecutor:
         tools: ComputerUseHostTools,
         progress: @escaping (String) -> Void
     ) async throws -> ComputerUseExecutionResult {
-        guard !isExecuting else { throw ExecutorError.alreadyExecuting }
-        isExecuting = true
-        defer { isExecuting = false }
+        try beginExecution()
+        defer { activeExecutionEpoch = nil }
         func executeVisualFallback() async throws
             -> ComputerUseExecutionResult {
             if let conversation {
@@ -565,9 +565,8 @@ final class MCPFirstComputerUseExecutor:
         tools: ComputerUseHostTools,
         progress: @escaping (String) -> Void
     ) async throws -> ComputerUseExecutionResult {
-        guard !isExecuting else { throw ExecutorError.alreadyExecuting }
-        isExecuting = true
-        defer { isExecuting = false }
+        try beginExecution()
+        defer { activeExecutionEpoch = nil }
         try Task.checkCancellation()
         guard var state = pendingApprovalState,
               pendingApprovalDigest == prepared.call.canonicalDigest,
@@ -617,9 +616,8 @@ final class MCPFirstComputerUseExecutor:
         tools: ComputerUseHostTools,
         progress: @escaping (String) -> Void
     ) async throws -> ComputerUseExecutionResult {
-        guard !isExecuting else { throw ExecutorError.alreadyExecuting }
-        isExecuting = true
-        defer { isExecuting = false }
+        try beginExecution()
+        defer { activeExecutionEpoch = nil }
         try await waitForStartedCancellation()
         guard let visualContinuation = visualFallback
             as? any ComputerUseVisualApprovalContinuing else {
@@ -641,12 +639,30 @@ final class MCPFirstComputerUseExecutor:
     }
 
     func cancelMCPWork() {
+        // Stop also invalidates a helper start that has not returned its
+        // generation yet, including when no helper is currently published.
+        cancellationEpoch &+= 1
         let generation = activeProcessGeneration
         activeProcessGeneration = nil
         pendingApprovalState = nil
         pendingApprovalDigest = nil
         guard let generation else { return }
         _ = cancellationJoin(for: generation).start()
+    }
+
+    private func beginExecution() throws {
+        guard activeExecutionEpoch == nil else { throw ExecutorError.alreadyExecuting }
+        try Task.checkCancellation()
+        activeExecutionEpoch = cancellationEpoch
+    }
+
+    private var executionWasStopped: Bool {
+        activeExecutionEpoch.map { $0 != cancellationEpoch } ?? false
+    }
+
+    private func checkExecutionCancellation() throws {
+        try Task.checkCancellation()
+        if executionWasStopped { throw CancellationError() }
     }
 
     private func cancellationJoin(for generation: UInt64) -> MCPGenerationCancellationJoin {
@@ -659,6 +675,11 @@ final class MCPFirstComputerUseExecutor:
     }
 
     private func waitForStartedCancellation() async throws {
+        await joinStartedCancellation()
+        try checkExecutionCancellation()
+    }
+
+    private func joinStartedCancellation() async {
         if let join = activeCancellationJoin, let task = join.startedTask() {
             await task.value
             if activeCancellationJoin === join {
@@ -666,11 +687,10 @@ final class MCPFirstComputerUseExecutor:
                 if activeProcessGeneration == join.generation { activeProcessGeneration = nil }
             }
         }
-        try Task.checkCancellation()
     }
 
     private func checkGenerationCancellation(_ generation: UInt64) throws {
-        try Task.checkCancellation()
+        try checkExecutionCancellation()
         if let join = activeCancellationJoin, join.generation == generation,
            join.startedTask() != nil {
             throw CancellationError()
@@ -689,20 +709,45 @@ final class MCPFirstComputerUseExecutor:
             } onCancel: { _ = join.start() }
             // A returned approved-action result remains a fact. Join cleanup
             // without turning that verified result into an unperformed action.
-            if Task.isCancelled || join.startedTask() != nil {
+            if Task.isCancelled || executionWasStopped || join.startedTask() != nil {
                 await join.start().value
                 if !preserveCompletedResultOnCancellation { throw CancellationError() }
             }
             return result
         } catch {
-            if error is CancellationError || Task.isCancelled || join.startedTask() != nil
-                || error as? AppleFoundationMCPPlannerError == .cancelled {
+            if error is CancellationError || Task.isCancelled || executionWasStopped || join.startedTask() != nil
+                || error as? AppleFoundationMCPPlannerError == .cancelled
+                || error as? MCPClientError == .cancelled {
                 await join.start().value
                 pendingApprovalState = nil
                 pendingApprovalDigest = nil
                 throw CancellationError()
             }
             throw error
+        }
+    }
+
+    private func withNewHelperGeneration(
+        operation: (UInt64) async throws -> ComputerUseExecutionResult
+    ) async throws -> ComputerUseExecutionResult {
+        try await waitForStartedCancellation()
+        let identity: MCPProcessIdentity
+        do { identity = try await clientPool.start(binaryURL: binaryURL) }
+        catch {
+            await joinStartedCancellation()
+            try checkExecutionCancellation()
+            if error as? MCPClientError == .cancelled { throw CancellationError() }
+            throw error
+        }
+        // A Stop during start may have begun cleanup of the earlier helper.
+        // Join it before recording the returned generation's separate owner.
+        // Even a cancelled caller must then retire this returned generation.
+        await joinStartedCancellation()
+        activeProcessGeneration = identity.processGeneration
+        helperReady = true
+        return try await withGenerationCancellation(generation: identity.processGeneration) {
+            try checkGenerationCancellation(identity.processGeneration)
+            return try await operation(identity.processGeneration)
         }
     }
 
@@ -770,11 +815,7 @@ final class MCPFirstComputerUseExecutor:
         var state = initialState
         try await waitForStartedCancellation()
         try planningWorker.requireAvailable()
-        let identity = try await clientPool.start(binaryURL: binaryURL)
-        activeProcessGeneration = identity.processGeneration
-        helperReady = true
-        let generation = identity.processGeneration
-        return try await withGenerationCancellation(generation: generation) {
+        return try await withNewHelperGeneration { generation in
             try checkGenerationCancellation(generation)
             let allTools = try await clientPool.allowedTools()
             try checkGenerationCancellation(generation)
@@ -946,28 +987,29 @@ final class MCPFirstComputerUseExecutor:
         progress: @escaping (String) -> Void
     ) async throws -> ComputerUseExecutionResult {
         progress("Preparing the exact email for your approval…")
-        let identity = try await clientPool.start(binaryURL: binaryURL)
-        activeProcessGeneration = identity.processGeneration
-        helperReady = true
-        let allowedTools = try await clientPool.allowedTools()
-        guard let mailTool = allowedTools.first(where: {
-            $0.serverID == RemoteDesktopMailMCP.serverID
-                && $0.toolName == RemoteDesktopMailMCP.toolName
-        }) else {
-            throw ExecutorError.requiredToolsMissing
+        return try await withNewHelperGeneration { generation in
+            let allowedTools = try await clientPool.allowedTools()
+            try checkGenerationCancellation(generation)
+            guard let mailTool = allowedTools.first(where: {
+                $0.serverID == RemoteDesktopMailMCP.serverID
+                    && $0.toolName == RemoteDesktopMailMCP.toolName
+            }) else {
+                throw ExecutorError.requiredToolsMissing
+            }
+            let call = try mailTool.makeCall(
+                taskID: taskID,
+                arguments: request.arguments)
+            let prepared = try await clientPool.prepareApproval(call)
+            try checkGenerationCancellation(generation)
+            pendingApprovalState = PlanningState(
+                taskID: taskID,
+                originalPrompt: prompt,
+                trustedUserPrompt: trustedUserPrompt,
+                results: [],
+                executedCallDigests: [])
+            pendingApprovalDigest = call.canonicalDigest
+            return .mcpApprovalRequired(prepared)
         }
-        let call = try mailTool.makeCall(
-            taskID: taskID,
-            arguments: request.arguments)
-        let prepared = try await clientPool.prepareApproval(call)
-        pendingApprovalState = PlanningState(
-            taskID: taskID,
-            originalPrompt: prompt,
-            trustedUserPrompt: trustedUserPrompt,
-            results: [],
-            executedCallDigests: [])
-        pendingApprovalDigest = call.canonicalDigest
-        return .mcpApprovalRequired(prepared)
     }
 
     private static func deterministicMailDecision(

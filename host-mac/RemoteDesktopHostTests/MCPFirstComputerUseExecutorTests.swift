@@ -3,6 +3,166 @@ import XCTest
 
 @MainActor
 final class MCPFirstComputerUseExecutorTests: XCTestCase {
+    func testDeterministicMailStartupCancellationRetiresReturnedHelperBeforeNewWork() async throws {
+        try await assertPreparationCancellation(at: .startup)
+    }
+
+    func testDeterministicMailDiscoveryCancellationCannotPrepareAnApproval() async throws {
+        try await assertPreparationCancellation(at: .discovery)
+    }
+
+    func testDeterministicMailPreparationCancellationCannotPublishOrReplayLateApproval() async throws {
+        try await assertPreparationCancellation(at: .preparation)
+    }
+
+    func testStructuredStartupCancellationAlsoRetiresReturnedHelperWithoutPlanning() async throws {
+        try await assertPreparationCancellation(at: .startup, structured: true)
+    }
+
+    func testCompleteMailRemainsModelIndependentWhilePlanningPermitIsOccupied() async throws {
+        let worker = ComputerUsePlanningWorker()
+        let gate = ComputerUsePlanningTestGate<Void>(started: expectation(description: "unrelated planner occupied"),
+                                                    returned: expectation(description: "unrelated planner returned"))
+        defer { gate.finish(()) }
+        let occupied = Task { try await worker.perform { await gate.wait() } }
+        await fulfillment(of: [gate.started], timeout: 1)
+        let planner = StubMCPPlanner(mode: .unavailable)
+        let pool = StubMCPClientPool(tools: [try makeMailTool()])
+        let fallback = StubVisualExecutor()
+        let executor = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/test/helper"),
+            visualFallback: fallback, planner: planner, clientPool: pool, planningWorker: worker)
+        let result = try await executor.execute(taskID: "exact-mail", prompt: exactPreparationPrompt,
+            tools: makeHostTools(), progress: { _ in })
+        guard case .mcpApprovalRequired(let prepared) = result else { return XCTFail("A complete Mail request needs no planner capacity") }
+        XCTAssertEqual(prepared.call.arguments["to"], .string("reviewer@example.invalid"))
+        XCTAssertEqual(prepared.call.arguments["send_now"], .bool(false))
+        XCTAssertTrue(planner.proposedToolNames.isEmpty)
+        XCTAssertEqual(fallback.callCount, 0)
+        let direct = await pool.directExecuteCount(), approved = await pool.approvedExecuteCount()
+        XCTAssertEqual(direct, 0)
+        XCTAssertEqual(approved, 0)
+        gate.finish(())
+        try await occupied.value
+        await fulfillment(of: [gate.returned], timeout: 1)
+    }
+
+    func testStoppedHelperStartFailureJoinsEarlierCleanupWithoutMailFallback() async throws {
+        let startGate = ComputerUsePlanningTestGate<Void>(started: expectation(description: "helper start entered"),
+                                                         returned: expectation(description: "helper start returned"))
+        let cleanupGate = ComputerUsePlanningTestGate<Void>(started: expectation(description: "earlier helper cleanup entered"),
+                                                           returned: expectation(description: "earlier helper cleanup finished"))
+        defer { startGate.finish(()); cleanupGate.finish(()) }
+        let pool = StubMCPClientPool(tools: [try makeMailTool()], advancesGenerations: true, cancellationGates: [1: cleanupGate])
+        let planner = StubMCPPlanner(mode: .clarification)
+        let fallback = StubVisualExecutor()
+        let executor = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/test/helper"),
+            visualFallback: fallback, planner: planner, clientPool: pool, planningWorker: ComputerUsePlanningWorker())
+        await pool.suspendNextStart(startGate)
+        await pool.failNextStart(.serverMismatch("Fixture startup failed after Stop"))
+        var finished = false
+        let request = Task { () -> Result<ComputerUseExecutionResult, Error> in
+            defer { finished = true }
+            do { return .success(try await executor.execute(taskID: "stopped", prompt: "Draft the exact acceptance email.", tools: makeHostTools(), progress: { _ in })) }
+            catch { return .failure(error) }
+        }
+        await fulfillment(of: [startGate.started], timeout: 1)
+        executor.cancelMCPWork()
+        await fulfillment(of: [cleanupGate.started], timeout: 1)
+        startGate.finish(())
+        await fulfillment(of: [startGate.returned], timeout: 1)
+        XCTAssertFalse(finished)
+        cleanupGate.finish(())
+        switch await request.value {
+        case .failure(let error): XCTAssertTrue(error is CancellationError)
+        case .success: XCTFail("A failed stopped start must not turn into a Mail clarification or fallback")
+        }
+        await fulfillment(of: [cleanupGate.returned], timeout: 1)
+        let state = await pool.loadState()
+        let prepared = await pool.preparedApprovalCount()
+        XCTAssertEqual(state.cancelled, [1])
+        XCTAssertEqual(state.cancelAll, 0)
+        XCTAssertEqual(state.discoveries, 1)
+        XCTAssertEqual(prepared, 0)
+        XCTAssertTrue(planner.proposedToolNames.isEmpty)
+        XCTAssertEqual(fallback.callCount, 0)
+    }
+
+    private enum PreparationStage { case startup, discovery, preparation }
+
+    private var exactPreparationPrompt: String {
+        "Draft an email to reviewer@example.invalid with subject Status and body The draft is ready for review."
+    }
+
+    private func assertPreparationCancellation(at stage: PreparationStage, structured: Bool = false) async throws {
+        for stopOnly in [false, true] {
+            let stageGate = ComputerUsePlanningTestGate<Void>(started: expectation(description: "\(stage) entered, Stop only \(stopOnly)"),
+                                                             returned: expectation(description: "\(stage) returned, Stop only \(stopOnly)"))
+            let cleanupGate = ComputerUsePlanningTestGate<Void>(started: expectation(description: "returned generation cleanup entered"),
+                                                               returned: expectation(description: "returned generation cleanup finished"))
+            defer { stageGate.finish(()); cleanupGate.finish(()) }
+            let pool = StubMCPClientPool(tools: [try makeMailTool()], resultText: "draft created",
+                advancesGenerations: true, cancellationGates: [2: cleanupGate])
+            let planner = StubMCPPlanner(mode: structured ? .clarification : .unavailable)
+            let fallback = StubVisualExecutor()
+            let executor = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/test/helper"),
+                visualFallback: fallback, planner: planner, clientPool: pool, planningWorker: ComputerUsePlanningWorker())
+            switch stage {
+            case .startup: await pool.suspendNextStart(stageGate)
+            case .discovery: await pool.suspendNextDiscovery(stageGate)
+            case .preparation: await pool.suspendNextPreparation(stageGate)
+            }
+            let prompt = structured ? "Help with this document." : exactPreparationPrompt
+            var finished = false
+            let request = Task { () -> Result<ComputerUseExecutionResult, Error> in
+                defer { finished = true }
+                do { return .success(try await executor.execute(taskID: "interrupted", prompt: prompt, tools: makeHostTools(), progress: { _ in })) }
+                catch { return .failure(error) }
+            }
+            await fulfillment(of: [stageGate.started], timeout: 1)
+            if stopOnly { executor.cancelMCPWork() } else { request.cancel() }
+            stageGate.finish(())
+            await fulfillment(of: [stageGate.returned, cleanupGate.started], timeout: 1)
+            XCTAssertFalse(finished, "The current owner must join cleanup of the returned generation")
+            do { _ = try await executor.execute(taskID: "overlap", prompt: prompt, tools: makeHostTools(), progress: { _ in }); XCTFail("Cleanup still owns this executor") }
+            catch { XCTAssertEqual(error as? MCPFirstComputerUseExecutor.ExecutorError, .alreadyExecuting) }
+            let whileStopping = await pool.loadState()
+            let preparedCount = await pool.preparedApprovalCount()
+            XCTAssertEqual(whileStopping.discoveries, stage == .startup ? 1 : 2)
+            XCTAssertEqual(preparedCount, stage == .preparation ? 1 : 0)
+            let stale = await pool.mostRecentPreparation()
+            if stage == .preparation { XCTAssertNotNil(stale) }
+            cleanupGate.finish(())
+            switch await request.value {
+            case .failure(let error): XCTAssertTrue(error is CancellationError)
+            case .success: XCTFail("An interrupted stage cannot publish approval or completion")
+            }
+            await fulfillment(of: [cleanupGate.returned], timeout: 1)
+            let stopped = await pool.loadState()
+            XCTAssertEqual(stopped.cancelled, stopOnly && stage == .startup ? [1, 2] : [2])
+            XCTAssertEqual(stopped.cancelAll, 0, "Cleanup must be scoped to the returned generation")
+            XCTAssertTrue(planner.proposedToolNames.isEmpty)
+            XCTAssertEqual(fallback.callCount, 0)
+            if let stale {
+                do { _ = try await executor.continueAfterApproval(stale, tools: makeHostTools(), progress: { _ in }); XCTFail("A late preparation cannot be replayed") }
+                catch { XCTAssertEqual(error as? MCPFirstComputerUseExecutor.ExecutorError, .approvalStateChanged) }
+            }
+            let direct = await pool.directExecuteCount(), approved = await pool.approvedExecuteCount()
+            XCTAssertEqual(direct, 0)
+            XCTAssertEqual(approved, 0)
+            let fresh = try await executor.execute(taskID: "fresh", prompt: prompt, tools: makeHostTools(), progress: { _ in })
+            if structured {
+                XCTAssertEqual(fresh, .clarificationRequired("Which document should I use?"))
+            } else {
+                guard case .mcpApprovalRequired(let prepared) = fresh else { return XCTFail("A fresh explicit request must remain usable after cleanup") }
+                XCTAssertEqual(prepared.call.processGeneration, 3)
+                let result = try await executor.continueAfterApproval(prepared, tools: makeHostTools(), progress: { _ in })
+                XCTAssertEqual(result, .completed("draft created"))
+                let performed = await pool.approvedExecuteCount()
+                XCTAssertEqual(performed, 1)
+            }
+        }
+    }
+
     func testPlanningDeadlineNeverFallsBackOrPreparesLateCalls() async throws {
         for prompt in ["What application is focused?", "Draft the exact acceptance email."] {
             let worker = ComputerUsePlanningWorker()
@@ -3681,7 +3841,15 @@ private actor StubMCPClientPool: MCPClientPooling {
     private var preparedCount = 0
     private var approvedCount = 0
     private var cancellationGate: ComputerUsePlanningTestGate<Void>?
+    private var cancellationGates: [UInt64: ComputerUsePlanningTestGate<Void>]
     private var approvedOperationGate: ComputerUsePlanningTestGate<Void>?
+    private var nextStartGate: ComputerUsePlanningTestGate<Void>?
+    private var nextStartError: MCPClientError?
+    private var nextToolsGate: ComputerUsePlanningTestGate<Void>?
+    private var nextPreparationGate: ComputerUsePlanningTestGate<Void>?
+    private var lastPrepared: MCPPreparedApproval?
+    private let advancesGenerations: Bool
+    private var currentGeneration: UInt64 = 1
     private let loadFault: LoadFault
     private var loadContinuation: CheckedContinuation<Void, Never>?
     private var discoveries = 0
@@ -3694,7 +3862,9 @@ private actor StubMCPClientPool: MCPClientPooling {
         structuredContent: MCPJSONValue = .object(["ok": .bool(true)]),
         loadFault: LoadFault = .none,
         cancellationGate: ComputerUsePlanningTestGate<Void>? = nil,
-        approvedOperationGate: ComputerUsePlanningTestGate<Void>? = nil
+        approvedOperationGate: ComputerUsePlanningTestGate<Void>? = nil,
+        advancesGenerations: Bool = false,
+        cancellationGates: [UInt64: ComputerUsePlanningTestGate<Void>] = [:]
     ) {
         self.tools = tools
         self.resultText = resultText
@@ -3702,15 +3872,27 @@ private actor StubMCPClientPool: MCPClientPooling {
         self.loadFault = loadFault
         self.cancellationGate = cancellationGate
         self.approvedOperationGate = approvedOperationGate
+        self.advancesGenerations = advancesGenerations
+        self.cancellationGates = cancellationGates
     }
 
     func start(binaryURL: URL) async throws -> MCPProcessIdentity {
         startCount += 1
+        let generation = advancesGenerations ? UInt64(startCount) : 1
+        currentGeneration = generation
         if cancellingCount > 0 { startsDuringCleanup += 1 }
         if loadFault == .suspendedStart { await withCheckedContinuation { loadContinuation = $0 } }
+        if let gate = nextStartGate {
+            nextStartGate = nil
+            await gate.wait()
+        }
+        if let error = nextStartError {
+            nextStartError = nil
+            throw error
+        }
         return MCPProcessIdentity(
             serverID: MCPServerRegistry.macControl.serverID,
-            processGeneration: 1,
+            processGeneration: generation,
             processIdentifier: 42,
             binaryPath: binaryURL.path,
             launchedAt: Date(timeIntervalSince1970: 1_700_000_000))
@@ -3720,7 +3902,17 @@ private actor StubMCPClientPool: MCPClientPooling {
         discoveries += 1
         if loadFault == .suspendedTools { await withCheckedContinuation { loadContinuation = $0 } }
         if loadFault == .toolsFailure { throw MCPClientError.notRunning }
-        return tools
+        let generation = currentGeneration
+        if let gate = nextToolsGate {
+            nextToolsGate = nil
+            await gate.wait()
+        }
+        guard advancesGenerations else { return tools }
+        return try tools.map { tool in
+            try MCPAllowedTool(serverID: tool.serverID, processGeneration: generation,
+                toolName: tool.toolName, description: tool.description, inputSchema: tool.inputSchema,
+                risk: tool.risk, approval: tool.approval)
+        }
     }
 
     func waitForSuspendedLoad() async {
@@ -3743,10 +3935,16 @@ private actor StubMCPClientPool: MCPClientPooling {
 
     func prepareApproval(_ call: MCPToolCall) async throws -> MCPPreparedApproval {
         preparedCount += 1
-        return MCPPreparedApproval(
+        let prepared = MCPPreparedApproval(
             call: call,
             fingerprint: MCPApprovalFingerprint(call: call),
             display: call.approvalDisplay)
+        lastPrepared = prepared
+        if let gate = nextPreparationGate {
+            nextPreparationGate = nil
+            await gate.wait()
+        }
+        return prepared
     }
 
     func performApproved(
@@ -3769,7 +3967,9 @@ private actor StubMCPClientPool: MCPClientPooling {
         cancelledGenerations.append(processGeneration)
         cancellingCount += 1
         defer { cancellingCount -= 1 }
-        if let gate = cancellationGate {
+        if let gate = cancellationGates.removeValue(forKey: processGeneration) {
+            await gate.wait()
+        } else if let gate = cancellationGate {
             cancellationGate = nil
             await gate.wait()
         }
@@ -3780,6 +3980,11 @@ private actor StubMCPClientPool: MCPClientPooling {
     func helperStartsDuringCleanup() -> Int { startsDuringCleanup }
     func preparedApprovalCount() -> Int { preparedCount }
     func approvedExecuteCount() -> Int { approvedCount }
+    func mostRecentPreparation() -> MCPPreparedApproval? { lastPrepared }
+    func suspendNextStart(_ gate: ComputerUsePlanningTestGate<Void>) { nextStartGate = gate }
+    func failNextStart(_ error: MCPClientError) { nextStartError = error }
+    func suspendNextDiscovery(_ gate: ComputerUsePlanningTestGate<Void>) { nextToolsGate = gate }
+    func suspendNextPreparation(_ gate: ComputerUsePlanningTestGate<Void>) { nextPreparationGate = gate }
 
     private func result() throws -> MCPToolResult {
         try MCPToolResult(
