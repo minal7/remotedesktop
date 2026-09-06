@@ -2,6 +2,150 @@ import XCTest
 @testable import RemoteDesktopHost
 
 final class MCPFoundationTests: XCTestCase {
+    @MainActor
+    func testPoolValidationCannotOutliveStopCancellationOrNewerStart() async throws {
+        try await assertStartupInvalidation(at: .validation)
+    }
+
+    @MainActor
+    func testPoolRetirementCannotPublishAfterStopCancellationOrNewerStart() async throws {
+        try await assertStartupInvalidation(at: .retirement)
+    }
+
+    @MainActor
+    func testPoolPrimaryStartupCannotLaunchEmbeddedAfterStopCancellationOrNewerStart() async throws {
+        try await assertStartupInvalidation(at: .primary)
+    }
+
+    @MainActor
+    func testPoolEmbeddedStartupCannotPublishAfterStopCancellationOrNewerStart() async throws {
+        try await assertStartupInvalidation(at: .embedded)
+    }
+
+    @MainActor
+    func testAlreadyCancelledPoolStartDoesNotValidateOrReplaceHealthySession() async throws {
+        let validator = StagedMCPBinaryValidator()
+        let factory = FakeMCPSessionFactory(toolNames: ["focused_app"])
+        let pool = MCPClientPool(binaryValidator: validator, mutationLedger: nil,
+            sessionFactory: { factory.make(binary: $0, generation: $1) }, embeddedSessionFactory: { _ in nil })
+        let healthy = try await pool.start(binaryURL: fakeBinaryURL)
+        let request = Task { try await pool.start(binaryURL: fakeBinaryURL) }
+        request.cancel()
+        do { _ = try await request.value; XCTFail("A pre-cancelled request cannot begin validation") }
+        catch is CancellationError { }
+        let validations = await validator.validationCount()
+        let current = try await pool.allowedTools()
+        let stops = await factory.latestSession()?.stopCount()
+        XCTAssertEqual(validations, 1)
+        XCTAssertEqual(factory.createdSessions().count, 1)
+        XCTAssertTrue(current.allSatisfy { $0.processGeneration == healthy.processGeneration })
+        XCTAssertEqual(stops, 0)
+        await pool.cancelAll()
+    }
+
+    func testPoolRejectsMismatchedPrimaryBeforeStartingEmbeddedServer() async throws {
+        let primary = FakeMCPSessionFactory(toolNames: ["focused_app"], advertisedServerID: "unexpected-server")
+        let embedded = FakeMCPSessionFactory(toolNames: [RemoteDesktopMailMCP.toolName], advertisedServerID: RemoteDesktopMailMCP.serverID)
+        let binary = MCPValidatedBinary(definition: MCPServerRegistry.macControl, appBundleURL: fakeBinaryURL.deletingLastPathComponent(), executableURL: fakeBinaryURL)
+        let pool = MCPClientPool(binaryValidator: AcceptingMCPBinaryValidator(), mutationLedger: nil,
+            sessionFactory: { primary.make(binary: $0, generation: $1) },
+            embeddedSessionFactory: { embedded.make(binary: binary, generation: $0) })
+        do { _ = try await pool.start(binaryURL: fakeBinaryURL); XCTFail("An invalid primary identity cannot activate embedded capabilities") }
+        catch { XCTAssertEqual(error as? MCPClientError, .cancelled) }
+        let embeddedStarts = await embedded.latestSession()?.startCount()
+        let primaryStops = await primary.latestSession()?.stopCount()
+        let embeddedStops = await embedded.latestSession()?.stopCount()
+        XCTAssertEqual(embeddedStarts, 0)
+        XCTAssertEqual(primaryStops, 1)
+        XCTAssertEqual(embeddedStops, 1)
+        do { _ = try await pool.allowedTools(); XCTFail("A failed startup cannot publish tools") }
+        catch { XCTAssertEqual(error as? MCPClientError, .notRunning) }
+    }
+
+    @MainActor
+    func testFailedReplacementValidationCannotLeaveObsoleteCandidateInPoolSlots() async throws {
+        let gate = ComputerUsePlanningTestGate<Void>(started: expectation(description: "obsolete primary started"),
+                                                    returned: expectation(description: "obsolete primary returned"))
+        defer { gate.finish(()) }
+        let primary = FakeMCPSessionFactory(toolNames: ["focused_app"], startGates: [1: gate])
+        let validator = StagedMCPBinaryValidator(rejectedCalls: [2])
+        let pool = MCPClientPool(binaryValidator: validator, mutationLedger: nil,
+            sessionFactory: { primary.make(binary: $0, generation: $1) }, embeddedSessionFactory: { _ in nil })
+        let obsolete = Task { try await pool.start(binaryURL: fakeBinaryURL) }
+        await fulfillment(of: [gate.started], timeout: 1)
+        do { _ = try await pool.start(binaryURL: fakeBinaryURL); XCTFail("The replacement fixture must fail validation") }
+        catch { XCTAssertEqual(error as? MCPClientError, .serverMismatch("Fixture validation rejected")) }
+        gate.finish(())
+        do { _ = try await obsolete.value; XCTFail("Failed replacement validation cannot revive the superseded attempt") }
+        catch { XCTAssertEqual(error as? MCPClientError, .cancelled) }
+        await fulfillment(of: [gate.returned], timeout: 1)
+        let stale = try XCTUnwrap(primary.createdSessions().first)
+        let stopsBeforeRetry = await stale.stopCount()
+        XCTAssertEqual(stopsBeforeRetry, 1)
+        let healthy = try await pool.start(binaryURL: fakeBinaryURL)
+        let stopsAfterRetry = await stale.stopCount()
+        XCTAssertEqual(stopsAfterRetry, 1, "A retired failed candidate must not remain in the pool for the next start to stop again")
+        let current = try await pool.allowedTools()
+        XCTAssertEqual(current.map(\.processGeneration), [healthy.processGeneration])
+        await pool.cancelAll()
+    }
+
+    private enum StartupStage { case validation, retirement, primary, embedded }
+
+    @MainActor
+    private func assertStartupInvalidation(at stage: StartupStage) async throws {
+        for interruption in ["task cancellation", "Stop", "newer start"] {
+            let gate = ComputerUsePlanningTestGate<Void>(started: expectation(description: "\(stage) entered before \(interruption)"),
+                                                        returned: expectation(description: "\(stage) returned after \(interruption)"))
+            defer { gate.finish(()) }
+            let validator = StagedMCPBinaryValidator(firstValidationGate: stage == .validation ? gate : nil)
+            let primary = FakeMCPSessionFactory(toolNames: ["focused_app"],
+                startGates: stage == .primary ? [1: gate] : [:], stopGates: stage == .retirement ? [1: gate] : [:])
+            let embedded = FakeMCPSessionFactory(toolNames: [RemoteDesktopMailMCP.toolName],
+                advertisedServerID: RemoteDesktopMailMCP.serverID, startGates: stage == .embedded ? [1: gate] : [:])
+            let binary = MCPValidatedBinary(definition: MCPServerRegistry.macControl,
+                appBundleURL: fakeBinaryURL.deletingLastPathComponent(), executableURL: fakeBinaryURL)
+            let pool = MCPClientPool(binaryValidator: validator, mutationLedger: nil,
+                sessionFactory: { primary.make(binary: $0, generation: $1) },
+                embeddedSessionFactory: { embedded.make(binary: binary, generation: $0) })
+            if stage == .retirement { _ = try await pool.start(binaryURL: fakeBinaryURL) }
+            let obsolete = Task { try await pool.start(binaryURL: fakeBinaryURL) }
+            await fulfillment(of: [gate.started], timeout: 1)
+            var replacement: MCPProcessIdentity?
+            switch interruption {
+            case "task cancellation": obsolete.cancel()
+            case "Stop": await pool.cancelAll()
+            default: replacement = try await pool.start(binaryURL: fakeBinaryURL)
+            }
+            gate.finish(())
+            do { _ = try await obsolete.value; XCTFail("An obsolete \(stage) cannot publish readiness after \(interruption)") }
+            catch is CancellationError { }
+            catch { XCTAssertEqual(error as? MCPClientError, .cancelled) }
+            await fulfillment(of: [gate.returned], timeout: 1)
+            let expectedCount = (stage == .validation ? 0 : 1) + (replacement == nil ? 0 : 1)
+            XCTAssertEqual(primary.createdSessions().count, expectedCount, "No obsolete candidate may be created after validation or retirement")
+            XCTAssertEqual(embedded.createdSessions().count, expectedCount)
+            if stage == .primary {
+                let staleEmbedded = try XCTUnwrap(embedded.createdSessions().first)
+                let starts = await staleEmbedded.startCount()
+                XCTAssertEqual(starts, 0, "A stopped or superseded primary must not start the next capability")
+            }
+            if let replacement {
+                let current = try await pool.allowedTools()
+                XCTAssertEqual(current.count, 2)
+                XCTAssertTrue(current.allSatisfy { $0.processGeneration == replacement.processGeneration })
+                let primaryStops = await primary.latestSession()?.stopCount()
+                let embeddedStops = await embedded.latestSession()?.stopCount()
+                XCTAssertEqual(primaryStops, 0, "Late cleanup must retain the replacement's primary session")
+                XCTAssertEqual(embeddedStops, 0, "Late cleanup must retain the replacement's embedded session")
+            } else {
+                do { _ = try await pool.allowedTools(); XCTFail("Cancelled startup cannot expose tools") }
+                catch { XCTAssertEqual(error as? MCPClientError, .notRunning) }
+            }
+            await pool.cancelAll()
+        }
+    }
+
     func testCanonicalCallDigestIsStableAcrossDictionaryOrderAndProcessRestart() throws {
         let firstTool = try allowedTool(
             name: "set_element_attribute",
@@ -542,6 +686,29 @@ private struct AcceptingMCPBinaryValidator: MCPServerBinaryValidating {
     }
 }
 
+private actor StagedMCPBinaryValidator: MCPServerBinaryValidating {
+    private var firstValidationGate: ComputerUsePlanningTestGate<Void>?
+    private let rejectedCalls: Set<Int>
+    private var calls = 0
+
+    init(firstValidationGate: ComputerUsePlanningTestGate<Void>? = nil, rejectedCalls: Set<Int> = []) {
+        self.firstValidationGate = firstValidationGate
+        self.rejectedCalls = rejectedCalls
+    }
+
+    func validate(binaryURL: URL, definition: MCPServerDefinition) async throws -> MCPValidatedBinary {
+        calls += 1
+        if rejectedCalls.contains(calls) { throw MCPClientError.serverMismatch("Fixture validation rejected") }
+        if let gate = firstValidationGate {
+            firstValidationGate = nil
+            await gate.wait()
+        }
+        return try await AcceptingMCPBinaryValidator().validate(binaryURL: binaryURL, definition: definition)
+    }
+
+    func validationCount() -> Int { calls }
+}
+
 private final class FakeMCPSessionFactory: @unchecked Sendable {
     enum Behavior: Sendable {
         case succeed
@@ -551,11 +718,19 @@ private final class FakeMCPSessionFactory: @unchecked Sendable {
     private let lock = NSLock()
     private let toolNames: [String]
     private let behavior: Behavior
+    private let advertisedServerID: String?
+    private let startGates: [UInt64: ComputerUsePlanningTestGate<Void>]
+    private let stopGates: [UInt64: ComputerUsePlanningTestGate<Void>]
     private var sessions: [FakeMCPSession] = []
 
-    init(toolNames: [String], behavior: Behavior = .succeed) {
+    init(toolNames: [String], behavior: Behavior = .succeed, advertisedServerID: String? = nil,
+         startGates: [UInt64: ComputerUsePlanningTestGate<Void>] = [:],
+         stopGates: [UInt64: ComputerUsePlanningTestGate<Void>] = [:]) {
         self.toolNames = toolNames
         self.behavior = behavior
+        self.advertisedServerID = advertisedServerID
+        self.startGates = startGates
+        self.stopGates = stopGates
     }
 
     func make(
@@ -566,7 +741,9 @@ private final class FakeMCPSessionFactory: @unchecked Sendable {
             binary: binary,
             generation: generation,
             toolNames: toolNames,
-            behavior: behavior)
+            behavior: behavior,
+            advertisedServerID: advertisedServerID,
+            startGate: startGates[generation], stopGate: stopGates[generation])
         lock.lock()
         sessions.append(session)
         lock.unlock()
@@ -578,6 +755,8 @@ private final class FakeMCPSessionFactory: @unchecked Sendable {
         defer { lock.unlock() }
         return sessions.last
     }
+
+    func createdSessions() -> [FakeMCPSession] { lock.withLock { sessions } }
 }
 
 private actor FakeMCPSession: MCPClientSessioning {
@@ -585,6 +764,10 @@ private actor FakeMCPSession: MCPClientSessioning {
     private let generation: UInt64
     private let toolNames: [String]
     private let behavior: FakeMCPSessionFactory.Behavior
+    private let advertisedServerID: String
+    private var startGate: ComputerUsePlanningTestGate<Void>?
+    private var stopGate: ComputerUsePlanningTestGate<Void>?
+    private var starts = 0
     private var executions = 0
     private var stops = 0
     private var executionWaiters: [CheckedContinuation<Void, Never>] = []
@@ -593,17 +776,28 @@ private actor FakeMCPSession: MCPClientSessioning {
         binary: MCPValidatedBinary,
         generation: UInt64,
         toolNames: [String],
-        behavior: FakeMCPSessionFactory.Behavior
+        behavior: FakeMCPSessionFactory.Behavior,
+        advertisedServerID: String? = nil,
+        startGate: ComputerUsePlanningTestGate<Void>? = nil,
+        stopGate: ComputerUsePlanningTestGate<Void>? = nil
     ) {
         self.binary = binary
         self.generation = generation
         self.toolNames = toolNames
         self.behavior = behavior
+        self.advertisedServerID = advertisedServerID ?? binary.definition.serverID
+        self.startGate = startGate
+        self.stopGate = stopGate
     }
 
     func start() async throws -> MCPProcessIdentity {
-        MCPProcessIdentity(
-            serverID: binary.definition.serverID,
+        starts += 1
+        if let gate = startGate {
+            startGate = nil
+            await gate.wait()
+        }
+        return MCPProcessIdentity(
+            serverID: advertisedServerID,
             processGeneration: generation,
             processIdentifier: 42,
             binaryPath: binary.executableURL.path,
@@ -614,7 +808,7 @@ private actor FakeMCPSession: MCPClientSessioning {
         try toolNames.map { name in
             let assessment = MCPToolSafetyPolicy.assess(toolName: name)
             return try MCPAllowedTool(
-                serverID: binary.definition.serverID,
+                serverID: advertisedServerID,
                 processGeneration: generation,
                 toolName: name,
                 description: "Fake \(name)",
@@ -648,8 +842,13 @@ private actor FakeMCPSession: MCPClientSessioning {
 
     func stop() async {
         stops += 1
+        if let gate = stopGate {
+            stopGate = nil
+            await gate.wait()
+        }
     }
 
+    func startCount() -> Int { starts }
     func executionCount() -> Int { executions }
     func stopCount() -> Int { stops }
 

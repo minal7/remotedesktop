@@ -53,12 +53,16 @@ actor MCPClientPool {
 
     @discardableResult
     func start(binaryURL: URL) async throws -> MCPProcessIdentity {
+        try Task.checkCancellation()
+        // Claim this attempt before validation can suspend. A late validator
+        // must not let an older request replace a newer start or undo Stop.
+        lifecycleEpoch &+= 1
+        let epoch = lifecycleEpoch
         let validated = try await binaryValidator.validate(
             binaryURL: binaryURL,
             definition: definition)
+        try requireCurrentStart(epoch)
 
-        lifecycleEpoch &+= 1
-        let epoch = lifecycleEpoch
         processGeneration &+= 1
         if processGeneration == 0 { processGeneration = 1 }
         let generation = processGeneration
@@ -72,6 +76,9 @@ actor MCPClientPool {
         pendingApprovals.removeAll()
         await previous?.stop()
         await previousEmbedded?.stop()
+        // These are exact old sessions. Finish retiring both, but do not
+        // publish a candidate after another attempt has acquired ownership.
+        try requireCurrentStart(epoch)
 
         let candidate = sessionFactory(validated, generation)
         let embeddedCandidate = embeddedSessionFactory(generation)
@@ -79,20 +86,17 @@ actor MCPClientPool {
         embeddedSession = embeddedCandidate
         do {
             let newIdentity = try await candidate.start()
-            let newEmbeddedIdentity = try await embeddedCandidate?.start()
-            guard lifecycleEpoch == epoch,
-                  newIdentity.serverID == definition.serverID,
+            try requireCurrentStart(epoch)
+            guard newIdentity.serverID == definition.serverID,
                   newIdentity.processGeneration == generation,
                   newIdentity.binaryPath == validated.executableURL.path else {
-                await candidate.stop()
-                await embeddedCandidate?.stop()
                 throw MCPClientError.cancelled
             }
+            let newEmbeddedIdentity = try await embeddedCandidate?.start()
+            try requireCurrentStart(epoch)
             if let newEmbeddedIdentity {
                 guard newEmbeddedIdentity.serverID == RemoteDesktopMailMCP.serverID,
                       newEmbeddedIdentity.processGeneration == generation else {
-                    await candidate.stop()
-                    await embeddedCandidate?.stop()
                     throw MCPClientError.serverMismatch(
                         "The embedded Mail MCP identity did not match the signed host.")
                 }
@@ -101,7 +105,10 @@ actor MCPClientPool {
             embeddedIdentity = newEmbeddedIdentity
             return newIdentity
         } catch {
-            if lifecycleEpoch == epoch {
+            // A newer validation attempt can supersede this request without
+            // allocating a replacement session. Clear slots still owned by
+            // this candidate; never clear a later allocated generation.
+            if processGeneration == generation {
                 session = nil
                 identity = nil
                 embeddedSession = nil
@@ -111,6 +118,11 @@ actor MCPClientPool {
             await embeddedCandidate?.stop()
             throw error
         }
+    }
+
+    private func requireCurrentStart(_ epoch: UInt64) throws {
+        try Task.checkCancellation()
+        guard lifecycleEpoch == epoch else { throw MCPClientError.cancelled }
     }
 
     func allowedTools() async throws -> [MCPAllowedTool] {
