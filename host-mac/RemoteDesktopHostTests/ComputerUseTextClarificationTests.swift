@@ -40,7 +40,7 @@ final class ComputerUseTextClarificationTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let url = root.appendingPathComponent("ledger.json"), ledger = ComputerUseTaskLedger(fileURL: url)
-        _ = try ledger.claim(taskID: "q", senderID: "phone", sessionID: "session")
+        _ = try ledger.claim(taskID: "q", senderID: "phone", sessionID: "session", promptBody: "Put the quoted text in a field")
         let reference = try ComputerUseClarificationReference(taskID: "q", expiresAt: Date().addingTimeInterval(60))
         let first = try ledger.complete(taskID: "q", response: "Which field?", outcome: .userInterventionRequired, clarification: reference)
         XCTAssertEqual(try ledger.complete(taskID: "q", response: "Different", outcome: .taskCompleted), first)

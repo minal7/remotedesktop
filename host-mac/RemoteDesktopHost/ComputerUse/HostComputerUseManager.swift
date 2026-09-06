@@ -5666,7 +5666,8 @@ final class HostComputerUseManager: ObservableObject {
             switch try taskLedger.claim(
                 taskID: envelope.id,
                 senderID: envelope.senderID,
-                sessionID: envelope.sessionID) {
+                sessionID: envelope.sessionID,
+                promptBody: envelope.body) {
             case .new:
                 if hasDifferentActiveTask {
                     sendDurableTerminal(
@@ -5761,12 +5762,19 @@ final class HostComputerUseManager: ObservableObject {
                 }
                 return
             case .identityMismatch:
+                // A conflicting delivery cannot replace the live request or
+                // terminalize its phone state while the original may act.
+                return
+            case .promptIdentityUnavailable:
+                send(kind: .assistant, body: Self.promptIdentityRecoveryResponse,
+                    replyingTo: envelope, channel: channel, outcome: .unableToComplete)
+                sendStatus("ready", replyingTo: envelope, channel: channel)
                 return
             }
         } catch {
             send(
                 kind: .assistant,
-                body: "The host could not safely record this request, so no action was taken.",
+                body: "The host could not safely record or verify this request. It will not start another attempt. Check the Mac before sending a new request.",
                 replyingTo: envelope,
                 channel: channel,
                 outcome: .unableToComplete)
@@ -6605,6 +6613,8 @@ final class HostComputerUseManager: ObservableObject {
         }
     }
 
+    static let promptIdentityRecoveryResponse = "The Mac has an older record for this request but cannot verify its original instruction. It will not run it again or use the old result as confirmation. Check the Mac before starting a new request."
+
     private func send(
         kind: ComputerUseEnvelope.Kind,
         body: String,
@@ -6615,18 +6625,24 @@ final class HostComputerUseManager: ObservableObject {
         isApprovedActionEvidenceOnly: Bool = false,
         evidenceDeliveryGeneration: (transport: UInt64, authorization: UInt64)? = nil
     ) {
-        let evidence = actionEvidence(for: envelope)
+        // Gate every projection of an older unbound result, including Cancel
+        // replies with no prompt body. Preserve the durable result for future
+        // reconciliation; do not attach its clarification or action evidence.
+        let needsIdentityRecovery = taskLedger.requiresPromptIdentityRecovery(taskID: envelope.id)
+        let evidence = needsIdentityRecovery ? nil : actionEvidence(for: envelope)
         if isApprovedActionEvidenceOnly && evidence == nil { return }
+        let responseBody = needsIdentityRecovery && kind == .assistant ? Self.promptIdentityRecoveryResponse : body
         let wireBody: String
         switch kind {
         case .assistant, .status:
             wireBody = (try? ComputerUseTaskUpdate(
                 taskID: envelope.id,
-                text: body,
+                text: responseBody,
                 appliedControlRevision: isApprovedActionEvidenceOnly ? nil : taskLedger.appliedControlRevision(
                     taskID: envelope.id),
-                outcome: outcome, clarification: clarification, approvedActionEvidence: evidence,
-                isApprovedActionEvidenceOnly: isApprovedActionEvidenceOnly).encodedBody()) ?? body
+                outcome: needsIdentityRecovery && kind == .assistant ? .unableToComplete : outcome,
+                clarification: needsIdentityRecovery ? nil : clarification, approvedActionEvidence: evidence,
+                isApprovedActionEvidenceOnly: isApprovedActionEvidenceOnly).encodedBody()) ?? responseBody
         default:
             wireBody = body
         }

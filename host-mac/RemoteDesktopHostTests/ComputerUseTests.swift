@@ -9,6 +9,246 @@ import XCTest
 
 @MainActor
 final class ComputerUseTests: XCTestCase {
+    func test_taskLedgerRequiresExactWireBodyBeforeAcceptedOrTerminalReplay() throws {
+        let url = temporaryLedgerURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let reference = try ComputerUseClarificationReference(taskID: "question", expiresAt: Date().addingTimeInterval(300))
+        let otherReference = try ComputerUseClarificationReference(taskID: "other-question", expiresAt: reference.expiresAt)
+        let body = try ComputerUsePromptRequest.answering(reference, text: "  e\u{301} 😀  ").encodedBody()
+        var changedConversation = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(body.utf8)) as? [String: Any])
+        changedConversation["conversation"] = [["role": "user", "text": "Use a different field"]]
+        let variants = [
+            body + "\n",
+            try ComputerUsePromptRequest.answering(reference, text: "  é 😀  ").encodedBody(),
+            try ComputerUsePromptRequest.answering(reference, text: "e\u{301} 😀").encodedBody(),
+            try ComputerUsePromptRequest.answering(otherReference, text: "  e\u{301} 😀  ").encodedBody(),
+            String(decoding: try JSONSerialization.data(withJSONObject: changedConversation), as: UTF8.self),
+            try ComputerUsePromptRequest.answering(reference, text: "  e\u{301} 😀  ", supportsApprovedActionEvidence: true).encodedBody(),
+            "Changed instruction"]
+        let ledger = ComputerUseTaskLedger(fileURL: url)
+        XCTAssertEqual(try ledger.claim(taskID: "exact", senderID: "phone", sessionID: "session", promptBody: body), .new)
+        for terminal in [false, true] {
+            if terminal { try ledger.complete(taskID: "exact", response: "Verified original", outcome: .taskCompleted) }
+            let saved = try Data(contentsOf: url), restored = ComputerUseTaskLedger(fileURL: url)
+            for changed in variants {
+                XCTAssertFalse(changed.utf8.elementsEqual(body.utf8))
+                XCTAssertEqual(try restored.claim(taskID: "exact", senderID: "phone", sessionID: "session", promptBody: changed), .identityMismatch)
+                XCTAssertEqual(try Data(contentsOf: url), saved, "A conflict must not bind or overwrite any state")
+            }
+            XCTAssertEqual(try restored.claim(taskID: "exact", senderID: "phone", sessionID: "session", promptBody: body),
+                terminal ? .completed("Verified original") : .accepted)
+            XCTAssertEqual(try Data(contentsOf: url), saved)
+        }
+        let records = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: [String: Any]])
+        XCTAssertEqual(records["exact"]?["promptDigest"] as? String, Self.sha256Hex(Data(body.utf8)))
+        XCTAssertFalse(String(decoding: try Data(contentsOf: url), as: UTF8.self).contains("question"), "Store the digest, not the request")
+    }
+
+    func test_taskLedgerBindsFirstPromptAfterControlAndNeverRebindsPausedOrCancelledRequest() throws {
+        for control in [ComputerUseTaskLedger.Control.pause, .resume, .cancel] {
+            let url = temporaryLedgerURL()
+            defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+            let ledger = ComputerUseTaskLedger(fileURL: url)
+            _ = try ledger.applyControl(control, taskID: "controlled", revision: 1, senderID: "phone", sessionID: "session")
+            let restored = ComputerUseTaskLedger(fileURL: url)
+            let expected: ComputerUseTaskLedger.Claim = control == .pause ? .paused(appliedControlRevision: 1)
+                : control == .cancel ? .completed(ComputerUseTaskLedger.stoppedResponse) : .new
+            XCTAssertEqual(try restored.claim(taskID: "controlled", senderID: "phone", sessionID: "session", promptBody: "Original"), expected)
+            let claimed = try Data(contentsOf: url), reloaded = ComputerUseTaskLedger(fileURL: url)
+            XCTAssertEqual(try reloaded.claim(taskID: "controlled", senderID: "phone", sessionID: "session", promptBody: "Replacement"), .identityMismatch)
+            XCTAssertEqual(try Data(contentsOf: url), claimed)
+            _ = try reloaded.applyControl(.resume, taskID: "controlled", revision: 2, senderID: "phone", sessionID: "session")
+            XCTAssertEqual(try reloaded.claim(taskID: "controlled", senderID: "phone", sessionID: "session", promptBody: "Replacement"), .identityMismatch)
+            XCTAssertEqual(try reloaded.claim(taskID: "controlled", senderID: "phone", sessionID: "session", promptBody: "Original"),
+                control == .pause ? .new : control == .cancel ? .completed(ComputerUseTaskLedger.stoppedResponse) : .accepted)
+        }
+    }
+
+    func test_legacyClaimedPromptCannotAcquireIdentityFromRetryOrDispatchApproval() throws {
+        for state in ["accepted", "paused", "completed", "unbound", "partial-owner"] {
+            let url = temporaryLedgerURL()
+            defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+            let ledger = ComputerUseTaskLedger(fileURL: url)
+            if state == "paused" { _ = try ledger.applyControl(.pause, taskID: "old", revision: 1, senderID: "phone", sessionID: "session") }
+            _ = try ledger.claim(taskID: "old", senderID: "phone", sessionID: "session", promptBody: "Original")
+            if state == "completed" { try ledger.complete(taskID: "old", response: "Old result", outcome: .taskCompleted) }
+            var records = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: [String: Any]])
+            records["old"]?.removeValue(forKey: "promptDigest")
+            if state == "unbound" {
+                for key in ["senderID", "sessionID", "promptClaimed", "executionStarted"] { records["old"]?.removeValue(forKey: key) }
+            }
+            if state == "partial-owner" { records["old"]?.removeValue(forKey: "sessionID") }
+            try JSONSerialization.data(withJSONObject: records).write(to: url)
+            let saved = try Data(contentsOf: url), restored = ComputerUseTaskLedger(fileURL: url)
+            XCTAssertTrue(restored.requiresPromptIdentityRecovery(taskID: "old"))
+            if state != "unbound" {
+                XCTAssertEqual(try restored.claim(taskID: "old", senderID: "foreign", sessionID: "session", promptBody: "Original"), .identityMismatch)
+            }
+            for body in ["Original", "Different"] {
+                XCTAssertEqual(try restored.claim(taskID: "old", senderID: "phone", sessionID: "session", promptBody: body), .promptIdentityUnavailable)
+                XCTAssertEqual(try Data(contentsOf: url), saved)
+            }
+            XCTAssertThrowsError(try restored.claimApprovedAction(taskID: "old", senderID: "phone", sessionID: "session",
+                prepared: receiptApproval(taskID: "old")))
+            XCTAssertEqual(try Data(contentsOf: url), saved)
+        }
+    }
+
+    func test_promptDigestPersistenceFailurePoisonsClaimWithoutPublishingIdentity() throws {
+        for control in [ComputerUseTaskLedger.Control.pause, .cancel] {
+            let url = temporaryLedgerURL(), folder = url.deletingLastPathComponent()
+            let parked = folder.appendingPathExtension("parked")
+            defer { try? FileManager.default.removeItem(at: folder); try? FileManager.default.removeItem(at: parked) }
+            let ledger = ComputerUseTaskLedger(fileURL: url)
+            _ = try ledger.applyControl(control, taskID: "pending", revision: 1, senderID: "phone", sessionID: "session")
+            let saved = try Data(contentsOf: url)
+            try FileManager.default.moveItem(at: folder, to: parked)
+            try Data("Blocked directory".utf8).write(to: folder)
+            XCTAssertThrowsError(try ledger.claim(taskID: "pending", senderID: "phone", sessionID: "session", promptBody: "First"))
+            try FileManager.default.removeItem(at: folder)
+            try FileManager.default.moveItem(at: parked, to: folder)
+            XCTAssertEqual(try Data(contentsOf: url), saved)
+            XCTAssertThrowsError(try ledger.claim(taskID: "pending", senderID: "phone", sessionID: "session", promptBody: "First"))
+            let restored = ComputerUseTaskLedger(fileURL: url)
+            XCTAssertEqual(try restored.claim(taskID: "pending", senderID: "phone", sessionID: "session", promptBody: "First"),
+                control == .pause ? .paused(appliedControlRevision: 1) : .completed(ComputerUseTaskLedger.stoppedResponse))
+            XCTAssertEqual(try restored.claim(taskID: "pending", senderID: "phone", sessionID: "session", promptBody: "Second"), .identityMismatch)
+        }
+    }
+
+    func test_malformedPromptDigestCannotTurnExistingLedgerIntoUnclaimedWork() throws {
+        let url = temporaryLedgerURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let ledger = ComputerUseTaskLedger(fileURL: url)
+        _ = try ledger.claim(taskID: "task", senderID: "phone", sessionID: "session", promptBody: "Original")
+        let records = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: [String: Any]])
+        let invalidFields: [(String, Any)] = [("promptDigest", ""), ("promptDigest", String(repeating: "g", count: 64)),
+            ("promptDigest", String(repeating: "A", count: 64)), ("promptDigest", 42),
+            ("promptClaimed", false), ("senderID", NSNull()), ("sessionID", NSNull())]
+        for (key, value) in invalidFields {
+            var changed = records; changed["task"]?[key] = value
+            try JSONSerialization.data(withJSONObject: changed).write(to: url)
+            let restored = ComputerUseTaskLedger(fileURL: url)
+            XCTAssertThrowsError(try restored.claim(taskID: "task", senderID: "phone", sessionID: "session", promptBody: "Original"))
+            XCTAssertThrowsError(try restored.claim(taskID: "new", senderID: "phone", sessionID: "session", promptBody: "Different"))
+        }
+    }
+
+    func test_managerChangedPromptCannotReplacePausedContextOrTerminalizeActiveTask() async throws {
+        let url = temporaryLedgerURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let executor = SuspendingComputerUseExecutor(), channel = FakeHostComputerUseChannel()
+        let manager = HostComputerUseManager(injector: InputInjector(), executor: executor,
+            taskLedger: ComputerUseTaskLedger(fileURL: url), allowsExternalServices: false, channelFactory: { _ in channel })
+        defer { manager.stop() }
+        let original = makeEnvelope(id: "retained-pause", kind: .prompt,
+            body: try ComputerUsePromptRequest(prompt: "Type the original text", conversation: [.init(role: .user, text: "Use Notes")]).encodedBody())
+        let replacement = makeEnvelope(id: original.id, kind: .prompt, body: "Type different text in another app")
+        manager.authorizePeer(senderID: original.senderID)
+        XCTAssertTrue(manager.handle(try makeControlEnvelope(kind: .pause, taskID: original.id, revision: 1), channel: channel))
+        XCTAssertTrue(manager.handle(original, channel: channel))
+        let saved = try Data(contentsOf: url)
+        XCTAssertTrue(manager.handle(replacement, channel: channel))
+        XCTAssertEqual(try Data(contentsOf: url), saved)
+        XCTAssertEqual(manager.activity, .paused); XCTAssertEqual(executor.callCount, 0)
+        XCTAssertTrue(manager.handle(try makeControlEnvelope(kind: .resume, taskID: original.id, revision: 2), channel: channel))
+        await waitUntil { executor.callCount == 1 }
+        XCTAssertEqual(executor.trustedUserPrompts, ["Type the original text"])
+        XCTAssertFalse(executor.prompts.contains { $0.contains("different text") })
+        XCTAssertTrue(manager.handle(replacement, channel: channel))
+        XCTAssertTrue(manager.handle(original, channel: channel))
+        try await flushPromptIdentityReplies(manager: manager, channel: channel)
+        let messages = await channel.sentMessages()
+        XCTAssertFalse(messages.contains { $0.kind == .assistant })
+        XCTAssertEqual(executor.callCount, 1); XCTAssertEqual(manager.activity, .working("Starting…"))
+    }
+
+    func test_managerChangedPromptCannotReplayTerminalClarificationOrApprovedActionEvidence() async throws {
+        for state in ["completed", "clarification", "confirmed-action", "unconfirmed-action"] {
+            let url = temporaryLedgerURL()
+            defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+            let ledger = ComputerUseTaskLedger(fileURL: url)
+            let original = makeEnvelope(id: "original", kind: .prompt, body: "Original instruction")
+            _ = try ledger.claim(taskID: original.id, senderID: original.senderID, sessionID: original.sessionID, promptBody: original.body)
+            let reference = try ComputerUseClarificationReference(taskID: original.id, expiresAt: Date().addingTimeInterval(300))
+            if state.hasSuffix("action") {
+                let prepared = try receiptApproval(taskID: original.id)
+                _ = try ledger.claimApprovedAction(taskID: original.id, senderID: original.senderID, sessionID: original.sessionID, prepared: prepared)
+                if state == "confirmed-action" {
+                    try ledger.recordApprovedActionResult(taskID: original.id, senderID: original.senderID, sessionID: original.sessionID,
+                        fingerprint: prepared.fingerprint, response: "Confirmed original effect")
+                }
+            } else {
+                try ledger.complete(taskID: original.id, response: "Original result", outcome: state == "clarification" ? .userInterventionRequired : .taskCompleted,
+                    clarification: state == "clarification" ? reference : nil)
+            }
+            let saved = try Data(contentsOf: url)
+            let executor = ImmediateComputerUseExecutor(results: []), channel = FakeHostComputerUseChannel()
+            let manager = HostComputerUseManager(injector: InputInjector(), executor: executor,
+                taskLedger: ComputerUseTaskLedger(fileURL: url), allowsExternalServices: false, channelFactory: { _ in channel })
+            defer { manager.stop() }
+            manager.authorizePeer(senderID: original.senderID)
+            XCTAssertTrue(manager.handle(makeEnvelope(id: original.id, kind: .prompt, body: "Different instruction"), channel: channel))
+            XCTAssertEqual(try Data(contentsOf: url), saved)
+            XCTAssertTrue(manager.handle(original, channel: channel))
+            try await flushPromptIdentityReplies(manager: manager, channel: channel)
+            let messages = await channel.sentMessages()
+            let terminals = messages.filter { $0.kind == .assistant }.compactMap { try? ComputerUseTaskUpdate.decodeBody($0.body) }
+            XCTAssertEqual(terminals.count, 1, "Only the byte-identical retry may replay a result")
+            let result = try XCTUnwrap(terminals.first)
+            XCTAssertEqual(result.taskID, original.id)
+            XCTAssertEqual(result.clarification, state == "clarification" ? reference : nil)
+            XCTAssertEqual(result.approvedActionEvidence?.state, state == "confirmed-action" ? .confirmed : state == "unconfirmed-action" ? .unconfirmed : nil)
+            XCTAssertEqual(result.outcome, state == "clarification" ? .userInterventionRequired : state == "unconfirmed-action" ? .unableToComplete : .taskCompleted)
+            XCTAssertEqual(executor.callCount, 0)
+        }
+    }
+
+    func test_managerLegacyPromptAndControlRepliesRequireRecoveryWithoutLeakingOldEvidence() async throws {
+        for state in ["completed", "clarification", "approved-action"] {
+            let url = temporaryLedgerURL()
+            defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+            let ledger = ComputerUseTaskLedger(fileURL: url), prompt = makeEnvelope(id: "legacy", kind: .prompt, body: "Unverifiable instruction")
+            _ = try ledger.claim(taskID: prompt.id, senderID: prompt.senderID, sessionID: prompt.sessionID, promptBody: "Old instruction")
+            if state == "approved-action" {
+                let prepared = try receiptApproval(taskID: prompt.id)
+                _ = try ledger.claimApprovedAction(taskID: prompt.id, senderID: prompt.senderID, sessionID: prompt.sessionID, prepared: prepared)
+                try ledger.recordApprovedActionResult(taskID: prompt.id, senderID: prompt.senderID, sessionID: prompt.sessionID,
+                    fingerprint: prepared.fingerprint, response: "Old action evidence")
+            }
+            let reference = try ComputerUseClarificationReference(taskID: prompt.id, expiresAt: Date().addingTimeInterval(300))
+            try ledger.complete(taskID: prompt.id, response: "Old retained result", outcome: state == "clarification" ? .userInterventionRequired : .taskCompleted,
+                clarification: state == "clarification" ? reference : nil)
+            var records = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: [String: Any]])
+            records[prompt.id]?.removeValue(forKey: "promptDigest")
+            try JSONSerialization.data(withJSONObject: records).write(to: url)
+            let saved = try Data(contentsOf: url), restored = ComputerUseTaskLedger(fileURL: url)
+            let executor = ImmediateComputerUseExecutor(results: []), channel = FakeHostComputerUseChannel()
+            let manager = HostComputerUseManager(injector: InputInjector(), executor: executor, taskLedger: restored,
+                allowsExternalServices: false, channelFactory: { _ in channel })
+            defer { manager.stop() }
+            manager.authorizePeer(senderID: prompt.senderID)
+            XCTAssertTrue(manager.handle(prompt, channel: channel))
+            XCTAssertEqual(try Data(contentsOf: url), saved)
+            XCTAssertTrue(manager.handle(try makeControlEnvelope(kind: .cancel, taskID: prompt.id, revision: 1), channel: channel))
+            await waitUntil { await channel.sentMessages().filter {
+                $0.kind == .status && (try? ComputerUseTaskUpdate.decodeBody($0.body).text) == "ready"
+            }.count == 2 }
+            let messages = await channel.sentMessages(), updates = messages.compactMap { try? ComputerUseTaskUpdate.decodeBody($0.body) }
+            let terminals = messages.filter { $0.kind == .assistant }.compactMap { try? ComputerUseTaskUpdate.decodeBody($0.body) }
+            XCTAssertEqual(terminals.count, 2)
+            XCTAssertTrue(terminals.allSatisfy { $0.text == HostComputerUseManager.promptIdentityRecoveryResponse && $0.outcome == .unableToComplete })
+            XCTAssertTrue(updates.allSatisfy { $0.approvedActionEvidence == nil && $0.clarification == nil })
+            XCTAssertEqual(terminals.last?.appliedControlRevision, 1)
+            XCTAssertEqual(executor.callCount, 0); XCTAssertEqual(manager.activity, .idle)
+            XCTAssertEqual(try restored.complete(taskID: prompt.id, response: "Must not replace").response, "Old retained result")
+            XCTAssertTrue(restored.requiresPromptIdentityRecovery(taskID: prompt.id))
+            if state == "approved-action" {
+                XCTAssertEqual(try restored.approvedAction(taskID: prompt.id, senderID: prompt.senderID, sessionID: prompt.sessionID)?.response, "Old action evidence")
+            }
+        }
+    }
+
     func test_approvedActionEvidenceWireRoundTripsAndLegacyPeersRemainCompatible() throws {
         let actionID = String(repeating: "a", count: 64), digest = String(repeating: "b", count: 64)
         for evidence in [try ComputerUseApprovedActionEvidence(actionID: actionID, state: .unconfirmed),
@@ -88,7 +328,7 @@ final class ComputerUseTests: XCTestCase {
             defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
             let ledger = ComputerUseTaskLedger(fileURL: url)
             let prompt = makeEnvelope(id: "retained", kind: .prompt, body: "Original request")
-            _ = try ledger.claim(taskID: prompt.id, senderID: prompt.senderID, sessionID: prompt.sessionID)
+            _ = try ledger.claim(taskID: prompt.id, senderID: prompt.senderID, sessionID: prompt.sessionID, promptBody: prompt.body)
             let prepared = try receiptApproval(taskID: prompt.id)
             _ = try ledger.claimApprovedAction(taskID: prompt.id, senderID: prompt.senderID, sessionID: prompt.sessionID, prepared: prepared)
             _ = try ledger.applyControl(.cancel, taskID: prompt.id, revision: 1, senderID: prompt.senderID, sessionID: prompt.sessionID)
@@ -163,13 +403,13 @@ final class ComputerUseTests: XCTestCase {
         let url = temporaryLedgerURL()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
         let ledger = ComputerUseTaskLedger(fileURL: url)
-        _ = try ledger.claim(taskID: "approved", senderID: "sender", sessionID: "session")
+        _ = try ledger.claim(taskID: "approved", senderID: "sender", sessionID: "session", promptBody: "Fixture request")
         let prepared = try receiptApproval(taskID: "approved")
         XCTAssertEqual(try ledger.claimApprovedAction(taskID: "approved", senderID: "sender", sessionID: "session", prepared: prepared), .new)
         _ = try ledger.applyControl(.cancel, taskID: "approved", revision: 1, senderID: "sender", sessionID: "session")
         try ledger.recordApprovedActionResult(taskID: "approved", senderID: "sender", sessionID: "session", fingerprint: prepared.fingerprint, response: "Confirmed exact action")
         let restored = ComputerUseTaskLedger(fileURL: url)
-        XCTAssertEqual(try restored.claim(taskID: "approved", senderID: "sender", sessionID: "session"), .completed(ComputerUseTaskLedger.stoppedResponse))
+        XCTAssertEqual(try restored.claim(taskID: "approved", senderID: "sender", sessionID: "session", promptBody: "Fixture request"), .completed(ComputerUseTaskLedger.stoppedResponse))
         XCTAssertEqual(restored.terminalOutcome(taskID: "approved"), .unableToComplete)
         XCTAssertEqual(restored.appliedControlRevision(taskID: "approved"), 1)
         let receipt = try XCTUnwrap(restored.approvedAction(taskID: "approved", senderID: "sender", sessionID: "session"))
@@ -185,7 +425,7 @@ final class ComputerUseTests: XCTestCase {
         let ledger = ComputerUseTaskLedger(fileURL: url)
         let prepared = try receiptApproval(taskID: "approved")
         XCTAssertThrowsError(try ledger.claimApprovedAction(taskID: "approved", senderID: "sender", sessionID: "session", prepared: prepared))
-        _ = try ledger.claim(taskID: "approved", senderID: "sender", sessionID: "session")
+        _ = try ledger.claim(taskID: "approved", senderID: "sender", sessionID: "session", promptBody: "Fixture request")
         XCTAssertThrowsError(try ledger.recordApprovedActionResult(taskID: "approved", senderID: "sender", sessionID: "session", fingerprint: prepared.fingerprint, response: "Unclaimed"))
         XCTAssertThrowsError(try ledger.claimApprovedAction(taskID: "approved", senderID: "foreign", sessionID: "session", prepared: prepared))
         XCTAssertThrowsError(try ledger.claimApprovedAction(taskID: "approved", senderID: "sender", sessionID: "foreign", prepared: prepared))
@@ -199,7 +439,7 @@ final class ComputerUseTests: XCTestCase {
         XCTAssertThrowsError(try ledger.recordApprovedActionResult(taskID: "approved", senderID: "sender", sessionID: "session", fingerprint: prepared.fingerprint, response: "Contradictory result"))
         XCTAssertEqual(try ledger.approvedAction(taskID: "approved", senderID: "sender", sessionID: "session")?.response, "First confirmed result")
         let long = try receiptApproval(taskID: "long-result"), prefix = String(repeating: "x", count: 4_000)
-        _ = try ledger.claim(taskID: "long-result", senderID: "sender", sessionID: "session")
+        _ = try ledger.claim(taskID: "long-result", senderID: "sender", sessionID: "session", promptBody: "Fixture request")
         _ = try ledger.claimApprovedAction(taskID: "long-result", senderID: "sender", sessionID: "session", prepared: long)
         try ledger.recordApprovedActionResult(taskID: "long-result", senderID: "sender", sessionID: "session", fingerprint: long.fingerprint, response: prefix + "first")
         XCTAssertThrowsError(try ledger.recordApprovedActionResult(taskID: "long-result", senderID: "sender", sessionID: "session", fingerprint: long.fingerprint, response: prefix + "conflicting suffix"))
@@ -212,7 +452,7 @@ final class ComputerUseTests: XCTestCase {
             let folder = url.deletingLastPathComponent(), parked = url.deletingLastPathComponent().appendingPathExtension("parked")
             defer { try? FileManager.default.removeItem(at: folder); try? FileManager.default.removeItem(at: parked) }
             let ledger = ComputerUseTaskLedger(fileURL: url)
-            _ = try ledger.claim(taskID: "approved", senderID: "sender", sessionID: "session")
+            _ = try ledger.claim(taskID: "approved", senderID: "sender", sessionID: "session", promptBody: "Fixture request")
             if recordingResult { _ = try ledger.claimApprovedAction(taskID: "approved", senderID: "sender", sessionID: "session", prepared: prepared) }
             try FileManager.default.moveItem(at: folder, to: parked)
             try Data("block the ledger directory".utf8).write(to: folder)
@@ -223,7 +463,7 @@ final class ComputerUseTests: XCTestCase {
             }
             try FileManager.default.removeItem(at: folder)
             try FileManager.default.moveItem(at: parked, to: folder)
-            XCTAssertThrowsError(try ledger.claim(taskID: "new", senderID: "sender", sessionID: "session"))
+            XCTAssertThrowsError(try ledger.claim(taskID: "new", senderID: "sender", sessionID: "session", promptBody: "Fixture request"))
             XCTAssertThrowsError(try ledger.approvedAction(taskID: "approved", senderID: "sender", sessionID: "session"))
             let restored = ComputerUseTaskLedger(fileURL: url)
             let receipt = try restored.approvedAction(taskID: "approved", senderID: "sender", sessionID: "session")
@@ -236,19 +476,19 @@ final class ComputerUseTests: XCTestCase {
         let url = temporaryLedgerURL()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
         let ledger = ComputerUseTaskLedger(fileURL: url)
-        _ = try ledger.claim(taskID: "approved", senderID: "sender", sessionID: "session")
+        _ = try ledger.claim(taskID: "approved", senderID: "sender", sessionID: "session", promptBody: "Fixture request")
         _ = try ledger.claimApprovedAction(taskID: "approved", senderID: "sender", sessionID: "session", prepared: receiptApproval(taskID: "approved"))
         _ = try ledger.applyControl(.cancel, taskID: "approved", revision: 1, senderID: "sender", sessionID: "session")
-        _ = try ledger.claim(taskID: "legacy", senderID: "sender", sessionID: "session")
+        _ = try ledger.claim(taskID: "legacy", senderID: "sender", sessionID: "session", promptBody: "Fixture request")
         var records = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: [String: Any]])
         records["approved"]?["acceptedAt"] = 0
         records["legacy"]?.removeValue(forKey: "approvedAction")
         try JSONSerialization.data(withJSONObject: records).write(to: url)
         let restored = ComputerUseTaskLedger(fileURL: url)
-        _ = try restored.claim(taskID: "trigger-pruning", senderID: "sender", sessionID: "session")
+        _ = try restored.claim(taskID: "trigger-pruning", senderID: "sender", sessionID: "session", promptBody: "Fixture request")
         let reloaded = ComputerUseTaskLedger(fileURL: url)
         XCTAssertNotNil(try reloaded.approvedAction(taskID: "approved", senderID: "sender", sessionID: "session"))
-        XCTAssertEqual(try reloaded.claim(taskID: "approved", senderID: "sender", sessionID: "session"), .completed(ComputerUseTaskLedger.stoppedResponse))
+        XCTAssertEqual(try reloaded.claim(taskID: "approved", senderID: "sender", sessionID: "session", promptBody: "Fixture request"), .completed(ComputerUseTaskLedger.stoppedResponse))
         XCTAssertNil(try reloaded.approvedAction(taskID: "legacy", senderID: "sender", sessionID: "session"))
     }
 
@@ -1730,7 +1970,7 @@ final class ComputerUseTests: XCTestCase {
             try relaunched.claim(
                 taskID: prompt.id,
                 senderID: prompt.senderID,
-                sessionID: prompt.sessionID),
+                sessionID: prompt.sessionID, promptBody: prompt.body),
             .completed(updates.first?.text ?? ""))
         XCTAssertEqual(
             relaunched.terminalOutcome(taskID: prompt.id),
@@ -1868,7 +2108,7 @@ final class ComputerUseTests: XCTestCase {
             try ComputerUseTaskLedger(fileURL: ledgerURL).claim(
                 taskID: competingPrompt.id,
                 senderID: competingPrompt.senderID,
-                sessionID: competingPrompt.sessionID),
+                sessionID: competingPrompt.sessionID, promptBody: competingPrompt.body),
             .completed(HostComputerUseManager.activeTaskConflictResponse))
         XCTAssertEqual(
             ComputerUseTaskLedger(fileURL: ledgerURL).terminalOutcome(
@@ -2130,7 +2370,7 @@ final class ComputerUseTests: XCTestCase {
             try ComputerUseTaskLedger(fileURL: ledgerURL).claim(
                 taskID: prompt.id,
                 senderID: prompt.senderID,
-                sessionID: prompt.sessionID),
+                sessionID: prompt.sessionID, promptBody: prompt.body),
             .completed(HostComputerUseManager.connectionEndedResponse))
 
         // Simulate a runtime that observes cancellation but still returns a
@@ -2160,7 +2400,7 @@ final class ComputerUseTests: XCTestCase {
             try ComputerUseTaskLedger(fileURL: ledgerURL).claim(
                 taskID: prompt.id,
                 senderID: prompt.senderID,
-                sessionID: prompt.sessionID),
+                sessionID: prompt.sessionID, promptBody: prompt.body),
             .completed(HostComputerUseManager.connectionEndedResponse))
     }
 
@@ -2377,7 +2617,7 @@ final class ComputerUseTests: XCTestCase {
             try ComputerUseTaskLedger(fileURL: ledgerURL).claim(
                 taskID: prompt.id,
                 senderID: prompt.senderID,
-                sessionID: prompt.sessionID),
+                sessionID: prompt.sessionID, promptBody: prompt.body),
             .completed(HostComputerUseManager.connectionEndedResponse))
         manager.authorizePeer(senderID: prompt.senderID)
         XCTAssertTrue(manager.handle(prompt, channel: channel))
@@ -2461,7 +2701,7 @@ final class ComputerUseTests: XCTestCase {
             try ComputerUseTaskLedger(fileURL: ledgerURL).claim(
                 taskID: prompt.id,
                 senderID: prompt.senderID,
-                sessionID: prompt.sessionID),
+                sessionID: prompt.sessionID, promptBody: prompt.body),
             .completed(HostComputerUseManager.connectionEndedResponse))
     }
 
@@ -4857,13 +5097,13 @@ final class ComputerUseTests: XCTestCase {
             try first.claim(
                 taskID: "task-1",
                 senderID: "IOS-PEER",
-                sessionID: "SESSION-1"),
+                sessionID: "SESSION-1", promptBody: "Fixture request"),
             .new)
         XCTAssertEqual(
             try first.claim(
                 taskID: "task-1",
                 senderID: "IOS-PEER",
-                sessionID: "SESSION-1"),
+                sessionID: "SESSION-1", promptBody: "Fixture request"),
             .accepted)
         try first.complete(
             taskID: "task-1",
@@ -4875,7 +5115,7 @@ final class ComputerUseTests: XCTestCase {
             try relaunched.claim(
                 taskID: "task-1",
                 senderID: "IOS-PEER",
-                sessionID: "SESSION-1"),
+                sessionID: "SESSION-1", promptBody: "Fixture request"),
             .completed("Finished"))
         XCTAssertEqual(
             relaunched.terminalOutcome(taskID: "task-1"),
@@ -4897,7 +5137,7 @@ final class ComputerUseTests: XCTestCase {
             try missing.claim(
                 taskID: "new-ledger-task",
                 senderID: "IOS-PEER",
-                sessionID: "SESSION-1"),
+                sessionID: "SESSION-1", promptBody: "Fixture request"),
             .new)
 
         let corruptURL = root
@@ -4920,7 +5160,7 @@ final class ComputerUseTests: XCTestCase {
             XCTAssertThrowsError(try ledger.claim(
                 taskID: "poisoned-claim-\(index)",
                 senderID: "IOS-PEER",
-                sessionID: "SESSION-1")) { error in
+                sessionID: "SESSION-1", promptBody: "Fixture request")) { error in
                     XCTAssertEqual(
                         error as? ComputerUseTaskLedger.LedgerError,
                         .unavailable)
@@ -5015,14 +5255,14 @@ final class ComputerUseTests: XCTestCase {
                     try ledger.claim(
                         taskID: taskID,
                         senderID: "IOS-PEER",
-                        sessionID: "SESSION-1"),
+                        sessionID: "SESSION-1", promptBody: "Fixture request"),
                     .new,
                     taskID)
                 XCTAssertEqual(
                     try ledger.claim(
                         taskID: taskID,
                         senderID: "IOS-PEER",
-                        sessionID: "SESSION-1"),
+                        sessionID: "SESSION-1", promptBody: "Fixture request"),
                     .accepted,
                     taskID)
             case .paused:
@@ -5030,14 +5270,14 @@ final class ComputerUseTests: XCTestCase {
                     try ledger.claim(
                         taskID: taskID,
                         senderID: "IOS-PEER",
-                        sessionID: "SESSION-1"),
+                        sessionID: "SESSION-1", promptBody: "Fixture request"),
                     .paused(appliedControlRevision: 2),
                     taskID)
                 XCTAssertEqual(
                     try ledger.claim(
                         taskID: taskID,
                         senderID: "IOS-PEER",
-                        sessionID: "SESSION-1"),
+                        sessionID: "SESSION-1", promptBody: "Fixture request"),
                     .paused(appliedControlRevision: 2),
                     "A paused, never-started Prompt must be reconstructible")
             case .cancelled:
@@ -5092,7 +5332,7 @@ final class ComputerUseTests: XCTestCase {
             try relaunched.claim(
                 taskID: taskID,
                 senderID: "IOS-PEER",
-                sessionID: "SESSION-1"),
+                sessionID: "SESSION-1", promptBody: "Fixture request"),
             .completed(ComputerUseTaskLedger.stoppedResponse))
         XCTAssertEqual(
             relaunched.terminalOutcome(taskID: taskID),
@@ -5119,7 +5359,7 @@ final class ComputerUseTests: XCTestCase {
             try afterPauseRestart.claim(
                 taskID: taskID,
                 senderID: "IOS-PEER",
-                sessionID: "SESSION-1"),
+                sessionID: "SESSION-1", promptBody: "Fixture request"),
             .paused(appliedControlRevision: 7))
         _ = try afterPauseRestart.applyControl(
             .resume,
@@ -5131,7 +5371,7 @@ final class ComputerUseTests: XCTestCase {
             try afterPauseRestart.claim(
                 taskID: taskID,
                 senderID: "IOS-PEER",
-                sessionID: "SESSION-1"),
+                sessionID: "SESSION-1", promptBody: "Fixture request"),
             .new)
 
         let afterStartRestart = ComputerUseTaskLedger(fileURL: url)
@@ -5139,7 +5379,7 @@ final class ComputerUseTests: XCTestCase {
             try afterStartRestart.claim(
                 taskID: taskID,
                 senderID: "IOS-PEER",
-                sessionID: "SESSION-1"),
+                sessionID: "SESSION-1", promptBody: "Fixture request"),
             .accepted)
     }
 
@@ -5162,13 +5402,13 @@ final class ComputerUseTests: XCTestCase {
             try ledger.claim(
                 taskID: taskID,
                 senderID: "OTHER-PEER",
-                sessionID: "SESSION-1"),
+                sessionID: "SESSION-1", promptBody: "Fixture request"),
             .identityMismatch)
         XCTAssertEqual(
             try ledger.claim(
                 taskID: taskID,
                 senderID: "IOS-PEER",
-                sessionID: "OTHER-SESSION"),
+                sessionID: "OTHER-SESSION", promptBody: "Fixture request"),
             .identityMismatch)
         let rejected = try ledger.applyControl(
             .cancel,
@@ -5182,7 +5422,7 @@ final class ComputerUseTests: XCTestCase {
             try ledger.claim(
                 taskID: taskID,
                 senderID: "IOS-PEER",
-                sessionID: "SESSION-1"),
+                sessionID: "SESSION-1", promptBody: "Fixture request"),
             .paused(appliedControlRevision: 1))
     }
 
@@ -5467,6 +5707,16 @@ final class ComputerUseTests: XCTestCase {
                 XCTFail("Unexpected error: \(error)")
             }
         }
+    }
+
+    private func flushPromptIdentityReplies(manager: HostComputerUseManager, channel: FakeHostComputerUseChannel) async throws {
+        // An unrelated pre-Prompt control appends a status after every queued
+        // reply without running an executor or changing the live task context.
+        let barrier = "reply-barrier-\(UUID().uuidString)"
+        XCTAssertTrue(manager.handle(try makeControlEnvelope(kind: .pause, taskID: barrier, revision: 1), channel: channel))
+        await waitUntil { await channel.sentMessages().contains {
+            (try? ComputerUseTaskUpdate.decodeBody($0.body).taskID) == barrier
+        } }
     }
 
     private func makeEnvelope(

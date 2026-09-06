@@ -1,3 +1,4 @@
+import CryptoKit
 import Darwin
 import Foundation
 
@@ -11,6 +12,7 @@ final class ComputerUseTaskLedger {
         case paused(appliedControlRevision: UInt64)
         case completed(String)
         case identityMismatch
+        case promptIdentityUnavailable
     }
 
     enum Control: String, Codable, Equatable {
@@ -76,6 +78,7 @@ final class ComputerUseTaskLedger {
         let acceptedAt: Date
         var senderID: String?
         var sessionID: String?
+        var promptDigest: String?
         var promptClaimed: Bool
         var executionStarted: Bool
         var response: String?
@@ -90,6 +93,7 @@ final class ComputerUseTaskLedger {
             sessionID: String,
             promptClaimed: Bool,
             executionStarted: Bool,
+            promptDigest: String? = nil,
             response: String? = nil,
             outcome: ComputerUseTerminalOutcome? = nil,
             control: ControlSnapshot? = nil
@@ -97,6 +101,7 @@ final class ComputerUseTaskLedger {
             self.acceptedAt = acceptedAt
             self.senderID = senderID
             self.sessionID = sessionID
+            self.promptDigest = promptDigest
             self.promptClaimed = promptClaimed
             self.executionStarted = executionStarted
             self.response = response
@@ -110,6 +115,7 @@ final class ComputerUseTaskLedger {
             case acceptedAt
             case senderID
             case sessionID
+            case promptDigest
             case promptClaimed
             case executionStarted
             case response
@@ -124,6 +130,7 @@ final class ComputerUseTaskLedger {
             acceptedAt = try values.decode(Date.self, forKey: .acceptedAt)
             senderID = try values.decodeIfPresent(String.self, forKey: .senderID)
             sessionID = try values.decodeIfPresent(String.self, forKey: .sessionID)
+            promptDigest = try values.decodeIfPresent(String.self, forKey: .promptDigest)
             response = try values.decodeIfPresent(String.self, forKey: .response)
             if let rawOutcome = try values.decodeIfPresent(
                 String.self,
@@ -145,6 +152,14 @@ final class ComputerUseTaskLedger {
             executionStarted = try values.decodeIfPresent(
                 Bool.self,
                 forKey: .executionStarted) ?? true
+            if !promptClaimed && executionStarted { throw LedgerError.unavailable }
+            if let promptDigest {
+                guard promptClaimed, senderID != nil, sessionID != nil,
+                      promptDigest.utf8.count == 64,
+                      promptDigest.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else {
+                    throw LedgerError.unavailable
+                }
+            }
             approvedAction = try values.decodeIfPresent(ApprovedActionRecord.self, forKey: .approvedAction)
             if approvedAction != nil, !promptClaimed || !executionStarted || senderID == nil || sessionID == nil {
                 throw LedgerError.unavailable
@@ -190,7 +205,8 @@ final class ComputerUseTaskLedger {
     func claim(
         taskID: String,
         senderID: String,
-        sessionID: String
+        sessionID: String,
+        promptBody: String
     ) throws -> Claim {
         try ensureAvailable()
         guard Self.validIdentity(
@@ -200,26 +216,41 @@ final class ComputerUseTaskLedger {
             throw LedgerError.invalidIdentity
         }
 
+        // Hash the exact wire bytes, not Swift String equality or decoded JSON:
+        // Unicode normalization, conversation and clarification changes matter.
+        let digest = SHA256.hash(data: Data(promptBody.utf8))
+            .map { String(format: "%02x", $0) }.joined()
         guard var record = records[taskID] else {
             let record = Record(
                 acceptedAt: Date(),
                 senderID: senderID,
                 sessionID: sessionID,
                 promptClaimed: true,
-                executionStarted: true)
+                executionStarted: true,
+                promptDigest: digest)
             try commit(record, for: taskID)
             return .new
         }
-        let wasUnbound = record.senderID == nil || record.sessionID == nil
         guard bindOrMatch(
             &record,
             senderID: senderID,
             sessionID: sessionID) else {
             return .identityMismatch
         }
+        if let originalDigest = record.promptDigest {
+            guard originalDigest == digest else { return .identityMismatch }
+        } else if record.promptClaimed {
+            // A retry cannot retroactively establish the content of an old
+            // claimed request. Keep the original record intact for recovery.
+            return .promptIdentityUnavailable
+        } else {
+            // Only a control-only record has never received a Prompt. Bind its
+            // first body in the same durable write that claims the instruction.
+            record.promptDigest = digest
+        }
 
         if let response = record.response {
-            if !record.promptClaimed || wasUnbound {
+            if !record.promptClaimed {
                 record.promptClaimed = true
                 try commit(record, for: taskID)
             }
@@ -243,10 +274,14 @@ final class ComputerUseTaskLedger {
             try commit(record, for: taskID)
             return .new
         }
-        if wasUnbound {
-            try commit(record, for: taskID)
-        }
         return .accepted
+    }
+
+    /// Legacy results have no proof of which instruction they answered. This
+    /// also gates control replies, whose envelopes intentionally have no body.
+    func requiresPromptIdentityRecovery(taskID: String) -> Bool {
+        guard initializationError == nil, let record = records[taskID] else { return false }
+        return record.promptClaimed && record.promptDigest == nil
     }
 
     func applyControl(
@@ -359,7 +394,7 @@ final class ComputerUseTaskLedger {
     func claimApprovedAction(taskID: String, senderID: String, sessionID: String,
                              prepared: MCPPreparedApproval) throws -> ApprovedActionClaim {
         try ensureAvailable()
-        guard var record = records[taskID], record.promptClaimed, record.executionStarted,
+        guard var record = records[taskID], record.promptClaimed, record.promptDigest != nil, record.executionStarted,
               record.senderID == senderID, record.sessionID == sessionID,
               prepared.call.taskID == taskID, prepared.call.risk == .approvalRequired,
               prepared.fingerprint == MCPApprovalFingerprint(call: prepared.call) else {
@@ -430,10 +465,8 @@ final class ComputerUseTaskLedger {
         senderID: String,
         sessionID: String
     ) -> Bool {
-        if let boundSenderID = record.senderID,
-           let boundSessionID = record.sessionID {
-            return boundSenderID == senderID && boundSessionID == sessionID
-        }
+        if let boundSenderID = record.senderID, boundSenderID != senderID { return false }
+        if let boundSessionID = record.sessionID, boundSessionID != sessionID { return false }
         // This is the one-time migration path for a pre-control ledger record.
         // Once bound, every future Prompt and control must present both values.
         record.senderID = senderID
