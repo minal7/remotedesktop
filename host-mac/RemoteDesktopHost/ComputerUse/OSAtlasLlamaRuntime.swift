@@ -342,6 +342,10 @@ struct OSAtlasLlamaRouterPreset: Equatable, Sendable {
         let boundedWorkerSettings = [
             "threads = \(OSAtlasLlamaLaunchConfiguration.workerThreads)",
             "threads-batch = \(OSAtlasLlamaLaunchConfiguration.workerThreads)",
+            // Each child has its own CPU pools; router flags alone would not
+            // establish the worker's wait policy.
+            "poll = 0",
+            "poll-batch = 0",
             "parallel = 1",
             "no-cont-batching = true",
             "batch-size = \(resourceProfile.logicalBatchSize)",
@@ -568,7 +572,7 @@ struct OSAtlasLlamaLaunchConfiguration: Equatable, Sendable {
 
     var arguments: [String] {
         if let authenticationFile {
-            // The measured Qwen3.5 form configuration, without a projector or
+            // The Qwen3.5 form configuration, without a projector or
             // visual template. Its credential remains in an owner-only file.
             return [
                 "--model", modelFirstSplitURL.path,
@@ -577,7 +581,8 @@ struct OSAtlasLlamaLaunchConfiguration: Equatable, Sendable {
                 "--api-key-file", authenticationFile.fileURL.path,
                 "--offline", "--no-ui", "--no-mmproj", "--log-disable",
                 "--parallel", "1", "--ctx-size", "4096", "--cache-ram", "0",
-                "--threads", "4", "--threads-batch", "4", "--n-gpu-layers", "99",
+                "--threads", String(Self.workerThreads), "--threads-batch", String(Self.workerThreads),
+                "--poll", "0", "--poll-batch", "0", "--n-gpu-layers", "99",
                 "--jinja", "--reasoning", "on", "--reasoning-budget", "512",
             ]
         }
@@ -610,6 +615,11 @@ struct OSAtlasLlamaLaunchConfiguration: Equatable, Sendable {
             "--ubatch-size", String(resourceProfile.physicalBatchSize),
             "--threads", String(Self.workerThreads),
             "--threads-batch", String(Self.workerThreads),
+            // b9992 defaults to busy-wait level 50 between CPU graphs. Wake
+            // sleeping workers for real work instead of spending that budget
+            // polling, including in the separate prompt-processing pool.
+            "--poll", "0",
+            "--poll-batch", "0",
             "--parallel", "1",
             "--no-cont-batching",
             // One 448 px InternVL tile produces 256 image tokens. Keep both

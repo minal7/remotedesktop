@@ -9149,6 +9149,8 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
         XCTAssertTrue(arguments.contains("--offline"))
         for (flag, value) in [("--host", "127.0.0.1"), ("--ctx-size", "4096"),
                               ("--parallel", "1"), ("--reasoning-budget", "512"),
+                              ("--threads", "4"), ("--threads-batch", "4"),
+                              ("--poll", "0"), ("--poll-batch", "0"),
                               ("--alias", ComputerUseNativeTextRuntimeInputs.modelAlias),
                               ("--api-key-file", file.fileURL.path)] {
             let index = try XCTUnwrap(arguments.firstIndex(of: flag))
@@ -9467,6 +9469,8 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
             "--ubatch-size", "128",
             "--threads", "4",
             "--threads-batch", "4",
+            "--poll", "0",
+            "--poll-batch", "0",
             "--parallel", "1",
             "--no-cont-batching",
             "--image-min-tokens", "256",
@@ -9519,6 +9523,11 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
                 .count - 1,
             2)
         XCTAssertTrue(preset.contents.contains("ctx-size = 4096"))
+        // Both model sections must opt out of the upstream busy-wait default.
+        for setting in ["poll = 0", "poll-batch = 0"] {
+            XCTAssertEqual(preset.contents.components(separatedBy: "\n")
+                .filter { $0 == setting }.count, 2)
+        }
         XCTAssertFalse(preset.contents.contains("hf-repo"))
         XCTAssertFalse(preset.contents.contains("model-url"))
 
@@ -9886,6 +9895,8 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
             configuration.resourceProfile.minimumInferenceMemoryBytes,
             1 * 1_024 * 1_024 * 1_024)
         XCTAssertEqual(try value(after: "--parallel"), "1")
+        XCTAssertEqual(try value(after: "--poll"), "0")
+        XCTAssertEqual(try value(after: "--poll-batch"), "0")
         XCTAssertEqual(try value(after: "--cache-ram"), "0")
         XCTAssertEqual(try value(after: "--ctx-checkpoints"), "0")
     }
