@@ -169,6 +169,9 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
             throw RoutingError.missingContinuation
         }
         let result = try await continuing.continueAfterApproval(prepared, tools: tools, progress: progress)
+        // A successful approved effect remains a fact after concurrent Stop.
+        // The manager records it separately from task cancellation/state.
+        if case .completed = result { return result }
         try Task.checkCancellation()
         return result
     }

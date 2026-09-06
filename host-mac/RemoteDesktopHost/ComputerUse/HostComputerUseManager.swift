@@ -5014,7 +5014,7 @@ final class HostComputerUseManager: ObservableObject {
     ) {
         actionGate.endAutomation(allowsActions: true)
         activity = .idle
-        let response = "The approved action was not performed: \(error.localizedDescription)"
+        let response = "I couldn't confirm the approved action's result. It will not be retried automatically: \(error.localizedDescription)"
         sendDurableTerminal(
             response,
             outcome: .unableToComplete,
@@ -5738,12 +5738,16 @@ final class HostComputerUseManager: ObservableObject {
                             channel: channel)
                     }
                 } else {
-                    let response = "That request was received before the host restarted, so it was not run again. Send it as a new request if it is still needed."
-                    sendDurableTerminal(
-                        response,
-                        outcome: .unableToComplete,
-                        replyingTo: envelope,
-                        channel: channel)
+                    if let action = try taskLedger.approvedAction(taskID: envelope.id,
+                        senderID: envelope.senderID, sessionID: envelope.sessionID) {
+                        sendDurableTerminal(action.response ?? Self.unconfirmedApprovedActionResponse,
+                            outcome: action.response == nil ? .unableToComplete : .taskCompleted,
+                            replyingTo: envelope, channel: channel)
+                    } else {
+                        let response = "That request was received before the host restarted, so it was not run again. Send it as a new request if it is still needed."
+                        sendDurableTerminal(response, outcome: .unableToComplete,
+                            replyingTo: envelope, channel: channel)
+                    }
                     sendStatus("ready", replyingTo: envelope, channel: channel)
                 }
                 return
@@ -5895,7 +5899,13 @@ final class HostComputerUseManager: ObservableObject {
                     self?.sendStatus(value, replyingTo: envelope, channel: channel)
                 }
                 let result: ComputerUseExecutionResult
-                if let textClarification {
+                if let action = try taskLedger.approvedAction(taskID: envelope.id,
+                    senderID: envelope.senderID, sessionID: envelope.sessionID) {
+                    // Resume joins the previous execution first. Reconcile a
+                    // claimed approved effect instead of asking any executor
+                    // to reconstruct or repeat this consequential task.
+                    result = Self.resultForApprovedAction(action)
+                } else if let textClarification {
                     guard let continuing = executor as? any ComputerUseTextClarificationContinuing else {
                         throw ComputerUseTextClarificationStore.Failure.invalidReference
                     }
@@ -6214,19 +6224,31 @@ final class HostComputerUseManager: ObservableObject {
                 return
             }
             do {
-                let result = try await continuation.continueAfterApproval(
-                    prepared,
-                    tools: tools,
-                    progress: { [weak self] value in
-                        guard self?.currentExecutionToken == token else { return }
-                        self?.activity = .working(value)
-                        self?.sendStatus(
-                            value,
-                            replyingTo: context.envelope,
-                            channel: context.channel)
-                    })
-                guard !Task.isCancelled,
-                      currentExecutionToken == token else { return }
+                let result: ComputerUseExecutionResult
+                switch try taskLedger.claimApprovedAction(taskID: context.envelope.id,
+                    senderID: context.envelope.senderID, sessionID: context.envelope.sessionID, prepared: prepared) {
+                case .existing(let action):
+                    result = Self.resultForApprovedAction(action)
+                case .new:
+                    result = try await continuation.continueAfterApproval(
+                        prepared,
+                        tools: tools,
+                        progress: { [weak self] value in
+                            guard self?.currentExecutionToken == token else { return }
+                            self?.activity = .working(value)
+                            self?.sendStatus(value, replyingTo: context.envelope, channel: context.channel)
+                        })
+                    guard case .completed(let response) = result else {
+                        throw MCPClientError.serverMismatch("The approved operation did not return a terminal result.")
+                    }
+                    // Record the exact old task's confirmed effect before
+                    // checking its UI token. Stop's first terminal still wins;
+                    // a stale completion may not clear or update a newer task.
+                    try taskLedger.recordApprovedActionResult(taskID: context.envelope.id,
+                        senderID: context.envelope.senderID, sessionID: context.envelope.sessionID,
+                        fingerprint: prepared.fingerprint, response: response)
+                }
+                guard currentExecutionToken == token else { return }
                 try acceptExecutionResult(
                     result,
                     executor: executor,
@@ -6245,6 +6267,13 @@ final class HostComputerUseManager: ObservableObject {
                 finishApprovedActionFailure(error, context: context)
             }
         }
+    }
+
+    private static let unconfirmedApprovedActionResponse = "The approved action may already have been performed. I couldn't confirm its result, so I will not repeat it. Check the Mac before starting another request for this action."
+
+    private static func resultForApprovedAction(_ action: ComputerUseTaskLedger.ApprovedActionRecord) -> ComputerUseExecutionResult {
+        if let response = action.response { return .completed(response) }
+        return .unableToComplete(unconfirmedApprovedActionResponse)
     }
 
     private func acceptExecutionResult(

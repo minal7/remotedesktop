@@ -9,6 +9,190 @@ import XCTest
 
 @MainActor
 final class ComputerUseTests: XCTestCase {
+    func test_approvedActionRecordPreservesLateConfirmationWithoutReplacingStop() throws {
+        let url = temporaryLedgerURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let ledger = ComputerUseTaskLedger(fileURL: url)
+        _ = try ledger.claim(taskID: "approved", senderID: "sender", sessionID: "session")
+        let prepared = try receiptApproval(taskID: "approved")
+        XCTAssertEqual(try ledger.claimApprovedAction(taskID: "approved", senderID: "sender", sessionID: "session", prepared: prepared), .new)
+        _ = try ledger.applyControl(.cancel, taskID: "approved", revision: 1, senderID: "sender", sessionID: "session")
+        try ledger.recordApprovedActionResult(taskID: "approved", senderID: "sender", sessionID: "session", fingerprint: prepared.fingerprint, response: "Confirmed exact action")
+        let restored = ComputerUseTaskLedger(fileURL: url)
+        XCTAssertEqual(try restored.claim(taskID: "approved", senderID: "sender", sessionID: "session"), .completed(ComputerUseTaskLedger.stoppedResponse))
+        XCTAssertEqual(restored.terminalOutcome(taskID: "approved"), .unableToComplete)
+        XCTAssertEqual(restored.appliedControlRevision(taskID: "approved"), 1)
+        let receipt = try XCTUnwrap(restored.approvedAction(taskID: "approved", senderID: "sender", sessionID: "session"))
+        XCTAssertEqual(receipt.response, "Confirmed exact action")
+        XCTAssertEqual(receipt.fingerprint, prepared.fingerprint)
+        XCTAssertEqual(try restored.claimApprovedAction(taskID: "approved", senderID: "sender", sessionID: "session",
+            prepared: receiptApproval(taskID: "approved", generation: 8)), .existing(receipt))
+    }
+
+    func test_approvedActionRecordRejectsForeignOrUnclaimedResultsAndConflictingConfirmation() throws {
+        let url = temporaryLedgerURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let ledger = ComputerUseTaskLedger(fileURL: url)
+        let prepared = try receiptApproval(taskID: "approved")
+        XCTAssertThrowsError(try ledger.claimApprovedAction(taskID: "approved", senderID: "sender", sessionID: "session", prepared: prepared))
+        _ = try ledger.claim(taskID: "approved", senderID: "sender", sessionID: "session")
+        XCTAssertThrowsError(try ledger.recordApprovedActionResult(taskID: "approved", senderID: "sender", sessionID: "session", fingerprint: prepared.fingerprint, response: "Unclaimed"))
+        XCTAssertThrowsError(try ledger.claimApprovedAction(taskID: "approved", senderID: "foreign", sessionID: "session", prepared: prepared))
+        XCTAssertThrowsError(try ledger.claimApprovedAction(taskID: "approved", senderID: "sender", sessionID: "foreign", prepared: prepared))
+        _ = try ledger.claimApprovedAction(taskID: "approved", senderID: "sender", sessionID: "session", prepared: prepared)
+        let foreign = try receiptApproval(taskID: "approved", generation: 8)
+        XCTAssertThrowsError(try ledger.recordApprovedActionResult(taskID: "approved", senderID: "sender", sessionID: "session", fingerprint: foreign.fingerprint, response: "Wrong generation"))
+        XCTAssertThrowsError(try ledger.approvedAction(taskID: "approved", senderID: "sender", sessionID: "foreign"))
+        for _ in 0..<2 {
+            try ledger.recordApprovedActionResult(taskID: "approved", senderID: "sender", sessionID: "session", fingerprint: prepared.fingerprint, response: "First confirmed result")
+        }
+        XCTAssertThrowsError(try ledger.recordApprovedActionResult(taskID: "approved", senderID: "sender", sessionID: "session", fingerprint: prepared.fingerprint, response: "Contradictory result"))
+        XCTAssertEqual(try ledger.approvedAction(taskID: "approved", senderID: "sender", sessionID: "session")?.response, "First confirmed result")
+        let long = try receiptApproval(taskID: "long-result"), prefix = String(repeating: "x", count: 4_000)
+        _ = try ledger.claim(taskID: "long-result", senderID: "sender", sessionID: "session")
+        _ = try ledger.claimApprovedAction(taskID: "long-result", senderID: "sender", sessionID: "session", prepared: long)
+        try ledger.recordApprovedActionResult(taskID: "long-result", senderID: "sender", sessionID: "session", fingerprint: long.fingerprint, response: prefix + "first")
+        XCTAssertThrowsError(try ledger.recordApprovedActionResult(taskID: "long-result", senderID: "sender", sessionID: "session", fingerprint: long.fingerprint, response: prefix + "conflicting suffix"))
+        XCTAssertEqual(try ledger.approvedAction(taskID: "long-result", senderID: "sender", sessionID: "session")?.response, prefix)
+    }
+
+    func test_approvedActionStorageFailureDoesNotPublishClaimOrResultAndPoisonsFurtherWork() throws {
+        for recordingResult in [false, true] {
+            let url = temporaryLedgerURL(), prepared = try receiptApproval(taskID: "approved")
+            let folder = url.deletingLastPathComponent(), parked = url.deletingLastPathComponent().appendingPathExtension("parked")
+            defer { try? FileManager.default.removeItem(at: folder); try? FileManager.default.removeItem(at: parked) }
+            let ledger = ComputerUseTaskLedger(fileURL: url)
+            _ = try ledger.claim(taskID: "approved", senderID: "sender", sessionID: "session")
+            if recordingResult { _ = try ledger.claimApprovedAction(taskID: "approved", senderID: "sender", sessionID: "session", prepared: prepared) }
+            try FileManager.default.moveItem(at: folder, to: parked)
+            try Data("block the ledger directory".utf8).write(to: folder)
+            if recordingResult {
+                XCTAssertThrowsError(try ledger.recordApprovedActionResult(taskID: "approved", senderID: "sender", sessionID: "session", fingerprint: prepared.fingerprint, response: "Not durably confirmed"))
+            } else {
+                XCTAssertThrowsError(try ledger.claimApprovedAction(taskID: "approved", senderID: "sender", sessionID: "session", prepared: prepared))
+            }
+            try FileManager.default.removeItem(at: folder)
+            try FileManager.default.moveItem(at: parked, to: folder)
+            XCTAssertThrowsError(try ledger.claim(taskID: "new", senderID: "sender", sessionID: "session"))
+            XCTAssertThrowsError(try ledger.approvedAction(taskID: "approved", senderID: "sender", sessionID: "session"))
+            let restored = ComputerUseTaskLedger(fileURL: url)
+            let receipt = try restored.approvedAction(taskID: "approved", senderID: "sender", sessionID: "session")
+            XCTAssertEqual(receipt != nil, recordingResult)
+            XCTAssertNil(receipt?.response)
+        }
+    }
+
+    func test_unconfirmedApprovedActionSurvivesTerminalPruningAndLegacyRecordsRemainReadable() throws {
+        let url = temporaryLedgerURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let ledger = ComputerUseTaskLedger(fileURL: url)
+        _ = try ledger.claim(taskID: "approved", senderID: "sender", sessionID: "session")
+        _ = try ledger.claimApprovedAction(taskID: "approved", senderID: "sender", sessionID: "session", prepared: receiptApproval(taskID: "approved"))
+        _ = try ledger.applyControl(.cancel, taskID: "approved", revision: 1, senderID: "sender", sessionID: "session")
+        _ = try ledger.claim(taskID: "legacy", senderID: "sender", sessionID: "session")
+        var records = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: [String: Any]])
+        records["approved"]?["acceptedAt"] = 0
+        records["legacy"]?.removeValue(forKey: "approvedAction")
+        try JSONSerialization.data(withJSONObject: records).write(to: url)
+        let restored = ComputerUseTaskLedger(fileURL: url)
+        _ = try restored.claim(taskID: "trigger-pruning", senderID: "sender", sessionID: "session")
+        let reloaded = ComputerUseTaskLedger(fileURL: url)
+        XCTAssertNotNil(try reloaded.approvedAction(taskID: "approved", senderID: "sender", sessionID: "session"))
+        XCTAssertEqual(try reloaded.claim(taskID: "approved", senderID: "sender", sessionID: "session"), .completed(ComputerUseTaskLedger.stoppedResponse))
+        XCTAssertNil(try reloaded.approvedAction(taskID: "legacy", senderID: "sender", sessionID: "session"))
+    }
+
+    func test_approvedMCPConfirmationSurvivesPauseAndResumeThroughCapabilityWrapperWithoutReplay() async throws {
+        try await assertApprovedActionInterruption("pause-confirmed")
+    }
+
+    func test_unconfirmedApprovedMCPActionCannotReplanOrRepeatOnResume() async throws {
+        try await assertApprovedActionInterruption("pause-unconfirmed")
+    }
+
+    func test_lateApprovedMCPConfirmationCannotReplaceStopOrChangeNewerTask() async throws {
+        try await assertApprovedActionInterruption("cancel-new-task")
+    }
+
+    func test_lateApprovedMCPConfirmationIsRetainedAfterTransportStopWithoutAnotherTerminal() async throws {
+        try await assertApprovedActionInterruption("transport-stop")
+    }
+
+    private func receiptApproval(taskID: String, generation: UInt64 = 7) throws -> MCPPreparedApproval {
+        let tool = try MCPAllowedTool(serverID: RemoteDesktopMailMCP.serverID, processGeneration: generation,
+            toolName: RemoteDesktopMailMCP.toolName, description: "Receipt fixture", inputSchema: .object(["type": .string("object")]),
+            risk: .approvalRequired, approval: MCPApprovalDisplay(summary: "Create this draft?", details: "Exact fixture values", confirmLabel: "Create draft"))
+        let call = try tool.makeCall(taskID: taskID, arguments: ["to": .string("receipt@example.invalid"), "subject": .string("Receipt fixture"), "body": .string("Fixture body"), "send_now": .bool(false)])
+        return MCPPreparedApproval(call: call, fingerprint: MCPApprovalFingerprint(call: call), display: call.approvalDisplay)
+    }
+
+    private func assertApprovedActionInterruption(_ mode: String) async throws {
+        let url = temporaryLedgerURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let ledger = ComputerUseTaskLedger(fileURL: url)
+        let gate = ComputerUsePlanningTestGate<Bool>(started: expectation(description: "approved action dispatched"), returned: expectation(description: "approved action returned"))
+        defer { gate.finish(true) }
+        let prompt = makeEnvelope(id: "approved-task", kind: .prompt,
+            body: "Draft an email to receipt@example.invalid with subject Receipt fixture and body Fixture body.")
+        let prepared = try receiptApproval(taskID: prompt.id)
+        let desktop = ApprovalHoldingMCPComputerUseExecutor(prepared: prepared, resultGate: gate,
+            resultAfterFirstExecution: .userInterventionRequired("New task awaits your input."))
+        var nativeCalls = 0
+        let executor = ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in nativeCalls += 1; return nil }, desktopFactory: { _ in desktop })
+        let channel = FakeHostComputerUseChannel()
+        let manager = HostComputerUseManager(injector: InputInjector(), executor: executor, taskLedger: ledger,
+            allowsExternalServices: false, channelFactory: { _ in channel })
+        defer { manager.stop() }
+        manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(manager.handle(prompt, channel: channel))
+        await waitUntil { await channel.sentMessages().contains { $0.kind == .approvalRequest } }
+        let messages = await channel.sentMessages()
+        let requestEnvelope = try XCTUnwrap(messages.first { $0.kind == .approvalRequest })
+        let request = try ComputerUseApprovalRequest.decodeBody(requestEnvelope.body)
+        let approval = ComputerUseApprovalResponse(requestID: request.requestID, approved: true)
+        XCTAssertTrue(manager.handle(makeEnvelope(kind: .approvalResponse, body: try approval.encodedBody()), channel: channel))
+        await fulfillment(of: [gate.started], timeout: 1)
+        XCTAssertNotNil(try ledger.approvedAction(taskID: prompt.id, senderID: prompt.senderID, sessionID: prompt.sessionID))
+        let newer = makeEnvelope(id: "newer-task", kind: .prompt, body: "Open Calculator")
+        switch mode {
+        case "cancel-new-task":
+            XCTAssertTrue(manager.handle(makeEnvelope(kind: .cancel), channel: channel))
+            XCTAssertTrue(manager.handle(newer, channel: channel))
+        case "transport-stop": manager.stop()
+        default:
+            XCTAssertTrue(manager.handle(makeEnvelope(kind: .pause), channel: channel))
+            XCTAssertTrue(manager.handle(makeEnvelope(kind: .resume), channel: channel))
+        }
+        XCTAssertEqual(desktop.executeCount, 1)
+        XCTAssertEqual(desktop.approvedActionSideEffectCount, 1)
+        gate.finish(mode != "pause-unconfirmed")
+        await fulfillment(of: [gate.returned], timeout: 1)
+        await waitUntil {
+            if mode == "cancel-new-task" { return desktop.executeCount == 2 && manager.activity == .paused }
+            if mode == "transport-stop" { return (try? ledger.approvedAction(taskID: prompt.id, senderID: prompt.senderID, sessionID: prompt.sessionID))?.response != nil }
+            return manager.activity == .idle
+        }
+        let record = try XCTUnwrap(ledger.approvedAction(taskID: prompt.id, senderID: prompt.senderID, sessionID: prompt.sessionID))
+        XCTAssertEqual(record.response, mode == "pause-unconfirmed" ? nil : "Confirmed approved fixture action")
+        XCTAssertEqual(desktop.continueAfterApprovalCount, 1)
+        XCTAssertEqual(desktop.approvedActionSideEffectCount, 1)
+        XCTAssertEqual(nativeCalls, mode == "cancel-new-task" ? 2 : 1)
+        await waitUntil { await channel.sentMessages().contains { $0.kind == .assistant } }
+        let sent = await channel.sentMessages()
+        let terminals = sent.filter { $0.kind == .assistant }.compactMap { try? ComputerUseTaskUpdate.decodeBody($0.body) }.filter { $0.taskID == prompt.id }
+        XCTAssertEqual(terminals.count, 1)
+        if mode == "pause-confirmed" {
+            XCTAssertEqual(terminals.first?.outcome, .taskCompleted)
+            XCTAssertEqual(terminals.first?.text, record.response)
+        } else {
+            XCTAssertEqual(terminals.first?.outcome, .unableToComplete)
+            if mode == "cancel-new-task" { XCTAssertEqual(terminals.first?.text, ComputerUseTaskLedger.stoppedResponse) }
+            if mode == "pause-unconfirmed" { XCTAssertTrue(terminals.first?.text.contains("may already have been performed") == true) }
+        }
+        let restored = ComputerUseTaskLedger(fileURL: url)
+        XCTAssertEqual(try restored.approvedAction(taskID: prompt.id, senderID: prompt.senderID, sessionID: prompt.sessionID), record)
+    }
+
     func test_manifestPinsAuditedRepositoriesRevisionsAndHashes() {
         let manifest = ComputerUseArtifactManifest.current
 
@@ -7275,13 +7459,18 @@ private final class ApprovalHoldingMCPComputerUseExecutor:
     let isReady = true
     let runtimeName = "Approval-holding MCP test runtime"
     private let prepared: MCPPreparedApproval
+    private let resultGate: ComputerUsePlanningTestGate<Bool>?
+    private let resultAfterFirstExecution: ComputerUseExecutionResult?
     private(set) var executeCount = 0
     private(set) var continueAfterApprovalCount = 0
     private(set) var cancelMCPWorkCount = 0
     private(set) var approvedActionSideEffectCount = 0
 
-    init(prepared: MCPPreparedApproval) {
+    init(prepared: MCPPreparedApproval, resultGate: ComputerUsePlanningTestGate<Bool>? = nil,
+         resultAfterFirstExecution: ComputerUseExecutionResult? = nil) {
         self.prepared = prepared
+        self.resultGate = resultGate
+        self.resultAfterFirstExecution = resultAfterFirstExecution
     }
 
     func execute(
@@ -7290,6 +7479,7 @@ private final class ApprovalHoldingMCPComputerUseExecutor:
         progress: @escaping (String) -> Void
     ) async throws -> ComputerUseExecutionResult {
         executeCount += 1
+        if executeCount > 1, let resultAfterFirstExecution { return resultAfterFirstExecution }
         return .mcpApprovalRequired(prepared)
     }
 
@@ -7300,6 +7490,10 @@ private final class ApprovalHoldingMCPComputerUseExecutor:
     ) async throws -> ComputerUseExecutionResult {
         continueAfterApprovalCount += 1
         approvedActionSideEffectCount += 1
+        if let resultGate {
+            guard await resultGate.wait() else { throw CancellationError() }
+            return .completed("Confirmed approved fixture action")
+        }
         return .completed("Unexpected approved MCP action")
     }
 

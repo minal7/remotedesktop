@@ -51,6 +51,20 @@ final class ComputerUseTaskLedger {
         let clarification: ComputerUseClarificationReference?
     }
 
+    /// Independent of the task's first terminal result. Stop can remain the
+    /// terminal outcome while a late helper result confirms an approved effect.
+    struct ApprovedActionRecord: Codable, Equatable {
+        let fingerprint: MCPApprovalFingerprint
+        let attemptedAt: Date
+        var response: String?
+        var responseDigest: String? = nil
+    }
+
+    enum ApprovedActionClaim: Equatable {
+        case new
+        case existing(ApprovedActionRecord)
+    }
+
     static let stoppedResponse = "Stopped. You're in control of the Mac."
 
     private struct ControlSnapshot: Codable {
@@ -68,6 +82,7 @@ final class ComputerUseTaskLedger {
         var outcome: ComputerUseTerminalOutcome?
         var clarification: ComputerUseClarificationReference?
         var control: ControlSnapshot?
+        var approvedAction: ApprovedActionRecord?
 
         init(
             acceptedAt: Date,
@@ -88,6 +103,7 @@ final class ComputerUseTaskLedger {
             self.outcome = outcome
             self.clarification = nil
             self.control = control
+            self.approvedAction = nil
         }
 
         private enum CodingKeys: String, CodingKey {
@@ -100,6 +116,7 @@ final class ComputerUseTaskLedger {
             case outcome
             case clarification
             case control
+            case approvedAction
         }
 
         init(from decoder: Decoder) throws {
@@ -128,6 +145,13 @@ final class ComputerUseTaskLedger {
             executionStarted = try values.decodeIfPresent(
                 Bool.self,
                 forKey: .executionStarted) ?? true
+            approvedAction = try values.decodeIfPresent(ApprovedActionRecord.self, forKey: .approvedAction)
+            if approvedAction != nil, !promptClaimed || !executionStarted || senderID == nil || sessionID == nil {
+                throw LedgerError.unavailable
+            }
+            if let approvedAction, (approvedAction.response == nil) != (approvedAction.responseDigest == nil) {
+                throw LedgerError.unavailable
+            }
         }
     }
 
@@ -332,6 +356,53 @@ final class ComputerUseTaskLedger {
         return records[taskID]?.outcome
     }
 
+    func claimApprovedAction(taskID: String, senderID: String, sessionID: String,
+                             prepared: MCPPreparedApproval) throws -> ApprovedActionClaim {
+        try ensureAvailable()
+        guard var record = records[taskID], record.promptClaimed, record.executionStarted,
+              record.senderID == senderID, record.sessionID == sessionID,
+              prepared.call.taskID == taskID, prepared.call.risk == .approvalRequired,
+              prepared.fingerprint == MCPApprovalFingerprint(call: prepared.call) else {
+            throw LedgerError.invalidIdentity
+        }
+        // One approved MCP action is terminal for this task. A second call,
+        // even with a new generation or fingerprint, cannot reopen dispatch.
+        if let existing = record.approvedAction { return .existing(existing) }
+        guard record.response == nil, record.control?.state != .cancelled,
+              record.control?.state != .paused else { throw LedgerError.invalidControl }
+        record.approvedAction = ApprovedActionRecord(fingerprint: prepared.fingerprint, attemptedAt: Date(), response: nil)
+        try commit(record, for: taskID)
+        return .new
+    }
+
+    func recordApprovedActionResult(taskID: String, senderID: String, sessionID: String,
+                                    fingerprint: MCPApprovalFingerprint, response: String) throws {
+        try ensureAvailable()
+        guard var record = records[taskID], record.senderID == senderID, record.sessionID == sessionID,
+              var action = record.approvedAction, action.fingerprint == fingerprint else {
+            throw LedgerError.invalidIdentity
+        }
+        let bounded = String(response.prefix(4_000))
+        let digest = try MCPDigest.sha256(of: .string(response))
+        if action.response != nil {
+            guard action.responseDigest == digest else { throw LedgerError.invalidIdentity }
+            return
+        }
+        action.response = bounded
+        action.responseDigest = digest
+        record.approvedAction = action
+        // Do not change a Cancel/Stop terminal or its control revision.
+        try commit(record, for: taskID)
+    }
+
+    func approvedAction(taskID: String, senderID: String, sessionID: String) throws -> ApprovedActionRecord? {
+        try ensureAvailable()
+        guard let record = records[taskID], record.senderID == senderID, record.sessionID == sessionID else {
+            throw LedgerError.invalidIdentity
+        }
+        return record.approvedAction
+    }
+
     func terminalClarification(taskID: String) -> ComputerUseClarificationReference? {
         guard initializationError == nil, let record = records[taskID], record.response != nil,
               record.outcome == .userInterventionRequired, record.control?.state != .cancelled,
@@ -398,11 +469,13 @@ final class ComputerUseTaskLedger {
     private func prune(_ candidate: inout [String: Record]) {
         let cutoff = Date(timeIntervalSinceNow: -(90 * 24 * 60 * 60))
         let accepted = candidate.filter {
-            $0.value.promptClaimed && $0.value.response == nil
+            ($0.value.promptClaimed && $0.value.response == nil)
+                || ($0.value.approvedAction != nil && $0.value.approvedAction?.response == nil)
         }
         let replayable = candidate
             .filter {
                 (!$0.value.promptClaimed || $0.value.response != nil)
+                    && !($0.value.approvedAction != nil && $0.value.approvedAction?.response == nil)
                     && $0.value.acceptedAt >= cutoff
             }
             .sorted { $0.value.acceptedAt > $1.value.acceptedAt }
