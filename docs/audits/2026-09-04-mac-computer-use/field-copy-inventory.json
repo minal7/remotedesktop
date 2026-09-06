@@ -18,6 +18,8 @@
   "expectedTests": [
     "RemoteDesktopHostTests/ComputerUseActionTextPlanTests/testActionPlannerKeepsExactBudgetAndEligibilityChecksBeforeInference",
     "RemoteDesktopHostTests/ComputerUseActionTextPlanTests/testExplicitActionsPreserveDirectionPayloadOriginAndRepeatedStepIdentity",
+    "RemoteDesktopHostTests/ComputerUseActionTextPlanTests/testLiteralSpellingAndCopyAmbiguityRemainIndependentOfLabelMatches",
+    "RemoteDesktopHostTests/ComputerUseActionTextPlanTests/testLiteralTextLookupDoesNotAliasFieldsOrRevealOtherPayloads",
     "RemoteDesktopHostTests/ComputerUseActionTextPlanTests/testSchemaChoosesActionBeforeSourceAndTargetAndRestrictsLiteralIDs",
     "RemoteDesktopHostTests/ComputerUseActionTextPlanTests/testStrictActionDecoderRejectsMixedInventedAndMissingBindings",
     "RemoteDesktopHostTests/ComputerUseActionTextPlanTests/testUnquotedAuthorityExcludesGeneratedMarkersAndQuotedContent",

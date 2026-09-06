@@ -10,9 +10,10 @@ final class ComputerUseActionTextPlanTests: XCTestCase {
                 selection: NSRange(location: 0, length: 0), isEditable: true, isSecure: false))
         }
     }
-    private func planner(transport: any ComputerUseTextModelTransport = ActionTransport()) throws -> ComputerUseLocalTextGoalPlanner {
+    private func planner(transport: any ComputerUseTextModelTransport = ActionTransport(),
+                         contract: ComputerUseLocalTextGoalPlanner.Contract = .textActionsV10) throws -> ComputerUseLocalTextGoalPlanner {
         try .init(connection: .init(baseURL: URL(string: "http://127.0.0.1:49123")!, bearerToken: "fictional-test-token", modelAlias: "test-native"),
-            transport: transport, contract: .textActionsV10)
+            transport: transport, contract: contract)
     }
     private func operation(_ action: String, target: String = "f2", arguments: [String: String], mode: String = "replaceAll") -> [String: String] {
         arguments.merging(["action": action, "targetFieldID": target, "mode": mode]) { _, new in new }
@@ -119,18 +120,61 @@ final class ComputerUseActionTextPlanTests: XCTestCase {
     }
 
     func testActionPlannerKeepsExactBudgetAndEligibilityChecksBeforeInference() async throws {
+        for contract in [ComputerUseLocalTextGoalPlanner.Contract.textActionsV10, .textActionsV11] {
         let oversized = ActionTransport(tokenCount: 3_009)
-        do { _ = try await planner(transport: oversized).propose(prompt: "Copy Origin into Destination.", fields: fields); XCTFail("Overflow must stop") }
+        do { _ = try await planner(transport: oversized, contract: contract).propose(prompt: "Copy Origin into Destination.", fields: fields); XCTFail("Overflow must stop") }
         catch { XCTAssertEqual(error as? ComputerUseLocalTextPlanError, .contextLimit) }
         let calls = await oversized.completions
         XCTAssertEqual(calls, 0)
         let protected = [ComputerUseTextField(label: "Password", snapshot: .init(targetID: "secure", value: "secret",
             selection: NSRange(location: 0, length: 0), isEditable: true, isSecure: true))]
         let unused = ActionTransport()
-        let result = try await planner(transport: unused).propose(prompt: "Copy Password into Destination.", fields: protected + fields)
+        let result = try await planner(transport: unused, contract: contract).propose(prompt: "Copy Password into Destination.", fields: protected + fields)
         XCTAssertEqual(result, .unsupported)
         let protectedCalls = await unused.completions
         XCTAssertEqual(protectedCalls, 0)
+        }
+    }
+
+    func testLiteralTextLookupDoesNotAliasFieldsOrRevealOtherPayloads() throws {
+        let prompt = #"Put "Origin" in Destination, then put "private supplied text" in Origin."#
+        let catalog = try ComputerUseTextPayloadCatalog(prompt)
+        let request = try planner(contract: .textActionsV11).makeRequest(catalog: catalog, fields: fields)
+        let data = try XCTUnwrap(request.httpBody)
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let messages = try XCTUnwrap(body["messages"] as? [[String: String]])
+        let context = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(XCTUnwrap(messages.last?["content"]).utf8)) as? [String: Any])
+        XCTAssertNil(context["literalFieldMatches"])
+        XCTAssertEqual(context["literalTextByID"] as? [String: String], ["p1": "Origin"])
+        XCTAssertEqual(context["literalPayloadIDs"] as? [String], ["p1", "p2"])
+        XCTAssertEqual(context["task"] as? String, #"Put "Origin" in Destination, then put [exact quoted payload p2] in Origin."#)
+        let raw = String(decoding: data, as: UTF8.self)
+        for secret in ["private supplied text", "private existing value", "private-target-"] { XCTAssertFalse(raw.contains(secret)) }
+        var before = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(planner().makeRequest(catalog: catalog, fields: fields).httpBody)) as? [String: Any])
+        var after = body
+        before.removeValue(forKey: "messages"); after.removeValue(forKey: "messages")
+        XCTAssertEqual(try JSONSerialization.data(withJSONObject: before, options: [.sortedKeys]),
+                       try JSONSerialization.data(withJSONObject: after, options: [.sortedKeys]), "Schema and sampling are unchanged")
+        XCTAssertThrowsError(try ComputerUseLocalTextGoalPlanner.context(catalog: catalog, fields: fields,
+            includeQuotedFieldMatches: true, includeLiteralTextLookup: true), "Conflicting identity and text metadata must not be composed")
+    }
+
+    func testLiteralSpellingAndCopyAmbiguityRemainIndependentOfLabelMatches() async throws {
+        let duplicate = fields + [.init(label: "ORIGIN", snapshot: .init(targetID: "third", value: "private duplicate",
+            selection: NSRange(location: 0, length: 0), isEditable: true, isSecure: false))]
+        let prompt = #"Put "origin" in Destination."#
+        let catalog = try ComputerUseTextPayloadCatalog(prompt)
+        let text = try ComputerUseLocalTextGoalPlanner.context(catalog: catalog, fields: duplicate,
+            preserveQuotedFieldNames: true, includeLiteralTextLookup: true)
+        let context = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
+        XCTAssertEqual(context["literalTextByID"] as? [String: String], ["p1": "origin"], "Retain user spelling, not the observed label's case")
+        let transport = ActionTransport(content: try content([operation("enterLiteral", arguments: ["literalID": "p1"])]))
+        let entered = try await planner(transport: transport, contract: .textActionsV11).propose(prompt: prompt, fields: duplicate)
+        XCTAssertEqual(entered, .fieldOperations([.enterText(.init(targetID: fields[1].snapshot.targetID, mode: .replaceAll, text: "origin"))],
+            unchangedTargetIDs: [fields[0].snapshot.targetID, "third"]))
+        let copying = ActionTransport(content: try content([operation("copyField", arguments: ["sourceFieldID": "f1"])]))
+        let copied = try await planner(transport: copying, contract: .textActionsV11).propose(prompt: #"Copy the "origin" field into Destination."#, fields: duplicate)
+        XCTAssertEqual(copied, .clarification, "A literal does not require disambiguating a source field; a copy does")
     }
 }
 

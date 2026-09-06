@@ -56,6 +56,7 @@ struct ComputerUseLocalTextGoalPlanner: ComputerUseTextGoalPlanning {
         case fieldOperationsV8 = "field-operations-v8"
         case fieldOperationsV9 = "field-operations-v9"
         case textActionsV10 = "text-actions-v10"
+        case textActionsV11 = "text-actions-v11"
     }
     static let contextTokens = 4_096
     static let outputTokens = 1_024
@@ -114,8 +115,9 @@ struct ComputerUseLocalTextGoalPlanner: ComputerUseTextGoalPlanning {
     func makeRequest(catalog: ComputerUseTextPayloadCatalog, fields: [ComputerUseTextField],
                      coverageRepair: ComputerUseSourceBoundTextPlan.CoverageFailure? = nil) throws -> URLRequest {
         guard coverageRepair == nil || contract == .sourceBoundV6 else { throw ComputerUseLocalTextPlanError.invalidResponse }
-        if contract == .textActionsV10 {
-            return try ComputerUseActionTextPlan.makeRequest(connection: connection, catalog: catalog, fields: fields)
+        if contract == .textActionsV10 || contract == .textActionsV11 {
+            return try ComputerUseActionTextPlan.makeRequest(connection: connection, catalog: catalog, fields: fields,
+                literalTextLookup: contract == .textActionsV11)
         }
         if contract == .fieldCopyV7 || contract == .fieldOperationsV8 || contract == .fieldOperationsV9 {
             return try ComputerUseFieldCopyPlan.makeRequest(connection: connection, catalog: catalog, fields: fields,
@@ -164,7 +166,9 @@ struct ComputerUseLocalTextGoalPlanner: ComputerUseTextGoalPlanning {
     /// Deterministic spacing/order matches the frozen Python prototype's
     /// model-visible context. Individual strings are always JSON-encoded.
     static func context(catalog: ComputerUseTextPayloadCatalog, fields: [ComputerUseTextField],
-                        includeQuotedFieldMatches: Bool = false, preserveQuotedFieldNames: Bool = false) throws -> String {
+                        includeQuotedFieldMatches: Bool = false, preserveQuotedFieldNames: Bool = false,
+                        includeLiteralTextLookup: Bool = false) throws -> String {
+        guard !(includeQuotedFieldMatches && includeLiteralTextLookup) else { throw ComputerUseLocalTextPlanError.invalidResponse }
         func quote(_ value: String) throws -> String {
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.withoutEscapingSlashes]
@@ -214,6 +218,17 @@ struct ComputerUseLocalTextGoalPlanner: ComputerUseTextGoalPlanning {
             }.joined(separator: ", ")
             context += ", \"literalFieldMatches\": [\(matches)]"
         }
+        if includeLiteralTextLookup {
+            // A captured literal is text, not an alias for a field handle.
+            // Only reveal spellings already present in observed labels; the
+            // user's exact case/Unicode and host payload identity are retained.
+            let entries = try literalIDs.compactMap { id -> String? in
+                guard let literal = catalog.payloads[id],
+                      fields.contains(where: { $0.label.caseInsensitiveCompare(literal) == .orderedSame }) else { return nil }
+                return "\(try quote(id)): \(try quote(literal))"
+            }.joined(separator: ", ")
+            context += ", \"literalTextByID\": {\(entries)}"
+        }
         return context + "}"
     }
 
@@ -237,7 +252,7 @@ struct ComputerUseLocalTextGoalPlanner: ComputerUseTextGoalPlanning {
             if let refusal = message["refusal"], refusal != .null && refusal != .string("") {
                 throw ComputerUseLocalTextPlanError.invalidResponse
             }
-            if contract == .textActionsV10 {
+            if contract == .textActionsV10 || contract == .textActionsV11 {
                 return try ComputerUseActionTextPlan.decode(content: content, catalog: catalog, fields: fields)
             }
             if contract == .fieldCopyV7 || contract == .fieldOperationsV8 || contract == .fieldOperationsV9 {

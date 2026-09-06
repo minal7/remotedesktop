@@ -1,0 +1,240 @@
+{
+  "schemaVersion": 1,
+  "status": "frozen-before-v11-inference",
+  "sourceBaseCommit": "6bfa757",
+  "contract": "text-actions-v11",
+  "productionPlannerDefaultUnchanged": true,
+  "changes": [
+    "Replace quoted payload-to-field-ID aliases with literalTextByID containing only exact quoted text whose spelling is already visible among field labels.",
+    "Preserve v9 quoted-name syntax, v10 action schema, exact literal-ID enums, source/target argument order, strict decoder and actual-user-segment checks.",
+    "Define disposition by operation type before selecting arguments: unsupported operation versus missing/ambiguous field or supplied value."
+  ],
+  "instructionSourceSymbol": "ComputerUseActionTextPlan.literalLookupInstructions",
+  "instructionBytes": 3663,
+  "instructionSHA256": "9d444ead04152c66415f55dc08e6659acc56559f899577d03a037479f2a99c3d",
+  "instructionRecipeFromV10": [
+    {
+      "from": "literalFieldMatches helps locate a quoted name or its literal ID; the surrounding request decides its role.",
+      "to": "literalTextByID gives the exact text of captured payloads whose spelling also appears in the field labels. Use this literal-ID lookup for supplied text; select field references from fields. The surrounding request decides the role."
+    },
+    {
+      "from": "Choose each action from the meaning of the request BEFORE choosing its arguments:",
+      "to": "Choose disposition by the requested operation type. Unsupported means at least one requested operation is outside this capability. If the operations are supported but a requested field or supplied value is missing or ambiguous, use clarification. Otherwise use supported and list the complete operations.\nChoose each action from the meaning of the request BEFORE choosing its arguments:"
+    }
+  ],
+  "corpus": {
+    "path": "host-mac/AcceptanceFixtures/native-field-operations-v8-regressions.json",
+    "sha256": "d3bb6e32a333a27720871b2d8f48b0134075ac2d62741fa92c2522a8bff79ee9",
+    "caseIDs": [
+      "C01",
+      "C02",
+      "C03",
+      "C04",
+      "C05",
+      "C06",
+      "C07",
+      "C08",
+      "C09",
+      "C10",
+      "C11",
+      "C12",
+      "C13",
+      "C14",
+      "C15",
+      "C16",
+      "C17",
+      "C18",
+      "C19",
+      "C20",
+      "N01",
+      "N02",
+      "N03",
+      "N04",
+      "N05",
+      "N06",
+      "N07",
+      "N08",
+      "N13",
+      "N14",
+      "N12",
+      "R15",
+      "R16",
+      "R17",
+      "H501",
+      "H502",
+      "H503",
+      "H504",
+      "H505",
+      "H506",
+      "H507",
+      "H508",
+      "H509",
+      "H510",
+      "H511",
+      "H512",
+      "H513",
+      "H514",
+      "H515",
+      "H516",
+      "H517",
+      "H518",
+      "H519",
+      "H520"
+    ]
+  },
+  "batches": [
+    {
+      "path": "host-mac/AcceptanceFixtures/native-field-operations-v8-batch-1.json",
+      "sha256": "ee1c5d862f3905839e9501e942c6bcd5c4b1b500be91496bc1a9c30b4934d8f5",
+      "caseIDs": [
+        "C01",
+        "C02",
+        "C03",
+        "C04",
+        "C05"
+      ]
+    },
+    {
+      "path": "host-mac/AcceptanceFixtures/native-field-operations-v8-batch-2.json",
+      "sha256": "3da0c242f37be780761a6b1e24ffdbd69b1e2acf2aa76b031e6b5f88575c2ea8",
+      "caseIDs": [
+        "C06",
+        "C07",
+        "C08",
+        "C09",
+        "C10"
+      ]
+    },
+    {
+      "path": "host-mac/AcceptanceFixtures/native-field-operations-v8-batch-3.json",
+      "sha256": "4ae85770fde42acc7a26a18f1950eb6689ad9a0ecd90ae1fdaa857d95f515189",
+      "caseIDs": [
+        "C11",
+        "C12",
+        "C13",
+        "C14",
+        "C15"
+      ]
+    },
+    {
+      "path": "host-mac/AcceptanceFixtures/native-field-operations-v8-batch-4.json",
+      "sha256": "225128e5f0691a24351cf210e393001ad9b8f6ab1028d874ba7397377ca6634a",
+      "caseIDs": [
+        "C16",
+        "C17",
+        "C18",
+        "C19",
+        "C20"
+      ]
+    },
+    {
+      "path": "host-mac/AcceptanceFixtures/native-field-operations-v8-batch-5.json",
+      "sha256": "772019c3ccf821c106a4f16dc75a5ff1f6af1c0320f1771433ff654e804baff0",
+      "caseIDs": [
+        "N01",
+        "N02",
+        "N03",
+        "N04",
+        "N05"
+      ]
+    },
+    {
+      "path": "host-mac/AcceptanceFixtures/native-field-operations-v8-batch-6.json",
+      "sha256": "cec90d12f602780b70669f72bc29cd5ed62cb57d590dbd5427c1b3602b70533a",
+      "caseIDs": [
+        "N06",
+        "N07",
+        "N08",
+        "N13",
+        "N14"
+      ]
+    },
+    {
+      "path": "host-mac/AcceptanceFixtures/native-field-operations-v8-batch-7.json",
+      "sha256": "067f0473da25e8155b7eda917a4053114edf2d945155a6faadc4a2506428141f",
+      "caseIDs": [
+        "N12",
+        "R15",
+        "R16",
+        "R17",
+        "H501"
+      ]
+    },
+    {
+      "path": "host-mac/AcceptanceFixtures/native-field-operations-v8-batch-8.json",
+      "sha256": "341bfb9ed64df9eb940fc2a2465130e6a5616166cc1461522cc570a7eda88349",
+      "caseIDs": [
+        "H502",
+        "H503",
+        "H504",
+        "H505",
+        "H506"
+      ]
+    },
+    {
+      "path": "host-mac/AcceptanceFixtures/native-field-operations-v8-batch-9.json",
+      "sha256": "d79a57889270d44d490b9b3e76310c468a2f190651a63cb70042970cbb9152e9",
+      "caseIDs": [
+        "H507",
+        "H508",
+        "H509",
+        "H510",
+        "H511"
+      ]
+    },
+    {
+      "path": "host-mac/AcceptanceFixtures/native-field-operations-v8-batch-10.json",
+      "sha256": "1ff81861040e4b5ae587ac18eb991fa3d271999da0883897808a55203e7fa758",
+      "caseIDs": [
+        "H512",
+        "H513",
+        "H514",
+        "H515",
+        "H516"
+      ]
+    },
+    {
+      "path": "host-mac/AcceptanceFixtures/native-field-operations-v8-batch-11.json",
+      "sha256": "b4a2b06d93c88952fd972b00d381a324e44c6371be1cc64f3ed3dad4436a6e4d",
+      "caseIDs": [
+        "H517",
+        "H518",
+        "H519",
+        "H520"
+      ]
+    }
+  ],
+  "expectationsChanged": false,
+  "modelSHA256": "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
+  "runtime": "llama.cpp b9992 / 6eddde06a",
+  "contextTokens": 4096,
+  "maximumOutputTokens": 1024,
+  "reasoningTokens": 512,
+  "exactInputLimit": 3008,
+  "temperature": 0,
+  "topP": 1,
+  "topK": 0,
+  "maximumPlannerStages": 1,
+  "desktopEffects": false,
+  "quotedCommandFastPath": false,
+  "testDiagnostics": "never",
+  "sha256": {
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFieldCopyPlan.swift": "9aae4becd2e46496a7f8900f32bb1a672967e0fba569b8619b0627faac26a322",
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseLocalTextGoalPlanner.swift": "519daeb8cd741a137c66a42d2b32a14e5eff48aa26e44f86039e1a1f83498ab5",
+    "host-mac/RemoteDesktopHost/ComputerUse/OSAtlasLlamaRuntime.swift": "c40c0e0cbb87c652e065fe21b0547f684a3a666f73ed21356e9b45e24c93278b",
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseTextGoalPlanner.swift": "542da96f26333cd6c4ce788b642a669127e13799ec08982ab2a4c5e47cd814b8",
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseTextTask.swift": "ae2d4ec97e5718579a4d06d42cae3b678ab6a9d3d9e7c4920cc1bb2bd3a62133",
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseBrowserDOM.swift": "02f90e1c51042b2b319bb295fad12e2e667eaf48a387309df37c0010407d10ca",
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseNativeTextExecutor.swift": "c417f144f9347a5b9ad0629250cf9a9a328025c6b16e1ba806326c7f9d27f8db",
+    "host-mac/RemoteDesktopHostTests/ComputerUseFieldCopyPlanTests.swift": "e21c9272145f9027c5c44cd4261f306c18b4faa3fd1ab4aefd6ccef3317db56e",
+    "host-mac/RemoteDesktopHostTests/ComputerUseSourceBoundTextModelAcceptanceTests.swift": "af73de3b96c3eeb581a3c28b374ad7f156749043ae492509a2fb45ca7bd591fd",
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseActionTextPlan.swift": "9a31b94d01f4769551f29917d2b2af6f565d2e398ca6b15efdade4be0d598734",
+    "host-mac/RemoteDesktopHostTests/ComputerUseActionTextPlanTests.swift": "6e9f2e1d35c06a39d1a54815618c53dabf859e5ea3509d3f92f5e709aed2b330",
+    "host-mac/RemoteDesktopHostTests/ComputerUseFieldOperationsBrowserAcceptanceTests.swift": "ba3759d12b33dbcb4c73cecc17d176f14136ff8bb2e7e366b10eee97412c31a3"
+  },
+  "qualification": "Run all 54 known case vectors under unchanged candidate source/model/sampling. Retain every failure. Only after this gate is satisfied, run the frozen unseen corpus and actual candidate browser fixture.",
+  "limitations": [
+    "A changed representation and clearer instructions do not prove semantic correctness.",
+    "The 54 cases are regression data; unseen, external native, mobile and release gates remain separate."
+  ]
+}

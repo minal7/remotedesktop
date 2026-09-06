@@ -4,7 +4,7 @@ import Foundation
 /// The host still compiles the same typed text/copy transaction contract.
 enum ComputerUseActionTextPlan {
     static func makeRequest(connection: ComputerUseTextModelConnection, catalog: ComputerUseTextPayloadCatalog,
-                            fields: [ComputerUseTextField]) throws -> URLRequest {
+                            fields: [ComputerUseTextField], literalTextLookup: Bool = false) throws -> URLRequest {
         var request = try ComputerUseFieldCopyPlan.makeRequest(connection: connection, catalog: catalog, fields: fields,
             requiresCopy: false, preserveQuotedFieldNames: true)
         guard let data = request.httpBody, var body = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw invalid }
@@ -26,9 +26,10 @@ enum ComputerUseActionTextPlan {
                            "operations": ["type": "array", "maxItems": 8, "items": ["oneOf": variants]]],
             "required": ["disposition", "operations"]]
         body["response_format"] = ["type": "json_schema", "json_schema": ["name": "form_actions", "strict": true, "schema": schema]]
-        body["messages"] = [["role": "system", "content": instructions],
+        body["messages"] = [["role": "system", "content": literalTextLookup ? literalLookupInstructions : instructions],
                             ["role": "user", "content": try ComputerUseLocalTextGoalPlanner.context(catalog: catalog, fields: fields,
-                                includeQuotedFieldMatches: true, preserveQuotedFieldNames: true)]]
+                                includeQuotedFieldMatches: !literalTextLookup, preserveQuotedFieldNames: true,
+                                includeLiteralTextLookup: literalTextLookup)]]
         request.httpBody = Data(try orderedJSON(body).utf8)
         return request
     }
@@ -99,4 +100,10 @@ enum ComputerUseActionTextPlan {
     Return supported only if ALL requested outcomes fit these actions. Pure literals, pure copies and mixed plans are supported. Return unsupported with no operations if ANY requested outcome requires generated writing, summarization, transforming or partially copying source contents, submitting, sending, saving, clicking, opening, navigation, or reading values into the reply. A poem, greeting or warm welcome to compose is generated writing, not literal text or a missing value. Conditional copies and restrictions on copied contents are unsupported. Never perform only a prefix of a mixed request.
     Otherwise return clarification with no operations for a missing or ambiguous field, alternative targets, contradictory instructions or an unspecified supplied value. Never substitute another field. Respect negation: a prohibited action is not requested. Prohibiting one value does not forbid entering another requested value. A field left unchanged may be read as a source but cannot be a destination. Keep every other field unchanged.
     """
+
+    static let literalLookupInstructions = instructions
+        .replacingOccurrences(of: "literalFieldMatches helps locate a quoted name or its literal ID; the surrounding request decides its role.",
+            with: "literalTextByID gives the exact text of captured payloads whose spelling also appears in the field labels. Use this literal-ID lookup for supplied text; select field references from fields. The surrounding request decides the role.")
+        .replacingOccurrences(of: "Choose each action from the meaning of the request BEFORE choosing its arguments:",
+            with: "Choose disposition by the requested operation type. Unsupported means at least one requested operation is outside this capability. If the operations are supported but a requested field or supplied value is missing or ambiguous, use clarification. Otherwise use supported and list the complete operations.\nChoose each action from the meaning of the request BEFORE choosing its arguments:")
 }

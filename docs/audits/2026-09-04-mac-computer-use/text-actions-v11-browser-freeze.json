@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "status": "frozen-before-v11-inference",
+  "candidate": "text-actions-candidate-v11.json",
+  "contract": "text-actions-v11",
+  "corpus": "host-mac/AcceptanceFixtures/native-field-operations-v8-browser.json",
+  "corpusSHA256": "9a3baa1f4a6c449821237a30ac10fce6ab683a43d9cf2be6855737db68a64464",
+  "caseIDs": [
+    "B801",
+    "B802",
+    "B803",
+    "B804",
+    "B805",
+    "B806"
+  ],
+  "oracle": "Independent hand-written full value/target state after each operation plus the exact typed proposal origin and count; same-task replay must add neither model calls nor input events.",
+  "expectationsUnchanged": true,
+  "fixtureSource": "host-mac/RemoteDesktopHostTests/ComputerUseFieldOperationsBrowserAcceptanceTests.swift",
+  "fixtureSourceSHA256": "ba3759d12b33dbcb4c73cecc17d176f14136ff8bb2e7e366b10eee97412c31a3",
+  "fixtureChange": "Validated contract selection includes v11; HTML, values, typed-operation oracle and handwritten states are unchanged.",
+  "limitations": [
+    "Known semantic regression phrasings, not held-out language qualification.",
+    "Controlled isolated WebKit forms; external native AX and broader pages remain separate."
+  ],
+  "candidateSourceBaseCommit": "6bfa757",
+  "qualificationRule": "Run under the frozen v11 candidate only after the 54-case known regression gate passes; all input and output expectations are unchanged."
+}

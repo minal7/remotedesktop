@@ -32,7 +32,7 @@ final class ComputerUseFieldOperationsBrowserAcceptanceTests: XCTestCase {
         let reportURL = URL(fileURLWithPath: try XCTUnwrap(environment["FIELD_OPERATIONS_BROWSER_REPORT"]))
         let contract = try XCTUnwrap(ComputerUseLocalTextGoalPlanner.Contract(rawValue:
             environment["FIELD_OPERATIONS_BROWSER_CONTRACT"] ?? "field-operations-v8"))
-        guard [.fieldOperationsV8, .fieldOperationsV9, .textActionsV10].contains(contract) else { throw Failure.invalidInput }
+        guard [.fieldOperationsV8, .fieldOperationsV9, .textActionsV10, .textActionsV11].contains(contract) else { throw Failure.invalidInput }
         guard !FileManager.default.fileExists(atPath: reportURL.path) else { throw Failure.invalidInput }
         let data = try Data(contentsOf: corpusURL)
         let corpusHash = Self.sha(data)
