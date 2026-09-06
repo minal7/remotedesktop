@@ -31,6 +31,7 @@ final class ComputerUseTaskLedger {
         enum Disposition: Equatable {
             case advanced
             case duplicateOrStale
+            case staleHostEpoch
             case identityMismatch
         }
 
@@ -85,7 +86,13 @@ final class ComputerUseTaskLedger {
         var outcome: ComputerUseTerminalOutcome?
         var clarification: ComputerUseClarificationReference?
         var control: ControlSnapshot?
+        var hostControlEpoch: UInt64 = 0
+        var localControlState: ControlState?
         var approvedAction: ApprovedActionRecord?
+
+        var effectiveControlState: ControlState? {
+            control?.state == .cancelled ? .cancelled : (localControlState ?? control?.state)
+        }
 
         init(
             acceptedAt: Date,
@@ -122,6 +129,8 @@ final class ComputerUseTaskLedger {
             case outcome
             case clarification
             case control
+            case hostControlEpoch
+            case localControlState
             case approvedAction
         }
 
@@ -143,6 +152,8 @@ final class ComputerUseTaskLedger {
             control = try values.decodeIfPresent(
                 ControlSnapshot.self,
                 forKey: .control)
+            hostControlEpoch = try values.decodeIfPresent(UInt64.self, forKey: .hostControlEpoch) ?? 0
+            localControlState = try values.decodeIfPresent(ControlState.self, forKey: .localControlState)
             // Records written before ordered controls existed were created
             // only by Prompt claims, and therefore conservatively represent
             // an execution that may already have started.
@@ -159,6 +170,10 @@ final class ComputerUseTaskLedger {
                       promptDigest.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else {
                     throw LedgerError.unavailable
                 }
+            }
+            if hostControlEpoch > 0 || localControlState != nil {
+                guard hostControlEpoch > 0, promptClaimed, promptDigest != nil,
+                      localControlState != .cancelled else { throw LedgerError.unavailable }
             }
             approvedAction = try values.decodeIfPresent(ApprovedActionRecord.self, forKey: .approvedAction)
             if approvedAction != nil, !promptClaimed || !executionStarted || senderID == nil || sessionID == nil {
@@ -257,7 +272,7 @@ final class ComputerUseTaskLedger {
             return .completed(response)
         }
 
-        if record.control?.state == .paused,
+        if record.effectiveControlState == .paused,
            !record.executionStarted {
             record.promptClaimed = true
             try commit(record, for: taskID)
@@ -289,10 +304,43 @@ final class ComputerUseTaskLedger {
         taskID: String,
         revision: UInt64,
         senderID: String,
-        sessionID: String
+        sessionID: String,
+        observedHostControlEpoch: UInt64? = nil
     ) throws -> ControlResolution {
         try reduceControl(control, taskID: taskID, revision: revision,
-                          senderID: senderID, sessionID: sessionID, permitsFinalLocalCancel: false)
+                          senderID: senderID, sessionID: sessionID,
+                          observedHostControlEpoch: observedHostControlEpoch, permitsFinalLocalCancel: false)
+    }
+
+    /// Local takeover/handback has its own durable clock. It must not borrow
+    /// phone revisions: an in-flight higher phone revision can predate this
+    /// choice. Only a claimed, content-bound task can receive local authority.
+    @discardableResult
+    func applyLocalControl(_ control: Control, taskID: String, senderID: String,
+                           sessionID: String) throws -> UInt64 {
+        try ensureAvailable()
+        guard control != .cancel else { throw LedgerError.invalidControl }
+        guard var record = records[taskID], record.senderID == senderID,
+              record.sessionID == sessionID, record.promptClaimed, record.promptDigest != nil,
+              record.response == nil, record.effectiveControlState != .cancelled else {
+            throw LedgerError.invalidIdentity
+        }
+        guard record.hostControlEpoch < UInt64.max else { throw LedgerError.invalidControl }
+        record.hostControlEpoch += 1
+        record.localControlState = control == .pause ? .paused : .running
+        try commit(record, for: taskID)
+        return record.hostControlEpoch
+    }
+
+    func hostControlEpoch(taskID: String) -> UInt64 {
+        records[taskID]?.hostControlEpoch ?? 0
+    }
+
+    func canResumeLocally(taskID: String, senderID: String, sessionID: String) -> Bool {
+        guard initializationError == nil, let record = records[taskID] else { return false }
+        return record.senderID == senderID && record.sessionID == sessionID
+            && record.promptClaimed && record.promptDigest != nil && record.response == nil
+            && record.effectiveControlState != .cancelled && record.hostControlEpoch < UInt64.max
     }
 
     /// A local Stop is absorbing, including when the remote counter is
@@ -301,11 +349,13 @@ final class ComputerUseTaskLedger {
         let previous = appliedControlRevision(taskID: taskID) ?? 0
         return try reduceControl(.cancel, taskID: taskID,
             revision: previous == UInt64.max ? previous : previous + 1,
-            senderID: senderID, sessionID: sessionID, permitsFinalLocalCancel: true)
+            senderID: senderID, sessionID: sessionID,
+            observedHostControlEpoch: nil, permitsFinalLocalCancel: true)
     }
 
     private func reduceControl(_ control: Control, taskID: String, revision: UInt64,
                                senderID: String, sessionID: String,
+                               observedHostControlEpoch: UInt64?,
                                permitsFinalLocalCancel: Bool) throws -> ControlResolution {
         try ensureAvailable()
         guard Self.validIdentity(
@@ -340,10 +390,21 @@ final class ComputerUseTaskLedger {
         if let applied = record.control, revision <= applied.revision, !canCancelAtExhaustedRevision {
             return ControlResolution(
                 disposition: .duplicateOrStale,
-                state: applied.state,
+                state: record.effectiveControlState,
                 appliedRevision: applied.revision,
                 terminalResponse: record.response,
                 promptClaimed: record.promptClaimed)
+        }
+
+        // Stop and terminal acknowledgements cannot resurrect a task. Every
+        // live Pause/Resume must instead have observed the latest local choice.
+        // Rejection leaves the phone revision untouched; it is not an ack.
+        if control != .cancel, record.response == nil,
+           ((observedHostControlEpoch ?? 0) != record.hostControlEpoch || record.hostControlEpoch == UInt64.max) {
+            return ControlResolution(disposition: .staleHostEpoch,
+                state: record.effectiveControlState,
+                appliedRevision: record.control?.revision,
+                terminalResponse: nil, promptClaimed: record.promptClaimed)
         }
 
         let reducedState: ControlState
@@ -361,6 +422,7 @@ final class ComputerUseTaskLedger {
         record.control = ControlSnapshot(
             revision: revision,
             state: reducedState)
+        record.localControlState = nil
         if reducedState == .cancelled { record.clarification = nil }
         if reducedState == .cancelled, record.response == nil {
             // Persist the terminal result before the manager cancels any
@@ -422,8 +484,8 @@ final class ComputerUseTaskLedger {
         // One approved MCP action is terminal for this task. A second call,
         // even with a new generation or fingerprint, cannot reopen dispatch.
         if let existing = record.approvedAction { return .existing(existing) }
-        guard record.response == nil, record.control?.state != .cancelled,
-              record.control?.state != .paused else { throw LedgerError.invalidControl }
+        guard record.response == nil, record.effectiveControlState != .cancelled,
+              record.effectiveControlState != .paused else { throw LedgerError.invalidControl }
         record.approvedAction = ApprovedActionRecord(fingerprint: prepared.fingerprint, attemptedAt: Date(), response: nil)
         try commit(record, for: taskID)
         return .new

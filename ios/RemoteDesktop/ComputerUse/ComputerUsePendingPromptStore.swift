@@ -28,15 +28,27 @@ struct ComputerUsePendingPrompt: Codable, Equatable, Sendable {
     /// Storing the canonical digest keeps older optional-field records
     /// decodable without making the protocol type Codable.
     let localAccountBindingRawValue: String?
-    /// Highest lifecycle control revision issued for this task. Optional keeps
-    /// Keychain records written by pre-revision clients decodable.
+    /// Highest issued or observed lifecycle revision, used for allocation.
+    /// Optional keeps pre-revision Keychain records decodable.
     let controlRevision: UInt64?
-    /// The lifecycle kind paired with `controlRevision`. Recovery replays this
-    /// exact pair instead of allocating a newer intent or accidentally
+    /// Highest revision actually acknowledged by the host. Local supersession
+    /// can invalidate an issued revision, but never forget an applied one.
+    let acknowledgedControlRevision: UInt64?
+    /// The lifecycle kind paired with `lastControlRevision`. Recovery replays
+    /// that original pair instead of allocating a newer intent or accidentally
     /// refreshing a paused/cancelled Prompt first.
     let lastControlKind: ComputerUseEnvelope.Kind?
-    /// A locked, durable approval choice. It is removed only by a terminal task
-    /// result or a genuinely new approval request ID.
+    /// Original command revision, separate from the allocation/acknowledgement
+    /// high-water marks that may advance before a replay after relaunch.
+    let lastControlRevision: UInt64?
+    /// Latest host clock observed, and the clock frozen with the last issued
+    /// phone intent. These are different after local takeover or handback.
+    let hostControlEpoch: UInt64?
+    let lastControlHostEpoch: UInt64?
+    /// Recover a host-owned pause without inventing a new phone Pause.
+    let hostControlPaused: Bool?
+    /// A locked, durable approval choice. A terminal result, authoritative
+    /// intervention or new approval request can retire it.
     let approvalDecision: ComputerUsePendingApprovalDecision?
     /// Exact bounded guidance for a resumable person-only handoff. Presence is
     /// also durable proof that the active paused task's typed outcome is
@@ -53,7 +65,12 @@ struct ComputerUsePendingPrompt: Codable, Equatable, Sendable {
         createdAt: Date,
         localAccountBinding: CloudKitAccountBinding? = nil,
         controlRevision: UInt64? = nil,
+        acknowledgedControlRevision: UInt64? = nil,
         lastControlKind: ComputerUseEnvelope.Kind? = nil,
+        lastControlRevision: UInt64? = nil,
+        hostControlEpoch: UInt64? = nil,
+        lastControlHostEpoch: UInt64? = nil,
+        hostControlPaused: Bool? = nil,
         approvalDecision: ComputerUsePendingApprovalDecision? = nil,
         interventionGuidance: String? = nil
     ) {
@@ -66,7 +83,12 @@ struct ComputerUsePendingPrompt: Codable, Equatable, Sendable {
         self.createdAt = createdAt
         self.localAccountBindingRawValue = localAccountBinding?.rawValue
         self.controlRevision = controlRevision
+        self.acknowledgedControlRevision = acknowledgedControlRevision
         self.lastControlKind = lastControlKind
+        self.lastControlRevision = lastControlRevision
+        self.hostControlEpoch = hostControlEpoch
+        self.lastControlHostEpoch = lastControlHostEpoch
+        self.hostControlPaused = hostControlPaused
         self.approvalDecision = approvalDecision
         self.interventionGuidance = interventionGuidance.map {
             String($0
@@ -100,7 +122,12 @@ struct ComputerUsePendingPrompt: Codable, Equatable, Sendable {
             createdAt: createdAt,
             localAccountBinding: localAccountBinding,
             controlRevision: controlRevision,
+            acknowledgedControlRevision: acknowledgedControlRevision,
             lastControlKind: lastControlKind,
+            lastControlRevision: lastControlRevision,
+            hostControlEpoch: hostControlEpoch,
+            lastControlHostEpoch: lastControlHostEpoch,
+            hostControlPaused: hostControlPaused,
             approvalDecision: approvalDecision,
             interventionGuidance: interventionGuidance)
     }

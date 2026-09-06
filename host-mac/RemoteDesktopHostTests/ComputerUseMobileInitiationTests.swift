@@ -301,7 +301,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         release = true
         let resume = ComputerUseEnvelope(senderID: "IOS-PEER", targetID: "HOST-ID", pairingCode: "123456",
             sessionID: "SESSION-1", kind: .resume,
-            body: try ComputerUseControlRequest(taskID: prompt.id, revision: 1).encodedBody())
+            body: try ComputerUseControlRequest(taskID: prompt.id, revision: 1, observedHostControlEpoch: 1).encodedBody())
         XCTAssertTrue(manager.handle(resume, channel: channel))
         let completed = await waitForTaskUpdate(channel: channel, taskID: prompt.id, outcome: .taskCompleted)
         XCTAssertEqual(completed?.text, "verified")

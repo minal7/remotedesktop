@@ -9,6 +9,210 @@ import XCTest
 
 @MainActor
 final class ComputerUseTests: XCTestCase {
+    func test_localControlEpochOrdersBothSidesAndSurvivesRestart() throws {
+        for phoneArrivesFirst in [false, true] {
+            let url = temporaryLedgerURL()
+            defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+            let ledger = ComputerUseTaskLedger(fileURL: url)
+            _ = try ledger.claim(taskID: "tickets", senderID: "phone", sessionID: "session", promptBody: "Find tickets")
+            if phoneArrivesFirst {
+                _ = try ledger.applyControl(.resume, taskID: "tickets", revision: 9, senderID: "phone", sessionID: "session")
+            }
+            XCTAssertEqual(try ledger.applyLocalControl(.pause, taskID: "tickets", senderID: "phone", sessionID: "session"), 1)
+            let oldResume = try ledger.applyControl(.resume, taskID: "tickets", revision: 10,
+                senderID: "phone", sessionID: "session", observedHostControlEpoch: 0)
+            XCTAssertEqual(oldResume.disposition, .staleHostEpoch)
+            XCTAssertEqual(oldResume.state, .paused)
+            XCTAssertEqual(oldResume.appliedRevision, phoneArrivesFirst ? 9 : nil, "Rejection cannot manufacture an acknowledgement")
+            XCTAssertEqual(try ledger.applyLocalControl(.resume, taskID: "tickets", senderID: "phone", sessionID: "session"), 2)
+            let oldPause = try ledger.applyControl(.pause, taskID: "tickets", revision: 11,
+                senderID: "phone", sessionID: "session", observedHostControlEpoch: 1)
+            XCTAssertEqual(oldPause.disposition, .staleHostEpoch)
+            XCTAssertEqual(oldPause.state, .running)
+            let currentPause = try ledger.applyControl(.pause, taskID: "tickets", revision: 12,
+                senderID: "phone", sessionID: "session", observedHostControlEpoch: 2)
+            XCTAssertEqual(currentPause.disposition, .advanced)
+            XCTAssertEqual(currentPause.state, .paused)
+            XCTAssertEqual(try ledger.applyLocalControl(.resume, taskID: "tickets", senderID: "phone", sessionID: "session"), 3)
+            let restored = ComputerUseTaskLedger(fileURL: url)
+            XCTAssertEqual(restored.hostControlEpoch(taskID: "tickets"), 3)
+            let duplicatePause = try restored.applyControl(.pause, taskID: "tickets", revision: 12,
+                senderID: "phone", sessionID: "session", observedHostControlEpoch: 2)
+            XCTAssertEqual(duplicatePause.disposition, .duplicateOrStale)
+            XCTAssertEqual(duplicatePause.state, .running, "Replay reflects local handback, not the earlier phone Pause")
+            let stopped = try restored.applyControl(.cancel, taskID: "tickets", revision: 13,
+                senderID: "phone", sessionID: "session", observedHostControlEpoch: 0)
+            XCTAssertEqual(stopped.state, .cancelled)
+            XCTAssertThrowsError(try restored.applyLocalControl(.resume, taskID: "tickets", senderID: "phone", sessionID: "session"))
+            let late = try restored.applyControl(.resume, taskID: "tickets", revision: 14, senderID: "phone", sessionID: "session")
+            XCTAssertEqual(late.state, .cancelled)
+            XCTAssertEqual(late.appliedRevision, 14)
+            XCTAssertEqual(late.terminalResponse, ComputerUseTaskLedger.stoppedResponse)
+        }
+    }
+
+    func test_localControlEpochRequiresClaimedOwnerAndPreservesPrePromptHandback() throws {
+        let url = temporaryLedgerURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let ledger = ComputerUseTaskLedger(fileURL: url)
+        _ = try ledger.applyControl(.pause, taskID: "pending", revision: 1, senderID: "phone", sessionID: "session")
+        XCTAssertThrowsError(try ledger.applyLocalControl(.resume, taskID: "pending", senderID: "phone", sessionID: "session"))
+        XCTAssertEqual(try ledger.claim(taskID: "pending", senderID: "phone", sessionID: "session", promptBody: "Find movies"),
+                       .paused(appliedControlRevision: 1))
+        for (sender, session) in [("other", "session"), ("phone", "other")] {
+            XCTAssertThrowsError(try ledger.applyLocalControl(.resume, taskID: "pending", senderID: sender, sessionID: session))
+        }
+        XCTAssertEqual(ledger.hostControlEpoch(taskID: "pending"), 0)
+        _ = try ledger.applyLocalControl(.resume, taskID: "pending", senderID: "phone", sessionID: "session")
+        let restored = ComputerUseTaskLedger(fileURL: url)
+        XCTAssertEqual(try restored.claim(taskID: "pending", senderID: "phone", sessionID: "session", promptBody: "Find movies"), .new)
+        XCTAssertEqual(try restored.claim(taskID: "pending", senderID: "phone", sessionID: "session", promptBody: "Find movies"), .accepted)
+        XCTAssertEqual(restored.appliedControlRevision(taskID: "pending"), 1)
+    }
+
+    func test_localControlEpochRejectsMalformedStorageAndExhaustionWithoutBlockingStop() throws {
+        let url = temporaryLedgerURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let ledger = ComputerUseTaskLedger(fileURL: url)
+        _ = try ledger.claim(taskID: "task", senderID: "phone", sessionID: "session", promptBody: "Find tickets")
+        _ = try ledger.applyLocalControl(.pause, taskID: "task", senderID: "phone", sessionID: "session")
+        let original = try XCTUnwrap(String(data: Data(contentsOf: url), encoding: .utf8))
+        let malformed = original.replacingOccurrences(of: "\"hostControlEpoch\":1", with: "\"hostControlEpoch\":0")
+        XCTAssertNotEqual(malformed, original)
+        try Data(malformed.utf8).write(to: url)
+        XCTAssertThrowsError(try ComputerUseTaskLedger(fileURL: url).claim(taskID: "task", senderID: "phone",
+            sessionID: "session", promptBody: "Find tickets"))
+        let exhausted = original.replacingOccurrences(of: "\"hostControlEpoch\":1", with: "\"hostControlEpoch\":18446744073709551615")
+        try Data(exhausted.utf8).write(to: url)
+        let restored = ComputerUseTaskLedger(fileURL: url)
+        XCTAssertEqual(restored.hostControlEpoch(taskID: "task"), UInt64.max)
+        XCTAssertThrowsError(try restored.applyLocalControl(.resume, taskID: "task", senderID: "phone", sessionID: "session"))
+        let resume = try restored.applyControl(.resume, taskID: "task", revision: 1,
+            senderID: "phone", sessionID: "session", observedHostControlEpoch: UInt64.max)
+        XCTAssertEqual(resume.disposition, .staleHostEpoch)
+        XCTAssertEqual(resume.state, .paused)
+        XCTAssertEqual(try restored.cancelLocally(taskID: "task", senderID: "phone", sessionID: "session").state, .cancelled)
+    }
+
+    func test_browserLocalControlEpochRejectsDelayedPhoneChoices() async throws {
+        let url = temporaryLedgerURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let executor = SuspendingComputerUseExecutor()
+        let fixture = try browserControlFixture(executor: executor, ledgerURL: url)
+        defer { fixture.manager.stop(); fixture.browser.close() }
+        let prompt = makeEnvelope(id: "cross-surface-handoff", kind: .prompt, body: "Find travel tickets after I sign in")
+        fixture.manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(fixture.manager.handle(prompt, channel: fixture.channel))
+        await waitUntil { executor.callCount == 1 }
+        let phonePause = try makeControlEnvelope(kind: .pause, taskID: prompt.id, revision: 1, hostEpoch: 0)
+        XCTAssertTrue(fixture.manager.handle(phonePause, channel: fixture.channel))
+        let paused = try XCTUnwrap(fixture.browser.taskControls)
+        fixture.browser.requestTaskControl(.resume, displayed: paused)
+        await waitUntil { executor.callCount == 2 }
+        XCTAssertEqual(fixture.ledger.hostControlEpoch(taskID: prompt.id), 1)
+        let running = try XCTUnwrap(fixture.browser.taskControls)
+        XCTAssertTrue(fixture.manager.handle(phonePause, channel: fixture.channel))
+        XCTAssertTrue(fixture.manager.handle(try makeControlEnvelope(kind: .pause, taskID: prompt.id,
+            revision: 2, hostEpoch: 0), channel: fixture.channel))
+        XCTAssertEqual(fixture.browser.taskControls, running)
+        fixture.browser.requestTaskControl(.takeControl, displayed: running)
+        XCTAssertEqual(fixture.ledger.hostControlEpoch(taskID: prompt.id), 2)
+        XCTAssertTrue(fixture.manager.handle(try makeControlEnvelope(kind: .resume, taskID: prompt.id,
+            revision: 3, hostEpoch: 1), channel: fixture.channel))
+        XCTAssertTrue(fixture.manager.handle(makeEnvelope(kind: .resume), channel: fixture.channel))
+        XCTAssertTrue(fixture.manager.handle(try makeControlEnvelope(kind: .resume, taskID: prompt.id,
+            revision: 4, sessionID: "other", hostEpoch: 2), channel: fixture.channel))
+        XCTAssertEqual(fixture.manager.activity, .paused)
+        XCTAssertEqual(executor.callCount, 2)
+        XCTAssertEqual(fixture.ledger.appliedControlRevision(taskID: prompt.id), 1)
+        await waitUntil {
+            await fixture.channel.sentMessages().contains {
+                guard let update = try? ComputerUseTaskUpdate.decodeBody($0.body) else { return false }
+                return update.hostControlEpoch == 2 && update.appliedControlRevision == 1
+                    && ($0.kind == .status) && (update.text == "paused" || update.outcome == .userInterventionRequired)
+            }
+        }
+        XCTAssertTrue(fixture.manager.handle(try makeControlEnvelope(kind: .resume, taskID: prompt.id,
+            revision: 4, hostEpoch: 2), channel: fixture.channel))
+        await waitUntil { executor.callCount == 3 }
+        XCTAssertEqual(executor.trustedUserPrompts, Array(repeating: prompt.body, count: 3))
+    }
+
+    func test_localTakeoverPersistenceFailureCannotResumeFromEitherSurface() async throws {
+        let url = temporaryLedgerURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let executor = StopJoinProbeExecutor()
+        var posted: [ComputerUsePredictedAction] = []
+        let fixture = try browserControlFixture(executor: executor, ledgerURL: url, actionPerformer: { posted.append($0) })
+        defer { executor.releaseFirstExecution(); fixture.manager.stop(); fixture.browser.close() }
+        let prompt = makeEnvelope(id: "unsaved-takeover", kind: .prompt, body: "Find movie tickets")
+        fixture.manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(fixture.manager.handle(prompt, channel: fixture.channel))
+        await waitUntil { executor.callCount == 1 }
+        let working = try XCTUnwrap(fixture.browser.taskControls)
+        try FileManager.default.removeItem(at: url.deletingLastPathComponent())
+        try Data("fixture write barrier".utf8).write(to: url.deletingLastPathComponent())
+        fixture.browser.requestTaskControl(.takeControl, displayed: working)
+        XCTAssertEqual(fixture.manager.activity, .paused)
+        XCTAssertFalse(try XCTUnwrap(fixture.browser.taskControls).canResume)
+        XCTAssertFalse(fixture.manager.handle(try makeControlEnvelope(kind: .resume, taskID: prompt.id,
+            revision: 1, hostEpoch: 0), channel: fixture.channel))
+        fixture.browser.requestTaskControl(.resume, displayed: try XCTUnwrap(fixture.browser.taskControls))
+        XCTAssertEqual(fixture.manager.activity, .paused)
+        executor.releaseFirstExecution()
+        await waitUntil { executor.staleActionAttempted }
+        XCTAssertEqual(executor.callCount, 1)
+        XCTAssertTrue(executor.staleActionWasBlocked)
+        XCTAssertTrue(posted.isEmpty)
+    }
+
+    func test_approvalAfterLocalTakeoverRequiresTheCurrentHostEpoch() async throws {
+        let action = ComputerUsePredictedAction.key(usage: 0x28, modifiers: 0)
+        let executor = ImmediateComputerUseExecutor(results: [
+            .approvalRequired(message: "First action", action: action, continuation: .init(taskID: "", nonce: UUID())),
+            .approvalRequired(message: "Current action", action: action, continuation: .init(taskID: "", nonce: UUID())),
+        ])
+        let url = temporaryLedgerURL(), channel = FakeHostComputerUseChannel()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        var posted: [ComputerUsePredictedAction] = []
+        let manager = HostComputerUseManager(injector: InputInjector(), executor: executor,
+            taskLedger: ComputerUseTaskLedger(fileURL: url), allowsExternalServices: false,
+            approvalTargetProvider: { _ in ComputerUseApprovalTargetSnapshot(context: "fixture target",
+                applicationID: "com.threadmark.tests.fixture", accessibilityIdentity: "epoch-fixture-target") },
+            actionPerformer: { posted.append($0) }, channelFactory: { _ in channel })
+        defer { manager.stop() }
+        let prompt = makeEnvelope(id: "epoch-approval", kind: .prompt, body: "Send the prepared fixture message")
+        manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(manager.handle(prompt, channel: channel))
+        await waitUntil { await channel.sentMessages().contains { $0.kind == .approvalRequest } }
+        manager.userIntervened()
+        XCTAssertEqual(manager.activity, .paused)
+        XCTAssertTrue(manager.handle(try makeControlEnvelope(kind: .resume, taskID: prompt.id,
+            revision: 1, hostEpoch: 1), channel: channel))
+        await waitUntil {
+            await channel.sentMessages().contains {
+                $0.kind == .approvalRequest && (try? ComputerUseApprovalRequest.decodeBody($0.body).hostControlEpoch) == 1
+            }
+        }
+        let messages = await channel.sentMessages()
+        let requests = messages.compactMap { envelope -> ComputerUseApprovalRequest? in
+            guard envelope.kind == .approvalRequest else { return nil }
+            return try? ComputerUseApprovalRequest.decodeBody(envelope.body)
+        }
+        let current = try XCTUnwrap(requests.last { $0.hostControlEpoch == 1 })
+        for oldEpoch in [nil, 0, 2] as [UInt64?] {
+            let stale = ComputerUseApprovalResponse(requestID: current.requestID, approved: true,
+                taskID: prompt.id, appliedControlRevision: current.appliedControlRevision, hostControlEpoch: oldEpoch)
+            XCTAssertTrue(manager.handle(makeEnvelope(kind: .approvalResponse, body: try stale.encodedBody()), channel: channel))
+        }
+        XCTAssertTrue(posted.isEmpty)
+        guard case .awaitingApproval = manager.activity else { return XCTFail("Stale metadata cannot consume the current card") }
+        let accepted = ComputerUseApprovalResponse(requestID: current.requestID, approved: true,
+            taskID: prompt.id, appliedControlRevision: current.appliedControlRevision, hostControlEpoch: 1)
+        XCTAssertTrue(manager.handle(makeEnvelope(kind: .approvalResponse, body: try accepted.encodedBody()), channel: channel))
+        await waitUntil { posted == [action] }
+    }
+
     func test_localStopRemainsAbsorbingAtExhaustedRemoteRevision() throws {
         let url = temporaryLedgerURL()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
@@ -232,7 +436,7 @@ final class ComputerUseTests: XCTestCase {
         server.releaseHeldResponses()
         await waitUntil(timeoutIterations: 1_000) { server.count("/account") == 1 }
         XCTAssertTrue(manager.handle(try makeControlEnvelope(kind: .resume,
-            taskID: prompt.id, revision: 1), channel: channel))
+            taskID: prompt.id, revision: 1, hostEpoch: 1), channel: channel))
         await waitUntil { manager.activity == .paused }
         XCTAssertEqual(executor.callCount, 1, "A loading login page cannot reach the successor executor")
         XCTAssertNil(owned.currentDocument(taskID: prompt.id))
@@ -242,7 +446,7 @@ final class ComputerUseTests: XCTestCase {
             owned.hasPageAwaitingHandback && server.count("/retained-session") == 1
         }
         XCTAssertTrue(manager.handle(try makeControlEnvelope(kind: .resume,
-            taskID: prompt.id, revision: 2), channel: channel))
+            taskID: prompt.id, revision: 2, hostEpoch: 2), channel: channel))
         await waitUntil(timeoutIterations: 1_000) { executor.callCount == 2 && manager.activity == .idle }
         XCTAssertEqual(executor.taskIDs, [prompt.id, prompt.id])
         XCTAssertEqual(executor.trustedPrompts, [prompt.body, prompt.body])
@@ -2449,7 +2653,7 @@ final class ComputerUseTests: XCTestCase {
             try makeControlEnvelope(
                 kind: .resume,
                 taskID: activePrompt.id,
-                revision: 1),
+                revision: 1, hostEpoch: 1),
             channel: channel))
         await waitUntil {
             executor.callCount == 2 && manager.activity == .idle
@@ -3117,7 +3321,7 @@ final class ComputerUseTests: XCTestCase {
         XCTAssertTrue(executor.answers.isEmpty)
         XCTAssertTrue(manager.handle(try makeControlEnvelope(kind: .resume, taskID: "a", revision: 2), channel: channel))
         await waitUntil { manager.activity == .paused && executor.answers.count == 1 }
-        XCTAssertTrue(manager.handle(try makeControlEnvelope(kind: .resume, taskID: "a", revision: 3), channel: channel))
+        XCTAssertTrue(manager.handle(try makeControlEnvelope(kind: .resume, taskID: "a", revision: 3, hostEpoch: 1), channel: channel))
         let next = try await clarificationUpdate(taskID: "a", channel: channel)
         XCTAssertEqual(executor.answers.count, 2); XCTAssertEqual(executor.answers.first?.goal, executor.answers.last?.goal)
         XCTAssertEqual(executor.answers.last?.goal.userTurns, [prompt.body, "Destination"])
@@ -3331,7 +3535,7 @@ final class ComputerUseTests: XCTestCase {
         XCTAssertFalse(executor.trustedUserPrompts[0].contains("TASK_COMPLETE"))
     }
 
-    func test_interventionPausesAndResumeReplansSavedPrompt() async {
+    func test_interventionPausesAndResumeReplansSavedPrompt() async throws {
         let executor = SuspendingComputerUseExecutor()
         let channel = FakeHostComputerUseChannel()
         let ledgerURL = temporaryLedgerURL()
@@ -3350,7 +3554,7 @@ final class ComputerUseTests: XCTestCase {
         manager.userIntervened()
         XCTAssertEqual(manager.activity, .paused)
 
-        manager.handle(makeEnvelope(kind: .resume), channel: channel)
+        manager.handle(try makeControlEnvelope(kind: .resume, taskID: prompt.id, revision: 1, hostEpoch: 1), channel: channel)
         await waitUntil { executor.prompts.count == 2 }
         XCTAssertTrue(executor.prompts[1].contains("do not repeat"))
         XCTAssertEqual(
@@ -3411,7 +3615,7 @@ final class ComputerUseTests: XCTestCase {
             "A person-only sign-in step must keep the task resumable")
 
         XCTAssertTrue(manager.handle(
-            makeEnvelope(kind: .resume),
+            try makeControlEnvelope(kind: .resume, taskID: prompt.id, revision: 1, hostEpoch: 1),
             channel: channel))
         await waitUntil { executor.callCount == 2 && manager.activity == .idle }
         XCTAssertTrue(executor.prompts[0].contains(untrustedAssistantContext))
@@ -3433,7 +3637,7 @@ final class ComputerUseTests: XCTestCase {
         })
     }
 
-    func test_losingPeerAuthorizationPausesAutomationUntilExplicitResume() async {
+    func test_losingPeerAuthorizationPausesAutomationUntilExplicitResume() async throws {
         let executor = SuspendingComputerUseExecutor()
         let channel = FakeHostComputerUseChannel()
         let ledgerURL = temporaryLedgerURL()
@@ -3464,12 +3668,12 @@ final class ComputerUseTests: XCTestCase {
             }
         }
 
-        manager.handle(makeEnvelope(kind: .resume), channel: channel)
+        manager.handle(try makeControlEnvelope(kind: .resume, taskID: prompt.id, revision: 1, hostEpoch: 1), channel: channel)
         await Task.yield()
         XCTAssertEqual(executor.prompts.count, 1)
 
         manager.authorizePeer(senderID: prompt.senderID)
-        manager.handle(makeEnvelope(kind: .resume), channel: channel)
+        manager.handle(try makeControlEnvelope(kind: .resume, taskID: prompt.id, revision: 1, hostEpoch: 1), channel: channel)
         await waitUntil { executor.prompts.count == 2 }
         manager.stop()
     }
@@ -4832,7 +5036,7 @@ final class ComputerUseTests: XCTestCase {
         }
 
         XCTAssertTrue(manager.handle(
-            makeEnvelope(kind: .resume),
+            try makeControlEnvelope(kind: .resume, taskID: prompt.id, revision: 1, hostEpoch: 1),
             channel: channel))
         await waitUntil { executor.callCount == 2 && manager.activity == .idle }
         XCTAssertTrue(performedActions.isEmpty)
@@ -5002,7 +5206,7 @@ final class ComputerUseTests: XCTestCase {
         await Task.yield()
         XCTAssertEqual(executor.callCount, 1)
 
-        manager.handle(makeEnvelope(kind: .resume), channel: channel)
+        manager.handle(try makeControlEnvelope(kind: .resume, taskID: prompt.id, revision: 1, hostEpoch: 1), channel: channel)
         await waitUntil { executor.callCount == 2 }
         XCTAssertTrue(executor.prompts.last?.contains("do not repeat") == true)
         manager.stop()
@@ -5983,11 +6187,13 @@ final class ComputerUseTests: XCTestCase {
         kind: ComputerUseEnvelope.Kind,
         taskID: String,
         revision: UInt64,
-        sessionID: String = "SESSION-1"
+        sessionID: String = "SESSION-1",
+        hostEpoch: UInt64? = nil
     ) throws -> ComputerUseEnvelope {
         let request = ComputerUseControlRequest(
             taskID: taskID,
-            revision: revision)
+            revision: revision,
+            observedHostControlEpoch: hostEpoch)
         return ComputerUseEnvelope(
             senderID: "IOS-PEER",
             targetID: "HOST-ID",

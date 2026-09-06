@@ -3544,6 +3544,7 @@ final class HostComputerUseManager: ObservableObject {
         let authorizationGeneration: UInt64
         let transportGeneration: UInt64
         let remoteRevision: UInt64?
+        let hostControlEpoch: UInt64
         let phase: ComputerUseBrowserTaskControls.Phase
         let canResume: Bool
 
@@ -4265,44 +4266,11 @@ final class HostComputerUseManager: ObservableObject {
     /// Called before direct user input so automation and a person never race.
     func userIntervened() {
         switch activity {
-        case .working:
+        case .working, .awaitingApproval:
             blockActionsForUserIntervention()
-            let interrupted = currentExecution
-            if let interrupted,
-               postedApprovedVisualTaskID == interrupted.envelope.id {
-                terminalizePostedVisualActionForIntervention(
-                    context: interrupted)
-                return
+            if let context = currentExecution ?? pendingApproval?.context {
+                pauseForLocalIntervention(context)
             }
-            pausedExecution = interrupted
-            currentExecution = nil
-            currentExecutionToken = nil
-            cancelActiveVisualApprovalContinuation()
-            cancelActiveMCPWork()
-            executionTask?.cancel()
-            activity = .paused
-            if let interrupted {
-                sendUserInterventionStatus(
-                    Self.userInterventionGuidance,
-                    replyingTo: interrupted.envelope,
-                    channel: interrupted.channel)
-            }
-
-        case .awaitingApproval:
-            let invalidated = pendingApproval
-            pendingApproval = nil
-            cancelApprovalIfNeeded(invalidated)
-            pausedExecution = invalidated?.context
-            approvalDeliveryTask?.cancel()
-            approvalDeliveryTask = nil
-            activity = .paused
-            if let invalidated {
-                sendUserInterventionStatus(
-                    Self.userInterventionGuidance,
-                    replyingTo: invalidated.context.envelope,
-                    channel: invalidated.context.channel)
-            }
-
         case .idle, .paused:
             return
         }
@@ -4570,8 +4538,11 @@ final class HostComputerUseManager: ObservableObject {
             authorizationGeneration: actionEvidenceAuthorizationGeneration,
             transportGeneration: transportGeneration,
             remoteRevision: taskLedger.appliedControlRevision(taskID: context.envelope.id),
+            hostControlEpoch: taskLedger.hostControlEpoch(taskID: context.envelope.id),
             phase: phase, canResume: phase == .paused
-                && isPeerAuthorizedForComputerUse(senderID: context.envelope.senderID))
+                && isPeerAuthorizedForComputerUse(senderID: context.envelope.senderID)
+                && taskLedger.canResumeLocally(taskID: context.envelope.id,
+                    senderID: context.envelope.senderID, sessionID: context.envelope.sessionID))
         if identity.executionToken == nil, let previous = browserControlIdentity,
            identity.sameOwner(as: previous) {
             identity.executionToken = previous.executionToken
@@ -4598,13 +4569,17 @@ final class HostComputerUseManager: ObservableObject {
         switch action {
         case .takeControl:
             guard current.phase != .paused else { return }
-            pauseExecution(context)
+            pauseForLocalIntervention(context)
         case .resume:
             // Resume uses the exact rendered state. Local input may have
             // paused a run between mouse-down and a Stop click, so Stop below
             // instead accepts that same run's earlier presentation.
             guard displayed == current, current.phase == .paused, current.canResume,
                   isPeerAuthorizedForComputerUse(senderID: context.envelope.senderID) else { return }
+            guard persistLocalControl(.resume, context: context) else {
+                pauseExecution(context, guidance: Self.localControlPersistenceFailureGuidance)
+                return
+            }
             resumeExecution(context)
         case .stop:
             // Stop is absorbing. Its durable Cancel must be replayable with
@@ -4664,7 +4639,8 @@ final class HostComputerUseManager: ObservableObject {
                 taskID: request.taskID,
                 revision: request.revision,
                 senderID: envelope.senderID,
-                sessionID: envelope.sessionID)
+                sessionID: envelope.sessionID,
+                observedHostControlEpoch: request.observedHostControlEpoch)
         } catch {
             // Control is fail-closed unless its causal state was durably
             // recorded. Pause and Cancel also stop the live executor before
@@ -4777,6 +4753,12 @@ final class HostComputerUseManager: ObservableObject {
         guard let context = legacyExecutionContext(matching: envelope) else {
             return
         }
+        // An empty legacy control cannot have observed a local handoff. Stop
+        // remains available; Pause/Resume need a versioned, current command.
+        if control != .cancel, taskLedger.hostControlEpoch(taskID: context.envelope.id) > 0 {
+            sendCurrentStatus(for: context, fallback: "paused", replyingTo: context.envelope, channel: context.channel)
+            return
+        }
 
         switch control {
         case .pause:
@@ -4835,16 +4817,39 @@ final class HostComputerUseManager: ObservableObject {
         }
     }
 
-    private func pauseExecution(_ context: ExecutionContext) {
+    private static let localControlPersistenceFailureGuidance =
+        "AI is paused, but the Mac couldn't safely save this handoff. Keep control of the Mac until its task storage is available."
+
+    private func persistLocalControl(_ control: ComputerUseTaskLedger.Control, context: ExecutionContext) -> Bool {
+        defer { refreshBrowserTaskControls() }
+        do {
+            try taskLedger.applyLocalControl(control, taskID: context.envelope.id,
+                senderID: context.envelope.senderID, sessionID: context.envelope.sessionID)
+            return true
+        } catch {
+            actionGate.endAutomation(allowsActions: false)
+            return false
+        }
+    }
+
+    private func pauseForLocalIntervention(_ context: ExecutionContext, guidance: String? = nil) {
+        actionGate.endAutomation(allowsActions: false)
+        let persisted = persistLocalControl(.pause, context: context)
+        pauseExecution(context, guidance: persisted ? guidance : Self.localControlPersistenceFailureGuidance)
+    }
+
+    private func pauseExecution(_ context: ExecutionContext, guidance: String? = nil) {
+        let guidance = guidance ?? Self.userInterventionGuidance
         if postedApprovedVisualTaskID == context.envelope.id {
             terminalizePostedVisualActionForIntervention(context: context)
             return
         }
         if pausedExecution?.envelope.id == context.envelope.id {
-            sendStatus(
-                "paused",
-                replyingTo: context.envelope,
-                channel: context.channel)
+            if guidance == Self.userInterventionGuidance {
+                sendStatus("paused", replyingTo: context.envelope, channel: context.channel)
+            } else {
+                sendUserInterventionStatus(guidance, replyingTo: context.envelope, channel: context.channel)
+            }
             return
         }
 
@@ -4865,7 +4870,7 @@ final class HostComputerUseManager: ObservableObject {
         executionTask?.cancel()
         activity = .paused
         sendUserInterventionStatus(
-            Self.userInterventionGuidance,
+            guidance,
             replyingTo: context.envelope,
             channel: context.channel)
     }
@@ -4908,13 +4913,8 @@ final class HostComputerUseManager: ObservableObject {
 
         guard let executor, executor.isReady else {
             self.pausedExecution = pausedExecution
-            actionGate.setAllowsActions(false)
-            actionGate.endAutomation(allowsActions: false)
             activity = .paused
-            sendUserInterventionStatus(
-                Self.userInterventionGuidance,
-                replyingTo: pausedExecution.envelope,
-                channel: pausedExecution.channel)
+            pauseForLocalIntervention(pausedExecution)
             return
         }
 
@@ -5061,16 +5061,7 @@ final class HostComputerUseManager: ObservableObject {
     private func pauseAfterApprovedOperationWasBlocked(
         context: ExecutionContext
     ) {
-        actionGate.endAutomation(allowsActions: false)
-        currentExecution = nil
-        currentExecutionToken = nil
-        executionTask = nil
-        pausedExecution = context
-        activity = .paused
-        sendUserInterventionStatus(
-            Self.userInterventionGuidance,
-            replyingTo: context.envelope,
-            channel: context.channel)
+        pauseForLocalIntervention(context)
     }
 
     private func approvalResponse(
@@ -5080,6 +5071,8 @@ final class HostComputerUseManager: ObservableObject {
         let taskID = approval.context.envelope.id
         let expectedRevision = approval.request.appliedControlRevision
         guard approval.request.taskID == taskID,
+              (response.hostControlEpoch ?? 0) == (approval.request.hostControlEpoch ?? 0),
+              (approval.request.hostControlEpoch ?? 0) == taskLedger.hostControlEpoch(taskID: taskID),
               taskLedger.appliedControlRevision(taskID: taskID)
                 == expectedRevision else {
             // A lifecycle control advanced after the card was created. The
@@ -5093,7 +5086,7 @@ final class HostComputerUseManager: ObservableObject {
             // Pre-revision clients did not echo task metadata. They remain
             // compatible only while the task itself has never received a
             // versioned lifecycle control.
-            return expectedRevision == nil
+            return expectedRevision == nil && (approval.request.hostControlEpoch ?? 0) == 0
         }
 
         return response.taskID == taskID
@@ -6112,15 +6105,7 @@ final class HostComputerUseManager: ObservableObject {
                 // Preserve the task for explicit Resume instead of recording
                 // a pause as a terminal failure.
                 guard currentExecutionToken == token else { return }
-                currentExecution = nil
-                currentExecutionToken = nil
-                pausedExecution = context
-                actionGate.endAutomation(allowsActions: false)
-                activity = .paused
-                sendUserInterventionStatus(
-                    Self.userInterventionGuidance,
-                    replyingTo: envelope,
-                    channel: channel)
+                pauseForLocalIntervention(context)
             } catch {
                 guard currentExecutionToken == token else { return }
                 if currentExecution?.envelope.id == envelope.id {
@@ -6147,16 +6132,7 @@ final class HostComputerUseManager: ObservableObject {
         token: UUID
     ) {
         guard currentExecutionToken == token else { return }
-        actionGate.endAutomation(allowsActions: false)
-        currentExecution = nil
-        currentExecutionToken = nil
-        executionTask = nil
-        pausedExecution = context
-        activity = .paused
-        sendUserInterventionStatus(
-            Self.userInterventionGuidance,
-            replyingTo: context.envelope,
-            channel: context.channel)
+        pauseForLocalIntervention(context)
     }
 
     private func continueApprovedVisualAction(
@@ -6552,17 +6528,7 @@ final class HostComputerUseManager: ObservableObject {
             // the idempotency ledger. Preserve the exact prompt so the user
             // can sign in through the live screen and resume from the changed
             // UI without starting a second task.
-            pausedExecution = context
-            currentExecution = nil
-            currentExecutionToken = nil
-            executionTask = nil
-            actionGate.setAllowsActions(false)
-            actionGate.endAutomation(allowsActions: false)
-            activity = .paused
-            sendUserInterventionStatus(
-                message,
-                replyingTo: envelope,
-                channel: context.channel)
+            pauseForLocalIntervention(context, guidance: message)
 
         case .approvalRequired(
             _,
@@ -6644,7 +6610,8 @@ final class HostComputerUseManager: ObservableObject {
             details: approval.request.details,
             confirmLabel: approval.request.confirmLabel,
             appliedControlRevision: taskLedger.appliedControlRevision(
-                taskID: approval.context.envelope.id))
+                taskID: approval.context.envelope.id),
+            hostControlEpoch: taskLedger.hostControlEpoch(taskID: approval.context.envelope.id))
         let stampedApproval = PendingApproval(
             request: request,
             context: approval.context,
@@ -6793,6 +6760,7 @@ final class HostComputerUseManager: ObservableObject {
                 text: responseBody,
                 appliedControlRevision: isApprovedActionEvidenceOnly ? nil : taskLedger.appliedControlRevision(
                     taskID: envelope.id),
+                hostControlEpoch: isApprovedActionEvidenceOnly ? nil : taskLedger.hostControlEpoch(taskID: envelope.id),
                 outcome: needsIdentityRecovery && kind == .assistant ? .unableToComplete : outcome,
                 clarification: needsIdentityRecovery ? nil : clarification, approvedActionEvidence: evidence,
                 isApprovedActionEvidenceOnly: isApprovedActionEvidenceOnly).encodedBody()) ?? responseBody

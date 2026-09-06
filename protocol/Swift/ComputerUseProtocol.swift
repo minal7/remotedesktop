@@ -458,6 +458,7 @@ public struct ComputerUseApprovalRequest: Codable, Equatable, Sendable {
     /// Highest lifecycle control revision applied when the host created this
     /// approval. `nil` keeps requests from pre-revision peers decodable.
     public let appliedControlRevision: UInt64?
+    public let hostControlEpoch: UInt64?
 
     public init(
         requestID: String = UUID().uuidString,
@@ -465,7 +466,8 @@ public struct ComputerUseApprovalRequest: Codable, Equatable, Sendable {
         message: String,
         details: [Detail]? = nil,
         confirmLabel: String? = nil,
-        appliedControlRevision: UInt64? = nil
+        appliedControlRevision: UInt64? = nil,
+        hostControlEpoch: UInt64? = nil
     ) {
         self.requestID = requestID
         self.taskID = taskID
@@ -473,6 +475,7 @@ public struct ComputerUseApprovalRequest: Codable, Equatable, Sendable {
         self.details = details.map { Array($0.prefix(12)) }
         self.confirmLabel = confirmLabel.map { String($0.prefix(80)) }
         self.appliedControlRevision = appliedControlRevision
+        self.hostControlEpoch = hostControlEpoch
     }
 
     public func encodedBody() throws -> String {
@@ -492,17 +495,20 @@ public struct ComputerUseApprovalResponse: Codable, Equatable, Sendable {
     /// accept responses from peers that predate ordered lifecycle controls.
     public let taskID: String?
     public let appliedControlRevision: UInt64?
+    public let hostControlEpoch: UInt64?
 
     public init(
         requestID: String,
         approved: Bool,
         taskID: String? = nil,
-        appliedControlRevision: UInt64? = nil
+        appliedControlRevision: UInt64? = nil,
+        hostControlEpoch: UInt64? = nil
     ) {
         self.requestID = requestID
         self.approved = approved
         self.taskID = taskID
         self.appliedControlRevision = appliedControlRevision
+        self.hostControlEpoch = hostControlEpoch
     }
 
     public func encodedBody() throws -> String {
@@ -521,7 +527,8 @@ public struct ComputerUseApprovalResponse: Codable, Equatable, Sendable {
 /// deliver Pause, Resume, Cancel, and the prompt itself in any order without a
 /// stale control reversing a newer user intent. Hosts still accept the empty
 /// control bodies emitted by older clients, but those legacy controls can only
-/// affect an already-active matching execution context.
+/// affect an already-active matching execution context before its first local
+/// handoff; they cannot override a nonzero host control epoch.
 public struct ComputerUseControlRequest: Codable, Equatable, Sendable {
     public static let currentVersion = 1
     public static let maximumTaskIDLength = 128
@@ -529,11 +536,16 @@ public struct ComputerUseControlRequest: Codable, Equatable, Sendable {
     public let version: Int
     public let taskID: String
     public let revision: UInt64
+    /// The host's local takeover/handback clock observed when this intent was
+    /// created. Freeze it with the revision through retries and recovery.
+    /// Missing values from older clients mean epoch zero, never the latest.
+    public let observedHostControlEpoch: UInt64?
 
-    public init(taskID: String, revision: UInt64) {
+    public init(taskID: String, revision: UInt64, observedHostControlEpoch: UInt64? = nil) {
         version = Self.currentVersion
         self.taskID = taskID
         self.revision = revision
+        self.observedHostControlEpoch = observedHostControlEpoch
     }
 
     public var isValid: Bool {
@@ -633,6 +645,10 @@ public struct ComputerUseTaskUpdate: Codable, Equatable, Sendable {
     /// this update was created. `nil` preserves decoding and behavior for
     /// peers that predate ordered controls.
     public let appliedControlRevision: UInt64?
+    /// Independent durable clock for host-local takeover and handback. A
+    /// greater epoch supersedes older nonterminal phone intents without
+    /// pretending their revisions were applied. Evidence-only updates omit it.
+    public let hostControlEpoch: UInt64?
     /// A machine-readable result for terminal assistant replies and resumable
     /// person-only status updates. `nil` preserves wire compatibility with
     /// peers that only understand the existing text and status prefix.
@@ -647,6 +663,7 @@ public struct ComputerUseTaskUpdate: Codable, Equatable, Sendable {
         taskID: String,
         text: String,
         appliedControlRevision: UInt64? = nil,
+        hostControlEpoch: UInt64? = nil,
         outcome: ComputerUseTerminalOutcome? = nil,
         clarification: ComputerUseClarificationReference? = nil,
         approvedActionEvidence: ComputerUseApprovedActionEvidence? = nil,
@@ -655,6 +672,7 @@ public struct ComputerUseTaskUpdate: Codable, Equatable, Sendable {
         self.taskID = taskID
         self.text = String(text.prefix(8_000))
         self.appliedControlRevision = appliedControlRevision
+        self.hostControlEpoch = hostControlEpoch
         self.outcome = outcome
         self.clarification = outcome == .userInterventionRequired && clarification?.taskID == taskID ? clarification : nil
         self.approvedActionEvidence = approvedActionEvidence
@@ -665,6 +683,7 @@ public struct ComputerUseTaskUpdate: Codable, Equatable, Sendable {
         case taskID
         case text
         case appliedControlRevision
+        case hostControlEpoch
         case outcome
         case clarification
         case approvedActionEvidence
@@ -678,6 +697,7 @@ public struct ComputerUseTaskUpdate: Codable, Equatable, Sendable {
         appliedControlRevision = try values.decodeIfPresent(
             UInt64.self,
             forKey: .appliedControlRevision)
+        hostControlEpoch = try values.decodeIfPresent(UInt64.self, forKey: .hostControlEpoch)
         let rawOutcome = try values.decodeIfPresent(
             String.self,
             forKey: .outcome)
@@ -707,6 +727,7 @@ public struct ComputerUseTaskUpdate: Codable, Equatable, Sendable {
         try values.encodeIfPresent(
             appliedControlRevision,
             forKey: .appliedControlRevision)
+        try values.encodeIfPresent(hostControlEpoch, forKey: .hostControlEpoch)
         try values.encodeIfPresent(outcome?.rawValue, forKey: .outcome)
         try values.encodeIfPresent(clarification, forKey: .clarification)
         try values.encodeIfPresent(approvedActionEvidence, forKey: .approvedActionEvidence)
@@ -715,7 +736,7 @@ public struct ComputerUseTaskUpdate: Codable, Equatable, Sendable {
 
     private func validateActionEvidenceUse() throws {
         guard !isApprovedActionEvidenceOnly || (approvedActionEvidence != nil && text.isEmpty
-            && appliedControlRevision == nil && outcome == nil && clarification == nil) else {
+            && appliedControlRevision == nil && hostControlEpoch == nil && outcome == nil && clarification == nil) else {
             throw ComputerUsePayloadError.invalidActionEvidence
         }
     }

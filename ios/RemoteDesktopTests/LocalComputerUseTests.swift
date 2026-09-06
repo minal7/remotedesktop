@@ -1080,7 +1080,12 @@ final class LocalComputerUseTests: XCTestCase {
             createdAt: Date(),
             localAccountBinding: accountA,
             controlRevision: 7,
+            acknowledgedControlRevision: 5,
             lastControlKind: .resume,
+            lastControlRevision: 6,
+            hostControlEpoch: 4,
+            lastControlHostEpoch: 3,
+            hostControlPaused: true,
             interventionGuidance: "Sign in on the Mac")
         defer {
             store.remove(
@@ -1110,7 +1115,12 @@ final class LocalComputerUseTests: XCTestCase {
         XCTAssertEqual(restored.messageID, pending.messageID)
         XCTAssertEqual(restored.exactWireBody, pending.exactWireBody)
         XCTAssertEqual(restored.controlRevision, pending.controlRevision)
+        XCTAssertEqual(restored.acknowledgedControlRevision, pending.acknowledgedControlRevision)
         XCTAssertEqual(restored.lastControlKind, pending.lastControlKind)
+        XCTAssertEqual(restored.lastControlRevision, pending.lastControlRevision)
+        XCTAssertEqual(restored.hostControlEpoch, pending.hostControlEpoch)
+        XCTAssertEqual(restored.lastControlHostEpoch, pending.lastControlHostEpoch)
+        XCTAssertEqual(restored.hostControlPaused, pending.hostControlPaused)
         XCTAssertEqual(
             restored.interventionGuidance,
             pending.interventionGuidance)

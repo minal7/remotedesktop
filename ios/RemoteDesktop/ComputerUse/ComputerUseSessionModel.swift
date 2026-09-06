@@ -125,7 +125,13 @@ final class ComputerUseSessionModel: ObservableObject {
     private var activePromptBody: String?
     private var activePromptCreatedAt: Date?
     private var controlRevision: UInt64 = 0
+    private var acknowledgedControlRevision: UInt64 = 0
     private var lastControlKind: ComputerUseEnvelope.Kind?
+    private var lastControlRevision: UInt64 = 0
+    private var hostControlEpoch: UInt64 = 0
+    private var lastControlHostEpoch: UInt64 = 0
+    private var hostControlPaused: Bool?
+    private var unpersistedHostControlEpoch: UInt64?
     private var pendingControlIntent: PendingControlIntent?
     private var approvalSubmission: ComputerUsePendingApprovalDecision?
     private var approvalResponseInFlightRequestID: String?
@@ -136,6 +142,7 @@ final class ComputerUseSessionModel: ObservableObject {
         let taskID: String
         let revision: UInt64
         let kind: ComputerUseEnvelope.Kind
+        let hostControlEpoch: UInt64
     }
 
     init(
@@ -174,7 +181,12 @@ final class ComputerUseSessionModel: ObservableObject {
             activePromptBody = restored.exactWireBody
             activePromptCreatedAt = restored.createdAt
             controlRevision = restored.controlRevision ?? 0
+            acknowledgedControlRevision = restored.acknowledgedControlRevision ?? 0
             lastControlKind = restored.lastControlKind
+            lastControlRevision = restored.lastControlRevision ?? restored.controlRevision ?? 0
+            hostControlEpoch = restored.hostControlEpoch ?? 0
+            lastControlHostEpoch = restored.lastControlHostEpoch ?? 0
+            hostControlPaused = restored.hostControlPaused
             approvalSubmission = restored.approvalDecision
             retryMessageID = restored.messageID
             retryPrompt = restored.prompt
@@ -211,8 +223,12 @@ final class ComputerUseSessionModel: ObservableObject {
                 state = .working
                 statusText = "Confirming your previous Stop…"
             default:
-                state = .working
-                if let decision = restored.approvalDecision {
+                state = restored.hostControlPaused == true ? .paused : .working
+                if restored.hostControlPaused == true {
+                    userInterventionGuidance = Self.boundedInterventionGuidance(restored.interventionGuidance)
+                    latestTerminalOutcome = .userInterventionRequired
+                    statusText = userInterventionGuidance ?? "AI paused — you're in control"
+                } else if let decision = restored.approvalDecision {
                     statusText = decision.approved
                         ? "Restoring your approval…"
                         : "Restoring your cancellation…"
@@ -235,7 +251,7 @@ final class ComputerUseSessionModel: ObservableObject {
                 startPromptRefresh(resendImmediately: true)
             }
             replayPersistedControlIfNeeded()
-            if lastControlKind != .pause {
+            if lastControlKind != .pause, hostControlPaused != true {
                 scheduleResponseTimeout()
             }
             if lastControlKind != .pause,
@@ -499,7 +515,8 @@ final class ComputerUseSessionModel: ObservableObject {
             requestID: request.requestID,
             approved: approved,
             taskID: request.taskID,
-            appliedControlRevision: request.appliedControlRevision)
+            appliedControlRevision: request.appliedControlRevision,
+            hostControlEpoch: request.hostControlEpoch)
         guard let responseBody = try? response.encodedBody() else {
             statusText = "Couldn’t safely record your choice. Please try again."
             return
@@ -576,7 +593,8 @@ final class ComputerUseSessionModel: ObservableObject {
         let intent = PendingControlIntent(
             taskID: request.taskID,
             revision: request.revision,
-            kind: kind)
+            kind: kind,
+            hostControlEpoch: request.observedHostControlEpoch ?? 0)
         pendingControlIntent = intent
         launchOutboundTask { model in
             do {
@@ -646,6 +664,7 @@ final class ComputerUseSessionModel: ObservableObject {
               activePromptID == submission.request.taskID,
               approvalSubmission == submission,
               approvalResponseInFlightRequestID == nil,
+              (submission.request.hostControlEpoch ?? 0) == hostControlEpoch,
               lastControlKind != .pause,
               lastControlKind != .cancel else { return }
         approvalResponseInFlightRequestID = submission.request.requestID
@@ -704,31 +723,43 @@ final class ComputerUseSessionModel: ObservableObject {
         kind: ComputerUseEnvelope.Kind
     ) -> ComputerUseControlRequest? {
         guard let taskID = activePromptID else { return nil }
+        guard kind == .cancel || unpersistedHostControlEpoch == nil else { return nil }
         guard controlRevision < UInt64.max else { return nil }
         let previousRevision = controlRevision
         let previousKind = lastControlKind
+        let previousIntentRevision = lastControlRevision
+        let previousEpoch = lastControlHostEpoch
+        let previousPaused = hostControlPaused
         controlRevision += 1
         lastControlKind = kind
+        lastControlRevision = controlRevision
+        lastControlHostEpoch = hostControlEpoch
+        hostControlPaused = kind == .pause
         guard persistActivePrompt() else {
             controlRevision = previousRevision
             lastControlKind = previousKind
+            lastControlRevision = previousIntentRevision
+            lastControlHostEpoch = previousEpoch
+            hostControlPaused = previousPaused
             return nil
         }
         return ComputerUseControlRequest(
             taskID: taskID,
-            revision: controlRevision)
+            revision: lastControlRevision,
+            observedHostControlEpoch: lastControlHostEpoch)
     }
 
     private func replayPersistedControlIfNeeded() {
         guard let taskID = activePromptID,
-              controlRevision > 0,
+              lastControlRevision > 0,
               let kind = lastControlKind,
               kind == .pause || kind == .resume || kind == .cancel else {
             return
         }
         let request = ComputerUseControlRequest(
             taskID: taskID,
-            revision: controlRevision)
+            revision: lastControlRevision,
+            observedHostControlEpoch: lastControlHostEpoch)
         guard let body = try? request.encodedBody() else { return }
         sendControl(
             kind,
@@ -830,6 +861,8 @@ final class ComputerUseSessionModel: ObservableObject {
                 let taskID = update?.taskID ?? activePromptID
                 guard let activePromptID,
                       taskID == activePromptID else { continue }
+                if update?.hostControlEpoch != nil, !hasHostControlScope(envelope) { continue }
+                guard acceptHostControlEpoch(update?.hostControlEpoch) else { continue }
                 if case .approvalRequired = state {
                     // A terminal envelope created before the approval card
                     // cannot prove that the person authorized or canceled the
@@ -840,7 +873,7 @@ final class ComputerUseSessionModel: ObservableObject {
                 if let appliedControlRevision = update?.appliedControlRevision {
                     guard acceptAppliedControlRevision(
                         appliedControlRevision) else { continue }
-                } else if controlRevision > 0 {
+                } else if requiredControlRevision > 0 {
                     // A terminal reply created before the newest lifecycle
                     // intent is not proof that Pause/Resume/Stop was applied.
                     // Current hosts attach their durable revision snapshot.
@@ -863,6 +896,11 @@ final class ComputerUseSessionModel: ObservableObject {
                     consumeActionEvidence(update, from: envelope)
                     if update.isApprovedActionEvidenceOnly { continue }
                     guard update.taskID == activePromptID else { continue }
+                    if update.hostControlEpoch != nil, !hasHostControlScope(envelope) { continue }
+                    let paused: Bool? = update.text == "paused"
+                        || ComputerUseStatusSignal.userInterventionMessage(from: update.text) != nil
+                        ? true : (update.text == "working" ? false : nil)
+                    guard acceptHostControlEpoch(update.hostControlEpoch, paused: paused) else { continue }
                     guard shouldApplyHostStatus(
                         update.text,
                         appliedControlRevision: update.appliedControlRevision) else {
@@ -880,6 +918,7 @@ final class ComputerUseSessionModel: ObservableObject {
                     // describe the active v2 task, but must never resurrect a
                     // terminal task after an assistant reply cleared it.
                     guard activePromptID != nil else { continue }
+                    guard acceptHostControlEpoch(nil) else { continue }
                     guard shouldApplyHostStatus(
                         envelope.body,
                         appliedControlRevision: nil) else { continue }
@@ -891,6 +930,8 @@ final class ComputerUseSessionModel: ObservableObject {
                     continue
                 }
                 guard request.taskID == activePromptID else { continue }
+                if request.hostControlEpoch != nil, !hasHostControlScope(envelope) { continue }
+                guard acceptHostControlEpoch(request.hostControlEpoch, paused: false) else { continue }
                 if lastControlKind == .cancel
                     || pendingControlIntent?.kind == .cancel
                     || pendingControlIntent?.kind == .pause {
@@ -900,7 +941,7 @@ final class ComputerUseSessionModel: ObservableObject {
                 if let appliedControlRevision = request.appliedControlRevision {
                     guard acceptAppliedControlRevision(
                         appliedControlRevision) else { continue }
-                } else if controlRevision > 0 {
+                } else if requiredControlRevision > 0 {
                     continue
                 }
                 if let submission = approvalSubmission,
@@ -954,6 +995,10 @@ final class ComputerUseSessionModel: ObservableObject {
         // This is an annotation on the exact original request. Do not touch
         // task/control state, timers, the composer, approval or conversation.
         messages[index].approvedActionEvidence = evidence
+    }
+
+    private func hasHostControlScope(_ envelope: ComputerUseEnvelope) -> Bool {
+        envelope.senderID == hostID && envelope.pairingCode == pairingCode && envelope.sessionID == sessionID
     }
 
     private func recordTaskProgress(
@@ -1034,10 +1079,9 @@ final class ComputerUseSessionModel: ObservableObject {
             return true
         }
 
-        // Once this client has issued a versioned lifecycle intent, an
-        // unversioned status can have been created before that intent and
-        // delivered later. Only a typed safety intervention may supersede it.
-        if controlRevision > 0 {
+        // Without a newer host epoch, an unversioned status cannot prove that
+        // the latest outstanding phone intent or acknowledged revision applied.
+        if requiredControlRevision > 0 {
             return false
         }
 
@@ -1066,13 +1110,66 @@ final class ComputerUseSessionModel: ObservableObject {
         return true
     }
 
+    /// A higher host epoch invalidates older Pause/Resume intents, not Stop.
+    /// Keep the phone counter for future allocation, but do not require an
+    /// acknowledgement for an intent that the newer local choice superseded.
+    private var requiredControlRevision: UInt64 {
+        max(acknowledgedControlRevision,
+            lastControlKind == .cancel || lastControlHostEpoch == hostControlEpoch ? lastControlRevision : 0)
+    }
+
+    private func acceptHostControlEpoch(_ value: UInt64?, paused: Bool? = nil) -> Bool {
+        let epoch = value ?? 0
+        guard epoch >= max(hostControlEpoch, unpersistedHostControlEpoch ?? 0) else { return false }
+        guard epoch > hostControlEpoch else { return true }
+        let previousEpoch = hostControlEpoch
+        let previousKind = lastControlKind
+        let previousPaused = hostControlPaused
+        let previousApproval = approvalSubmission
+        hostControlEpoch = epoch
+        if lastControlKind != .cancel {
+            lastControlKind = nil
+            approvalSubmission = nil
+            hostControlPaused = paused ?? true
+        }
+        // Commit supersession before canceling retries or changing the card.
+        // A crash must never turn the old Resume into a current-epoch command.
+        guard persistActivePrompt() else {
+            hostControlEpoch = previousEpoch
+            lastControlKind = previousKind
+            hostControlPaused = previousPaused
+            approvalSubmission = previousApproval
+            unpersistedHostControlEpoch = epoch
+            if lastControlKind != .cancel { state = .paused }
+            statusText = "Couldn't safely save the Mac's handoff. Use the Mac directly until recovery is available."
+            return false
+        }
+        unpersistedHostControlEpoch = nil
+        if lastControlKind != .cancel {
+            pendingControlIntent = nil
+            controlRetryTask?.cancel()
+            controlRetryTask = nil
+            approvalResponseInFlightRequestID = nil
+            if paused == false {
+                state = .working
+            } else if case .approvalRequired = state {
+                state = .paused
+            }
+            advanceStateGeneration()
+        }
+        return true
+    }
+
     private func acceptAppliedControlRevision(_ revision: UInt64) -> Bool {
-        guard revision >= controlRevision else { return false }
-        if revision > controlRevision {
+        guard revision >= requiredControlRevision else { return false }
+        if revision > acknowledgedControlRevision || revision > controlRevision {
             let previousRevision = controlRevision
-            controlRevision = revision
+            let previousAcknowledged = acknowledgedControlRevision
+            controlRevision = max(controlRevision, revision)
+            acknowledgedControlRevision = max(acknowledgedControlRevision, revision)
             guard persistActivePrompt() else {
                 controlRevision = previousRevision
+                acknowledgedControlRevision = previousAcknowledged
                 return false
             }
         }
@@ -1113,19 +1210,21 @@ final class ComputerUseSessionModel: ObservableObject {
         case "working":
             latestTerminalOutcome = nil
             userInterventionGuidance = nil
+            hostControlPaused = false
+            _ = persistActivePrompt()
             state = .working
             statusText = "Your Mac is working on it…"
             scheduleResponseTimeout()
         case "paused":
-            // A typed intervention causes iOS to persist a versioned Pause so
-            // the host and phone agree that the person owns the screen. The
-            // host's later generic `paused` acknowledgement must not erase the
-            // specific instruction that caused that safety pause.
+            // A generic acknowledgement must not erase the specific login or
+            // other intervention guidance already associated with this pause.
             let interventionGuidance = latestTerminalOutcome
                 == .userInterventionRequired
                 ? userInterventionGuidance
                 : nil
             userInterventionGuidance = interventionGuidance
+            hostControlPaused = true
+            _ = persistActivePrompt()
             responseTimeoutTask?.cancel()
             responseTimeoutTask = nil
             state = .paused
@@ -1134,6 +1233,8 @@ final class ComputerUseSessionModel: ObservableObject {
             stabilizeAuthoritativePause()
         case "ready":
             userInterventionGuidance = nil
+            hostControlPaused = false
+            _ = persistActivePrompt()
             if pendingControlIntent?.kind == .cancel,
                activePromptID != nil,
                activePromptBody != nil {
@@ -1215,6 +1316,7 @@ final class ComputerUseSessionModel: ObservableObject {
             ?? "Your input is required before AI can continue."
         latestTerminalOutcome = .userInterventionRequired
         userInterventionGuidance = guidance
+        hostControlPaused = true
         state = .paused
         statusText = guidance
         responseTimeoutTask?.cancel()
@@ -1238,10 +1340,13 @@ final class ComputerUseSessionModel: ObservableObject {
         return bounded.isEmpty ? nil : bounded
     }
 
-    /// A host can pause on its own for manual input or because a Resume could
-    /// not continue. Persist a strictly newer Pause before returning control
-    /// to the person so relaunch cannot replay the older Resume or approval.
+    /// Older hosts need a phone Pause to retain their unversioned intervention
+    /// through relaunch. Hosts with local epochs already persist that choice.
     private func stabilizeAuthoritativePause() {
+        // Versioned local handoffs are already durable on the host. Echoing a
+        // newly allocated phone Pause would turn an old status delivery into a
+        // fresh command capable of undoing a later handback.
+        guard hostControlEpoch == 0 else { return }
         guard activePromptID != nil,
               lastControlKind != .pause,
               lastControlKind != .cancel else { return }
@@ -1364,7 +1469,13 @@ final class ComputerUseSessionModel: ObservableObject {
         activePromptBody = wireBody
         activePromptCreatedAt = createdAt
         controlRevision = 0
+        acknowledgedControlRevision = 0
         lastControlKind = nil
+        lastControlRevision = 0
+        hostControlEpoch = 0
+        lastControlHostEpoch = 0
+        hostControlPaused = nil
+        unpersistedHostControlEpoch = nil
         pendingControlIntent = nil
         approvalSubmission = nil
         approvalResponseInFlightRequestID = nil
@@ -1389,7 +1500,12 @@ final class ComputerUseSessionModel: ObservableObject {
             createdAt: createdAt,
             localAccountBinding: localAccountBinding,
             controlRevision: controlRevision == 0 ? nil : controlRevision,
+            acknowledgedControlRevision: acknowledgedControlRevision,
             lastControlKind: lastControlKind,
+            lastControlRevision: lastControlRevision,
+            hostControlEpoch: hostControlEpoch,
+            lastControlHostEpoch: lastControlHostEpoch,
+            hostControlPaused: hostControlPaused,
             approvalDecision: approvalSubmission,
             interventionGuidance: userInterventionGuidance))
     }
@@ -1400,7 +1516,13 @@ final class ComputerUseSessionModel: ObservableObject {
         activePromptBody = nil
         activePromptCreatedAt = nil
         controlRevision = 0
+        acknowledgedControlRevision = 0
         lastControlKind = nil
+        lastControlRevision = 0
+        hostControlEpoch = 0
+        lastControlHostEpoch = 0
+        hostControlPaused = nil
+        unpersistedHostControlEpoch = nil
         pendingControlIntent = nil
         approvalSubmission = nil
         approvalResponseInFlightRequestID = nil
