@@ -148,7 +148,8 @@
     "RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests/testContactCompletionLabelsWhichRequestedEntityHasNoMatches",
     "RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests/testCompiledContactEntitiesRejectPartialOrPunctuationChangedQueriesBeforeAccess",
     "RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests/testUncompiledContactEntityClausesCannotBecomePartialCompletion",
-    "RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests/testQuotedContactEntityKeepsItsConjunctionInsideOneQuery"
+    "RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests/testQuotedContactEntityKeepsItsConjunctionInsideOneQuery",
+    "RemoteDesktopHostTests/ComputerUseTests/test_managerLoginHandbackWaitsForPageAndPreservesTaskAndBrowserSession"
   ],
   "expectedTests": [
     "RemoteDesktopHostTests/AppleFoundationMCPPlannerTests/testOrderedInputDistinguishesReturnKeyFromControlLabelAndRequiresSignedAppScope",
@@ -303,6 +304,7 @@
     "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testBoundNavigationRequiresTheExactCurrentDocumentBeforeLoading",
     "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testCancelledNavigationAndLateResponseCannotAcquireAReceipt",
     "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testDeadlineAndOwnershipLossStopPendingLoadWithoutSuccess",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testFailedOrAutomationTimePageChangesCannotBeAdoptedOnHandback",
     "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testHTTPFailureDoesNotProduceSuccessReceipt",
     "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testNavigationGrammarRequiresACompleteCurrentTurnCommand",
     "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testPageInitiatedSameURLReloadInvalidatesTheOriginalDocument",
@@ -312,6 +314,7 @@
     "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testRepeatedURLHasTwoRealRequestsDistinctReceiptsAndNoDuplicateOperation",
     "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testStepJournalResumesAfterFirstPageWithoutReplayingAndContainsNoURLs",
     "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testUncertainNavigationCannotReplayOnResumeOrNewContext",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testUserControlPageNeedsExplicitHandbackAndNeverBecomesNavigationProof",
     "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testWrongTaskClosedGateAndInvalidURLCannotStartNavigation",
     "RemoteDesktopHostTests/ComputerUsePlanningWorkerTests/testAlreadyCancelledPlanningDoesNotInvokeOperationOrOccupyPermit",
     "RemoteDesktopHostTests/ComputerUsePlanningWorkerTests/testCancellationReturnsBeforeUncooperativePlannerAndDiscardsLateProposal",
@@ -379,6 +382,7 @@
     "RemoteDesktopHostTests/ComputerUseTests/test_managerContinuesExactReferencedGoalThroughTwoQuestionsAndDurableReplays",
     "RemoteDesktopHostTests/ComputerUseTests/test_managerDoesNotExposeOrRetainAClarificationWhoseTerminalWriteFailed",
     "RemoteDesktopHostTests/ComputerUseTests/test_managerLegacyPromptAndControlRepliesRequireRecoveryWithoutLeakingOldEvidence",
+    "RemoteDesktopHostTests/ComputerUseTests/test_managerLoginHandbackWaitsForPageAndPreservesTaskAndBrowserSession",
     "RemoteDesktopHostTests/ComputerUseTests/test_managerRejectsMalformedForgedSessionMismatchedAndCancelledAnswersWithoutFallback",
     "RemoteDesktopHostTests/ComputerUseTests/test_managerResumesClaimedAnswerWithTypedGoalAndRejectsRestartedReference",
     "RemoteDesktopHostTests/ComputerUseTests/test_managerRetiresReferencesOnExpiryNewRequestRevocationAndTransportStop",

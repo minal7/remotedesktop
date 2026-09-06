@@ -9,6 +9,75 @@ import XCTest
 
 @MainActor
 final class ComputerUseTests: XCTestCase {
+    func test_managerLoginHandbackWaitsForPageAndPreservesTaskAndBrowserSession() async throws {
+        let server = try OwnedBrowserHTTPFixture(routes: [
+            "/login": .init(body: """
+                <h1>Local sign-in handoff fixture</h1><script>
+                sessionStorage.handoff = 'retained';
+                fetch('/signal').then(() => location.href = '/account');
+                </script>
+                """),
+            "/signal": .init(held: true),
+            "/account": .init(body: """
+                <label>Session <input id="session"></label><script>
+                document.getElementById('session').value = sessionStorage.handoff || 'lost';
+                fetch(sessionStorage.handoff === 'retained' ? '/retained-session' : '/lost-session');
+                </script>
+                """, held: true),
+        ])
+        let base = try await server.start()
+        defer { server.stop() }
+        let ledgerURL = temporaryLedgerURL()
+        defer { try? FileManager.default.removeItem(at: ledgerURL.deletingLastPathComponent()) }
+        var browser: ComputerUseOwnedBrowser?
+        let executor = BrowserLoginHandoffTestExecutor(loginURL: base.appendingPathComponent("login"),
+                                                     browser: { browser })
+        let channel = FakeHostComputerUseChannel()
+        let manager = HostComputerUseManager(
+            injector: InputInjector(), executor: executor,
+            taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
+            browserNavigationFactory: { mayAct in
+                let owned = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: mayAct)
+                browser = owned
+                return ComputerUseBrowserNavigationTask(browser: owned,
+                    journalDirectory: ledgerURL.deletingLastPathComponent().appendingPathComponent("browser"))
+            },
+            allowsExternalServices: false, channelFactory: { _ in channel })
+        let owned = try XCTUnwrap(browser)
+        defer { owned.close() }
+        let prompt = makeEnvelope(id: "login-handoff", kind: .prompt,
+                                  body: "Find travel options after I sign in.")
+        manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(manager.handle(prompt, channel: channel))
+        await waitUntil(timeoutIterations: 1_000) {
+            manager.activity == .paused && server.count("/signal") == 1
+        }
+        XCTAssertEqual(executor.callCount, 1)
+        server.releaseHeldResponses()
+        await waitUntil(timeoutIterations: 1_000) { server.count("/account") == 1 }
+        XCTAssertTrue(manager.handle(try makeControlEnvelope(kind: .resume,
+            taskID: prompt.id, revision: 1), channel: channel))
+        await waitUntil { manager.activity == .paused }
+        XCTAssertEqual(executor.callCount, 1, "A loading login page cannot reach the successor executor")
+        XCTAssertNil(owned.currentDocument(taskID: prompt.id))
+
+        server.releaseHeldResponses()
+        await waitUntil(timeoutIterations: 1_000) {
+            owned.hasPageAwaitingHandback && server.count("/retained-session") == 1
+        }
+        XCTAssertTrue(manager.handle(try makeControlEnvelope(kind: .resume,
+            taskID: prompt.id, revision: 2), channel: channel))
+        await waitUntil(timeoutIterations: 1_000) { executor.callCount == 2 && manager.activity == .idle }
+        XCTAssertEqual(executor.taskIDs, [prompt.id, prompt.id])
+        XCTAssertEqual(executor.trustedPrompts, [prompt.body, prompt.body])
+        XCTAssertEqual(executor.resumedDocument?.source, .userControlObservation)
+        XCTAssertEqual(executor.resumedDocument?.committedURL.path, "/account")
+        XCTAssertEqual(executor.resumedValues, ["retained"])
+        XCTAssertEqual(server.count("/login"), 1, "Handback must not replay the original navigation")
+        XCTAssertEqual(server.count("/account"), 1)
+        XCTAssertEqual(server.count("/lost-session"), 0)
+    }
+
     func test_taskLedgerRequiresExactWireBodyBeforeAcceptedOrTerminalReplay() throws {
         let url = temporaryLedgerURL()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
@@ -7600,6 +7669,51 @@ private final class ScopedClarificationTestExecutor: ComputerUseExecuting, Compu
         pending = .init(taskID: taskID, goal: goal, question: "Which field?", scope: String(repeating: "a", count: 64),
                         expiresAt: Date().addingTimeInterval(300))
         return .clarificationRequired("Which field?")
+    }
+}
+
+@MainActor
+private final class BrowserLoginHandoffTestExecutor: ComputerUseExecuting {
+    let isReady = true
+    let runtimeName = "Local browser handoff fixture"
+    let requiresMacControlHelper = false
+    let loginURL: URL
+    let browser: () -> ComputerUseOwnedBrowser?
+    private(set) var taskIDs: [String] = []
+    private(set) var trustedPrompts: [String] = []
+    private(set) var resumedDocument: ComputerUseBrowserDocument?
+    private(set) var resumedValues: [String] = []
+    var callCount: Int { taskIDs.count }
+
+    init(loginURL: URL, browser: @escaping () -> ComputerUseOwnedBrowser?) {
+        self.loginURL = loginURL
+        self.browser = browser
+    }
+
+    func execute(prompt: String, tools: ComputerUseHostTools,
+                 progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
+        XCTFail("The host must retain the task-aware execution boundary")
+        return .unableToComplete("Missing task context")
+    }
+
+    func execute(taskID: String, prompt: String, trustedUserPrompt: String,
+                 tools: ComputerUseHostTools, progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
+        taskIDs.append(taskID)
+        trustedPrompts.append(trustedUserPrompt)
+        let owned = try XCTUnwrap(browser())
+        if callCount == 1 {
+            try owned.claim(taskID: taskID)
+            _ = try await owned.navigate(taskID: taskID, operationID: "fixture-login", to: loginURL)
+            return .userInterventionRequired("Sign in on the local fixture page, then choose Resume.")
+        }
+        let current = try XCTUnwrap(owned.currentDocument(taskID: taskID))
+        resumedDocument = current
+        let target = ComputerUseBrowserTextTarget(browser: owned, document: current, requiresFrontmost: false)
+        let fields = try await target.fieldsIfSupported()
+        resumedValues = fields?.map { $0.snapshot.value } ?? []
+        guard current.source == .userControlObservation, current.committedURL.path == "/account",
+              resumedValues == ["retained"] else { return .unableToComplete("Handback was not verified") }
+        return .completed("Checked the local fixture page after handback.")
     }
 }
 

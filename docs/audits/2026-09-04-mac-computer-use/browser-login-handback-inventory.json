@@ -1,0 +1,36 @@
+{
+  "selectors": [
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests",
+    "RemoteDesktopHostTests/ComputerUseTests/test_managerLoginHandbackWaitsForPageAndPreservesTaskAndBrowserSession",
+    "RemoteDesktopHostTests/ComputerUseTests/test_interventionPausesAndResumeReplansSavedPrompt",
+    "RemoteDesktopHostTests/ComputerUseTests/test_executorRequestedUserInterventionPausesWithoutCompletingAndResumesTask",
+    "RemoteDesktopHostTests/ComputerUseTests/test_losingPeerAuthorizationPausesAutomationUntilExplicitResume",
+    "RemoteDesktopHostTests/ComputerUseTests/test_transportStopTerminalizesPausedTaskInsteadOfResumingAfterReconnect",
+    "RemoteDesktopHostTests/ComputerUseTests/test_approvedMCPConfirmationSurvivesPauseAndResumeThroughCapabilityWrapperWithoutReplay",
+    "RemoteDesktopHostTests/ComputerUseTests/test_unconfirmedApprovedMCPActionCannotReplanOrRepeatOnResume"
+  ],
+  "expectedTests": [
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testBoundNavigationRequiresTheExactCurrentDocumentBeforeLoading",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testCancelledNavigationAndLateResponseCannotAcquireAReceipt",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testDeadlineAndOwnershipLossStopPendingLoadWithoutSuccess",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testFailedOrAutomationTimePageChangesCannotBeAdoptedOnHandback",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testHTTPFailureDoesNotProduceSuccessReceipt",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testNavigationGrammarRequiresACompleteCurrentTurnCommand",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testPageInitiatedSameURLReloadInvalidatesTheOriginalDocument",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testPageReloadAfterDurableAttemptCannotStartTheNextPlannedNavigation",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testProductionCoordinatorUsesOnlyCurrentRequestAndNeverFallsThroughAfterBrowserFailure",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testRedirectRecordsCommittedURLAndSubframesCannotFailMainNavigation",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testRepeatedURLHasTwoRealRequestsDistinctReceiptsAndNoDuplicateOperation",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testStepJournalResumesAfterFirstPageWithoutReplayingAndContainsNoURLs",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testUncertainNavigationCannotReplayOnResumeOrNewContext",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testUserControlPageNeedsExplicitHandbackAndNeverBecomesNavigationProof",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testWrongTaskClosedGateAndInvalidURLCannotStartNavigation",
+    "RemoteDesktopHostTests/ComputerUseTests/test_approvedMCPConfirmationSurvivesPauseAndResumeThroughCapabilityWrapperWithoutReplay",
+    "RemoteDesktopHostTests/ComputerUseTests/test_executorRequestedUserInterventionPausesWithoutCompletingAndResumesTask",
+    "RemoteDesktopHostTests/ComputerUseTests/test_interventionPausesAndResumeReplansSavedPrompt",
+    "RemoteDesktopHostTests/ComputerUseTests/test_losingPeerAuthorizationPausesAutomationUntilExplicitResume",
+    "RemoteDesktopHostTests/ComputerUseTests/test_managerLoginHandbackWaitsForPageAndPreservesTaskAndBrowserSession",
+    "RemoteDesktopHostTests/ComputerUseTests/test_transportStopTerminalizesPausedTaskInsteadOfResumingAfterReconnect",
+    "RemoteDesktopHostTests/ComputerUseTests/test_unconfirmedApprovedMCPActionCannotReplanOrRepeatOnResume"
+  ]
+}

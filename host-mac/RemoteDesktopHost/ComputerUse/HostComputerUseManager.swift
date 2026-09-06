@@ -1201,6 +1201,10 @@ final class ComputerUseHostTools {
         browserNavigationTask = nil
     }
 
+    func reacquireOwnedBrowserAfterUserControl(taskID: String) throws {
+        try browserNavigationTask?.reacquireAfterUserControl(taskID: taskID)
+    }
+
     /// Checks whether a transient macOS notification owns the exact pointer
     /// target. Waiting and re-observing is safer than sending the intended
     /// click through an unrelated overlay or dismissing that overlay without
@@ -5922,20 +5926,32 @@ final class HostComputerUseManager: ObservableObject {
                     // claimed approved effect instead of asking any executor
                     // to reconstruct or repeat this consequential task.
                     result = Self.resultForApprovedAction(action)
-                } else if let textClarification {
-                    guard let continuing = executor as? any ComputerUseTextClarificationContinuing else {
-                        throw ComputerUseTextClarificationStore.Failure.invalidReference
-                    }
-                    result = try await continuing.continueClarification(taskID: envelope.id,
-                        originatingTaskID: textClarification.originatingTaskID, goal: textClarification.goal, progress: progress)
                 } else {
-                    result = try await executor.execute(
-                        taskID: envelope.id,
-                        modelPrompt: envelope.body,
-                        currentUserPrompt: trustedUserPrompt,
-                        conversation: conversation,
-                        tools: tools,
-                        progress: progress)
+                    if isResuming {
+                        do {
+                            try tools.reacquireOwnedBrowserAfterUserControl(taskID: envelope.id)
+                        } catch {
+                            try acceptExecutionResult(.userInterventionRequired(
+                                "The AI browser is not ready to continue. Finish signing in or loading the page, then choose Resume."),
+                                executor: executor, context: context, token: token)
+                            return
+                        }
+                    }
+                    if let textClarification {
+                        guard let continuing = executor as? any ComputerUseTextClarificationContinuing else {
+                            throw ComputerUseTextClarificationStore.Failure.invalidReference
+                        }
+                        result = try await continuing.continueClarification(taskID: envelope.id,
+                            originatingTaskID: textClarification.originatingTaskID, goal: textClarification.goal, progress: progress)
+                    } else {
+                        result = try await executor.execute(
+                            taskID: envelope.id,
+                            modelPrompt: envelope.body,
+                            currentUserPrompt: trustedUserPrompt,
+                            conversation: conversation,
+                            tools: tools,
+                            progress: progress)
+                    }
                 }
                 guard !Task.isCancelled,
                       currentExecutionToken == token else { return }

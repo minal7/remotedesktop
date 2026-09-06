@@ -139,6 +139,10 @@ final class ComputerUseBrowserNavigationTask {
 
     func close() { browser.close() }
 
+    func reacquireAfterUserControl(taskID: String) throws {
+        try browser.reacquireAfterUserControl(taskID: taskID)
+    }
+
     func textTargetIfFrontmost(taskID: String) throws -> ComputerUseBrowserTextTarget? {
         guard browser.isFrontmostWindow else { return nil }
         return ComputerUseBrowserTextTarget(browser: browser, document: try browser.acquireCurrentDocument(taskID: taskID))

@@ -235,6 +235,97 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
             "The historical navigation receipt must not masquerade as the current document")
     }
 
+    func testUserControlPageNeedsExplicitHandbackAndNeverBecomesNavigationProof() async throws {
+        for destination in ["/login", "/account"] {
+            let body = """
+                <label>Destination <input value="unchanged"></label><script>
+                if (!sessionStorage.handoff) {
+                    sessionStorage.handoff = 'retained';
+                    fetch('/signal').then(() => location.href = '\(destination)');
+                }
+                </script>
+                """
+            let landing = """
+                <label>Destination <input id="destination"></label><script>
+                document.getElementById('destination').value = sessionStorage.handoff || 'lost';
+                </script>
+                """
+            let server = try OwnedBrowserHTTPFixture(routes: [
+                "/login": .init(body: body), "/account": .init(body: landing), "/signal": .init(held: true),
+            ])
+            let base = try await server.start()
+            defer { server.stop() }
+            var allowed = true
+            let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { allowed })
+            defer { browser.close() }
+            try browser.claim(taskID: "handoff")
+            let original = try await browser.navigate(taskID: "handoff", operationID: "opened-login",
+                to: base.appendingPathComponent("login"))
+            try await waitUntil { server.count("/signal") == 1 }
+            allowed = false
+            server.releaseHeldResponses()
+            try await waitUntil { browser.hasPageAwaitingHandback }
+            XCTAssertFalse(browser.validate(original))
+            XCTAssertThrowsError(try browser.reacquireAfterUserControl(taskID: "handoff")) {
+                XCTAssertEqual($0 as? ComputerUseBrowserError, .ownershipLost)
+            }
+            allowed = true
+            XCTAssertNil(browser.currentDocument(taskID: "handoff"), "Opening the gate is not handback")
+            XCTAssertThrowsError(try browser.acquireCurrentDocument(taskID: "handoff"))
+            try browser.reacquireAfterUserControl(taskID: "handoff")
+            let current = try XCTUnwrap(browser.currentDocument(taskID: "handoff"))
+            XCTAssertEqual(current.source, .userControlObservation)
+            XCTAssertEqual(current.committedURL.path, destination)
+            XCTAssertNotEqual(current.generation, original.generation)
+            XCTAssertNotEqual(current.operationID, original.operationID)
+            XCTAssertEqual(browser.receipt(taskID: "handoff", operationID: "opened-login"), original)
+            XCTAssertNil(browser.receipt(taskID: "handoff", operationID: current.operationID))
+            XCTAssertFalse(browser.validate(original))
+            let target = ComputerUseBrowserTextTarget(browser: browser, document: current, requiresFrontmost: false)
+            let fields = try await target.fieldsIfSupported()
+            XCTAssertEqual(fields?.first?.snapshot.value, destination == "/account" ? "retained" : "unchanged")
+            let transferred = try browser.acquireCurrentDocument(taskID: "next-request")
+            XCTAssertEqual(transferred.source, .userControlObservation)
+            XCTAssertNil(browser.receipt(taskID: "next-request", operationID: transferred.operationID))
+            XCTAssertEqual(server.count("/login"), destination == "/login" ? 2 : 1)
+            XCTAssertEqual(server.count("/account"), destination == "/account" ? 1 : 0)
+            browser.close()
+            XCTAssertFalse(browser.hasPageAwaitingHandback)
+            XCTAssertNil(browser.currentDocument(taskID: "next-request"))
+        }
+    }
+
+    func testFailedOrAutomationTimePageChangesCannotBeAdoptedOnHandback() async throws {
+        for row in [(pause: false, status: 200), (pause: true, status: 404)] {
+            let body = "<script>fetch('/signal').then(() => location.href = '/destination')</script>"
+            let server = try OwnedBrowserHTTPFixture(routes: [
+                "/login": .init(body: body), "/signal": .init(held: true),
+                "/destination": .init(status: row.status),
+            ])
+            let base = try await server.start()
+            defer { server.stop() }
+            var allowed = true
+            let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { allowed })
+            defer { browser.close() }
+            try browser.claim(taskID: "rejected-handoff")
+            let original = try await browser.navigate(taskID: "rejected-handoff", operationID: "original",
+                to: base.appendingPathComponent("login"))
+            try await waitUntil { server.count("/signal") == 1 }
+            allowed = !row.pause
+            server.releaseHeldResponses()
+            try await waitUntil { server.count("/destination") == 1 && !browser.isLoadingPage }
+            allowed = true
+            XCTAssertThrowsError(try browser.reacquireAfterUserControl(taskID: "rejected-handoff")) {
+                XCTAssertEqual($0 as? ComputerUseBrowserError, .pageChanged)
+            }
+            XCTAssertNil(browser.currentDocument(taskID: "rejected-handoff"))
+            XCTAssertFalse(browser.hasPageAwaitingHandback)
+            XCTAssertEqual(browser.receipt(taskID: "rejected-handoff", operationID: "original"), original)
+            XCTAssertEqual(server.count("/login"), 1)
+            XCTAssertEqual(server.count("/destination"), 1)
+        }
+    }
+
     func testStepJournalResumesAfterFirstPageWithoutReplayingAndContainsNoURLs() async throws {
         let server = try OwnedBrowserHTTPFixture()
         let base = try await server.start()
