@@ -9231,6 +9231,47 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
         await runtime.shutdown()
     }
 
+    func testRuntimeClarificationRetainsTurnsAndUsesTheExistingManagedModelLease() async throws {
+        let events = RuntimeEventLog()
+        let response = try JSONSerialization.data(withJSONObject: [
+            "model": ComputerUseNativeTextRuntimeInputs.modelAlias,
+            "choices": [["finish_reason": "stop", "message": ["role": "assistant",
+                "content": #"{"disposition":"supported","edits":[{"fieldID":"f1","mode":"replaceAll","value":"p1"}]}"#]]]])
+        let transport = FakeTransportMaker(events: events, completionDataResponses: [response])
+        let runtime = textRuntime(FakeLlamaLauncher(events: events), transports: transport)
+        let goal = try ComputerUseUnresolvedTextGoal(userRequest: "Set Origin to a value")
+            .answering("What exact text?", with: "\"  東京\n\"")
+        let result = try await ComputerUseRuntimeTextGoalPlanner(inputs: nativeTextInputs, runtime: runtime)
+            .propose(goal: goal, fields: nativeTextFields)
+        guard case .edits(let edits, _) = result else { await runtime.shutdown(); return XCTFail("Clarification lost its literal") }
+        XCTAssertEqual(edits.count, 1); XCTAssertTrue(edits[0].text.utf8.elementsEqual("  東京\n".utf8))
+        let requests = transport.recordedCompletionRequests()
+        XCTAssertEqual(requests.count, 1)
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(requests.first?.httpBody)) as? [String: Any])
+        let messages = try XCTUnwrap(body["messages"] as? [[String: String]])
+        let context = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(XCTUnwrap(messages[1]["content"]).utf8)) as? [String: Any])
+        XCTAssertEqual(context["userTurns"] as? [String], ["Set Origin to a value", "[exact quoted payload p1]"])
+        XCTAssertEqual(context["questionsBeforeAnswers"] as? [String], ["What exact text?"])
+        await runtime.shutdown()
+    }
+
+    func testRuntimeClarificationRejectsAnUnrelatedOriginalAndChecksExactContextLimit() async throws {
+        for mismatchedOriginal in [false, true] {
+            let events = RuntimeEventLog()
+            let transport = FakeTransportMaker(events: events, inputTokenCounts: [3_009])
+            let runtime = textRuntime(FakeLlamaLauncher(events: events), transports: transport)
+            let endpoint = try await runtime.activateNativeText(nativeTextInputs)
+            let goal = try ComputerUseUnresolvedTextGoal(userRequest: "Set Origin to a value").answering("What exact text?", with: "Oslo")
+            do {
+                _ = try await runtime.proposeNativeText(endpoint: endpoint,
+                    prompt: mismatchedOriginal ? "Different goal" : goal.userTurns[0], fields: nativeTextFields, clarificationGoal: goal)
+                XCTFail("An invalid clarification must stop before completion")
+            } catch { XCTAssertEqual(error as? ComputerUseLocalTextPlanError, mismatchedOriginal ? .invalidResponse : .contextLimit) }
+            XCTAssertTrue(transport.recordedCompletionRequests().isEmpty)
+            await runtime.shutdown()
+        }
+    }
+
     func testNativeTextCancellationReleasesModelLeaseBeforeVisualReplacement() async throws {
         let events = RuntimeEventLog()
         let launcher = FakeLlamaLauncher(events: events)

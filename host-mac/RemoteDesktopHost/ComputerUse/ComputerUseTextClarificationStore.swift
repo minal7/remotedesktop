@@ -8,6 +8,14 @@ struct ComputerUseUnresolvedTextGoal: Equatable, Sendable {
     let userTurns: [String]
     let questions: [String]
 
+    /// Contract identity only; never parse this value as user instructions.
+    /// Single-turn identities remain compatible with existing text tasks.
+    var taskIdentityText: String {
+        guard userTurns.count > 1 else { return userTurns[0] }
+        return "clarified-form-goal-v1:" + ComputerUseTaskContract.digest(
+            [String(userTurns.count)] + userTurns + [String(questions.count)] + questions)
+    }
+
     static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.userTurns.count == rhs.userTurns.count && lhs.questions.count == rhs.questions.count
             && zip(lhs.userTurns, rhs.userTurns).allSatisfy { $0.utf8.elementsEqual($1.utf8) }

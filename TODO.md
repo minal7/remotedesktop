@@ -4,7 +4,7 @@ Companion to [the detailed audit](</Users/michael/Documents/ChatGPT/remote deskt
 
 **Phase 1 · Make evidence trustworthy and define the supported product**
 
-- [x] **F29:** Replace the stale expected count of 138 with reviewed test-identifier discovery/validation. The baseline selected 167 methods; the reviewed selection now includes 357 with the repair regressions. Exact source/result checks are implemented: 116 Python tests pass; signed text/runtime checkpoints, the real package/runtime prerequisite and all 18 host setup lifecycle methods were verified by exact ID. A separate 20-method client setup inventory is source-checked and compiled, not yet executed. The full OCR-dependent gate remains failing.
+- [x] **F29:** Replace the stale expected count of 138 with reviewed test-identifier discovery/validation. The baseline selected 167 methods; the reviewed selection now includes 365 with the repair regressions. Exact source/result checks are implemented: 116 Python tests pass; signed text/runtime checkpoints, the real package/runtime prerequisite and all 18 host setup lifecycle methods were verified by exact ID. A separate 20-method client setup inventory is source-checked and compiled, not yet executed. The full OCR-dependent gate remains failing.
 - [ ] **F29:** Split current visual-only package acceptance from future V4/V5 semantic-package qualification. Current acceptance must test the currently shipped manifest and router.
 - [ ] **F30:** Extract a testable Mac core module for policy, task state, wire contracts, parsers, and model adapters. Execute its tests on every PR without privileged-host provisioning.
 - [ ] **F18:** Specify supported OS, Apple Intelligence availability, languages, task families, and degraded modes. Replace ambiguous overall readiness with capability readiness.
@@ -138,6 +138,8 @@ Only then broaden capabilities and evaluate whether an additional model pays for
 
 
 **Work log**
+
+- 2026-09-05: Added typed clarification input to the local text planner/runtime. Questions cannot become literal values, source spans cannot cross answer boundaries, original quoted payloads remain exact, and single-turn requests remain byte-identical. All 147 focused signed methods pass. The first 20-state actual-model input evaluation is frozen before inference in [the clarification manifest](docs/audits/2026-09-04-mac-computer-use/clarification-planner-v1-freeze.json). Reference issuance, scoped adapter continuation and mobile replies are still pending; T29 remains open.
 
 - 2026-09-05: Added exact clarification-answer wire types and a bounded host retention primitive. Thirteen focused signed methods pass: exact whitespace/Unicode and long original text survive multiple answers; stale, forged, cross-session, duplicate and changed-scope references reject. See [the foundation evidence](docs/audits/2026-09-04-mac-computer-use/clarification-foundation-v1-results.json). T29 remains open: client/host issuance, typed planner input, actual adapter scope and end-to-end continuation are not wired yet and are the next work.
 

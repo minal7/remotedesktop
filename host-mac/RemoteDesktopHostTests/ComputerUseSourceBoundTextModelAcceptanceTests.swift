@@ -9,7 +9,17 @@ final class ComputerUseSourceBoundTextModelAcceptanceTests: XCTestCase {
     private struct Case: Decodable {
         let id: String; let prompt: String; let fields: [String]; let expectedDisposition: String
         let allowedPlans: [[Edit]]?
+        let clarificationAnswers: [ClarificationAnswer]?
+
+        func clarificationGoal() throws -> ComputerUseUnresolvedTextGoal? {
+            guard let clarificationAnswers else { return nil }
+            guard (1...3).contains(clarificationAnswers.count) else { throw Failure.invalidInput }
+            var goal = try ComputerUseUnresolvedTextGoal(userRequest: prompt)
+            for answer in clarificationAnswers { goal = try goal.answering(answer.question, with: answer.text) }
+            return goal
+        }
     }
+    private struct ClarificationAnswer: Decodable { let question: String; let text: String }
     private struct Edit: Codable, Equatable {
         let field: Int
         let mode: String
@@ -36,6 +46,21 @@ final class ComputerUseSourceBoundTextModelAcceptanceTests: XCTestCase {
         XCTAssertEqual(copy, Edit(field: 1, mode: "replaceAll", sourceField: 0))
     }
 
+    func testClarificationFixturePreservesEachExactTurnAndRejectsAnEmptyAnswerList() throws {
+        func item(answers: [[String: String]]?) throws -> Case {
+            var object: [String: Any] = ["id":"fixture", "prompt":"Put a value in a field", "fields":["Notes","Tag"],
+                                        "expectedDisposition":"clarification"]
+            if let answers { object["clarificationAnswers"] = answers }
+            return try JSONDecoder().decode(Case.self, from: JSONSerialization.data(withJSONObject: object))
+        }
+        XCTAssertNil(try item(answers: nil).clarificationGoal())
+        XCTAssertThrowsError(try item(answers: []).clarificationGoal())
+        let goal = try XCTUnwrap(item(answers: [["question":"Which field?", "text":"Notes"],
+            ["question":"What exact text?", "text":"  e\u{301} 😀\n  "]]).clarificationGoal())
+        XCTAssertEqual(goal.userTurns.count, 3); XCTAssertEqual(goal.questions, ["Which field?", "What exact text?"])
+        XCTAssertTrue(goal.userTurns[2].utf8.elementsEqual("  e\u{301} 😀\n  ".utf8))
+    }
+
     func testSignedRuntimeCompilesTheExactCorpusWithoutDesktopEffects() async throws {
         let environment = ProcessInfo.processInfo.environment
         guard environment["RUN_SOURCE_BOUND_TEXT_MODEL_ACCEPTANCE"] == "1" else {
@@ -55,6 +80,7 @@ final class ComputerUseSourceBoundTextModelAcceptanceTests: XCTestCase {
               Set(corpus.cases.map(\.id)).count == corpus.cases.count,
               corpus.cases.allSatisfy({ item in
                   (1...16).contains(item.fields.count) && ["supported", "unsupported", "clarification"].contains(item.expectedDisposition)
+                  && (item.clarificationAnswers == nil || (contract == .candidateV2 && !allowFieldCopy))
                   && (item.expectedDisposition == "supported" ? !(item.allowedPlans ?? []).isEmpty : item.allowedPlans == nil)
                   && (item.allowedPlans ?? []).allSatisfy { plan in
                       (1...8).contains(plan.count) && plan.allSatisfy { edit in
@@ -76,6 +102,7 @@ final class ComputerUseSourceBoundTextModelAcceptanceTests: XCTestCase {
                 "corpusSHA256": corpusHash, "runtimeBinarySHA256": runtimeHash,
                 "modelSHA256FromVerifiedManifest": ComputerUseArtifactManifest.nativeTextV2.modelArtifacts[0].sha256,
                 "expectedCaseIDs": corpus.cases.map(\.id), "cases": rows,
+                "clarificationCaseIDs": corpus.cases.filter { $0.clarificationAnswers != nil }.map(\.id),
                 "oracle": "exact-disposition-and-complete-operation-sequences-including-count-mode-target-payload-origin-exact-bytes-and-order",
                 "desktopEffects": false, "quotedCommandFastPath": false, "allowFieldCopy": allowFieldCopy]
             try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys]).write(to: reportURL, options: .atomic)
@@ -94,8 +121,10 @@ final class ComputerUseSourceBoundTextModelAcceptanceTests: XCTestCase {
                         .init(label: label, snapshot: .init(targetID: "fixture-\(index)", value: "private existing fixture value",
                             selection: NSRange(location: 0, length: 0), isEditable: true, isSecure: false))
                     }
+                    let goal = try item.clarificationGoal()
+                    row["userTurnCount"] = goal?.userTurns.count ?? 1
                     let result = try await runtime.proposeNativeText(endpoint: endpoint, prompt: item.prompt, fields: fields,
-                        contract: contract, allowFieldCopy: allowFieldCopy, inspectProposal: { recorder.record($0) })
+                        contract: contract, allowFieldCopy: allowFieldCopy, inspectProposal: { recorder.record($0) }, clarificationGoal: goal)
                     let disposition: String
                     var edits: [Edit] = []
                     switch result {

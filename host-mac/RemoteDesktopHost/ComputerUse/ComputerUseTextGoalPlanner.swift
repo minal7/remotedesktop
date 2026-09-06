@@ -26,6 +26,14 @@ enum ComputerUseTextGoalOperation: Equatable, Sendable {
 
 protocol ComputerUseTextGoalPlanning: Sendable {
     func propose(prompt: String, fields: [ComputerUseTextField]) async throws -> ComputerUseTextGoalProposal
+    func propose(goal: ComputerUseUnresolvedTextGoal, fields: [ComputerUseTextField]) async throws -> ComputerUseTextGoalProposal
+}
+
+extension ComputerUseTextGoalPlanning {
+    func propose(goal: ComputerUseUnresolvedTextGoal, fields: [ComputerUseTextField]) async throws -> ComputerUseTextGoalProposal {
+        guard goal.userTurns.count == 1 else { return .unsupported }
+        return try await propose(prompt: goal.userTurns[0], fields: fields)
+    }
 }
 
 /// A separate proposal-only capability with a small schema. It sees field
@@ -46,49 +54,67 @@ struct ComputerUseTextGoalPlanner: ComputerUseTextGoalPlanning {
 
 struct ComputerUseTextPayloadCatalog {
     let projectedTask: String
+    let projectedUserTurns: [String]
     let payloads: [String: String]
     private let unquotedSegments: [String]
 
     init(_ task: String) throws {
-        guard task.utf8.count <= 32 * 1_024 else { throw ComputerUseTextTaskError.invalidPlan }
-        var projection = ""
+        try self.init(userTurns: [task])
+    }
+
+    init(goal: ComputerUseUnresolvedTextGoal) throws {
+        try self.init(userTurns: goal.userTurns)
+    }
+
+    private init(userTurns: [String]) throws {
+        guard (1...ComputerUseUnresolvedTextGoal.maximumUserTurns).contains(userTurns.count),
+              userTurns.reduce(0, { $0 + $1.utf8.count }) <= 32 * 1_024 else { throw ComputerUseTextTaskError.invalidPlan }
+        var projections: [String] = []
         var values: [String: String] = [:]
         var nextPayloadID = 1
-        var cursor = task.startIndex
-        var segment = ""
         var segments: [String] = []
-        while cursor < task.endIndex {
-            let opening = task[cursor]
-            guard opening == "\"" || opening == "“" else {
-                projection.append(opening)
-                segment.append(opening)
-                cursor = task.index(after: cursor)
-                continue
+        for task in userTurns {
+            var projection = ""
+            var cursor = task.startIndex
+            var segment = ""
+            while cursor < task.endIndex {
+                let opening = task[cursor]
+                guard opening == "\"" || opening == "“" else {
+                    projection.append(opening)
+                    segment.append(opening)
+                    cursor = task.index(after: cursor)
+                    continue
+                }
+                let close: Character = opening == "“" ? "”" : "\""
+                let start = task.index(after: cursor)
+                guard let end = task[start...].firstIndex(of: close), values.count < 8 else {
+                    throw ComputerUseTextTaskError.invalidPlan
+                }
+                let text = String(task[start..<end])
+                guard text.utf8.count <= ComputerUseTextEditor.maximumPayloadBytes else {
+                    throw ComputerUseTextTaskError.invalidPlan
+                }
+                // A reference must not alias ordinary user text such as a field
+                // value "p1" or a payload-marker-looking string in the request.
+                while userTurns.contains(where: { $0.contains("p\(nextPayloadID)") }) { nextPayloadID += 1 }
+                let id = "p\(nextPayloadID)"
+                nextPayloadID += 1
+                values[id] = text
+                if !segment.isEmpty { segments.append(segment); segment = "" }
+                // The position of the reference preserves which field/clause owns
+                // the literal. The model never has to reproduce its bytes.
+                projection += "[exact quoted payload \(id)]"
+                cursor = task.index(after: end)
             }
-            let close: Character = opening == "“" ? "”" : "\""
-            let start = task.index(after: cursor)
-            guard let end = task[start...].firstIndex(of: close), values.count < 8 else {
-                throw ComputerUseTextTaskError.invalidPlan
-            }
-            let text = String(task[start..<end])
-            guard text.utf8.count <= ComputerUseTextEditor.maximumPayloadBytes else {
-                throw ComputerUseTextTaskError.invalidPlan
-            }
-            // A reference must not alias ordinary user text such as a field
-            // value "p1" or a payload-marker-looking string in the request.
-            while task.contains("p\(nextPayloadID)") { nextPayloadID += 1 }
-            let id = "p\(nextPayloadID)"
-            nextPayloadID += 1
-            values[id] = text
-            if !segment.isEmpty { segments.append(segment); segment = "" }
-            // The position of the reference preserves which field/clause owns
-            // the literal. The model never has to reproduce its bytes.
-            projection += "[exact quoted payload \(id)]"
-            cursor = task.index(after: end)
+            if !segment.isEmpty { segments.append(segment) }
+            projections.append(projection)
         }
-        projectedTask = projection
+        projectedUserTurns = projections
+        // This joined form supports existing reference checks only. The
+        // clarification request sends separate turns to the model, and the
+        // authority segments above never cross a turn boundary.
+        projectedTask = projections.joined(separator: "\n")
         payloads = values
-        if !segment.isEmpty { segments.append(segment) }
         unquotedSegments = segments
     }
 

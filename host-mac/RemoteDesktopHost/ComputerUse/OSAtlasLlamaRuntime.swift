@@ -82,6 +82,14 @@ struct ComputerUseRuntimeTextGoalPlanner: ComputerUseTextGoalPlanning {
         let endpoint = try await runtime.activateNativeText(inputs)
         return try await runtime.proposeNativeText(endpoint: endpoint, prompt: prompt, fields: fields, allowFieldCopy: allowFieldCopy)
     }
+
+    func propose(goal: ComputerUseUnresolvedTextGoal, fields: [ComputerUseTextField]) async throws -> ComputerUseTextGoalProposal {
+        guard goal.userTurns.count > 1 else { return try await propose(prompt: goal.userTurns[0], fields: fields) }
+        guard !allowFieldCopy else { return .unsupported }
+        let endpoint = try await runtime.activateNativeText(inputs)
+        return try await runtime.proposeNativeText(endpoint: endpoint, prompt: goal.userTurns[0], fields: fields,
+            clarificationGoal: goal)
+    }
 }
 
 struct OSAtlasLlamaEndpoint: Equatable, Sendable {
@@ -1246,7 +1254,8 @@ actor OSAtlasLlamaRuntime {
         fields: [ComputerUseTextField],
         contract: ComputerUseLocalTextGoalPlanner.Contract = .candidateV2,
         allowFieldCopy: Bool = false,
-        inspectProposal: (@Sendable (Data) -> Void)? = nil
+        inspectProposal: (@Sendable (Data) -> Void)? = nil,
+        clarificationGoal: ComputerUseUnresolvedTextGoal? = nil
     ) async throws -> ComputerUseTextGoalProposal {
         let lease = try await acquireModelAccessLease()
         defer { releaseModelAccessLease(lease) }
@@ -1256,6 +1265,12 @@ actor OSAtlasLlamaRuntime {
         }
         do {
             guard !allowFieldCopy || contract == .candidateV2 else { throw ComputerUseLocalTextPlanError.invalidResponse }
+            if let clarificationGoal {
+                guard !allowFieldCopy, contract == .candidateV2,
+                      prompt.utf8.elementsEqual(clarificationGoal.userTurns[0].utf8) else {
+                    throw ComputerUseLocalTextPlanError.invalidResponse
+                }
+            }
             try validateResources(minimumReclaimableBytes:
                 server.resourceProfile.minimumInferenceMemoryBytes)
             let connection = try ComputerUseTextModelConnection(baseURL: endpoint.baseURL, bearerToken: endpoint.bearerToken,
@@ -1268,7 +1283,8 @@ actor OSAtlasLlamaRuntime {
                         contract: .fieldCopyV7, inspectProposal: inspectProposal))
                 : primary
             let proposal = try await withTaskCancellationHandler {
-                try await planner.propose(prompt: prompt, fields: fields)
+                if let clarificationGoal { return try await planner.propose(goal: clarificationGoal, fields: fields) }
+                return try await planner.propose(prompt: prompt, fields: fields)
             } onCancel: {
                 Task { await self.cancel(endpoint: endpoint) }
             }

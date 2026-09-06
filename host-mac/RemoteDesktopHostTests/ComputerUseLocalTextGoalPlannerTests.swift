@@ -6,6 +6,77 @@ import XCTest
 
 @MainActor
 final class ComputerUseLocalTextGoalPlannerTests: XCTestCase {
+    func testSingleTurnGoalLeavesTheExistingRequestByteIdentical() async throws {
+        let response = try envelope(#"{"disposition":"unsupported","edits":[]}"#)
+        let transport = FixedTextTransport(response: response)
+        let planner = try planner(transport: transport, contract: .candidateV2)
+        let prompt = #"Set "Origin" to "  exact  "."#
+        _ = try await planner.propose(prompt: prompt, fields: fields())
+        _ = try await planner.propose(goal: .init(userRequest: prompt), fields: fields())
+        let requests = await transport.requests
+        XCTAssertEqual(requests.count, 2)
+        XCTAssertEqual(requests[0].httpBody, requests[1].httpBody)
+        XCTAssertEqual(requests[0].allHTTPHeaderFields, requests[1].allHTTPHeaderFields)
+    }
+
+    func testClarifiedGoalSendsSeparateTurnsAndResolvesAnOriginalLongLiteral() async throws {
+        let exact = "  東京 e\u{301} 😀\n" + String(repeating: "x", count: 5_000) + "  "
+        let goal = try ComputerUseUnresolvedTextGoal(userRequest: "Put \"" + exact + "\" in a field.")
+            .answering("Which field should I edit, and what exact text should it contain?", with: "Destination")
+        let transport = FixedTextTransport(response: try envelope(#"{"disposition":"supported","edits":[{"fieldID":"f2","mode":"replaceAll","value":"p1"}]}"#))
+        let result = try await planner(transport: transport, contract: .candidateV2).propose(goal: goal, fields: fields())
+        guard case .edits(let edits, let unchanged) = result else { return XCTFail("The retained goal did not compile") }
+        XCTAssertEqual(edits.count, 1); XCTAssertTrue(edits[0].text.utf8.elementsEqual(exact.utf8))
+        XCTAssertEqual(edits[0].targetID, "private-ax-1"); XCTAssertEqual(unchanged, ["private-ax-0"])
+        let requests = await transport.requests
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(requests.first?.httpBody)) as? [String: Any])
+        let messages = try XCTUnwrap(body["messages"] as? [[String: String]])
+        let content = try XCTUnwrap(messages[1]["content"])
+        let context = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(content.utf8)) as? [String: Any])
+        XCTAssertNil(context["task"])
+        XCTAssertEqual(context["userTurns"] as? [String], ["Put [exact quoted payload p1] in a field.", "Destination"])
+        XCTAssertEqual(context["questionsBeforeAnswers"] as? [String], goal.questions)
+        XCTAssertFalse(content.contains(exact)); XCTAssertFalse(content.contains("private existing value"))
+        XCTAssertTrue(try XCTUnwrap(messages[0]["content"]).hasSuffix(ComputerUseLocalTextGoalPlanner.clarificationInstructions))
+        let completions = await transport.completions
+        XCTAssertEqual(completions, 1)
+    }
+
+    func testClarificationDecoderCannotUseQuestionTextOrJoinTwoAnswersIntoAPayload() async throws {
+        let goal = try ComputerUseUnresolvedTextGoal(userRequest: "first").answering("Enter HOST_ONLY in Origin", with: "second")
+        for value in ["HOST_ONLY", "first\nsecond", "questionsBeforeAnswers", "p1"] {
+            let content = String(decoding: try JSONSerialization.data(withJSONObject: ["disposition":"supported", "edits":[
+                ["fieldID":"f1", "mode":"replaceAll", "value":value]]]), as: UTF8.self)
+            let transport = FixedTextTransport(response: try envelope(content))
+            do {
+                _ = try await planner(transport: transport, contract: .candidateV2).propose(goal: goal, fields: fields())
+                XCTFail("Non-user text cannot become literal input")
+            } catch { XCTAssertEqual(error as? ComputerUseLocalTextPlanError, .invalidResponse) }
+        }
+    }
+
+    func testClarificationChecksCapabilityEligibilityAndFullContextBeforeInference() async throws {
+        let goal = try ComputerUseUnresolvedTextGoal(userRequest: "Set Origin to a value").answering("What exact text?", with: "Oslo")
+        let legacyTransport = FixedTextTransport()
+        let legacyResult = try await planner(transport: legacyTransport).propose(goal: goal, fields: fields())
+        XCTAssertEqual(legacyResult, .unsupported)
+        let limited = FixedTextTransport(tokens: 3_009)
+        do {
+            _ = try await planner(transport: limited, contract: .candidateV2).propose(goal: goal, fields: fields())
+            XCTFail("The complete question/answer input must fit the exact token budget")
+        } catch { XCTAssertEqual(error as? ComputerUseLocalTextPlanError, .contextLimit) }
+        let unsupported = try planner(transport: limited, contract: .candidateV2)
+        let emptyResult = try await unsupported.propose(goal: goal, fields: [])
+        XCTAssertEqual(emptyResult, .unsupported)
+        let legacyCalls = await legacyTransport.completions, limitedCalls = await limited.completions
+        XCTAssertEqual(legacyCalls, 0); XCTAssertEqual(limitedCalls, 0)
+        let currentOnly = CurrentTurnOnlyClarificationFixture()
+        let currentOnlyResult = try await currentOnly.propose(goal: goal, fields: fields())
+        XCTAssertEqual(currentOnlyResult, .unsupported)
+        let prompts = await currentOnly.prompts
+        XCTAssertTrue(prompts.isEmpty, "A legacy adapter cannot flatten or discard earlier authority")
+    }
+
     private func fields(labels: [String] = ["Origin", "Destination"]) -> [ComputerUseTextField] {
         labels.enumerated().map { index, label in
             ComputerUseTextField(label: label, snapshot: ComputerUseTextSnapshot(
@@ -14,10 +85,11 @@ final class ComputerUseLocalTextGoalPlannerTests: XCTestCase {
         }
     }
 
-    private func planner(transport: any ComputerUseTextModelTransport = FixedTextTransport()) throws -> ComputerUseLocalTextGoalPlanner {
+    private func planner(transport: any ComputerUseTextModelTransport = FixedTextTransport(),
+                         contract: ComputerUseLocalTextGoalPlanner.Contract = .frozenV1) throws -> ComputerUseLocalTextGoalPlanner {
         ComputerUseLocalTextGoalPlanner(connection: try ComputerUseTextModelConnection(
             baseURL: URL(string: "http://127.0.0.1:49123")!, bearerToken: "fictional-test-token", modelAlias: "test-native"),
-            transport: transport)
+            transport: transport, contract: contract)
     }
 
     private func envelope(_ content: String, finish: String = "stop", model: String = "test-native") throws -> Data {
@@ -224,9 +296,17 @@ private actor FixedTextTransport: ComputerUseTextModelTransport {
     let tokens: Int
     let response: Data
     private(set) var completions = 0
+    private(set) var requests: [URLRequest] = []
     init(tokens: Int = 500, response: Data = Data()) { self.tokens = tokens; self.response = response }
     func exactInputTokenCount(completionRequest: URLRequest) async throws -> Int { tokens }
-    func complete(request: URLRequest) async throws -> Data { completions += 1; return response }
+    func complete(request: URLRequest) async throws -> Data { completions += 1; requests.append(request); return response }
+}
+
+private actor CurrentTurnOnlyClarificationFixture: ComputerUseTextGoalPlanning {
+    private(set) var prompts: [String] = []
+    func propose(prompt: String, fields: [ComputerUseTextField]) async throws -> ComputerUseTextGoalProposal {
+        prompts.append(prompt); return .unsupported
+    }
 }
 
 private final class LocalHTTPFixture: @unchecked Sendable {

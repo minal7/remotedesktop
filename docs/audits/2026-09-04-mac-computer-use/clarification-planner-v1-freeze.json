@@ -1,0 +1,145 @@
+{
+  "schemaVersion": 1,
+  "status": "frozen-before-first-clarification-model-inference",
+  "sourceBaseCommit": "1a85fddfc3175130ac0ec7f5308d1d86dc391441",
+  "inputContract": "candidate-v2-with-explicit-clarification-turns-v1",
+  "contract": "candidate-v2",
+  "corpus": {
+    "path": "host-mac/AcceptanceFixtures/native-text-clarification-v1.json",
+    "sha256": "6334379a54986de7f9233ba019c9644891a7569a83d939570fbd33d0a76344d5",
+    "caseIDs": [
+      "Q901",
+      "Q902",
+      "Q903",
+      "Q904",
+      "Q905",
+      "Q906",
+      "Q907",
+      "Q908",
+      "Q909",
+      "Q910",
+      "Q911",
+      "Q912",
+      "Q913",
+      "Q914",
+      "Q915",
+      "Q916",
+      "Q917",
+      "Q918",
+      "Q919",
+      "Q920"
+    ],
+    "clarificationCaseIDs": [
+      "Q902",
+      "Q904",
+      "Q906",
+      "Q908",
+      "Q910",
+      "Q912",
+      "Q914",
+      "Q915",
+      "Q917",
+      "Q919",
+      "Q920"
+    ]
+  },
+  "batches": [
+    {
+      "path": "host-mac/AcceptanceFixtures/native-text-clarification-v1-batch-1.json",
+      "sha256": "11bb893efb07d2d2b91389928cb838ae4375382cbbda2ab85e4ce8ec0d8a2c06",
+      "caseIDs": [
+        "Q901",
+        "Q902",
+        "Q903",
+        "Q904",
+        "Q905"
+      ],
+      "clarificationCaseIDs": [
+        "Q902",
+        "Q904"
+      ]
+    },
+    {
+      "path": "host-mac/AcceptanceFixtures/native-text-clarification-v1-batch-2.json",
+      "sha256": "7ac431c6826cb4c65d4f84e6bec7bf3622b826779b5fa869ab46e2671c27e747",
+      "caseIDs": [
+        "Q906",
+        "Q907",
+        "Q908",
+        "Q909",
+        "Q910"
+      ],
+      "clarificationCaseIDs": [
+        "Q906",
+        "Q908",
+        "Q910"
+      ]
+    },
+    {
+      "path": "host-mac/AcceptanceFixtures/native-text-clarification-v1-batch-3.json",
+      "sha256": "b984f6b35ffd27bbb0cdcdc78be0f506984b0723479d3baf7133a3dd5440933d",
+      "caseIDs": [
+        "Q911",
+        "Q912",
+        "Q913",
+        "Q914",
+        "Q915"
+      ],
+      "clarificationCaseIDs": [
+        "Q912",
+        "Q914",
+        "Q915"
+      ]
+    },
+    {
+      "path": "host-mac/AcceptanceFixtures/native-text-clarification-v1-batch-4.json",
+      "sha256": "e5b84db7908ab666a1ea9da695f437ae6b84331dd8f2d9ebd8482d9d24798c9d",
+      "caseIDs": [
+        "Q916",
+        "Q917",
+        "Q918",
+        "Q919",
+        "Q920"
+      ],
+      "clarificationCaseIDs": [
+        "Q917",
+        "Q919",
+        "Q920"
+      ]
+    }
+  ],
+  "expectationsChanged": false,
+  "contextTokens": 4096,
+  "maximumOutputTokens": 1024,
+  "reasoningTokens": 512,
+  "exactInputLimit": 3008,
+  "temperature": 0,
+  "topP": 1,
+  "topK": 0,
+  "modelSHA256": "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
+  "runtimeVersion": "llama.cpp b9992 / 6eddde06a",
+  "runtimePath": "/tmp/remotedesktop-repair-derived-data/Build/Products/Debug/RemoteDesktopHost.app/Contents/Resources/ComputerUseRuntime/llama-b9992/llama-server",
+  "runtimeBinarySHA256": "a8c143c5b8028a8dc2f89af343f623df61d8dc01c9a1dd0f5792caddda7fbeed",
+  "clarificationInstructionsSHA256": "11e5eeaef6925fea16cfc01008d58e521761a91f4e9c9df4f490cc4b2d4cade5",
+  "sha256": {
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseTextGoalPlanner.swift": "48c366569ed57c8c66b7ad6d28a4a2abbbcc6140d84da5ecb801d0a69c59aff5",
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseLocalTextGoalPlanner.swift": "75f36c1bd15638148786b312bff70b830dadc541414a061b235078006c7ff32b",
+    "host-mac/RemoteDesktopHost/ComputerUse/OSAtlasLlamaRuntime.swift": "9f757cc4006188ee77920dadcd479d86ffcd44d3f14ae805fd3aa6f146c1850b",
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseTextClarificationStore.swift": "5ce93e7e8c4d899b2e16b1020294904095603d993521cfdb54273baba34b49cd",
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseTextEditor.swift": "6979f0aa98bab21d129195348a090931ae33c072805cf9e668f273249948e56d",
+    "host-mac/RemoteDesktopHostTests/ComputerUseSourceBoundTextModelAcceptanceTests.swift": "5523a0f302e3134875e5430d05e308ee93cf6a19c5eeba8297cc534b8308094d",
+    "host-mac/RemoteDesktopHostTests/ComputerUseTextClarificationTests.swift": "ac3453fb9b6ae72be6f4cb23948bfd60ea3a75a09ad1e4b385c09814bf52eae2",
+    "host-mac/RemoteDesktopHostTests/ComputerUseLocalTextGoalPlannerTests.swift": "22c06e734ef025e1c3dbc40fb1973e56b3761d2699265f318350ed05a090dc64",
+    "host-mac/RemoteDesktopHostTests/OSAtlasComputerUseExecutorTests.swift": "91243681fe9b72f468be4437873af0cc8757ebb658908fbdb2db7bfbd0cc49eb",
+    "protocol/Swift/ComputerUseProtocol.swift": "89d27013dc501ea0c45fc1bf2878cbaed4a26d1f09b25b5d6fd1f0adb2b219a2"
+  },
+  "desktopEffects": false,
+  "quotedCommandFastPath": false,
+  "allowFieldCopy": false,
+  "qualification": "Run all twenty expected states under unchanged source/model/sampling. Preserve every first response and case failure. Do not infer that proposal-only results prove an actual clarification conversation or input execution.",
+  "limitations": [
+    "The initial and answered states are independent proposal calls, not a running host/client conversation.",
+    "Q917 is a counterfactual retained-constraint probe; a correct initial planner would decline rather than ask a question.",
+    "The prior twenty unseen field-copy cases remain unrun and are a separate qualification gate."
+  ]
+}

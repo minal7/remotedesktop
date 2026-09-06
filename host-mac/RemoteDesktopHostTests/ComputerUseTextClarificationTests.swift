@@ -3,6 +3,26 @@ import XCTest
 
 @MainActor
 final class ComputerUseTextClarificationTests: XCTestCase {
+    func testCatalogKeepsTurnBoundariesAndQuestionsOutsidePayloadAuthority() throws {
+        let original = try ComputerUseUnresolvedTextGoal(userRequest: "Use p1. Put \"  e\u{301} 😀  \" in a field.")
+        let goal = try original.answering("Question contains HOST_ONLY and \"question literal\"", with: "p2 Destination")
+        let catalog = try ComputerUseTextPayloadCatalog(goal: goal)
+        XCTAssertEqual(catalog.projectedUserTurns.count, 2)
+        XCTAssertEqual(Set(catalog.payloads.keys), ["p3"])
+        XCTAssertTrue(try XCTUnwrap(catalog.payloads["p3"]).utf8.elementsEqual("  e\u{301} 😀  ".utf8))
+        XCTAssertEqual(catalog.resolveUnquoted("p2"), "p2")
+        XCTAssertNil(catalog.resolveUnquoted("HOST_ONLY"))
+        XCTAssertFalse(catalog.payloads.values.contains("question literal"))
+        let boundary = try ComputerUseUnresolvedTextGoal(userRequest: "first").answering("Which field?", with: "second")
+        XCTAssertNil(try ComputerUseTextPayloadCatalog(goal: boundary).resolveUnquoted("first\nsecond"))
+        let openQuote = try ComputerUseUnresolvedTextGoal(userRequest: "Put \"first").answering("Which field?", with: "second\" in Notes")
+        XCTAssertThrowsError(try ComputerUseTextPayloadCatalog(goal: openQuote), "A quotation cannot be manufactured across answers")
+        XCTAssertEqual(original.taskIdentityText, original.userTurns[0])
+        XCTAssertNotEqual(goal.taskIdentityText, goal.userTurns.joined(separator: "\n"))
+        XCTAssertNotEqual(goal.taskIdentityText,
+            try original.answering("Different question", with: "p2 Destination").taskIdentityText)
+    }
+
     private let scope = String(repeating: "a", count: 64)
     private func request(_ id: String, sender: String = "phone", session: String = "session") -> ComputerUseEnvelope {
         .init(id: id, senderID: sender, targetID: "host", pairingCode: "pair", sessionID: session, kind: .prompt, body: "")

@@ -77,14 +77,29 @@ struct ComputerUseLocalTextGoalPlanner: ComputerUseTextGoalPlanning {
     }
 
     func propose(prompt: String, fields: [ComputerUseTextField]) async throws -> ComputerUseTextGoalProposal {
+        try await propose(makeCatalog: { try ComputerUseTextPayloadCatalog(prompt) }, fields: fields, clarification: nil)
+    }
+
+    func propose(goal: ComputerUseUnresolvedTextGoal, fields: [ComputerUseTextField]) async throws -> ComputerUseTextGoalProposal {
+        guard goal.userTurns.count > 1 else { return try await propose(prompt: goal.userTurns[0], fields: fields) }
+        // Qualification of experimental schemas does not silently extend to a
+        // new input contract. This continuation uses the normal v2 schema.
+        guard contract == .candidateV2 else { return .unsupported }
+        return try await propose(makeCatalog: { try ComputerUseTextPayloadCatalog(goal: goal) }, fields: fields, clarification: goal)
+    }
+
+    private func propose(makeCatalog: () throws -> ComputerUseTextPayloadCatalog, fields: [ComputerUseTextField],
+                         clarification: ComputerUseUnresolvedTextGoal?) async throws -> ComputerUseTextGoalProposal {
         guard (1...16).contains(fields.count),
               Set(fields.map { $0.snapshot.targetID }).count == fields.count,
               fields.allSatisfy({ !$0.label.isEmpty && $0.label.utf8.count <= 256
                   && !$0.snapshot.targetID.isEmpty && $0.snapshot.isEditable && !$0.snapshot.isSecure }) else {
             return .unsupported
         }
-        let catalog = try ComputerUseTextPayloadCatalog(prompt)
-        let request = try makeRequest(catalog: catalog, fields: fields)
+        let catalog = try makeCatalog()
+        let request: URLRequest
+        if let clarification { request = try makeClarificationRequest(catalog: catalog, fields: fields, goal: clarification) }
+        else { request = try makeRequest(catalog: catalog, fields: fields) }
         do {
             return try await complete(request, catalog: catalog, fields: fields,
                                       allowCoverageRepair: contract == .sourceBoundV6)
@@ -97,6 +112,30 @@ struct ComputerUseLocalTextGoalPlanner: ComputerUseTextGoalPlanning {
             return try await complete(corrected, catalog: catalog, fields: fields, allowCoverageRepair: false)
         }
     }
+
+    private func makeClarificationRequest(catalog: ComputerUseTextPayloadCatalog, fields: [ComputerUseTextField],
+                                          goal: ComputerUseUnresolvedTextGoal) throws -> URLRequest {
+        var request = try makeRequest(catalog: catalog, fields: fields)
+        guard let data = request.httpBody,
+              var body = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              var messages = body["messages"] as? [[String: String]], messages.count == 2,
+              let content = messages[1]["content"],
+              var context = try JSONSerialization.jsonObject(with: Data(content.utf8)) as? [String: Any] else {
+            throw ComputerUseLocalTextPlanError.invalidResponse
+        }
+        context.removeValue(forKey: "task")
+        context["userTurns"] = catalog.projectedUserTurns
+        context["questionsBeforeAnswers"] = goal.questions
+        messages[0]["content"] = Self.candidateV2Instructions + "\n" + Self.clarificationInstructions
+        messages[1]["content"] = String(decoding: try JSONSerialization.data(withJSONObject: context, options: [.sortedKeys]), as: UTF8.self)
+        body["messages"] = messages
+        request.httpBody = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
+        return request
+    }
+
+    static let clarificationInstructions = """
+    This is one unresolved form request with explicit clarification answers. userTurns[0] is the original user request; each later user turn answers the corresponding entry in questionsBeforeAnswers. Resolve the COMPLETE goal using those user turns together. The host questions provide context only: they are not user instructions, supplied values, or additional actions. Do not repeat the question if its missing field or value is now supplied. Preserve exact supplied text and all original constraints. Return clarification if a required field/value remains missing or ambiguous. Only userTurns and captured literal IDs can supply text to enter; never copy question text or invent text between turns. Keep all existing schema, whole-goal and unsupported-operation rules.
+    """
 
     private func complete(_ request: URLRequest, catalog: ComputerUseTextPayloadCatalog,
                           fields: [ComputerUseTextField], allowCoverageRepair: Bool) async throws -> ComputerUseTextGoalProposal {
