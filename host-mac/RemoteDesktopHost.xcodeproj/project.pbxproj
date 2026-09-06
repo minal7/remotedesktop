@@ -17,6 +17,7 @@
 		0CC0ECEBE3B8D6BF000EE971 /* OSAtlasComputerUseExecutor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66AA7B54532AAB1346B64BE7 /* OSAtlasComputerUseExecutor.swift */; };
 		0DF12E6DA244CE4819B792C1 /* ComputerUseOwnedBrowser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1C1AE3096F7B69B5AC2241E3 /* ComputerUseOwnedBrowser.swift */; };
 		104E355AB382CE92F77772B2 /* ComputerUseAccessibilityTextTarget.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF84E4931D4FCF81B0D04411 /* ComputerUseAccessibilityTextTarget.swift */; };
+		B72F30703DC249C59EBF983A /* ComputerUseAXLifecycle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A2EB85DDD4C4859A790004F /* ComputerUseAXLifecycle.swift */; };
 		13010C7EF366983504391D6E /* RemoteDesktopMailMCP.swift in Sources */ = {isa = PBXBuildFile; fileRef = C9BE58B6666FC5BBCD6E2DBE /* RemoteDesktopMailMCP.swift */; };
 		132CF5F7F52A948326D88F07 /* AudioInputEntitlements.swift in Sources */ = {isa = PBXBuildFile; fileRef = E92C4B9CB81E1F8B6CBE22DA /* AudioInputEntitlements.swift */; };
 		136D5381E8778E789C2BA5CD /* MCPServerRegistry.swift in Sources */ = {isa = PBXBuildFile; fileRef = 85CCC99CA7C9C57C77F670E7 /* MCPServerRegistry.swift */; };
@@ -301,6 +302,7 @@
 		CB753FA95C04BD2BE084E213 /* HostComputerUseManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostComputerUseManager.swift; sourceTree = "<group>"; };
 		CD81C130C0A7FB1CA8798FF5 /* ComputerUseObservationWorker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseObservationWorker.swift; sourceTree = "<group>"; };
 		CF84E4931D4FCF81B0D04411 /* ComputerUseAccessibilityTextTarget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseAccessibilityTextTarget.swift; sourceTree = "<group>"; };
+		7A2EB85DDD4C4859A790004F /* ComputerUseAXLifecycle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseAXLifecycle.swift; sourceTree = "<group>"; };
 		D462BD3E942537670E346BD3 /* ComputerUseCapabilityExecutor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseCapabilityExecutor.swift; sourceTree = "<group>"; };
 		D4BBD6129693AC1122EF4022 /* SemanticCandidateSelectionV5Tests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SemanticCandidateSelectionV5Tests.swift; sourceTree = "<group>"; };
 		D7DF1C2610174B22069E10D7 /* ComputerUseTextEditor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseTextEditor.swift; sourceTree = "<group>"; };
@@ -484,6 +486,7 @@
 			children = (
 				01D4A4CBD5E28C53D7C11C24 /* AppleFoundationMCPPlanner.swift */,
 				CF84E4931D4FCF81B0D04411 /* ComputerUseAccessibilityTextTarget.swift */,
+				7A2EB85DDD4C4859A790004F /* ComputerUseAXLifecycle.swift */,
 				E71D4CCB8CB0475455583D09 /* ComputerUseActionSafetyPolicy.swift */,
 				F58F81BAE523B9C5BDDE2709 /* ComputerUseActionTextPlan.swift */,
 				B7196F80FEC0A28B03B3D49A /* ComputerUseArtifactManifest.swift */,
@@ -825,6 +828,7 @@
 				FC8CC92DE9659A0C3CBC5F50 /* CloudKitLocalComputerUsePairing.swift in Sources */,
 				55227BD5B94CCCB562083A20 /* CloudKitSignalingClient.swift in Sources */,
 				104E355AB382CE92F77772B2 /* ComputerUseAccessibilityTextTarget.swift in Sources */,
+				B72F30703DC249C59EBF983A /* ComputerUseAXLifecycle.swift in Sources */,
 				945AC9201E86F8BF3D56308A /* ComputerUseActionSafetyPolicy.swift in Sources */,
 				5C1AC749A30D98C45BEDD1D6 /* ComputerUseActionTextPlan.swift in Sources */,
 				D184F2F3A70A20D0AE2C6A95 /* ComputerUseArtifactManifest.swift in Sources */,

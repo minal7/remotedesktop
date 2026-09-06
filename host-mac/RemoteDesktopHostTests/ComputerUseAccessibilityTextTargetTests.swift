@@ -370,6 +370,198 @@ final class ComputerUseAccessibilityTextTargetTests: XCTestCase {
         XCTAssertTrue(graph.writes.isEmpty); XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
     }
 
+    func testNativeLifecycleEventsRetireSameObjectAuthorityAfterVisibleStateReturns() throws {
+        for notification in [kAXTitleChangedNotification, kAXLayoutChangedNotification,
+                             kAXFocusedWindowChangedNotification, kAXApplicationDeactivatedNotification,
+                             kAXCreatedNotification, kAXRowCountChangedNotification] {
+            let graph = AXTextGraph(), monitor = AXFixtureLifecycleMonitor()
+            graph.lifecycleFactory = { _ in monitor }
+            let target = ComputerUseAccessibilityTextTarget(access: graph.access)
+            let before = try XCTUnwrap(target.snapshot())
+            // The application has already returned to identical attributes
+            // when the next read begins. The delivered event is the evidence.
+            monitor.notify(notification as String, element: graph.element("destination"))
+            XCTAssertNil(target.snapshot(targetID: before.targetID), notification as String)
+            assertRejected(target, expected: before)
+            XCTAssertTrue(graph.writes.isEmpty)
+            let fresh = try XCTUnwrap(target.snapshot())
+            XCTAssertNotEqual(fresh.targetID, before.targetID); XCTAssertEqual(fresh.value, before.value)
+            XCTAssertEqual(try target.replaceSelectedText("!", expected: fresh), true)
+            XCTAssertEqual(graph.value("destination"), "old!")
+        }
+    }
+
+    func testDestroyedNativeObjectsAreNeverQueriedAgainThroughAnyAXBoundary() throws {
+        for name in ["destination", "label", "group", "window", "application"] {
+            let graph = AXTextGraph(), monitor = AXFixtureLifecycleMonitor()
+            if name == "label" { graph.set("destination", kAXTitleAttribute, nil) }
+            graph.lifecycleFactory = { _ in monitor }
+            let target = ComputerUseAccessibilityTextTarget(access: graph.access)
+            let before = try XCTUnwrap(target.snapshot())
+            monitor.notify(kAXUIElementDestroyedNotification as String, element: graph.element(name))
+            let start = graph.calls.count
+            XCTAssertNil(target.snapshot(targetID: before.targetID))
+            assertRejected(target, expected: before)
+            _ = target.fields(); _ = target.snapshot()
+            graph.restoreDestination()
+            if name == "label" { graph.set("destination", kAXTitleAttribute, nil) }
+            XCTAssertNil(target.snapshot(targetID: before.targetID))
+            XCTAssertNil(target.snapshot(), "Retained destroyed objects cannot be revived by readable attributes")
+            XCTAssertFalse(graph.calls.dropFirst(start).contains { $0.element == name }, "No read, settable query, timeout or write may use the destroyed \(name)")
+            XCTAssertTrue(graph.writes.isEmpty)
+        }
+    }
+
+    func testNativeLifecycleDistinguishesTextStateFromLabelMeaning() throws {
+        let graph = AXTextGraph(), monitor = AXFixtureLifecycleMonitor()
+        graph.set("destination", kAXTitleAttribute, nil)
+        graph.lifecycleFactory = { _ in monitor }
+        let target = ComputerUseAccessibilityTextTarget(access: graph.access)
+        let fields = target.fields()
+        let destination = try XCTUnwrap(fields.first { $0.label == "café" }).snapshot
+        let source = try XCTUnwrap(fields.first { $0.label == "Source" }).snapshot
+        graph.set("destination", kAXValueAttribute, "new" as NSString)
+        for notification in [kAXValueChangedNotification, kAXSelectedTextChangedNotification, kAXFocusedUIElementChangedNotification] {
+            monitor.notify(notification as String, element: graph.element("destination"))
+        }
+        let edited = try XCTUnwrap(target.snapshot(targetID: destination.targetID))
+        XCTAssertEqual(edited.targetID, destination.targetID); XCTAssertEqual(edited.value, "new")
+        XCTAssertEqual(target.snapshot(targetID: source.targetID), source)
+        monitor.notify(kAXValueChangedNotification as String, element: graph.element("label"))
+        XCTAssertNil(target.snapshot(targetID: destination.targetID), "A label changed and reverted; its old meaning cannot be reused")
+        XCTAssertEqual(target.snapshot(targetID: source.targetID), source, "An unrelated field's exact identity remains intact")
+        let refreshed = try XCTUnwrap(target.snapshot())
+        monitor.notify(kAXValueChangedNotification as String, element: graph.element("window"))
+        XCTAssertNil(target.snapshot(targetID: refreshed.targetID))
+        XCTAssertNil(target.snapshot(targetID: source.targetID), "An enclosing context value is not an ordinary edit to either field")
+        XCTAssertTrue(graph.writes.isEmpty)
+    }
+
+    func testNativeLifecycleIgnoresUnusedLabelObjectsWithoutReadingTheirValues() throws {
+        for titleObject in ["label", "destination"] {
+            let graph = AXTextGraph(), monitor = AXFixtureLifecycleMonitor()
+            graph.set("destination", kAXTitleUIElementAttribute, graph.element(titleObject))
+            graph.lifecycleFactory = { _ in monitor }
+            let target = ComputerUseAccessibilityTextTarget(access: graph.access)
+            let before = try XCTUnwrap(target.snapshot())
+            XCTAssertEqual(graph.readCount("label", kAXValueAttribute), 0, "The explicit title already supplies the planning label")
+            monitor.notify(kAXValueChangedNotification as String, element: graph.element(titleObject))
+            XCTAssertEqual(target.snapshot(targetID: before.targetID), before)
+            if titleObject == "label" {
+                monitor.notify(kAXUIElementDestroyedNotification as String, element: graph.element("label"))
+                XCTAssertEqual(target.snapshot(targetID: before.targetID), before, "An unused title object carries no edit authority")
+            }
+            XCTAssertEqual(try target.replaceSelectedText("!", expected: before), true)
+            XCTAssertEqual(graph.value("destination"), "old!")
+            XCTAssertEqual(graph.readCount("label", kAXValueAttribute), 0)
+        }
+    }
+
+    func testNativeLifecycleEventsDuringObservationAndCapabilityChecksStopBeforeInput() throws {
+        for stage in [kAXValueAttribute, kAXTitleAttribute, "AXIdentifier", "capability"] {
+            let graph = AXTextGraph(), monitor = AXFixtureLifecycleMonitor()
+            graph.lifecycleFactory = { _ in monitor }
+            let target = ComputerUseAccessibilityTextTarget(access: graph.access)
+            let before = try XCTUnwrap(target.snapshot())
+            var delivered = false
+            func deliver() {
+                guard !delivered else { return }
+                delivered = true
+                monitor.notify(kAXLayoutChangedNotification as String, element: graph.element("window"))
+            }
+            if stage == "capability" { graph.onCapabilityQuery = { deliver() } }
+            else { graph.afterRead = { element, attribute in if element == "destination", attribute == stage { deliver() } } }
+            if stage == "capability" {
+                XCTAssertThrowsError(try target.select(NSRange(location: 0, length: 0), expected: before)) {
+                    XCTAssertEqual($0 as? ComputerUseTextEditError, .preconditionChanged)
+                }
+            } else { XCTAssertNil(target.snapshot(targetID: before.targetID)) }
+            XCTAssertTrue(delivered); XCTAssertTrue(graph.writes.isEmpty)
+            graph.afterRead = nil; graph.onCapabilityQuery = nil
+            assertRejected(target, expected: before)
+            XCTAssertNotEqual(try XCTUnwrap(target.snapshot()).targetID, before.targetID)
+        }
+    }
+
+    func testNativeLifecycleChangesDuringPlanningRejectEditsAndClarificationAnswers() async throws {
+        for scenario in ["edit", "clarification"] {
+            let graph = AXTextGraph(), monitor = AXFixtureLifecycleMonitor()
+            graph.lifecycleFactory = { _ in monitor }
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            if scenario == "edit" {
+                let planner = AXGraphPlanner()
+                planner.beforeProposal = { monitor.notify(kAXLayoutChangedNotification as String, element: graph.element("window")) }
+                let executor = ComputerUseNativeTextExecutor(injector: InputInjector(eventPoster: { _ in XCTFail("No key input") }),
+                    mayAct: { true }, journalDirectory: directory, planner: planner,
+                    nativeTarget: ComputerUseAccessibilityTextTarget(access: graph.access))
+                do { _ = try await executor.execute(taskID: "edit", prompt: "Apply the requested form edit", progress: { _ in }); XCTFail("A lifecycle event must retire planning authority") }
+                catch { XCTAssertEqual(error as? ComputerUseTextTaskError, .staleTarget) }
+            } else {
+                let planner = AXClarificationPlanner()
+                let executor = clarificationExecutor(graph: graph, planner: planner, directory: directory)
+                _ = try await executor.execute(taskID: "question", prompt: "Put \"blue\" in the correct field.", progress: { _ in })
+                let pending = try XCTUnwrap(executor.clarification(taskID: "question"))
+                monitor.notify(kAXTitleChangedNotification as String, element: graph.element("destination"))
+                do { _ = try await executor.continueClarification(taskID: "answer", originatingTaskID: "question",
+                    goal: pending.goal.answering(pending.question, with: "café"), progress: { _ in }); XCTFail("An answer cannot revive pre-event references") }
+                catch { XCTAssertEqual(error as? ComputerUseNativeTextExecutor.Failure, .invalidClarification) }
+                XCTAssertNil(try executor.clarification(taskID: "question")); XCTAssertEqual(planner.goals.count, 1)
+            }
+            XCTAssertTrue(graph.writes.isEmpty); XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+        }
+    }
+
+    func testNativeLifecycleScopeReplacementCancelsOldCallbacksAndOverflowStopsObservation() throws {
+        let graph = AXTextGraph()
+        var monitors: [AXFixtureLifecycleMonitor] = []
+        graph.lifecycleFactory = { _ in let next = AXFixtureLifecycleMonitor(); monitors.append(next); return next }
+        var target: ComputerUseAccessibilityTextTarget? = ComputerUseAccessibilityTextTarget(access: graph.access)
+        let first = try XCTUnwrap(target?.snapshot())
+        XCTAssertEqual(target?.snapshot()?.targetID, first.targetID); XCTAssertEqual(monitors.count, 1)
+        graph.applicationIdentity = "second-launch"
+        let second = try XCTUnwrap(target?.snapshot())
+        XCTAssertNotEqual(first.targetID, second.targetID); XCTAssertEqual(monitors.count, 2)
+        XCTAssertEqual(monitors[0].cancellations, 1)
+        monitors[0].notify(kAXUIElementDestroyedNotification as String, element: graph.element("destination"))
+        XCTAssertEqual(target?.snapshot(targetID: second.targetID), second, "An old source must not invalidate a replacement scope")
+        for _ in 0...ComputerUseAXLifecycleInbox.maximumEvents {
+            monitors[1].notify(kAXUIElementDestroyedNotification as String, element: graph.element("other-label"))
+        }
+        let calls = graph.calls.count
+        XCTAssertNil(target?.snapshot(targetID: second.targetID)); XCTAssertNil(target?.snapshot())
+        XCTAssertTrue(target?.fields().isEmpty == true)
+        XCTAssertEqual(graph.calls.count, calls, "Lost event coverage must stop all AX queries in this scope")
+        target = nil
+        XCTAssertEqual(monitors[1].cancellations, 1)
+    }
+
+    func testNativeLifecycleCallbackRegistryOwnsExactRegistrationAndBoundsItsInbox() throws {
+        let callbacks = ComputerUseAXLifecycleCallbacks(), source = NSObject()
+        let element = AXUIElementCreateApplication(60_000)
+        let first = ComputerUseAXLifecycleInbox(), second = ComputerUseAXLifecycleInbox()
+        let oldRegistration = callbacks.register(source: source, inbox: first)
+        callbacks.deliver(source: source, element: element, notification: kAXTitleChangedNotification as String)
+        XCTAssertEqual(first.drain().map(\.kind), [.elementChanged])
+        let replacement = callbacks.register(source: source, inbox: second)
+        callbacks.remove(oldRegistration)
+        callbacks.deliver(source: source, element: element, notification: kAXUIElementDestroyedNotification as String)
+        let event = try XCTUnwrap(second.drain().first)
+        XCTAssertEqual(event.kind, .destroyed); XCTAssertTrue(CFEqual(try XCTUnwrap(event.element), element))
+        callbacks.deliver(source: source, element: element, notification: "UnknownNotification")
+        callbacks.deliver(source: source, element: element, notification: kAXSelectedTextChangedNotification as String)
+        XCTAssertTrue(second.drain().isEmpty)
+        callbacks.remove(replacement)
+        callbacks.deliver(source: source, element: element, notification: kAXLayoutChangedNotification as String)
+        second.record(.init(kind: .scopeChanged, element: nil))
+        XCTAssertTrue(first.drain().isEmpty); XCTAssertTrue(second.drain().isEmpty)
+        let overflow = ComputerUseAXLifecycleInbox()
+        for _ in 0...ComputerUseAXLifecycleInbox.maximumEvents { overflow.record(.init(kind: .destroyed, element: element)) }
+        XCTAssertEqual(overflow.drain().map(\.kind), [.coverageLost])
+        XCTAssertEqual(overflow.drain().map(\.kind), [.coverageLost], "Draining must not erase the fact that a destruction event was lost")
+        overflow.close(); XCTAssertTrue(overflow.drain().isEmpty)
+    }
+
     private func clarificationExecutor(graph: AXTextGraph, planner: AXClarificationPlanner, directory: URL,
                                        mayAct: @escaping () -> Bool = { true }, now: @escaping () -> Date = Date.init) -> ComputerUseNativeTextExecutor {
         ComputerUseNativeTextExecutor(injector: InputInjector(eventPoster: { _ in XCTFail("The AX fixture must not emit keys") }),
@@ -428,11 +620,14 @@ private final class AXGraphPlanner: ComputerUseTextGoalPlanning {
 @MainActor
 private final class AXTextGraph {
     struct Write { let element: String; let attribute: String }
+    struct Call { let element: String; let operation: String }
     private let names = ["application", "window", "other-window", "group", "other-group", "destination", "source", "label", "other-label", "replacement"]
     private var elements: [String: AXUIElement] = [:]
     private var attributes: [String: [String: CFTypeRef]] = [:]
     private var reads: [(String, String)] = []
     var writes: [Write] = []
+    var calls: [Call] = []
+    var lifecycleFactory: ((ComputerUseAccessibilityTextTarget.Application) -> any ComputerUseAXLifecycleMonitoring)?
     var focused = "destination"
     var applicationIdentity = "fixture-process-launch"
     var applicationAvailable = true
@@ -464,16 +659,19 @@ private final class AXTextGraph {
         .init(frontmost: { [self] in applicationAvailable ? .init(identity: applicationIdentity, root: element("application")) : nil },
               read: { [self] attribute, element in
                   guard let name = name(element) else { return nil }
+                  calls.append(.init(element: name, operation: "read"))
                   reads.append((name, attribute))
                   let value: CFTypeRef? = name == "application" && attribute == kAXFocusedUIElementAttribute ? self.element(focused) : attributes[name]?[attribute]
                   afterRead?(name, attribute)
                   return value
               }, canSet: { [self] attribute, element in
+                  calls.append(.init(element: name(element) ?? "unknown", operation: "canSet"))
                   onCapabilityQuery?()
                   return ["destination", "source"].contains(name(element) ?? "")
                       && [kAXSelectedTextAttribute, kAXSelectedTextRangeAttribute, kAXValueAttribute].contains(attribute)
               }, write: { [self] attribute, value, element in
                   guard let name = name(element) else { return .invalidUIElement }
+                  calls.append(.init(element: name, operation: "write"))
                   writes.append(.init(element: name, attribute: attribute))
                   if attribute == kAXFocusedAttribute { focused = name }
                   else if attribute == kAXSelectedTextRangeAttribute { set(name, attribute, value) }
@@ -490,7 +688,8 @@ private final class AXTextGraph {
                       setSelection(name, NSRange(location: (value as? String ?? "").utf16.count, length: 0))
                   } else { return .attributeUnsupported }
                   return .success
-              }, timeout: { _, _ in })
+              }, timeout: { [self] element, _ in calls.append(.init(element: name(element) ?? "unknown", operation: "timeout")) },
+              makeLifecycleMonitor: lifecycleFactory)
     }
     func element(_ name: String) -> AXUIElement { elements[name]! }
     func set(_ name: String, _ attribute: String, _ value: CFTypeRef?) { attributes[name, default: [:]][attribute] = value }
@@ -517,4 +716,16 @@ private final class AXTextGraph {
         moveDestination(to: "group"); setSelection("destination", NSRange(location: 3, length: 0))
     }
     private func name(_ element: AXUIElement) -> String? { names.first { CFEqual(elements[$0]!, element) } }
+}
+
+private final class AXFixtureLifecycleMonitor: ComputerUseAXLifecycleMonitoring {
+    private let inbox = ComputerUseAXLifecycleInbox()
+    private let callbacks = ComputerUseAXLifecycleCallbacks()
+    private let source = NSObject()
+    private var registration: ComputerUseAXLifecycleCallbacks.Registration!
+    private(set) var cancellations = 0
+    init() { registration = callbacks.register(source: source, inbox: inbox) }
+    func notify(_ notification: String, element: AXUIElement) { callbacks.deliver(source: source, element: element, notification: notification) }
+    func drain() -> [ComputerUseAXLifecycleEvent] { inbox.drain() }
+    func cancel() { cancellations += 1; callbacks.remove(registration); inbox.close() }
 }
