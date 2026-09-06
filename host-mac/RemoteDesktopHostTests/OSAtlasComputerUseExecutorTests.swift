@@ -8,6 +8,130 @@ import XCTest
 
 @MainActor
 final class OSAtlasComputerUseExecutorTests: XCTestCase {
+    func testTerminalVisualTaskReplaysWithoutModelOrEffectsAndNewRequestsStillExecute() async throws {
+        let fixture = makeCorrectionRuntime(completionResponses: [], port: 43_390)
+        let requests = SemanticRoutingRequestLog()
+        let executor = OSAtlasComputerUseExecutor.makeForTesting(inputs: fixture.inputs, runtime: fixture.runtime,
+            semanticRouter: StubSemanticActionRouter { request in
+                await requests.record(request)
+                return .init(directive: .openApplication, argument: .applicationName("Notes"))
+            }, maxSteps: 1)
+        var opened: [String] = []
+        let tools = correctionTestTools(applicationOpener: { opened.append($0) },
+            actionPerformer: { _ in XCTFail("Opening this fixture app must not post input") })
+        do {
+            let result = try await executor.execute(taskID: "open-notes", prompt: "Open Notes.",
+                trustedUserPrompt: "Open Notes.", tools: tools, progress: { _ in })
+            XCTAssertEqual(result, .completed("Done. I opened the requested app."))
+            await fixture.runtime.shutdown()
+            let eventsBeforeReplay = await fixture.events.values()
+            for context in ["Open Notes.", "Earlier assistant context must not replace the task"] {
+                let replay = try await executor.execute(taskID: "open-notes", modelPrompt: context,
+                    currentUserPrompt: "Open Notes.", conversation: [.init(role: .assistant, text: context)],
+                    tools: tools, progress: { _ in XCTFail("Terminal replay must not restart work") })
+                XCTAssertEqual(replay, result)
+            }
+            let cancelled = Task { try await executor.execute(taskID: "open-notes", prompt: "Open Notes.",
+                trustedUserPrompt: "Open Notes.", tools: tools, progress: { _ in }) }
+            cancelled.cancel()
+            do { _ = try await cancelled.value; XCTFail("Cancellation must win even over a cached result") }
+            catch is CancellationError {}
+            let eventsAfterReplay = await fixture.events.values()
+            XCTAssertEqual(eventsAfterReplay, eventsBeforeReplay)
+            let routesAfterReplay = await requests.values()
+            XCTAssertEqual(routesAfterReplay.count, 1); XCTAssertEqual(opened, ["Notes"])
+
+            _ = try await executor.execute(taskID: "new-open-notes", prompt: "Open Notes.",
+                trustedUserPrompt: "Open Notes.", tools: tools, progress: { _ in })
+            // The API without a caller-supplied identity represents new user
+            // requests; it must not reuse a single synthetic "legacy" task ID.
+            for _ in 0..<2 { _ = try await executor.execute(prompt: "Open Notes.", tools: tools, progress: { _ in }) }
+            XCTAssertEqual(opened, Array(repeating: "Notes", count: 4))
+        } catch { await fixture.runtime.shutdown(); throw error }
+        await fixture.runtime.shutdown()
+    }
+
+    func testVisualTaskCannotReplaceExactRequestBytesUnderTheSameIdentity() async throws {
+        let fixture = makeCorrectionRuntime(completionResponses: [], port: 43_391)
+        let executor = OSAtlasComputerUseExecutor.makeForTesting(inputs: fixture.inputs, runtime: fixture.runtime, maxSteps: 0)
+        let tools = correctionTestTools(actionPerformer: { _ in XCTFail("This fixture admits no effect steps") })
+        let original = "Type \"caf\u{00e9}\" into the focused field."
+        let normalizedDifferently = "Type \"cafe\u{0301}\" into the focused field."
+        XCTAssertEqual(original, normalizedDifferently, "Swift String equality alone does not bind exact payload bytes")
+        XCTAssertFalse(original.utf8.elementsEqual(normalizedDifferently.utf8))
+        do {
+            do {
+                _ = try await executor.execute(taskID: "retained", prompt: original, trustedUserPrompt: original,
+                    tools: tools, progress: { _ in })
+                XCTFail("The zero-step fixture must retain its task at the step limit")
+            } catch OSAtlasComputerUseExecutor.RuntimeError.stepLimit {}
+            let before = await fixture.events.values()
+            for changed in [normalizedDifferently, original + " ", "Open Notes."] {
+                do {
+                    _ = try await executor.execute(taskID: "retained", prompt: changed, trustedUserPrompt: changed,
+                        tools: tools, progress: { _ in })
+                    XCTFail("A changed request must not reset the checkpoint")
+                } catch { XCTAssertEqual(error as? OSAtlasComputerUseExecutor.RuntimeError, .taskChanged) }
+            }
+            let after = await fixture.events.values()
+            XCTAssertEqual(after, before, "Identity rejection must precede activation or cancellation")
+            do {
+                _ = try await executor.execute(taskID: "retained", prompt: "Resume context", trustedUserPrompt: original,
+                    tools: tools, progress: { _ in })
+                XCTFail("Unchanged authority resumes the original bounded task")
+            } catch OSAtlasComputerUseExecutor.RuntimeError.stepLimit {}
+        } catch { await fixture.runtime.shutdown(); throw error }
+        await fixture.runtime.shutdown()
+    }
+
+    func testOverlappingVisualCallsCannotReplaceOrCancelTheActiveOwner() async throws {
+        let fixture = makeCorrectionRuntime(completionResponses: [], port: 43_392)
+        let executor = OSAtlasComputerUseExecutor.makeForTesting(inputs: fixture.inputs, runtime: fixture.runtime,
+            semanticRouter: StubSemanticActionRouter { _ in
+                .init(directive: .openApplication, argument: .applicationName("Notes"))
+            }, maxSteps: 1)
+        var pending: CheckedContinuation<Void, Never>?
+        var opened: [String] = []
+        let tools = correctionTestTools(applicationOpener: { name in
+            opened.append(name)
+            // Hold only the original call so a regression reports unwanted
+            // additional effects instead of hanging on a second continuation.
+            if opened.count == 1 { await withCheckedContinuation { pending = $0 } }
+        }, actionPerformer: { _ in XCTFail("The fixture must not post input") })
+        let first = Task { try await executor.execute(taskID: "owner", prompt: "Open Notes.",
+            trustedUserPrompt: "Open Notes.", tools: tools, progress: { _ in }) }
+        do {
+            let deadline = ContinuousClock.now + .seconds(10)
+            while pending == nil && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(5)) }
+            let release = try XCTUnwrap(pending, "The owner never entered the held app-open callback")
+            let before = await fixture.events.values()
+            for taskID in ["owner", "replacement"] {
+                do {
+                    _ = try await executor.execute(taskID: taskID, prompt: "Open Notes.",
+                        trustedUserPrompt: "Open Notes.", tools: tools, progress: { _ in })
+                    XCTFail("Overlapping entry must not replace the active checkpoint")
+                } catch { XCTAssertEqual(error as? OSAtlasComputerUseExecutor.RuntimeError, .alreadyExecuting) }
+            }
+            do {
+                _ = try await executor.continueAfterApprovedVisualAction(.init(taskID: "owner", nonce: UUID()),
+                    action: .wait, tools: tools, progress: { _ in })
+                XCTFail("A second entrypoint must not overlap the active executor")
+            } catch { XCTAssertEqual(error as? OSAtlasComputerUseExecutor.RuntimeError, .alreadyExecuting) }
+            let after = await fixture.events.values()
+            XCTAssertEqual(after, before); XCTAssertEqual(opened, ["Notes"])
+            pending = nil; release.resume()
+            let result = try await first.value
+            XCTAssertEqual(result, .completed("Done. I opened the requested app."))
+        } catch {
+            first.cancel()
+            if let release = pending { pending = nil; release.resume() }
+            _ = try? await first.value
+            await fixture.runtime.shutdown()
+            throw error
+        }
+        await fixture.runtime.shutdown()
+    }
+
     func testOfficialProActionsParseAsExactlyOneAction() throws {
         XCTAssertEqual(
             try parse("CLICK <point>[[101, 872]]</point>"),
@@ -3538,8 +3662,10 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
             let fixture = makeCorrectionRuntime(
                 completionResponses: [response("CLICK [[500,500]]")],
                 port: 43_250)
-            let router = StubSemanticActionRouter { _ in
-                OSAtlasSemanticActionRoute(
+            let routingRequests = SemanticRoutingRequestLog()
+            let router = StubSemanticActionRouter { request in
+                await routingRequests.record(request)
+                return OSAtlasSemanticActionRoute(
                     directive: .ask,
                     argument: .question(
                         "What departure city should I use?"))
@@ -3553,11 +3679,20 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
             let result: ComputerUseExecutionResult
             do {
                 result = try await executor.execute(
+                    taskID: "missing-city",
                     prompt: "Plan this Saturday train trip to Monterey.",
+                    trustedUserPrompt: "Plan this Saturday train trip to Monterey.",
                     tools: correctionTestTools(
                         observation: observation,
                         actionPerformer: { performedActions.append($0) }),
                     progress: { _ in })
+                let replay = try await executor.execute(taskID: "missing-city", prompt: "Changed display context",
+                    trustedUserPrompt: "Plan this Saturday train trip to Monterey.",
+                    tools: correctionTestTools(observation: observation, actionPerformer: { _ in XCTFail("Replaying a question must not act") }),
+                    progress: { _ in XCTFail("A repeated question must not restart planning") })
+                XCTAssertEqual(replay, result)
+                let requests = await routingRequests.values()
+                XCTAssertEqual(requests.count, 1)
             } catch {
                 await fixture.runtime.shutdown()
                 throw error
@@ -4766,9 +4901,18 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
         let result: ComputerUseExecutionResult
         do {
             result = try await executor.execute(
+                taskID: "pending-report",
                 prompt: spinnerTask,
+                trustedUserPrompt: spinnerTask,
                 tools: tools,
                 progress: { progress.append($0) })
+            let capturesBeforeReplay = captures
+            let eventsBeforeReplay = await fixture.events.values()
+            let replay = try await executor.execute(taskID: "pending-report", prompt: spinnerTask,
+                trustedUserPrompt: spinnerTask, tools: tools, progress: { _ in XCTFail("An unable result must not restart the task") })
+            let eventsAfterReplay = await fixture.events.values()
+            XCTAssertEqual(replay, result); XCTAssertEqual(captures, capturesBeforeReplay)
+            XCTAssertEqual(eventsAfterReplay, eventsBeforeReplay)
         } catch {
             await fixture.runtime.shutdown()
             throw error
@@ -8524,6 +8668,20 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
                 await fixture.runtime.shutdown()
                 return XCTFail("The purchase click must require approval")
             }
+
+            let beforeReplay = await fixture.events.values()
+            let replay = try await executor.execute(taskID: taskID, prompt: "Updated display context",
+                trustedUserPrompt: "Click Place Order now.", tools: tools,
+                progress: { _ in XCTFail("Pending approval replay must not plan or reactivate") })
+            XCTAssertEqual(replay, result, "The same task must retain its exact approval token and action")
+            do {
+                _ = try await executor.execute(taskID: taskID, prompt: "Click a different order.",
+                    trustedUserPrompt: "Click a different order.", tools: tools, progress: { _ in })
+                XCTFail("Changing a task must not discard its pending approval")
+            } catch { XCTAssertEqual(error as? OSAtlasComputerUseExecutor.RuntimeError, .taskChanged) }
+            let afterReplay = await fixture.events.values()
+            XCTAssertEqual(afterReplay, beforeReplay)
+            XCTAssertTrue(performedActions.isEmpty)
 
             let wrongToken = ComputerUseVisualApprovalContinuation(
                 taskID: taskID,

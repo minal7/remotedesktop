@@ -845,6 +845,8 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
         case unverifiedTerminalAction(String)
         case planningStateChanged
         case invalidApprovalContinuation
+        case alreadyExecuting
+        case taskChanged
         case stepLimit
         case invalidImage
         case proModelRequired
@@ -863,6 +865,10 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
                 return "The focused screen kept changing while AI was planning, so no stale action was performed. Let the screen settle, then send the request again."
             case .invalidApprovalContinuation:
                 return "The approved action no longer matches the paused AI Computer Use session, so it was not resumed."
+            case .alreadyExecuting:
+                return "This visual executor is still handling another call. Wait for it to finish or stop before continuing."
+            case .taskChanged:
+                return "This task ID already belongs to a different request. Start a new task for the changed request."
             case .stepLimit:
                 return "The safety limit of 25 actions was reached. Review the screen and send a new request to continue."
             case .invalidImage:
@@ -966,19 +972,22 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
         let taskID: String
         let trustedUserPrompt: String
         var state: ExecutionState
+        var terminalResult: ComputerUseExecutionResult? = nil
     }
 
-    // Retain progress, never coordinates or pending approval authority. The
-    // next execution still captures and validates a fresh screen before use.
+    // Retain the current task's progress and terminal delivery result. An
+    // unfinished loop still captures and validates a fresh screen on resume;
+    // pending approval authority stays in its separate one-use continuation.
     private var executionCheckpoint: ExecutionCheckpoint?
+    private var isExecuting = false
 
     private func saveCheckpoint(
         taskID: String,
         trustedUserPrompt: String,
         state: ExecutionState
     ) {
-        guard executionCheckpoint?.taskID == taskID,
-              executionCheckpoint?.trustedUserPrompt == trustedUserPrompt else {
+        guard let checkpoint = executionCheckpoint, checkpoint.taskID == taskID,
+              checkpoint.trustedUserPrompt.utf8.elementsEqual(trustedUserPrompt.utf8) else {
             return
         }
         executionCheckpoint?.state = state
@@ -988,6 +997,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
     /// while the manager asks the person to approve one grounded host action.
     private struct PendingVisualApproval {
         let continuation: ComputerUseVisualApprovalContinuation
+        let message: String
         let prompt: String
         let trustedUserPrompt: String
         let conversation: [ComputerUseConversationTurn]
@@ -1258,7 +1268,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
         progress: @escaping (String) -> Void
     ) async throws -> ComputerUseExecutionResult {
         try await execute(
-            taskID: "legacy",
+            taskID: UUID().uuidString,
             prompt: prompt,
             trustedUserPrompt: prompt,
             tools: tools,
@@ -1304,6 +1314,9 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
         tools: ComputerUseHostTools,
         progress: @escaping (String) -> Void
     ) async throws -> ComputerUseExecutionResult {
+        guard !isExecuting else { throw RuntimeError.alreadyExecuting }
+        isExecuting = true
+        defer { isExecuting = false }
         guard let pending = pendingVisualApproval,
               pending.continuation == continuation,
               pending.continuation.taskID == continuation.taskID,
@@ -1477,6 +1490,22 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
         tools: ComputerUseHostTools,
         progress: @escaping (String) -> Void
     ) async throws -> ComputerUseExecutionResult {
+        guard !isExecuting else { throw RuntimeError.alreadyExecuting }
+        isExecuting = true
+        defer { isExecuting = false }
+        try Task.checkCancellation()
+        if let checkpoint = executionCheckpoint, checkpoint.taskID == taskID {
+            guard checkpoint.trustedUserPrompt.utf8.elementsEqual(trustedUserPrompt.utf8) else {
+                throw RuntimeError.taskChanged
+            }
+            // Replaying a terminal task reports its prior result. It must not
+            // activate a model, reopen an app or start the action loop again.
+            if let result = checkpoint.terminalResult { return result }
+            if let pending = pendingVisualApproval, pending.continuation.taskID == taskID {
+                return .approvalRequired(message: pending.message, action: pending.action,
+                    continuation: pending.continuation)
+            }
+        }
         if let cancellationBarrier = endpointCancellationBarrier {
             await cancellationBarrier.start().value
             if endpointCancellationBarrier === cancellationBarrier {
@@ -1504,8 +1533,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
             await runtime.cancel(endpoint: replacedApproval.endpoint)
             try Task.checkCancellation()
         }
-        if executionCheckpoint?.taskID != taskID
-            || executionCheckpoint?.trustedUserPrompt != trustedUserPrompt {
+        if executionCheckpoint?.taskID != taskID {
             executionCheckpoint = ExecutionCheckpoint(
                 taskID: taskID,
                 trustedUserPrompt: trustedUserPrompt,
@@ -1606,8 +1634,9 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
             try Task.checkCancellation()
             switch result {
             case .completed, .unableToComplete, .clarificationRequired:
-                if executionCheckpoint?.taskID == taskID {
-                    executionCheckpoint = nil
+                if let checkpoint = executionCheckpoint, checkpoint.taskID == taskID,
+                   checkpoint.trustedUserPrompt.utf8.elementsEqual(trustedUserPrompt.utf8) {
+                    executionCheckpoint?.terminalResult = result
                 }
             case .userInterventionRequired, .approvalRequired,
                     .mcpApprovalRequired:
@@ -2674,6 +2703,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
                             nonce: UUID())
                     pendingVisualApproval = PendingVisualApproval(
                         continuation: continuation,
+                        message: reason,
                         prompt: prompt,
                         trustedUserPrompt: trustedUserPrompt,
                         conversation: conversation,
