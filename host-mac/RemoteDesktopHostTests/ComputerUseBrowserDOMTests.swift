@@ -207,13 +207,167 @@ final class ComputerUseBrowserDOMTests: XCTestCase {
         _ = try await executor.execute(taskID: "q1", prompt: "Put \"blue\n\" in a field.", progress: { _ in })
         let pending = try XCTUnwrap(executor.clarification(taskID: "q1"))
         let answer = try pending.goal.answering(pending.question, with: "Destination")
-        for _ in 0..<2 {
-            do { _ = try await executor.continueClarification(taskID: "a1", originatingTaskID: "q1", goal: answer, progress: { _ in }); XCTFail("A sanitized value is not the requested result") }
-            catch { XCTAssertEqual(error as? ComputerUseTextTaskError, .uncertainEffect) }
-        }
-        try await fixture.wait { fixture.editedValues.count == 1 }
-        XCTAssertEqual(fixture.editedValues, ["blue"]); XCTAssertEqual(planner.goals.count, 2)
+        let result = try await executor.continueClarification(taskID: "a1", originatingTaskID: "q1", goal: answer, progress: { _ in })
+        guard case .unableToComplete = result else { return XCTFail("Reject an incompatible result before input") }
+        do { _ = try await executor.continueClarification(taskID: "a1", originatingTaskID: "q1", goal: answer, progress: { _ in }); XCTFail("The rejected answer cannot retain planning authority") }
+        catch { XCTAssertEqual(error as? ComputerUseNativeTextExecutor.Failure, .invalidClarification) }
+        let observed = ComputerUseBrowserTextTarget(browser: fixture.browser,
+            document: try fixture.browser.acquireCurrentDocument(taskID: "audit"), requiresFrontmost: false)
+        let values = try await observed.fields().map { $0.snapshot.value }
+        XCTAssertEqual(values, ["old", "keep"])
+        XCTAssertEqual(fixture.editedValues, []); XCTAssertEqual(planner.goals.count, 2)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path), "Rejection precedes journal creation")
         XCTAssertNil(try executor.clarification(taskID: "q1")); XCTAssertNil(try executor.clarification(taskID: "a1"))
+    }
+
+    func testUnrepresentableValuesRejectBeforeLiveSetterSelectionReceiptOrInput() async throws {
+        let cases = [("<input type='text' value='keep'>", "a\nb"),
+                     ("<input type='search' value='keep'>", "a\rb"),
+                     ("<input type='tel' value='keep'>", "a\r\nb"),
+                     ("<input type='url' value='keep'>", " https://example.test/path "),
+                     ("<input type='email' value='keep'>", " person@example.test "),
+                     ("<input type='email' multiple value='keep'>", "a@example.test, b@example.test"),
+                     ("<textarea>keep</textarea>", "a\rb"),
+                     ("<textarea>keep</textarea>", "a\r\nb")]
+        for (html, payload) in cases {
+            let fixture = try await DOMFixture(body: "<label>Value" + html + "</label>" + Self.representabilityAuditScript,
+                heldSignal: true)
+            defer { fixture.close() }
+            let fields = try await fixture.target.fields(), initial = try XCTUnwrap(fields.first?.snapshot)
+            let operation = ComputerUseTaskContract.digest(["rejected", html, payload])
+            for _ in 0..<2 {
+                do { try await fixture.target.apply(.init(targetID: initial.targetID, mode: .replaceAll, text: payload), expected: initial, operationID: operation)
+                    XCTFail("The native value round trip changes these bytes: \(html)") }
+                catch { XCTAssertEqual(error as? ComputerUseTextEditError, .valueNotRepresentable, html) }
+                let after = try await fixture.target.read(targetID: initial.targetID)
+                XCTAssertEqual(after, initial, "No value or selection mutation")
+                let dispatched = try await fixture.target.didDispatchInput(operationID: operation)
+                XCTAssertFalse(dispatched)
+            }
+            try await fixture.wait { fixture.server.count("/signal") == 1 }
+            fixture.server.releaseHeldResponses()
+            try await fixture.wait { Self.representabilityAudit(fixture) != nil }
+            let audit = try XCTUnwrap(Self.representabilityAudit(fixture))
+            XCTAssertEqual(audit["events"], "0")
+            XCTAssertEqual(audit["value0"], "keep")
+            XCTAssertEqual(audit["start0"], initial.selection.location == NSNotFound ? "-1" : String(initial.selection.location))
+            XCTAssertEqual(audit["end0"], initial.selection.location == NSNotFound ? "-1" : String(NSMaxRange(initial.selection)))
+        }
+    }
+
+    func testRepresentableValuesKeepExactBytesAndAllThreeEditModes() async throws {
+        let cases: [(String, ComputerUseTextEditMode, String, String)] = [
+            ("<input type='text' value='keep'>", .replaceAll, "  e\u{301} 😀\t ", "  e\u{301} 😀\t "),
+            ("<input type='search' value='keep'>", .append, " 😀 ", "keep 😀 "),
+            ("<input type='tel' value='keep'>", .replaceAll, " +1 234 ", " +1 234 "),
+            ("<input type='url' value='keep'>", .replaceAll, "https://example.test/x\u{a0}", "https://example.test/x\u{a0}"),
+            ("<input type='url' value='keep'>", .insert, " ", "ke ep"),
+            ("<input type='email' value='keep'>", .append, "@example.test", "keep@example.test"),
+            ("<input type='email' multiple value='keep'>", .replaceAll, "a@example.test,b@example.test", "a@example.test,b@example.test"),
+            ("<textarea>keep</textarea>", .replaceAll, " \ne\u{301} 😀\n ", " \ne\u{301} 😀\n "),
+            ("<textarea>keep</textarea>", .replaceAll, "", "")]
+        for (html, mode, payload, expected) in cases {
+            let fixture = try await DOMFixture(body: "<label>Value" + html + "</label>" + Self.representabilityAuditScript,
+                heldSignal: true)
+            defer { fixture.close() }
+            let fields = try await fixture.target.fields(), initial = try XCTUnwrap(fields.first?.snapshot)
+            let contract = try ComputerUseTextTaskContract(taskID: "compatible", prompt: "Controlled text edit", fields: fields,
+                edits: [.init(targetID: initial.targetID, mode: mode, text: payload)])
+            for _ in 0..<2 { try await fixture.target.validateRepresentability(of: contract) }
+            let beforeInput = try await fixture.target.read(targetID: initial.targetID)
+            XCTAssertEqual(beforeInput, initial, "Repeated preflight must not move selection or change the value")
+            let operation = contract.steps[0].id
+            let beforeReceipt = try await fixture.target.didDispatchInput(operationID: operation)
+            XCTAssertFalse(beforeReceipt)
+            try await fixture.target.apply(.init(targetID: initial.targetID, mode: mode, text: payload), expected: initial, operationID: operation)
+            let after = try await fixture.target.read(targetID: initial.targetID)
+            XCTAssertTrue(try XCTUnwrap(after?.value).utf8.elementsEqual(expected.utf8))
+            try await fixture.wait { fixture.server.count("/signal") == 1 }
+            fixture.server.releaseHeldResponses()
+            try await fixture.wait { Self.representabilityAudit(fixture) != nil }
+            let audit = try XCTUnwrap(Self.representabilityAudit(fixture))
+            XCTAssertEqual(audit["events"], "1")
+            XCTAssertTrue(try XCTUnwrap(audit["value0"]).utf8.elementsEqual(expected.utf8), html)
+        }
+    }
+
+    func testNativePreflightsEveryIntermediateAndCopiedResultBeforeAnyFieldChanges() async throws {
+        for copy in [false, true] {
+            let fixture = try await DOMFixture(body: "<label>Origin<textarea>old</textarea></label><label>Destination<input value='keep'></label>" + Self.representabilityAuditScript,
+                heldSignal: true)
+            defer { fixture.close() }
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let planner = DOMRepresentabilityFixturePlanner { fields in
+                let source = try XCTUnwrap(fields.first(where: { $0.label == "Origin" })?.snapshot.targetID)
+                let target = try XCTUnwrap(fields.first(where: { $0.label == "Destination" })?.snapshot.targetID)
+                if copy {
+                    return .fieldOperations([
+                        .enterText(.init(targetID: source, mode: .replaceAll, text: "new\nvalue")),
+                        .copyField(sourceTargetID: source, targetID: target, mode: .replaceAll)
+                    ], unchangedTargetIDs: [])
+                }
+                return .edits([
+                    .init(targetID: source, mode: .replaceAll, text: "first valid edit"),
+                    .init(targetID: target, mode: .replaceAll, text: "incompatible\nintermediate"),
+                    .init(targetID: target, mode: .replaceAll, text: "valid final value")
+                ], unchangedTargetIDs: [])
+            }
+            let executor = ComputerUseNativeTextExecutor(injector: InputInjector(), mayAct: { true }, journalDirectory: directory,
+                planner: planner, browserTargetProvider: { taskID in
+                    ComputerUseBrowserTextTarget(browser: fixture.browser,
+                        document: try fixture.browser.acquireCurrentDocument(taskID: taskID), requiresFrontmost: false)
+                })
+            let result = try await executor.execute(taskID: "whole-plan", prompt: "Carry out the planned form edits", progress: { _ in })
+            guard case .unableToComplete = result else { return XCTFail("The complete plan is incompatible before its first edit") }
+            XCTAssertEqual(planner.calls, 1)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+            try await fixture.wait { fixture.server.count("/signal") == 1 }
+            fixture.server.releaseHeldResponses()
+            try await fixture.wait { Self.representabilityAudit(fixture) != nil }
+            let audit = try XCTUnwrap(Self.representabilityAudit(fixture))
+            XCTAssertEqual(audit["events"], "0")
+            XCTAssertEqual(audit["value0"], "old"); XCTAssertEqual(audit["value1"], "keep")
+        }
+    }
+
+    func testChangingAndRestoringEmailMultipleRetiresTheObservedField() async throws {
+        let fixture = try await DOMFixture(body: """
+            <label>Addresses<input type="email" multiple value="keep"></label><script>
+            fetch('/signal').then(() => { const e = document.querySelector('input'); e.multiple = false; e.multiple = true; fetch('/changed'); });
+            </script>
+            """, heldSignal: true)
+        defer { fixture.close() }
+        let fields = try await fixture.target.fields(), initial = try XCTUnwrap(fields.first?.snapshot)
+        let contract = try ComputerUseTextTaskContract(taskID: "changed", prompt: "Controlled edit", fields: fields,
+            edits: [.init(targetID: initial.targetID, mode: .replaceAll, text: "a@example.test,b@example.test")])
+        try await fixture.target.validateRepresentability(of: contract)
+        try await fixture.wait { fixture.server.count("/signal") == 1 }
+        fixture.server.releaseHeldResponses()
+        try await fixture.wait { fixture.server.count("/changed") == 1 }
+        do { try await fixture.target.validateRepresentability(of: contract); XCTFail("A changed native value capability needs a new observation") }
+        catch { XCTAssertEqual(error as? ComputerUseTextTaskError, .staleTarget) }
+        do { try await fixture.target.apply(.init(targetID: initial.targetID, mode: .replaceAll, text: "a@example.test,b@example.test"), expected: initial, operationID: contract.steps[0].id); XCTFail("Earlier preflight cannot authorize a changed field") }
+        catch { XCTAssertEqual(error as? ComputerUseTextTaskError, .staleTarget) }
+    }
+
+    private static let representabilityAuditScript = """
+        <script>
+        const auditFields = [...document.querySelectorAll('input,textarea')]; let inputEvents = 0;
+        for (const e of auditFields) { if (e.selectionStart !== null) e.setSelectionRange(2,2); e.addEventListener('input', () => inputEvents++); }
+        fetch('/signal').then(() => {
+          const values = {events:String(inputEvents)};
+          auditFields.forEach((e,i) => { values['value'+i] = e.value; values['start'+i] = String(e.selectionStart ?? -1); values['end'+i] = String(e.selectionEnd ?? -1); });
+          fetch('/audit?' + new URLSearchParams(values));
+        });
+        </script>
+        """
+
+    private static func representabilityAudit(_ fixture: DOMFixture) -> [String: String]? {
+        guard let path = fixture.server.requestedPaths.first(where: { $0.hasPrefix("/audit?") }),
+              let items = URLComponents(string: "http://localhost" + path.replacingOccurrences(of: "+", with: "%20"))?.queryItems,
+              Set(items.map(\.name)).count == items.count else { return nil }
+        return Dictionary(uniqueKeysWithValues: items.map { ($0.name, $0.value ?? "") })
     }
 
     func testNativeClarificationRejectsRewrittenGoalsAndConsumesAChangedFormWithoutRediscovery() async throws {
@@ -838,6 +992,17 @@ private final class DOMFixturePlanner: ComputerUseTextGoalPlanning {
         let first = try XCTUnwrap(fields.first(where: { $0.label == "Origin" }))
         return .edits([.init(targetID: first.snapshot.targetID, mode: .replaceAll, text: "Paris")],
                       unchangedTargetIDs: fields.filter { $0.label != "Origin" }.map { $0.snapshot.targetID })
+    }
+}
+
+@MainActor
+private final class DOMRepresentabilityFixturePlanner: ComputerUseTextGoalPlanning {
+    var calls = 0
+    let proposal: ([ComputerUseTextField]) throws -> ComputerUseTextGoalProposal
+    init(_ proposal: @escaping ([ComputerUseTextField]) throws -> ComputerUseTextGoalProposal) { self.proposal = proposal }
+    func propose(prompt: String, fields: [ComputerUseTextField]) async throws -> ComputerUseTextGoalProposal {
+        calls += 1
+        return try proposal(fields)
     }
 }
 

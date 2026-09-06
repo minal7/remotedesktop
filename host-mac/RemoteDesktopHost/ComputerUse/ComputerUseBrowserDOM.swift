@@ -1,7 +1,7 @@
 import Foundation
 import WebKit
 
-enum ComputerUseBrowserDOMCommand: String { case fields, read, edit, receipt, reobserve }
+enum ComputerUseBrowserDOMCommand: String { case fields, read, edit, receipt, reobserve, preflight }
 
 struct ComputerUseBrowserDOMReply: Decodable {
     struct Field: Decodable {
@@ -31,9 +31,10 @@ enum ComputerUseBrowserDOM {
       const bindings = new Map(), operations = new Map();
       const protectedTypes = new Set(['password', 'hidden', 'file']);
       const textTypes = new Set(['text', 'search', 'url', 'tel', 'email']);
-      const identityAttributes = new Set(['id', 'name', 'type', 'form', 'action', 'method', 'enctype', 'target', 'disabled', 'readonly', 'hidden', 'inert', 'aria-hidden', 'aria-label', 'aria-labelledby', 'placeholder', 'autocomplete']);
+      const identityAttributes = new Set(['id', 'name', 'type', 'multiple', 'form', 'action', 'method', 'enctype', 'target', 'disabled', 'readonly', 'hidden', 'inert', 'aria-hidden', 'aria-label', 'aria-labelledby', 'placeholder', 'autocomplete']);
       const valueGetters = [HTMLInputElement, HTMLTextAreaElement].map(c => Object.getOwnPropertyDescriptor(c.prototype, 'value').get);
       const valueSetters = [HTMLInputElement, HTMLTextAreaElement].map(c => Object.getOwnPropertyDescriptor(c.prototype, 'value').set);
+      const probeDocument = doc.implementation.createHTMLDocument('');
       const reply = (status, fields) => ({status, documentID, ...(fields ? {fields} : {})});
       const parent = node => node.parentElement || (node.getRootNode() instanceof ShadowRoot ? node.getRootNode().host : null);
       const contains = (ancestor, node) => {
@@ -109,9 +110,21 @@ enum ComputerUseBrowserDOM {
       }
       function shape(element) {
         return [element.tagName, element.type || '', element.name || '', element.id || '',
-                element.form?.action || '', element.form?.method || ''].join('\u0000');
+                element.form?.action || '', element.form?.method || '', String(element.multiple === true)].join('\u0000');
       }
       function valueOf(element) { return valueGetters[kind(element)].call(element); }
+      // Ask this WebKit engine whether its native setter/getter can preserve
+      // the complete result. The probe has no browsing context, is never
+      // connected to the page, copies no custom-element attributes, and emits
+      // no events. It must never test compatibility by mutating the real field.
+      function canRepresent(element, expected) {
+        const index = kind(element);
+        if (index < 0) return false;
+        const probe = probeDocument.createElement(index === 0 ? 'input' : 'textarea');
+        if (index === 0) { probe.type = element.type; probe.multiple = element.multiple; }
+        valueSetters[index].call(probe, expected);
+        return valueGetters[index].call(probe) === expected;
+      }
       function snapshot(binding) {
         const element = binding.element;
         if (!binding.valid || !editable(element) || binding.form !== element.form || binding.shape !== shape(element) || binding.label !== labelFor(element).label) return null;
@@ -173,6 +186,18 @@ enum ComputerUseBrowserDOM {
           if (typeof args.operationID !== 'string' || args.operationID.length !== 64) return reply('unsupported');
           return reply(operations.get(args.operationID) === 'dispatched' ? 'dispatched' : 'unproven');
         }
+        if (command === 'preflight') {
+          if (!Array.isArray(args.steps) || args.steps.length < 1 || args.steps.length > 8) return reply('unsupported');
+          // Check every intermediate result, including repeated targets and
+          // values resolved from earlier copies, before the task starts input.
+          for (const step of args.steps) {
+            if (!step || typeof step.id !== 'string' || typeof step.after !== 'string' || encoder.encode(step.after).length > 1048576) return reply('unsupported');
+            const binding = bindings.get(step.id);
+            if (!binding || !snapshot(binding)) return reply('stale');
+            if (!canRepresent(binding.element, step.after)) return reply('unrepresentable');
+          }
+          return reply('ok');
+        }
         const binding = bindings.get(args.id), current = binding && snapshot(binding);
         if (!current) return reply('stale');
         if (command === 'read') return reply('ok', [current]);
@@ -193,6 +218,9 @@ enum ComputerUseBrowserDOM {
         if (!['replaceAll', 'append', 'insert'].includes(args.mode) || start < 0 || end < start || end > current.value.length) return reply('unsupported');
         const expected = current.value.slice(0, start) + args.payload + current.value.slice(end);
         if (encoder.encode(expected).length > 1048576 || expected !== args.after) return reply('unsupported');
+        // Repeat at the actual dispatch boundary, before touching the live
+        // value, selection, receipt, or any page event handler.
+        if (!canRepresent(binding.element, expected)) return reply('unrepresentable');
         // The dispatcher persisted its attempt before this call. This second
         // one-use boundary also prevents a lost callback from repeating input.
         operations.set(args.operationID, 'attempted');
@@ -319,6 +347,23 @@ final class ComputerUseBrowserTextTarget {
         return reply.status == "dispatched"
     }
 
+    func validateRepresentability(of contract: ComputerUseTextTaskContract) async throws {
+        try validate()
+        guard let documentID, (1...8).contains(contract.steps.count) else { throw ComputerUseTextTaskError.staleTarget }
+        let steps: [[String: String]] = try contract.steps.map { step in
+            guard let id = targets[step.targetID], step.after.utf8.count <= ComputerUseTextEditor.maximumObservedValueBytes else {
+                throw ComputerUseTextTaskError.staleTarget
+            }
+            return ["id": id, "after": step.after]
+        }
+        let reply = try await browser.callDOM(.preflight, arguments: ["documentID": documentID, "steps": steps], document: document)
+        try validate()
+        guard reply.documentID == documentID else { throw ComputerUseBrowserError.pageChanged }
+        if reply.status == "stale" { throw ComputerUseTextTaskError.staleTarget }
+        if reply.status == "unrepresentable" { throw ComputerUseTextEditError.valueNotRepresentable }
+        guard reply.status == "ok" else { throw ComputerUseBrowserError.unsupportedDocument }
+    }
+
     func apply(_ edit: ComputerUseTextPlanEdit, expected: ComputerUseTextSnapshot, operationID: String,
                copySource: ComputerUseTextSnapshot? = nil) async throws {
         try validate()
@@ -347,6 +392,7 @@ final class ComputerUseBrowserTextTarget {
         try validate()
         if reply.status == "stale" { throw ComputerUseTextTaskError.staleTarget }
         guard reply.documentID == documentID else { throw ComputerUseTextEditError.deliveryUncertain }
+        if reply.status == "unrepresentable" { throw ComputerUseTextEditError.valueNotRepresentable }
         guard reply.status == "attempted" else { throw ComputerUseTextEditError.deliveryUncertain }
         // A separate read by the transaction engine proves the resulting value.
     }

@@ -31,7 +31,7 @@ struct ComputerUseTextSnapshot: Equatable, Sendable {
 enum ComputerUseTextEditMode: String, Codable, Sendable { case insert, replaceAll, append }
 
 enum ComputerUseTextEditError: Error, Equatable, LocalizedError {
-    case unavailableTarget, secureTarget, invalidSelection, payloadTooLarge
+    case unavailableTarget, secureTarget, invalidSelection, payloadTooLarge, valueNotRepresentable
     case preconditionChanged, selectionUnsupported, deliveryUncertain, interrupted, deadlineExceeded
 
     var errorDescription: String? {
@@ -44,6 +44,8 @@ enum ComputerUseTextEditError: Error, Equatable, LocalizedError {
             return "The app's text selection could not be verified. No text was entered."
         case .payloadTooLarge:
             return "This edit exceeds the supported text size. No text was entered."
+        case .valueNotRepresentable:
+            return "That field cannot preserve the exact requested text. This edit was not sent."
         case .preconditionChanged:
             return "The field, document, value, or selection changed before typing. No text was entered."
         case .selectionUnsupported:

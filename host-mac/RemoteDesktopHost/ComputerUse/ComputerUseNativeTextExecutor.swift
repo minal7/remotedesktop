@@ -249,6 +249,18 @@ final class ComputerUseNativeTextExecutor {
         let contract = try ComputerUseTextTaskContract(taskID: taskID, prompt: goal.taskIdentityText,
                                                        fields: fields, operations: operations,
                                                        unchangedTargetIDs: unchanged)
+        if let browserTarget {
+            do { try await browserTarget.validateRepresentability(of: contract) }
+            catch ComputerUseTextEditError.valueNotRepresentable {
+                return .unableToComplete("A selected field cannot preserve the exact requested text. No fields were edited. Use a field that supports the text, or change the request.")
+            }
+        }
+        try Task.checkCancellation()
+        guard mayAct() else { throw ComputerUseTextEditError.interrupted }
+        if originatingTaskID != nil {
+            guard let prepared = preparedClarification, prepared.taskID == taskID,
+                  prepared.goal == goal, now() < prepared.expiresAt else { throw Failure.invalidClarification }
+        }
         let store = try ComputerUseTextStepStore(directory: journalDirectory)
         let task = try ComputerUseTextTask(contract: contract, recovered: store.load(taskID: taskID),
             read: read,
