@@ -5,6 +5,156 @@ import XCTest
 
 @MainActor
 final class ComputerUseOwnedBrowserModelAcceptanceTests: XCTestCase {
+    func testSignedManagedLocalModelContinuesRetainedBrowserClarificationsWithoutReplay() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["RUN_SIGNED_BROWSER_CLARIFICATION_ACCEPTANCE"] == "1" else {
+            throw XCTSkip("Opt-in: actual signed local model and explicit retained-browser clarification executor")
+        }
+        guard Bundle.main.bundleURL.pathExtension == "app" else { throw AcceptanceError.incomplete("A signed app host is required") }
+        let corpusURL = URL(fileURLWithPath: try XCTUnwrap(environment["COMPUTER_USE_BROWSER_CLARIFICATION_CORPUS"]))
+        let reportURL = URL(fileURLWithPath: try XCTUnwrap(environment["COMPUTER_USE_BROWSER_CLARIFICATION_REPORT"]))
+        guard !FileManager.default.fileExists(atPath: reportURL.path) else { throw AcceptanceError.incomplete("Refusing to overwrite evidence") }
+        let data = try Data(contentsOf: corpusURL)
+        let corpusHash = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        guard corpusHash == "6334379a54986de7f9233ba019c9644891a7569a83d939570fbd33d0a76344d5",
+              let corpus = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let cases = corpus["cases"] as? [[String: Any]], cases.count == 20 else {
+            throw AcceptanceError.incomplete("The original clarification corpus changed")
+        }
+        let byID = try Dictionary(uniqueKeysWithValues: cases.map { (try XCTUnwrap($0["id"] as? String), $0) })
+        let groups = [["Q909", "Q910"], ["Q911", "Q912"], ["Q913", "Q914", "Q915"]]
+        var routes: [String: OwnedBrowserHTTPFixture.Response] = [:]
+        for group in groups {
+            let labels = try XCTUnwrap(byID[group[0]]?["fields"] as? [String])
+            guard labels.count == 2 else { throw AcceptanceError.incomplete("The browser fixture needs two fields") }
+            routes["/case/" + group[0]] = .init(body: Self.form(id: group[0], initial: [:], labels: labels))
+        }
+        let server = try OwnedBrowserHTTPFixture(routes: routes)
+        let base = try await server.start()
+        defer { server.stop() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("BrowserClarificationModel-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let previousPolicy = NSApp.activationPolicy()
+        NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true })
+        let navigation = ComputerUseBrowserNavigationTask(browser: browser, journalDirectory: directory.appendingPathComponent("navigation"))
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true }, browserNavigationTask: navigation)
+        defer { tools.closeOwnedBrowser() }
+        let receipt = try await ComputerUseInstaller.nativeText().install { _ in }
+        let runtime = OSAtlasLlamaRuntime.shared
+        let runtimeDirectory = try OSAtlasVisualExecutorLoader.bundledRuntimeDirectoryURL(in: .main)
+        let inputs = try OSAtlasRuntimeInputResolver(manifest: .nativeTextV2).resolveNativeText(receipt: receipt,
+            runtimeDirectoryURL: runtimeDirectory, enclosingBundleURL: Bundle.main.bundleURL)
+        let runtimeHash = SHA256.hash(data: try Data(contentsOf: runtimeDirectory.appendingPathComponent("llama-server")))
+            .map { String(format: "%02x", $0) }.joined()
+        let planner = BrowserClarificationAcceptancePlanner(delegate: .init(inputs: inputs, runtime: runtime))
+        let native = tools.makeNativeTextExecutor(planner: planner, journalDirectory: directory.appendingPathComponent("text"))
+        let runID = UUID().uuidString
+        var rows: [[String: Any]] = []
+        func save() throws {
+            let report: [String: Any] = ["schemaVersion": 1, "scope": "signed-native-executor-owned-browser-clarification-known-cases",
+                "hostBundlePath": Bundle.main.bundleURL.path, "installationVersion": receipt.installationVersion,
+                "runtimeBinarySHA256": runtimeHash, "modelSHA256FromVerifiedManifest": ComputerUseArtifactManifest.nativeTextV2.modelArtifacts[0].sha256,
+                "corpusSHA256": corpusHash, "stateGroups": groups, "plannerCalls": planner.calls,
+                "contract": "candidate-v2", "managerReferenceTransportExercised": false,
+                "oracle": "independent-page-input-events-with-exact-target-and-full-form-state-after-every-allowed-operation", "cases": rows]
+            try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: reportURL, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: reportURL.path)
+        }
+        try save()
+        do {
+            for group in groups {
+                let firstID = group[0], started = ProcessInfo.processInfo.systemUptime, callsBefore = planner.calls
+                var states: [[String: String]] = []
+                do {
+                    let open = "Open \(base.appendingPathComponent("case/" + firstID))"
+                    let opened = try await tools.executeOwnedBrowserTaskIfSupported(taskID: runID + "-open-" + firstID, prompt: open, progress: { _ in })
+                    guard case .completed = opened, browser.isFrontmostWindow else { throw AcceptanceError.incomplete("The actual browser window is not frontmost") }
+                    let prompt = try XCTUnwrap(byID[firstID]?["prompt"] as? String)
+                    var pending: ComputerUseNativeTextExecutor.Clarification?
+                    var scope: String?
+                    for (index, id) in group.enumerated() {
+                        let item = try XCTUnwrap(byID[id]), taskID = runID + "-" + id
+                        guard item["prompt"] as? String == prompt else { throw AcceptanceError.incomplete("A state changed the original request") }
+                        let origin = pending?.taskID
+                        let goal: ComputerUseUnresolvedTextGoal
+                        if index == 0 { goal = try .init(userRequest: prompt) }
+                        else {
+                            let retained = try XCTUnwrap(pending)
+                            let answers = try XCTUnwrap(item["clarificationAnswers"] as? [[String: String]])
+                            guard answers.count == index, let answer = answers.last,
+                                  answer["question"] == retained.question, let text = answer["text"] else {
+                                throw AcceptanceError.incomplete("The answer does not match the actual question")
+                            }
+                            goal = try retained.goal.answering(retained.question, with: text)
+                        }
+                        func runState() async throws -> ComputerUseExecutionResult? {
+                            if index == 0 { return try await native.execute(taskID: taskID, prompt: prompt, progress: { _ in }) }
+                            return try await native.continueClarification(taskID: taskID, originatingTaskID: XCTUnwrap(origin), goal: goal, progress: { _ in })
+                        }
+                        let before = planner.calls
+                        let result = try await runState()
+                        guard planner.calls == before + 1 else { throw AcceptanceError.incomplete("Each new state must use the actual local planner once") }
+                        // Validate the first result before any replay check;
+                        // a model failure must not get an automatic retry.
+                        if item["expectedDisposition"] as? String == "clarification" {
+                            guard case .clarificationRequired = result else { throw AcceptanceError.incomplete(id + " first result: " + String(describing: result)) }
+                        } else if item["expectedDisposition"] as? String == "supported" {
+                            guard case .completed = result else { throw AcceptanceError.incomplete(id + " first result: " + String(describing: result)) }
+                        } else { throw AcceptanceError.incomplete("Unexpected frozen disposition") }
+                        let replay = try await runState()
+                        guard planner.calls == before + 1 else { throw AcceptanceError.incomplete("Replaying a state called the model again") }
+                        switch item["expectedDisposition"] as? String {
+                        case "clarification":
+                            guard case .clarificationRequired = result, case .clarificationRequired = replay else {
+                                throw AcceptanceError.incomplete(id + " did not ask the expected question: " + String(describing: result))
+                            }
+                            pending = try XCTUnwrap(native.clarification(taskID: taskID))
+                            guard pending?.goal == goal else { throw AcceptanceError.incomplete("The executor lost the exact original goal") }
+                            if let scope { guard pending?.scope == scope else { throw AcceptanceError.incomplete("The retained form scope changed") } }
+                            else { scope = pending?.scope }
+                            guard Self.states(server, id: firstID).allSatisfy({ $0["sequence"] == "0" }) else {
+                                throw AcceptanceError.incomplete("A question dispatched input")
+                            }
+                            states.append(["id": id, "outcome": "clarification", "replay": "no model call or input"])
+                        case "supported":
+                            guard index == group.count - 1, case .completed = result, case .completed = replay else {
+                                throw AcceptanceError.incomplete(id + " did not complete: " + String(describing: result))
+                            }
+                            guard try native.clarification(taskID: taskID) == nil else { throw AcceptanceError.incomplete("Completed work retained a question") }
+                            states.append(["id": id, "outcome": "completed", "replay": "no model call or input"])
+                        default: throw AcceptanceError.incomplete("Unexpected frozen disposition")
+                        }
+                    }
+                    let final = try XCTUnwrap(byID[try XCTUnwrap(group.last)])
+                    let plans = try XCTUnwrap(final["allowedPlans"] as? [[[String: Any]]])
+                    let sequences = try plans.map { try Self.expectedSequence(initial: [:], edits: $0) }
+                    guard sequences.allSatisfy({ $0.count == 2 }) else { throw AcceptanceError.incomplete("These conversations must each perform one exact edit") }
+                    let deadline = ContinuousClock.now + .seconds(5)
+                    while Self.states(server, id: firstID).count < 2 && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+                    let observed = Self.states(server, id: firstID).sorted { (Int($0["sequence"] ?? "") ?? -1) < (Int($1["sequence"] ?? "") ?? -1) }
+                    guard observed.count == 2, Set(observed.compactMap { Int($0["sequence"] ?? "") }) == [0, 1],
+                          sequences.contains(where: { Self.matches(observed, expected: $0) }), server.count("/case/" + firstID) == 1 else {
+                        throw AcceptanceError.incomplete("The independent page event sequence did not match the full goal")
+                    }
+                    rows.append(["id": firstID, "stateIDs": group, "states": states, "verified": true,
+                        "inputEvents": 1, "plannerCalls": planner.calls - callsBefore, "observedFixtureStates": observed,
+                        "elapsedSeconds": ProcessInfo.processInfo.systemUptime - started])
+                    try save()
+                    FileHandle.standardError.write(Data("Owned browser clarification: \(group.joined(separator: ",")) verified\n".utf8))
+                } catch {
+                    rows.append(["id": firstID, "stateIDs": group, "states": states, "verified": false, "error": String(describing: error),
+                        "plannerCalls": planner.calls - callsBefore, "observedFixtureStates": Self.states(server, id: firstID),
+                        "elapsedSeconds": ProcessInfo.processInfo.systemUptime - started])
+                    try? save()
+                    throw error
+                }
+            }
+            await runtime.shutdown()
+        } catch { await runtime.shutdown(); throw error }
+    }
+
     func testIndependentSequenceOracleRejectsExtraWrongTargetReorderedAndNormalizedIntermediateStates() throws {
         let edits: [[String: Any]] = [["field": 0, "mode": "replaceAll", "value": "e\u{301}"],
                                      ["field": 0, "mode": "append", "value": " / checked"]]
@@ -228,7 +378,7 @@ final class ComputerUseOwnedBrowserModelAcceptanceTests: XCTestCase {
         }
     }
 
-    private static func form(id: String, initial: [String: String]) -> String {
+    private static func form(id: String, initial: [String: String], labels: [String] = ["Origin", "Destination"]) -> String {
         func escape(_ value: String) -> String {
             value.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;").replacingOccurrences(of: ">", with: "&gt;")
         }
@@ -237,8 +387,8 @@ final class ComputerUseOwnedBrowserModelAcceptanceTests: XCTestCase {
         <style>body {font:17px system-ui;color:#172d36;background:#f5f8f9;margin:40px} main {max-width:640px;margin:auto}
         label {display:block;font-weight:600;margin:24px 0 8px} textarea {box-sizing:border-box;width:100%;height:100px;font:17px system-ui;border:1px solid #a5bbc4;border-radius:8px;padding:12px}
         </style></head><body><main><p>LOCAL FORM ACCEPTANCE · \(id)</p><h1>Travel details</h1>
-        <label for="origin">Origin</label><textarea id="origin">\(escape(initial["origin"] ?? ""))</textarea>
-        <label for="destination">Destination</label><textarea id="destination">\(escape(initial["destination"] ?? ""))</textarea>
+        <label for="origin">\(escape(labels[0]))</label><textarea id="origin">\(escape(initial["origin"] ?? ""))</textarea>
+        <label for="destination">\(escape(labels[1]))</label><textarea id="destination">\(escape(initial["destination"] ?? ""))</textarea>
         </main><script>
         const originField = document.getElementById('origin'), destinationField = document.getElementById('destination');
         let sequence = 0;
@@ -253,4 +403,19 @@ final class ComputerUseOwnedBrowserModelAcceptanceTests: XCTestCase {
     }
 
     private enum AcceptanceError: Error { case incomplete(String) }
+}
+
+@MainActor
+private final class BrowserClarificationAcceptancePlanner: ComputerUseTextGoalPlanning {
+    let delegate: ComputerUseRuntimeTextGoalPlanner
+    private(set) var calls = 0
+    init(delegate: ComputerUseRuntimeTextGoalPlanner) { self.delegate = delegate }
+    func propose(prompt: String, fields: [ComputerUseTextField]) async throws -> ComputerUseTextGoalProposal {
+        calls += 1
+        return try await delegate.propose(prompt: prompt, fields: fields)
+    }
+    func propose(goal: ComputerUseUnresolvedTextGoal, fields: [ComputerUseTextField]) async throws -> ComputerUseTextGoalProposal {
+        calls += 1
+        return try await delegate.propose(goal: goal, fields: fields)
+    }
 }
