@@ -213,6 +213,18 @@ enum ComputerUseBrowserDOM {
           const sourceBinding = bindings.get(args.copySourceID), source = sourceBinding && snapshot(sourceBinding);
           if (!source || source.value !== args.copySourceValue || source.value !== args.payload) return reply('stale');
         }
+        // These checks and the live setter run in one synchronous invocation.
+        // Host reads alone cannot keep an unchanged or previously edited field
+        // from drifting while an edit is queued in WebKit.
+        if (!Array.isArray(args.requiredValues) || args.requiredValues.length > 16) return reply('unsupported');
+        const requiredIDs = new Set();
+        for (const required of args.requiredValues) {
+          if (!required || typeof required.id !== 'string' || typeof required.value !== 'string' ||
+              requiredIDs.has(required.id) || encoder.encode(required.value).length > 1048576) return reply('unsupported');
+          requiredIDs.add(required.id);
+          const retainedBinding = bindings.get(required.id), retained = retainedBinding && snapshot(retainedBinding);
+          if (!retained || retained.value !== required.value) return reply('constraint-changed');
+        }
         const start = args.mode === 'replaceAll' ? 0 : args.mode === 'append' ? current.value.length : current.selectionStart;
         const end = args.mode === 'replaceAll' ? current.value.length : args.mode === 'append' ? current.value.length : current.selectionEnd;
         if (!['replaceAll', 'append', 'insert'].includes(args.mode) || start < 0 || end < start || end > current.value.length) return reply('unsupported');
@@ -378,8 +390,15 @@ final class ComputerUseBrowserTextTarget {
         guard reply.status == "ok" else { throw ComputerUseBrowserError.unsupportedDocument }
     }
 
+    func apply(_ dispatch: ComputerUseTextInputDispatch) async throws {
+        try await apply(dispatch.edit, expected: dispatch.expected, operationID: dispatch.operationID,
+                        copySource: dispatch.copySource, requiredValues: dispatch.requiredValues)
+    }
+
+    /// Standalone edits have no constraints on other fields. Compiled tasks
+    /// use the dispatch overload to retain every per-step requirement.
     func apply(_ edit: ComputerUseTextPlanEdit, expected: ComputerUseTextSnapshot, operationID: String,
-               copySource: ComputerUseTextSnapshot? = nil) async throws {
+               copySource: ComputerUseTextSnapshot? = nil, requiredValues: [String: String] = [:]) async throws {
         try validate()
         guard edit.targetID == expected.targetID, let documentID, let id = targets[edit.targetID],
               edit.text.utf8.count <= ComputerUseTextEditor.maximumPayloadBytes else { throw ComputerUseTextTaskError.staleTarget }
@@ -392,8 +411,17 @@ final class ComputerUseBrowserTextTarget {
         guard let textRange = Range(range, in: expected.value) else { throw ComputerUseTextEditError.invalidSelection }
         let after = expected.value.replacingCharacters(in: textRange, with: edit.text)
         guard after.utf8.count <= ComputerUseTextEditor.maximumObservedValueBytes else { throw ComputerUseTextEditError.payloadTooLarge }
+        guard requiredValues.count <= 16 else { throw ComputerUseTextTaskError.invalidPlan }
+        let requirements: [[String: String]] = try requiredValues.keys.sorted().map { targetID in
+            guard let id = targets[targetID], let value = requiredValues[targetID],
+                  value.utf8.count <= ComputerUseTextEditor.maximumObservedValueBytes else {
+                throw ComputerUseTextTaskError.staleTarget
+            }
+            return ["id": id, "value": value]
+        }
         var arguments: [String: Any] = ["documentID": documentID, "id": id,
             "operationID": operationID, "mode": edit.mode.rawValue, "payload": edit.text, "before": expected.value, "after": after,
+            "requiredValues": requirements,
             "selectionStart": expected.selection.location == NSNotFound ? -1 : expected.selection.location,
             "selectionEnd": expected.selection.location == NSNotFound ? -1 : NSMaxRange(expected.selection)]
         if let copySource {
@@ -406,6 +434,7 @@ final class ComputerUseBrowserTextTarget {
         try validate()
         if reply.status == "stale" { throw ComputerUseTextTaskError.staleTarget }
         guard reply.documentID == documentID else { throw ComputerUseTextEditError.deliveryUncertain }
+        if reply.status == "constraint-changed" { throw ComputerUseTextTaskError.incompleteOutcome }
         if reply.status == "unrepresentable" { throw ComputerUseTextEditError.valueNotRepresentable }
         guard reply.status == "attempted" else { throw ComputerUseTextEditError.deliveryUncertain }
         // A separate read by the transaction engine proves the resulting value.

@@ -277,12 +277,7 @@ final class ComputerUseNativeTextExecutor {
                 else { try await apply(edit, expected: expected) }
             },
             applyWithIdentity: browserTarget.map { target in
-                { edit, expected, operationID in try await target.apply(edit, expected: expected, operationID: operationID) }
-            },
-            applyCopyWithIdentity: browserTarget.map { target in
-                { edit, expected, source, operationID in
-                    try await target.apply(edit, expected: expected, operationID: operationID, copySource: source)
-                }
+                { dispatch in try await target.apply(dispatch) }
             },
             didDispatchInput: browserTarget.map { target in
                 { operationID in try await target.didDispatchInput(operationID: operationID) }

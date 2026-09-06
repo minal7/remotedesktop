@@ -3,6 +3,94 @@ import XCTest
 
 @MainActor
 final class ComputerUseTextTaskTests: XCTestCase {
+    func testRetainedValuesChangingDuringDurableAttemptStopLiteralAndCopyAdapters() async throws {
+        for earlierEdit in [false, true] {
+            for copy in [false, true] {
+                let fields = [field("source", "Paris"), field("retained", "keep"), field("destination", "old")]
+                var operations: [ComputerUseTextGoalOperation] = earlierEdit
+                    ? [.enterText(.init(targetID: "retained", mode: .replaceAll, text: "keep"))] : []
+                operations.append(copy ? .copyField(sourceTargetID: "source", targetID: "destination", mode: .replaceAll)
+                    : .enterText(.init(targetID: "destination", mode: .replaceAll, text: "Paris")))
+                let contract = try ComputerUseTextTaskContract(taskID: "retained-race", prompt: "Keep the required field intact",
+                    fields: fields, operations: operations, unchangedTargetIDs: earlierEdit ? [] : ["retained"])
+                var state = Dictionary(uniqueKeysWithValues: fields.map { ($0.snapshot.targetID, $0.snapshot) })
+                var effects: [String] = []
+                let task = try ComputerUseTextTask(contract: contract, read: { state[$0] },
+                    apply: { _, _ in XCTFail("Use the identified adapter") }, applyWithIdentity: { dispatch in
+                        effects.append(dispatch.edit.targetID)
+                        state[dispatch.edit.targetID] = self.field(dispatch.edit.targetID, dispatch.edit.text).snapshot
+                    }, persist: { journal in
+                        if journal.statuses.last == .attempted { state["retained"] = self.field("retained", "changed").snapshot }
+                    }, mayAct: { true })
+                do { try await task.run(); XCTFail("A retained value changed after preflight") }
+                catch { XCTAssertEqual(error as? ComputerUseTextTaskError, .incompleteOutcome) }
+                XCTAssertEqual(task.journal.statuses, earlierEdit ? [.verified, .uncertain] : [.uncertain])
+                do { try await task.run(); XCTFail("The rejected attempt must not replay") } catch {}
+                XCTAssertEqual(effects, earlierEdit ? ["retained"] : [])
+                XCTAssertEqual(state["destination"]?.value, "old")
+            }
+        }
+    }
+
+    func testRetainedValueReadHonorsCancellationAndTakeoverBeforeDispatch() async throws {
+        for cancellation in [false, true] {
+            let fields = [field("source", "Paris"), field("destination", "old"), field("retained", "keep")]
+            let state = Dictionary(uniqueKeysWithValues: fields.map { ($0.snapshot.targetID, $0.snapshot) })
+            let contract = try ComputerUseTextTaskContract(taskID: "retained-stop", prompt: "Copy and keep retained unchanged",
+                fields: fields, operations: [.copyField(sourceTargetID: "source", targetID: "destination", mode: .replaceAll)],
+                unchangedTargetIDs: ["retained"])
+            var attempted = false, allowed = true, effects = 0, interrupted = false
+            var running: Task<Void, Error>?
+            defer { running = nil }
+            let task = try ComputerUseTextTask(contract: contract, read: { id in
+                if attempted && id == "retained" {
+                    interrupted = true
+                    if cancellation { running?.cancel() } else { allowed = false }
+                }
+                return state[id]
+            }, apply: { _, _ in effects += 1 }, applyWithIdentity: { _ in effects += 1 },
+                persist: { attempted = $0.statuses.contains(.attempted) }, mayAct: { allowed })
+            running = Task { try await task.run() }
+            do { try await running!.value; XCTFail("The final retained read cannot authorize input after interruption") }
+            catch {
+                if cancellation { XCTAssertTrue(error is CancellationError) }
+                else { XCTAssertEqual(error as? ComputerUseTextEditError, .interrupted) }
+            }
+            XCTAssertTrue(interrupted); XCTAssertEqual(effects, 0)
+            XCTAssertEqual(task.journal.statuses, [cancellation ? .attempted : .uncertain])
+        }
+    }
+
+    func testIdentifiedDispatchCarriesLatestConstraintsWithoutFreezingUnrelatedFields() async throws {
+        let fields = [field("origin", "old"), field("destination", "prior"), field("retained", "keep"), field("unrelated", "free")]
+        let contract = try ComputerUseTextTaskContract(taskID: "retained-chain", prompt: "Replace, copy, and append twice; keep retained",
+            fields: fields, operations: [.enterText(.init(targetID: "origin", mode: .replaceAll, text: "Paris")),
+                .copyField(sourceTargetID: "origin", targetID: "destination", mode: .replaceAll),
+                .enterText(.init(targetID: "origin", mode: .append, text: "!")),
+                .enterText(.init(targetID: "origin", mode: .append, text: "!"))], unchangedTargetIDs: ["retained"])
+        let required: [[String: String]] = [["retained": "keep"], ["retained": "keep", "origin": "Paris"],
+            ["retained": "keep", "origin": "Paris", "destination": "Paris"],
+            ["retained": "keep", "origin": "Paris!", "destination": "Paris"]]
+        var state = Dictionary(uniqueKeysWithValues: fields.map { ($0.snapshot.targetID, $0.snapshot) })
+        var operationIDs: [String] = []
+        let task = try ComputerUseTextTask(contract: contract, read: { state[$0] },
+            apply: { _, _ in XCTFail("Copies and literals must use the same dispatch") }, applyWithIdentity: { dispatch in
+                let index = operationIDs.count
+                XCTAssertEqual(dispatch.requiredValues, required[index])
+                XCTAssertEqual(dispatch.copySource?.targetID, index == 1 ? "origin" : nil)
+                XCTAssertEqual(dispatch.copySource?.value, index == 1 ? "Paris" : nil)
+                operationIDs.append(dispatch.operationID)
+                let value = dispatch.edit.mode == .append ? dispatch.expected.value + dispatch.edit.text : dispatch.edit.text
+                state[dispatch.edit.targetID] = self.field(dispatch.edit.targetID, value).snapshot
+                state["unrelated"] = self.field("unrelated", "freely changed").snapshot
+            }, persist: { _ in }, mayAct: { true })
+        try await task.run(); try await task.run()
+        XCTAssertEqual(operationIDs.count, 4); XCTAssertEqual(Set(operationIDs).count, 4)
+        XCTAssertEqual(state["origin"]?.value, "Paris!!"); XCTAssertEqual(state["destination"]?.value, "Paris")
+        XCTAssertEqual(state["retained"]?.value, "keep"); XCTAssertEqual(state["unrelated"]?.value, "freely changed")
+        XCTAssertEqual(task.journal.statuses, Array(repeating: .verified, count: 4))
+    }
+
     func testMatchingLiteralValuesCannotProveUnsentOrReconstructedInput() async throws {
         for initial in ["same", "different before external change"] {
             let contract = try ComputerUseTextTaskContract(taskID: "literal-no-receipt", prompt: "Put same in Notes",
@@ -26,8 +114,8 @@ final class ComputerUseTextTaskTests: XCTestCase {
         var receipts = Set<String>(), calls: [String] = []
         func task(recovered: ComputerUseTextStepJournal? = nil) throws -> ComputerUseTextTask {
             try .init(contract: contract, recovered: recovered, read: { _ in initial.snapshot },
-                apply: { _, _ in XCTFail("Use identified input") }, applyWithIdentity: { _, _, operationID in
-                    calls.append(operationID); receipts.insert(operationID)
+                apply: { _, _ in XCTFail("Use identified input") }, applyWithIdentity: { dispatch in
+                    calls.append(dispatch.operationID); receipts.insert(dispatch.operationID)
                     if calls.count == 1 { throw CancellationError() }
                 }, didDispatchInput: { receipts.contains($0) }, persist: { _ in }, mayAct: { true })
         }
@@ -47,7 +135,7 @@ final class ComputerUseTextTaskTests: XCTestCase {
         var receipts = Set<String>(), calls = 0
         let task = try ComputerUseTextTask(contract: contract,
             read: { id in fields.first { $0.snapshot.targetID == id }?.snapshot },
-            apply: { _, _ in XCTFail("Use identified input") }, applyWithIdentity: { _, _, id in calls += 1; receipts.insert(id) },
+            apply: { _, _ in XCTFail("Use identified input") }, applyWithIdentity: { dispatch in calls += 1; receipts.insert(dispatch.operationID) },
             didDispatchInput: { receipts.contains($0) }, persist: { journal in
                 if journal.statuses == [.verified, .planned] { receipts.removeAll() }
             }, mayAct: { true })
@@ -78,8 +166,8 @@ final class ComputerUseTextTaskTests: XCTestCase {
         let values = Dictionary(uniqueKeysWithValues: fields.map { ($0.snapshot.targetID, $0.snapshot) })
         var receipts = Set<String>(), calls = 0
         let first = try ComputerUseTextTask(contract: contract, read: { values[$0] }, apply: { _, _ in XCTFail("Use bound copy adapter") },
-            applyCopyWithIdentity: { _, _, _, operationID in
-                calls += 1; receipts.insert(operationID); throw CancellationError()
+            applyWithIdentity: { dispatch in
+                calls += 1; receipts.insert(dispatch.operationID); throw CancellationError()
             }, didDispatchInput: { receipts.contains($0) }, persist: { _ in }, mayAct: { true })
         do { try await first.run(); XCTFail("The callback was lost") } catch is CancellationError {}
         let recovered = try ComputerUseTextTask(contract: contract, recovered: first.journal, read: { values[$0] },
@@ -287,10 +375,10 @@ final class ComputerUseTextTaskTests: XCTestCase {
         var count = 0
         var receipts = Set<String>()
         let task = try ComputerUseTextTask(contract: contract, read: { state[$0] },
-            apply: { _, _ in XCTFail("Lost completion requires an independent receipt") }, applyWithIdentity: { edit, _, operationID in
+            apply: { _, _ in XCTFail("Lost completion requires an independent receipt") }, applyWithIdentity: { dispatch in
             count += 1
-            state[edit.targetID] = self.field(edit.targetID, edit.text).snapshot
-            receipts.insert(operationID)
+            state[dispatch.edit.targetID] = self.field(dispatch.edit.targetID, dispatch.edit.text).snapshot
+            receipts.insert(dispatch.operationID)
             if count == 1 { throw CancellationError() }
         }, didDispatchInput: { receipts.contains($0) }, persist: { _ in }, mayAct: { true })
         do { try await task.run(); XCTFail("Expected interruption") } catch is CancellationError {}
@@ -416,6 +504,8 @@ final class ComputerUseTextTaskTests: XCTestCase {
         ]
         for alternative in alternatives {
             XCTAssertNotEqual(contract.contractDigest, alternative.contractDigest)
+            XCTAssertNotEqual(contract.steps.map(\.id), alternative.steps.map(\.id),
+                "Each input identity must also bind its retained value requirements")
             XCTAssertThrowsError(try ComputerUseTextTask(contract: alternative, recovered: original.journal,
                 read: { _ in nil }, apply: { _, _ in XCTFail("No input") }, persist: { _ in }, mayAct: { true })) {
                 XCTAssertEqual($0 as? ComputerUseTextTaskError, .journalMismatch)

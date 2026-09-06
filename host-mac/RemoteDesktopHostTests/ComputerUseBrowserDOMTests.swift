@@ -3,6 +3,150 @@ import XCTest
 
 @MainActor
 final class ComputerUseBrowserDOMTests: XCTestCase {
+    func testRetainedFieldDriftAtDOMDispatchPreventsLiteralAndCopiedInputWithoutReplay() async throws {
+        let cases: [(earlierEdit: Bool, copy: Bool, change: String)] = [
+            (false, false, "field.value = 'changed';"),
+            (true, false, "field.value = 'changed';"),
+            (false, true, "field.replaceWith(field.cloneNode(true));"),
+            (true, true, "field.setAttribute('aria-label', 'Different field');"),
+            (false, true, "field.value = 'cafe\\u0301';")
+        ]
+        for scenario in cases {
+            let fixture = try await DOMFixture(body: """
+                <label>Source<input id="source" value="Paris"></label>
+                <label>Retained<input id="retained" value="café"></label>
+                <label>Destination<textarea id="target">old</textarea></label>
+                <script>document.addEventListener('input', e => fetch('/edited?value=' + encodeURIComponent(e.target.id + ':' + e.target.value)));
+                fetch('/signal').then(() => { const field = document.querySelector('#retained'); \(scenario.change) fetch('/changed'); });</script>
+                """, heldSignal: true)
+            defer { fixture.close() }
+            let fields = try await fixture.target.fields()
+            let source = try XCTUnwrap(fields.first { $0.label == "Source" }).snapshot
+            let retained = try XCTUnwrap(fields.first { $0.label == "Retained" }).snapshot
+            let destination = try XCTUnwrap(fields.first { $0.label == "Destination" }).snapshot
+            var operations: [ComputerUseTextGoalOperation] = scenario.earlierEdit
+                ? [.enterText(.init(targetID: retained.targetID, mode: .replaceAll, text: "café"))] : []
+            operations.append(scenario.copy ? .copyField(sourceTargetID: source.targetID, targetID: destination.targetID, mode: .replaceAll)
+                : .enterText(.init(targetID: destination.targetID, mode: .replaceAll, text: "Paris")))
+            let contract = try ComputerUseTextTaskContract(taskID: "dom-constraint-race", prompt: "Keep the required field intact",
+                fields: fields, operations: operations, unchangedTargetIDs: scenario.earlierEdit ? [] : [retained.targetID])
+            var durable: ComputerUseTextStepJournal?, rejectedOperation: String?, dispatches = 0
+            let task = try ComputerUseTextTask(contract: contract, read: { try await fixture.target.read(targetID: $0) },
+                apply: { _, _ in XCTFail("Use the complete DOM dispatch") }, applyWithIdentity: { dispatch in
+                    dispatches += 1
+                    if dispatch.edit.targetID == destination.targetID {
+                        XCTAssertEqual(durable?.statuses.last, .attempted)
+                        XCTAssertEqual(dispatch.requiredValues, [retained.targetID: "café"])
+                        XCTAssertEqual(dispatch.copySource?.targetID, scenario.copy ? source.targetID : nil)
+                        rejectedOperation = dispatch.operationID
+                        // Every host read has already succeeded. Mutate the
+                        // real page before the isolated check-and-edit call.
+                        try await fixture.wait { fixture.server.count("/signal") == 1 }
+                        fixture.server.releaseHeldResponses()
+                        try await fixture.wait { fixture.server.count("/changed") == 1 }
+                    }
+                    try await fixture.target.apply(dispatch)
+                }, didDispatchInput: { try await fixture.target.didDispatchInput(operationID: $0) },
+                persist: { durable = $0 }, mayAct: { true })
+            do { try await task.run(); XCTFail("DOM dispatch must reject stale retained authority") }
+            catch { XCTAssertEqual(error as? ComputerUseTextTaskError, .incompleteOutcome, "\(scenario)") }
+            XCTAssertEqual(task.journal.statuses, scenario.earlierEdit ? [.verified, .uncertain] : [.uncertain])
+            let rejectedID = try XCTUnwrap(rejectedOperation)
+            let hasReceipt = try await fixture.target.didDispatchInput(operationID: rejectedID)
+            XCTAssertFalse(hasReceipt, "Rejected input cannot create a dispatch receipt")
+            do { try await task.run(); XCTFail("An uncertain attempt cannot replay") } catch {}
+            XCTAssertEqual(dispatches, scenario.earlierEdit ? 2 : 1)
+            let after = try await fixture.target.read(targetID: destination.targetID)
+            XCTAssertEqual(after?.value, "old"); XCTAssertEqual(after?.selection, destination.selection)
+            if scenario.earlierEdit { try await fixture.wait { fixture.editedValues.count == 1 } }
+            XCTAssertEqual(fixture.editedValues, scenario.earlierEdit ? ["retained:café"] : [])
+        }
+    }
+
+    func testDOMDispatchRejectsUnboundOrChangedConstraintsWithoutConsumingInputIdentity() async throws {
+        let fixture = try await DOMFixture(body: """
+            <label>Destination<input value="old"></label><label>Retained<input value="keep"></label>
+            <script>document.addEventListener('input', () => fetch('/input-event'));</script>
+            """)
+        defer { fixture.close() }
+        let fields = try await fixture.target.fields()
+        let destination = try XCTUnwrap(fields.first { $0.label == "Destination" }).snapshot
+        let retained = try XCTUnwrap(fields.first { $0.label == "Retained" }).snapshot
+        let operationID = ComputerUseTextTaskContract.digest("unbound-constraint")
+        for unknown in [true, false] {
+            do {
+                try await fixture.target.apply(.init(targetID: destination.targetID, mode: .replaceAll, text: "Paris"),
+                    expected: destination, operationID: operationID,
+                    requiredValues: unknown ? ["different-document-field": "keep"] : [retained.targetID: "different required value"])
+                XCTFail("An unbound or mismatched constraint cannot be silently dropped")
+            } catch { XCTAssertEqual(error as? ComputerUseTextTaskError, unknown ? .staleTarget : .incompleteOutcome) }
+            let after = try await fixture.target.read(targetID: destination.targetID)
+            let hasReceipt = try await fixture.target.didDispatchInput(operationID: operationID)
+            XCTAssertEqual(after, destination); XCTAssertFalse(hasReceipt)
+            XCTAssertEqual(fixture.server.count("/input-event"), 0)
+        }
+        // Exercise the low-level adapter independently: a rejection must not
+        // consume its one-use input ID. The task engine still prohibits replay
+        // of an attempted step, as covered by the preceding task-level cases.
+        try await fixture.target.apply(.init(targetID: destination.targetID, mode: .replaceAll, text: "Paris"),
+            expected: destination, operationID: operationID, requiredValues: [retained.targetID: "keep"])
+        try await fixture.wait { fixture.server.count("/input-event") == 1 }
+        let after = try await fixture.target.read(targetID: destination.targetID)
+        let hasReceipt = try await fixture.target.didDispatchInput(operationID: operationID)
+        XCTAssertEqual(after?.value, "Paris"); XCTAssertTrue(hasReceipt)
+    }
+
+    func testProductionDOMDispatchPreservesLatestConstraintsAcrossCopiesAndRepeatedEdits() async throws {
+        let fixture = try await DOMFixture(body: """
+            <label>Origin<input id="origin" value="old"></label>
+            <label>Destination<textarea id="destination">prior</textarea></label>
+            <label>Retained<input id="retained" value="keep"></label>
+            <label>Other<input id="other" value="free"></label>
+            <script>let sequence = 0; document.addEventListener('input', e => {
+              document.querySelector('#other').value = 'freely changed';
+              const values = ['origin', 'destination', 'retained', 'other'].map(id => document.getElementById(id).value);
+              fetch('/edited?value=' + encodeURIComponent(JSON.stringify([String(++sequence), e.target.id, ...values])));
+            });</script>
+            """)
+        defer { fixture.close() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let planner = DOMRepresentabilityFixturePlanner { fields in
+            let origin = try XCTUnwrap(fields.first { $0.label == "Origin" }).snapshot.targetID
+            let destination = try XCTUnwrap(fields.first { $0.label == "Destination" }).snapshot.targetID
+            let retained = try XCTUnwrap(fields.first { $0.label == "Retained" }).snapshot.targetID
+            return .fieldOperations([.enterText(.init(targetID: origin, mode: .replaceAll, text: "Paris")),
+                .copyField(sourceTargetID: origin, targetID: destination, mode: .replaceAll),
+                .enterText(.init(targetID: origin, mode: .append, text: "!")),
+                .enterText(.init(targetID: origin, mode: .append, text: "!"))], unchangedTargetIDs: [retained])
+        }
+        let native = ComputerUseNativeTextExecutor(injector: InputInjector(), mayAct: { true }, journalDirectory: directory,
+            planner: planner, editOverride: { _, _ in XCTFail("Owned DOM input cannot fall through to AX") },
+            browserTargetProvider: { taskID in ComputerUseBrowserTextTarget(browser: fixture.browser,
+                document: try fixture.browser.acquireCurrentDocument(taskID: taskID), requiresFrontmost: false) })
+        let executor = ComputerUseCapabilityExecutor(native: native, desktopFactory: { _ in
+            XCTFail("This exact form goal must stay in its reviewed capability")
+            throw ComputerUseTextTaskError.invalidPlan
+        })
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true })
+        let prompt = "Set Origin to Paris, copy Origin to Destination, append ! to Origin twice, and leave Retained unchanged."
+        for _ in 0..<2 {
+            let result = try await executor.execute(taskID: "retained-chain", prompt: prompt,
+                trustedUserPrompt: prompt, tools: tools, progress: { _ in })
+            guard case .completed = result else { return XCTFail("Every exact step and retained value must verify") }
+        }
+        try await fixture.wait { fixture.editedValues.count == 4 }
+        let observed = try fixture.editedValues.map { try JSONDecoder().decode([String].self, from: Data($0.utf8)) }
+            .sorted { ($0.first ?? "") < ($1.first ?? "") }
+        XCTAssertEqual(observed, [["1", "origin", "Paris", "prior", "keep", "freely changed"],
+            ["2", "destination", "Paris", "Paris", "keep", "freely changed"],
+            ["3", "origin", "Paris!", "Paris", "keep", "freely changed"],
+            ["4", "origin", "Paris!!", "Paris", "keep", "freely changed"]])
+        XCTAssertEqual(planner.calls, 1)
+        let journal = try XCTUnwrap(try ComputerUseTextStepStore(directory: directory).load(taskID: "retained-chain"))
+        XCTAssertEqual(journal.statuses, Array(repeating: .verified, count: 4))
+    }
+
     func testClaimedClarificationResumesSameFormAfterObservationOrPlanningCancellation() async throws {
         for stage in ["observation", "planning"] {
             var answerTask: Task<ComputerUseExecutionResult, Error>?
@@ -521,7 +665,7 @@ final class ComputerUseBrowserDOMTests: XCTestCase {
         func task(recovered: ComputerUseTextStepJournal? = nil) throws -> ComputerUseTextTask {
             try .init(contract: contract, recovered: recovered, read: { try await fixture.target.read(targetID: $0) },
                 apply: { _, _ in XCTFail("Use identified DOM input") },
-                applyWithIdentity: { try await fixture.target.apply($0, expected: $1, operationID: $2) },
+                applyWithIdentity: { try await fixture.target.apply($0) },
                 didDispatchInput: { try await fixture.target.didDispatchInput(operationID: $0) },
                 persist: { _ in }, mayAct: { true })
         }
@@ -568,9 +712,7 @@ final class ComputerUseBrowserDOMTests: XCTestCase {
         func task(recovered: ComputerUseTextStepJournal? = nil) throws -> ComputerUseTextTask {
             try .init(contract: contract, recovered: recovered, read: { try await fixture.target.read(targetID: $0) },
                 apply: { _, _ in XCTFail("Copy needs its bound source") },
-                applyCopyWithIdentity: { edit, before, source, operationID in
-                    try await fixture.target.apply(edit, expected: before, operationID: operationID, copySource: source)
-                }, didDispatchInput: { try await fixture.target.didDispatchInput(operationID: $0) },
+                applyWithIdentity: { try await fixture.target.apply($0) }, didDispatchInput: { try await fixture.target.didDispatchInput(operationID: $0) },
                 persist: { _ in }, mayAct: { true })
         }
         let unsent = ComputerUseTextStepJournal(taskID: contract.taskID, promptDigest: contract.promptDigest,
@@ -837,9 +979,9 @@ final class ComputerUseBrowserDOMTests: XCTestCase {
         var durable: ComputerUseTextStepJournal?
         let task = try ComputerUseTextTask(contract: contract, read: { try await fixture.target.read(targetID: $0) },
             apply: { _, _ in XCTFail("DOM must receive the real step identity") },
-            applyWithIdentity: { edit, expected, operation in
+            applyWithIdentity: { dispatch in
                 XCTAssertEqual(durable?.statuses, [.attempted])
-                try await fixture.target.apply(edit, expected: expected, operationID: operation)
+                try await fixture.target.apply(dispatch)
             }, persist: { durable = $0 }, mayAct: { true })
         for _ in 0..<2 {
             do { try await task.run(); XCTFail("A DOM setter return cannot prove that the page accepted its value") }
@@ -1068,7 +1210,7 @@ final class ComputerUseBrowserDOMTests: XCTestCase {
                 edits: [.init(targetID: field.snapshot.targetID, mode: .replaceAll, text: "Paris")])
             let task = try ComputerUseTextTask(contract: contract, read: { try await fixture.target.read(targetID: $0) },
                 apply: { _, _ in XCTFail("DOM needs the shared operation identity") },
-                applyWithIdentity: { try await fixture.target.apply($0, expected: $1, operationID: $2) },
+                applyWithIdentity: { try await fixture.target.apply($0) },
                 didDispatchInput: { try await fixture.target.didDispatchInput(operationID: $0) },
                 persist: { _ in }, mayAct: { allowed })
             running = Task { try await task.run() }

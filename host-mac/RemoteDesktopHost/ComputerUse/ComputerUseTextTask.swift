@@ -12,6 +12,17 @@ struct ComputerUseTextPlanEdit: Equatable, Sendable {
     let text: String
 }
 
+/// Exact host-owned authority carried to the adapter's input boundary. Copies
+/// and literals use the same dispatch path so neither can drop other fields'
+/// constraints. The operation ID belongs to the shared transaction engine.
+struct ComputerUseTextInputDispatch: Sendable {
+    let edit: ComputerUseTextPlanEdit
+    let expected: ComputerUseTextSnapshot
+    let operationID: String
+    let copySource: ComputerUseTextSnapshot?
+    let requiredValues: [String: String]
+}
+
 /// A bounded task contract for exact edits in one already-open form. Payloads
 /// and values remain host-owned; the journal contains only IDs and statuses.
 struct ComputerUseTextTaskContract: Sendable {
@@ -25,6 +36,9 @@ struct ComputerUseTextTaskContract: Sendable {
         let insertionSelection: NSRange?
         let after: String
         let copySource: ComputerUseTextSnapshot?
+        /// Explicit unchanged fields and the latest value of earlier edits.
+        /// Destination and copy-source preconditions are carried separately.
+        let requiredValues: [String: String]
     }
     let taskID: String
     let promptDigest: String
@@ -87,14 +101,20 @@ struct ComputerUseTextTaskContract: Sendable {
             }
             // Step index distinguishes legitimate repeated operations even when
             // target, operation and payload are identical. No history strings.
-            var identity = ["text-input-dispatch-required-v2", taskID, String(index), field.targetID, edit.mode.rawValue,
+            let requiredValues = finalValues
+            var identity = ["text-input-required-values-v3", taskID, String(index), field.targetID, edit.mode.rawValue,
                 edit.text, field.value, String(range.location), String(range.length), after]
             if let source { identity += ["copied-field-v2-dispatch-required", source.targetID, source.value] }
+            identity.append(String(requiredValues.count))
+            for targetID in requiredValues.keys.sorted() {
+                identity += [targetID, requiredValues[targetID]!]
+            }
             let id = Self.framedDigest(identity)
             steps.append(Step(id: id, dependency: steps.last?.id,
                               targetID: field.targetID, mode: edit.mode, payload: edit.text,
                               before: field.value,
-                              insertionSelection: edit.mode == .insert ? range : nil, after: after, copySource: source))
+                              insertionSelection: edit.mode == .insert ? range : nil, after: after, copySource: source,
+                              requiredValues: requiredValues))
             values[field.targetID] = ComputerUseTextSnapshot(
                 targetID: field.targetID, value: after,
                 selection: field.selection.location == NSNotFound ? field.selection
@@ -141,7 +161,8 @@ typealias ComputerUseTextStepJournal = ComputerUseTaskJournal
 
 /// Text capability compiler/adapter for the shared transaction engine. The
 /// private journal format is unchanged, but the versioned step identities
-/// reject older contracts that did not require dispatch evidence for all input.
+/// reject older contracts that did not bind dispatch evidence and retained
+/// value requirements to every input step.
 @MainActor
 final class ComputerUseTextTask {
     let contract: ComputerUseTextTaskContract
@@ -161,8 +182,7 @@ final class ComputerUseTextTask {
          recovered: ComputerUseTextStepJournal? = nil,
          read: @escaping (String) async throws -> ComputerUseTextSnapshot?,
          apply: @escaping (ComputerUseTextPlanEdit, ComputerUseTextSnapshot) async throws -> Void,
-         applyWithIdentity: ((ComputerUseTextPlanEdit, ComputerUseTextSnapshot, String) async throws -> Void)? = nil,
-         applyCopyWithIdentity: ((ComputerUseTextPlanEdit, ComputerUseTextSnapshot, ComputerUseTextSnapshot, String) async throws -> Void)? = nil,
+         applyWithIdentity: ((ComputerUseTextInputDispatch) async throws -> Void)? = nil,
          didDispatchInput: ((String) async throws -> Bool)? = nil,
          persist: @escaping (ComputerUseTextStepJournal) throws -> Void,
          mayAct: @escaping () -> Bool) throws {
@@ -277,10 +297,26 @@ final class ComputerUseTextTask {
                         }
                         try Task.checkCancellation()
                         guard mayAct() else { throw ComputerUseTextEditError.interrupted }
-                        if let applyCopyWithIdentity { try await applyCopyWithIdentity(plan, current, source, operationID) }
-                        else { try await apply(plan, current) }
-                    } else if let applyWithIdentity { try await applyWithIdentity(plan, current, operationID) }
-                    else { try await apply(plan, current) }
+                    }
+                    // The durable attempt and the last asynchronous reads can
+                    // outlive the engine's preflight. Recheck retained values
+                    // before either adapter, and carry the same requirements
+                    // into the browser's synchronous check-and-edit operation.
+                    for targetID in edit.requiredValues.keys.sorted() {
+                        try Task.checkCancellation()
+                        guard mayAct() else { throw ComputerUseTextEditError.interrupted }
+                        let retained = try await read(targetID)
+                        try Task.checkCancellation()
+                        guard mayAct() else { throw ComputerUseTextEditError.interrupted }
+                        guard let retained, retained.targetID == targetID, retained.isEditable, !retained.isSecure,
+                              retained.value.utf8.elementsEqual(edit.requiredValues[targetID]!.utf8) else {
+                            throw ComputerUseTextTaskError.incompleteOutcome
+                        }
+                    }
+                    if let applyWithIdentity {
+                        try await applyWithIdentity(.init(edit: plan, expected: current, operationID: operationID,
+                            copySource: edit.copySource, requiredValues: edit.requiredValues))
+                    } else { try await apply(plan, current) }
                     locallyDispatchedInputs.insert(operationID)
                 }, persist: { try persist(Self.textJournal($0, contract: contract)) },
                 assertOwnership: { guard mayAct() else { throw ComputerUseTextEditError.interrupted } })
