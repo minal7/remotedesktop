@@ -2169,6 +2169,9 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
                             routeFrontmostApplication
                                 .identityIsAuthoritative,
                         visibleText: visibleText,
+                        browserPageContext: try browserPageEvidence.map {
+                            try ComputerUseBrowserPlanningContext(page: $0.page)
+                        },
                         history: Self.semanticRoutingHistory(history),
                         availableDirectives: Self.semanticRoutingDirectives(
                             actionContract: actionContract),

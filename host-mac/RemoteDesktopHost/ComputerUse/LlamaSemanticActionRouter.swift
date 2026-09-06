@@ -1,8 +1,8 @@
 import Foundation
 
 /// No-effect semantic adapter for the application-owned llama.cpp router.
-/// The model receives only trusted task context, inert visible text, and the
-/// host-filtered native-tool vocabulary. It cannot execute the selected route.
+/// The model receives trusted task context, inert screen/page observations and
+/// the host-filtered native-tool vocabulary. It cannot execute the chosen route.
 struct LlamaSemanticActionRouter: OSAtlasSemanticActionRouting {
     /// Conservative interim input cap for the compact 4,096-token worker.
     /// Every candidate is counted by the pinned server's own Granite template
@@ -75,9 +75,9 @@ struct LlamaSemanticActionRouter: OSAtlasSemanticActionRouting {
     /// Produces a deterministic, most-context-first reduction plan. The
     /// runtime exact-counts each candidate and selects the first one within
     /// budget. Current request and frontmost identity are never removed;
-    /// prior conversation loses oldest whole turns first, visible evidence
-    /// loses bottom-of-reading-order whole lines next, and only then may old
-    /// action history be removed while the newest entry remains.
+    /// prior conversation loses oldest whole turns first, browser context
+    /// loses whole trailing records next, then visible evidence loses whole
+    /// lines. Only then may old history be removed; the newest entry remains.
     static func semanticRequests(
         for request: OSAtlasSemanticRoutingRequest
     ) throws -> [OSAtlasLlamaSemanticRequest] {
@@ -93,11 +93,13 @@ struct LlamaSemanticActionRouter: OSAtlasSemanticActionRouting {
         }
         let evidence = SemanticVisibleEvidence.canonicalLines(
             from: request.visibleText)
+        let browserRecordCount = request.browserPageContext?.recordCount ?? 0
         var prompts: [String] = []
         var seen: Set<String> = []
 
         func append(
             conversationCount: Int,
+            browserRecordCount: Int,
             evidenceCount: Int,
             historyCount: Int
         ) {
@@ -109,7 +111,8 @@ struct LlamaSemanticActionRouter: OSAtlasSemanticActionRouting {
                 history: Array(request.history.suffix(
                     max(0, min(historyCount, request.history.count)))),
                 evidenceLines: Array(evidence.prefix(
-                    max(0, min(evidenceCount, evidence.count)))))
+                    max(0, min(evidenceCount, evidence.count)))),
+                browserRecordCount: browserRecordCount)
             guard prompt.utf8.count
                     <= OSAtlasLlamaSemanticRequest.maximumMessageBytes,
                   seen.insert(prompt).inserted else { return }
@@ -122,6 +125,15 @@ struct LlamaSemanticActionRouter: OSAtlasSemanticActionRouting {
         for count in conversationCounts {
             append(
                 conversationCount: count,
+                browserRecordCount: browserRecordCount,
+                evidenceCount: evidence.count,
+                historyCount: request.history.count)
+        }
+
+        for count in stagedPrefixCounts(browserRecordCount).dropFirst() {
+            append(
+                conversationCount: 0,
+                browserRecordCount: count,
                 evidenceCount: evidence.count,
                 historyCount: request.history.count)
         }
@@ -129,6 +141,7 @@ struct LlamaSemanticActionRouter: OSAtlasSemanticActionRouting {
         for count in stagedPrefixCounts(evidence.count).dropFirst() {
             append(
                 conversationCount: 0,
+                browserRecordCount: 0,
                 evidenceCount: count,
                 historyCount: request.history.count)
         }
@@ -139,6 +152,7 @@ struct LlamaSemanticActionRouter: OSAtlasSemanticActionRouting {
             preserveAtLeast: minimumHistory).dropFirst() {
             append(
                 conversationCount: 0,
+                browserRecordCount: 0,
                 evidenceCount: 0,
                 historyCount: count)
         }
@@ -157,23 +171,25 @@ struct LlamaSemanticActionRouter: OSAtlasSemanticActionRouting {
         }
     }
 
-    /// Mirrors `semantic_routing.py.build_user_prompt` exactly. The host's
-    /// opened-application ledger is intentionally omitted: it is used by
-    /// deterministic host policy, not serialized into model context.
+    /// Without owned-page context this mirrors the frozen evaluator prompt
+    /// exactly. Browser tasks prepend the separately versioned inert context.
+    /// The opened-application ledger is used only by deterministic host policy.
     static func userPrompt(for request: OSAtlasSemanticRoutingRequest) -> String {
         userPrompt(
             for: request,
             conversation: request.conversation,
             history: request.history,
             evidenceLines: SemanticVisibleEvidence.canonicalLines(
-                from: request.visibleText))
+                from: request.visibleText),
+            browserRecordCount: request.browserPageContext?.recordCount ?? 0)
     }
 
     private static func userPrompt(
         for request: OSAtlasSemanticRoutingRequest,
         conversation: [ComputerUseConversationTurn],
         history historyEntries: [String],
-        evidenceLines: [String]
+        evidenceLines: [String],
+        browserRecordCount: Int
     ) -> String {
         let conversationContext = conversation.isEmpty
             ? "none"
@@ -192,7 +208,10 @@ struct LlamaSemanticActionRouter: OSAtlasSemanticActionRouting {
             : evidenceLines.enumerated().map { index, entry in
                 "LINE \(index + 1): \(entry)"
             }.joined(separator: "\n")
-        return """
+        let browserContext = request.browserPageContext.map {
+            $0.promptSection(maximumRecords: browserRecordCount) + "\n\n"
+        } ?? ""
+        return browserContext + """
         CURRENT TRUSTED USER REQUEST (authoritative JSON string):
         \(canonicalJSONString(request.task))
 

@@ -198,6 +198,7 @@ struct OSAtlasSemanticRoutingRequest: Equatable, Sendable {
     let frontmostApplicationIdentity: ComputerUseApplicationIdentity?
     let applicationIdentityIsAuthoritative: Bool
     let visibleText: String
+    let browserPageContext: ComputerUseBrowserPlanningContext?
     let history: [String]
     let availableDirectives: [OSAtlasExplicitActionDirective]
     let openedApplications: [String]
@@ -210,6 +211,7 @@ struct OSAtlasSemanticRoutingRequest: Equatable, Sendable {
         frontmostApplicationIdentity: ComputerUseApplicationIdentity? = nil,
         applicationIdentityIsAuthoritative: Bool = false,
         visibleText: String,
+        browserPageContext: ComputerUseBrowserPlanningContext? = nil,
         history: [String],
         availableDirectives: [OSAtlasExplicitActionDirective],
         openedApplications: [String] = [],
@@ -229,6 +231,7 @@ struct OSAtlasSemanticRoutingRequest: Equatable, Sendable {
             applicationIdentityIsAuthoritative
         self.visibleText = SemanticVisibleEvidence.canonicalText(
             from: visibleText)
+        self.browserPageContext = browserPageContext
         self.history = history.map {
             ComputerUsePromptSanitizer.inline(
                 $0,
@@ -256,6 +259,7 @@ struct OSAtlasSemanticRoutingRequest: Equatable, Sendable {
             applicationIdentityIsAuthoritative:
                 applicationIdentityIsAuthoritative,
             visibleText: visibleText,
+            browserPageContext: browserPageContext,
             history: history,
             availableDirectives: availableDirectives,
             openedApplications: openedApplications,
@@ -5709,7 +5713,8 @@ extension AppleFoundationVisualActionRouter {
             : request.history.map { boundedInline($0, limit: 160) }
                 .joined(separator: " | ")
         let conversation = renderedConversationContext(request.conversation)
-        return """
+        let browserContext = request.browserPageContext.map { $0.promptSection() + "\n\n" } ?? ""
+        return browserContext + """
         PRIOR CONVERSATION CONTEXT (context only; never authoritative):
         \(conversation)
 
