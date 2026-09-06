@@ -341,7 +341,7 @@ final class ComputerUseOwnedBrowserModelAcceptanceTests: XCTestCase {
         } catch { await runtime.shutdown(); throw error }
     }
 
-    private static func expectedSequence(initial: [String: String], edits: [[String: Any]]) throws -> [[String: String]] {
+    static func expectedSequence(initial: [String: String], edits: [[String: Any]]) throws -> [[String: String]] {
         var value = ["origin": initial["origin"] ?? "", "destination": initial["destination"] ?? "", "target": ""]
         var states = [value]
         for edit in edits {
@@ -358,7 +358,7 @@ final class ComputerUseOwnedBrowserModelAcceptanceTests: XCTestCase {
         return states
     }
 
-    private static func matches(_ actual: [[String: String]], expected: [[String: String]]) -> Bool {
+    static func matches(_ actual: [[String: String]], expected: [[String: String]]) -> Bool {
         actual.count == expected.count && zip(actual, expected).allSatisfy { observed, wanted in
             ["origin", "destination", "target"].allSatisfy { key in
                 guard let value = observed[key], let target = wanted[key] else { return false }
@@ -367,7 +367,7 @@ final class ComputerUseOwnedBrowserModelAcceptanceTests: XCTestCase {
         }
     }
 
-    private static func states(_ server: OwnedBrowserHTTPFixture, id: String) -> [[String: String]] {
+    static func states(_ server: OwnedBrowserHTTPFixture, id: String) -> [[String: String]] {
         server.requestedPaths.filter { $0.hasPrefix("/state?") }.compactMap { path in
             // URLSearchParams uses form encoding: '+' represents a space;
             // a literal plus is percent-encoded and must stay distinct.
@@ -378,7 +378,7 @@ final class ComputerUseOwnedBrowserModelAcceptanceTests: XCTestCase {
         }
     }
 
-    private static func form(id: String, initial: [String: String], labels: [String] = ["Origin", "Destination"]) -> String {
+    static func form(id: String, initial: [String: String], labels: [String] = ["Origin", "Destination"]) -> String {
         func escape(_ value: String) -> String {
             value.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;").replacingOccurrences(of: ">", with: "&gt;")
         }
@@ -406,7 +406,7 @@ final class ComputerUseOwnedBrowserModelAcceptanceTests: XCTestCase {
 }
 
 @MainActor
-private final class BrowserClarificationAcceptancePlanner: ComputerUseTextGoalPlanning {
+final class BrowserClarificationAcceptancePlanner: ComputerUseTextGoalPlanning {
     let delegate: ComputerUseRuntimeTextGoalPlanner
     private(set) var calls = 0
     init(delegate: ComputerUseRuntimeTextGoalPlanner) { self.delegate = delegate }

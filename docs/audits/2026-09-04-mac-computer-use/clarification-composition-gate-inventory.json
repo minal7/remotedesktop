@@ -1,0 +1,10 @@
+{
+  "selectors": [
+    "RemoteDesktopHostTests/ComputerUseClarificationCompositionTests/testBrowserFactoryReceivesTheManagerActionGate",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserModelAcceptanceTests/testIndependentSequenceOracleRejectsExtraWrongTargetReorderedAndNormalizedIntermediateStates"
+  ],
+  "expectedTests": [
+    "RemoteDesktopHostTests/ComputerUseClarificationCompositionTests/testBrowserFactoryReceivesTheManagerActionGate",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserModelAcceptanceTests/testIndependentSequenceOracleRejectsExtraWrongTargetReorderedAndNormalizedIntermediateStates"
+  ]
+}

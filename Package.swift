@@ -66,6 +66,7 @@ let package = Package(
             exclude: [
                 "HostSessionTests.swift", "ScreenCaptureSizingTests.swift",
                 "ComputerUseLicenseComplianceTests.swift", "OSAtlasNativeRealUIAcceptanceTests.swift",
+                "ComputerUseClarificationCompositionTests.swift",
             ],
             swiftSettings: [.enableExperimentalFeature("StrictConcurrency")]),
     ],

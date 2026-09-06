@@ -3608,6 +3608,7 @@ final class HostComputerUseManager: ObservableObject {
         executorComposer: ComputerUseExecutorComposer? = nil,
         taskLedger: ComputerUseTaskLedger = ComputerUseTaskLedger(),
         textClarifications: ComputerUseTextClarificationStore? = nil,
+        browserNavigationFactory: ((@escaping () -> Bool) -> ComputerUseBrowserNavigationTask)? = nil,
         transportTeardownTimeout: Duration = .seconds(5),
         allowsExternalServices: Bool = true,
         approvalTargetProvider:
@@ -3626,14 +3627,16 @@ final class HostComputerUseManager: ObservableObject {
         }
     ) {
         let gate = ComputerUseActionGate()
+        let mayAct = { [weak gate] in gate?.allowsActions == true }
         self.executor = executor
         self.injector = injector
         self.actionGate = gate
         self.tools = ComputerUseHostTools(
             injector: injector,
-            mayAct: { [weak gate] in gate?.allowsActions == true },
+            mayAct: mayAct,
             approvalTargetProvider: approvalTargetProvider,
             actionPerformer: actionPerformer,
+            browserNavigationTask: browserNavigationFactory?(mayAct),
             approvedActionStepDidPost: approvedActionStepDidPost,
             screenProvider: screenProvider,
             accessibilityContextProvider: accessibilityContextProvider)
