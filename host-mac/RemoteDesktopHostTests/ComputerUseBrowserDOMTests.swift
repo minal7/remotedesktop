@@ -843,12 +843,228 @@ final class ComputerUseBrowserDOMTests: XCTestCase {
         catch { XCTAssertEqual(error as? ComputerUseTextTaskError, .staleTarget) }
     }
 
+    func testNativeScalarValuesPreserveExactBytesAndCommitOnceWithoutTextSelection() async throws {
+        let cases: [(String, ComputerUseTextEditMode, String)] = [
+            ("type='date' min='2026-09-01' max='2026-09-30' value='2026-09-01'", .replaceAll, "2026-09-12"),
+            ("type='datetime-local' min='2026-09-01T09:00' step='900' value='2026-09-01T09:00'", .replaceAll, "2026-09-12T10:15"),
+            ("type='time' min='21:00' max='06:00' value='22:00'", .replaceAll, "01:30"),
+            ("type='number' min='1' max='8' value='1'", .replaceAll, "2"),
+            ("type='number' step='any' value='1'", .append, ".25"),
+            ("type='number' step='2' value='1'", .replaceAll, "3"),
+            ("type='number' min='0.5' step='1' value='1'", .replaceAll, "1.5"),
+            ("type='date' required value='2026-09-01'", .replaceAll, "")
+        ]
+        for (attributes, mode, payload) in cases {
+            let fixture = try await DOMFixture(body: "<label>Value<input " + attributes + "></label>" + Self.representabilityAuditScript, heldSignal: true)
+            defer { fixture.close() }
+            let fields = try await fixture.target.fields(), initial = try XCTUnwrap(fields.first?.snapshot)
+            XCTAssertEqual(initial.selection.location, NSNotFound, attributes)
+            let edit = ComputerUseTextPlanEdit(targetID: initial.targetID, mode: mode, text: payload)
+            let contract = try ComputerUseTextTaskContract(taskID: "scalar", prompt: "Controlled value edit", fields: fields, edits: [edit])
+            try await fixture.target.validateRepresentability(of: contract)
+            let before = try await fixture.target.read(targetID: initial.targetID)
+            XCTAssertEqual(before, initial, "Preflight must leave the live field untouched")
+            do { try await fixture.target.apply(.init(targetID: initial.targetID, mode: .insert, text: payload), expected: initial, operationID: contract.steps[0].id)
+                XCTFail("A scalar has no text insertion selection") }
+            catch { XCTAssertEqual(error as? ComputerUseTextEditError, .invalidSelection) }
+            try await fixture.target.apply(edit, expected: initial, operationID: contract.steps[0].id)
+            let observed = try await fixture.target.read(targetID: initial.targetID)
+            let after = try XCTUnwrap(observed)
+            XCTAssertTrue(after.value.utf8.elementsEqual(contract.steps[0].after.utf8))
+            let receipt = try await fixture.target.didDispatchInput(operationID: contract.steps[0].id)
+            XCTAssertTrue(receipt)
+            do { try await fixture.target.apply(edit, expected: after, operationID: contract.steps[0].id); XCTFail("A committed operation cannot run twice") }
+            catch { XCTAssertEqual(error as? ComputerUseTextEditError, .deliveryUncertain) }
+            try await fixture.wait { fixture.server.count("/signal") == 1 }
+            fixture.server.releaseHeldResponses()
+            try await fixture.wait { Self.representabilityAudit(fixture) != nil }
+            let audit = try XCTUnwrap(Self.representabilityAudit(fixture))
+            XCTAssertEqual(audit["events"], "1"); XCTAssertEqual(audit["changes"], "1")
+            XCTAssertEqual(audit["invalid"], "0"); XCTAssertEqual(audit["order"], "input,change")
+            XCTAssertEqual(audit["value0"], after.value)
+        }
+    }
+
+    func testNativeScalarSyntaxRangeAndStepRejectBeforeLiveEffects() async throws {
+        let cases: [(String, String)] = [
+            ("type='date' value='2026-09-01'", "2026-02-30"),
+            ("type='date' value='2026-09-01'", "09/12/2026"),
+            ("type='date' min='2026-09-01' value='2026-09-01'", "2026-08-31"),
+            ("type='date' max='2026-09-30' value='2026-09-01'", "2026-10-01"),
+            ("type='date' min='2026-09-01' step='2' value='2026-09-01'", "2026-09-02"),
+            ("type='datetime-local' value='2026-09-01T09:00'", "2026-09-12 10:15"),
+            ("type='time' value='09:00'", "09:00:30"),
+            ("type='time' min='21:00' max='06:00' value='22:00'", "12:00"),
+            ("type='number' value='1'", "1.5"),
+            ("type='number' step='2' value='1'", "2"),
+            ("type='number' min='0.5' step='1' value='1'", "2"),
+            ("type='number' min='1' max='8' value='1'", "9"),
+            ("type='number' step='any' value='1'", " 2 ")
+        ]
+        for (attributes, payload) in cases {
+            let fixture = try await DOMFixture(body: "<label>Value<input " + attributes + "></label>" + Self.representabilityAuditScript, heldSignal: true)
+            defer { fixture.close() }
+            let fields = try await fixture.target.fields(), initial = try XCTUnwrap(fields.first?.snapshot)
+            let edit = ComputerUseTextPlanEdit(targetID: initial.targetID, mode: .replaceAll, text: payload)
+            let contract = try ComputerUseTextTaskContract(taskID: "invalid-scalar", prompt: "Controlled value edit", fields: fields, edits: [edit])
+            do { try await fixture.target.validateRepresentability(of: contract); XCTFail("Preflight must reject \(attributes): \(payload)") }
+            catch { XCTAssertEqual(error as? ComputerUseTextEditError, .valueNotRepresentable) }
+            for _ in 0..<2 {
+                do { try await fixture.target.apply(edit, expected: initial, operationID: contract.steps[0].id); XCTFail("Dispatch must also validate scalar constraints") }
+                catch { XCTAssertEqual(error as? ComputerUseTextEditError, .valueNotRepresentable) }
+            }
+            let after = try await fixture.target.read(targetID: initial.targetID)
+            XCTAssertEqual(after, initial)
+            let receipt = try await fixture.target.didDispatchInput(operationID: contract.steps[0].id)
+            XCTAssertFalse(receipt)
+            try await fixture.wait { fixture.server.count("/signal") == 1 }
+            fixture.server.releaseHeldResponses()
+            try await fixture.wait { Self.representabilityAudit(fixture) != nil }
+            let audit = try XCTUnwrap(Self.representabilityAudit(fixture))
+            XCTAssertEqual(audit["events"], "0"); XCTAssertEqual(audit["changes"], "0")
+            XCTAssertEqual(audit["invalid"], "0"); XCTAssertEqual(audit["value0"], initial.value)
+        }
+    }
+
+    func testRestoringScalarConstraintsStillRetiresThePlannedObject() async throws {
+        for attribute in ["min", "max", "step", "value"] {
+            let fixture = try await DOMFixture(body: """
+                <label>Quantity<input type="number" min="0" max="10" step="1" value="1"></label><script>
+                fetch('/signal').then(() => { const e = document.querySelector('input');
+                  const previous = e.getAttribute('\(attribute)'); e.setAttribute('\(attribute)', '2');
+                  e.setAttribute('\(attribute)', previous); fetch('/changed'); });
+                </script>
+                """, heldSignal: true)
+            defer { fixture.close() }
+            let fields = try await fixture.target.fields(), initial = try XCTUnwrap(fields.first?.snapshot)
+            let edit = ComputerUseTextPlanEdit(targetID: initial.targetID, mode: .replaceAll, text: "3")
+            let contract = try ComputerUseTextTaskContract(taskID: "changed-scalar", prompt: "Controlled edit", fields: fields, edits: [edit])
+            try await fixture.target.validateRepresentability(of: contract)
+            try await fixture.wait { fixture.server.count("/signal") == 1 }
+            fixture.server.releaseHeldResponses()
+            try await fixture.wait { fixture.server.count("/changed") == 1 }
+            do { try await fixture.target.validateRepresentability(of: contract); XCTFail("The old capability must retire after \(attribute) changed") }
+            catch { XCTAssertEqual(error as? ComputerUseTextTaskError, .staleTarget) }
+            do { try await fixture.target.apply(edit, expected: initial, operationID: contract.steps[0].id); XCTFail("Old preflight cannot survive constraint changes") }
+            catch { XCTAssertEqual(error as? ComputerUseTextTaskError, .staleTarget) }
+            let receipt = try await fixture.target.didDispatchInput(operationID: contract.steps[0].id)
+            XCTAssertFalse(receipt)
+        }
+    }
+
+    func testScalarInputHandlerDriftStopsChangeAndLeavesAnUncertainNonReplayableStep() async throws {
+        let changes = ["e.min = '2'; e.min = '0';", "e.replaceWith(e.cloneNode(true));", "e.value = '4';",
+            "document.body.insertAdjacentHTML('beforeend', '<label>Password<input type=password></label>');"]
+        for change in changes {
+            let fixture = try await DOMFixture(body: """
+                <label>Quantity<input type="number" min="0" max="10" value="1"></label><script>
+                document.querySelector('input').addEventListener('input', event => { const e = event.target; \(change) });
+                </script>
+                """ + Self.representabilityAuditScript, heldSignal: true)
+            defer { fixture.close() }
+            let fields = try await fixture.target.fields(), initial = try XCTUnwrap(fields.first?.snapshot)
+            let contract = try ComputerUseTextTaskContract(taskID: "scalar-drift", prompt: "Set Quantity to 3", fields: fields,
+                edits: [.init(targetID: initial.targetID, mode: .replaceAll, text: "3")])
+            try await fixture.target.validateRepresentability(of: contract)
+            var dispatches = 0, operationID: String?
+            let task = try ComputerUseTextTask(contract: contract, read: { try await fixture.target.read(targetID: $0) },
+                apply: { _, _ in XCTFail("Use the retained operation identity") }, applyWithIdentity: { dispatch in
+                    dispatches += 1; operationID = dispatch.operationID; try await fixture.target.apply(dispatch)
+                }, didDispatchInput: { try await fixture.target.didDispatchInput(operationID: $0) }, persist: { _ in }, mayAct: { true })
+            do { try await task.run(); XCTFail("Input alone cannot prove the committed scalar action") }
+            catch {
+                if change.contains("type=password") { XCTAssertEqual(error as? ComputerUseBrowserError, .authenticationRequired) }
+                else { XCTAssertEqual(error as? ComputerUseTextEditError, .deliveryUncertain) }
+            }
+            XCTAssertEqual(task.journal.statuses, [.uncertain])
+            let receipt = try await fixture.target.didDispatchInput(operationID: XCTUnwrap(operationID))
+            XCTAssertFalse(receipt)
+            do { try await task.run(); XCTFail("An incomplete event sequence cannot be replayed") } catch {}
+            XCTAssertEqual(dispatches, 1)
+            try await fixture.wait { fixture.server.count("/signal") == 1 }
+            fixture.server.releaseHeldResponses()
+            try await fixture.wait { Self.representabilityAudit(fixture) != nil }
+            let audit = try XCTUnwrap(Self.representabilityAudit(fixture))
+            XCTAssertEqual(audit["events"], "1"); XCTAssertEqual(audit["changes"], "0")
+            XCTAssertEqual(audit["order"], "input")
+        }
+    }
+
+    func testCompiledScalarFormGoalUsesExactValuesAndDurableReceiptsWithoutModelOrReplay() async throws {
+        let fixture = try await DOMFixture(body: """
+            <label>Departure<input type="date" min="2026-09-01" max="2026-09-30" value="2026-09-01"></label>
+            <label>Quantity<input type="number" min="1" max="8" value="1"></label>
+            """ + Self.representabilityAuditScript, heldSignal: true)
+        defer { fixture.close() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let planner = DOMRepresentabilityFixturePlanner { _ in XCTFail("Complete literal form commands use the production compiler"); return .unsupported }
+        let native = ComputerUseNativeTextExecutor(injector: InputInjector(), mayAct: { true }, journalDirectory: directory,
+            planner: planner, editOverride: { _, _ in XCTFail("DOM scalar input must not fall through to AX") },
+            browserTargetProvider: { taskID in ComputerUseBrowserTextTarget(browser: fixture.browser,
+                document: try fixture.browser.acquireCurrentDocument(taskID: taskID), requiresFrontmost: false) })
+        let executor = ComputerUseCapabilityExecutor(native: native, desktopFactory: { _ in
+            XCTFail("The complete form task must stay in the compiled capability"); throw ComputerUseTextTaskError.invalidPlan
+        })
+        let prompt = #"Set "Departure" to "2026-09-12", then set "Quantity" to "2"."#
+        for _ in 0..<2 {
+            let result = try await executor.execute(taskID: "compiled-scalar", prompt: prompt, trustedUserPrompt: prompt,
+                tools: ComputerUseHostTools(injector: InputInjector(), mayAct: { true }), progress: { _ in })
+            guard case .completed = result else { return XCTFail("Both exact scalar edits must verify") }
+        }
+        XCTAssertEqual(planner.calls, 0)
+        let journal = try XCTUnwrap(try ComputerUseTextStepStore(directory: directory).load(taskID: "compiled-scalar"))
+        XCTAssertEqual(journal.statuses, [.verified, .verified])
+        try await fixture.wait { fixture.server.count("/signal") == 1 }
+        fixture.server.releaseHeldResponses()
+        try await fixture.wait { Self.representabilityAudit(fixture) != nil }
+        let audit = try XCTUnwrap(Self.representabilityAudit(fixture))
+        XCTAssertEqual(audit["events"], "2"); XCTAssertEqual(audit["changes"], "2")
+        XCTAssertEqual(audit["order"], "input,change,input,change")
+        XCTAssertEqual(audit["value0"], "2026-09-12"); XCTAssertEqual(audit["value1"], "2")
+    }
+
+    func testCompiledScalarIntermediateFailurePrecedesEveryFieldEditAndJournalCreation() async throws {
+        let fixture = try await DOMFixture(body: """
+            <label>Origin<input value="old"></label>
+            <label>Quantity<input type="number" min="1" max="8" value="1"></label>
+            """ + Self.representabilityAuditScript, heldSignal: true)
+        defer { fixture.close() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let planner = DOMRepresentabilityFixturePlanner { _ in XCTFail("The full explicit command is compiled"); return .unsupported }
+        let native = ComputerUseNativeTextExecutor(injector: InputInjector(), mayAct: { true }, journalDirectory: directory,
+            planner: planner, browserTargetProvider: { taskID in ComputerUseBrowserTextTarget(browser: fixture.browser,
+                document: try fixture.browser.acquireCurrentDocument(taskID: taskID), requiresFrontmost: false) })
+        let executor = ComputerUseCapabilityExecutor(native: native, desktopFactory: { _ in
+            XCTFail("A scalar constraint failure must not fall through to visual input"); throw ComputerUseTextTaskError.invalidPlan
+        })
+        let prompt = #"Set "Origin" to "Paris", set "Quantity" to "9", then set "Quantity" to "2"."#
+        let result = try await executor.execute(taskID: "invalid-scalar-plan", prompt: prompt, trustedUserPrompt: prompt,
+            tools: ComputerUseHostTools(injector: InputInjector(), mayAct: { true }), progress: { _ in })
+        guard case .unableToComplete = result else { return XCTFail("A valid final value cannot conceal an invalid intermediate") }
+        XCTAssertEqual(planner.calls, 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+        try await fixture.wait { fixture.server.count("/signal") == 1 }
+        fixture.server.releaseHeldResponses()
+        try await fixture.wait { Self.representabilityAudit(fixture) != nil }
+        let audit = try XCTUnwrap(Self.representabilityAudit(fixture))
+        XCTAssertEqual(audit["events"], "0"); XCTAssertEqual(audit["changes"], "0")
+        XCTAssertEqual(audit["value0"], "old"); XCTAssertEqual(audit["value1"], "1")
+    }
+
     private static let representabilityAuditScript = """
         <script>
-        const auditFields = [...document.querySelectorAll('input,textarea')]; let inputEvents = 0;
-        for (const e of auditFields) { if (e.selectionStart !== null) e.setSelectionRange(2,2); e.addEventListener('input', () => inputEvents++); }
+        const auditFields = [...document.querySelectorAll('input,textarea')]; let inputEvents = 0, changeEvents = 0, invalidEvents = 0;
+        const eventOrder = [];
+        for (const e of auditFields) {
+          if (e.selectionStart !== null) e.setSelectionRange(2,2);
+          e.addEventListener('input', () => { inputEvents++; eventOrder.push('input'); });
+          e.addEventListener('change', () => { changeEvents++; eventOrder.push('change'); });
+          e.addEventListener('invalid', () => invalidEvents++);
+        }
         fetch('/signal').then(() => {
-          const values = {events:String(inputEvents)};
+          const values = {events:String(inputEvents), changes:String(changeEvents), invalid:String(invalidEvents), order:eventOrder.join(',')};
           auditFields.forEach((e,i) => { values['value'+i] = e.value; values['start'+i] = String(e.selectionStart ?? -1); values['end'+i] = String(e.selectionEnd ?? -1); });
           fetch('/audit?' + new URLSearchParams(values));
         });

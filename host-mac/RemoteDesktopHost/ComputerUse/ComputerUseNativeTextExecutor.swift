@@ -377,7 +377,7 @@ final class ComputerUseNativeTextExecutor {
         if let browserTarget {
             do { try await browserTarget.validateRepresentability(of: contract) }
             catch ComputerUseTextEditError.valueNotRepresentable {
-                return .unableToComplete("A selected field cannot preserve the exact requested text. No fields were edited. Use a field that supports the text, or change the request.")
+                return .unableToComplete("A selected field cannot accept the exact requested value. Check its format, range or allowed increments. No fields were edited.")
             }
         }
         try Task.checkCancellation()

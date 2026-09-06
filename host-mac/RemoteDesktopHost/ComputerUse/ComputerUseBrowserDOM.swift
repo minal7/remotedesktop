@@ -286,6 +286,8 @@ enum ComputerUseBrowserDOM {
       let nextPageControlID = 0, nextPageFormID = 0, nextPageOptionID = 0;
       const protectedTypes = new Set(['password', 'hidden', 'file']);
       const textTypes = new Set(['text', 'search', 'url', 'tel', 'email']);
+      const scalarTypes = new Set(['date', 'datetime-local', 'month', 'week', 'time', 'number']);
+      const scalarConstraintAttributes = new Set(['min', 'max', 'step', 'value']);
       const identityAttributes = new Set(['id', 'name', 'type', 'multiple', 'form', 'action', 'method', 'enctype', 'target', 'disabled', 'readonly', 'hidden', 'inert', 'aria-hidden', 'aria-label', 'aria-labelledby', 'placeholder', 'autocomplete']);
       const valueGetters = [HTMLInputElement, HTMLTextAreaElement].map(c => Object.getOwnPropertyDescriptor(c.prototype, 'value').get);
       const valueSetters = [HTMLInputElement, HTMLTextAreaElement].map(c => Object.getOwnPropertyDescriptor(c.prototype, 'value').set);
@@ -304,12 +306,15 @@ enum ComputerUseBrowserDOM {
           for (const binding of bindings.values()) {
             if (record.type === 'childList' && Array.from(record.removedNodes).some(node => node === binding.element || node.contains(binding.element) || contains(node, binding.element))) binding.valid = false;
             if (record.type === 'attributes' && identityAttributes.has(record.attributeName) && (record.target === binding.form || contains(record.target, binding.element))) binding.valid = false;
+            if (record.type === 'attributes' && scalarConstraintAttributes.has(record.attributeName)
+                && record.target === binding.element && scalarTypes.has(binding.element.type)) binding.valid = false;
             if (record.type !== 'attributes' && binding.labels.some(label => label === record.target || label.contains(record.target))) binding.valid = false;
           }
         }
       }
       const observer = new MutationObserver(retire);
-      const observationOptions = {subtree: true, childList: true, attributes: true, attributeFilter: Array.from(identityAttributes), characterData: true};
+      const observationOptions = {subtree: true, childList: true, attributes: true,
+        attributeFilter: [...identityAttributes, ...scalarConstraintAttributes], characterData: true};
       observer.observe(doc, observationOptions);
       function synchronize() {
         retire(observer.takeRecords());
@@ -320,7 +325,8 @@ enum ComputerUseBrowserDOM {
       }
       function kind(element) {
         if (element instanceof HTMLTextAreaElement) return 1;
-        if (!(element instanceof HTMLInputElement) || protectedTypes.has(element.type) || !textTypes.has(element.type)) return -1;
+        if (!(element instanceof HTMLInputElement) || protectedTypes.has(element.type)
+            || (!textTypes.has(element.type) && !scalarTypes.has(element.type))) return -1;
         return 0;
       }
       function rendered(element) {
@@ -418,8 +424,14 @@ enum ComputerUseBrowserDOM {
         return null;
       }
       function shape(element) {
-        return [element.tagName, element.type || '', element.name || '', element.id || '',
-                element.form?.action || '', element.form?.method || '', String(element.multiple === true)].join('\u0000');
+        const form = element.form;
+        const parts = [element.tagName, element.type || '', element.name || '', element.id || '',
+          form ? formGetters.action.call(form) : '', form ? formGetters.method.call(form) : '', String(element.multiple === true)];
+        if (scalarTypes.has(element.type)) {
+          for (const name of scalarConstraintAttributes) parts.push(element.getAttribute(name));
+        }
+        if (parts.some(value => value !== null && (value.length > 8192 || encoder.encode(value).length > 8192))) return null;
+        return JSON.stringify(parts);
       }
       function valueOf(element) { return valueGetters[kind(element)].call(element); }
       // Ask this WebKit engine whether its native setter/getter can preserve
@@ -431,17 +443,32 @@ enum ComputerUseBrowserDOM {
         if (index < 0) return false;
         const probe = probeDocument.createElement(index === 0 ? 'input' : 'textarea');
         if (index === 0) { probe.type = element.type; probe.multiple = element.multiple; }
+        const scalar = index === 0 && scalarTypes.has(element.type);
+        if (scalar) {
+          for (const name of scalarConstraintAttributes) {
+            const value = element.getAttribute(name);
+            if (value !== null) {
+              if (value.length > 8192 || encoder.encode(value).length > 8192) return false;
+              probe.setAttribute(name, value);
+            }
+          }
+        }
         valueSetters[index].call(probe, expected);
-        return valueGetters[index].call(probe) === expected;
+        if (valueGetters[index].call(probe) !== expected) return false;
+        // Scalar syntax and canonicalization are decided by this WebKit
+        // engine. The value attribute participates in the step base even
+        // when the live value is dirty. Reading validity dispatches no event.
+        return !scalar || (!probe.validity.rangeUnderflow && !probe.validity.rangeOverflow && !probe.validity.stepMismatch);
       }
       function snapshot(binding) {
         const element = binding.element;
-        if (!binding.valid || !editable(element) || binding.form !== element.form || binding.shape !== shape(element) || binding.label !== labelFor(element).label) return null;
+        const currentShape = shape(element);
+        if (!binding.valid || !editable(element) || currentShape === null || binding.form !== element.form || binding.shape !== currentShape || binding.label !== labelFor(element).label) return null;
         const value = valueOf(element);
         if (encoder.encode(value).length > 1048576) return null;
         const start = element.selectionStart, end = element.selectionEnd;
-        // Email inputs have no browser selection API. Replace/append remain
-        // supported; insert is rejected by the host's invalid-range check.
+        // Email and scalar inputs have no browser text-selection API.
+        // Replace/append remain supported; insertion needs a valid selection.
         return {id: binding.id, label: binding.label, value,
                 selectionStart: start === null ? -1 : start,
                 selectionEnd: end === null ? -1 : end};
@@ -765,11 +792,25 @@ enum ComputerUseBrowserDOM {
         if (!canRepresent(binding.element, expected)) return reply('unrepresentable');
         // The dispatcher persisted its attempt before this call. This second
         // one-use boundary also prevents a lost callback from repeating input.
+        const scalar = scalarTypes.has(binding.element.type), effectURL = doc.URL;
         operations.set(args.operationID, 'attempted');
         try {
           valueSetters[kind(binding.element)].call(binding.element, expected);
           if (current.selectionStart >= 0) binding.element.setSelectionRange(start + args.payload.length, start + args.payload.length);
-          binding.element.dispatchEvent(new InputEvent('input', {bubbles: true, composed: true, inputType: 'insertText', data: args.payload}));
+          binding.element.dispatchEvent(scalar ? new Event('input', {bubbles: true, composed: true})
+            : new InputEvent('input', {bubbles: true, composed: true, inputType: 'insertText', data: args.payload}));
+          if (scalar) {
+            // This is a value commit, including the change notification used
+            // by native date/number forms. An input handler may replace the
+            // field, alter its constraints or reveal login before that tail.
+            synchronize();
+            if (args.documentID !== documentID || doc.URL !== effectURL) return reply('uncertain');
+            const status = authenticationStatus();
+            if (status) return reply(status);
+            const afterInput = snapshot(binding);
+            if (!afterInput || afterInput.value !== expected) return reply('uncertain');
+            binding.element.dispatchEvent(new Event('change', {bubbles: true}));
+          }
           operations.set(args.operationID, 'dispatched');
           return reply('attempted');
         } catch (_) { return reply('uncertain'); }

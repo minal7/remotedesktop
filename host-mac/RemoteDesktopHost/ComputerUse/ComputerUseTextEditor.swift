@@ -45,7 +45,7 @@ enum ComputerUseTextEditError: Error, Equatable, LocalizedError {
         case .payloadTooLarge:
             return "This edit exceeds the supported text size. No text was entered."
         case .valueNotRepresentable:
-            return "That field cannot preserve the exact requested text. This edit was not sent."
+            return "That field cannot accept the exact requested value. Check its format, range or allowed increments. This edit was not sent."
         case .preconditionChanged:
             return "The field, document, value, or selection changed before typing. No text was entered."
         case .selectionUnsupported:
