@@ -55,6 +55,7 @@ struct ComputerUseLocalTextGoalPlanner: ComputerUseTextGoalPlanning {
         case fieldCopyV7 = "field-copy-v7"
         case fieldOperationsV8 = "field-operations-v8"
         case fieldOperationsV9 = "field-operations-v9"
+        case textActionsV10 = "text-actions-v10"
     }
     static let contextTokens = 4_096
     static let outputTokens = 1_024
@@ -113,6 +114,9 @@ struct ComputerUseLocalTextGoalPlanner: ComputerUseTextGoalPlanning {
     func makeRequest(catalog: ComputerUseTextPayloadCatalog, fields: [ComputerUseTextField],
                      coverageRepair: ComputerUseSourceBoundTextPlan.CoverageFailure? = nil) throws -> URLRequest {
         guard coverageRepair == nil || contract == .sourceBoundV6 else { throw ComputerUseLocalTextPlanError.invalidResponse }
+        if contract == .textActionsV10 {
+            return try ComputerUseActionTextPlan.makeRequest(connection: connection, catalog: catalog, fields: fields)
+        }
         if contract == .fieldCopyV7 || contract == .fieldOperationsV8 || contract == .fieldOperationsV9 {
             return try ComputerUseFieldCopyPlan.makeRequest(connection: connection, catalog: catalog, fields: fields,
                 requiresCopy: contract == .fieldCopyV7, preserveQuotedFieldNames: contract == .fieldOperationsV9)
@@ -232,6 +236,9 @@ struct ComputerUseLocalTextGoalPlanner: ComputerUseTextGoalPlanning {
             }
             if let refusal = message["refusal"], refusal != .null && refusal != .string("") {
                 throw ComputerUseLocalTextPlanError.invalidResponse
+            }
+            if contract == .textActionsV10 {
+                return try ComputerUseActionTextPlan.decode(content: content, catalog: catalog, fields: fields)
             }
             if contract == .fieldCopyV7 || contract == .fieldOperationsV8 || contract == .fieldOperationsV9 {
                 return try ComputerUseFieldCopyPlan.decode(content: content, catalog: catalog, fields: fields,

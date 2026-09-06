@@ -47,6 +47,7 @@ struct ComputerUseTextGoalPlanner: ComputerUseTextGoalPlanning {
 struct ComputerUseTextPayloadCatalog {
     let projectedTask: String
     let payloads: [String: String]
+    private let unquotedSegments: [String]
 
     init(_ task: String) throws {
         guard task.utf8.count <= 32 * 1_024 else { throw ComputerUseTextTaskError.invalidPlan }
@@ -54,10 +55,13 @@ struct ComputerUseTextPayloadCatalog {
         var values: [String: String] = [:]
         var nextPayloadID = 1
         var cursor = task.startIndex
+        var segment = ""
+        var segments: [String] = []
         while cursor < task.endIndex {
             let opening = task[cursor]
             guard opening == "\"" || opening == "“" else {
                 projection.append(opening)
+                segment.append(opening)
                 cursor = task.index(after: cursor)
                 continue
             }
@@ -76,6 +80,7 @@ struct ComputerUseTextPayloadCatalog {
             let id = "p\(nextPayloadID)"
             nextPayloadID += 1
             values[id] = text
+            if !segment.isEmpty { segments.append(segment); segment = "" }
             // The position of the reference preserves which field/clause owns
             // the literal. The model never has to reproduce its bytes.
             projection += "[exact quoted payload \(id)]"
@@ -83,6 +88,17 @@ struct ComputerUseTextPayloadCatalog {
         }
         projectedTask = projection
         payloads = values
+        if !segment.isEmpty { segments.append(segment) }
+        unquotedSegments = segments
+    }
+
+    /// A source span must come from the user's words, not from a generated
+    /// payload marker or the concatenation of text on either side of a quote.
+    /// All text planners use this authority check before returning a literal.
+    func resolveUnquoted(_ text: String) -> String? {
+        guard !text.isEmpty, text.utf8.count <= 512,
+              unquotedSegments.contains(where: { Data($0.utf8).range(of: Data(text.utf8)) != nil }) else { return nil }
+        return text
     }
 
     func resolve(reference: String, userText: String, originalTask: String) -> String? {
@@ -90,9 +106,9 @@ struct ComputerUseTextPayloadCatalog {
             guard userText.isEmpty else { return nil }
             return payloads[reference]
         }
-        guard !userText.isEmpty, userText.utf8.count <= 512,
-              Data(originalTask.utf8).range(of: Data(userText.utf8)) != nil else { return nil }
-        return userText
+        guard let text = resolveUnquoted(userText),
+              Data(originalTask.utf8).range(of: Data(text.utf8)) != nil else { return nil }
+        return text
     }
 }
 
