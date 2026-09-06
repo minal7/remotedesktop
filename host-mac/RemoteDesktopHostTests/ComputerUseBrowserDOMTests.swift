@@ -147,6 +147,55 @@ final class ComputerUseBrowserDOMTests: XCTestCase {
         XCTAssertEqual(journal.statuses, Array(repeating: .verified, count: 4))
     }
 
+    func testCompleteTextCommandsUseProductionStepReceiptsForRepeatedLiteralsCopiesAndTargetReferences() async throws {
+        let fixture = try await DOMFixture(body: """
+            <label>Origin<input id="origin" value="old"></label>
+            <label>Destination<textarea id="destination">prior</textarea></label>
+            <label>Retained<input id="retained" value="keep"></label>
+            <script>let sequence = 0; document.addEventListener('input', e => {
+              const values = ['origin', 'destination', 'retained'].map(id => document.getElementById(id).value);
+              fetch('/edited?value=' + encodeURIComponent(JSON.stringify([String(++sequence), e.target.id, ...values])));
+            });</script>
+            """)
+        defer { fixture.close() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let planner = DOMRepresentabilityFixturePlanner { _ in
+            XCTFail("A complete explicit text task must retain its compiled argument roles")
+            return .unsupported
+        }
+        let native = ComputerUseNativeTextExecutor(injector: InputInjector(), mayAct: { true }, journalDirectory: directory,
+            planner: planner, editOverride: { _, _ in XCTFail("Owned DOM input cannot fall through to AX") },
+            browserTargetProvider: { taskID in ComputerUseBrowserTextTarget(browser: fixture.browser,
+                document: try fixture.browser.acquireCurrentDocument(taskID: taskID), requiresFrontmost: false) })
+        let executor = ComputerUseCapabilityExecutor(native: native, desktopFactory: { _ in
+            XCTFail("The entire compiled form goal must stay in its reviewed capability")
+            throw ComputerUseTextTaskError.invalidPlan
+        })
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true })
+        let prompt = #"Set "Origin" to "Paris" twice, copy the "Origin" field into "Destination", append "!" to the same field twice, then replace "Origin" with the text "Destination"."#
+        for _ in 0..<2 {
+            let result = try await executor.execute(taskID: "compiled-text-sequence", prompt: prompt,
+                trustedUserPrompt: prompt, tools: tools, progress: { _ in })
+            guard case .completed = result else { return XCTFail("Every requested operation and preserved value must verify") }
+        }
+        try await fixture.wait { fixture.editedValues.count == 6 }
+        let observed = try fixture.editedValues.map { try JSONDecoder().decode([String].self, from: Data($0.utf8)) }
+            .sorted { ($0.first ?? "") < ($1.first ?? "") }
+        XCTAssertEqual(observed, [
+            ["1", "origin", "Paris", "prior", "keep"],
+            ["2", "origin", "Paris", "prior", "keep"],
+            ["3", "destination", "Paris", "Paris", "keep"],
+            ["4", "destination", "Paris", "Paris!", "keep"],
+            ["5", "destination", "Paris", "Paris!!", "keep"],
+            ["6", "origin", "Destination", "Paris!!", "keep"],
+        ])
+        XCTAssertEqual(planner.calls, 0)
+        let journal = try XCTUnwrap(try ComputerUseTextStepStore(directory: directory).load(taskID: "compiled-text-sequence"))
+        XCTAssertEqual(journal.statuses, Array(repeating: .verified, count: 6))
+        XCTAssertEqual(Set(journal.stepIDs).count, 6, "Explicit repetition must retain distinct operation identities")
+    }
+
     func testClaimedClarificationResumesSameFormAfterObservationOrPlanningCancellation() async throws {
         for stage in ["observation", "planning"] {
             var answerTask: Task<ComputerUseExecutionResult, Error>?

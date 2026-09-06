@@ -292,6 +292,104 @@ final class ComputerUseTextTaskTests: XCTestCase {
         }
     }
 
+    func testCompleteTextCommandsPreserveModesAndRepeatedTargetReferences() throws {
+        let fields = [field("origin", "old"), field("destination", "prior"), field("retained", "keep")]
+        let prompt = #"Set "origin" to "start", type "!" into the field named "destination", append "?" to the same field twice, then replace "origin" with the text "destination"."#
+        let proposal = try ComputerUseQuotedTextRequest.compile(prompt: prompt, fields: fields)
+        guard case .edits(let edits, let unchanged) = proposal else { return XCTFail("The complete text sequence must compile") }
+        XCTAssertEqual(edits, [
+            .init(targetID: "origin", mode: .replaceAll, text: "start"),
+            .init(targetID: "destination", mode: .insert, text: "!"),
+            .init(targetID: "destination", mode: .append, text: "?"),
+            .init(targetID: "destination", mode: .append, text: "?"),
+            .init(targetID: "origin", mode: .replaceAll, text: "destination"),
+        ])
+        XCTAssertEqual(unchanged, ["retained"])
+        let contract = try ComputerUseTextTaskContract(taskID: "ordered-input", prompt: prompt, fields: fields,
+            edits: edits, unchangedTargetIDs: unchanged)
+        XCTAssertEqual(contract.finalValues, ["origin": "destination", "destination": "prior!??", "retained": "keep"])
+        XCTAssertEqual(Set(contract.steps.map(\.id)).count, 5)
+        XCTAssertEqual(contract.steps[3].before, "prior!?")
+    }
+
+    func testCompleteCopyCommandsRetainPayloadOriginsAndUpdatedSourceDependencies() throws {
+        let fields = [field("origin", "private old value"), field("destination", "prior"), field("retained", "keep")]
+        let prompt = #"Set "origin" to "first", copy the "origin" field into "destination", then append the current value of "destination" to "origin" twice."#
+        guard case .fieldOperations(let operations, let unchanged) = try ComputerUseQuotedTextRequest.compile(prompt: prompt, fields: fields)
+        else { return XCTFail("Literal input and observed copying must have distinct origins") }
+        XCTAssertEqual(operations, [
+            .enterText(.init(targetID: "origin", mode: .replaceAll, text: "first")),
+            .copyField(sourceTargetID: "origin", targetID: "destination", mode: .replaceAll),
+            .copyField(sourceTargetID: "destination", targetID: "origin", mode: .append),
+            .copyField(sourceTargetID: "destination", targetID: "origin", mode: .append),
+        ])
+        let contract = try ComputerUseTextTaskContract(taskID: "ordered-copy", prompt: prompt, fields: fields,
+            operations: operations, unchangedTargetIDs: unchanged)
+        XCTAssertEqual(contract.steps[1].copySource?.value, "first")
+        XCTAssertEqual(contract.finalValues, ["origin": "firstfirstfirst", "destination": "first", "retained": "keep"])
+
+        let selfCopyPrompt = #"Append the current value of "origin" to "origin" twice."#
+        guard case .fieldOperations(let copies, _) = try ComputerUseQuotedTextRequest.compile(prompt: selfCopyPrompt, fields: [field("origin", "x")])
+        else { return XCTFail("Whole-value self-copy has ordered dependencies") }
+        let selfCopy = try ComputerUseTextTaskContract(taskID: "self-copy-twice", prompt: selfCopyPrompt,
+            fields: [field("origin", "x")], operations: copies)
+        XCTAssertEqual(selfCopy.steps.map { $0.copySource?.value }, ["x", "xx"])
+        XCTAssertEqual(selfCopy.finalValues["origin"], "xxxx")
+        XCTAssertEqual(try ComputerUseQuotedTextRequest.compile(prompt: #"Copy the text "origin" into "destination"."#, fields: fields),
+            .edits([.init(targetID: "destination", mode: .replaceAll, text: "origin")], unchangedTargetIDs: ["origin", "retained"]))
+    }
+
+    func testCompleteTextCompilerRejectsPartialPlansAndAmbiguousRolesBeforeBinding() throws {
+        let fields = [field("origin"), field("destination")]
+        for prompt in [
+            #"Copy "origin" into "destination"."#,
+            #"Copy the "missing" field into "destination", then submit."#,
+            #"Type "hello" into "missing", then open Mail."#,
+            #"Write a warm welcome in "origin"."#,
+            #"Set "origin" to "hello" if the page is ready."#,
+            #"Set "origin" to "hello" and leave "destination" unchanged."#,
+            #"Append "!" to the same "destination"."#,
+            #"Insert "hello" into "origin" or "destination"."#,
+            #"Set [exact quoted payload p1] to "value". "origin""#,
+            #"Set "origin" to "hello", then."#,
+        ] {
+            XCTAssertNil(try ComputerUseQuotedTextRequest.compile(prompt: prompt, fields: fields), prompt)
+        }
+        XCTAssertEqual(try ComputerUseQuotedTextRequest.compile(prompt: #"Append "!" to the same field."#, fields: fields), .clarification)
+        XCTAssertEqual(try ComputerUseQuotedTextRequest.compile(
+            prompt: #"Set "destination" to "x", then copy the "origin" field into the same field."#, fields: fields), .clarification,
+            "A newly mentioned source makes the later same-field reference ambiguous")
+        guard case .fieldOperations(let beforeSource, _) = try ComputerUseQuotedTextRequest.compile(
+            prompt: #"Set "destination" to "x", then replace the same field with the current value of "origin"."#, fields: fields)
+        else { return XCTFail("A target reference before the new source mention still binds the earlier target") }
+        XCTAssertEqual(beforeSource.last, .copyField(sourceTargetID: "origin", targetID: "destination", mode: .replaceAll))
+        XCTAssertEqual(try ComputerUseQuotedTextRequest.compile(prompt: #"Copy the "missing" field into "destination"."#, fields: fields), .clarification)
+        XCTAssertEqual(try ComputerUseQuotedTextRequest.compile(prompt: #"Type "hello" into "origin"."#,
+            fields: fields + [field("ORIGIN")]), .clarification)
+        let protected = ComputerUseTextField(label: "origin", snapshot: .init(targetID: "secret", value: "private",
+            selection: .init(location: 0, length: 0), isEditable: true, isSecure: true))
+        XCTAssertEqual(try ComputerUseQuotedTextRequest.compile(prompt: #"Copy the "origin" field into "destination"."#,
+            fields: [protected, field("destination")]), .clarification)
+    }
+
+    func testCompleteTextCompilerSupportsEightOperationsWithoutModelQuoteLimitsOrByteChanges() throws {
+        let payload = "  東京\ne\u{301} 😀; then copy [exact quoted payload p1] C:\\  "
+        let clause = "Set “origin” to “\(payload)”"
+        let prompt = Array(repeating: clause, count: 8).joined(separator: ", then ") + "."
+        XCTAssertThrowsError(try ComputerUseTextPayloadCatalog(prompt),
+            "The deterministic compiler must not widen the model's separate quoted-payload budget")
+        guard case .edits(let edits, _) = try ComputerUseQuotedTextRequest.compile(prompt: prompt, fields: [field("origin")])
+        else { return XCTFail("Eight operations may contain sixteen independent quoted arguments") }
+        XCTAssertEqual(edits.count, 8)
+        XCTAssertTrue(edits.allSatisfy { $0.text.utf8.elementsEqual(payload.utf8) })
+        let repeated = try ComputerUseQuotedTextRequest.compile(prompt: #"Set "origin" to "x" exactly eight times."#, fields: [field("origin")])
+        guard case .edits(let repeatedEdits, _) = repeated else { return XCTFail("An explicit repetition count must preserve every operation") }
+        XCTAssertEqual(repeatedEdits.count, 8)
+        XCTAssertNil(try ComputerUseQuotedTextRequest.compile(prompt: Array(repeating: clause, count: 9).joined(separator: ", then "), fields: [field("origin")]))
+        XCTAssertNil(try ComputerUseQuotedTextRequest.compile(prompt: #"Append "!" to "origin" nine times."#, fields: [field("origin")]))
+        XCTAssertThrowsError(try ComputerUseQuotedTextRequest.compile(prompt: "Set \"origin\" to \"unfinished", fields: [field("origin")]))
+    }
+
     func testQuotedCommandCompilerRejectsPartialGoalsAndClarifiesUnboundTargets() throws {
         let fields = [field("origin"), field("destination")]
         for prompt in [#"Set "origin" to "Paris", then submit"#, #"Do not set "origin" to "Paris""#,
