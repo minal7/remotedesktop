@@ -2,6 +2,8 @@
 
 Parent source: `1faf48a`. Status: source implementation and fixture registration only. No build, XCTest execution, model inference, application launch or computer-use activity ran. Performance optimization and real-site acceptance remain deferred.
 
+Follow-up: [native and MCP planning deadlines](CAPABILITY_PLANNING_DEADLINE_REVIEW.md) extend this worker to the other proposal paths and join generation-scoped MCP cancellation. Counts and scope below describe this original visual checkpoint.
+
 ## First-principles problem
 
 A step-count limit cannot bound a task that never receives its next planning result. The visual executor has finite step/retry limits, observation work has a deadline and native application opening has a bounded callback wait. Its typed semantic routing await could still remain suspended indefinitely. This await can include Apple planning and a local fallback or candidate selection.

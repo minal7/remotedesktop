@@ -114,6 +114,8 @@ final class ComputerUseNativeTextExecutor {
     private let mayAct: () -> Bool
     private let journalDirectory: URL
     private let planner: any ComputerUseTextGoalPlanning
+    private let planningWorker: ComputerUsePlanningWorker
+    private let planningTimeout: TimeInterval
     private let editOverride: ((ComputerUseTextPlanEdit, ComputerUseTextSnapshot) async throws -> Void)?
     private let browserTargetProvider: ((String) throws -> ComputerUseBrowserTextTarget?)?
     private let now: () -> Date
@@ -131,13 +133,17 @@ final class ComputerUseNativeTextExecutor {
          editOverride: ((ComputerUseTextPlanEdit, ComputerUseTextSnapshot) async throws -> Void)? = nil,
          browserTargetProvider: ((String) throws -> ComputerUseBrowserTextTarget?)? = nil,
          now: @escaping () -> Date = Date.init, clarificationLifetime: TimeInterval = 600,
-         nativeTarget: (any ComputerUseNativeTextTarget)? = nil) {
+         nativeTarget: (any ComputerUseNativeTextTarget)? = nil,
+         planningWorker: ComputerUsePlanningWorker = .shared,
+         planningTimeout: TimeInterval = ComputerUsePlanningWorker.maximumWait) {
         precondition(clarificationLifetime.isFinite && clarificationLifetime > 0 && clarificationLifetime <= 600)
         self.injector = injector
         self.target = nativeTarget ?? ComputerUseAccessibilityTextTarget()
         self.mayAct = mayAct
         self.journalDirectory = journalDirectory
         self.planner = planner
+        self.planningWorker = planningWorker
+        self.planningTimeout = planningTimeout
         self.editOverride = editOverride
         self.browserTargetProvider = browserTargetProvider
         self.now = now
@@ -281,7 +287,9 @@ final class ComputerUseNativeTextExecutor {
             }
             return result
         } catch {
-            if !(error is CancellationError) && error as? ComputerUseTextEditError != .interrupted {
+            let planningFailure = error as? ComputerUsePlanningWorker.Failure
+            let mayRetryPlanning = planningFailure == .busy || planningFailure == .timedOut
+            if !(error is CancellationError) && error as? ComputerUseTextEditError != .interrupted && !mayRetryPlanning {
                 invalidateClarification(taskID: taskID)
             }
             throw error
@@ -302,7 +310,11 @@ final class ComputerUseNativeTextExecutor {
         let proposal: ComputerUseTextGoalProposal
         if goal.userTurns.count == 1,
            let compiled = try ComputerUseQuotedTextRequest.compile(prompt: goal.userTurns[0], fields: fields) { proposal = compiled }
-        else { proposal = try await planner.propose(goal: goal, fields: fields) }
+        else {
+            proposal = try await planningWorker.perform(timeout: planningTimeout) { [planner] in
+                try await planner.propose(goal: goal, fields: fields)
+            }
+        }
         try Task.checkCancellation()
         guard mayAct() else { throw ComputerUseTextEditError.interrupted }
         // Expiry/invalidation during planning applies to every outcome,

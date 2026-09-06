@@ -156,6 +156,114 @@ final class ComputerUseAccessibilityTextTargetTests: XCTestCase {
         XCTAssertEqual(planner.calls, 2)
     }
 
+    func testNativePlanningDeadlineDiscardsLateEditsButAllowsCompiledWorkWithoutAnotherPlanner() async throws {
+        let graph = AXTextGraph(), planner = AXClarificationPlanner(), worker = ComputerUsePlanningWorker()
+        let gate = ComputerUsePlanningTestGate<Void>(started: expectation(description: "planner started"),
+                                                    returned: expectation(description: "planner returned"))
+        defer { gate.finish(()) }
+        planner.beforeProposal = { _, fields in
+            let destination = try XCTUnwrap(fields.first { $0.label == "café" })
+            let proposal = ComputerUseTextGoalProposal.edits([
+                .init(targetID: destination.snapshot.targetID, mode: .replaceAll, text: "blue")
+            ], unchangedTargetIDs: fields.filter { $0.label != "café" }.map { $0.snapshot.targetID })
+            await gate.wait()
+            return proposal
+        }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let executor = clarificationExecutor(graph: graph, planner: planner, directory: directory,
+            planningWorker: worker, planningTimeout: 0.1)
+        do { _ = try await executor.execute(taskID: "late", prompt: "Put \"blue\" in café.", progress: { _ in }); XCTFail("The planner must time out") }
+        catch { XCTAssertEqual(error as? ComputerUsePlanningWorker.Failure, .timedOut) }
+        await fulfillment(of: [gate.started], timeout: 1)
+        XCTAssertTrue(graph.writes.isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+        do { _ = try await executor.execute(taskID: "busy", prompt: "Put \"blue\" in café.", progress: { _ in }); XCTFail("No second planner may start") }
+        catch { XCTAssertEqual(error as? ComputerUsePlanningWorker.Failure, .busy) }
+        XCTAssertEqual(planner.goals.count, 1)
+        guard case .completed = try await executor.execute(taskID: "compiled", prompt: "Set café to \"green\".", progress: { _ in }) else {
+            return XCTFail("An exact compiled task must not depend on planning capacity")
+        }
+        XCTAssertEqual(graph.value("destination"), "green")
+        gate.finish(())
+        await fulfillment(of: [gate.returned], timeout: 1)
+        try await waitForAvailablePlanningWorker(worker)
+        XCTAssertEqual(graph.value("destination"), "green", "The stale blue proposal cannot overwrite a later authorized edit")
+        XCTAssertEqual(planner.goals.count, 1)
+        XCTAssertEqual(graph.writes.filter { $0.attribute == kAXSelectedTextAttribute }.count, 1)
+    }
+
+    func testNativeClarificationPlanningDeadlineRetainsExactAnswerOwnershipAndFreshRetry() async throws {
+        let graph = AXTextGraph(), planner = AXClarificationPlanner(), worker = ComputerUsePlanningWorker()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let executor = clarificationExecutor(graph: graph, planner: planner, directory: directory,
+            planningWorker: worker, planningTimeout: 0.1)
+        _ = try await executor.execute(taskID: "question", prompt: "Put \"blue\" in the correct field.", progress: { _ in })
+        let pending = try XCTUnwrap(executor.clarification(taskID: "question"))
+        let answer = try pending.goal.answering(pending.question, with: "Use café.")
+        let gate = ComputerUsePlanningTestGate<Void>(started: expectation(description: "answer planner started"),
+                                                    returned: expectation(description: "answer planner returned"))
+        defer { gate.finish(()) }
+        planner.beforeProposal = { _, _ in await gate.wait(); return nil }
+        do { _ = try await executor.continueClarification(taskID: "answer", originatingTaskID: "question", goal: answer, progress: { _ in }); XCTFail("Answer planning must time out") }
+        catch { XCTAssertEqual(error as? ComputerUsePlanningWorker.Failure, .timedOut) }
+        await fulfillment(of: [gate.started], timeout: 1)
+        XCTAssertNil(try executor.clarification(taskID: "question"))
+        XCTAssertTrue(graph.writes.isEmpty)
+        do { _ = try await executor.continueClarification(taskID: "other-answer", originatingTaskID: "question", goal: answer, progress: { _ in }); XCTFail("The expired proposal cannot transfer answer ownership") }
+        catch { XCTAssertEqual(error as? ComputerUseNativeTextExecutor.Failure, .invalidClarification) }
+        do { _ = try await executor.continueClarification(taskID: "answer", originatingTaskID: "question", goal: answer, progress: { _ in }); XCTFail("An exact retry must still wait for the old call") }
+        catch { XCTAssertEqual(error as? ComputerUsePlanningWorker.Failure, .busy) }
+        gate.finish(())
+        await fulfillment(of: [gate.returned], timeout: 1)
+        try await waitForAvailablePlanningWorker(worker)
+        planner.beforeProposal = nil
+        graph.set("source", kAXValueAttribute, "fresh source" as NSString)
+        graph.set("destination", kAXValueAttribute, "fresh destination" as NSString)
+        for _ in 0..<2 {
+            guard case .completed = try await executor.continueClarification(taskID: "answer", originatingTaskID: "question", goal: answer, progress: { _ in }) else {
+                return XCTFail("The same answer must remain resumable and replay without another edit")
+            }
+        }
+        XCTAssertEqual(planner.goals, [pending.goal, answer, answer])
+        XCTAssertEqual(planner.observations.last?.first { $0.label == "café" }?.snapshot.value, "fresh destination")
+        XCTAssertEqual(graph.value("destination"), "blue")
+        XCTAssertEqual(graph.value("source"), "fresh source")
+        XCTAssertEqual(graph.writes.filter { $0.attribute == kAXSelectedTextAttribute }.count, 1)
+    }
+
+    func testNativeClarificationDeadlineDoesNotRenewExpiryOrAuthorizeChangedScope() async throws {
+        for invalidation in ["expiry", "scope"] {
+            let graph = AXTextGraph(), planner = AXClarificationPlanner(), worker = ComputerUsePlanningWorker()
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            var now = Date(timeIntervalSince1970: 1_000)
+            let executor = clarificationExecutor(graph: graph, planner: planner, directory: directory, now: { now },
+                planningWorker: worker, planningTimeout: 0.1)
+            _ = try await executor.execute(taskID: "question", prompt: "Put \"blue\" in the correct field.", progress: { _ in })
+            let pending = try XCTUnwrap(executor.clarification(taskID: "question"))
+            let answer = try pending.goal.answering(pending.question, with: "café")
+            let gate = ComputerUsePlanningTestGate<Void>(started: expectation(description: "planner started \(invalidation)"),
+                                                        returned: expectation(description: "planner returned \(invalidation)"))
+            defer { gate.finish(()) }
+            planner.beforeProposal = { _, _ in await gate.wait(); return nil }
+            do { _ = try await executor.continueClarification(taskID: "answer", originatingTaskID: "question", goal: answer, progress: { _ in }); XCTFail("Planning must time out") }
+            catch { XCTAssertEqual(error as? ComputerUsePlanningWorker.Failure, .timedOut) }
+            await fulfillment(of: [gate.started], timeout: 1)
+            gate.finish(())
+            await fulfillment(of: [gate.returned], timeout: 1)
+            try await waitForAvailablePlanningWorker(worker)
+            planner.beforeProposal = nil
+            if invalidation == "expiry" { now = pending.expiresAt.addingTimeInterval(1) }
+            else { graph.set("destination", kAXTitleAttribute, "Changed purpose" as NSString) }
+            do { _ = try await executor.continueClarification(taskID: "answer", originatingTaskID: "question", goal: answer, progress: { _ in }); XCTFail("A retry cannot renew expired or changed authority") }
+            catch { XCTAssertEqual(error as? ComputerUseNativeTextExecutor.Failure, .invalidClarification) }
+            XCTAssertEqual(planner.goals.count, 2)
+            XCTAssertTrue(graph.writes.isEmpty)
+        }
+    }
+
     func testNativeClarificationPreservesExactGoalAndReferencesWithFreshValuesAndNoReplay() async throws {
         let graph = AXTextGraph(), planner = AXClarificationPlanner()
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -563,10 +671,13 @@ final class ComputerUseAccessibilityTextTargetTests: XCTestCase {
     }
 
     private func clarificationExecutor(graph: AXTextGraph, planner: AXClarificationPlanner, directory: URL,
-                                       mayAct: @escaping () -> Bool = { true }, now: @escaping () -> Date = Date.init) -> ComputerUseNativeTextExecutor {
+                                       mayAct: @escaping () -> Bool = { true }, now: @escaping () -> Date = Date.init,
+                                       planningWorker: ComputerUsePlanningWorker = ComputerUsePlanningWorker(),
+                                       planningTimeout: TimeInterval = ComputerUsePlanningWorker.maximumWait) -> ComputerUseNativeTextExecutor {
         ComputerUseNativeTextExecutor(injector: InputInjector(eventPoster: { _ in XCTFail("The AX fixture must not emit keys") }),
             mayAct: mayAct, journalDirectory: directory, planner: planner, now: now,
-            nativeTarget: ComputerUseAccessibilityTextTarget(access: graph.access))
+            nativeTarget: ComputerUseAccessibilityTextTarget(access: graph.access),
+            planningWorker: planningWorker, planningTimeout: planningTimeout)
     }
 
     private func assertRejected(_ target: ComputerUseAccessibilityTextTarget, expected: ComputerUseTextSnapshot,

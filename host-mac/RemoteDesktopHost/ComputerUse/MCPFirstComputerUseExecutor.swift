@@ -42,6 +42,31 @@ protocol MCPApprovalContinuing: AnyObject {
     func cancelMCPWork()
 }
 
+private final class MCPGenerationCancellationJoin: @unchecked Sendable {
+    let generation: UInt64
+    private let clientPool: any MCPClientPooling
+    private let lock = NSLock()
+    private var task: Task<Void, Never>?
+
+    init(clientPool: any MCPClientPooling, generation: UInt64) {
+        self.clientPool = clientPool
+        self.generation = generation
+    }
+
+    func startedTask() -> Task<Void, Never>? { lock.withLock { task } }
+
+    func start() -> Task<Void, Never> {
+        lock.withLock {
+            if let task { return task }
+            let task = Task { [clientPool, generation] in
+                await clientPool.cancel(processGeneration: generation)
+            }
+            self.task = task
+            return task
+        }
+    }
+}
+
 /// Routes structured work through a pinned local MCP sidecar and Apple's
 /// on-device planner. OS-Atlas Pro 4B remains the visual fallback for
 /// applications that do not expose an appropriate structured operation.
@@ -53,6 +78,7 @@ final class MCPFirstComputerUseExecutor:
     ComputerUseVisualApprovalContinuing {
     enum ExecutorError: Error, LocalizedError, Equatable {
         case requiredToolsMissing
+        case alreadyExecuting
         case tooManySteps
         case approvalStateChanged
         case structuredToolFailed(String)
@@ -64,6 +90,8 @@ final class MCPFirstComputerUseExecutor:
             switch self {
             case .requiredToolsMissing:
                 return "The verified local Mac tools helper is missing required tools."
+            case .alreadyExecuting:
+                return "This Mac task is still finishing. Wait for it to finish or stop before continuing."
             case .tooManySteps:
                 return "The local planner could not finish within the safe step limit."
             case .approvalStateChanged:
@@ -229,11 +257,15 @@ final class MCPFirstComputerUseExecutor:
     ]
 
     private let planner: any MCPProposalPlanning
+    private let planningWorker: ComputerUsePlanningWorker
+    private let planningTimeout: TimeInterval
     private let clientPool: any MCPClientPooling
     private let binaryURL: URL
     private let visualFallback: any ComputerUseExecuting
     private var helperReady = false
     private var activeProcessGeneration: UInt64?
+    private var activeCancellationJoin: MCPGenerationCancellationJoin?
+    private var isExecuting = false
     private var pendingApprovalState: PlanningState?
     private var pendingApprovalDigest: String?
 
@@ -241,25 +273,33 @@ final class MCPFirstComputerUseExecutor:
         planner: any MCPProposalPlanning,
         clientPool: any MCPClientPooling,
         binaryURL: URL,
-        visualFallback: any ComputerUseExecuting
+        visualFallback: any ComputerUseExecuting,
+        planningWorker: ComputerUsePlanningWorker,
+        planningTimeout: TimeInterval
     ) {
         self.planner = planner
         self.clientPool = clientPool
         self.binaryURL = binaryURL
         self.visualFallback = visualFallback
+        self.planningWorker = planningWorker
+        self.planningTimeout = planningTimeout
     }
 
     static func load(
         binaryURL: URL,
         visualFallback: any ComputerUseExecuting,
         planner: any MCPProposalPlanning = AppleFoundationMCPPlanner(),
-        clientPool: any MCPClientPooling
+        clientPool: any MCPClientPooling,
+        planningWorker: ComputerUsePlanningWorker = .shared,
+        planningTimeout: TimeInterval = ComputerUsePlanningWorker.maximumWait
     ) async throws -> MCPFirstComputerUseExecutor {
         let executor = MCPFirstComputerUseExecutor(
             planner: planner,
             clientPool: clientPool,
             binaryURL: binaryURL.standardizedFileURL,
-            visualFallback: visualFallback)
+            visualFallback: visualFallback,
+            planningWorker: planningWorker,
+            planningTimeout: planningTimeout)
         try Task.checkCancellation()
         let identity = try await clientPool.start(binaryURL: binaryURL)
         do {
@@ -373,6 +413,9 @@ final class MCPFirstComputerUseExecutor:
         tools: ComputerUseHostTools,
         progress: @escaping (String) -> Void
     ) async throws -> ComputerUseExecutionResult {
+        guard !isExecuting else { throw ExecutorError.alreadyExecuting }
+        isExecuting = true
+        defer { isExecuting = false }
         func executeVisualFallback() async throws
             -> ComputerUseExecutionResult {
             if let conversation {
@@ -391,6 +434,7 @@ final class MCPFirstComputerUseExecutor:
                 tools: tools,
                 progress: progress)
         }
+        try await waitForStartedCancellation()
         pendingApprovalState = nil
         pendingApprovalDigest = nil
 
@@ -466,6 +510,10 @@ final class MCPFirstComputerUseExecutor:
             throw CancellationError()
         } catch AppleFoundationMCPPlannerError.cancelled {
             throw CancellationError()
+        } catch let error as ComputerUsePlanningWorker.Failure {
+            // An expired or still-running proposal cannot authorize another
+            // planner, visual fallback, or a deterministic Mail fallback.
+            throw error
         } catch let error as AppleFoundationMCPPlannerError {
             if let mailResult = try await routeMailWithoutPlanner(
                 taskID: taskID,
@@ -517,6 +565,10 @@ final class MCPFirstComputerUseExecutor:
         tools: ComputerUseHostTools,
         progress: @escaping (String) -> Void
     ) async throws -> ComputerUseExecutionResult {
+        guard !isExecuting else { throw ExecutorError.alreadyExecuting }
+        isExecuting = true
+        defer { isExecuting = false }
+        try Task.checkCancellation()
         guard var state = pendingApprovalState,
               pendingApprovalDigest == prepared.call.canonicalDigest,
               prepared.call.taskID == state.taskID else {
@@ -526,7 +578,8 @@ final class MCPFirstComputerUseExecutor:
         pendingApprovalDigest = nil
 
         let generation = prepared.call.processGeneration
-        return try await withTaskCancellationHandler {
+        return try await withGenerationCancellation(generation: generation, preserveCompletedResultOnCancellation: true) {
+            try checkGenerationCancellation(generation)
             progress("Performing the one approved Mac action…")
             let result = try await clientPool.performApproved(
                 prepared.call,
@@ -551,8 +604,6 @@ final class MCPFirstComputerUseExecutor:
             return .completed(Self.completionMessage(
                 for: prepared.call,
                 result: result))
-        } onCancel: { [clientPool] in
-            Task { await clientPool.cancel(processGeneration: generation) }
         }
     }
 
@@ -566,6 +617,10 @@ final class MCPFirstComputerUseExecutor:
         tools: ComputerUseHostTools,
         progress: @escaping (String) -> Void
     ) async throws -> ComputerUseExecutionResult {
+        guard !isExecuting else { throw ExecutorError.alreadyExecuting }
+        isExecuting = true
+        defer { isExecuting = false }
+        try await waitForStartedCancellation()
         guard let visualContinuation = visualFallback
             as? any ComputerUseVisualApprovalContinuing else {
             throw ExecutorError.visualApprovalContinuationUnavailable
@@ -591,8 +646,63 @@ final class MCPFirstComputerUseExecutor:
         pendingApprovalState = nil
         pendingApprovalDigest = nil
         guard let generation else { return }
-        Task { [clientPool] in
-            await clientPool.cancel(processGeneration: generation)
+        _ = cancellationJoin(for: generation).start()
+    }
+
+    private func cancellationJoin(for generation: UInt64) -> MCPGenerationCancellationJoin {
+        if let activeCancellationJoin, activeCancellationJoin.generation == generation {
+            return activeCancellationJoin
+        }
+        let join = MCPGenerationCancellationJoin(clientPool: clientPool, generation: generation)
+        activeCancellationJoin = join
+        return join
+    }
+
+    private func waitForStartedCancellation() async throws {
+        if let join = activeCancellationJoin, let task = join.startedTask() {
+            await task.value
+            if activeCancellationJoin === join {
+                activeCancellationJoin = nil
+                if activeProcessGeneration == join.generation { activeProcessGeneration = nil }
+            }
+        }
+        try Task.checkCancellation()
+    }
+
+    private func checkGenerationCancellation(_ generation: UInt64) throws {
+        try Task.checkCancellation()
+        if let join = activeCancellationJoin, join.generation == generation,
+           join.startedTask() != nil {
+            throw CancellationError()
+        }
+    }
+
+    private func withGenerationCancellation(
+        generation: UInt64,
+        preserveCompletedResultOnCancellation: Bool = false,
+        operation: () async throws -> ComputerUseExecutionResult
+    ) async throws -> ComputerUseExecutionResult {
+        let join = cancellationJoin(for: generation)
+        do {
+            let result = try await withTaskCancellationHandler {
+                try await operation()
+            } onCancel: { _ = join.start() }
+            // A returned approved-action result remains a fact. Join cleanup
+            // without turning that verified result into an unperformed action.
+            if Task.isCancelled || join.startedTask() != nil {
+                await join.start().value
+                if !preserveCompletedResultOnCancellation { throw CancellationError() }
+            }
+            return result
+        } catch {
+            if error is CancellationError || Task.isCancelled || join.startedTask() != nil
+                || error as? AppleFoundationMCPPlannerError == .cancelled {
+                await join.start().value
+                pendingApprovalState = nil
+                pendingApprovalDigest = nil
+                throw CancellationError()
+            }
+            throw error
         }
     }
 
@@ -658,12 +768,16 @@ final class MCPFirstComputerUseExecutor:
         progress: @escaping (String) -> Void
     ) async throws -> ComputerUseExecutionResult {
         var state = initialState
+        try await waitForStartedCancellation()
+        try planningWorker.requireAvailable()
         let identity = try await clientPool.start(binaryURL: binaryURL)
         activeProcessGeneration = identity.processGeneration
         helperReady = true
         let generation = identity.processGeneration
-        return try await withTaskCancellationHandler {
+        return try await withGenerationCancellation(generation: generation) {
+            try checkGenerationCancellation(generation)
             let allTools = try await clientPool.allowedTools()
+            try checkGenerationCancellation(generation)
             let structuredTools = allTools.filter {
                 Self.structuredToolNames.contains($0.toolName)
             }
@@ -673,14 +787,18 @@ final class MCPFirstComputerUseExecutor:
             }
 
             for step in 0 ..< Self.maximumStructuredSteps {
-                try Task.checkCancellation()
+                try checkGenerationCancellation(generation)
                 progress(step == 0
                     ? "Planning with on-device Apple Intelligence…"
                     : "Checking the local result…")
-                let proposal = try await planner.propose(MCPProposalPlanningRequest(
+                let request = MCPProposalPlanningRequest(
                     taskID: state.taskID,
                     prompt: Self.planningPrompt(state),
-                    tools: structuredTools))
+                    tools: structuredTools)
+                let proposal = try await planningWorker.perform(timeout: planningTimeout) { [planner] in
+                    try await planner.propose(request)
+                }
+                try checkGenerationCancellation(generation)
 
                 switch proposal {
                 case .message(let message):
@@ -726,6 +844,7 @@ final class MCPFirstComputerUseExecutor:
 
                     case .approvalRequired:
                         let prepared = try await clientPool.prepareApproval(call)
+                        try checkGenerationCancellation(generation)
                         pendingApprovalState = state
                         pendingApprovalDigest = call.canonicalDigest
                         return .mcpApprovalRequired(prepared)
@@ -742,6 +861,7 @@ final class MCPFirstComputerUseExecutor:
                         }
                         progress(Self.progressMessage(for: call.toolName))
                         let result = try await clientPool.execute(call)
+                        try checkGenerationCancellation(generation)
                         guard !result.isError else {
                             throw ExecutorError.structuredToolFailed(
                                 Self.boundedFailure(result.text))
@@ -771,8 +891,6 @@ final class MCPFirstComputerUseExecutor:
                 }
             }
             throw ExecutorError.tooManySteps
-        } onCancel: { [clientPool] in
-            Task { await clientPool.cancel(processGeneration: generation) }
         }
     }
 
