@@ -2154,8 +2154,17 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
                         selectedRouteUsedFoundationModels = await
                             foundationRouteTracker.consume(rawSelectedRoute)
                     }
+                    guard Self.semanticRouteHasValidArguments(rawSelectedRoute) else {
+                        throw RuntimeError.unsupportedAction(
+                            "semantic-plan-arguments")
+                    }
+                    let terminalContinuation = AppleFoundationVisualActionRouter
+                        .taskBoundTerminalContinuation(
+                            replacing: rawSelectedRoute,
+                            request: routingRequest,
+                            rawHistory: history)
                     let selectedRoute = Self.taskBoundPointerCanonicalized(
-                        rawSelectedRoute,
+                        terminalContinuation ?? rawSelectedRoute,
                         request: routingRequest,
                         rawHistory: history)
                     try Task.checkCancellation()
@@ -2248,8 +2257,11 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
                     }
                     requiredRoute = selectedRoute
                     semanticRoute = selectedRoute
+                    // Consume the original proposal's provenance, but do not
+                    // credit its model with a replacement derived by the host.
                     semanticRoutePlannerProvenance =
                         selectedRouteUsedFoundationModels
+                            && terminalContinuation == nil
                             ? .appleFoundationModels : .nonFoundation
                     semanticRouteUsesVerifiedPostActionAnswer =
                         selectedRouteIsVerifiedPostActionAnswer

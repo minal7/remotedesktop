@@ -4598,6 +4598,16 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
 
     func testSemanticOrderedInputUsesRecordedEffectsAndKeepsRepeatSuppression()
         async throws {
+        try await assertOrderedInputRepeatSuppression(prematureTerminal: false)
+    }
+
+    func testTerminalRecoveryUsesRecordedInputAndKeepsRepeatSuppression()
+        async throws {
+        try await assertOrderedInputRepeatSuppression(prematureTerminal: true)
+    }
+
+    private func assertOrderedInputRepeatSuppression(prematureTerminal: Bool)
+        async throws {
         let cases: [(task: String, routes: [OSAtlasSemanticActionRoute], expected: [ComputerUsePredictedAction], repeats: Bool)] = [
             (
                 "Type \"ALPHA\", press Return, then type \"alpha\".",
@@ -4628,7 +4638,9 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
             let router = StubSemanticActionRouter { request in
                 await requests.record(request)
                 let count = await requests.values().count
-                return testCase.routes[min(count - 1, testCase.routes.count - 1)]
+                return prematureTerminal
+                    ? .init(directive: .complete)
+                    : testCase.routes[min(count - 1, testCase.routes.count - 1)]
             }
             var actions: [ComputerUsePredictedAction] = []
             let executor = OSAtlasComputerUseExecutor.makeForTesting(
@@ -4748,6 +4760,19 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
 
     func testSemanticTypeRequiresVerifiedEditableNonSecureFocus()
         async throws {
+        try await assertSemanticTypeFocus(prematureTerminal: false)
+    }
+
+    func testTerminalRecoveryRequiresVerifiedEditableNonSecureFocus()
+        async throws {
+        try await assertSemanticTypeFocus(prematureTerminal: true)
+    }
+
+    private func assertSemanticTypeFocus(prematureTerminal: Bool)
+        async throws {
+        let task = prematureTerminal
+            ? "Type \"launch checklist\" into the focused field."
+            : "Type launch checklist into the focused field."
         let rejectedContexts = [
             "AXButton • focused Save",
             "AXStaticText • focused note heading",
@@ -4760,9 +4785,9 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
                 completionResponses: [response("CLICK [[500,500]]")],
                 port: UInt16(43_280 + index))
             let router = StubSemanticActionRouter { _ in
-                OSAtlasSemanticActionRoute(
-                    directive: .type,
-                    argument: .text("launch checklist"))
+                prematureTerminal
+                    ? .init(directive: .complete)
+                    : .init(directive: .type, argument: .text("launch checklist"))
             }
             var performedActions: [ComputerUsePredictedAction] = []
             let executor = OSAtlasComputerUseExecutor.makeForTesting(
@@ -4772,7 +4797,7 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
                 maxSteps: 1)
             do {
                 _ = try await executor.execute(
-                    prompt: "Type launch checklist into the focused field.",
+                    prompt: task,
                     tools: correctionTestTools(
                         accessibilityContext: accessibilityContext,
                         actionPerformer: { performedActions.append($0) }),
@@ -4797,9 +4822,9 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
             completionResponses: [response("CLICK [[500,500]]")],
             port: 43_285)
         let changedRouter = StubSemanticActionRouter { _ in
-            OSAtlasSemanticActionRoute(
-                directive: .type,
-                argument: .text("launch checklist"))
+            prematureTerminal
+                ? .init(directive: .complete)
+                : .init(directive: .type, argument: .text("launch checklist"))
         }
         var accessibilityQueries = 0
         var changedTargetActions: [ComputerUsePredictedAction] = []
@@ -4810,7 +4835,7 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
             maxSteps: 1)
         do {
             _ = try await changedExecutor.execute(
-                prompt: "Type launch checklist into the focused field.",
+                prompt: task,
                 tools: correctionTestTools(
                     accessibilityContextProvider: { _ in
                         accessibilityQueries += 1
@@ -5932,6 +5957,16 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
 
     func testPostedFoundationPointerPersistsTaskBoundOwnerOnlyAttestation()
         async throws {
+        try await assertPostedPointerAttestation(prematureTerminal: false)
+    }
+
+    func testRecoveredTerminalPointerRetainsTaskTargetAndNonFoundationAttestation()
+        async throws {
+        try await assertPostedPointerAttestation(prematureTerminal: true)
+    }
+
+    private func assertPostedPointerAttestation(prematureTerminal: Bool)
+        async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(
                 "browser-action-attestation-\(UUID().uuidString)",
@@ -5949,9 +5984,9 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
             completionResponses: [response("CLICK [[250,750]]")],
             port: 43_193)
         let router = StubSemanticActionRouter { _ in
-            OSAtlasSemanticActionRoute(
-                directive: .click,
-                argument: .targetHint("Continue"))
+            prematureTerminal
+                ? .init(directive: .complete)
+                : .init(directive: .click, argument: .targetHint("Continue"))
         }
         var performedActions: [ComputerUsePredictedAction] = []
         var receivedSemanticHints: [String] = []
@@ -6019,7 +6054,8 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
         let task = try XCTUnwrap(tasks[taskID] as? [String: Any])
         XCTAssertEqual(
             task["plannerProvenance"] as? String,
-            "apple-foundation-models")
+            prematureTerminal ? "non-foundation" : "apple-foundation-models",
+            "A Foundation terminal proposal must not claim a host-derived effect")
         let groundings = try XCTUnwrap(
             task["groundings"] as? [[String: Any]])
         XCTAssertEqual(groundings.count, 1)
@@ -6840,10 +6876,11 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
             inputs: fixture.inputs, runtime: fixture.runtime, semanticRouter: router, maxSteps: 1)
         do {
             let result = try await executor.execute(
-                prompt: "Click the appointment details button, then tell me the dentist appointment.",
+                prompt: "Click the appointment details button twice, then tell me the dentist appointment.",
                 tools: correctionTestTools(observation: observation, actionPerformer: { _ in XCTFail("The proposed terminal answer must not emit input") }),
                 progress: { _ in })
-            XCTAssertEqual(result, .unableToComplete("I couldn't verify every requested step. The visible result alone does not establish that the full task is complete."))
+            XCTAssertEqual(result, .unableToComplete("I couldn't verify every requested step. The visible result alone does not establish that the full task is complete."),
+                "Uncompiled repeat syntax cannot be replaced by one click or by a visible answer")
         } catch {
             await fixture.runtime.shutdown()
             throw error
@@ -6853,6 +6890,31 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
         XCTAssertEqual(routed.count, 1)
         let inferenceCalls = await fixture.events.values().filter { $0 == "complete" }.count
         XCTAssertEqual(inferenceCalls, 0, "The source fixture uses a proposal-only router and no visual inference")
+    }
+
+    func testMalformedTerminalProposalCannotBeHiddenByTaskContinuation() async throws {
+        let fixture = makeCorrectionRuntime(completionResponses: [response("CLICK [[500,500]]")], port: 43_650)
+        let router = StubSemanticActionRouter { _ in
+            OSAtlasSemanticActionRoute(directive: .complete, argument: .question("malformed"))
+        }
+        let executor = OSAtlasComputerUseExecutor.makeForTesting(
+            inputs: fixture.inputs, runtime: fixture.runtime, semanticRouter: router,
+            allowsExplicitActionCompatibility: false, maxSteps: 1)
+        do {
+            _ = try await executor.execute(
+                prompt: "Click Continue.",
+                tools: correctionTestTools(actionPerformer: { _ in XCTFail("Malformed proposal cannot dispatch an effect") }),
+                progress: { _ in })
+            XCTFail("Malformed terminal route should fail before recovery")
+        } catch let error as OSAtlasComputerUseExecutor.RuntimeError {
+            XCTAssertEqual(error, .unsupportedAction("semantic-plan-arguments"))
+        } catch {
+            await fixture.runtime.shutdown()
+            throw error
+        }
+        await fixture.runtime.shutdown()
+        let runtimeEvents = await fixture.events.values()
+        XCTAssertFalse(runtimeEvents.contains("complete"))
     }
 
     func testVerifiedSemanticAnswerReturnsOnlyHostMatchedEvidence() async throws {
@@ -7582,6 +7644,16 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
 
     func testSubmittedSearchAnswerIgnoresOnlyBlinkingCaretAndReverifiesFreshOCR()
         async throws {
+        try await assertSubmittedSearchAnswer(prematureTerminal: false)
+    }
+
+    func testPrematureSemanticAnswerContinuesExactInputAndReturnBeforeAcceptingFreshResult()
+        async throws {
+        try await assertSubmittedSearchAnswer(prematureTerminal: true)
+    }
+
+    private func assertSubmittedSearchAnswer(prematureTerminal: Bool)
+        async throws {
         let fixture = makeCorrectionRuntime(
             completionResponses: [response("WAIT")],
             port: 43_162)
@@ -7626,7 +7698,7 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
             "Post-submit evidence must be absent before the Enter effect")
         let state = LockedSubmittedSearchAnswerTestState()
         let router = StubSemanticActionRouter { _ in
-            state.nextRoute(answer: answer)
+            state.nextRoute(answer: answer, prematureTerminal: prematureTerminal)
         }
         let executor = OSAtlasComputerUseExecutor.makeForTesting(
             inputs: fixture.inputs,
@@ -12528,9 +12600,13 @@ private final class LockedSubmittedSearchAnswerTestState: @unchecked Sendable {
     private var caretFrames = 0
     private var performedActions: [ComputerUsePredictedAction] = []
 
-    func nextRoute(answer: String) -> OSAtlasSemanticActionRoute {
+    func nextRoute(answer: String, prematureTerminal: Bool = false) -> OSAtlasSemanticActionRoute {
         lock.withLock {
             routes += 1
+            if prematureTerminal {
+                return .init(directive: .answer, argument: .visibleAnswer(
+                    summary: answer, evidence: [answer]))
+            }
             switch routes {
             case 1:
                 return OSAtlasSemanticActionRoute(

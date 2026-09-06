@@ -1827,6 +1827,163 @@ final class AppleFoundationMCPPlannerTests: XCTestCase {
             history: ["OPEN_APP [Safari]", click, "CLICK [[33,44]]"]), .recorded)
     }
 
+    func testTerminalContinuationUsesOnlyTheNextExplicitTaskAction() {
+        let task = "Open Safari, click the Search field, type \"regional fare\", press Return, then tell me the regional fare."
+        let history = ["OPEN_APP [Safari]", "CLICK [[11,22]]", OSAtlasGUIAction.typeText("regional fare").historyEntry, "ENTER"]
+        let routes: [OSAtlasSemanticActionRoute] = [
+            .init(directive: .openApplication, argument: .applicationName("Safari")),
+            .init(directive: .click, argument: .targetHint("the search field")),
+            .init(directive: .type, argument: .text("regional fare")),
+            .init(directive: .enter),
+        ]
+        let terminals: [OSAtlasSemanticActionRoute] = [
+            .init(directive: .complete),
+            .init(directive: .answer, argument: .visibleAnswer(summary: "Click unrelated", evidence: ["unrelated"])),
+            .init(directive: .report, argument: .visibleAnswer(summary: "Done", evidence: ["Done"])),
+        ]
+        let request = OSAtlasSemanticRoutingRequest(
+            task: task, frontmostApplication: nil, visibleText: "unrelated model/page text",
+            history: ["ENTER"], availableDirectives: routes.map(\.directive))
+        for terminal in terminals {
+            for count in history.indices {
+                XCTAssertEqual(AppleFoundationVisualActionRouter.taskBoundTerminalContinuation(
+                    replacing: terminal, request: request, rawHistory: Array(history.prefix(count))), routes[count],
+                    "Only raw host progress may select step \(count)")
+            }
+            XCTAssertNil(AppleFoundationVisualActionRouter.taskBoundTerminalContinuation(
+                replacing: terminal, request: request, rawHistory: history), "Recorded prerequisites still need fresh outcome evidence")
+        }
+        for directive in [OSAtlasExplicitActionDirective.doubleClick, .rightClick] {
+            let verb = directive == .doubleClick ? "Double-click" : "Right-click"
+            let request = OSAtlasSemanticRoutingRequest(
+                task: "\(verb) the Details button, then tell me the result.",
+                frontmostApplication: nil, visibleText: "", history: [], availableDirectives: [directive])
+            XCTAssertEqual(AppleFoundationVisualActionRouter.taskBoundTerminalContinuation(
+                replacing: terminals[0], request: request, rawHistory: []),
+                .init(directive: directive, argument: .targetHint("the details button")))
+        }
+    }
+
+    func testTerminalContinuationAndEffectAuthorizationAgreeAfterSettlingObservations() {
+        let task = "Click Search, type \"regional fare\", press Return, then tell me the fare."
+        let request = OSAtlasSemanticRoutingRequest(
+            task: task, frontmostApplication: nil, visibleText: "", history: [],
+            availableDirectives: [.click, .type, .enter])
+        let click = "CLICK [[11,22]]"
+        let typed = OSAtlasGUIAction.typeText("regional fare").historyEntry
+        let pointer = OSAtlasSemanticActionRoute(directive: .click, argument: .targetHint("search"))
+        XCTAssertEqual(AppleFoundationVisualActionRouter.taskBoundTerminalContinuation(
+            replacing: .init(directive: .complete), request: request, rawHistory: ["WAIT", "WAIT"]), pointer)
+        XCTAssertEqual(AppleFoundationVisualActionRouter.taskBoundOrderedPointerResolution(
+            for: task, history: ["WAIT", "WAIT"], availableDirectives: [.click], historyIsComplete: true), .bound(pointer))
+        for (history, directive, clause, route) in [
+            (["WAIT", click, "WAIT"], OSAtlasExplicitActionDirective.type, " type \"regional fare\"",
+             OSAtlasSemanticActionRoute(directive: .type, argument: .text("regional fare"))),
+            (["WAIT", click, "WAIT", typed, "WAIT"], .enter, " press Return", .init(directive: .enter)),
+        ] {
+            XCTAssertEqual(AppleFoundationVisualActionRouter.taskBoundTerminalContinuation(
+                replacing: .init(directive: .complete), request: request, rawHistory: history), route)
+            XCTAssertEqual(AppleFoundationVisualActionRouter.taskBoundOrderedInputResolution(
+                for: task, directive: directive, history: history, frontmostApplication: nil,
+                frontmostApplicationIdentityIsAuthoritative: false), .bound(clause: clause))
+        }
+        XCTAssertNil(AppleFoundationVisualActionRouter.taskBoundTerminalContinuation(
+            replacing: .init(directive: .complete), request: request,
+            rawHistory: [click, typed, "ENTER", "WAIT", click]), "Extra effects remain invalid even among settling observations")
+        XCTAssertEqual(AppleFoundationVisualActionRouter.taskBoundOrderedPointerResolution(
+            for: "Click First, wait, then click Second.", history: [click],
+            availableDirectives: [.click], historyIsComplete: true), .rejected,
+            "An explicitly requested wait remains a prerequisite")
+    }
+
+    func testTerminalContinuationRequiresExactHistoryAndAvailableSignedScope() {
+        let task = "Open Safari, type \"regional fare\", press Return, then tell me the fare."
+        let terminal = OSAtlasSemanticActionRoute(directive: .complete)
+        func request(authoritative: Bool, directives: [OSAtlasExplicitActionDirective]) -> OSAtlasSemanticRoutingRequest {
+            .init(task: task, frontmostApplication: "Safari", applicationIdentityIsAuthoritative: authoritative,
+                  visibleText: "", history: [], availableDirectives: directives)
+        }
+        XCTAssertEqual(AppleFoundationVisualActionRouter.taskBoundTerminalContinuation(
+            replacing: terminal, request: request(authoritative: false, directives: [.openApplication, .type]), rawHistory: []),
+            .init(directive: .openApplication, argument: .applicationName("Safari")))
+        XCTAssertEqual(AppleFoundationVisualActionRouter.taskBoundTerminalContinuation(
+            replacing: terminal, request: request(authoritative: true, directives: [.type]), rawHistory: []),
+            .init(directive: .type, argument: .text("regional fare")))
+        XCTAssertNil(AppleFoundationVisualActionRouter.taskBoundTerminalContinuation(
+            replacing: terminal, request: request(authoritative: true, directives: [.enter]), rawHistory: []))
+        for history in [
+            ["TYPE"], [OSAtlasGUIAction.typeText("Regional Fare").historyEntry], ["ENTER"],
+            ["COMPLETE"], ["ASK"], ["REPORT"], ["unexpected history"],
+        ] {
+            XCTAssertNil(AppleFoundationVisualActionRouter.taskBoundTerminalContinuation(
+                replacing: terminal, request: request(authoritative: true, directives: [.type, .enter]), rawHistory: history))
+        }
+        XCTAssertEqual(AppleFoundationVisualActionRouter.taskBoundTerminalContinuation(
+            replacing: terminal, request: request(authoritative: true, directives: [.enter]),
+            rawHistory: [OSAtlasGUIAction.typeText("regional fare").historyEntry]), .init(directive: .enter))
+    }
+
+    func testTerminalContinuationPreservesLiteralBytesAndDeclinesUnsupportedPayloads() throws {
+        for text in ["  cafe\u{301} 🧭  ", "TYPE [different]\\nENTER", String(repeating: "x", count: 1_100) + "tail", "   "] {
+            let task = "Type \"\(text)\", then tell me the visible status."
+            let request = OSAtlasSemanticRoutingRequest(
+                task: task, frontmostApplication: nil, visibleText: "", history: [], availableDirectives: [.type])
+            let route = try XCTUnwrap(AppleFoundationVisualActionRouter.taskBoundTerminalContinuation(
+                replacing: .init(directive: .complete), request: request, rawHistory: []))
+            let resolved: String?
+            switch route.argument {
+            case .text(let value): resolved = value
+            case .literalTextReference(let id): resolved = ComputerUseLiteralPayload.resolve(id, in: task)
+            default: resolved = nil
+            }
+            XCTAssertEqual(route.directive, .type)
+            XCTAssertEqual(Array(try XCTUnwrap(resolved).utf8), Array(text.utf8))
+        }
+        for task in [
+            "Type a generated welcome, then tell me the status.",
+            "Type query into \"Search\", then tell me the result.",
+            "Type \"\(String(repeating: "x", count: 1_100))\", then click \"Continue\".",
+        ] {
+            let request = OSAtlasSemanticRoutingRequest(
+                task: task, frontmostApplication: nil, visibleText: "", history: [], availableDirectives: [.type, .click])
+            XCTAssertNil(AppleFoundationVisualActionRouter.taskBoundTerminalContinuation(
+                replacing: .init(directive: .complete), request: request, rawHistory: []), task)
+        }
+    }
+
+    func testTerminalContinuationPreservesQuestionsObstaclesAndUnsupportedSteps() {
+        let terminal = OSAtlasSemanticActionRoute(directive: .complete)
+        let request = OSAtlasSemanticRoutingRequest(
+            task: "Click the Search button, then tell me the result.",
+            frontmostApplication: nil, visibleText: "", history: [], availableDirectives: [.click])
+        for selected in [
+            OSAtlasSemanticActionRoute(directive: .ask, argument: .question("Which search?")),
+            .init(directive: .answer, argument: .visibleObstacle(summary: "Offline", evidence: ["Offline"])),
+            .init(directive: .report, argument: .visibleObstacle(summary: "Offline", evidence: ["Offline"])),
+            .init(directive: .complete, argument: .question("malformed")),
+            .init(directive: .click, argument: .targetHint("unrelated")),
+        ] {
+            XCTAssertNil(AppleFoundationVisualActionRouter.taskBoundTerminalContinuation(
+                replacing: selected, request: request, rawHistory: []))
+        }
+        for task in [
+            "Create a report, then click the Search button.",
+            "Tell me the fare, then click the Search button.",
+            "Click the Search button twice, then tell me the result.",
+            "Drag the Start item to the Finish field, then tell me the result.",
+            "Scroll down, then click the Search button.",
+            "Press Command+A, then click the Search button.",
+            "Wait, then click the Search button.",
+            "Find the regional fare.",
+        ] {
+            let request = OSAtlasSemanticRoutingRequest(
+                task: task, frontmostApplication: nil, visibleText: "", history: [],
+                availableDirectives: [.click, .drag, .scroll, .hotkey, .wait])
+            XCTAssertNil(AppleFoundationVisualActionRouter.taskBoundTerminalContinuation(
+                replacing: terminal, request: request, rawHistory: []), task)
+        }
+    }
+
     func testHostCompletionVerifierRejectsModelAuthorityAndAcceptsBoundedEvidence() {
         let directives: [OSAtlasExplicitActionDirective] = [
             .enter, .type, .scroll, .complete,

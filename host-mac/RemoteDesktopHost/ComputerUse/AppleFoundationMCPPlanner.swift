@@ -4260,6 +4260,73 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
         }
     }
 
+    /// Repairs only a premature success proposal, using the trusted request
+    /// and complete host history. This supplies a route, not permission to
+    /// execute: the normal app/target, input, policy and outcome gates remain
+    /// mandatory. Questions and host-verified obstacles must stay terminal.
+    static func taskBoundTerminalContinuation(
+        replacing selected: OSAtlasSemanticActionRoute,
+        request: OSAtlasSemanticRoutingRequest,
+        rawHistory: [String]
+    ) -> OSAtlasSemanticActionRoute? {
+        switch (selected.directive, selected.argument) {
+        case (.complete, .none), (.answer, .visibleAnswer),
+             (.report, .visibleAnswer):
+            break
+        default:
+            return nil
+        }
+        // A terminal or unknown history entry cannot become a fresh attempt.
+        // The sole non-action diagnostic currently emitted by this executor
+        // is a transient-overlay observation, which proves no requested step.
+        guard rawHistory.allSatisfy({
+            taskBoundHistoryDirective($0) != nil
+                || $0 == "WAIT [transient system overlay]"
+        }), case .bound(let next) = taskBoundOrderedActionResolution(
+            for: request.task,
+            history: rawHistory,
+            historyIsComplete: true,
+            requiresPointerClause: false,
+            terminalCheck: true,
+            frontmostApplication: request.frontmostApplication,
+            frontmostApplicationIdentityIsAuthoritative:
+                request.applicationIdentityIsAuthoritative),
+              request.availableDirectives.contains(next.directive) else {
+            return nil
+        }
+        if let pointer = next.pointerClause {
+            return .init(
+                directive: pointer.directive,
+                argument: .targetHint(pointer.targetHint))
+        }
+        if let applicationName = next.applicationName {
+            return .init(
+                directive: .openApplication,
+                argument: .applicationName(applicationName))
+        }
+        if next.directive == .enter { return .init(directive: .enter) }
+        if next.directive == .type,
+           let clause = next.inputClause,
+           let text = taskBoundQuotedInputPayload(in: clause) {
+            let route = literalTextRoute(text, task: request.task)
+            switch route.argument {
+            case .text(let value) where value.utf8.elementsEqual(text.utf8):
+                return route
+            case .literalTextReference(let id):
+                guard let value = ComputerUseLiteralPayload.resolve(
+                    id, in: request.task),
+                      value.utf8.elementsEqual(text.utf8) else { return nil }
+                return route
+            default:
+                return nil
+            }
+        }
+        // Drag, scrolling, shortcuts and waits need their own target/duration
+        // semantics. An action-family marker is insufficient to synthesize
+        // those routes, generated text, or an intermediate information result.
+        return nil
+    }
+
     private static func taskBoundOrderedActionResolution(
         for task: String,
         history: [String],
@@ -4694,7 +4761,6 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
                 (directive: $0, entry: entry)
             }
         }
-        guard terminalCheck || completed.count <= actions.count else { return .rejected }
         var actionIndex = actions.startIndex
         func currentApplicationSatisfiesNextOpen() -> Bool {
             guard frontmostApplicationIdentityIsAuthoritative,
@@ -4706,10 +4772,12 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
                 matches: applicationName)
         }
         for completedAction in completed {
-            if terminalCheck, completedAction.directive == .wait,
+            if completedAction.directive == .wait,
                !actions.indices.contains(actionIndex) || actions[actionIndex].directive != .wait {
                 // Settling observations make no requested effect complete.
                 // An explicitly requested WAIT still consumes its own entry.
+                // Use the same rule for effect authorization and terminal
+                // checks so a settled screen does not block the next action.
                 continue
             }
             if actions.indices.contains(actionIndex),
@@ -4757,7 +4825,7 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
             if actionIndex == actions.endIndex { return .recorded }
             if actionIndex == actions.count - 1,
                actions[actionIndex].directive == .answer { return .recorded }
-            return .rejected
+            return .bound(actions[actionIndex])
         }
         guard actions.indices.contains(actionIndex) else {
             return .rejected

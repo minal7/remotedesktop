@@ -2,6 +2,8 @@
 
 Parent source: `ddb0c59`. Status: source implementation and regression registration only. No build, tests, model inference, app launch or computer-use action ran. Performance optimization and real-site qualification remain deferred.
 
+Follow-up: [terminal continuation](TERMINAL_CONTINUATION_REVIEW.md) adds bounded recovery for explicit supported pending steps. The original premature-click rejection fixture now uses uncompiled repeated-click syntax; supported single-click proposals can continue through normal action checks. Counts and descriptions below record the original prerequisite checkpoint.
+
 ## First-principles problem
 
 Evidence of a result and evidence of executing a requested workflow are different obligations. A visible appointment can answer “When is my appointment?” It cannot by itself prove “Click the appointment details button, then tell me the appointment” if that click never happened.
