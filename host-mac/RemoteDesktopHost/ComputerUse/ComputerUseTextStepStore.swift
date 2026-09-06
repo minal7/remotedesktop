@@ -11,6 +11,7 @@ final class ComputerUseTaskJournalStore {
     private let descriptor: Int32
     private let operationLock = NSLock()
     private var writeFailed = false
+    private var executionOwners: [String: WeakExecutionLease] = [:]
     private let afterReplacement: (() throws -> Void)?
     enum StoreError: Error, Equatable, LocalizedError {
         case unavailable, invalidFile, busy, staleJournal, invalidTransition
@@ -70,6 +71,71 @@ final class ComputerUseTaskJournalStore {
         try withJournalLock(taskID: taskID, exclusive: false) { try readJournal(taskID: taskID) }
     }
 
+    /// Retained by one run through its actual return, including cancellation
+    /// unwind. A newer runner must neither reconcile nor observe its effects
+    /// while that owner is still inside an adapter call.
+    func acquireExecution(taskID: String, expected: ComputerUseTaskJournal?) throws -> any ComputerUseTaskExecutionLease {
+        try withStoreOperation {
+            let stem = ComputerUseTextTaskContract.digest(taskID)
+            let name = stem + ".execution.lock"
+            let fd = try openLock(name: name, exclusive: true)
+            let lease = ExecutionLease(store: self, name: name, descriptor: fd)
+            do {
+                let journalLock = try openLock(name: stem + ".lock", exclusive: false)
+                defer { close(journalLock) }
+                guard Self.matches(try readJournal(taskID: taskID), expected) else { throw StoreError.staleJournal }
+                try lease.assertOwnership()
+                executionOwners[name] = WeakExecutionLease(lease)
+                return lease
+            } catch {
+                lease.release()
+                throw error
+            }
+        }
+    }
+
+    private final class WeakExecutionLease {
+        weak var value: ExecutionLease?
+        init(_ value: ExecutionLease) { self.value = value }
+    }
+
+    private final class ExecutionLease: ComputerUseTaskExecutionLease {
+        private let store: ComputerUseTaskJournalStore
+        private let name: String
+        private let descriptor: Int32
+        private let lock = NSLock()
+        private var released = false
+
+        init(store: ComputerUseTaskJournalStore, name: String, descriptor: Int32) {
+            self.store = store
+            self.name = name
+            self.descriptor = descriptor
+        }
+
+        deinit { release() }
+
+        var isActive: Bool { lock.withLock { !released } }
+
+        func assertOwnership() throws {
+            try lock.withLock {
+                guard !released else { throw StoreError.unavailable }
+                var held = stat(), current = stat()
+                guard fstat(descriptor, &held) == 0, held.st_mode & S_IFMT == S_IFREG,
+                      held.st_uid == getuid(), held.st_mode & 0o777 == 0o600, held.st_nlink == 1,
+                      fstatat(store.descriptor, name, &current, AT_SYMLINK_NOFOLLOW) == 0,
+                      current.st_dev == held.st_dev, current.st_ino == held.st_ino else { throw StoreError.invalidFile }
+            }
+        }
+
+        func release() {
+            lock.withLock {
+                guard !released else { return }
+                released = true
+                close(descriptor)
+            }
+        }
+    }
+
     private func readJournal(taskID: String) throws -> ComputerUseTaskJournal? {
         let name = ComputerUseTextTaskContract.digest(taskID) + ".json"
         let fd = openat(descriptor, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
@@ -124,16 +190,43 @@ final class ComputerUseTaskJournalStore {
         guard fsync(descriptor) == 0 else { throw StoreError.unavailable }
     }
 
-    private func withJournalLock<Value>(taskID: String, exclusive: Bool, _ body: () throws -> Value) throws -> Value {
+    private func withStoreOperation<Value>(_ body: () throws -> Value) throws -> Value {
         guard operationLock.try() else { throw StoreError.busy }
         defer { operationLock.unlock() }
         guard !writeFailed else { throw StoreError.unavailable }
+        return try body()
+    }
+
+    private func withJournalLock<Value>(taskID: String, exclusive: Bool, _ body: () throws -> Value) throws -> Value {
+        try withStoreOperation {
+            let stem = ComputerUseTextTaskContract.digest(taskID)
+            var temporaryExecutionLock: Int32?
+            defer { if let temporaryExecutionLock { close(temporaryExecutionLock) } }
+            if exclusive {
+                let executionName = stem + ".execution.lock"
+                if let owner = executionOwners[executionName]?.value, owner.isActive {
+                    try owner.assertOwnership()
+                } else {
+                    executionOwners.removeValue(forKey: executionName)
+                    // A standalone writer must also stay out of a live run.
+                    // Acquire in the same execution -> journal order as a run.
+                    temporaryExecutionLock = try openLock(name: executionName, exclusive: true)
+                }
+            }
+            let name = stem + ".lock"
+            let fd = try openLock(name: name, exclusive: exclusive)
+            defer { close(fd) }
+            return try body()
+        }
+    }
+
+    private func openLock(name: String, exclusive: Bool) throws -> Int32 {
         // Lock a stable sibling, never the replaceable journal inode. All
         // cooperating stores keep this file; unlinking it would split locks.
-        let name = ComputerUseTextTaskContract.digest(taskID) + ".lock"
         let fd = openat(descriptor, name, O_RDWR | O_CREAT | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, 0o600)
         guard fd >= 0 else { throw StoreError.unavailable }
-        defer { close(fd) }
+        var transferred = false
+        defer { if !transferred { close(fd) } }
         var info = stat()
         guard fstat(fd, &info) == 0, info.st_mode & S_IFMT == S_IFREG,
               info.st_uid == getuid(), info.st_mode & 0o777 == 0o600, info.st_nlink == 1 else { throw StoreError.invalidFile }
@@ -144,7 +237,8 @@ final class ComputerUseTaskJournalStore {
         var current = stat()
         guard fstatat(descriptor, name, &current, AT_SYMLINK_NOFOLLOW) == 0,
               current.st_dev == info.st_dev, current.st_ino == info.st_ino else { throw StoreError.invalidFile }
-        return try body()
+        transferred = true
+        return fd
     }
 
     private static func isValid(_ journal: ComputerUseTaskJournal) -> Bool {

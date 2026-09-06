@@ -185,6 +185,7 @@ final class ComputerUseTextTask {
          applyWithIdentity: ((ComputerUseTextInputDispatch) async throws -> Void)? = nil,
          didDispatchInput: ((String) async throws -> Bool)? = nil,
          persist: @escaping (ComputerUseTextStepJournal) throws -> Void,
+         acquireExecutionLease: (() throws -> any ComputerUseTaskExecutionLease)? = nil,
          mayAct: @escaping () -> Bool) throws {
         self.contract = contract
         var predicates: [ComputerUseTaskContract.Predicate] = []
@@ -319,6 +320,7 @@ final class ComputerUseTextTask {
                     } else { try await apply(plan, current) }
                     locallyDispatchedInputs.insert(operationID)
                 }, persist: { try persist(Self.textJournal($0, contract: contract)) },
+                acquireExecutionLease: acquireExecutionLease,
                 assertOwnership: { guard mayAct() else { throw ComputerUseTextEditError.interrupted } })
         } catch ComputerUseTaskExecutionError.journalMismatch {
             throw ComputerUseTextTaskError.journalMismatch

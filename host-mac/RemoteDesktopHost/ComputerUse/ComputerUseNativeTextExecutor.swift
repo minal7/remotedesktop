@@ -404,6 +404,8 @@ final class ComputerUseNativeTextExecutor {
             persist: { journal in
                 try store.save(journal, replacing: persistedJournal)
                 persistedJournal = journal
+            }, acquireExecutionLease: {
+                try store.acquireExecution(taskID: taskID, expected: persistedJournal)
             }, mayAct: mayAct)
         retainedTask = task
         retainedTaskOriginID = originatingTaskID

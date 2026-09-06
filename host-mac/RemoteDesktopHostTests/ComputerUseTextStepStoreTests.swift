@@ -4,6 +4,97 @@ import XCTest
 @testable import RemoteDesktopHost
 
 final class ComputerUseTextStepStoreTests: XCTestCase {
+    func testExecutionLeaseExcludesDuplicateRunWhileAllowingJournalReadAndDifferentTask() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let first = try ComputerUseTextStepStore(directory: directory), second = try ComputerUseTextStepStore(directory: directory)
+        let lease = try first.acquireExecution(taskID: "task", expected: nil)
+        defer { lease.release() }
+        try lease.assertOwnership()
+        XCTAssertNil(try second.load(taskID: "task"))
+        XCTAssertThrowsError(try second.acquireExecution(taskID: "task", expected: nil)) {
+            XCTAssertEqual($0 as? ComputerUseTextStepStore.StoreError, .busy)
+        }
+        let unrelated = try second.acquireExecution(taskID: "unrelated", expected: nil)
+        unrelated.release()
+        let attempted = journal([.attempted, .planned])
+        try first.save(attempted, replacing: nil)
+        XCTAssertEqual(try second.load(taskID: "task"), attempted)
+        XCTAssertThrowsError(try second.save(journal([.verified, .planned]), replacing: attempted)) {
+            XCTAssertEqual($0 as? ComputerUseTextStepStore.StoreError, .busy)
+        }
+        XCTAssertEqual(try second.load(taskID: "task"), attempted)
+        XCTAssertThrowsError(try second.acquireExecution(taskID: "task", expected: attempted)) {
+            XCTAssertEqual($0 as? ComputerUseTextStepStore.StoreError, .busy)
+        }
+        lease.release(); lease.release()
+        XCTAssertThrowsError(try lease.assertOwnership())
+        XCTAssertThrowsError(try second.acquireExecution(taskID: "task", expected: nil)) {
+            XCTAssertEqual($0 as? ComputerUseTextStepStore.StoreError, .staleJournal)
+        }
+        let successor = try second.acquireExecution(taskID: "task", expected: attempted)
+        lease.release() // A stale token must not close a reused descriptor.
+        try successor.assertOwnership()
+        successor.release()
+        XCTAssertTrue(FileManager.default.fileExists(atPath: directory.appendingPathComponent(
+            ComputerUseTextTaskContract.digest("task") + ".execution.lock").path))
+    }
+
+    func testExecutionAdmissionFailureReleasesItsLockAndLeaseDeinitializationReleasesOwnership() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let first = try ComputerUseTextStepStore(directory: directory), second = try ComputerUseTextStepStore(directory: directory)
+        let attempted = journal([.attempted, .planned])
+        try first.save(attempted, replacing: nil)
+        let file = directory.appendingPathComponent(ComputerUseTextTaskContract.digest("task") + ".json")
+        let saved = try Data(contentsOf: file)
+        try Data("Invalid stored progress".utf8).write(to: file)
+        XCTAssertThrowsError(try first.acquireExecution(taskID: "task", expected: attempted))
+        try saved.write(to: file)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+        var lease: (any ComputerUseTaskExecutionLease)? = try second.acquireExecution(taskID: "task", expected: attempted)
+        try XCTUnwrap(lease).assertOwnership()
+        XCTAssertThrowsError(try first.acquireExecution(taskID: "task", expected: attempted))
+        lease = nil
+        let successor = try first.acquireExecution(taskID: "task", expected: attempted)
+        successor.release()
+    }
+
+    func testExecutionLeaseRejectsUnsafeFilesAndDetectsOwnershipFileChanges() throws {
+        for kind in ["symlink", "hardlink", "directory", "fifo", "permissions", "replacement"] {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let store = try ComputerUseTextStepStore(directory: directory)
+            let file = directory.appendingPathComponent(ComputerUseTextTaskContract.digest("task") + ".execution.lock")
+            let parked = directory.appendingPathComponent("retained-file")
+            if kind == "permissions" || kind == "replacement" {
+                let lease = try store.acquireExecution(taskID: "task", expected: nil)
+                defer { lease.release() }
+                if kind == "permissions" {
+                    try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: file.path)
+                } else {
+                    try FileManager.default.moveItem(at: file, to: parked)
+                    try Data().write(to: file)
+                    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+                }
+                XCTAssertThrowsError(try lease.assertOwnership()) {
+                    XCTAssertEqual($0 as? ComputerUseTextStepStore.StoreError, .invalidFile)
+                }
+            } else {
+                try Data("Retained file".utf8).write(to: parked)
+                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: parked.path)
+                switch kind {
+                case "symlink": try FileManager.default.createSymbolicLink(at: file, withDestinationURL: parked)
+                case "hardlink": try FileManager.default.linkItem(at: parked, to: file)
+                case "directory": try FileManager.default.createDirectory(at: file, withIntermediateDirectories: false)
+                default: XCTAssertEqual(file.path.withCString { Darwin.mkfifo($0, 0o600) }, 0)
+                }
+                XCTAssertThrowsError(try store.acquireExecution(taskID: "task", expected: nil))
+                XCTAssertEqual(try Data(contentsOf: parked), Data("Retained file".utf8))
+            }
+        }
+    }
+
     func testStaleWriterCannotOverwriteNewAttemptOrVerifiedProgress() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

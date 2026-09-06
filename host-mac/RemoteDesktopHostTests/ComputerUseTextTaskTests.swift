@@ -3,6 +3,39 @@ import XCTest
 
 @MainActor
 final class ComputerUseTextTaskTests: XCTestCase {
+    func testTextTaskAcquiresRunOwnershipBeforeReadingAndReacquiresItForReplay() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try ComputerUseTextStepStore(directory: directory), other = try ComputerUseTextStepStore(directory: directory)
+        let initial = field("destination", "old")
+        let contract = try ComputerUseTextTaskContract(taskID: "lease-text", prompt: "Replace Destination with Paris",
+            fields: [initial], edits: [.init(targetID: "destination", mode: .replaceAll, text: "Paris")])
+        var current = initial.snapshot, reads = 0, effects = 0, acquisitions = 0
+        var expected = try store.load(taskID: contract.taskID)
+        let held = try other.acquireExecution(taskID: contract.taskID, expected: nil)
+        defer { held.release() }
+        let task = try ComputerUseTextTask(contract: contract, recovered: expected,
+            read: { _ in reads += 1; return current }, apply: { edit, _ in
+                effects += 1; current = self.field("destination", edit.text).snapshot
+            }, persist: { journal in
+                try store.save(journal, replacing: expected)
+                expected = journal
+            }, acquireExecutionLease: {
+                acquisitions += 1
+                return try store.acquireExecution(taskID: contract.taskID, expected: expected)
+            }, mayAct: { true })
+        do { try await task.run(); XCTFail("The previous run still owns this task") }
+        catch { XCTAssertEqual(error as? ComputerUseTextStepStore.StoreError, .busy) }
+        XCTAssertEqual(reads, 0); XCTAssertEqual(effects, 0)
+        held.release()
+        try await task.run()
+        try await task.run()
+        XCTAssertEqual(current.value, "Paris"); XCTAssertEqual(effects, 1); XCTAssertEqual(acquisitions, 3)
+        let latest = try other.load(taskID: contract.taskID)
+        let released = try other.acquireExecution(taskID: contract.taskID, expected: latest)
+        released.release()
+    }
+
     func testRetainedValuesChangingDuringDurableAttemptStopLiteralAndCopyAdapters() async throws {
         for earlierEdit in [false, true] {
             for copy in [false, true] {

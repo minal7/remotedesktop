@@ -112,6 +112,8 @@ final class ComputerUseBrowserNavigationTask {
                 }, persist: { journal in
                     try store.save(journal, replacing: persistedJournal)
                     persistedJournal = journal
+                }, acquireExecutionLease: {
+                    try store.acquireExecution(taskID: taskID, expected: persistedJournal)
                 }, assertOwnership: { [browser] in
                     guard browser.hasOwnership(taskID: taskID) else { throw ComputerUseBrowserError.ownershipLost }
                 })

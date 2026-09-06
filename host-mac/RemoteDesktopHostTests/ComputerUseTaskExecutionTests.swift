@@ -3,6 +3,130 @@ import XCTest
 
 @MainActor
 final class ComputerUseTaskExecutionTests: XCTestCase {
+    func testChangedExecutionLeaseCannotAuthorizeInputOrCompletionAfterAnAdapterReturns() async throws {
+        for stage in ["observation", "effect", "outcome"] {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let fixture = try SearchTransactionFixture(), store = try ComputerUseTaskJournalStore(directory: directory)
+            let leaseFile = directory.appendingPathComponent(ComputerUseTextTaskContract.digest(fixture.contract.taskID) + ".execution.lock")
+            func replaceLeaseFile() throws {
+                try FileManager.default.moveItem(at: leaseFile, to: directory.appendingPathComponent("displaced-lock"))
+                try Data().write(to: leaseFile)
+                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: leaseFile.path)
+            }
+            var expected = try store.load(taskID: fixture.contract.taskID), displaced = false
+            let execution = try fixture.executor(observe: { predicate in
+                if !displaced && (stage == "observation" || (stage == "outcome" && fixture.effects.count == 4 && predicate.id == "query")) {
+                    displaced = true; try replaceLeaseFile()
+                }
+                return fixture.observe(predicate)
+            }, persist: { journal in
+                try store.save(journal, replacing: expected)
+                expected = journal; fixture.saved = journal
+            }, acquireExecutionLease: { try store.acquireExecution(taskID: fixture.contract.taskID, expected: expected) },
+            afterEffect: { step in
+                if stage == "effect" && step.id == "type-1" { displaced = true; try replaceLeaseFile() }
+            })
+            do { try await execution.run(); XCTFail("A matching value cannot replace execution ownership") }
+            catch { XCTAssertEqual(error as? ComputerUseTaskJournalStore.StoreError, .invalidFile) }
+            XCTAssertTrue(displaced)
+            XCTAssertEqual(fixture.effects.count, stage == "observation" ? 0 : stage == "effect" ? 1 : 4)
+        }
+    }
+
+    func testDuplicateRunCannotReconcileDuringObservationEffectOrFinalVerificationEvenAfterCancel() async throws {
+        for stage in ["observation", "effect", "postcondition", "outcome"] {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let fixture = try SearchTransactionFixture(), store = try ComputerUseTaskJournalStore(directory: directory)
+            let competitorStore = try ComputerUseTaskJournalStore(directory: directory)
+            let gate = ComputerUsePlanningTestGate<Bool>(started: expectation(description: stage + " entered"),
+                returned: expectation(description: stage + " returned"))
+            defer { gate.finish(true) }
+            var stoppedAtGate = false
+            var expected = try store.load(taskID: fixture.contract.taskID)
+            let execution = try fixture.executor(observe: { predicate in
+                let stopHere = (stage == "observation" && fixture.effects.isEmpty)
+                    || (stage == "postcondition" && fixture.effects.count == 1 && predicate.id == "query")
+                    || (stage == "outcome" && fixture.effects.count == 4 && predicate.id == "query")
+                if stopHere && !stoppedAtGate { stoppedAtGate = true; _ = await gate.wait() }
+                return fixture.observe(predicate)
+            }, persist: { journal in
+                try store.save(journal, replacing: expected)
+                expected = journal; fixture.saved = journal
+            }, acquireExecutionLease: { try store.acquireExecution(taskID: fixture.contract.taskID, expected: expected) },
+            afterEffect: { step in
+                if stage == "effect" && step.id == "type-1" { _ = await gate.wait() }
+            })
+            let running = Task { try await execution.run() }
+            defer { running.cancel() }
+            await fulfillment(of: [gate.started], timeout: 2)
+            var competingExpected = try competitorStore.load(taskID: fixture.contract.taskID)
+            var competingObservations = 0, competingEffects = 0
+            let competing = try ComputerUseTaskExecution(contract: fixture.contract, recovered: competingExpected,
+                observe: { _ in competingObservations += 1; return true }, perform: { _, _ in competingEffects += 1 },
+                persist: { journal in
+                    try competitorStore.save(journal, replacing: competingExpected)
+                    competingExpected = journal
+                }, acquireExecutionLease: {
+                    try competitorStore.acquireExecution(taskID: fixture.contract.taskID, expected: competingExpected)
+                }, assertOwnership: { })
+            for cancel in [false, true] {
+                if cancel { running.cancel() }
+                do { try await competing.run(); XCTFail("The original adapter has not returned") }
+                catch { XCTAssertEqual(error as? ComputerUseTaskJournalStore.StoreError, .busy, stage) }
+                XCTAssertEqual(competingObservations, 0); XCTAssertEqual(competingEffects, 0)
+            }
+            gate.finish(true)
+            do { try await running.value; XCTFail("Cancellation cannot become completion after the gate returns") }
+            catch { XCTAssertTrue(error is CancellationError, stage) }
+            let effectsAtStop = fixture.effects.count
+            XCTAssertEqual(effectsAtStop, stage == "observation" ? 0 : stage == "outcome" ? 4 : 1)
+            var latest = try competitorStore.load(taskID: fixture.contract.taskID)
+            fixture.saved = latest
+            let resumed = try fixture.executor(recovered: latest, persist: { journal in
+                try competitorStore.save(journal, replacing: latest)
+                latest = journal; fixture.saved = journal
+            }, acquireExecutionLease: {
+                try competitorStore.acquireExecution(taskID: fixture.contract.taskID, expected: latest)
+            })
+            try await resumed.run()
+            XCTAssertEqual(fixture.effects, ["type-1", "submit-1", "type-2", "submit-2"])
+            XCTAssertEqual(fixture.submissions, ["Paris", "Paris"])
+            let released = try competitorStore.acquireExecution(taskID: fixture.contract.taskID, expected: latest)
+            released.release()
+        }
+    }
+
+    func testExecutionLeaseReleasesOnSuccessObservationFailureAndFailedDurableWrite() async throws {
+        for mode in ["success", "observation-failure", "write-failure"] {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let fixture = try SearchTransactionFixture()
+            let store = try ComputerUseTaskJournalStore(directory: directory, afterReplacement: {
+                if mode == "write-failure" { throw TransactionFixtureError.writeFailed }
+            })
+            var expected = try store.load(taskID: fixture.contract.taskID)
+            let execution = try fixture.executor(observe: { predicate in
+                if mode == "observation-failure" { throw TransactionFixtureError.ownershipLost }
+                return fixture.observe(predicate)
+            }, persist: { journal in
+                try store.save(journal, replacing: expected)
+                expected = journal; fixture.saved = journal
+            }, acquireExecutionLease: { try store.acquireExecution(taskID: fixture.contract.taskID, expected: expected) })
+            do { try await execution.run(); XCTAssertEqual(mode, "success") }
+            catch {
+                XCTAssertNotEqual(mode, "success")
+                XCTAssertEqual(error as? TransactionFixtureError, mode == "write-failure" ? .writeFailed : .ownershipLost)
+            }
+            let reopened = try ComputerUseTaskJournalStore(directory: directory)
+            let latest = try reopened.load(taskID: fixture.contract.taskID)
+            let lease = try reopened.acquireExecution(taskID: fixture.contract.taskID, expected: latest)
+            try lease.assertOwnership(); lease.release()
+            XCTAssertEqual(fixture.effects.count, mode == "success" ? 4 : 0)
+        }
+    }
+
     func testTwoExecutorsWithTheSameFreshSnapshotCannotBothDispatchOrRewindProgress() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -14,14 +138,15 @@ final class ComputerUseTaskExecutionTests: XCTestCase {
         let first = try fixture.executor(recovered: firstExpected, persist: { journal in
             try firstStore.save(journal, replacing: firstExpected)
             firstExpected = journal; fixture.saved = journal
-        })
+        }, acquireExecutionLease: { try firstStore.acquireExecution(taskID: fixture.contract.taskID, expected: firstExpected) })
         var staleEffects: [String] = []
         let stale = try ComputerUseTaskExecution(contract: fixture.contract, recovered: staleExpected,
             observe: { _ in true }, perform: { step, _ in staleEffects.append(step.id) },
             persist: { journal in
                 try staleStore.save(journal, replacing: staleExpected)
                 staleExpected = journal
-            }, assertOwnership: { })
+            }, acquireExecutionLease: { try staleStore.acquireExecution(taskID: fixture.contract.taskID, expected: staleExpected) },
+            assertOwnership: { })
         try await first.run()
         let finished = try XCTUnwrap(firstStore.load(taskID: fixture.contract.taskID))
         for _ in 0..<2 {
@@ -48,7 +173,7 @@ final class ComputerUseTaskExecutionTests: XCTestCase {
             let execution = try fixture.executor(recovered: expected, persist: { journal in
                 try store.save(journal, replacing: expected)
                 expected = journal; fixture.saved = journal
-            })
+            }, acquireExecutionLease: { try store.acquireExecution(taskID: fixture.contract.taskID, expected: expected) })
             do { try await execution.run(); XCTFail("An unconfirmed durable write cannot authorize progress") }
             catch { XCTAssertEqual(error as? TransactionFixtureError, .writeFailed) }
             XCTAssertEqual(fixture.effects.count, failedWrite == 1 ? 0 : 1)
@@ -61,7 +186,7 @@ final class ComputerUseTaskExecutionTests: XCTestCase {
             let resumed = try fixture.executor(recovered: recovered, persist: { journal in
                 try reopened.save(journal, replacing: recovered)
                 recovered = journal; fixture.saved = journal
-            })
+            }, acquireExecutionLease: { try reopened.acquireExecution(taskID: fixture.contract.taskID, expected: recovered) })
             if failedWrite == 1 {
                 do { try await resumed.run(); XCTFail("A visible attempted journal does not prove that its effect happened") }
                 catch { XCTAssertEqual(error as? ComputerUseTaskExecutionError, .uncertainEffect("type-1")) }
@@ -279,26 +404,32 @@ private final class SearchTransactionFixture {
 
     func executor(recovered: ComputerUseTaskJournal? = nil,
                   observe: ((ComputerUseTaskContract.Predicate) async throws -> Bool)? = nil,
-                  persist: ((ComputerUseTaskJournal) throws -> Void)? = nil) throws -> ComputerUseTaskExecution {
+                  persist: ((ComputerUseTaskJournal) throws -> Void)? = nil,
+                  acquireExecutionLease: (() throws -> any ComputerUseTaskExecutionLease)? = nil,
+                  afterEffect: ((ComputerUseTaskContract.Step) async throws -> Void)? = nil) throws -> ComputerUseTaskExecution {
         try ComputerUseTaskExecution(contract: contract, recovered: recovered,
-            observe: observe ?? { [self] predicate in
-                let value: String
-                switch predicate.kind {
-                case "value": value = input
-                case "receipt-count": value = String(submissions.count)
-                case "document-generation": value = String(documentGeneration)
-                default: return false
-                }
-                return ComputerUseTaskContract.digest([value]) == predicate.expectedDigest
-            }, perform: { [self] step, identity in
+            observe: observe ?? { [self] in self.observe($0) }, perform: { [self] step, identity in
                 let index = effects.count
                 XCTAssertEqual(saved?.statuses[index], .attempted, "Persist must precede every effect")
                 effects.append(step.id)
                 effectIDs.append(identity)
                 if step.operation.capabilityID == "text.replace" { input = "Paris" }
                 else if !dropSubmission { submissions.append(input) }
+                try await afterEffect?(step)
                 if interruptAfterEffect == index { throw CancellationError() }
             }, persist: persist ?? { [self] in saved = $0 },
+            acquireExecutionLease: acquireExecutionLease,
             assertOwnership: { [self] in guard ownsTask else { throw TransactionFixtureError.ownershipLost } })
+    }
+
+    func observe(_ predicate: ComputerUseTaskContract.Predicate) -> Bool {
+        let value: String
+        switch predicate.kind {
+        case "value": value = input
+        case "receipt-count": value = String(submissions.count)
+        case "document-generation": value = String(documentGeneration)
+        default: return false
+        }
+        return ComputerUseTaskContract.digest([value]) == predicate.expectedDigest
     }
 }

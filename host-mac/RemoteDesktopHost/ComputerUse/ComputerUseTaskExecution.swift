@@ -135,6 +135,13 @@ enum ComputerUseTaskExecutionError: Error, Equatable {
     case preconditionFailed(String), uncertainEffect(String), incompleteOutcome(String)
 }
 
+/// Excludes another runner while this one is observing or awaiting effects.
+/// Cancellation must not release ownership before those calls actually return.
+protocol ComputerUseTaskExecutionLease: AnyObject {
+    func assertOwnership() throws
+    func release()
+}
+
 /// Shared transaction engine, independent of the planner and effect adapter.
 /// Every effect is durably attempted before dispatch. Only a fresh observation
 /// from the adapter can establish its postconditions; effect-return/model prose
@@ -148,12 +155,15 @@ final class ComputerUseTaskExecution {
     private let perform: (ComputerUseTaskContract.Step, String) async throws -> Void
     private let persist: (ComputerUseTaskJournal) throws -> Void
     private let assertOwnership: () throws -> Void
+    private let acquireExecutionLease: (() throws -> any ComputerUseTaskExecutionLease)?
+    private var executionLease: (any ComputerUseTaskExecutionLease)?
     private var isExecuting = false
 
     init(contract: ComputerUseTaskContract, recovered: ComputerUseTaskJournal? = nil,
          observe: @escaping (ComputerUseTaskContract.Predicate) async throws -> Bool,
          perform: @escaping (ComputerUseTaskContract.Step, String) async throws -> Void,
          persist: @escaping (ComputerUseTaskJournal) throws -> Void,
+         acquireExecutionLease: (() throws -> any ComputerUseTaskExecutionLease)? = nil,
          assertOwnership: @escaping () throws -> Void) throws {
         self.contract = contract
         let initial = ComputerUseTaskJournal(taskID: contract.taskID, promptDigest: contract.promptDigest,
@@ -179,12 +189,20 @@ final class ComputerUseTaskExecution {
         self.perform = perform
         self.persist = persist
         self.assertOwnership = assertOwnership
+        self.acquireExecutionLease = acquireExecutionLease
     }
 
     func run(progress: (Int, Int) -> Void = { _, _ in }) async throws {
         guard !isExecuting else { throw ComputerUseTaskExecutionError.alreadyExecuting }
         isExecuting = true
-        defer { isExecuting = false }
+        defer {
+            executionLease?.release()
+            executionLease = nil
+            isExecuting = false
+        }
+        try checkOwnership()
+        executionLease = try acquireExecutionLease?()
+        try checkOwnership()
         for (index, step) in contract.steps.enumerated() {
             await Task.yield()
             try checkOwnership()
@@ -232,7 +250,12 @@ final class ComputerUseTaskExecution {
         try checkOwnership()
     }
 
-    private func checkOwnership() throws { try Task.checkCancellation(); try assertOwnership() }
+    private func checkOwnership() throws {
+        try Task.checkCancellation()
+        try assertOwnership()
+        try executionLease?.assertOwnership()
+        try Task.checkCancellation()
+    }
     private func satisfies(_ id: String) async throws -> Bool {
         try checkOwnership()
         guard let predicate = predicates[id] else { throw ComputerUseTaskExecutionError.invalidContract }
