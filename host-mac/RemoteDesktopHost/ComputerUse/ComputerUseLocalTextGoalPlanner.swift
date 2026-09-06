@@ -53,6 +53,7 @@ struct ComputerUseLocalTextGoalPlanner: ComputerUseTextGoalPlanning {
         case sourceBoundV5 = "source-bound-v5"
         case sourceBoundV6 = "source-bound-v6"
         case fieldCopyV7 = "field-copy-v7"
+        case fieldOperationsV8 = "field-operations-v8"
     }
     static let contextTokens = 4_096
     static let outputTokens = 1_024
@@ -111,8 +112,9 @@ struct ComputerUseLocalTextGoalPlanner: ComputerUseTextGoalPlanning {
     func makeRequest(catalog: ComputerUseTextPayloadCatalog, fields: [ComputerUseTextField],
                      coverageRepair: ComputerUseSourceBoundTextPlan.CoverageFailure? = nil) throws -> URLRequest {
         guard coverageRepair == nil || contract == .sourceBoundV6 else { throw ComputerUseLocalTextPlanError.invalidResponse }
-        if contract == .fieldCopyV7 {
-            return try ComputerUseFieldCopyPlan.makeRequest(connection: connection, catalog: catalog, fields: fields)
+        if contract == .fieldCopyV7 || contract == .fieldOperationsV8 {
+            return try ComputerUseFieldCopyPlan.makeRequest(connection: connection, catalog: catalog, fields: fields,
+                requiresCopy: contract == .fieldCopyV7)
         }
         if contract == .sourceBoundV3 || contract == .sourceBoundV4 || contract == .sourceBoundV5 || contract == .sourceBoundV6 {
             return try ComputerUseSourceBoundTextPlan.makeRequest(connection: connection, catalog: catalog, fields: fields,
@@ -209,8 +211,9 @@ struct ComputerUseLocalTextGoalPlanner: ComputerUseTextGoalPlanning {
             if let refusal = message["refusal"], refusal != .null && refusal != .string("") {
                 throw ComputerUseLocalTextPlanError.invalidResponse
             }
-            if contract == .fieldCopyV7 {
-                return try ComputerUseFieldCopyPlan.decode(content: content, catalog: catalog, fields: fields)
+            if contract == .fieldCopyV7 || contract == .fieldOperationsV8 {
+                return try ComputerUseFieldCopyPlan.decode(content: content, catalog: catalog, fields: fields,
+                    requiresCopy: contract == .fieldCopyV7)
             }
             if contract == .sourceBoundV3 || contract == .sourceBoundV4 || contract == .sourceBoundV5 || contract == .sourceBoundV6 {
                 return try ComputerUseSourceBoundTextPlan.decode(content: content, catalog: catalog, fields: fields)

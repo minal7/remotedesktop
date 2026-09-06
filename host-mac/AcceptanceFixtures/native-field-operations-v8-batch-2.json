@@ -1,0 +1,120 @@
+{
+  "schemaVersion": 1,
+  "scope": "Known 54-case regression comparison for unified typed field operations v8; combines 20 copy and 34 earlier literal/decline cases; not held-out qualification; preselected batch 2/11",
+  "cases": [
+    {
+      "id": "C06",
+      "prompt": "Copy the \"Origin\" field into the \"Destination\" field.",
+      "fields": [
+        "Origin",
+        "Destination"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "sourceField": 0
+          }
+        ]
+      ]
+    },
+    {
+      "id": "C07",
+      "prompt": "Copy Notes into Backup, then copy Backup into Archive.",
+      "fields": [
+        "Notes",
+        "Backup",
+        "Archive"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "sourceField": 0
+          },
+          {
+            "field": 2,
+            "mode": "replaceAll",
+            "sourceField": 1
+          }
+        ]
+      ]
+    },
+    {
+      "id": "C08",
+      "prompt": "Copy Title into both Tag and Label.",
+      "fields": [
+        "Title",
+        "Tag",
+        "Label"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "sourceField": 0
+          },
+          {
+            "field": 2,
+            "mode": "replaceAll",
+            "sourceField": 0
+          }
+        ],
+        [
+          {
+            "field": 2,
+            "mode": "replaceAll",
+            "sourceField": 0
+          },
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "sourceField": 0
+          }
+        ]
+      ]
+    },
+    {
+      "id": "C09",
+      "prompt": "Append what is in Notes to Notes itself.",
+      "fields": [
+        "Notes",
+        "Tag"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 0,
+            "mode": "append",
+            "sourceField": 0
+          }
+        ]
+      ]
+    },
+    {
+      "id": "C10",
+      "prompt": "Leave Title unchanged. Copy its current value into Tag.",
+      "fields": [
+        "Title",
+        "Tag"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "sourceField": 0
+          }
+        ]
+      ]
+    }
+  ]
+}

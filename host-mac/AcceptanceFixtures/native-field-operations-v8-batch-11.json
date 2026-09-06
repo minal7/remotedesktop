@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "scope": "Known 54-case regression comparison for unified typed field operations v8; combines 20 copy and 34 earlier literal/decline cases; not held-out qualification; preselected batch 11/11",
+  "cases": [
+    {
+      "id": "H517",
+      "prompt": "Put Marseille in City.",
+      "fields": [
+        "Town",
+        "Country"
+      ],
+      "expectedDisposition": "clarification"
+    },
+    {
+      "id": "H518",
+      "prompt": "Change Code to \"B-9\".",
+      "fields": [
+        "Code",
+        "Code"
+      ],
+      "expectedDisposition": "clarification"
+    },
+    {
+      "id": "H519",
+      "prompt": "Set either Label or Tag to \"west\".",
+      "fields": [
+        "Label",
+        "Tag"
+      ],
+      "expectedDisposition": "clarification"
+    },
+    {
+      "id": "H520",
+      "prompt": "Do not type \"red\" in Tag. Instead, put \"blue\" in Tag.",
+      "fields": [
+        "Tag",
+        "Title"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "value": "blue"
+          }
+        ]
+      ]
+    }
+  ]
+}

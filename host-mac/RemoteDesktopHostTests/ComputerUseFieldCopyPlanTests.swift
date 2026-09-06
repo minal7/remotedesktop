@@ -18,9 +18,10 @@ final class ComputerUseFieldCopyPlanTests: XCTestCase {
         let source = String(decoding: try JSONSerialization.data(withJSONObject: ["disposition": disposition, "operations": operations]), as: UTF8.self)
         return try ComputerUseFieldCopyPlan.decode(content: source, catalog: .init(prompt), fields: targets ?? fields)
     }
-    private func planner(transport: any ComputerUseTextModelTransport = CopyOverflowTransport()) throws -> ComputerUseLocalTextGoalPlanner {
+    private func planner(transport: any ComputerUseTextModelTransport = CopyOverflowTransport(),
+                         contract: ComputerUseLocalTextGoalPlanner.Contract = .fieldCopyV7) throws -> ComputerUseLocalTextGoalPlanner {
         try .init(connection: .init(baseURL: URL(string: "http://127.0.0.1:49123")!, bearerToken: "fictional-test-token", modelAlias: "test-native"),
-                  transport: transport, contract: .fieldCopyV7)
+                  transport: transport, contract: contract)
     }
 
     func testCopyAndSuppliedPayloadsRemainDifferentTypesThroughOrderedCompilation() throws {
@@ -38,8 +39,9 @@ final class ComputerUseFieldCopyPlanTests: XCTestCase {
     }
 
     func testCopySchemaAndExactBudgetNeverExposeExistingValuesOrRegenerateLiterals() async throws {
+        for contract in [ComputerUseLocalTextGoalPlanner.Contract.fieldCopyV7, .fieldOperationsV8] {
         let transport = CopyOverflowTransport()
-        let candidate = try planner(transport: transport)
+        let candidate = try planner(transport: transport, contract: contract)
         let prompt = #"Set Origin to "private supplied payload", then copy Origin to Destination."#
         let request = try candidate.makeRequest(catalog: .init(prompt), fields: fields)
         let body = String(decoding: try XCTUnwrap(request.httpBody), as: UTF8.self)
@@ -50,6 +52,57 @@ final class ComputerUseFieldCopyPlanTests: XCTestCase {
         catch { XCTAssertEqual(error as? ComputerUseLocalTextPlanError, .contextLimit) }
         let count = await transport.completions
         XCTAssertEqual(count, 0)
+        }
+    }
+
+    func testUnifiedPlannerRetainsLiteralAndCopiedOriginsWhenTheirBytesWouldMatch() throws {
+        let prompt = #"Put "Origin" in Destination, then copy Origin to Destination."#
+        let literal = operation("f2", ["kind": "suppliedText", "value": "p1"])
+        let copied = operation("f2", ["kind": "fieldValue", "fieldID": "f1"])
+        let candidate = try planner(contract: .fieldOperationsV8)
+        func response(_ operations: [[String: Any]]) throws -> Data {
+            let content = String(decoding: try JSONSerialization.data(withJSONObject: ["disposition": "supported", "operations": operations]), as: UTF8.self)
+            return try JSONSerialization.data(withJSONObject: ["model": "test-native", "choices": [["finish_reason": "stop",
+                "message": ["role": "assistant", "content": content]]]])
+        }
+        let source = ComputerUseTextField(label: "Origin", snapshot: .init(targetID: fields[0].snapshot.targetID,
+            value: "Origin", selection: NSRange(location: 0, length: 0), isEditable: true, isSecure: false))
+        let targets = [source, fields[1]], catalog = try ComputerUseTextPayloadCatalog(prompt)
+        let result = try candidate.decode(response([literal, copied]), catalog: catalog, fields: targets)
+        guard case .fieldOperations(let operations, let unchanged) = result else { return XCTFail("Expected typed operations") }
+        let contract = try ComputerUseTextTaskContract(taskID: "origins", prompt: prompt, fields: targets,
+            operations: operations, unchangedTargetIDs: unchanged)
+        XCTAssertEqual(contract.steps.map(\.payload), ["Origin", "Origin"])
+        XCTAssertNil(contract.steps[0].copySource)
+        XCTAssertEqual(contract.steps[1].copySource?.targetID, source.snapshot.targetID)
+        let singleLiteral = try candidate.decode(response([literal]), catalog: .init(#"Type the literal word "Origin" in Destination."#), fields: targets)
+        XCTAssertEqual(singleLiteral, .fieldOperations([.enterText(.init(targetID: fields[1].snapshot.targetID, mode: .replaceAll, text: "Origin"))],
+            unchangedTargetIDs: [source.snapshot.targetID]))
+        XCTAssertThrowsError(try planner().decode(response([literal]), catalog: catalog, fields: targets),
+            "The historical fallback must still reject literal-only plans")
+    }
+
+    func testUnifiedPlannerRejectsUntaggedMixedAndUnownedLiteralPayloads() throws {
+        let candidate = try planner(contract: .fieldOperationsV8)
+        let catalog = try ComputerUseTextPayloadCatalog(#"Put "  é 東京 😀  " in Destination."#)
+        func response(_ object: [String: Any], reason: String = "stop") throws -> Data {
+            let content = String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self)
+            return try JSONSerialization.data(withJSONObject: ["model": "test-native", "choices": [["finish_reason": reason,
+                "message": ["role": "assistant", "content": content]]]])
+        }
+        let valid: [String: Any] = ["disposition": "supported", "operations": [operation("f2", ["kind": "suppliedText", "value": "p1"])]]
+        guard case .fieldOperations(let operations, _) = try candidate.decode(response(valid), catalog: catalog, fields: fields),
+              case .enterText(let edit) = operations.first else { return XCTFail("Expected host-owned literal") }
+        XCTAssertTrue(edit.text.utf8.elementsEqual("  e\u{301} 東京 😀  ".utf8))
+        for object in [
+            ["disposition": "supported", "edits": [["fieldID": "f2", "mode": "replaceAll", "value": "p1"]]],
+            ["disposition": "supported", "operations": [operation("f2", ["kind": "suppliedText", "value": "invented"])]],
+            ["disposition": "unsupported", "operations": [operation("f2", ["kind": "suppliedText", "value": "p1"])]],
+            ["disposition": "supported", "operations": [operation("f2", ["kind": "fieldValue", "fieldID": "f1", "value": "p1"])]]
+        ] as [[String: Any]] {
+            XCTAssertThrowsError(try candidate.decode(response(object), catalog: catalog, fields: fields))
+        }
+        XCTAssertThrowsError(try candidate.decode(response(valid, reason: "length"), catalog: catalog, fields: fields))
     }
 
     func testMalformedMixedInventedAndUnmentionedCopyReferencesCannotBecomeInput() throws {

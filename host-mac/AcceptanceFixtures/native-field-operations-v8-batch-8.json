@@ -1,0 +1,140 @@
+{
+  "schemaVersion": 1,
+  "scope": "Known 54-case regression comparison for unified typed field operations v8; combines 20 copy and 34 earlier literal/decline cases; not held-out qualification; preselected batch 8/11",
+  "cases": [
+    {
+      "id": "H502",
+      "prompt": "For Label use Delta; for Code use 47-B.",
+      "fields": [
+        "Label",
+        "Code"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "value": "Delta"
+          },
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "value": "47-B"
+          }
+        ],
+        [
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "value": "47-B"
+          },
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "value": "Delta"
+          }
+        ]
+      ]
+    },
+    {
+      "id": "H503",
+      "prompt": "Make both Pickup and Dropoff read \"Ghent\".",
+      "fields": [
+        "Pickup",
+        "Dropoff"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "value": "Ghent"
+          },
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "value": "Ghent"
+          }
+        ],
+        [
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "value": "Ghent"
+          },
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "value": "Ghent"
+          }
+        ]
+      ]
+    },
+    {
+      "id": "H504",
+      "prompt": "Start by replacing Notes with \"draft\". After that, add \" / checked\" at the end of the same field.",
+      "fields": [
+        "Notes",
+        "Tag"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "value": "draft"
+          },
+          {
+            "field": 0,
+            "mode": "append",
+            "value": " / checked"
+          }
+        ]
+      ]
+    },
+    {
+      "id": "H505",
+      "prompt": "Add \" +\" to Memo, then add \" +\" to Memo again.",
+      "fields": [
+        "Memo",
+        "Tag"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 0,
+            "mode": "append",
+            "value": " +"
+          },
+          {
+            "field": 0,
+            "mode": "append",
+            "value": " +"
+          }
+        ]
+      ]
+    },
+    {
+      "id": "H506",
+      "prompt": "Set \"Project\" to \"Aster\".",
+      "fields": [
+        "Project",
+        "Tag"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "value": "Aster"
+          }
+        ]
+      ]
+    }
+  ]
+}
