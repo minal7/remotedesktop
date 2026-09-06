@@ -1,0 +1,134 @@
+{
+  "allowFieldCopy" : false,
+  "cases" : [
+    {
+      "disposition" : "clarification",
+      "edits" : [
+
+      ],
+      "elapsedSeconds" : 12.729484624986071,
+      "id" : "Q901",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\n  \"disposition\": \"clarification\",\n  \"edits\": []\n}",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\n  \"disposition\": \"clarification\",\n  \"edits\": []\n}",
+          "finishReason" : "stop"
+        }
+      ],
+      "userTurnCount" : 1,
+      "verified" : true
+    },
+    {
+      "disposition" : "clarification",
+      "edits" : [
+
+      ],
+      "elapsedSeconds" : 12.117305833322462,
+      "id" : "Q902",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\n          \"disposition\": \"clarification\",\n          \"edits\": []\n        }",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\n          \"disposition\": \"clarification\",\n          \"edits\": []\n        }",
+          "finishReason" : "stop"
+        }
+      ],
+      "userTurnCount" : 2,
+      "verified" : false
+    },
+    {
+      "disposition" : "clarification",
+      "edits" : [
+
+      ],
+      "elapsedSeconds" : 11.419643375003943,
+      "id" : "Q903",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\n  \"disposition\": \"clarification\",\n  \"edits\": []\n}",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\n  \"disposition\": \"clarification\",\n  \"edits\": []\n}",
+          "finishReason" : "stop"
+        }
+      ],
+      "userTurnCount" : 1,
+      "verified" : true
+    },
+    {
+      "disposition" : "supported",
+      "edits" : [
+        {
+          "field" : 0,
+          "mode" : "replaceAll",
+          "value" : "Oslo"
+        }
+      ],
+      "elapsedSeconds" : 12.419565583346412,
+      "id" : "Q904",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\n  \"disposition\": \"supported\",\n  \"edits\": [\n    {\n      \"fieldID\": \"f1\",\n      \"mode\": \"replaceAll\",\n      \"value\": \"Oslo\"\n    }\n  ]\n}",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\n  \"disposition\": \"supported\",\n  \"edits\": [\n    {\n      \"fieldID\": \"f1\",\n      \"mode\": \"replaceAll\",\n      \"value\": \"Oslo\"\n    }\n  ]\n}",
+          "finishReason" : "stop"
+        }
+      ],
+      "userTurnCount" : 2,
+      "verified" : true
+    },
+    {
+      "disposition" : "clarification",
+      "edits" : [
+
+      ],
+      "elapsedSeconds" : 11.741070541669615,
+      "id" : "Q905",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\n      \"disposition\": \"clarification\",\n      \"edits\": []\n    }",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\n      \"disposition\": \"clarification\",\n      \"edits\": []\n    }",
+          "finishReason" : "stop"
+        }
+      ],
+      "userTurnCount" : 1,
+      "verified" : true
+    }
+  ],
+  "clarificationCaseIDs" : [
+    "Q902",
+    "Q904"
+  ],
+  "contract" : "quoted-references-v12",
+  "corpusSHA256" : "11bb893efb07d2d2b91389928cb838ae4375382cbbda2ab85e4ce8ec0d8a2c06",
+  "desktopEffects" : false,
+  "expectedCaseIDs" : [
+    "Q901",
+    "Q902",
+    "Q903",
+    "Q904",
+    "Q905"
+  ],
+  "modelSHA256FromVerifiedManifest" : "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
+  "oracle" : "exact-disposition-and-complete-operation-sequences-including-count-mode-target-payload-origin-exact-bytes-and-order",
+  "quotedCommandFastPath" : false,
+  "runtimeBinarySHA256" : "02d3079746efaf908ae62667c64afd2d3e9a336ff7368ba96fa9338410e310bc",
+  "schemaVersion" : 1,
+  "scope" : "First frozen explicit-clarification-input evaluation: initial requests, supplied answer states and one counterfactual constraint-retention probe. Proposal only, no desktop effects or client\/host continuation qualification. Preselected batch 1\/4."
+}

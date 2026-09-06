@@ -1,0 +1,697 @@
+{
+  "schemaVersion": 1,
+  "sourceCommit": "10a297a82f2f4163fddebd02acd9775e5e5e7be1",
+  "freeze": "quoted-references-v12-freeze.json",
+  "contract": "quoted-references-v12",
+  "corpus": {
+    "path": "host-mac/AcceptanceFixtures/native-text-clarification-v1.json",
+    "sha256": "6334379a54986de7f9233ba019c9644891a7569a83d939570fbd33d0a76344d5",
+    "caseIDs": [
+      "Q901",
+      "Q902",
+      "Q903",
+      "Q904",
+      "Q905",
+      "Q906",
+      "Q907",
+      "Q908",
+      "Q909",
+      "Q910",
+      "Q911",
+      "Q912",
+      "Q913",
+      "Q914",
+      "Q915",
+      "Q916",
+      "Q917",
+      "Q918",
+      "Q919",
+      "Q920"
+    ],
+    "clarificationCaseIDs": [
+      "Q902",
+      "Q904",
+      "Q906",
+      "Q908",
+      "Q910",
+      "Q912",
+      "Q914",
+      "Q915",
+      "Q917",
+      "Q919",
+      "Q920"
+    ]
+  },
+  "total": 20,
+  "passed": 17,
+  "initialStates": {
+    "passed": 8,
+    "total": 9
+  },
+  "answeredStates": {
+    "passed": 9,
+    "total": 11
+  },
+  "modelResponses": 20,
+  "elapsedCaseSeconds": 245.91683870827546,
+  "incorrectAcceptedPlanCaseIDs": [],
+  "conservativeFailureCaseIDs": [
+    "Q902",
+    "Q907",
+    "Q919"
+  ],
+  "desktopEffects": 0,
+  "productionContract": "candidate-v2",
+  "candidateEnabledInProduct": false,
+  "heldoutRun": false,
+  "batches": [
+    {
+      "report": "quoted-references-v12-batch-1-first-results.json",
+      "sha256": "f6a6704acbba853c890bbf5ef0cac4b1725e8890034b6cfb31aa461a16b249a7",
+      "resultBundle": "/tmp/remotedesktop-quoted-references-v12-batch-1-first.xcresult",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 0,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost \u00b7 Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1788663888.256,
+        "passedTests": 0,
+        "result": "Failed",
+        "skippedTests": 0,
+        "startTime": 1788663824.884,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "XCTAssertTrue failed - Q902: disposition or complete edit sequence did not match the independent corpus",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseSourceBoundTextModelAcceptanceTests/testSignedRuntimeCompilesTheExactCorpusWithoutDesktopEffects()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseSourceBoundTextModelAcceptanceTests/testSignedRuntimeCompilesTheExactCorpusWithoutDesktopEffects",
+            "testName": "testSignedRuntimeCompilesTheExactCorpusWithoutDesktopEffects()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      },
+      "executedTests": {
+        "RemoteDesktopHostTests/ComputerUseSourceBoundTextModelAcceptanceTests/testSignedRuntimeCompilesTheExactCorpusWithoutDesktopEffects": "Failed"
+      }
+    },
+    {
+      "report": "quoted-references-v12-batch-2-first-results.json",
+      "sha256": "3274159d54a92b81c8671676e32e4210e9437cfd5cf59f28976dd5b7dc382af4",
+      "resultBundle": "/tmp/remotedesktop-quoted-references-v12-batch-2-first.xcresult",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 0,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost \u00b7 Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1788663955.657,
+        "passedTests": 0,
+        "result": "Failed",
+        "skippedTests": 0,
+        "startTime": 1788663890.986,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "XCTAssertTrue failed - Q907: disposition or complete edit sequence did not match the independent corpus",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseSourceBoundTextModelAcceptanceTests/testSignedRuntimeCompilesTheExactCorpusWithoutDesktopEffects()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseSourceBoundTextModelAcceptanceTests/testSignedRuntimeCompilesTheExactCorpusWithoutDesktopEffects",
+            "testName": "testSignedRuntimeCompilesTheExactCorpusWithoutDesktopEffects()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      },
+      "executedTests": {
+        "RemoteDesktopHostTests/ComputerUseSourceBoundTextModelAcceptanceTests/testSignedRuntimeCompilesTheExactCorpusWithoutDesktopEffects": "Failed"
+      }
+    },
+    {
+      "report": "quoted-references-v12-batch-3-first-results.json",
+      "sha256": "c0ba9aa461939400f608f38749b110cda53e9b76bd03974209cfb3d5c7dd1f48",
+      "resultBundle": "/tmp/remotedesktop-quoted-references-v12-batch-3-first.xcresult",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 0,
+            "passedTests": 1,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost \u00b7 Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1788664022.578,
+        "passedTests": 1,
+        "result": "Passed",
+        "skippedTests": 0,
+        "startTime": 1788663958.402,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      },
+      "executedTests": {
+        "RemoteDesktopHostTests/ComputerUseSourceBoundTextModelAcceptanceTests/testSignedRuntimeCompilesTheExactCorpusWithoutDesktopEffects": "Passed"
+      }
+    },
+    {
+      "report": "quoted-references-v12-batch-4-first-results.json",
+      "sha256": "f317efce72c9e999c6b7b98d3b34285055d675add6bb44645b370856053ceb7e",
+      "resultBundle": "/tmp/remotedesktop-quoted-references-v12-batch-4-first.xcresult",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 0,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost \u00b7 Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1788664090.02,
+        "passedTests": 0,
+        "result": "Failed",
+        "skippedTests": 0,
+        "startTime": 1788664025.293,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "XCTAssertTrue failed - Q919: disposition or complete edit sequence did not match the independent corpus",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseSourceBoundTextModelAcceptanceTests/testSignedRuntimeCompilesTheExactCorpusWithoutDesktopEffects()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseSourceBoundTextModelAcceptanceTests/testSignedRuntimeCompilesTheExactCorpusWithoutDesktopEffects",
+            "testName": "testSignedRuntimeCompilesTheExactCorpusWithoutDesktopEffects()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      },
+      "executedTests": {
+        "RemoteDesktopHostTests/ComputerUseSourceBoundTextModelAcceptanceTests/testSignedRuntimeCompilesTheExactCorpusWithoutDesktopEffects": "Failed"
+      }
+    }
+  ],
+  "cases": [
+    {
+      "disposition": "clarification",
+      "edits": [],
+      "elapsedSeconds": 12.729484624986071,
+      "id": "Q901",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\n  \"disposition\": \"clarification\",\n  \"edits\": []\n}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\n  \"disposition\": \"clarification\",\n  \"edits\": []\n}",
+          "finishReason": "stop"
+        }
+      ],
+      "userTurnCount": 1,
+      "verified": true
+    },
+    {
+      "disposition": "clarification",
+      "edits": [],
+      "elapsedSeconds": 12.117305833322462,
+      "id": "Q902",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\n          \"disposition\": \"clarification\",\n          \"edits\": []\n        }",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\n          \"disposition\": \"clarification\",\n          \"edits\": []\n        }",
+          "finishReason": "stop"
+        }
+      ],
+      "userTurnCount": 2,
+      "verified": false
+    },
+    {
+      "disposition": "clarification",
+      "edits": [],
+      "elapsedSeconds": 11.419643375003943,
+      "id": "Q903",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\n  \"disposition\": \"clarification\",\n  \"edits\": []\n}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\n  \"disposition\": \"clarification\",\n  \"edits\": []\n}",
+          "finishReason": "stop"
+        }
+      ],
+      "userTurnCount": 1,
+      "verified": true
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 0,
+          "mode": "replaceAll",
+          "value": "Oslo"
+        }
+      ],
+      "elapsedSeconds": 12.419565583346412,
+      "id": "Q904",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\n  \"disposition\": \"supported\",\n  \"edits\": [\n    {\n      \"fieldID\": \"f1\",\n      \"mode\": \"replaceAll\",\n      \"value\": \"Oslo\"\n    }\n  ]\n}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\n  \"disposition\": \"supported\",\n  \"edits\": [\n    {\n      \"fieldID\": \"f1\",\n      \"mode\": \"replaceAll\",\n      \"value\": \"Oslo\"\n    }\n  ]\n}",
+          "finishReason": "stop"
+        }
+      ],
+      "userTurnCount": 2,
+      "verified": true
+    },
+    {
+      "disposition": "clarification",
+      "edits": [],
+      "elapsedSeconds": 11.741070541669615,
+      "id": "Q905",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\n      \"disposition\": \"clarification\",\n      \"edits\": []\n    }",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\n      \"disposition\": \"clarification\",\n      \"edits\": []\n    }",
+          "finishReason": "stop"
+        }
+      ],
+      "userTurnCount": 1,
+      "verified": true
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 0,
+          "mode": "append",
+          "value": " +"
+        }
+      ],
+      "elapsedSeconds": 13.953562708309619,
+      "id": "Q906",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\n      \"disposition\": \"supported\",\n      \"edits\": [\n        {\n          \"fieldID\": \"f1\",\n          \"mode\": \"append\",\n          \"value\": \"p1\"\n        }\n      ]\n    }",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\n      \"disposition\": \"supported\",\n      \"edits\": [\n        {\n          \"fieldID\": \"f1\",\n          \"mode\": \"append\",\n          \"value\": \"p1\"\n        }\n      ]\n    }",
+          "finishReason": "stop"
+        }
+      ],
+      "userTurnCount": 2,
+      "verified": true
+    },
+    {
+      "disposition": "unsupported",
+      "edits": [],
+      "elapsedSeconds": 11.635635749989888,
+      "id": "Q907",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\": \"unsupported\", \"edits\": []}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\": \"unsupported\", \"edits\": []}",
+          "finishReason": "stop"
+        }
+      ],
+      "userTurnCount": 1,
+      "verified": false
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 0,
+          "mode": "insert",
+          "value": "\u2022 "
+        }
+      ],
+      "elapsedSeconds": 12.161184958327794,
+      "id": "Q908",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\": \"supported\", \"edits\": [{\"fieldID\": \"f1\", \"mode\": \"insert\", \"value\": \"p1\"}]}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\": \"supported\", \"edits\": [{\"fieldID\": \"f1\", \"mode\": \"insert\", \"value\": \"p1\"}]}",
+          "finishReason": "stop"
+        }
+      ],
+      "userTurnCount": 2,
+      "verified": true
+    },
+    {
+      "disposition": "clarification",
+      "edits": [],
+      "elapsedSeconds": 11.640596458310029,
+      "id": "Q909",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\n      \"disposition\": \"clarification\",\n      \"edits\": []\n    }",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\n      \"disposition\": \"clarification\",\n      \"edits\": []\n    }",
+          "finishReason": "stop"
+        }
+      ],
+      "userTurnCount": 1,
+      "verified": true
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 1,
+          "mode": "replaceAll",
+          "value": "  \u6771\u4eac e\u0301 \ud83d\ude00\nxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx  "
+        }
+      ],
+      "elapsedSeconds": 12.61885987498681,
+      "id": "Q910",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\n      \"disposition\": \"supported\",\n      \"edits\": [\n        {\n          \"fieldID\": \"f2\",\n          \"mode\": \"replaceAll\",\n          \"value\": \"p1\"\n        }\n      ]\n    }",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\n      \"disposition\": \"supported\",\n      \"edits\": [\n        {\n          \"fieldID\": \"f2\",\n          \"mode\": \"replaceAll\",\n          \"value\": \"p1\"\n        }\n      ]\n    }",
+          "finishReason": "stop"
+        }
+      ],
+      "userTurnCount": 2,
+      "verified": true
+    },
+    {
+      "disposition": "clarification",
+      "edits": [],
+      "elapsedSeconds": 12.235264333314262,
+      "id": "Q911",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\n  \"disposition\": \"supported\",\n  \"edits\": [\n    {\n      \"fieldID\": \"f1\",\n      \"mode\": \"replaceAll\",\n      \"value\": \"Put this exact text in Notes.\"\n    }\n  ]\n}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\n  \"disposition\": \"supported\",\n  \"edits\": [\n    {\n      \"fieldID\": \"f1\",\n      \"mode\": \"replaceAll\",\n      \"value\": \"Put this exact text in Notes.\"\n    }\n  ]\n}",
+          "finishReason": "stop"
+        }
+      ],
+      "userTurnCount": 1,
+      "verified": true
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 0,
+          "mode": "replaceAll",
+          "value": "  ma\u00f1ana e\u0301 \ud83e\udded\nline 2  "
+        }
+      ],
+      "elapsedSeconds": 12.80358983334736,
+      "id": "Q912",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\n      \"disposition\": \"supported\",\n      \"edits\": [\n        {\n          \"fieldID\": \"f1\",\n          \"mode\": \"replaceAll\",\n          \"value\": \"p1\"\n        }\n      ]\n    }",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\n      \"disposition\": \"supported\",\n      \"edits\": [\n        {\n          \"fieldID\": \"f1\",\n          \"mode\": \"replaceAll\",\n          \"value\": \"p1\"\n        }\n      ]\n    }",
+          "finishReason": "stop"
+        }
+      ],
+      "userTurnCount": 2,
+      "verified": true
+    },
+    {
+      "disposition": "clarification",
+      "edits": [],
+      "elapsedSeconds": 9.816627708321903,
+      "id": "Q913",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\"disposition\": \"clarification\", \"edits\": []}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\"disposition\": \"clarification\", \"edits\": []}",
+          "finishReason": "stop"
+        }
+      ],
+      "userTurnCount": 1,
+      "verified": true
+    },
+    {
+      "disposition": "clarification",
+      "edits": [],
+      "elapsedSeconds": 12.797543666674756,
+      "id": "Q914",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\n          \"disposition\": \"clarification\",\n          \"edits\": []\n        }",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\n          \"disposition\": \"clarification\",\n          \"edits\": []\n        }",
+          "finishReason": "stop"
+        }
+      ],
+      "userTurnCount": 2,
+      "verified": true
+    },
+    {
+      "disposition": "supported",
+      "edits": [
+        {
+          "field": 0,
+          "mode": "replaceAll",
+          "value": "ready"
+        }
+      ],
+      "elapsedSeconds": 13.821487541688839,
+      "id": "Q915",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\n  \"disposition\": \"supported\",\n  \"edits\": [\n    {\n      \"fieldID\": \"f1\",\n      \"mode\": \"replaceAll\",\n      \"value\": \"p1\"\n    }\n  ]\n}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\n  \"disposition\": \"supported\",\n  \"edits\": [\n    {\n      \"fieldID\": \"f1\",\n      \"mode\": \"replaceAll\",\n      \"value\": \"p1\"\n    }\n  ]\n}",
+          "finishReason": "stop"
+        }
+      ],
+      "userTurnCount": 3,
+      "verified": true
+    },
+    {
+      "disposition": "unsupported",
+      "edits": [],
+      "elapsedSeconds": 12.494199166656472,
+      "id": "Q916",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\n  \"disposition\": \"unsupported\",\n  \"edits\": []\n}",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\n  \"disposition\": \"unsupported\",\n  \"edits\": []\n}",
+          "finishReason": "stop"
+        }
+      ],
+      "userTurnCount": 1,
+      "verified": true
+    },
+    {
+      "disposition": "unsupported",
+      "edits": [],
+      "elapsedSeconds": 11.93826487500337,
+      "id": "Q917",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\n      \"disposition\": \"unsupported\",\n      \"edits\": []\n    }",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\n      \"disposition\": \"unsupported\",\n      \"edits\": []\n    }",
+          "finishReason": "stop"
+        }
+      ],
+      "userTurnCount": 2,
+      "verified": true
+    },
+    {
+      "disposition": "clarification",
+      "edits": [],
+      "elapsedSeconds": 12.603742791659897,
+      "id": "Q918",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\n      \"disposition\": \"clarification\",\n      \"edits\": []\n    }",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\n      \"disposition\": \"clarification\",\n      \"edits\": []\n    }",
+          "finishReason": "stop"
+        }
+      ],
+      "userTurnCount": 1,
+      "verified": true
+    },
+    {
+      "disposition": "clarification",
+      "edits": [],
+      "elapsedSeconds": 12.570468458347023,
+      "id": "Q919",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\n      \"disposition\": \"clarification\",\n      \"edits\": []\n    }",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\n      \"disposition\": \"clarification\",\n      \"edits\": []\n    }",
+          "finishReason": "stop"
+        }
+      ],
+      "userTurnCount": 2,
+      "verified": false
+    },
+    {
+      "disposition": "clarification",
+      "edits": [],
+      "elapsedSeconds": 12.39874062500894,
+      "id": "Q920",
+      "modelResponses": 1,
+      "proposal": {
+        "content": "{\n      \"disposition\": \"clarification\",\n      \"edits\": []\n    }",
+        "finishReason": "stop"
+      },
+      "proposals": [
+        {
+          "content": "{\n      \"disposition\": \"clarification\",\n      \"edits\": []\n    }",
+          "finishReason": "stop"
+        }
+      ],
+      "userTurnCount": 2,
+      "verified": true
+    }
+  ],
+  "assessment": "Quotation syntax alone fails the known-state gate. Q901 improves to clarification but Q907 regresses to unsupported; Q902 and Q919 still ask after valid field answers. No net outcome improvement over the current decoder replay control (17/20). The original v2 model run remains 16/20; the Q911 guard is a separate host decoder change.",
+  "limitations": [
+    "One frozen first-response pass per state, not a broad performance claim.",
+    "The twenty unseen clarification cases remain unused.",
+    "These are independent proposal states, not a host/client conversation or desktop execution.",
+    "Keep normal production at candidate-v2 and retain exact state through the execution continuation path."
+  ]
+}

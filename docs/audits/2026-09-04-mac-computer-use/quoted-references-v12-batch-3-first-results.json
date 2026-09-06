@@ -1,0 +1,139 @@
+{
+  "allowFieldCopy" : false,
+  "cases" : [
+    {
+      "disposition" : "clarification",
+      "edits" : [
+
+      ],
+      "elapsedSeconds" : 12.235264333314262,
+      "id" : "Q911",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\n  \"disposition\": \"supported\",\n  \"edits\": [\n    {\n      \"fieldID\": \"f1\",\n      \"mode\": \"replaceAll\",\n      \"value\": \"Put this exact text in Notes.\"\n    }\n  ]\n}",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\n  \"disposition\": \"supported\",\n  \"edits\": [\n    {\n      \"fieldID\": \"f1\",\n      \"mode\": \"replaceAll\",\n      \"value\": \"Put this exact text in Notes.\"\n    }\n  ]\n}",
+          "finishReason" : "stop"
+        }
+      ],
+      "userTurnCount" : 1,
+      "verified" : true
+    },
+    {
+      "disposition" : "supported",
+      "edits" : [
+        {
+          "field" : 0,
+          "mode" : "replaceAll",
+          "value" : "  mañana é 🧭\nline 2  "
+        }
+      ],
+      "elapsedSeconds" : 12.80358983334736,
+      "id" : "Q912",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\n      \"disposition\": \"supported\",\n      \"edits\": [\n        {\n          \"fieldID\": \"f1\",\n          \"mode\": \"replaceAll\",\n          \"value\": \"p1\"\n        }\n      ]\n    }",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\n      \"disposition\": \"supported\",\n      \"edits\": [\n        {\n          \"fieldID\": \"f1\",\n          \"mode\": \"replaceAll\",\n          \"value\": \"p1\"\n        }\n      ]\n    }",
+          "finishReason" : "stop"
+        }
+      ],
+      "userTurnCount" : 2,
+      "verified" : true
+    },
+    {
+      "disposition" : "clarification",
+      "edits" : [
+
+      ],
+      "elapsedSeconds" : 9.8166277083219029,
+      "id" : "Q913",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\"disposition\": \"clarification\", \"edits\": []}",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\"disposition\": \"clarification\", \"edits\": []}",
+          "finishReason" : "stop"
+        }
+      ],
+      "userTurnCount" : 1,
+      "verified" : true
+    },
+    {
+      "disposition" : "clarification",
+      "edits" : [
+
+      ],
+      "elapsedSeconds" : 12.797543666674756,
+      "id" : "Q914",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\n          \"disposition\": \"clarification\",\n          \"edits\": []\n        }",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\n          \"disposition\": \"clarification\",\n          \"edits\": []\n        }",
+          "finishReason" : "stop"
+        }
+      ],
+      "userTurnCount" : 2,
+      "verified" : true
+    },
+    {
+      "disposition" : "supported",
+      "edits" : [
+        {
+          "field" : 0,
+          "mode" : "replaceAll",
+          "value" : "ready"
+        }
+      ],
+      "elapsedSeconds" : 13.821487541688839,
+      "id" : "Q915",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\n  \"disposition\": \"supported\",\n  \"edits\": [\n    {\n      \"fieldID\": \"f1\",\n      \"mode\": \"replaceAll\",\n      \"value\": \"p1\"\n    }\n  ]\n}",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\n  \"disposition\": \"supported\",\n  \"edits\": [\n    {\n      \"fieldID\": \"f1\",\n      \"mode\": \"replaceAll\",\n      \"value\": \"p1\"\n    }\n  ]\n}",
+          "finishReason" : "stop"
+        }
+      ],
+      "userTurnCount" : 3,
+      "verified" : true
+    }
+  ],
+  "clarificationCaseIDs" : [
+    "Q912",
+    "Q914",
+    "Q915"
+  ],
+  "contract" : "quoted-references-v12",
+  "corpusSHA256" : "b984f6b35ffd27bbb0cdcdc78be0f506984b0723479d3baf7133a3dd5440933d",
+  "desktopEffects" : false,
+  "expectedCaseIDs" : [
+    "Q911",
+    "Q912",
+    "Q913",
+    "Q914",
+    "Q915"
+  ],
+  "modelSHA256FromVerifiedManifest" : "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
+  "oracle" : "exact-disposition-and-complete-operation-sequences-including-count-mode-target-payload-origin-exact-bytes-and-order",
+  "quotedCommandFastPath" : false,
+  "runtimeBinarySHA256" : "02d3079746efaf908ae62667c64afd2d3e9a336ff7368ba96fa9338410e310bc",
+  "schemaVersion" : 1,
+  "scope" : "First frozen explicit-clarification-input evaluation: initial requests, supplied answer states and one counterfactual constraint-retention probe. Proposal only, no desktop effects or client\/host continuation qualification. Preselected batch 3\/4."
+}
