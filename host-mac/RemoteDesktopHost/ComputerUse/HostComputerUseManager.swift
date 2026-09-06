@@ -4553,7 +4553,9 @@ final class HostComputerUseManager: ObservableObject {
         } ?? false
         let snapshot = ComputerUseBrowserTaskControls(taskID: identity.taskID,
             scopeID: sameRun ? (browserControlSnapshot?.scopeID ?? UUID()) : UUID(),
-            presentationID: UUID(), phase: phase, canResume: identity.canResume)
+            presentationID: UUID(), phase: phase, canResume: identity.canResume,
+            ownerID: browserControlIdentity.map { identity.sameOwner(as: $0) } == true
+                ? (browserControlSnapshot?.ownerID ?? UUID()) : UUID())
         browserControlIdentity = identity
         browserControlSnapshot = snapshot
         tools.updateOwnedBrowserTaskControls(snapshot)
@@ -6061,8 +6063,11 @@ final class HostComputerUseManager: ObservableObject {
                         do {
                             try await tools.reacquireOwnedBrowserAfterUserControl(taskID: envelope.id)
                         } catch {
+                            let guidance = error as? ComputerUseBrowserError == .signInWindowOpen
+                                ? ComputerUseBrowserError.signInWindowOpen.localizedDescription
+                                : "The AI browser is not ready to continue. Finish signing in or loading the page, then choose Resume."
                             try acceptExecutionResult(.userInterventionRequired(
-                                "The AI browser is not ready to continue. Finish signing in or loading the page, then choose Resume."),
+                                guidance),
                                 executor: executor, context: context, token: token)
                             return
                         }

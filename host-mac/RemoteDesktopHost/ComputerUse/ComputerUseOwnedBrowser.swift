@@ -10,6 +10,19 @@ struct ComputerUseBrowserTaskControls: Equatable {
     let presentationID: UUID
     let phase: Phase
     let canResume: Bool
+    /// Stable through Pause/Resume; changes with peer, session, authorization,
+    /// transport or task ownership. Button authority still uses scopeID.
+    let ownerID: UUID
+
+    init(taskID: String, scopeID: UUID, presentationID: UUID, phase: Phase,
+         canResume: Bool, ownerID: UUID? = nil) {
+        self.taskID = taskID
+        self.scopeID = scopeID
+        self.presentationID = presentationID
+        self.phase = phase
+        self.canResume = canResume
+        self.ownerID = ownerID ?? scopeID
+    }
 }
 
 /// A display projection, never a navigation target or document identity. Page
@@ -64,7 +77,7 @@ struct ComputerUseBrowserDocument: Equatable, Sendable, CustomStringConvertible,
 }
 
 enum ComputerUseBrowserError: Error, LocalizedError, Equatable {
-    case invalidURL, busy, ownershipLost, pageChanged, navigationFailed, deadlineExceeded, closed, unsupportedDocument, documentUnresponsive, windowNotActive, authenticationRequired
+    case invalidURL, busy, ownershipLost, pageChanged, navigationFailed, deadlineExceeded, closed, unsupportedDocument, documentUnresponsive, windowNotActive, authenticationRequired, signInWindowOpen
     var errorDescription: String? {
         switch self {
         case .invalidURL: return "The browser needs an HTTP or HTTPS URL without embedded credentials."
@@ -78,6 +91,7 @@ enum ComputerUseBrowserError: Error, LocalizedError, Equatable {
         case .documentUnresponsive: return "The AI browser page did not respond before the deadline. Check it before continuing."
         case .windowNotActive: return "The AI browser is open, but another Mac window still has focus. Select the AI browser, then continue."
         case .authenticationRequired: return "Sign in or complete verification yourself in the AI browser, then choose Let AI continue. AI will check the page again before continuing your request."
+        case .signInWindowOpen: return "Finish or close the sign-in window, then choose Let AI continue in the AI browser."
         }
     }
 }
@@ -86,11 +100,13 @@ enum ComputerUseBrowserError: Error, LocalizedError, Equatable {
 /// imports their cookies, or accepts model-supplied JavaScript. Navigation
 /// receipts come from the exact WKNavigation owned by the current task.
 @MainActor
-final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDelegate, NSWindowDelegate {
+final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelegate, NSWindowDelegate {
     let contextID = UUID().uuidString
     @Published private(set) var displayedSite = ComputerUseBrowserSite.displayName(for: nil)
     @Published private(set) var detail = "Ready"
     @Published private(set) var taskControls: ComputerUseBrowserTaskControls?
+    @Published private(set) var signInSite: String?
+    @Published private(set) var signInDetail = "You control this window. AI is paused."
     private var taskControlHandler: ((ComputerUseBrowserTaskControls, ComputerUseBrowserTaskControls.Action) -> Void)?
     private(set) var taskID: String?
     private var generation: UInt64 = 0
@@ -109,6 +125,10 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     private var userNavigation: UserNavigation?
     private var observedUserPage: ObservedUserPage?
     private var loadedPageIdentity: String?
+    private var signInBrowser: WKWebView?
+    private var signInWindow: NSWindow?
+    private var signInURLObservation: NSKeyValueObservation?
+    private var signInScope: (taskID: String, ownerID: UUID)?
 
     private struct UserNavigation {
         let navigation: WKNavigation
@@ -177,6 +197,10 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
 
     func updateTaskControls(_ controls: ComputerUseBrowserTaskControls?,
         handler: @escaping (ComputerUseBrowserTaskControls, ComputerUseBrowserTaskControls.Action) -> Void) {
+        if let scope = signInScope,
+           controls?.taskID != scope.taskID || controls?.ownerID != scope.ownerID {
+            closeSignInWindow(restoreParent: false)
+        }
         taskControlHandler = handler
         if taskControls != controls { taskControls = controls }
     }
@@ -189,6 +213,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     }
 
     func claim(taskID: String) throws {
+        guard !hasOpenSignInWindow else { throw ComputerUseBrowserError.signInWindowOpen }
         guard pending == nil, pendingDOM == nil, userNavigation == nil else { throw ComputerUseBrowserError.busy }
         guard mayAct(), !taskID.isEmpty else { throw ComputerUseBrowserError.ownershipLost }
         if self.taskID != taskID {
@@ -200,7 +225,9 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         }
     }
 
-    func hasOwnership(taskID: String) -> Bool { self.taskID == taskID && mayAct() }
+    func hasOwnership(taskID: String) -> Bool { self.taskID == taskID && mayAct() && !hasOpenSignInWindow }
+
+    var hasOpenSignInWindow: Bool { signInBrowser != nil }
 
     var isFrontmostWindow: Bool {
         guard let window, window.isVisible, !window.isMiniaturized,
@@ -208,7 +235,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         return NSApp.keyWindow === window
     }
 
-    var hasRequiredPresentation: Bool { !presentsWindow || isFrontmostWindow }
+    var hasRequiredPresentation: Bool { !hasOpenSignInWindow && (!presentsWindow || isFrontmostWindow) }
 
     /// A new current-form request may acquire the already-open owned page.
     /// This creates an ownership token, never a new navigation receipt.
@@ -239,6 +266,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     func reacquireAfterUserControl(taskID: String) async throws {
         try Task.checkCancellation()
         guard browser != nil, self.taskID == taskID || isFrontmostWindow else { return }
+        guard !hasOpenSignInWindow else { throw ComputerUseBrowserError.signInWindowOpen }
         guard mayAct() else { throw ComputerUseBrowserError.ownershipLost }
         guard pending == nil, pendingDOM == nil, userNavigation == nil,
               browser?.isLoading == false else { throw ComputerUseBrowserError.busy }
@@ -461,6 +489,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     }
 
     func stop() {
+        closeSignInWindow(restoreParent: false)
         if let pending { failPending(id: pending.id, error: .ownershipLost) }
         if let pendingDOM { interruptDOM(id: pendingDOM.id, error: ComputerUseBrowserError.ownershipLost) }
         taskID = nil
@@ -483,6 +512,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     }
 
     private func releaseBrowser() {
+        closeSignInWindow(restoreParent: false)
         if let pendingDOM { interruptDOM(id: pendingDOM.id, error: ComputerUseBrowserError.closed) }
         pendingDOM = nil
         userNavigation = nil
@@ -490,11 +520,19 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         loadedPageIdentity = nil
         urlObservation = nil
         browser?.navigationDelegate = nil
+        browser?.uiDelegate = nil
         browser = nil
         displayedSite = ComputerUseBrowserSite.displayName(for: nil)
     }
 
     func windowWillClose(_ notification: Notification) {
+        if let closingWindow = notification.object as? NSWindow, closingWindow === signInWindow {
+            closingWindow.delegate = nil
+            closingWindow.contentView = nil
+            signInWindow = nil
+            closeSignInWindow()
+            return
+        }
         guard let closingWindow = notification.object as? NSWindow,
               closingWindow === window else { return }
         if let controls = taskControls { requestTaskControl(.stop, displayed: controls) }
@@ -509,10 +547,14 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         if let browser { return browser }
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .nonPersistent()
+        // Provider flows may open their window after an asynchronous response.
+        // Our delegate admits one owned window only during explicit user control.
+        configuration.preferences.javaScriptCanOpenWindowsAutomatically = true
         configuration.userContentController.addUserScript(WKUserScript(source: ComputerUseBrowserDOM.source,
             injectionTime: .atDocumentStart, forMainFrameOnly: true, in: ComputerUseBrowserDOM.world))
         let view = WKWebView(frame: NSRect(x: 0, y: 0, width: 960, height: 640), configuration: configuration)
         view.navigationDelegate = self
+        view.uiDelegate = self
         urlObservation = view.observe(\.url, options: [.new]) { [weak self] view, change in
             let url = change.newValue ?? nil
             if Thread.isMainThread {
@@ -555,6 +597,110 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         detail = "Page changed"
     }
 
+    private var isUserControllingTask: Bool {
+        guard !mayAct(), let taskID, let controls = taskControls else { return false }
+        return controls.taskID == taskID && controls.phase == .paused && controls.canResume
+    }
+
+    private var canOpenSignInWindow: Bool {
+        isUserControllingTask && !hasOpenSignInWindow && pending == nil
+            && pendingDOM == nil && browser?.isLoading == false
+    }
+
+    private var canNavigateSignInWindow: Bool {
+        // An early Resume is rejected by reacquisition, but briefly publishes
+        // a working phase. Keep the person's in-flight login alive during that
+        // transition; the open child independently blocks all browser effects.
+        guard hasOpenSignInWindow, let scope = signInScope else { return false }
+        return taskID == scope.taskID && taskControls?.taskID == scope.taskID
+            && taskControls?.ownerID == scope.ownerID
+    }
+
+    private static func isSignInLocation(_ url: URL?) -> Bool {
+        guard let url else { return false }
+        // An opener may allocate a blank window before obtaining the provider
+        // URL. Other about/data/javascript/custom-scheme main pages are refused.
+        return url.absoluteString == "about:blank" || validatedURL(url) != nil
+    }
+
+    private static func isSignInCreationLocation(_ url: URL?) -> Bool {
+        // window.open() / window.open('') allocate a blank context with an
+        // empty request URL. Only creation admits that omission; every later
+        // child navigation still needs an explicit supported location.
+        url == nil || url?.absoluteString.isEmpty == true || isSignInLocation(url)
+    }
+
+    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
+                 for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+        guard webView === browser, navigationAction.targetFrame == nil,
+              canOpenSignInWindow, Self.isSignInCreationLocation(navigationAction.request.url),
+              let controls = taskControls else { return nil }
+        // WebKit must supply the configuration and perform the initial load:
+        // replacing either breaks opener/postMessage and the shared session.
+        let child = WKWebView(frame: NSRect(x: 0, y: 0, width: 640, height: 720), configuration: configuration)
+        child.navigationDelegate = self
+        child.uiDelegate = self
+        signInScope = (controls.taskID, controls.ownerID)
+        signInBrowser = child
+        signInSite = ComputerUseBrowserSite.displayName(for: navigationAction.request.url)
+        signInDetail = "You control this window. AI is paused."
+        signInURLObservation = child.observe(\.url, options: [.new]) { [weak self] child, _ in
+            Task { @MainActor [weak self, weak child] in
+                guard let self, let child, signInBrowser === child else { return }
+                signInSite = ComputerUseBrowserSite.displayName(for: child.url)
+            }
+        }
+        if presentsWindow {
+            let popup = NSWindow(contentRect: child.bounds, styleMask: [.titled, .closable, .resizable],
+                                 backing: .buffered, defer: false)
+            popup.title = "Sign-in window — AI Browser"
+            popup.isReleasedWhenClosed = false
+            popup.isRestorable = false
+            popup.delegate = self
+            popup.contentView = NSHostingView(rootView: OwnedBrowserSignInContent(context: self, browser: child))
+            popup.minSize = NSSize(width: 480, height: 320)
+            if let screen = window?.screen ?? NSScreen.main {
+                let visible = screen.visibleFrame
+                var frame = popup.frame
+                frame.size.width = min(frame.width, visible.width)
+                frame.size.height = min(frame.height, visible.height)
+                frame.origin = NSPoint(x: visible.midX - frame.width / 2, y: visible.midY - frame.height / 2)
+                popup.setFrame(frame, display: false)
+            }
+            signInWindow = popup
+            popup.makeKeyAndOrderFront(nil)
+        }
+        return child
+    }
+
+    func webViewDidClose(_ webView: WKWebView) {
+        guard webView === signInBrowser else { return }
+        closeSignInWindow()
+    }
+
+    func closeSignInWindow() { closeSignInWindow(restoreParent: true) }
+
+    private func closeSignInWindow(restoreParent: Bool) {
+        guard let child = signInBrowser else { return }
+        let wasKey = signInWindow?.isKeyWindow == true
+        // Retire delegate identity before stopping/closing: late child callbacks
+        // can neither close a replacement nor change the main page's evidence.
+        signInBrowser = nil
+        signInScope = nil
+        signInURLObservation = nil
+        child.navigationDelegate = nil
+        child.uiDelegate = nil
+        child.stopLoading()
+        signInWindow?.delegate = nil
+        signInWindow?.close()
+        signInWindow?.contentView = nil
+        signInWindow = nil
+        signInSite = nil
+        detail = "Sign-in window closed — choose Let AI continue when you are ready"
+        if restoreParent, wasKey { window?.makeKeyAndOrderFront(nil) }
+        // Closing is not handback, a login assertion, or a navigation receipt.
+    }
+
     private func presentIfNeeded(_ browser: WKWebView) {
         guard presentsWindow else { return }
         if window == nil {
@@ -590,10 +736,24 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
                  decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void) {
+        if webView === signInBrowser {
+            guard canNavigateSignInWindow, let frame = navigationAction.targetFrame else {
+                decisionHandler(.cancel)
+                return
+            }
+            let permitted = frame.isMainFrame ? Self.isSignInLocation(navigationAction.request.url)
+                : ["http", "https", "about", "data", "blob"].contains(navigationAction.request.url?.scheme?.lowercased() ?? "")
+            if !permitted { signInDetail = "This sign-in destination is not supported in the AI browser. Close this window to return." }
+            decisionHandler(permitted ? .allow : .cancel)
+            return
+        }
         guard webView === browser else { decisionHandler(.cancel); return }
-        // A popup or unsupported subframe is not the task's main navigation.
-        // Cancelling it must not consume that navigation's continuation.
-        guard let frame = navigationAction.targetFrame else { decisionHandler(.cancel); return }
+        // A popup cannot consume the main navigation's continuation. Admission
+        // is rechecked when WebKit asks for the concrete child configuration.
+        guard let frame = navigationAction.targetFrame else {
+            decisionHandler(canOpenSignInWindow && Self.isSignInCreationLocation(navigationAction.request.url) ? .allow : .cancel)
+            return
+        }
         guard frame.isMainFrame else {
             let scheme = navigationAction.request.url?.scheme?.lowercased() ?? ""
             decisionHandler(["http", "https", "about", "data", "blob"].contains(scheme) ? .allow : .cancel)
@@ -614,6 +774,16 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse,
                  decisionHandler: @escaping @MainActor @Sendable (WKNavigationResponsePolicy) -> Void) {
+        if webView === signInBrowser {
+            guard canNavigateSignInWindow else { decisionHandler(.cancel); return }
+            guard navigationResponse.isForMainFrame else { decisionHandler(.allow); return }
+            // Error pages may explain a provider refusal to the person. They
+            // are display only and never become task/navigation evidence.
+            let permitted = navigationResponse.canShowMIMEType && Self.isSignInLocation(navigationResponse.response.url)
+            if !permitted { signInDetail = "The sign-in page cannot be displayed. Close this window to return." }
+            decisionHandler(permitted ? .allow : .cancel)
+            return
+        }
         guard webView === browser else { decisionHandler(.cancel); return }
         guard navigationResponse.isForMainFrame else { decisionHandler(.allow); return }
         guard navigationResponse.canShowMIMEType,
@@ -680,6 +850,10 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        if webView === signInBrowser {
+            signInDetail = "The sign-in page did not finish loading. Close this window to return."
+            return
+        }
         guard webView === browser else { return }
         if let observed = userNavigation, navigation === observed.navigation {
             userNavigation = nil; observedUserPage = nil
@@ -687,6 +861,10 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         if let pending, navigation === pending.navigation { failPending(id: pending.id, error: .navigationFailed) }
     }
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        if webView === signInBrowser {
+            signInDetail = "The sign-in page did not finish loading. Close this window to return."
+            return
+        }
         guard webView === browser else { return }
         if let observed = userNavigation, navigation === observed.navigation {
             userNavigation = nil; observedUserPage = nil
@@ -694,7 +872,13 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         if let pending, navigation === pending.navigation { failPending(id: pending.id, error: .navigationFailed) }
     }
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        if webView === signInBrowser {
+            closeSignInWindow()
+            detail = "The sign-in window stopped. Check the main page before continuing."
+            return
+        }
         guard webView === browser else { return }
+        closeSignInWindow(restoreParent: false)
         if let pending { failPending(id: pending.id, error: .navigationFailed) }
         generation &+= 1
         document = nil
@@ -721,11 +905,39 @@ private struct OwnedBrowserContent: View {
                 if let controls = context.taskControls {
                     if controls.phase == .paused {
                         Button("Let AI continue") { context.requestTaskControl(.resume, displayed: controls) }
-                            .disabled(!controls.canResume)
+                            .disabled(!controls.canResume || context.hasOpenSignInWindow)
                     } else {
                         Button("Take control") { context.requestTaskControl(.takeControl, displayed: controls) }
                     }
                     Button("Stop AI") { context.requestTaskControl(.stop, displayed: controls) }
+                }
+            }.padding(12)
+            if context.hasOpenSignInWindow {
+                Text("Finish or close the sign-in window before returning control to AI.")
+                    .font(.caption).padding(.horizontal, 12).padding(.bottom, 8)
+            }
+            Divider()
+            OwnedBrowserWebView(browser: browser)
+        }.frame(minWidth: 480, minHeight: 320)
+    }
+}
+
+private struct OwnedBrowserSignInContent: View {
+    @ObservedObject var context: ComputerUseOwnedBrowser
+    let browser: WKWebView
+    var body: some View {
+        VStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(context.signInSite ?? "Website unavailable")
+                    .lineLimit(1).truncationMode(.middle).textSelection(.enabled)
+                    .accessibilityLabel("Website: \(context.signInSite ?? "Website unavailable")")
+                Text(context.signInDetail).font(.caption).foregroundStyle(.secondary)
+                HStack {
+                    Button("Close sign-in window") { context.closeSignInWindow() }
+                    Spacer()
+                    if let controls = context.taskControls {
+                        Button("Stop AI") { context.requestTaskControl(.stop, displayed: controls) }
+                    }
                 }
             }.padding(12)
             Divider()

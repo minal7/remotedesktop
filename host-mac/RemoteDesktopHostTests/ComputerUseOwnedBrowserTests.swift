@@ -6,6 +6,232 @@ import XCTest
 
 @MainActor
 final class ComputerUseOwnedBrowserTests: XCTestCase {
+    func testClosingSignInPopupDoesNotAssertAuthenticationSucceeded() async throws {
+        let server = try OwnedBrowserHTTPFixture(routes: [
+            "/login": .init(body: """
+                <input type="password" value="private-password">
+                <script>fetch('/signal').then(() => window.open('/provider'));</script>
+                """), "/signal": .init(held: true),
+            "/provider": .init(body: "<input autocomplete='one-time-code' value='private-code'><script>fetch('/ready');</script>"),
+        ])
+        let base = try await server.start()
+        defer { server.stop() }
+        var allowed = true
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { allowed })
+        defer { browser.close() }
+        try browser.claim(taskID: "incomplete-login")
+        let original = try await browser.navigate(taskID: "incomplete-login", operationID: "login", to: base.appendingPathComponent("login"))
+        try await waitUntil { server.count("/signal") == 1 }
+        allowed = false
+        browser.updateTaskControls(.init(taskID: "incomplete-login", scopeID: UUID(), presentationID: UUID(),
+            phase: .paused, canResume: true), handler: { _, _ in })
+        server.releaseHeldResponses()
+        try await waitUntil { browser.hasOpenSignInWindow && server.count("/ready") == 1 }
+        browser.closeSignInWindow()
+        XCTAssertNil(browser.currentDocument(taskID: "incomplete-login"))
+        allowed = true
+        try await browser.reacquireAfterUserControl(taskID: "incomplete-login")
+        XCTAssertEqual(browser.currentDocument(taskID: "incomplete-login"), original)
+        let target = ComputerUseBrowserTextTarget(browser: browser, document: original, requiresFrontmost: false)
+        do {
+            _ = try await target.fieldsIfSupported()
+            XCTFail("The unchanged authentication form must request user intervention again")
+        } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .authenticationRequired) }
+        XCTAssertEqual(server.count("/login"), 1)
+    }
+
+    func testSignInPopupPreservesOpenerSessionAndRequiresExplicitHandback() async throws {
+        for open in [
+            "window.open('/provider?opaque=private-token#private-fragment');",
+            "const child = window.open('about:blank'); child.location = '/provider?opaque=private-token#private-fragment';",
+            "const child = window.open(''); child.location = '/provider?opaque=private-token#private-fragment';",
+            "const child = window.open(); child.location = '/provider?opaque=private-token#private-fragment';",
+        ] {
+            let server = try OwnedBrowserHTTPFixture(routes: [
+                "/login": .init(body: """
+                    <label>Origin<input value="old"></label><input type="password" value="private-password">
+                    <script>
+                    fetch('/open-signal').then(() => { \(open) });
+                    addEventListener('message', e => {
+                        if (e.origin !== location.origin || e.data !== 'finished') return;
+                        document.body.innerHTML = '<label>Origin<input id="fresh" value="retained"></label>';
+                        document.getElementById('fresh').addEventListener('input', e => fetch('/edited?value=' + encodeURIComponent(e.target.value)));
+                        history.replaceState({}, '', '/account');
+                        fetch(document.cookie.includes('fixture_session=yes') ? '/shared-session' : '/lost-session');
+                    });
+                    </script>
+                    """),
+                "/open-signal": .init(held: true),
+                "/provider?opaque=private-token": .init(body: """
+                    <input autocomplete="one-time-code" value="private-code"><script>
+                    document.cookie = 'fixture_session=yes; SameSite=Lax; Path=/';
+                    fetch('/finish-signal').then(() => {
+                        if (opener) opener.postMessage('finished', location.origin);
+                        window.close();
+                    });
+                    </script>
+                    """),
+                "/finish-signal": .init(held: true),
+            ])
+            let base = try await server.start()
+            defer { server.stop() }
+            var allowed = true
+            var commands: [ComputerUseBrowserDOMCommand] = []
+            let browser = ComputerUseOwnedBrowser(presentsWindow: false,
+                domScriptDidDispatch: { commands.append($0) }, mayAct: { allowed })
+            defer { browser.close() }
+            try browser.claim(taskID: "popup-login")
+            let original = try await browser.navigate(taskID: "popup-login", operationID: "login", to: base.appendingPathComponent("login"))
+            try await waitUntil { server.count("/open-signal") == 1 }
+            let beforePause = commands
+            allowed = false
+            browser.updateTaskControls(.init(taskID: "popup-login", scopeID: UUID(), presentationID: UUID(),
+                phase: .paused, canResume: true), handler: { _, _ in })
+            server.releaseHeldResponses()
+            try await waitUntil { browser.hasOpenSignInWindow && server.count("/finish-signal") == 1 }
+            XCTAssertEqual(browser.signInSite, base.absoluteString)
+            XCTAssertFalse(browser.signInDetail.contains("private-"))
+            allowed = true
+            XCTAssertFalse(browser.hasOwnership(taskID: "popup-login"))
+            XCTAssertFalse(browser.hasRequiredPresentation)
+            XCTAssertNil(browser.currentDocument(taskID: "popup-login"))
+            XCTAssertThrowsError(try browser.claim(taskID: "replacement")) {
+                XCTAssertEqual($0 as? ComputerUseBrowserError, .signInWindowOpen)
+            }
+            do {
+                try await browser.reacquireAfterUserControl(taskID: "popup-login")
+                XCTFail("Resume cannot bypass an open sign-in window")
+            } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .signInWindowOpen) }
+            do {
+                _ = try await browser.callDOM(.fields, arguments: [:], document: original)
+                XCTFail("Even a temporarily open host gate cannot inspect the popup or its opener")
+            } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+            XCTAssertEqual(commands, beforePause, "No DOM command runs while the user owns the sign-in flow")
+            allowed = false
+            server.releaseHeldResponses()
+            try await waitUntil { !browser.hasOpenSignInWindow && browser.hasPageAwaitingHandback && server.count("/shared-session") == 1 }
+            XCTAssertNil(browser.signInSite)
+            XCTAssertNil(browser.currentDocument(taskID: "popup-login"))
+            allowed = true
+            XCTAssertNil(browser.currentDocument(taskID: "popup-login"))
+            try await browser.reacquireAfterUserControl(taskID: "popup-login")
+            let current = try XCTUnwrap(browser.currentDocument(taskID: "popup-login"))
+            XCTAssertEqual(current.source, .userControlObservation)
+            XCTAssertFalse(browser.validate(original))
+            XCTAssertEqual(browser.receipt(taskID: "popup-login", operationID: "login"), original)
+            XCTAssertNil(browser.receipt(taskID: "popup-login", operationID: current.operationID))
+            let target = ComputerUseBrowserTextTarget(browser: browser, document: current, requiresFrontmost: false)
+            let fields = try await target.fieldsIfSupported()
+            let field = try XCTUnwrap(fields?.first)
+            XCTAssertEqual(field.snapshot.value, "retained")
+            try await target.apply(.init(targetID: field.snapshot.targetID, mode: .replaceAll, text: "Paris"),
+                expected: field.snapshot, operationID: ComputerUseTaskContract.digest(["popup-edit"]))
+            try await waitUntil { server.count("/edited?value=Paris") == 1 }
+            XCTAssertEqual(server.count("/login"), 1)
+            XCTAssertEqual(server.count("/provider?opaque=private-token"), 1)
+            XCTAssertEqual(server.count("/account"), 0)
+            XCTAssertEqual(server.count("/lost-session"), 0)
+        }
+    }
+
+    func testSignInPopupRequiresPausedTaskAndRejectsExtraAndNestedWindows() async throws {
+        for (phase, canResume) in [(ComputerUseBrowserTaskControls.Phase.working, false),
+                                  (.awaitingApproval, false), (.paused, false), (.paused, true)] {
+            let server = try OwnedBrowserHTTPFixture(routes: [
+                "/login": .init(body: """
+                    <script>fetch('/signal').then(() => {
+                        window.open('data:text/html,unsupported');
+                        window.open('/provider'); window.open('/extra'); fetch('/attempted');
+                    });</script>
+                    """), "/signal": .init(held: true),
+                "/provider": .init(body: "<script>window.open('/nested'); fetch('/provider-ready');</script>"),
+            ])
+            let base = try await server.start()
+            defer { server.stop() }
+            var allowed = true
+            let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { allowed })
+            defer { browser.close() }
+            try browser.claim(taskID: "popup-admission")
+            let original = try await browser.navigate(taskID: "popup-admission", operationID: "login", to: base.appendingPathComponent("login"))
+            try await waitUntil { server.count("/signal") == 1 }
+            allowed = phase == .working
+            browser.updateTaskControls(.init(taskID: "popup-admission", scopeID: UUID(), presentationID: UUID(),
+                phase: phase, canResume: canResume), handler: { _, _ in })
+            server.releaseHeldResponses()
+            try await waitUntil { server.count("/attempted") == 1 }
+            if phase == .paused && canResume {
+                try await waitUntil { server.count("/provider-ready") == 1 }
+                XCTAssertTrue(browser.hasOpenSignInWindow)
+                XCTAssertEqual(server.count("/provider"), 1)
+            } else {
+                XCTAssertFalse(browser.hasOpenSignInWindow)
+                XCTAssertEqual(server.count("/provider"), 0)
+            }
+            XCTAssertEqual(server.count("/extra"), 0)
+            XCTAssertEqual(server.count("/nested"), 0)
+            browser.closeSignInWindow()
+            XCTAssertEqual(browser.taskID, "popup-admission", "Closing the child does not cancel the main task")
+            allowed = true
+            XCTAssertEqual(browser.currentDocument(taskID: "popup-admission"), original)
+            XCTAssertEqual(browser.receipt(taskID: "popup-admission", operationID: "login"), original)
+        }
+    }
+
+    func testSignInPopupRetainsOwnerThroughResumeButRetiresOnStopCloseOrReplacement() async throws {
+        for ending in ["stop", "close", "owner", "revoke"] {
+            let server = try OwnedBrowserHTTPFixture(routes: [
+                "/login": .init(body: "<script>fetch('/signal').then(() => window.open('/provider'));</script>"),
+                "/signal": .init(held: true),
+                "/provider": .init(body: "<script>fetch('/late-child'); window.close();</script>", held: true),
+            ])
+            let base = try await server.start()
+            defer { server.stop() }
+            var allowed = true
+            let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { allowed })
+            defer { browser.close() }
+            try browser.claim(taskID: "popup-owner")
+            let original = try await browser.navigate(taskID: "popup-owner", operationID: "login", to: base.appendingPathComponent("login"))
+            try await waitUntil { server.count("/signal") == 1 }
+            let ownerID = UUID()
+            allowed = false
+            browser.updateTaskControls(.init(taskID: "popup-owner", scopeID: UUID(), presentationID: UUID(),
+                phase: .paused, canResume: true, ownerID: ownerID), handler: { _, _ in })
+            server.releaseHeldResponses()
+            try await waitUntil { browser.hasOpenSignInWindow && server.count("/provider") == 1 }
+            browser.updateTaskControls(.init(taskID: "popup-owner", scopeID: UUID(), presentationID: UUID(),
+                phase: .working, canResume: false, ownerID: ownerID), handler: { _, _ in })
+            XCTAssertTrue(browser.hasOpenSignInWindow, "A successor execution must not silently dismiss an unfinished login")
+            allowed = true
+            do {
+                try await browser.reacquireAfterUserControl(taskID: "popup-owner")
+                XCTFail("Early handback must retain the child and pause again")
+            } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .signInWindowOpen) }
+            allowed = false
+            if ending == "stop" { browser.stop() }
+            else if ending == "close" { browser.close() }
+            else if ending == "revoke" { browser.updateTaskControls(nil, handler: { _, _ in }) }
+            else {
+                browser.updateTaskControls(.init(taskID: "popup-owner", scopeID: UUID(), presentationID: UUID(),
+                    phase: .paused, canResume: true, ownerID: UUID()), handler: { _, _ in })
+            }
+            XCTAssertFalse(browser.hasOpenSignInWindow)
+            XCTAssertNil(browser.signInSite)
+            server.releaseHeldResponses()
+            // This bound checks that a retired held response cannot run its
+            // script or mutate the opener; it is not a general timing oracle.
+            try await Task.sleep(for: .milliseconds(150))
+            XCTAssertEqual(server.count("/late-child"), 0)
+            XCTAssertFalse(browser.hasPageAwaitingHandback)
+            allowed = true
+            if ending == "stop" || ending == "close" {
+                XCTAssertNil(browser.taskID)
+                XCTAssertFalse(browser.validate(original))
+            } else {
+                XCTAssertEqual(browser.currentDocument(taskID: "popup-owner"), original)
+            }
+        }
+    }
+
     func testHistoryHandbackCreatesFreshTargetsWithoutReloadOrNavigationProof() async throws {
         let changes = [
             "history.pushState({}, '', '/account?opaque=private-query#private-fragment');",
@@ -783,6 +1009,64 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
 
 @MainActor
 final class ComputerUseOwnedBrowserVisibleAcceptanceTests: XCTestCase {
+    func testSignedHostOwnsVisibleSignInWindowAndClosingItPreservesThePausedParent() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_OWNED_BROWSER_VISIBLE_ACCEPTANCE"] == "1" else {
+            throw XCTSkip("Opt-in: presents only local fixture browser and sign-in windows")
+        }
+        let previousPolicy = NSApp.activationPolicy()
+        NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let server = try OwnedBrowserHTTPFixture(routes: [
+            "/login": .init(body: "<script>fetch('/signal').then(() => window.open('/provider?opaque=private-token'));</script>"),
+            "/signal": .init(held: true),
+            "/provider?opaque=private-token": .init(body: "<label>Password<input type='password'></label><script>fetch('/ready');</script>"),
+        ])
+        let base = try await server.start()
+        defer { server.stop() }
+        var allowed = true
+        let browser = ComputerUseOwnedBrowser(mayAct: { allowed })
+        defer { browser.close() }
+        try browser.claim(taskID: "visible-popup")
+        let original = try await browser.navigate(taskID: "visible-popup", operationID: "login", to: base.appendingPathComponent("login"))
+        let parent = try XCTUnwrap(NSApp.windows.first { $0.title == "AI Browser — Remote Desktop" })
+        let controls = ComputerUseBrowserTaskControls(taskID: "visible-popup", scopeID: UUID(),
+            presentationID: UUID(), phase: .paused, canResume: true)
+        allowed = false
+        browser.updateTaskControls(controls, handler: { _, _ in XCTFail("Closing the child must not send Resume or Stop") })
+        let deadline = ContinuousClock.now + .seconds(5)
+        while server.count("/signal") == 0 && ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(server.count("/signal"), 1)
+        server.releaseHeldResponses()
+        while server.count("/ready") == 0 && ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(server.count("/ready"), 1)
+        let child = try XCTUnwrap(NSApp.windows.first { $0.title == "Sign-in window — AI Browser" })
+        XCTAssertTrue(child.isVisible)
+        XCTAssertTrue(NSApp.keyWindow === child)
+        XCTAssertFalse(child.isRestorable)
+        XCTAssertTrue(child.styleMask.contains(.closable))
+        XCTAssertTrue(child.styleMask.contains(.resizable))
+        XCTAssertTrue(parent.isVisible)
+        XCTAssertFalse(browser.hasRequiredPresentation)
+        if let screen = child.screen { XCTAssertTrue(screen.visibleFrame.contains(child.frame)) }
+        XCTAssertEqual(browser.signInSite, base.absoluteString)
+        child.performClose(nil)
+        XCTAssertFalse(child.isVisible)
+        XCTAssertNil(child.contentView)
+        XCTAssertFalse(browser.hasOpenSignInWindow)
+        XCTAssertTrue(parent.isVisible)
+        XCTAssertEqual(browser.taskID, "visible-popup")
+        XCTAssertEqual(browser.taskControls, controls)
+        XCTAssertNil(browser.currentDocument(taskID: "visible-popup"))
+        allowed = true
+        try await browser.reacquireAfterUserControl(taskID: "visible-popup")
+        XCTAssertEqual(browser.currentDocument(taskID: "visible-popup"), original)
+        XCTAssertEqual(server.count("/login"), 1)
+    }
+
     func testSignedHostPresentsAndClosesItsOwnedBrowserWindow() async throws {
         guard ProcessInfo.processInfo.environment["RUN_OWNED_BROWSER_VISIBLE_ACCEPTANCE"] == "1" else {
             throw XCTSkip("Opt-in: opens only the signed development host's local fixture window")

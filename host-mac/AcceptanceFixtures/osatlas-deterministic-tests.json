@@ -162,7 +162,8 @@
     "RemoteDesktopHostTests/ComputerUseTests/test_approvalAfterLocalTakeoverRequiresTheCurrentHostEpoch",
     "RemoteDesktopHostTests/ComputerUseTests/test_ownedBrowserAuthenticationPausesBeforeNativePlanningAndRechecksOnHandback",
     "RemoteDesktopHostTests/ComputerUseTests/test_ownedBrowserCallbackReplyAndDurableReplayContainOnlyWebsiteIdentity",
-    "RemoteDesktopHostTests/ComputerUseTests/test_managerResumesExactNativeGoalAfterHistoryLoginWithoutReloadOrOldTargets"
+    "RemoteDesktopHostTests/ComputerUseTests/test_managerResumesExactNativeGoalAfterHistoryLoginWithoutReloadOrOldTargets",
+    "RemoteDesktopHostTests/ComputerUseTests/test_managerRejectsEarlyPopupHandbackThenContinuesTheExactNativeGoal"
   ],
   "expectedTests": [
     "RemoteDesktopHostTests/AppleFoundationMCPPlannerTests/testOrderedInputDistinguishesReturnKeyFromControlLabelAndRequiresSignedAppScope",
@@ -321,6 +322,7 @@
     "RemoteDesktopHostTests/ComputerUseOwnedBrowserModelAcceptanceTests/testIndependentSequenceOracleRejectsExtraWrongTargetReorderedAndNormalizedIntermediateStates",
     "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testBoundNavigationRequiresTheExactCurrentDocumentBeforeLoading",
     "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testCancelledNavigationAndLateResponseCannotAcquireAReceipt",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testClosingSignInPopupDoesNotAssertAuthenticationSucceeded",
     "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testDeadlineAndOwnershipLossStopPendingLoadWithoutSuccess",
     "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testFailedCallbackKeepsAddressAndErrorProjectionsFreeOfOpaqueValues",
     "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testFailedOrAutomationTimePageChangesCannotBeAdoptedOnHandback",
@@ -338,6 +340,9 @@
     "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testRedirectRecordsCommittedURLAndSubframesCannotFailMainNavigation",
     "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testRepeatedURLHasTwoRealRequestsDistinctReceiptsAndNoDuplicateOperation",
     "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testResponseMatchingExcludesOnlyFragmentAndNeverReplacesExactDocumentMatching",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testSignInPopupPreservesOpenerSessionAndRequiresExplicitHandback",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testSignInPopupRequiresPausedTaskAndRejectsExtraAndNestedWindows",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testSignInPopupRetainsOwnerThroughResumeButRetiresOnStopCloseOrReplacement",
     "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testStepJournalResumesAfterFirstPageWithoutReplayingAndContainsNoURLs",
     "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testUncertainNavigationCannotReplayOnResumeOrNewContext",
     "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testUserControlPageNeedsExplicitHandbackAndNeverBecomesNavigationProof",
@@ -420,6 +425,7 @@
     "RemoteDesktopHostTests/ComputerUseTests/test_managerDoesNotExposeOrRetainAClarificationWhoseTerminalWriteFailed",
     "RemoteDesktopHostTests/ComputerUseTests/test_managerLegacyPromptAndControlRepliesRequireRecoveryWithoutLeakingOldEvidence",
     "RemoteDesktopHostTests/ComputerUseTests/test_managerLoginHandbackWaitsForPageAndPreservesTaskAndBrowserSession",
+    "RemoteDesktopHostTests/ComputerUseTests/test_managerRejectsEarlyPopupHandbackThenContinuesTheExactNativeGoal",
     "RemoteDesktopHostTests/ComputerUseTests/test_managerRejectsMalformedForgedSessionMismatchedAndCancelledAnswersWithoutFallback",
     "RemoteDesktopHostTests/ComputerUseTests/test_managerResumesClaimedAnswerWithTypedGoalAndRejectsRestartedReference",
     "RemoteDesktopHostTests/ComputerUseTests/test_managerResumesExactNativeGoalAfterHistoryLoginWithoutReloadOrOldTargets",
