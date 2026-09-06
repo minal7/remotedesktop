@@ -74,9 +74,16 @@
     "RemoteDesktopHostTests/ComputerUseTests/test_managerDoesNotExposeOrRetainAClarificationWhoseTerminalWriteFailed",
     "RemoteDesktopHostTests/ComputerUseClarificationCompositionTests/testBrowserFactoryReceivesTheManagerActionGate",
     "RemoteDesktopHostTests/OSAtlasModelAccessGateTests",
-    "RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testCancellingQueuedActivationAndInferenceDoesNotCancelTheCurrentModelOwner"
+    "RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testCancellingQueuedActivationAndInferenceDoesNotCancelTheCurrentModelOwner",
+    "RemoteDesktopHostTests/ComputerUseAccessibilityTextTargetTests"
   ],
   "expectedTests": [
+    "RemoteDesktopHostTests/ComputerUseAccessibilityTextTargetTests/testNativePlanningLabelsDoNotReadProtectedOrEditableTitleValues",
+    "RemoteDesktopHostTests/ComputerUseAccessibilityTextTargetTests/testNativePlanningUsesTheLabelBoundByItsSnapshot",
+    "RemoteDesktopHostTests/ComputerUseAccessibilityTextTargetTests/testNativeReferenceRejectsSemanticOrParentChangesWithIdenticalValues",
+    "RemoteDesktopHostTests/ComputerUseAccessibilityTextTargetTests/testNativeTaskRejectsRepurposedPlanningTargetAndAcceptsFreshAuthority",
+    "RemoteDesktopHostTests/ComputerUseAccessibilityTextTargetTests/testNativeTypingAndOtherFieldReadsPreserveTheExplicitTarget",
+    "RemoteDesktopHostTests/ComputerUseAccessibilityTextTargetTests/testObservedInvalidNativeFieldsCannotReviveOldAuthority",
     "RemoteDesktopHostTests/ComputerUseActionTextPlanTests/testActionPlannerKeepsExactBudgetAndEligibilityChecksBeforeInference",
     "RemoteDesktopHostTests/ComputerUseActionTextPlanTests/testExplicitActionsPreserveDirectionPayloadOriginAndRepeatedStepIdentity",
     "RemoteDesktopHostTests/ComputerUseActionTextPlanTests/testLiteralSpellingAndCopyAmbiguityRemainIndependentOfLabelMatches",

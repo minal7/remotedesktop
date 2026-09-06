@@ -20,6 +20,60 @@ protocol ComputerUseNativeTextTarget: AnyObject {
 /// launch, window, and the nearest exposed document identity.
 @MainActor
 final class ComputerUseAccessibilityTextTarget: ComputerUseNativeTextTarget {
+    struct Application {
+        let identity: String
+        let root: AXUIElement
+    }
+    /// A narrow AX boundary lets fixtures exercise the production reference
+    /// rules without querying or mutating another application's interface.
+    struct Access {
+        let frontmost: () -> Application?
+        let read: (String, AXUIElement) -> CFTypeRef?
+        let canSet: (String, AXUIElement) -> Bool
+        let write: (String, CFTypeRef, AXUIElement) -> AXError
+        let timeout: (AXUIElement, Float) -> Void
+
+        @MainActor static var live: Access {
+            Access(frontmost: {
+                guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
+                return Application(identity: "\(app.processIdentifier):\(app.launchDate?.timeIntervalSince1970 ?? 0):\(app.bundleURL?.path ?? "")",
+                    root: AXUIElementCreateApplication(app.processIdentifier))
+            }, read: { name, element in
+                var value: CFTypeRef?
+                guard AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else { return nil }
+                return value
+            }, canSet: { name, element in
+                var settable: DarwinBoolean = false
+                return AXUIElementIsAttributeSettable(element, name as CFString, &settable) == .success && settable.boolValue
+            }, write: { name, value, element in
+                AXUIElementSetAttributeValue(element, name as CFString, value)
+            }, timeout: { element, duration in _ = AXUIElementSetMessagingTimeout(element, duration) })
+        }
+    }
+    private struct Label {
+        let text: String
+        let element: AXUIElement?
+    }
+    private struct Shape {
+        let role: String
+        let subrole: String
+        let identifier: String
+        let label: Label
+        let ancestors: [AXUIElement]
+
+        func matches(_ other: Shape) -> Bool {
+            let sameLabelElement: Bool
+            switch (label.element, other.label.element) {
+            case (nil, nil): sameLabelElement = true
+            case (let first?, let second?): sameLabelElement = CFEqual(first, second)
+            default: sameLabelElement = false
+            }
+            return role.utf8.elementsEqual(other.role.utf8) && subrole.utf8.elementsEqual(other.subrole.utf8)
+                && identifier.utf8.elementsEqual(other.identifier.utf8) && label.text.utf8.elementsEqual(other.label.text.utf8)
+                && sameLabelElement && ancestors.count == other.ancestors.count
+                && zip(ancestors, other.ancestors).allSatisfy { CFEqual($0.0, $0.1) }
+        }
+    }
     private struct Binding {
         let id: String
         let application: String
@@ -28,13 +82,17 @@ final class ComputerUseAccessibilityTextTarget: ComputerUseNativeTextTarget {
         let document: String
         let documentRoot: AXUIElement
         let isWebContent: Bool
+        let shape: Shape
     }
+    private let access: Access
     private var bindings: [Binding] = []
 
+    init(access: Access? = nil) { self.access = access ?? .live }
+
     func snapshot() -> ComputerUseTextSnapshot? {
-        guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
-        let root = AXUIElementCreateApplication(app.processIdentifier)
-        AXUIElementSetMessagingTimeout(root, 0.15)
+        guard let app = access.frontmost() else { return nil }
+        let root = app.root
+        access.timeout(root, 0.15)
         guard let element = elementAttribute(kAXFocusedUIElementAttribute, on: root),
               let window = elementAttribute(kAXFocusedWindowAttribute, on: root) else { return nil }
         return snapshot(element: element, window: window, app: app)
@@ -43,9 +101,9 @@ final class ComputerUseAccessibilityTextTarget: ComputerUseNativeTextTarget {
     /// Bounded discovery in the current window. Labels are untrusted planning
     /// data; opaque IDs retain the actual AX references needed for execution.
     func fields() -> [ComputerUseTextField] {
-        guard let app = NSWorkspace.shared.frontmostApplication else { return [] }
-        let root = AXUIElementCreateApplication(app.processIdentifier)
-        AXUIElementSetMessagingTimeout(root, 0.15)
+        guard let app = access.frontmost() else { return [] }
+        let root = app.root
+        access.timeout(root, 0.15)
         guard let window = elementAttribute(kAXFocusedWindowAttribute, on: root) else { return [] }
         let focused = elementAttribute(kAXFocusedUIElementAttribute, on: root)
         var queue = [window]
@@ -57,15 +115,12 @@ final class ComputerUseAccessibilityTextTarget: ComputerUseNativeTextTarget {
             let element = queue.removeFirst()
             if visited.contains(where: { CFEqual($0, element) }) { continue }
             visited.append(element)
-            AXUIElementSetMessagingTimeout(element, 0.1)
+            access.timeout(element, 0.1)
             if let value = snapshot(element: element, window: window, app: app) {
-                let titleElement = elementAttribute(kAXTitleUIElementAttribute, on: element)
-                let label = [stringAttribute(kAXTitleAttribute, on: element),
-                             stringAttribute(kAXDescriptionAttribute, on: element),
-                             stringAttribute("AXPlaceholderValue", on: element),
-                             titleElement.flatMap { stringAttribute(kAXValueAttribute, on: $0) }]
-                    .compactMap { $0 }.first { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-                    ?? (focused.map { CFEqual($0, element) } == true ? "Focused field" : "")
+                // Use the exact label bound by this observation, rather than
+                // making an independent planning-label read afterward.
+                let observedLabel = bindings.first { $0.id == value.targetID }?.shape.label.text ?? ""
+                let label = observedLabel.isEmpty ? (focused.map { CFEqual($0, element) } == true ? "Focused field" : "") : observedLabel
                 if !label.isEmpty, label.utf8.count <= 256 {
                     fields.append(ComputerUseTextField(label: label, snapshot: value))
                     guard fields.count <= 16 else { return [] }
@@ -81,12 +136,12 @@ final class ComputerUseAccessibilityTextTarget: ComputerUseNativeTextTarget {
 
     func snapshot(targetID: String) -> ComputerUseTextSnapshot? {
         guard let retained = bindings.first(where: { $0.id == targetID }),
-              let app = NSWorkspace.shared.frontmostApplication else { return nil }
-        let root = AXUIElementCreateApplication(app.processIdentifier)
-        AXUIElementSetMessagingTimeout(root, 0.15)
+              let app = access.frontmost() else { return nil }
+        let root = app.root
+        access.timeout(root, 0.15)
         guard let window = elementAttribute(kAXFocusedWindowAttribute, on: root),
               CFEqual(window, retained.window),
-              applicationIdentity(app) == retained.application,
+              app.identity.utf8.elementsEqual(retained.application.utf8),
               let value = snapshot(element: retained.element, window: window, app: app),
               value.targetID == targetID else { return nil }
         return value
@@ -98,19 +153,20 @@ final class ComputerUseAccessibilityTextTarget: ComputerUseNativeTextTarget {
             throw ComputerUseTextEditError.preconditionChanged
         }
         try Task.checkCancellation()
-        return AXUIElementSetAttributeValue(
-            binding.element, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success
-    }
-
-    private func applicationIdentity(_ app: NSRunningApplication) -> String {
-        "\(app.processIdentifier):\(app.launchDate?.timeIntervalSince1970 ?? 0):\(app.bundleURL?.path ?? "")"
+        return access.write(kAXFocusedAttribute, kCFBooleanTrue, binding.element) == .success
     }
 
     private func snapshot(element: AXUIElement, window: AXUIElement,
-                          app: NSRunningApplication) -> ComputerUseTextSnapshot? {
-        let application = applicationIdentity(app)
+                          app: Application) -> ComputerUseTextSnapshot? {
+        let application = app.identity
+        var valid = false
+        defer {
+            // Once this exact object was observed as invalid, a later return
+            // to its old visible state must receive new authority.
+            if !valid { bindings.removeAll { CFEqual($0.element, element) } }
+        }
         // Apply the timeout before the first query on every new AX reference.
-        AXUIElementSetMessagingTimeout(element, 0.15)
+        access.timeout(element, 0.15)
         guard let role = stringAttribute(kAXRoleAttribute, on: element) else { return nil }
         let subrole = stringAttribute(kAXSubroleAttribute, on: element) ?? ""
         let secure = subrole == kAXSecureTextFieldSubrole as String
@@ -141,10 +197,13 @@ final class ComputerUseAccessibilityTextTarget: ComputerUseNativeTextTarget {
         var isWebContent = false
         var documentRoot = window
         var reachedWindow = false
+        var ancestors: [AXUIElement] = []
         var ancestor: AXUIElement? = element
         for _ in 0 ..< 12 {
             guard let current = ancestor else { break }
-            AXUIElementSetMessagingTimeout(current, 0.15)
+            guard !ancestors.contains(where: { CFEqual($0, current) }) else { return nil }
+            ancestors.append(current)
+            access.timeout(current, 0.15)
             if stringAttribute(kAXRoleAttribute, on: current) == "AXWebArea" {
                 if !isWebContent { documentRoot = current }
                 isWebContent = true
@@ -162,10 +221,15 @@ final class ComputerUseAccessibilityTextTarget: ComputerUseNativeTextTarget {
         // pixels, and an unchanged URL do not prove current document membership.
         guard reachedWindow else { return nil }
         let document = documentParts.map { "\($0.utf8.count):\($0)" }.joined()
+        let label = labelFor(element)
+        let identifier = stringAttribute("AXIdentifier", on: element) ?? ""
+        guard label.text.utf8.count <= 256, identifier.utf8.count <= 1_024 else { return nil }
+        let shape = Shape(role: role, subrole: subrole, identifier: identifier, label: label, ancestors: ancestors)
         var binding = bindings.first(where: {
-            $0.application == application && CFEqual($0.element, element)
-                && CFEqual($0.window, window) && $0.document == document
+            $0.application.utf8.elementsEqual(application.utf8) && CFEqual($0.element, element)
+                && CFEqual($0.window, window) && $0.document.utf8.elementsEqual(document.utf8)
                 && CFEqual($0.documentRoot, documentRoot)
+                && $0.shape.matches(shape)
         })
         if binding == nil {
             // Old references cannot be revived by matching a label/position.
@@ -174,10 +238,11 @@ final class ComputerUseAccessibilityTextTarget: ComputerUseNativeTextTarget {
             binding = Binding(id: UUID().uuidString, application: application,
                               element: element, window: window, document: document,
                               documentRoot: documentRoot,
-                              isWebContent: isWebContent)
+                              isWebContent: isWebContent, shape: shape)
             bindings.append(binding!)
         }
         guard let binding else { return nil }
+        valid = true
         return ComputerUseTextSnapshot(
             targetID: binding.id, value: value,
             selection: NSRange(location: selection.location, length: selection.length),
@@ -190,16 +255,14 @@ final class ComputerUseAccessibilityTextTarget: ComputerUseNativeTextTarget {
         }
         var cfRange = CFRange(location: range.location, length: range.length)
         guard let value = AXValueCreate(.cfRange, &cfRange) else { return false }
-        return AXUIElementSetAttributeValue(
-            binding.element, kAXSelectedTextRangeAttribute as CFString, value) == .success
+        return access.write(kAXSelectedTextRangeAttribute, value, binding.element) == .success
     }
 
     func replaceSelectedText(_ text: String, expected: ComputerUseTextSnapshot) throws -> Bool? {
         guard let binding = try mutationBinding(expected: expected, attribute: kAXSelectedTextAttribute) else {
             return nil
         }
-        return AXUIElementSetAttributeValue(
-            binding.element, kAXSelectedTextAttribute as CFString, text as CFString) == .success
+        return access.write(kAXSelectedTextAttribute, text as CFString, binding.element) == .success
     }
 
     /// WebKit advertises AXSelectedText as writable but may accept it without
@@ -207,8 +270,7 @@ final class ComputerUseAccessibilityTextTarget: ComputerUseNativeTextTarget {
     /// fully computed expected value; readback remains mandatory.
     func replaceWebValue(_ value: String, expected: ComputerUseTextSnapshot) throws -> Bool? {
         guard let binding = try mutationBinding(expected: expected, attribute: kAXValueAttribute, requiresWebContent: true) else { return nil }
-        return AXUIElementSetAttributeValue(
-            binding.element, kAXValueAttribute as CFString, value as CFString) == .success
+        return access.write(kAXValueAttribute, value as CFString, binding.element) == .success
     }
 
     /// An observation of another field must never retarget a later setter.
@@ -226,11 +288,21 @@ final class ComputerUseAccessibilityTextTarget: ComputerUseNativeTextTarget {
     }
 
     private func attribute(_ name: String, on element: AXUIElement) -> CFTypeRef? {
-        var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else {
-            return nil
+        access.read(name, element)
+    }
+
+    private func labelFor(_ element: AXUIElement) -> Label {
+        let titleElement = elementAttribute(kAXTitleUIElementAttribute, on: element)
+        var titleValue: String?
+        if let titleElement, stringAttribute(kAXRoleAttribute, on: titleElement) == kAXStaticTextRole as String,
+           stringAttribute(kAXSubroleAttribute, on: titleElement) != kAXSecureTextFieldSubrole as String,
+           boolAttribute("AXProtectedContent", on: titleElement) != true {
+            titleValue = stringAttribute(kAXValueAttribute, on: titleElement)
         }
-        return value
+        let text = [stringAttribute(kAXTitleAttribute, on: element), stringAttribute(kAXDescriptionAttribute, on: element),
+                    stringAttribute("AXPlaceholderValue", on: element), titleValue]
+            .compactMap { $0 }.first { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } ?? ""
+        return Label(text: text, element: titleElement)
     }
 
     private func stringAttribute(_ name: String, on element: AXUIElement) -> String? {
@@ -248,8 +320,6 @@ final class ComputerUseAccessibilityTextTarget: ComputerUseNativeTextTarget {
     }
 
     private func isSettable(_ name: String, on element: AXUIElement) -> Bool {
-        var settable: DarwinBoolean = false
-        return AXUIElementIsAttributeSettable(element, name as CFString, &settable) == .success
-            && settable.boolValue
+        access.canSet(name, element)
     }
 }

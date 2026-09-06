@@ -82,6 +82,7 @@
 		6D6AC21CC6C01821F4B30731 /* App.swift in Sources */ = {isa = PBXBuildFile; fileRef = 75EE7C6868D1A93B054508AE /* App.swift */; };
 		708DF3BE5C4A24255B9E8F58 /* MCPClientPool.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E8CC4B1A8E8D3C92F38FBDE /* MCPClientPool.swift */; };
 		70CD60F7F7C9999D9E6CA995 /* ComputerUseObservationWorker.swift in Sources */ = {isa = PBXBuildFile; fileRef = CD81C130C0A7FB1CA8798FF5 /* ComputerUseObservationWorker.swift */; };
+		5FF17FDAEF7FD090F8EA36AA /* ComputerUseAccessibilityTextTargetTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7AA82FD874185FF2151E69E7 /* ComputerUseAccessibilityTextTargetTests.swift */; };
 		72E1D921B22574C34E127EBC /* ComputerUseTextEditorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AE72B41B2121EE13B4022CE5 /* ComputerUseTextEditorTests.swift */; };
 		7433C423300B52ED30A1AAFC /* ComputerUseFieldOperationsBrowserAcceptanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 32D3D424D1ED61CDA23EE6E9 /* ComputerUseFieldOperationsBrowserAcceptanceTests.swift */; };
 		746750FC5D04FDA4281C12A7 /* ComputerUseTextStepStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 552B1D1A5E75FF516E92A88E /* ComputerUseTextStepStore.swift */; };
@@ -287,6 +288,7 @@
 		A37E3877757C83F68CF37A28 /* OSAtlasNativeRealUIAcceptanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OSAtlasNativeRealUIAcceptanceTests.swift; sourceTree = "<group>"; };
 		A548774FD133C86136F2D8CA /* RemoteDesktopMailAutomationPreflight.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteDesktopMailAutomationPreflight.swift; sourceTree = "<group>"; };
 		A6B97E935E1443928B613EDB /* ComputerUseLiteralPayload.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseLiteralPayload.swift; sourceTree = "<group>"; };
+		7AA82FD874185FF2151E69E7 /* ComputerUseAccessibilityTextTargetTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseAccessibilityTextTargetTests.swift; sourceTree = "<group>"; };
 		AE72B41B2121EE13B4022CE5 /* ComputerUseTextEditorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseTextEditorTests.swift; sourceTree = "<group>"; };
 		AFD149FEBF7D38FE05DBBC37 /* SignalingEnvelope.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignalingEnvelope.swift; sourceTree = "<group>"; };
 		B104C1229A29AC3A660D5AE2 /* HostCommandLine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostCommandLine.swift; sourceTree = "<group>"; };
@@ -453,6 +455,7 @@
 				65C1CCA3980A9ACC266277D7 /* ComputerUseTaskExecutionTests.swift */,
 				66E1A3BCCCB20F05C6898FCF /* ComputerUseTests.swift */,
 				22E0B1015DEC570F8CC3A9B1 /* ComputerUseTextClarificationTests.swift */,
+				7AA82FD874185FF2151E69E7 /* ComputerUseAccessibilityTextTargetTests.swift */,
 				AE72B41B2121EE13B4022CE5 /* ComputerUseTextEditorTests.swift */,
 				17F037AD9C0B16BCD93B582B /* ComputerUseTextGoalPlannerTests.swift */,
 				F271B7EB4A7FBF76E7DCD0BF /* ComputerUseTextStepStoreTests.swift */,
@@ -786,6 +789,7 @@
 				1F1B65C5A8F68A51B6651A69 /* ComputerUseTaskExecutionTests.swift in Sources */,
 				B2DFFB922AEFC361EC219915 /* ComputerUseTests.swift in Sources */,
 				1A38B1E2A1107DA3781D3D0D /* ComputerUseTextClarificationTests.swift in Sources */,
+				5FF17FDAEF7FD090F8EA36AA /* ComputerUseAccessibilityTextTargetTests.swift in Sources */,
 				72E1D921B22574C34E127EBC /* ComputerUseTextEditorTests.swift in Sources */,
 				E541373D9B0B715CADDF54AF /* ComputerUseTextGoalPlannerTests.swift in Sources */,
 				284AA0F76549D75BD14D0B2D /* ComputerUseTextStepStoreTests.swift in Sources */,
