@@ -85,8 +85,9 @@ final class ComputerUseBrowserNavigationTask {
                 invariants: ["owned-context"],
                 outcomes: urls.indices.map { "navigation-\($0)" } + ["current-\(urls.count - 1)"])
             let store = try ComputerUseTaskJournalStore(directory: journalDirectory)
+            var persistedJournal = try store.load(taskID: taskID)
             let indices = Dictionary(uniqueKeysWithValues: steps.enumerated().map { ($0.element.id, $0.offset) })
-            execution = try ComputerUseTaskExecution(contract: contract, recovered: store.load(taskID: taskID),
+            execution = try ComputerUseTaskExecution(contract: contract, recovered: persistedJournal,
                 observe: { [browser] predicate in
                     if predicate.id == "owned-context" { return browser.hasOwnership(taskID: taskID) }
                     guard let suffix = predicate.id.split(separator: "-").last, let index = Int(suffix),
@@ -108,7 +109,10 @@ final class ComputerUseBrowserNavigationTask {
                     if let beforeNavigationDispatch { try await beforeNavigationDispatch(index) }
                     _ = try await browser.navigate(taskID: taskID, operationID: operationID,
                         to: urls[index], from: prerequisite)
-                }, persist: { try store.save($0) }, assertOwnership: { [browser] in
+                }, persist: { journal in
+                    try store.save(journal, replacing: persistedJournal)
+                    persistedJournal = journal
+                }, assertOwnership: { [browser] in
                     guard browser.hasOwnership(taskID: taskID) else { throw ComputerUseBrowserError.ownershipLost }
                 })
             retainedURLs = urls

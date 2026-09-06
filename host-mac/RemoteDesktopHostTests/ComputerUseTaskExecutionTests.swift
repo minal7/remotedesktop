@@ -3,6 +3,77 @@ import XCTest
 
 @MainActor
 final class ComputerUseTaskExecutionTests: XCTestCase {
+    func testTwoExecutorsWithTheSameFreshSnapshotCannotBothDispatchOrRewindProgress() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = try SearchTransactionFixture()
+        let firstStore = try ComputerUseTaskJournalStore(directory: directory), staleStore = try ComputerUseTaskJournalStore(directory: directory)
+        var firstExpected = try firstStore.load(taskID: fixture.contract.taskID)
+        var staleExpected = try staleStore.load(taskID: fixture.contract.taskID)
+        XCTAssertNil(firstExpected); XCTAssertNil(staleExpected)
+        let first = try fixture.executor(recovered: firstExpected, persist: { journal in
+            try firstStore.save(journal, replacing: firstExpected)
+            firstExpected = journal; fixture.saved = journal
+        })
+        var staleEffects: [String] = []
+        let stale = try ComputerUseTaskExecution(contract: fixture.contract, recovered: staleExpected,
+            observe: { _ in true }, perform: { step, _ in staleEffects.append(step.id) },
+            persist: { journal in
+                try staleStore.save(journal, replacing: staleExpected)
+                staleExpected = journal
+            }, assertOwnership: { })
+        try await first.run()
+        let finished = try XCTUnwrap(firstStore.load(taskID: fixture.contract.taskID))
+        for _ in 0..<2 {
+            do { try await stale.run(); XCTFail("A stale executor cannot claim an already completed step") }
+            catch { XCTAssertEqual(error as? ComputerUseTaskJournalStore.StoreError, .staleJournal) }
+            XCTAssertEqual(try firstStore.load(taskID: fixture.contract.taskID), finished)
+        }
+        XCTAssertTrue(staleEffects.isEmpty)
+        XCTAssertEqual(fixture.effects, ["type-1", "submit-1", "type-2", "submit-2"])
+        XCTAssertTrue(stale.journal.statuses.allSatisfy { $0 == .planned })
+    }
+
+    func testUnconfirmedDiskCommitCannotDispatchOrReplayAnEffectAfterReconstruction() async throws {
+        for failedWrite in [1, 2] {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let fixture = try SearchTransactionFixture()
+            var writeCount = 0
+            let store = try ComputerUseTaskJournalStore(directory: directory, afterReplacement: {
+                writeCount += 1
+                if writeCount == failedWrite { throw TransactionFixtureError.writeFailed }
+            })
+            var expected = try store.load(taskID: fixture.contract.taskID)
+            let execution = try fixture.executor(recovered: expected, persist: { journal in
+                try store.save(journal, replacing: expected)
+                expected = journal; fixture.saved = journal
+            })
+            do { try await execution.run(); XCTFail("An unconfirmed durable write cannot authorize progress") }
+            catch { XCTAssertEqual(error as? TransactionFixtureError, .writeFailed) }
+            XCTAssertEqual(fixture.effects.count, failedWrite == 1 ? 0 : 1)
+            do { try await execution.run(); XCTFail("The writer remains unavailable after its failed commit") }
+            catch { XCTAssertEqual(error as? ComputerUseTaskJournalStore.StoreError, .unavailable) }
+            let reopened = try ComputerUseTaskJournalStore(directory: directory)
+            var recovered = try reopened.load(taskID: fixture.contract.taskID)
+            XCTAssertEqual(recovered?.statuses.first, failedWrite == 1 ? .attempted : .verified)
+            fixture.saved = recovered
+            let resumed = try fixture.executor(recovered: recovered, persist: { journal in
+                try reopened.save(journal, replacing: recovered)
+                recovered = journal; fixture.saved = journal
+            })
+            if failedWrite == 1 {
+                do { try await resumed.run(); XCTFail("A visible attempted journal does not prove that its effect happened") }
+                catch { XCTAssertEqual(error as? ComputerUseTaskExecutionError, .uncertainEffect("type-1")) }
+                XCTAssertTrue(fixture.effects.isEmpty)
+            } else {
+                try await resumed.run()
+                XCTAssertEqual(fixture.effects, ["type-1", "submit-1", "type-2", "submit-2"])
+                XCTAssertEqual(fixture.submissions, ["Paris", "Paris"])
+            }
+        }
+    }
+
     func testTwoIdenticalQueriesUseDistinctStepsAndEachSubmissionNeedsItsOwnEvidence() async throws {
         let fixture = try SearchTransactionFixture()
         let execution = try fixture.executor()

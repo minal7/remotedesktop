@@ -388,7 +388,8 @@ final class ComputerUseNativeTextExecutor {
                   now() < prepared.expiresAt else { throw Failure.invalidClarification }
         }
         let store = try ComputerUseTextStepStore(directory: journalDirectory)
-        let task = try ComputerUseTextTask(contract: contract, recovered: store.load(taskID: taskID),
+        var persistedJournal = try store.load(taskID: taskID)
+        let task = try ComputerUseTextTask(contract: contract, recovered: persistedJournal,
             read: read,
             apply: { _, _ in throw ComputerUseTextTaskError.invalidPlan },
             applyWithIdentity: { [weak self] dispatch in
@@ -400,7 +401,10 @@ final class ComputerUseNativeTextExecutor {
             didDispatchInput: browserTarget.map { target in
                 { operationID in try await target.didDispatchInput(operationID: operationID) }
             },
-            persist: { try store.save($0) }, mayAct: mayAct)
+            persist: { journal in
+                try store.save(journal, replacing: persistedJournal)
+                persistedJournal = journal
+            }, mayAct: mayAct)
         retainedTask = task
         retainedTaskOriginID = originatingTaskID
         invalidateClarification(taskID: taskID)
