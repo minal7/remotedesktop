@@ -76,6 +76,24 @@ struct ComputerUseBrowserDocument: Equatable, Sendable, CustomStringConvertible,
     }
 }
 
+/// Keeps the navigation/document authority beside the DOM observation. A
+/// model sees a bounded projection only after a capability chooses one; this
+/// object itself is never a completion or an input authorization.
+struct ComputerUseBrowserPageEvidence: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    let document: ComputerUseBrowserDocument
+    let documentID: String
+    let page: ComputerUseBrowserPageSnapshot
+
+    fileprivate init(document: ComputerUseBrowserDocument, documentID: String, page: ComputerUseBrowserPageSnapshot) {
+        self.document = document
+        self.documentID = documentID
+        self.page = page
+    }
+
+    var description: String { "ComputerUseBrowserPageEvidence(\(document), \(page))" }
+    var debugDescription: String { description }
+}
+
 enum ComputerUseBrowserError: Error, LocalizedError, Equatable {
     case invalidURL, busy, ownershipLost, pageChanged, navigationFailed, deadlineExceeded, closed, unsupportedDocument, documentUnresponsive, windowNotActive, authenticationRequired, signInWindowOpen
     var errorDescription: String? {
@@ -315,6 +333,27 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         try await callDOM(command, arguments: arguments, validateContext: { self.validate(expected) })
     }
 
+    func observePage(document expected: ComputerUseBrowserDocument) async throws -> ComputerUseBrowserPageEvidence {
+        guard hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
+        let result = try await callDOM(.pageSnapshot, arguments: [:], document: expected)
+        guard hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
+        guard result.status == "page-snapshot", result.fields == nil,
+              let page = result.page, page.isWellFormed else { throw ComputerUseBrowserError.unsupportedDocument }
+        return ComputerUseBrowserPageEvidence(document: expected, documentID: result.documentID, page: page)
+    }
+
+    /// The browser/document gate is rechecked around WebKit's await; the
+    /// script separately re-reads text, rendering and destinations. A fresh
+    /// read replaces the prior observation rather than extending its lease.
+    func validatePageEvidence(_ evidence: ComputerUseBrowserPageEvidence) async throws {
+        guard hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
+        let result = try await callDOM(.validatePageSnapshot,
+            arguments: ["documentID": evidence.documentID, "snapshotID": evidence.page.id], document: evidence.document)
+        guard hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
+        guard result.status == "page-current", result.documentID == evidence.documentID,
+              result.fields == nil, result.page == nil else { throw ComputerUseBrowserError.pageChanged }
+    }
+
     private func readPageIdentity(validateContext: () -> Bool) async throws -> String {
         let reply = try await callDOM(.pageIdentity, arguments: [:], validateContext: validateContext)
         guard reply.status == "page-identity", reply.fields == nil else { throw ComputerUseBrowserError.pageChanged }
@@ -368,7 +407,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             throw ComputerUseBrowserError.pageChanged
         }
         if result.status == "authentication-required" {
-            guard result.fields == nil else { throw ComputerUseBrowserError.unsupportedDocument }
+            guard result.fields == nil, result.page == nil else { throw ComputerUseBrowserError.unsupportedDocument }
             throw ComputerUseBrowserError.authenticationRequired
         }
         return result

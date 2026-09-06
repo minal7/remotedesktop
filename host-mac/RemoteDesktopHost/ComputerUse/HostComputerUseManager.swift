@@ -1204,6 +1204,21 @@ final class ComputerUseHostTools {
         browserNavigationTask = nil
     }
 
+    /// Read-only evidence for browser capabilities. It does not open a window,
+    /// claim that a search finished, or feed raw destinations into a model.
+    func observeOwnedBrowserPage(taskID: String) async throws -> ComputerUseBrowserPageEvidence? {
+        try Task.checkCancellation()
+        guard mayAct() else { throw ToolError.paused }
+        return try await browserNavigationTask?.pageEvidenceIfFrontmost(taskID: taskID)
+    }
+
+    func validateOwnedBrowserPageEvidence(_ evidence: ComputerUseBrowserPageEvidence) async throws {
+        try Task.checkCancellation()
+        guard mayAct() else { throw ToolError.paused }
+        guard let browserNavigationTask else { throw ComputerUseBrowserError.closed }
+        try await browserNavigationTask.validatePageEvidence(evidence)
+    }
+
     func reacquireOwnedBrowserAfterUserControl(taskID: String) async throws {
         try await browserNavigationTask?.reacquireAfterUserControl(taskID: taskID)
     }

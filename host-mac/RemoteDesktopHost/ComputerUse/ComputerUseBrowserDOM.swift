@@ -1,7 +1,58 @@
 import Foundation
 import WebKit
 
-enum ComputerUseBrowserDOMCommand: String { case fields, read, edit, receipt, reobserve, preflight, pageIdentity }
+enum ComputerUseBrowserDOMCommand: String {
+    case fields, read, edit, receipt, reobserve, preflight, pageIdentity, pageSnapshot, validatePageSnapshot
+}
+
+/// Page evidence, not an action receipt or proof that the user's goal is met.
+/// Destinations stay host-side: a later result adapter must review a selected
+/// URL before exposing it as a shareable source. Never serialize this object
+/// wholesale into a model prompt or a controller/log message.
+struct ComputerUseBrowserPageSnapshot: Decodable, Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    struct Text: Decodable, Equatable, Sendable {
+        let id: String
+        /// DOM grouping only; it does not prove two facts describe one ticket.
+        let containerID: String
+        let text: String
+    }
+    struct Link: Decodable, Equatable, Sendable {
+        let id: String
+        let label: String
+        let destination: String
+        let textIDs: [String]
+    }
+    let id: String
+    let texts: [Text]
+    let links: [Link]
+    let truncated: Bool
+    let omittedEmbeddedContent: Bool
+
+    var description: String {
+        "ComputerUseBrowserPageSnapshot(texts: \(texts.count), links: \(links.count), truncated: \(truncated), omittedEmbeddedContent: \(omittedEmbeddedContent))"
+    }
+    var debugDescription: String { description }
+
+    var isWellFormed: Bool {
+        func identifier(_ value: String, prefix: String) -> Bool {
+            value.hasPrefix(prefix) && value.utf8.count <= 32
+                && !value.dropFirst(prefix.count).isEmpty
+                && value.dropFirst(prefix.count).utf8.allSatisfy { (48...57).contains($0) }
+        }
+        guard id.utf8.count == 32,
+              id.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }),
+              texts.count <= 256, links.count <= 128,
+              Set(texts.map(\.id)).count == texts.count, Set(links.map(\.id)).count == links.count,
+              texts.allSatisfy({ identifier($0.id, prefix: "t") && identifier($0.containerID, prefix: "g")
+                  && !$0.text.isEmpty && $0.text.utf8.count <= 2_048 }),
+              links.allSatisfy({ identifier($0.id, prefix: "l") && !$0.label.isEmpty && $0.label.utf8.count <= 2_048
+                  && URL(string: $0.destination).flatMap(ComputerUseOwnedBrowser.validatedURL) != nil
+                  && Set($0.textIDs).count == $0.textIDs.count && $0.textIDs.count <= 256
+                  && Set($0.textIDs).isSubset(of: Set(texts.map(\.id))) }) else { return false }
+        return texts.reduce(0) { $0 + $1.text.utf8.count }
+            + links.reduce(0) { $0 + $1.label.utf8.count + $1.destination.utf8.count } <= 65_536
+    }
+}
 
 struct ComputerUseBrowserDOMReply: Decodable {
     struct Field: Decodable {
@@ -14,6 +65,7 @@ struct ComputerUseBrowserDOMReply: Decodable {
     let status: String
     let documentID: String
     let fields: [Field]?
+    let page: ComputerUseBrowserPageSnapshot?
 }
 
 /// Fixed host code in a separate WebKit script world. Page text, model output
@@ -30,6 +82,7 @@ enum ComputerUseBrowserDOM {
       const pageID = nonce();
       let documentID = nonce(), root = null, nextID = 0;
       const bindings = new Map(), operations = new Map();
+      let lastPageSnapshot = null;
       const protectedTypes = new Set(['password', 'hidden', 'file']);
       const textTypes = new Set(['text', 'search', 'url', 'tel', 'email']);
       const identityAttributes = new Set(['id', 'name', 'type', 'multiple', 'form', 'action', 'method', 'enctype', 'target', 'disabled', 'readonly', 'hidden', 'inert', 'aria-hidden', 'aria-label', 'aria-labelledby', 'placeholder', 'autocomplete']);
@@ -58,7 +111,7 @@ enum ComputerUseBrowserDOM {
       function synchronize() {
         retire(observer.takeRecords());
         if (root !== doc.documentElement) {
-          if (root) { documentID = nonce(); bindings.clear(); operations.clear(); }
+          if (root) { documentID = nonce(); bindings.clear(); operations.clear(); lastPageSnapshot = null; }
           root = doc.documentElement;
         }
       }
@@ -226,6 +279,96 @@ enum ComputerUseBrowserDOM {
         if (retained && found.length !== retained.size) return reply('stale');
         return reply('ok', found);
       }
+      function pageContent() {
+        // Read rendered text nodes, never form values, innerHTML, scripts or
+        // frame documents. Omitted surfaces and bounds remain explicit; this
+        // is not a claim to have read every result on a website.
+        const excluded = 'script,style,noscript,template,input,textarea,select,option,[contenteditable]:not([contenteditable="false"]),[role="textbox"],[hidden],[inert],[aria-hidden="true"]';
+        const texts = [], links = [], anchors = new Map(), containers = new Map();
+        const textRange = doc.createRange();
+        const pageParent = node => node.assignedSlot || parent(node);
+        let count = 0, bytes = 0, truncated = false, omittedEmbeddedContent = false;
+        function visibleInPage(element) {
+          for (let depth = 0; element && depth < 128; element = pageParent(element), depth++) {
+            const style = getComputedStyle(element);
+            if (element.matches(excluded) || style.display === 'none' || style.visibility !== 'visible' || Number(style.opacity) === 0) return false;
+            if (element === root) return true;
+          }
+          truncated = true;
+          return false;
+        }
+        const filter = {
+          acceptNode(node) {
+            if (node.nodeType === Node.ELEMENT_NODE) {
+              const style = getComputedStyle(node);
+              if (node.matches(excluded) || style.display === 'none' || style.visibility !== 'visible' || Number(style.opacity) === 0) return NodeFilter.FILTER_REJECT;
+              if (node.matches('iframe,frame,object,embed,canvas,svg')) {
+                omittedEmbeddedContent = true;
+                return NodeFilter.FILTER_REJECT;
+              }
+            }
+            return NodeFilter.FILTER_ACCEPT;
+          }
+        };
+        if (filter.acceptNode(root) === NodeFilter.FILTER_REJECT) return {texts, links, truncated, omittedEmbeddedContent};
+        // display:contents has no own rectangle but its descendants can render.
+        const walkers = [doc.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, filter)];
+        while (walkers.length) {
+          const walker = walkers[walkers.length - 1], node = walker.nextNode();
+          if (!node) { walkers.pop(); continue; }
+          if (++count > 10000) { truncated = true; break; }
+          if (node.nodeType === Node.ELEMENT_NODE) {
+            if (node.shadowRoot) walkers.push(doc.createTreeWalker(node.shadowRoot, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, filter));
+            if (node instanceof HTMLAnchorElement && node.hasAttribute('href')) anchors.set(node, []);
+            continue;
+          }
+          if (texts.length >= 256) { truncated = true; break; }
+          if (!visibleInPage(pageParent(node))) continue;
+          // A text node may live in unassigned light DOM or unused slot
+          // fallback. Computed style alone does not prove it participates in
+          // layout. Ranges also preserve text under display:contents parents.
+          textRange.selectNodeContents(node);
+          if (textRange.getClientRects().length === 0) continue;
+          const raw = node.nodeValue || '';
+          if (raw.length > 8192) { truncated = true; continue; }
+          const text = raw.replace(/\s+/g, ' ').trim();
+          if (!text) continue;
+          const size = encoder.encode(text).length;
+          if (size > 2048 || texts.length >= 256 || bytes + size > 65536) { truncated = true; continue; }
+          bytes += size;
+          let container = pageParent(node);
+          for (let element = container, depth = 0; element && depth < 128; element = pageParent(element), depth++) {
+            container = element;
+            if (element.matches('p,li,tr,article,section,div,h1,h2,h3,h4,h5,h6,[role="listitem"]')) break;
+          }
+          if (!containers.has(container)) containers.set(container, 'g' + (containers.size + 1));
+          const entry = {id: 't' + (texts.length + 1), containerID: containers.get(container), text};
+          texts.push(entry);
+          for (let element = pageParent(node), depth = 0; element && depth < 128; element = pageParent(element), depth++) {
+            if (anchors.has(element)) { anchors.get(element).push(entry); break; }
+          }
+        }
+        for (const [anchor, parts] of anchors) {
+          // href is data. Resolve with the document's base URL; never navigate
+          // or evaluate it. Unsupported destinations remain plain page text.
+          if (links.length >= 128) { truncated = true; break; }
+          if (!visibleInPage(anchor) || (!parts.length && anchor.getClientRects().length === 0)) continue;
+          const label = parts.map(entry => entry.text).join(' ').trim() || (anchor.getAttribute('aria-label') || '').trim();
+          const raw = anchor.getAttribute('href') || '';
+          if (!label) continue;
+          if (label.length > 8192 || raw.length > 8192) { truncated = true; continue; }
+          let url;
+          try { url = new URL(raw, doc.baseURI); } catch (_) { continue; }
+          if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) continue;
+          const labelBytes = encoder.encode(label).length, urlBytes = encoder.encode(url.href).length;
+          if (labelBytes > 2048 || urlBytes > 8192 || links.length >= 128 || bytes + labelBytes + urlBytes > 65536) {
+            truncated = true; continue;
+          }
+          bytes += labelBytes + urlBytes;
+          links.push({id: 'l' + (links.length + 1), label, destination: url.href, textIDs: parts.map(entry => entry.id)});
+        }
+        return {texts, links, truncated, omittedEmbeddedContent};
+      }
       function run(command, args) {
         // Read only the identity of this loaded Document, before inspecting
         // any form metadata/value or draining target mutation records. Root
@@ -236,6 +379,22 @@ enum ComputerUseBrowserDOM {
         }
         synchronize();
         if (!root || doc !== document) return reply('stale');
+        if (command === 'pageSnapshot' || command === 'validatePageSnapshot') {
+          const status = authenticationStatus();
+          if (status) { lastPageSnapshot = null; return reply(status); }
+          if (doc.readyState !== 'complete') return reply('stale');
+          const content = pageContent(), serialized = JSON.stringify(content);
+          if (command === 'validatePageSnapshot') {
+            // Re-read the projection, including rendering and resolved URLs.
+            // Mutation records alone miss CSSOM/value-property changes.
+            if (!lastPageSnapshot || args.documentID !== documentID || args.snapshotID !== lastPageSnapshot.id
+                || lastPageSnapshot.documentID !== documentID || serialized !== lastPageSnapshot.serialized) return reply('stale');
+            return reply('page-current');
+          }
+          const id = nonce();
+          lastPageSnapshot = {id, documentID, serialized};
+          return {status: 'page-snapshot', documentID, page: {id, ...content}};
+        }
         if (command !== 'fields' && args.documentID !== documentID) return reply('stale');
         // Historical dispatch evidence reads no form values and must survive
         // a login overlay appearing after an earlier input was dispatched.

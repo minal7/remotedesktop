@@ -155,6 +155,15 @@ final class ComputerUseBrowserNavigationTask {
         return ComputerUseBrowserTextTarget(browser: browser, document: try browser.acquireCurrentDocument(taskID: taskID))
     }
 
+    func pageEvidenceIfFrontmost(taskID: String) async throws -> ComputerUseBrowserPageEvidence? {
+        guard browser.isFrontmostWindow else { return nil }
+        return try await browser.observePage(document: browser.acquireCurrentDocument(taskID: taskID))
+    }
+
+    func validatePageEvidence(_ evidence: ComputerUseBrowserPageEvidence) async throws {
+        try await browser.validatePageEvidence(evidence)
+    }
+
     static var journalDirectory: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Remote Desktop Host/Computer Use Tasks/Browser Steps", isDirectory: true)

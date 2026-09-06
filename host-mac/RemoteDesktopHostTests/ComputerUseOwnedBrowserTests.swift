@@ -6,6 +6,207 @@ import XCTest
 
 @MainActor
 final class ComputerUseOwnedBrowserTests: XCTestCase {
+    func testPageEvidenceReadsRenderedTextAndLinksWithoutFormValuesOrEffects() async throws {
+        let server = try OwnedBrowserHTTPFixture(routes: ["/results": .init(body: """
+            <base href="/tickets/"><style>.hidden { display:none } .contents { display:contents }</style>
+            <h1>Concert tickets</h1><div class="contents"><p>Friday, September 18 — $35</p></div>
+            <a href="event/42?date=2026-09-18#seats"><span>See seats</span> 🧭</a>
+            <a href="javascript:fetch('/unexpected')">Script action</a>
+            <a href="https://user:secret@example.test/private">Unsupported destination</a>
+            <div class="hidden">hidden-result</div><div aria-hidden="true">aria-hidden-result</div>
+            <label>Search<input value="private-query"></label><textarea aria-label="Notes">private-notes</textarea>
+            <div contenteditable>private-draft</div><select><option>private-option</option></select>
+            <script>const privateScript = 'private-script'; addEventListener('input', () => fetch('/unexpected'));</script>
+            """)])
+        let base = try await server.start()
+        defer { server.stop() }
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+        defer { browser.close() }
+        try browser.claim(taskID: "page-read")
+        let document = try await browser.navigate(taskID: "page-read", operationID: "results", to: base.appendingPathComponent("results"))
+        let evidence = try await browser.observePage(document: document)
+        let text = evidence.page.texts.map(\.text).joined(separator: " ")
+        XCTAssertTrue(text.contains("Concert tickets"))
+        XCTAssertTrue(text.contains("Friday, September 18 — $35"))
+        XCTAssertFalse(text.contains("private-"))
+        XCTAssertFalse(text.contains("hidden-result"))
+        XCTAssertEqual(evidence.page.links.map(\.label), ["See seats 🧭"])
+        let linkTextIDs = try XCTUnwrap(evidence.page.links.first).textIDs
+        let linkTexts = evidence.page.texts.filter { linkTextIDs.contains($0.id) }
+        XCTAssertEqual(linkTexts.map(\.text), ["See seats", "🧭"])
+        XCTAssertEqual(Set(linkTexts.map(\.containerID)).count, 1)
+        XCTAssertEqual(evidence.page.links.first?.destination,
+            base.appendingPathComponent("tickets/event/42").absoluteString + "?date=2026-09-18#seats")
+        XCTAssertFalse(evidence.page.truncated)
+        XCTAssertFalse(evidence.page.omittedEmbeddedContent)
+        XCTAssertTrue(evidence.page.isWellFormed)
+        try await browser.validatePageEvidence(evidence)
+        XCTAssertEqual(server.count("/unexpected"), 0)
+        XCTAssertEqual(server.count("/results"), 1)
+        XCTAssertFalse(String(reflecting: evidence).contains("date="))
+        XCTAssertFalse(String(reflecting: evidence).contains("Concert tickets"))
+    }
+
+    func testPageEvidenceRejectsChangedResultsDestinationsRenderingAndDocumentRoots() async throws {
+        for mutation in [
+            "document.querySelector('p').textContent = 'Sold out';",
+            "document.querySelector('a').href = '/different-event';",
+            "document.styleSheets[0].insertRule('p { display:none }', 0);",
+            "document.documentElement.replaceWith(document.documentElement.cloneNode(true));",
+        ] {
+            let server = try OwnedBrowserHTTPFixture(routes: ["/results": .init(body: """
+                <style></style><p>Available for $35</p><a href="/event">Event</a>
+                <script>fetch('/change').then(() => { \(mutation) fetch('/changed'); });</script>
+                """), "/change": .init(held: true)])
+            let base = try await server.start()
+            defer { server.stop() }
+            let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+            defer { browser.close() }
+            try browser.claim(taskID: "changed-results")
+            let document = try await browser.navigate(taskID: "changed-results", operationID: "results", to: base.appendingPathComponent("results"))
+            try await waitUntil { server.count("/change") == 1 }
+            let evidence = try await browser.observePage(document: document)
+            server.releaseHeldResponses()
+            try await waitUntil { server.count("/changed") == 1 }
+            do {
+                try await browser.validatePageEvidence(evidence)
+                XCTFail("Old page evidence cannot survive a changed projection or document root")
+            } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged, mutation) }
+            let fresh = try await browser.observePage(document: document)
+            try await browser.validatePageEvidence(fresh)
+            XCTAssertNotEqual(fresh.page.id, evidence.page.id)
+        }
+    }
+
+    func testPageEvidenceReportsBoundsAndEmbeddedContentWithoutInventingCoverage() async throws {
+        let server = try OwnedBrowserHTTPFixture(routes: ["/results": .init(body: """
+            <p>Known result</p><iframe src="/frame"></iframe><canvas>Canvas fallback</canvas>
+            <div id="shadow"><span slot="chosen">Assigned result</span><span slot="concealed">Invisible assigned result</span><span>Unassigned result</span></div><script>
+            document.getElementById('shadow').attachShadow({mode:'open'}).innerHTML = '<p>Shadow result</p><a href="/shadow-event">Shadow event</a><a href="/assigned-event"><slot name="chosen">Unused slot fallback</slot></a><span style="opacity:0"><slot name="concealed"></slot></span>';
+            for (let i = 0; i < 300; i++) { const p = document.createElement('p'); p.textContent = 'Result ' + i; document.body.append(p); }
+            </script>
+            """), "/frame": .init(body: "<p>Embedded result cannot be silently included</p>")])
+        let base = try await server.start()
+        defer { server.stop() }
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+        defer { browser.close() }
+        try browser.claim(taskID: "bounded-results")
+        let document = try await browser.navigate(taskID: "bounded-results", operationID: "results", to: base.appendingPathComponent("results"))
+        let evidence = try await browser.observePage(document: document)
+        XCTAssertTrue(evidence.page.truncated)
+        XCTAssertTrue(evidence.page.omittedEmbeddedContent)
+        XCTAssertEqual(evidence.page.texts.count, 256)
+        XCTAssertTrue(evidence.page.texts.contains { $0.text == "Shadow result" })
+        XCTAssertTrue(evidence.page.texts.contains { $0.text == "Assigned result" })
+        XCTAssertFalse(evidence.page.texts.contains { $0.text == "Unassigned result" || $0.text == "Invisible assigned result" || $0.text == "Unused slot fallback" || $0.text == "Canvas fallback" })
+        XCTAssertFalse(evidence.page.texts.contains { $0.text.contains("Embedded result") })
+        XCTAssertTrue(evidence.page.links.contains { $0.label == "Shadow event" })
+        XCTAssertTrue(evidence.page.links.contains { $0.label == "Assigned result" && $0.destination.hasSuffix("/assigned-event") })
+        XCTAssertTrue(evidence.page.isWellFormed)
+        try await browser.validatePageEvidence(evidence)
+    }
+
+    func testPageEvidenceAuthenticationAndControlGatesRunBeforePublication() async throws {
+        for credential in ["<input type='password' value='private-password'>",
+                           "<input autocomplete='one-time-code' value='private-code'>"] {
+            let server = try OwnedBrowserHTTPFixture(routes: ["/login": .init(body: "<p>Private account page</p>" + credential)])
+            let base = try await server.start()
+            defer { server.stop() }
+            var allowed = true
+            var commands: [ComputerUseBrowserDOMCommand] = []
+            let browser = ComputerUseOwnedBrowser(presentsWindow: false,
+                domScriptDidDispatch: { commands.append($0) }, mayAct: { allowed })
+            defer { browser.close() }
+            try browser.claim(taskID: "page-login")
+            let document = try await browser.navigate(taskID: "page-login", operationID: "login", to: base.appendingPathComponent("login"))
+            allowed = false
+            let beforePause = commands
+            do { _ = try await browser.observePage(document: document); XCTFail("Paused reads cannot dispatch") }
+            catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+            XCTAssertEqual(commands, beforePause)
+            allowed = true
+            do { _ = try await browser.observePage(document: document); XCTFail("Authentication cannot publish page text") }
+            catch { XCTAssertEqual(error as? ComputerUseBrowserError, .authenticationRequired) }
+        }
+        let server = try OwnedBrowserHTTPFixture(routes: ["/results": .init(body: "<p>Current result</p>")])
+        let base = try await server.start()
+        defer { server.stop() }
+        var allowed = true
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false,
+            domScriptDidDispatch: { if $0 == .pageSnapshot { allowed = false } }, mayAct: { allowed })
+        defer { browser.close() }
+        try browser.claim(taskID: "read-race")
+        let document = try await browser.navigate(taskID: "read-race", operationID: "results", to: base.appendingPathComponent("results"))
+        do { _ = try await browser.observePage(document: document); XCTFail("Losing control during WebKit's await cannot publish evidence") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+    }
+
+    func testPageEvidenceFreshReadSupersedesPriorEvidenceWithoutRetiringFormBindings() async throws {
+        let server = try OwnedBrowserHTTPFixture(routes: ["/results": .init(body: "<p>Current result</p><label>Search<input value='private-query'></label>")])
+        let base = try await server.start()
+        defer { server.stop() }
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+        defer { browser.close() }
+        try browser.claim(taskID: "page-and-form")
+        let document = try await browser.navigate(taskID: "page-and-form", operationID: "results", to: base.appendingPathComponent("results"))
+        let target = ComputerUseBrowserTextTarget(browser: browser, document: document, requiresFrontmost: false)
+        let fields = try await target.fields()
+        let field = try XCTUnwrap(fields.first)
+        let first = try await browser.observePage(document: document)
+        let second = try await browser.observePage(document: document)
+        let retained = try await target.read(targetID: field.snapshot.targetID)
+        XCTAssertEqual(retained, field.snapshot)
+        do { try await browser.validatePageEvidence(first); XCTFail("A new read supersedes the earlier snapshot") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+        try await browser.validatePageEvidence(second)
+        browser.close()
+        do { try await browser.validatePageEvidence(second); XCTFail("Closing the page invalidates its evidence") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+    }
+
+    func testPageEvidenceAfterLoginRequiresHandbackAndUsesOnlyTheCurrentDocument() async throws {
+        let server = try OwnedBrowserHTTPFixture(routes: [
+            "/results": .init(body: "<p>Public results</p><script>fetch('/go').then(() => location.href = '/login');</script>"),
+            "/go": .init(held: true),
+            "/login": .init(body: "<input type='password' value='private-password'><script>fetch('/finish').then(() => location.href = '/account');</script>"),
+            "/finish": .init(held: true),
+            "/account": .init(body: "<p>Member tickets available</p><a href='/event'>Member event</a>"),
+        ])
+        let base = try await server.start()
+        defer { server.stop() }
+        var allowed = true
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { allowed })
+        defer { browser.close() }
+        try browser.claim(taskID: "login-evidence")
+        let original = try await browser.navigate(taskID: "login-evidence", operationID: "results", to: base.appendingPathComponent("results"))
+        try await waitUntil { server.count("/go") == 1 }
+        let beforeLogin = try await browser.observePage(document: original)
+        allowed = false
+        server.releaseHeldResponses()
+        try await waitUntil { server.count("/finish") == 1 && browser.hasPageAwaitingHandback }
+        allowed = true
+        try await browser.reacquireAfterUserControl(taskID: "login-evidence")
+        let login = try XCTUnwrap(browser.currentDocument(taskID: "login-evidence"))
+        do { _ = try await browser.observePage(document: login); XCTFail("Early handback still stops at authentication") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .authenticationRequired) }
+        allowed = false
+        server.releaseHeldResponses()
+        try await waitUntil { server.count("/account") == 1 && browser.hasPageAwaitingHandback }
+        allowed = true
+        XCTAssertNil(browser.currentDocument(taskID: "login-evidence"), "Opening the gate alone cannot adopt the person's page")
+        try await browser.reacquireAfterUserControl(taskID: "login-evidence")
+        let account = try XCTUnwrap(browser.currentDocument(taskID: "login-evidence"))
+        let current = try await browser.observePage(document: account)
+        XCTAssertEqual(account.source, .userControlObservation)
+        XCTAssertTrue(current.page.texts.contains { $0.text == "Member tickets available" })
+        XCTAssertFalse(current.page.texts.contains { $0.text == "Public results" })
+        try await browser.validatePageEvidence(current)
+        do { try await browser.validatePageEvidence(beforeLogin); XCTFail("Pre-login result evidence belongs to an old document") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+        XCTAssertNil(browser.receipt(taskID: "login-evidence", operationID: account.operationID))
+        XCTAssertEqual(server.count("/results"), 1)
+    }
+
     func testClosingSignInPopupDoesNotAssertAuthenticationSucceeded() async throws {
         let server = try OwnedBrowserHTTPFixture(routes: [
             "/login": .init(body: """
