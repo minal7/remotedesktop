@@ -585,9 +585,47 @@ public struct ComputerUseClarificationReference: Codable, Equatable, Sendable {
     }
 }
 
+/// Facts about one approved action, independent of the task's terminal state.
+/// The identifiers are opaque digests; tool arguments never cross this surface.
+public struct ComputerUseApprovedActionEvidence: Codable, Equatable, Sendable {
+    public enum State: String, Codable, Equatable, Sendable { case unconfirmed, confirmed }
+    public let actionID: String
+    public let state: State
+    public let summary: String?
+    public let resultDigest: String?
+
+    public init(actionID: String, state: State, summary: String? = nil, resultDigest: String? = nil) throws {
+        func isDigest(_ value: String) -> Bool {
+            value.utf8.count == 64 && value.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
+        }
+        guard isDigest(actionID) else { throw ComputerUsePayloadError.invalidIdentifier }
+        switch state {
+        case .unconfirmed:
+            guard summary == nil, resultDigest == nil else { throw ComputerUsePayloadError.invalidActionEvidence }
+        case .confirmed:
+            guard let summary, !summary.isEmpty, summary.count <= 4_000, summary.utf8.count <= 16_000,
+                  let resultDigest, isDigest(resultDigest) else { throw ComputerUsePayloadError.invalidActionEvidence }
+        }
+        self.actionID = actionID
+        self.state = state
+        self.summary = summary
+        self.resultDigest = resultDigest
+    }
+
+    private enum CodingKeys: String, CodingKey { case actionID, state, summary, resultDigest }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(actionID: values.decode(String.self, forKey: .actionID),
+            state: values.decode(State.self, forKey: .state),
+            summary: values.decodeIfPresent(String.self, forKey: .summary),
+            resultDigest: values.decodeIfPresent(String.self, forKey: .resultDigest))
+    }
+}
+
 /// Correlates assistant/status traffic with the stable privileged prompt ID.
-/// This lets iOS safely ignore a delayed replay from an older task after the
-/// user has already started a newer one in the same chat session.
+/// A delayed lifecycle replay cannot replace a newer task, while optional
+/// action evidence can still annotate its original request.
 public struct ComputerUseTaskUpdate: Codable, Equatable, Sendable {
     public let taskID: String
     public let text: String
@@ -600,19 +638,27 @@ public struct ComputerUseTaskUpdate: Codable, Equatable, Sendable {
     /// peers that only understand the existing text and status prefix.
     public let outcome: ComputerUseTerminalOutcome?
     public let clarification: ComputerUseClarificationReference?
+    public let approvedActionEvidence: ComputerUseApprovedActionEvidence?
+    /// Carried in a status envelope. It updates historical evidence only and
+    /// cannot acknowledge controls, finish a task or open an approval flow.
+    public let isApprovedActionEvidenceOnly: Bool
 
     public init(
         taskID: String,
         text: String,
         appliedControlRevision: UInt64? = nil,
         outcome: ComputerUseTerminalOutcome? = nil,
-        clarification: ComputerUseClarificationReference? = nil
+        clarification: ComputerUseClarificationReference? = nil,
+        approvedActionEvidence: ComputerUseApprovedActionEvidence? = nil,
+        isApprovedActionEvidenceOnly: Bool = false
     ) {
         self.taskID = taskID
         self.text = String(text.prefix(8_000))
         self.appliedControlRevision = appliedControlRevision
         self.outcome = outcome
         self.clarification = outcome == .userInterventionRequired && clarification?.taskID == taskID ? clarification : nil
+        self.approvedActionEvidence = approvedActionEvidence
+        self.isApprovedActionEvidenceOnly = isApprovedActionEvidenceOnly
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -621,6 +667,8 @@ public struct ComputerUseTaskUpdate: Codable, Equatable, Sendable {
         case appliedControlRevision
         case outcome
         case clarification
+        case approvedActionEvidence
+        case isApprovedActionEvidenceOnly
     }
 
     public init(from decoder: Decoder) throws {
@@ -630,9 +678,10 @@ public struct ComputerUseTaskUpdate: Codable, Equatable, Sendable {
         appliedControlRevision = try values.decodeIfPresent(
             UInt64.self,
             forKey: .appliedControlRevision)
-        if let rawOutcome = try values.decodeIfPresent(
+        let rawOutcome = try values.decodeIfPresent(
             String.self,
-            forKey: .outcome) {
+            forKey: .outcome)
+        if let rawOutcome {
             // A newer peer may add another result category. Preserve the
             // correlated text update and fall back to legacy presentation
             // instead of rejecting the entire JSON envelope.
@@ -642,9 +691,16 @@ public struct ComputerUseTaskUpdate: Codable, Equatable, Sendable {
         }
         let reference = try values.decodeIfPresent(ComputerUseClarificationReference.self, forKey: .clarification)
         clarification = outcome == .userInterventionRequired && reference?.taskID == taskID ? reference : nil
+        approvedActionEvidence = try values.decodeIfPresent(ComputerUseApprovedActionEvidence.self, forKey: .approvedActionEvidence)
+        isApprovedActionEvidenceOnly = try values.decodeIfPresent(Bool.self, forKey: .isApprovedActionEvidenceOnly) ?? false
+        if isApprovedActionEvidenceOnly && (rawOutcome != nil || reference != nil) {
+            throw ComputerUsePayloadError.invalidActionEvidence
+        }
+        try validateActionEvidenceUse()
     }
 
     public func encode(to encoder: Encoder) throws {
+        try validateActionEvidenceUse()
         var values = encoder.container(keyedBy: CodingKeys.self)
         try values.encode(taskID, forKey: .taskID)
         try values.encode(text, forKey: .text)
@@ -653,6 +709,15 @@ public struct ComputerUseTaskUpdate: Codable, Equatable, Sendable {
             forKey: .appliedControlRevision)
         try values.encodeIfPresent(outcome?.rawValue, forKey: .outcome)
         try values.encodeIfPresent(clarification, forKey: .clarification)
+        try values.encodeIfPresent(approvedActionEvidence, forKey: .approvedActionEvidence)
+        if isApprovedActionEvidenceOnly { try values.encode(true, forKey: .isApprovedActionEvidenceOnly) }
+    }
+
+    private func validateActionEvidenceUse() throws {
+        guard !isApprovedActionEvidenceOnly || (approvedActionEvidence != nil && text.isEmpty
+            && appliedControlRevision == nil && outcome == nil && clarification == nil) else {
+            throw ComputerUsePayloadError.invalidActionEvidence
+        }
     }
 
     public func encodedBody() throws -> String {
@@ -726,29 +791,36 @@ public struct ComputerUsePromptRequest: Codable, Equatable, Sendable {
     public let prompt: String
     public let conversation: [ComputerUseConversationTurn]
     public let clarification: ComputerUseClarificationReference?
+    /// Allows evidence-only status updates. Older clients receive optional
+    /// evidence only on their existing lifecycle replies.
+    public let supportsApprovedActionEvidence: Bool
 
     public init(
         prompt: String,
-        conversation: [ComputerUseConversationTurn] = []
+        conversation: [ComputerUseConversationTurn] = [],
+        supportsApprovedActionEvidence: Bool = false
     ) {
         version = Self.currentVersion
         self.prompt = Self.boundedPrompt(prompt)
         self.conversation = Self.boundedConversation(conversation)
         clarification = nil
+        self.supportsApprovedActionEvidence = supportsApprovedActionEvidence
     }
 
     /// A clarification answer is exact user input, not a bounded chat-history
     /// excerpt. Reject an oversized answer instead of truncating its payload.
-    public static func answering(_ reference: ComputerUseClarificationReference, text: String) throws -> Self {
-        try Self(exactAnswer: text, reference: reference)
+    public static func answering(_ reference: ComputerUseClarificationReference, text: String,
+        supportsApprovedActionEvidence: Bool = false) throws -> Self {
+        try Self(exactAnswer: text, reference: reference, supportsApprovedActionEvidence: supportsApprovedActionEvidence)
     }
 
-    private init(exactAnswer: String, reference: ComputerUseClarificationReference) throws {
+    private init(exactAnswer: String, reference: ComputerUseClarificationReference, supportsApprovedActionEvidence: Bool) throws {
         try Self.validateExactAnswer(exactAnswer)
         version = Self.currentVersion
         prompt = exactAnswer
         conversation = []
         clarification = reference
+        self.supportsApprovedActionEvidence = supportsApprovedActionEvidence
     }
 
     private static func validateExactAnswer(_ text: String) throws {
@@ -789,6 +861,7 @@ public struct ComputerUsePromptRequest: Codable, Equatable, Sendable {
         case prompt
         case conversation
         case clarification
+        case supportsApprovedActionEvidence
     }
 
     public init(from decoder: Decoder) throws {
@@ -796,6 +869,7 @@ public struct ComputerUsePromptRequest: Codable, Equatable, Sendable {
         version = try values.decodeIfPresent(Int.self, forKey: .version)
             ?? Self.currentVersion
         clarification = try values.decodeIfPresent(ComputerUseClarificationReference.self, forKey: .clarification)
+        supportsApprovedActionEvidence = try values.decodeIfPresent(Bool.self, forKey: .supportsApprovedActionEvidence) ?? false
         let rawPrompt = try values.decode(String.self, forKey: .prompt)
         if clarification != nil {
             try Self.validateExactAnswer(rawPrompt)
@@ -815,6 +889,7 @@ public struct ComputerUsePromptRequest: Codable, Equatable, Sendable {
         try values.encode(prompt, forKey: .prompt)
         try values.encode(conversation, forKey: .conversation)
         try values.encodeIfPresent(clarification, forKey: .clarification)
+        if supportsApprovedActionEvidence { try values.encode(true, forKey: .supportsApprovedActionEvidence) }
     }
 
     private static func boundedPrompt(_ value: String) -> String {
@@ -899,4 +974,5 @@ private enum ComputerUsePayloadError: Error {
     case invalidUTF8
     case invalidIdentifier
     case payloadTooLarge
+    case invalidActionEvidence
 }

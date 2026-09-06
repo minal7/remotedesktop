@@ -44,6 +44,7 @@ final class ComputerUseSessionModel: ObservableObject {
         let author: Author
         let text: String
         let createdAt: Date
+        var approvedActionEvidence: ComputerUseApprovedActionEvidence? = nil
     }
 
     enum State: Equatable {
@@ -287,11 +288,11 @@ final class ComputerUseSessionModel: ObservableObject {
         do {
             switch composerMode {
             case .answer(let reference, _):
-                request = try .answering(reference, text: rawPrompt)
+                request = try .answering(reference, text: rawPrompt, supportsApprovedActionEvidence: true)
             case .legacyAnswer:
-                request = .init(prompt: rawPrompt, conversation: recentConversation())
+                request = .init(prompt: rawPrompt, conversation: recentConversation(), supportsApprovedActionEvidence: true)
             case .request:
-                request = .init(prompt: rawPrompt)
+                request = .init(prompt: rawPrompt, supportsApprovedActionEvidence: true)
             case .expiredAnswer: return false
             }
             wireBody = try request.encodedBody()
@@ -822,6 +823,8 @@ final class ComputerUseSessionModel: ObservableObject {
             switch envelope.kind {
             case .assistant:
                 let update = try? ComputerUseTaskUpdate.decodeBody(envelope.body)
+                if update?.isApprovedActionEvidenceOnly == true { continue }
+                if let update { consumeActionEvidence(update, from: envelope) }
                 let trimmed = envelope.body.trimmingCharacters(in: .whitespacesAndNewlines)
                 if update == nil && (trimmed.first == "{" || trimmed.first == "[") { continue }
                 let taskID = update?.taskID ?? activePromptID
@@ -857,6 +860,8 @@ final class ComputerUseSessionModel: ObservableObject {
                 applyAssistantOutcome(update?.outcome, text: assistantText, clarification: update?.clarification)
             case .status:
                 if let update = try? ComputerUseTaskUpdate.decodeBody(envelope.body) {
+                    consumeActionEvidence(update, from: envelope)
+                    if update.isApprovedActionEvidenceOnly { continue }
                     guard update.taskID == activePromptID else { continue }
                     guard shouldApplyHostStatus(
                         update.text,
@@ -869,6 +874,8 @@ final class ComputerUseSessionModel: ObservableObject {
                     recordTaskProgress(update.text, outcome: update.outcome)
                     applyHostStatus(update.text, outcome: update.outcome)
                 } else {
+                    let trimmed = envelope.body.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if trimmed.first == "{" || trimmed.first == "[" { continue }
                     // Legacy raw statuses have no task identity. They may
                     // describe the active v2 task, but must never resurrect a
                     // terminal task after an assistant reply cleared it.
@@ -934,6 +941,19 @@ final class ComputerUseSessionModel: ObservableObject {
                 break
             }
         }
+    }
+
+    private func consumeActionEvidence(_ update: ComputerUseTaskUpdate, from envelope: ComputerUseEnvelope) {
+        guard envelope.senderID == hostID, envelope.pairingCode == pairingCode, envelope.sessionID == sessionID,
+              let evidence = update.approvedActionEvidence,
+              let index = messages.firstIndex(where: { $0.author == .user && $0.id == update.taskID }) else { return }
+        if let existing = messages[index].approvedActionEvidence {
+            guard existing.actionID == evidence.actionID,
+                  existing.state == .unconfirmed, evidence.state == .confirmed else { return }
+        }
+        // This is an annotation on the exact original request. Do not touch
+        // task/control state, timers, the composer, approval or conversation.
+        messages[index].approvedActionEvidence = evidence
     }
 
     private func recordTaskProgress(

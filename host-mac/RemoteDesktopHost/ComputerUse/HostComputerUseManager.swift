@@ -3681,6 +3681,7 @@ final class HostComputerUseManager: ObservableObject {
     /// Some channel implementations cannot promptly cancel an in-flight
     /// network request, so Task cancellation alone is not a sufficient fence.
     private var transportGeneration: UInt64 = 0
+    private var actionEvidenceAuthorizationGeneration: UInt64 = 0
     private var executionTask: Task<Void, Never>?
     private var currentExecution: ExecutionContext?
     private var pausedExecution: ExecutionContext?
@@ -4009,6 +4010,7 @@ final class HostComputerUseManager: ObservableObject {
         supportsOrderedComputerUseControls: Bool = true
     ) {
         guard !senderID.isEmpty else { return }
+        if authorizedPeerID != senderID { actionEvidenceAuthorizationGeneration &+= 1 }
         authorizedPeerID = senderID
         authorizedPeerSupportsOrderedComputerUseControls =
             supportsOrderedComputerUseControls
@@ -4051,6 +4053,7 @@ final class HostComputerUseManager: ObservableObject {
 
     func revokePeerAuthorization() {
         invalidateTextClarification()
+        actionEvidenceAuthorizationGeneration &+= 1
         authorizedPeerID = nil
         authorizedPeerSupportsOrderedComputerUseControls = false
         _ = blockActionsForUserIntervention()
@@ -6203,6 +6206,8 @@ final class HostComputerUseManager: ObservableObject {
             return
         }
 
+        let evidenceTransportGeneration = transportGeneration
+        let evidenceAuthorizationGeneration = actionEvidenceAuthorizationGeneration
         let precedingExecution = executionTask
         precedingExecution?.cancel()
         let token = UUID()
@@ -6230,6 +6235,8 @@ final class HostComputerUseManager: ObservableObject {
                 case .existing(let action):
                     result = Self.resultForApprovedAction(action)
                 case .new:
+                    sendApprovedActionEvidence(for: context, transportGeneration: evidenceTransportGeneration,
+                        authorizationGeneration: evidenceAuthorizationGeneration)
                     result = try await continuation.continueAfterApproval(
                         prepared,
                         tools: tools,
@@ -6247,6 +6254,8 @@ final class HostComputerUseManager: ObservableObject {
                     try taskLedger.recordApprovedActionResult(taskID: context.envelope.id,
                         senderID: context.envelope.senderID, sessionID: context.envelope.sessionID,
                         fingerprint: prepared.fingerprint, response: response)
+                    sendApprovedActionEvidence(for: context, transportGeneration: evidenceTransportGeneration,
+                        authorizationGeneration: evidenceAuthorizationGeneration)
                 }
                 guard currentExecutionToken == token else { return }
                 try acceptExecutionResult(
@@ -6274,6 +6283,37 @@ final class HostComputerUseManager: ObservableObject {
     private static func resultForApprovedAction(_ action: ComputerUseTaskLedger.ApprovedActionRecord) -> ComputerUseExecutionResult {
         if let response = action.response { return .completed(response) }
         return .unableToComplete(unconfirmedApprovedActionResponse)
+    }
+
+    private func actionEvidence(for envelope: ComputerUseEnvelope) -> ComputerUseApprovedActionEvidence? {
+        guard let action = try? taskLedger.approvedAction(taskID: envelope.id,
+            senderID: envelope.senderID, sessionID: envelope.sessionID) else { return nil }
+        let summary = action.response.map { response in
+            var bounded = "", byteCount = 0
+            for character in response.prefix(4_000) {
+                let bytes = String(character).utf8.count
+                guard byteCount + bytes <= 16_000 else { break }
+                bounded.append(character)
+                byteCount += bytes
+            }
+            return bounded.isEmpty ? "The Mac confirmed the approved action." : bounded
+        }
+        return try? ComputerUseApprovedActionEvidence(actionID: action.fingerprint.canonicalDigest,
+            state: action.response == nil ? .unconfirmed : .confirmed,
+            summary: summary, resultDigest: action.responseDigest)
+    }
+
+    private func sendApprovedActionEvidence(for context: ExecutionContext, transportGeneration: UInt64,
+        authorizationGeneration: UInt64) {
+        // A late result may annotate its original task while a newer task is
+        // active. Check again after queued delivery to fence a later revocation.
+        guard ComputerUsePromptRequest.decodeCompatibleBody(context.envelope.body).supportsApprovedActionEvidence,
+              self.transportGeneration == transportGeneration,
+              actionEvidenceAuthorizationGeneration == authorizationGeneration,
+              authorizedPeerID == context.envelope.senderID else { return }
+        send(kind: .status, body: "", replyingTo: context.envelope,
+            channel: context.channel, isApprovedActionEvidenceOnly: true,
+            evidenceDeliveryGeneration: (transportGeneration, authorizationGeneration))
     }
 
     private func acceptExecutionResult(
@@ -6565,23 +6605,33 @@ final class HostComputerUseManager: ObservableObject {
         replyingTo envelope: ComputerUseEnvelope,
         channel: any HostComputerUseChannel,
         outcome: ComputerUseTerminalOutcome? = nil,
-        clarification: ComputerUseClarificationReference? = nil
+        clarification: ComputerUseClarificationReference? = nil,
+        isApprovedActionEvidenceOnly: Bool = false,
+        evidenceDeliveryGeneration: (transport: UInt64, authorization: UInt64)? = nil
     ) {
+        let evidence = actionEvidence(for: envelope)
+        if isApprovedActionEvidenceOnly && evidence == nil { return }
         let wireBody: String
         switch kind {
         case .assistant, .status:
             wireBody = (try? ComputerUseTaskUpdate(
                 taskID: envelope.id,
                 text: body,
-                appliedControlRevision: taskLedger.appliedControlRevision(
+                appliedControlRevision: isApprovedActionEvidenceOnly ? nil : taskLedger.appliedControlRevision(
                     taskID: envelope.id),
-                outcome: outcome, clarification: clarification).encodedBody()) ?? body
+                outcome: outcome, clarification: clarification, approvedActionEvidence: evidence,
+                isApprovedActionEvidenceOnly: isApprovedActionEvidenceOnly).encodedBody()) ?? body
         default:
             wireBody = body
         }
         let previousDelivery = outboundDeliveryTask
-        let delivery = Task {
+        let delivery = Task { [weak self] in
             if let previousDelivery { await previousDelivery.value }
+            if let evidenceDeliveryGeneration {
+                guard let self, self.transportGeneration == evidenceDeliveryGeneration.transport,
+                      self.actionEvidenceAuthorizationGeneration == evidenceDeliveryGeneration.authorization,
+                      self.authorizedPeerID == envelope.senderID else { return }
+            }
             _ = try? await channel.send(
                 kind: kind,
                 body: wireBody,

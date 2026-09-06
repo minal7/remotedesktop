@@ -194,6 +194,195 @@ final class ComputerUseClarificationClientTests: XCTestCase {
 }
 
 @MainActor
+final class ComputerUseActionEvidenceClientTests: XCTestCase {
+    func testActionEvidenceDoesNotAcknowledgeStopAndCanArriveBeforeOrAfterItsTerminal() async throws {
+        for terminalFirst in [false, true] {
+            let fixture = ClarificationClientFixture()
+            defer { fixture.model.stop() }
+            fixture.model.start(); XCTAssertTrue(fixture.model.sendPrompt("Draft the fixture email"))
+            let request = try await fixture.channel.prompt(at: 0)
+            fixture.model.stopCurrentTask()
+            let before = snapshot(fixture)
+            let unconfirmed = try evidence(.unconfirmed)
+            await fixture.channel.deliver(try metadata(taskID: request.id, evidence: unconfirmed), kind: .status)
+            try await fixture.channel.waitForDelivery()
+            XCTAssertEqual(snapshot(fixture), before)
+            XCTAssertTrue(fixture.model.isCancellationPending)
+            XCTAssertEqual(fixture.model.messages.first?.approvedActionEvidence, unconfirmed)
+            let terminal = try ComputerUseTaskUpdate(taskID: request.id, text: "Stopped.", appliedControlRevision: 1,
+                outcome: .unableToComplete).encodedBody()
+            if terminalFirst {
+                await fixture.channel.deliver(terminal)
+                try await fixture.channel.waitForDelivery()
+            }
+            let beforeConfirmation = snapshot(fixture)
+            let confirmed = try evidence(.confirmed)
+            await fixture.channel.deliver(try metadata(taskID: request.id, evidence: confirmed), kind: .status)
+            try await fixture.channel.waitForDelivery()
+            XCTAssertEqual(snapshot(fixture), beforeConfirmation)
+            XCTAssertEqual(fixture.model.messages.first?.approvedActionEvidence, confirmed)
+            if !terminalFirst {
+                await fixture.channel.deliver(terminal)
+                try await fixture.channel.waitForDelivery()
+            }
+            XCTAssertFalse(fixture.model.hasActivePrompt)
+            XCTAssertEqual(fixture.model.latestTerminalOutcome, .unableToComplete)
+            XCTAssertEqual(fixture.model.messages.filter { $0.author == .assistant }.map(\.text), ["Stopped."])
+        }
+    }
+
+    func testHistoricalActionEvidenceCannotChangeANewerWorkingPausedOrApprovalTask() async throws {
+        for state in ["working", "paused", "approval"] {
+            let fixture = ClarificationClientFixture()
+            defer { fixture.model.stop() }
+            fixture.model.start(); XCTAssertTrue(fixture.model.sendPrompt("Original request"))
+            let original = try await fixture.channel.prompt(at: 0)
+            await fixture.channel.deliver(try ComputerUseTaskUpdate(taskID: original.id, text: "Stopped.", outcome: .unableToComplete).encodedBody())
+            try await fixture.channel.waitForDelivery()
+            XCTAssertTrue(fixture.model.sendPrompt("New request"))
+            let current = try await fixture.channel.prompt(at: 1)
+            await fixture.channel.deliver(try ComputerUseTaskUpdate(taskID: current.id, text: "working").encodedBody(), kind: .status)
+            try await fixture.channel.waitForDelivery()
+            if state == "paused" { fixture.model.takeControl() }
+            if state == "approval" {
+                await fixture.channel.deliver(try ComputerUseApprovalRequest(taskID: current.id, message: "Approve the new action?").encodedBody(), kind: .approvalRequest)
+                try await fixture.channel.waitForDelivery()
+            }
+            let before = snapshot(fixture), confirmed = try evidence(.confirmed)
+            await fixture.channel.deliver(try metadata(taskID: original.id, evidence: confirmed), kind: .status)
+            // A replay may carry the same evidence with an obsolete lifecycle result.
+            await fixture.channel.deliver(try ComputerUseTaskUpdate(taskID: original.id, text: "Old task completed.",
+                appliedControlRevision: 90, outcome: .taskCompleted, approvedActionEvidence: confirmed).encodedBody())
+            try await fixture.channel.waitForDelivery()
+            XCTAssertEqual(snapshot(fixture), before, state)
+            XCTAssertEqual(fixture.model.messages.first?.approvedActionEvidence, confirmed)
+            XCTAssertNil(fixture.model.messages.first { $0.id == current.id }?.approvedActionEvidence)
+            XCTAssertFalse(fixture.model.messages.contains { $0.text == "Old task completed." })
+        }
+    }
+
+    func testActionEvidenceAdvancesOnceAndRejectsConflictingOrReorderedRecords() async throws {
+        let fixture = ClarificationClientFixture()
+        defer { fixture.model.stop() }
+        fixture.model.start(); XCTAssertTrue(fixture.model.sendPrompt("Original request"))
+        let original = try await fixture.channel.prompt(at: 0)
+        let pending = try evidence(.unconfirmed), confirmed = try evidence(.confirmed)
+        await fixture.channel.deliver(try metadata(taskID: original.id, evidence: pending), kind: .status)
+        let foreign = try evidence(.confirmed, actionID: String(repeating: "c", count: 64))
+        await fixture.channel.deliver(try metadata(taskID: original.id, evidence: foreign), kind: .status)
+        try await fixture.channel.waitForDelivery()
+        XCTAssertEqual(fixture.model.messages.first?.approvedActionEvidence, pending)
+        await fixture.channel.deliver(try ComputerUseTaskUpdate(taskID: original.id, text: "Task completed.", outcome: .taskCompleted,
+            approvedActionEvidence: confirmed).encodedBody())
+        try await fixture.channel.waitForDelivery()
+        let before = fixture.model.messages
+        for replay in [pending, confirmed, foreign, try evidence(.confirmed, summary: "Conflicting response"),
+                       try evidence(.confirmed, resultDigest: String(repeating: "d", count: 64))] {
+            await fixture.channel.deliver(try metadata(taskID: original.id, evidence: replay), kind: .status)
+        }
+        try await fixture.channel.waitForDelivery()
+        XCTAssertEqual(fixture.model.messages, before)
+        XCTAssertEqual(fixture.model.messages.first?.approvedActionEvidence, confirmed)
+        XCTAssertEqual(fixture.model.latestTerminalOutcome, .taskCompleted)
+    }
+
+    func testActionEvidenceRejectsForeignHostPairingSessionTaskAndWrongEnvelopeKind() async throws {
+        let fixture = ClarificationClientFixture()
+        defer { fixture.model.stop() }
+        fixture.model.start(); XCTAssertTrue(fixture.model.sendPrompt("Original request"))
+        let original = try await fixture.channel.prompt(at: 0)
+        let confirmed = try evidence(.confirmed), body = try metadata(taskID: original.id, evidence: confirmed)
+        await fixture.channel.deliver(body, kind: .status, senderID: "FOREIGN")
+        await fixture.channel.deliver(body, kind: .status, pairingCode: "654321")
+        await fixture.channel.deliver(body, kind: .status, sessionID: "foreign-session")
+        await fixture.channel.deliver(try metadata(taskID: "unknown-task", evidence: confirmed), kind: .status)
+        await fixture.channel.deliver(body, kind: .assistant)
+        try await fixture.channel.waitForDelivery()
+        XCTAssertTrue(fixture.model.messages.allSatisfy { $0.approvedActionEvidence == nil })
+        XCTAssertTrue(fixture.model.hasActivePrompt)
+        await fixture.channel.deliver(body, kind: .status)
+        try await fixture.channel.waitForDelivery()
+        XCTAssertEqual(fixture.model.messages.first?.approvedActionEvidence, confirmed)
+    }
+
+    func testMalformedEvidenceStatusCannotBecomeLegacyProgressOrClearRetry() async throws {
+        let fixture = ClarificationClientFixture()
+        defer { fixture.model.stop() }
+        fixture.model.start()
+        await fixture.channel.failNextPrompt()
+        XCTAssertTrue(fixture.model.sendPrompt("Original request"))
+        let original = try await fixture.channel.prompt(at: 0)
+        try await fixture.wait { fixture.model.retryPrompt != nil }
+        let before = snapshot(fixture)
+        for body in [#"{"taskID":"broken","text":"working","approvedActionEvidence":{}}"#, "[malformed",
+                     "{\"taskID\":\"\(original.id)\",\"text\":\"working\",\"isApprovedActionEvidenceOnly\":true}"] {
+            await fixture.channel.deliver(body, kind: .status)
+        }
+        await fixture.channel.deliver(try metadata(taskID: original.id, evidence: evidence(.confirmed)), kind: .status)
+        try await fixture.channel.waitForDelivery()
+        XCTAssertEqual(snapshot(fixture), before)
+        XCTAssertNotNil(fixture.model.messages.first?.approvedActionEvidence)
+    }
+
+    func testEvidenceCapabilityIsAdvertisedForRequestsAndAnswersWithoutAddingAnnotationsToModelContext() async throws {
+        let fixture = ClarificationClientFixture()
+        defer { fixture.model.stop() }
+        fixture.model.start(); XCTAssertTrue(fixture.model.sendPrompt("Draft an email"))
+        let original = try await fixture.channel.prompt(at: 0)
+        XCTAssertTrue(try ComputerUsePromptRequest.decodeBody(original.body).supportsApprovedActionEvidence)
+        let question = "Who should receive the email?"
+        await fixture.channel.deliver(try ComputerUseTaskUpdate(taskID: original.id, text: question,
+            approvedActionEvidence: evidence(.confirmed, summary: "Private helper receipt")).encodedBody())
+        try await fixture.channel.waitForDelivery()
+        XCTAssertEqual(fixture.model.composerMode, .legacyAnswer)
+        XCTAssertTrue(fixture.model.sendPrompt("alex@example.invalid"))
+        let answer = try await fixture.channel.prompt(at: 1)
+        let decoded = try ComputerUsePromptRequest.decodeBody(answer.body)
+        XCTAssertTrue(decoded.supportsApprovedActionEvidence)
+        XCTAssertEqual(decoded.conversation, [.init(role: .user, text: "Draft an email"), .init(role: .assistant, text: question)])
+        XCTAssertFalse(decoded.modelPrompt.contains("Private helper receipt"))
+        let reference = try await fixture.question(for: answer)
+        let exact = "  e\u{301} 😀\n  "
+        XCTAssertTrue(fixture.model.sendPrompt(exact))
+        let exactAnswer = try ComputerUsePromptRequest.decodeBody(await fixture.channel.prompt(at: 2).body)
+        XCTAssertTrue(exactAnswer.supportsApprovedActionEvidence)
+        XCTAssertTrue(exactAnswer.prompt.utf8.elementsEqual(exact.utf8))
+        XCTAssertEqual(exactAnswer.clarification, reference); XCTAssertTrue(exactAnswer.conversation.isEmpty)
+    }
+
+    private func evidence(_ state: ComputerUseApprovedActionEvidence.State,
+        actionID: String = String(repeating: "a", count: 64), summary: String = "Confirmed fixture action",
+        resultDigest: String = String(repeating: "b", count: 64)) throws -> ComputerUseApprovedActionEvidence {
+        try ComputerUseApprovedActionEvidence(actionID: actionID, state: state,
+            summary: state == .confirmed ? summary : nil, resultDigest: state == .confirmed ? resultDigest : nil)
+    }
+
+    private func metadata(taskID: String, evidence: ComputerUseApprovedActionEvidence) throws -> String {
+        try ComputerUseTaskUpdate(taskID: taskID, text: "", approvedActionEvidence: evidence,
+            isApprovedActionEvidenceOnly: true).encodedBody()
+    }
+
+    private struct LifecycleSnapshot: Equatable {
+        let state: ComputerUseSessionModel.State
+        let status: String
+        let active: Bool
+        let cancellationPending: Bool
+        let outcome: ComputerUseTerminalOutcome?
+        let progress: [String]
+        let retry: String?
+        let composer: ComputerUseSessionModel.ComposerMode
+        let pending: ComputerUsePendingPrompt?
+    }
+
+    private func snapshot(_ fixture: ClarificationClientFixture) -> LifecycleSnapshot {
+        .init(state: fixture.model.state, status: fixture.model.statusText, active: fixture.model.hasActivePrompt,
+            cancellationPending: fixture.model.isCancellationPending, outcome: fixture.model.latestTerminalOutcome,
+            progress: fixture.model.taskProgressHistory, retry: fixture.model.retryPrompt, composer: fixture.model.composerMode,
+            pending: fixture.store.load(hostID: "HOST-ID", pairingCode: "123456"))
+    }
+}
+
+@MainActor
 private final class ClarificationClientFixture {
     let channel = ClarificationClientChannel()
     let store = ClarificationClientStore()
@@ -241,9 +430,10 @@ private actor ClarificationClientChannel: ComputerUseSessionChannel {
         let result = incoming; incoming.removeAll(); return result
     }
     func acknowledge(_ envelopes: [ComputerUseEnvelope]) async throws { acknowledgedCount += envelopes.count }
-    func deliver(_ body: String) {
+    func deliver(_ body: String, kind: ComputerUseEnvelope.Kind = .assistant, senderID: String = "HOST-ID",
+        pairingCode: String = "123456", sessionID: String = "session-1") {
         deliveredCount += 1
-        incoming.append(.init(senderID: "HOST-ID", targetID: "IOS-ID", pairingCode: "123456", sessionID: "session-1", kind: .assistant, body: body))
+        incoming.append(.init(senderID: senderID, targetID: "IOS-ID", pairingCode: pairingCode, sessionID: sessionID, kind: kind, body: body))
     }
     func promptCount() -> Int { prompts.count }
     func failNextPrompt() { failPrompt = true }

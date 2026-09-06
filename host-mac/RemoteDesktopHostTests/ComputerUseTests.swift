@@ -9,6 +9,156 @@ import XCTest
 
 @MainActor
 final class ComputerUseTests: XCTestCase {
+    func test_approvedActionEvidenceWireRoundTripsAndLegacyPeersRemainCompatible() throws {
+        let actionID = String(repeating: "a", count: 64), digest = String(repeating: "b", count: 64)
+        for evidence in [try ComputerUseApprovedActionEvidence(actionID: actionID, state: .unconfirmed),
+                         try ComputerUseApprovedActionEvidence(actionID: actionID, state: .confirmed,
+                            summary: "Confirmed 東京 e\u{301} 😀", resultDigest: digest)] {
+            let update = ComputerUseTaskUpdate(taskID: "original", text: "", approvedActionEvidence: evidence,
+                isApprovedActionEvidenceOnly: true)
+            XCTAssertEqual(try ComputerUseTaskUpdate.decodeBody(update.encodedBody()), update)
+            struct LegacyUpdate: Decodable { let taskID: String; let text: String }
+            let terminal = ComputerUseTaskUpdate(taskID: "original", text: "Stopped.", outcome: .unableToComplete,
+                approvedActionEvidence: evidence)
+            let legacy = try JSONDecoder().decode(LegacyUpdate.self, from: Data(terminal.encodedBody().utf8))
+            XCTAssertEqual(legacy.taskID, "original"); XCTAssertEqual(legacy.text, "Stopped.")
+        }
+        let legacy = try ComputerUseTaskUpdate.decodeBody(#"{"taskID":"old","text":"working"}"#)
+        XCTAssertNil(legacy.approvedActionEvidence); XCTAssertFalse(legacy.isApprovedActionEvidenceOnly)
+        XCTAssertFalse(try ComputerUsePromptRequest.decodeBody(#"{"prompt":"Open Calculator"}"#).supportsApprovedActionEvidence)
+        XCTAssertFalse(ComputerUsePromptRequest.decodeCompatibleBody("Open Calculator").supportsApprovedActionEvidence)
+        let reference = try ComputerUseClarificationReference(taskID: "original", expiresAt: Date().addingTimeInterval(300))
+        for request in [ComputerUsePromptRequest(prompt: "Open Calculator", supportsApprovedActionEvidence: true),
+                        try .answering(reference, text: "  Exact answer  ", supportsApprovedActionEvidence: true)] {
+            XCTAssertEqual(try ComputerUsePromptRequest.decodeBody(request.encodedBody()), request)
+            XCTAssertTrue(request.supportsApprovedActionEvidence)
+            XCTAssertFalse(request.modelPrompt.contains("supportsApprovedActionEvidence"))
+        }
+    }
+
+    func test_approvedActionEvidenceRejectsMalformedIdentitiesStatesAndUnboundedSummaries() throws {
+        let valid: [String: Any] = ["actionID": String(repeating: "a", count: 64), "state": "confirmed",
+            "summary": "Confirmed", "resultDigest": String(repeating: "b", count: 64)]
+        let invalid: [(String, Any)] = [
+            ("actionID", ""), ("actionID", String(repeating: "A", count: 64)), ("actionID", String(repeating: "g", count: 64)),
+            ("state", "unknown"), ("state", "unconfirmed"), ("summary", ""),
+            ("summary", String(repeating: "x", count: 4_001)),
+            ("summary", "e" + String(repeating: "\u{301}", count: 8_000)),
+            ("resultDigest", String(repeating: "b", count: 63))]
+        for (key, value) in invalid {
+            var record = valid; record[key] = value
+            XCTAssertThrowsError(try JSONDecoder().decode(ComputerUseApprovedActionEvidence.self,
+                from: JSONSerialization.data(withJSONObject: record)), key)
+        }
+        for key in ["summary", "resultDigest"] {
+            var record = valid; record.removeValue(forKey: key)
+            XCTAssertThrowsError(try JSONDecoder().decode(ComputerUseApprovedActionEvidence.self,
+                from: JSONSerialization.data(withJSONObject: record)), key)
+        }
+        XCTAssertThrowsError(try ComputerUseApprovedActionEvidence(actionID: "invalid", state: .unconfirmed))
+        XCTAssertThrowsError(try ComputerUseApprovedActionEvidence(actionID: String(repeating: "a", count: 64),
+            state: .unconfirmed, summary: "Invented result"))
+    }
+
+    func test_approvedActionEvidenceOnlyCannotCarryTaskOutcomeTextClarificationOrControlAcknowledgement() throws {
+        let evidence = try ComputerUseApprovedActionEvidence(actionID: String(repeating: "a", count: 64), state: .unconfirmed)
+        let update = ComputerUseTaskUpdate(taskID: "original", text: "", approvedActionEvidence: evidence,
+            isApprovedActionEvidenceOnly: true)
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(update.encodedBody().utf8)) as? [String: Any])
+        let reference = try ComputerUseClarificationReference(taskID: "different", expiresAt: Date().addingTimeInterval(300))
+        let referenceJSON = try JSONSerialization.jsonObject(with: JSONEncoder().encode(reference))
+        let invalidFields: [(String, Any)] = [("text", "working"), ("outcome", "taskCompleted"), ("outcome", "future-outcome"),
+            ("clarification", referenceJSON), ("appliedControlRevision", 42), ("approvedActionEvidence", NSNull())]
+        for (key, value) in invalidFields {
+            var invalid = body; invalid[key] = value
+            let encoded = String(decoding: try JSONSerialization.data(withJSONObject: invalid), as: UTF8.self)
+            XCTAssertThrowsError(try ComputerUseTaskUpdate.decodeBody(encoded), key)
+        }
+        for invalid in [ComputerUseTaskUpdate(taskID: "original", text: "", isApprovedActionEvidenceOnly: true),
+                        ComputerUseTaskUpdate(taskID: "original", text: "ready", approvedActionEvidence: evidence, isApprovedActionEvidenceOnly: true),
+                        ComputerUseTaskUpdate(taskID: "original", text: "", appliedControlRevision: 1, approvedActionEvidence: evidence, isApprovedActionEvidenceOnly: true),
+                        ComputerUseTaskUpdate(taskID: "original", text: "", outcome: .taskCompleted, approvedActionEvidence: evidence, isApprovedActionEvidenceOnly: true)] {
+            XCTAssertThrowsError(try invalid.encodedBody())
+        }
+    }
+
+    func test_approvedActionEvidenceReplayRetainsStopAndBoundsEmptyOrLargeUnicodeConfirmation() async throws {
+        for response in ["", "e" + String(repeating: "\u{301}", count: 8_000), String(repeating: "👨‍👩‍👧‍👦", count: 1_000), "Confirmed exact action"] {
+            let url = temporaryLedgerURL()
+            defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+            let ledger = ComputerUseTaskLedger(fileURL: url)
+            let prompt = makeEnvelope(id: "retained", kind: .prompt, body: "Original request")
+            _ = try ledger.claim(taskID: prompt.id, senderID: prompt.senderID, sessionID: prompt.sessionID)
+            let prepared = try receiptApproval(taskID: prompt.id)
+            _ = try ledger.claimApprovedAction(taskID: prompt.id, senderID: prompt.senderID, sessionID: prompt.sessionID, prepared: prepared)
+            _ = try ledger.applyControl(.cancel, taskID: prompt.id, revision: 1, senderID: prompt.senderID, sessionID: prompt.sessionID)
+            try ledger.recordApprovedActionResult(taskID: prompt.id, senderID: prompt.senderID, sessionID: prompt.sessionID,
+                fingerprint: prepared.fingerprint, response: response)
+            let executor = SuspendingComputerUseExecutor(), channel = FakeHostComputerUseChannel()
+            let manager = HostComputerUseManager(injector: InputInjector(), executor: executor,
+                taskLedger: ComputerUseTaskLedger(fileURL: url), allowsExternalServices: false, channelFactory: { _ in channel })
+            defer { manager.stop() }
+            manager.authorizePeer(senderID: prompt.senderID)
+            XCTAssertTrue(manager.handle(prompt, channel: channel))
+            await waitUntil { await channel.sentMessages().contains { $0.kind == .assistant } }
+            let sent = await channel.sentMessages()
+            let terminal = try XCTUnwrap(sent.filter { $0.kind == .assistant }.compactMap { try? ComputerUseTaskUpdate.decodeBody($0.body) }.first)
+            let evidence = try XCTUnwrap(terminal.approvedActionEvidence)
+            XCTAssertEqual(terminal.text, ComputerUseTaskLedger.stoppedResponse); XCTAssertEqual(terminal.outcome, .unableToComplete)
+            XCTAssertEqual(terminal.appliedControlRevision, 1); XCTAssertEqual(evidence.state, .confirmed)
+            XCTAssertEqual(evidence.actionID, prepared.fingerprint.canonicalDigest)
+            XCTAssertEqual(evidence.resultDigest, try MCPDigest.sha256(of: .string(response)))
+            XCTAssertFalse(try XCTUnwrap(evidence.summary).isEmpty)
+            XCTAssertLessThanOrEqual(try XCTUnwrap(evidence.summary).utf8.count, 16_000)
+            XCTAssertLessThanOrEqual(try XCTUnwrap(evidence.summary).count, 4_000)
+            XCTAssertEqual(executor.callCount, 0)
+        }
+    }
+
+    func test_legacyApprovedActionClientReceivesNoEvidenceOnlyStatus() async throws {
+        try await assertApprovedActionInterruption("legacy-confirmed")
+    }
+
+    func test_queuedApprovedActionEvidenceIsFencedAfterRevocationOrTransportReplacement() async throws {
+        for stopTransport in [false, true] {
+            let url = temporaryLedgerURL()
+            defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+            let ledger = ComputerUseTaskLedger(fileURL: url)
+            let action = ComputerUsePlanningTestGate<Bool>(started: expectation(description: "approved action entered"), returned: expectation(description: "approved action returned"))
+            let delivery = ComputerUsePlanningTestGate<Bool>(started: expectation(description: "working send blocked"), returned: expectation(description: "working send released"))
+            defer { action.finish(true); delivery.finish(true) }
+            let prompt = makeEnvelope(id: "queued-evidence", kind: .prompt, body: try ComputerUsePromptRequest(
+                prompt: "Draft the fixture email", supportsApprovedActionEvidence: true).encodedBody())
+            let executor = ApprovalHoldingMCPComputerUseExecutor(prepared: try receiptApproval(taskID: prompt.id), resultGate: action)
+            let channel = FakeHostComputerUseChannel()
+            let manager = HostComputerUseManager(injector: InputInjector(), executor: executor, taskLedger: ledger,
+                allowsExternalServices: false, channelFactory: { _ in channel })
+            defer { manager.stop() }
+            manager.authorizePeer(senderID: prompt.senderID)
+            XCTAssertTrue(manager.handle(prompt, channel: channel))
+            await waitUntil { await channel.sentMessages().contains { $0.kind == .approvalRequest } }
+            let sent = await channel.sentMessages()
+            let approval = try ComputerUseApprovalRequest.decodeBody(XCTUnwrap(sent.first { $0.kind == .approvalRequest }).body)
+            await channel.holdNextStatusSend(delivery)
+            XCTAssertTrue(manager.handle(makeEnvelope(kind: .approvalResponse, body: try ComputerUseApprovalResponse(
+                requestID: approval.requestID, approved: true).encodedBody()), channel: channel))
+            await fulfillment(of: [delivery.started, action.started], timeout: 1)
+            action.finish(true)
+            await waitUntil { manager.activity == .idle }
+            XCTAssertNotNil(try ledger.approvedAction(taskID: prompt.id, senderID: prompt.senderID, sessionID: prompt.sessionID)?.response)
+            if stopTransport { manager.stop() } else { manager.revokePeerAuthorization() }
+            // Renewing the same peer cannot validate an older queued push.
+            manager.authorizePeer(senderID: prompt.senderID)
+            delivery.finish(true)
+            await waitUntil { await channel.sentMessages().contains {
+                $0.kind == .status && (try? ComputerUseTaskUpdate.decodeBody($0.body).text) == "ready"
+            } }
+            let delivered = await channel.sentMessages()
+            XCTAssertFalse(delivered.contains { (try? ComputerUseTaskUpdate.decodeBody($0.body).isApprovedActionEvidenceOnly) == true })
+            XCTAssertEqual(executor.approvedActionSideEffectCount, 1)
+        }
+    }
+
     func test_approvedActionRecordPreservesLateConfirmationWithoutReplacingStop() throws {
         let url = temporaryLedgerURL()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
@@ -132,8 +282,9 @@ final class ComputerUseTests: XCTestCase {
         let ledger = ComputerUseTaskLedger(fileURL: url)
         let gate = ComputerUsePlanningTestGate<Bool>(started: expectation(description: "approved action dispatched"), returned: expectation(description: "approved action returned"))
         defer { gate.finish(true) }
-        let prompt = makeEnvelope(id: "approved-task", kind: .prompt,
-            body: "Draft an email to receipt@example.invalid with subject Receipt fixture and body Fixture body.")
+        let prompt = makeEnvelope(id: "approved-task", kind: .prompt, body: try ComputerUsePromptRequest(
+            prompt: "Draft an email to receipt@example.invalid with subject Receipt fixture and body Fixture body.",
+            supportsApprovedActionEvidence: mode != "legacy-confirmed").encodedBody())
         let prepared = try receiptApproval(taskID: prompt.id)
         let desktop = ApprovalHoldingMCPComputerUseExecutor(prepared: prepared, resultGate: gate,
             resultAfterFirstExecution: .userInterventionRequired("New task awaits your input."))
@@ -153,6 +304,11 @@ final class ComputerUseTests: XCTestCase {
         XCTAssertTrue(manager.handle(makeEnvelope(kind: .approvalResponse, body: try approval.encodedBody()), channel: channel))
         await fulfillment(of: [gate.started], timeout: 1)
         XCTAssertNotNil(try ledger.approvedAction(taskID: prompt.id, senderID: prompt.senderID, sessionID: prompt.sessionID))
+        if mode != "legacy-confirmed" {
+            await waitUntil { await channel.sentMessages().contains {
+                (try? ComputerUseTaskUpdate.decodeBody($0.body).isApprovedActionEvidenceOnly) == true
+            } }
+        }
         let newer = makeEnvelope(id: "newer-task", kind: .prompt, body: "Open Calculator")
         switch mode {
         case "cancel-new-task":
@@ -178,10 +334,28 @@ final class ComputerUseTests: XCTestCase {
         XCTAssertEqual(desktop.approvedActionSideEffectCount, 1)
         XCTAssertEqual(nativeCalls, mode == "cancel-new-task" ? 2 : 1)
         await waitUntil { await channel.sentMessages().contains { $0.kind == .assistant } }
+        if mode == "pause-confirmed" || mode == "cancel-new-task" {
+            await waitUntil { await channel.sentMessages().contains {
+                guard let update = try? ComputerUseTaskUpdate.decodeBody($0.body) else { return false }
+                return update.isApprovedActionEvidenceOnly && update.approvedActionEvidence?.state == .confirmed
+            } }
+        }
         let sent = await channel.sentMessages()
         let terminals = sent.filter { $0.kind == .assistant }.compactMap { try? ComputerUseTaskUpdate.decodeBody($0.body) }.filter { $0.taskID == prompt.id }
         XCTAssertEqual(terminals.count, 1)
-        if mode == "pause-confirmed" {
+        let evidenceUpdates = sent.filter { $0.kind == .status }.compactMap { try? ComputerUseTaskUpdate.decodeBody($0.body) }
+            .filter { $0.taskID == prompt.id && $0.isApprovedActionEvidenceOnly }
+        if mode == "legacy-confirmed" {
+            XCTAssertTrue(evidenceUpdates.isEmpty)
+        } else {
+            XCTAssertEqual(evidenceUpdates.compactMap { $0.approvedActionEvidence?.state },
+                mode == "transport-stop" || mode == "pause-unconfirmed" ? [.unconfirmed] : [.unconfirmed, .confirmed])
+            for update in evidenceUpdates {
+                XCTAssertTrue(update.text.isEmpty); XCTAssertNil(update.outcome); XCTAssertNil(update.appliedControlRevision)
+                XCTAssertEqual(update.approvedActionEvidence?.actionID, prepared.fingerprint.canonicalDigest)
+            }
+        }
+        if mode == "pause-confirmed" || mode == "legacy-confirmed" {
             XCTAssertEqual(terminals.first?.outcome, .taskCompleted)
             XCTAssertEqual(terminals.first?.text, record.response)
         } else {
@@ -7660,6 +7834,9 @@ private final class CapturedCGEventStore: @unchecked Sendable {
 
 private actor FakeHostComputerUseChannel: HostComputerUseChannel {
     private var sent: [ComputerUseEnvelope] = []
+    private var nextStatusSendGate: ComputerUsePlanningTestGate<Bool>?
+
+    func holdNextStatusSend(_ gate: ComputerUsePlanningTestGate<Bool>) { nextStatusSendGate = gate }
 
     func send(
         kind: ComputerUseEnvelope.Kind,
@@ -7668,6 +7845,10 @@ private actor FakeHostComputerUseChannel: HostComputerUseChannel {
         sessionID explicitSessionID: String?,
         messageID explicitMessageID: String?
     ) async throws -> ComputerUseEnvelope {
+        if kind == .status, let gate = nextStatusSendGate {
+            nextStatusSendGate = nil
+            _ = await gate.wait()
+        }
         let envelope = ComputerUseEnvelope(
             id: explicitMessageID ?? UUID().uuidString,
             senderID: "HOST-ID",

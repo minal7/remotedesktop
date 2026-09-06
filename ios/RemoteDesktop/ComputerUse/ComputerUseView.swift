@@ -609,10 +609,10 @@ struct ComputerUseView: View {
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 composer
             }
-            .onChange(of: model.messages) { _, messages in
-                guard let last = messages.last else { return }
+            .onChange(of: model.messages.last?.id) { _, lastID in
+                guard let lastID else { return }
                 withAnimation(.easeOut(duration: 0.2)) {
-                    proxy.scrollTo(last.id, anchor: .bottom)
+                    proxy.scrollTo(lastID, anchor: .bottom)
                 }
             }
         }
@@ -761,7 +761,22 @@ struct ComputerUseView: View {
     private func messageBubble(_ message: ComputerUseSessionModel.ChatMessage) -> some View {
         HStack {
             if message.author == .user { Spacer(minLength: 44) }
-            Text(message.text)
+            VStack(alignment: .leading, spacing: 8) {
+                Text(message.text)
+                    .accessibilityLabel(message.author == .user ? "You: \(message.text)" : "AI: \(message.text)")
+                if let evidence = message.approvedActionEvidence {
+                    Divider()
+                    VStack(alignment: .leading, spacing: 4) {
+                        Label(evidence.state == .confirmed ? "Action confirmed on Mac" : "Action result not confirmed",
+                            systemImage: evidence.state == .confirmed ? "checkmark.circle" : "questionmark.circle")
+                            .font(.caption.weight(.semibold))
+                        Text(evidence.summary ?? "The approved action may have occurred. Its result has not been confirmed.")
+                            .font(.callout)
+                    }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("computer-use-action-evidence-\(message.id)")
+                }
+            }
                 .font(.body)
                 .foregroundStyle(message.author == .user ? Color.white : Color.primary)
                 .padding(.horizontal, 14)
@@ -771,7 +786,6 @@ struct ComputerUseView: View {
                         ? Color.accentColor
                         : Color(uiColor: .secondarySystemGroupedBackground),
                     in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-                .accessibilityLabel(message.author == .user ? "You: \(message.text)" : "AI: \(message.text)")
             if message.author != .user { Spacer(minLength: 44) }
         }
         .frame(maxWidth: .infinity)
