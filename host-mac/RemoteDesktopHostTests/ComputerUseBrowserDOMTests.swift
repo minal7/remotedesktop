@@ -3,6 +3,207 @@ import XCTest
 
 @MainActor
 final class ComputerUseBrowserDOMTests: XCTestCase {
+    func testNativeClarificationExpiryRejectsAnswersAndReleasesTheRetainedTargetWithoutAnotherRequest() async throws {
+        let fixture = try await DOMFixture(body: "<label>Origin<input value='old'></label><label>Destination<input value='keep'></label>")
+        defer { fixture.close() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var now = Date(timeIntervalSince1970: 1_000)
+        let planner = DOMClarificationFixturePlanner()
+        let executor = clarificationExecutor(fixture: fixture, planner: planner, directory: directory, now: { now })
+        _ = try await executor.execute(taskID: "q1", prompt: "Put \"blue\" in a field.", progress: { _ in })
+        let pending = try XCTUnwrap(executor.clarification(taskID: "q1"))
+        XCTAssertEqual(pending.expiresAt, Date(timeIntervalSince1970: 1_600))
+        let answer = try pending.goal.answering(pending.question, with: "Destination")
+        now = pending.expiresAt
+        do { _ = try await executor.continueClarification(taskID: "a1", originatingTaskID: "q1", goal: answer, progress: { _ in }); XCTFail("An expired goal cannot run") }
+        catch { XCTAssertEqual(error as? ComputerUseNativeTextExecutor.Failure, .invalidClarification) }
+        XCTAssertNil(try executor.clarification(taskID: "q1")); XCTAssertEqual(planner.goals.count, 1)
+        weak var retainedTarget: ComputerUseBrowserTextTarget?
+        let timed = ComputerUseNativeTextExecutor(injector: InputInjector(), mayAct: { true }, journalDirectory: directory,
+            planner: DOMClarificationFixturePlanner(), browserTargetProvider: { taskID in
+                let target = ComputerUseBrowserTextTarget(browser: fixture.browser,
+                    document: try fixture.browser.acquireCurrentDocument(taskID: taskID), requiresFrontmost: false)
+                retainedTarget = target
+                return target
+            }, clarificationLifetime: 0.05)
+        _ = try await timed.execute(taskID: "timed", prompt: "Put \"blue\" in a field.", progress: { _ in })
+        XCTAssertNotNil(retainedTarget)
+        // Observe object lifetime without querying the executor: expiration
+        // must release private retention even when no next request arrives.
+        try await fixture.wait { retainedTarget == nil }
+        XCTAssertNil(try timed.clarification(taskID: "timed"))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+    }
+
+    func testNativeClarificationExecutesTheRetainedLongGoalWithFreshValuesAndNoAnswerReplay() async throws {
+        let fixture = try await DOMFixture(body: """
+            <label>Origin<input id="origin" value="old"></label><label>Destination<textarea id="destination">keep</textarea></label>
+            <script>document.querySelector('#destination').addEventListener('input', e => fetch('/edited?value=' + encodeURIComponent(e.target.value)));
+            fetch('/signal').then(() => { document.querySelector('#origin').value = 'fresh'; fetch('/changed'); });</script>
+            """, heldSignal: true)
+        defer { fixture.close() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let planner = DOMClarificationFixturePlanner()
+        let executor = clarificationExecutor(fixture: fixture, planner: planner, directory: directory)
+        let literal = "  e\u{301} 😀\n" + String(repeating: "x", count: 5_000) + "  "
+        let prompt = "Put \"" + literal + "\" in a field."
+        for _ in 0..<2 {
+            let question = try await executor.execute(taskID: "q1", prompt: prompt, progress: { _ in })
+            guard case .clarificationRequired = question else { return XCTFail("The unresolved goal needs a question") }
+        }
+        XCTAssertEqual(planner.goals.count, 1, "Replaying the question cannot ask the model again")
+        let pending = try XCTUnwrap(executor.clarification(taskID: "q1"))
+        XCTAssertTrue(pending.goal.userTurns[0].utf8.elementsEqual(prompt.utf8))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+        try await fixture.wait { fixture.server.count("/signal") == 1 }
+        fixture.server.releaseHeldResponses()
+        try await fixture.wait { fixture.server.count("/changed") == 1 }
+        let goal = try pending.goal.answering(pending.question, with: "Destination")
+        for _ in 0..<2 {
+            let result: ComputerUseExecutionResult
+            do { result = try await executor.continueClarification(taskID: "a1", originatingTaskID: "q1", goal: goal, progress: { _ in }) }
+            catch { return XCTFail("Retained long-goal continuation failed: \(error)") }
+            guard case .completed = result else { return XCTFail("The exact retained goal should complete") }
+        }
+        try await fixture.wait { fixture.editedValues.count == 1 }
+        XCTAssertTrue(fixture.editedValues[0].utf8.elementsEqual(literal.utf8))
+        XCTAssertEqual(planner.goals, [pending.goal, goal]); XCTAssertEqual(planner.fieldValues.last, ["fresh", "keep"])
+        XCTAssertNil(try executor.clarification(taskID: "q1")); XCTAssertNil(try executor.clarification(taskID: "a1"))
+        do {
+            _ = try await executor.execute(taskID: "a1", prompt: goal.taskIdentityText, progress: { _ in })
+            XCTFail("A raw prompt cannot impersonate the retained continuation identity")
+        } catch { XCTAssertEqual(error as? ComputerUseTextTaskError, .journalMismatch) }
+        XCTAssertEqual(fixture.editedValues.count, 1)
+    }
+
+    func testNativeClarificationPreservesTwoQuestionsAndEachQuestionTaskIdentity() async throws {
+        let fixture = try await DOMFixture(body: """
+            <label>Origin<input value="old"></label><label>Destination<textarea>keep</textarea></label>
+            <script>document.querySelectorAll('input,textarea').forEach(e => e.addEventListener('input', () => fetch('/input-event')));</script>
+            """)
+        defer { fixture.close() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let planner = DOMClarificationFixturePlanner(answersNeeded: 2)
+        let executor = clarificationExecutor(fixture: fixture, planner: planner, directory: directory)
+        _ = try await executor.execute(taskID: "q1", prompt: "Put an exact value in a field.", progress: { _ in })
+        let first = try XCTUnwrap(executor.clarification(taskID: "q1"))
+        let firstAnswer = try first.goal.answering(first.question, with: "Destination")
+        for _ in 0..<2 {
+            let result = try await executor.continueClarification(taskID: "a1", originatingTaskID: "q1", goal: firstAnswer, progress: { _ in })
+            guard case .clarificationRequired = result else { return XCTFail("The value is still missing") }
+        }
+        let second = try XCTUnwrap(executor.clarification(taskID: "a1"))
+        XCTAssertEqual(second.goal, firstAnswer); XCTAssertEqual(second.scope, first.scope)
+        XCTAssertNil(try executor.clarification(taskID: "q1")); XCTAssertEqual(planner.goals.count, 2)
+        let final = try second.goal.answering(second.question, with: "\"  ready\n\"")
+        let result: ComputerUseExecutionResult
+        do { result = try await executor.continueClarification(taskID: "a2", originatingTaskID: "a1", goal: final, progress: { _ in }) }
+        catch { return XCTFail("Second-answer continuation failed: \(error)") }
+        guard case .completed = result else { return XCTFail("Both answers should compile one complete goal") }
+        try await fixture.wait { fixture.server.count("/input-event") == 1 }
+        XCTAssertEqual(planner.goals.last, final); XCTAssertEqual(final.userTurns.count, 3)
+        XCTAssertEqual(fixture.server.count("/input-event"), 1)
+    }
+
+    func testNativeClarificationDetectsSingleLineValueSanitizationWithoutReplayOrAnotherQuestion() async throws {
+        let fixture = try await DOMFixture(body: """
+            <label>Origin<input value="old"></label><label>Destination<input id="destination" value="keep"></label>
+            <script>document.querySelector('#destination').addEventListener('input', e => fetch('/edited?value=' + encodeURIComponent(e.target.value)));</script>
+            """)
+        defer { fixture.close() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let planner = DOMClarificationFixturePlanner()
+        let executor = clarificationExecutor(fixture: fixture, planner: planner, directory: directory)
+        _ = try await executor.execute(taskID: "q1", prompt: "Put \"blue\n\" in a field.", progress: { _ in })
+        let pending = try XCTUnwrap(executor.clarification(taskID: "q1"))
+        let answer = try pending.goal.answering(pending.question, with: "Destination")
+        for _ in 0..<2 {
+            do { _ = try await executor.continueClarification(taskID: "a1", originatingTaskID: "q1", goal: answer, progress: { _ in }); XCTFail("A sanitized value is not the requested result") }
+            catch { XCTAssertEqual(error as? ComputerUseTextTaskError, .uncertainEffect) }
+        }
+        try await fixture.wait { fixture.editedValues.count == 1 }
+        XCTAssertEqual(fixture.editedValues, ["blue"]); XCTAssertEqual(planner.goals.count, 2)
+        XCTAssertNil(try executor.clarification(taskID: "q1")); XCTAssertNil(try executor.clarification(taskID: "a1"))
+    }
+
+    func testNativeClarificationRejectsRewrittenGoalsAndConsumesAChangedFormWithoutRediscovery() async throws {
+        let fixture = try await DOMFixture(body: """
+            <label>Origin<input value="old"></label><label>Destination<input id="destination" value="keep"></label>
+            <script>document.querySelector('#destination').addEventListener('input', () => fetch('/input-event'));
+            fetch('/signal').then(() => { const e = document.querySelector('#destination'); e.replaceWith(e.cloneNode(true)); fetch('/changed'); });</script>
+            """, heldSignal: true)
+        defer { fixture.close() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let planner = DOMClarificationFixturePlanner()
+        let executor = clarificationExecutor(fixture: fixture, planner: planner, directory: directory)
+        _ = try await executor.execute(taskID: "q1", prompt: "Put \"blue\" in a field.", progress: { _ in })
+        let pending = try XCTUnwrap(executor.clarification(taskID: "q1"))
+        let valid = try pending.goal.answering(pending.question, with: "Destination")
+        let rewritten = try ComputerUseUnresolvedTextGoal(userRequest: "Put \"red\" in a field.").answering(pending.question, with: "Destination")
+        for (origin, goal) in [("wrong-task", valid), ("q1", rewritten), ("q1", try pending.goal.answering("Forged question", with: "Destination"))] {
+            do { _ = try await executor.continueClarification(taskID: "a1", originatingTaskID: origin, goal: goal, progress: { _ in }); XCTFail("An answer cannot rewrite the retained goal") }
+            catch { XCTAssertEqual(error as? ComputerUseNativeTextExecutor.Failure, .invalidClarification) }
+        }
+        XCTAssertEqual(try executor.clarification(taskID: "q1"), pending)
+        try await fixture.wait { fixture.server.count("/signal") == 1 }
+        fixture.server.releaseHeldResponses()
+        try await fixture.wait { fixture.server.count("/changed") == 1 }
+        do { _ = try await executor.continueClarification(taskID: "a1", originatingTaskID: "q1", goal: valid, progress: { _ in }); XCTFail("A replacement form cannot inherit the goal") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+        XCTAssertNil(try executor.clarification(taskID: "q1"))
+        do { _ = try await executor.continueClarification(taskID: "a2", originatingTaskID: "q1", goal: valid, progress: { _ in }); XCTFail("A failed transfer cannot be rediscovered or replayed") }
+        catch { XCTAssertEqual(error as? ComputerUseNativeTextExecutor.Failure, .invalidClarification) }
+        XCTAssertEqual(planner.goals.count, 1); XCTAssertEqual(fixture.server.count("/input-event"), 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+    }
+
+    func testNativeClarificationCancellationDeclineAndTurnLimitLeaveNoPendingAuthorityOrEffects() async throws {
+        for scenario in ["cancel", "decline", "limit", "new-request"] {
+            let fixture = try await DOMFixture(body: """
+                <label>Origin<input value="old"></label><label>Destination<input value="keep"></label>
+                <script>document.querySelectorAll('input').forEach(e => e.addEventListener('input', () => fetch('/input-event')));</script>
+                """)
+            defer { fixture.close() }
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let planner = DOMClarificationFixturePlanner(answersNeeded: scenario == "limit" ? 10 : 1, declinesAnswer: scenario == "decline")
+            let executor = clarificationExecutor(fixture: fixture, planner: planner, directory: directory)
+            _ = try await executor.execute(taskID: "q1", prompt: "Put \"blue\" in a field.", progress: { _ in })
+            var pending = try XCTUnwrap(executor.clarification(taskID: "q1"))
+            if scenario == "cancel" || scenario == "new-request" {
+                if scenario == "cancel" { executor.invalidateClarification(taskID: "q1") }
+                else { _ = try await executor.execute(taskID: "new", prompt: "Put \"red\" in a field.", progress: { _ in }) }
+                let answer = try pending.goal.answering(pending.question, with: "Destination")
+                do { _ = try await executor.continueClarification(taskID: "a1", originatingTaskID: "q1", goal: answer, progress: { _ in }); XCTFail("Old authority must be gone") }
+                catch { XCTAssertEqual(error as? ComputerUseNativeTextExecutor.Failure, .invalidClarification) }
+            } else {
+                for index in 1...(scenario == "limit" ? 3 : 1) {
+                    let answer = try pending.goal.answering(pending.question, with: "Destination")
+                    let result = try await executor.continueClarification(taskID: "a\(index)", originatingTaskID: pending.taskID, goal: answer, progress: { _ in })
+                    if scenario == "decline" || index == 3 {
+                        guard case .unableToComplete = result else { return XCTFail("A terminal decline must not reopen routing or another question") }
+                        XCTAssertNil(try executor.clarification(taskID: "a\(index)"))
+                    } else { pending = try XCTUnwrap(executor.clarification(taskID: "a\(index)")) }
+                }
+            }
+            XCTAssertNil(try executor.clarification(taskID: "q1")); XCTAssertEqual(fixture.server.count("/input-event"), 0)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+        }
+    }
+
+    private func clarificationExecutor(fixture: DOMFixture, planner: DOMClarificationFixturePlanner, directory: URL,
+                                       now: @escaping () -> Date = Date.init) -> ComputerUseNativeTextExecutor {
+        ComputerUseNativeTextExecutor(injector: InputInjector(), mayAct: { true }, journalDirectory: directory,
+            planner: planner, editOverride: { _, _ in XCTFail("A retained browser answer cannot use native AX input") },
+            browserTargetProvider: { taskID in ComputerUseBrowserTextTarget(browser: fixture.browser,
+                document: try fixture.browser.acquireCurrentDocument(taskID: taskID), requiresFrontmost: false) }, now: now)
+    }
+
     func testClarificationTransferPreservesObjectsReadsFreshValuesAndRetiresOldTaskAuthority() async throws {
         let fixture = try await DOMFixture(body: """
             <label>Origin<input id="target" value="old"></label><label>Destination<input value="keep"></label>
@@ -551,6 +752,28 @@ private final class DOMFixturePlanner: ComputerUseTextGoalPlanning {
         let first = try XCTUnwrap(fields.first(where: { $0.label == "Origin" }))
         return .edits([.init(targetID: first.snapshot.targetID, mode: .replaceAll, text: "Paris")],
                       unchangedTargetIDs: fields.filter { $0.label != "Origin" }.map { $0.snapshot.targetID })
+    }
+}
+
+@MainActor
+private final class DOMClarificationFixturePlanner: ComputerUseTextGoalPlanning {
+    let answersNeeded: Int
+    let declinesAnswer: Bool
+    var goals: [ComputerUseUnresolvedTextGoal] = []
+    var fieldValues: [[String]] = []
+    init(answersNeeded: Int = 1, declinesAnswer: Bool = false) { self.answersNeeded = answersNeeded; self.declinesAnswer = declinesAnswer }
+    func propose(prompt: String, fields: [ComputerUseTextField]) async throws -> ComputerUseTextGoalProposal {
+        try await propose(goal: ComputerUseUnresolvedTextGoal(userRequest: prompt), fields: fields)
+    }
+    func propose(goal: ComputerUseUnresolvedTextGoal, fields: [ComputerUseTextField]) async throws -> ComputerUseTextGoalProposal {
+        goals.append(goal); fieldValues.append(fields.map { $0.snapshot.value })
+        if goal.userTurns.count <= answersNeeded { return .clarification }
+        if declinesAnswer { return .unsupported }
+        let target = try XCTUnwrap(fields.first(where: { $0.label == "Destination" }))
+        let catalog = try ComputerUseTextPayloadCatalog(goal: goal)
+        let value = try XCTUnwrap(catalog.payloads["p1"])
+        return .edits([.init(targetID: target.snapshot.targetID, mode: .replaceAll, text: value)],
+            unchangedTargetIDs: fields.filter { $0.snapshot.targetID != target.snapshot.targetID }.map { $0.snapshot.targetID })
     }
 }
 
