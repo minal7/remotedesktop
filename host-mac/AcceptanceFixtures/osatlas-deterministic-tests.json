@@ -71,7 +71,8 @@
     "RemoteDesktopHostTests/ComputerUseTests/test_managerRejectsMalformedForgedSessionMismatchedAndCancelledAnswersWithoutFallback",
     "RemoteDesktopHostTests/ComputerUseTests/test_managerResumesClaimedAnswerWithTypedGoalAndRejectsRestartedReference",
     "RemoteDesktopHostTests/ComputerUseTests/test_managerRetiresReferencesOnExpiryNewRequestRevocationAndTransportStop",
-    "RemoteDesktopHostTests/ComputerUseTests/test_managerDoesNotExposeOrRetainAClarificationWhoseTerminalWriteFailed"
+    "RemoteDesktopHostTests/ComputerUseTests/test_managerDoesNotExposeOrRetainAClarificationWhoseTerminalWriteFailed",
+    "RemoteDesktopHostTests/ComputerUseClarificationCompositionTests/testBrowserFactoryReceivesTheManagerActionGate"
   ],
   "expectedTests": [
     "RemoteDesktopHostTests/ComputerUseActionTextPlanTests/testActionPlannerKeepsExactBudgetAndEligibilityChecksBeforeInference",
@@ -117,6 +118,7 @@
     "RemoteDesktopHostTests/ComputerUseCapabilityExecutorTests/testMissingOrCancelledDeferredVisualCannotExecuteOrCreateContinuation",
     "RemoteDesktopHostTests/ComputerUseCapabilityExecutorTests/testNativeErrorCannotReplayGoalThroughDesktopAndSameIDCannotChangeGoal",
     "RemoteDesktopHostTests/ComputerUseCapabilityExecutorTests/testNativeGoalUsesOnlyCurrentUserAuthorityAndDoesNotLoadDesktop",
+    "RemoteDesktopHostTests/ComputerUseClarificationCompositionTests/testBrowserFactoryReceivesTheManagerActionGate",
     "RemoteDesktopHostTests/ComputerUseFieldCopyPlanTests/testCopyAndSuppliedPayloadsRemainDifferentTypesThroughOrderedCompilation",
     "RemoteDesktopHostTests/ComputerUseFieldCopyPlanTests/testCopySchemaAndExactBudgetNeverExposeExistingValuesOrRegenerateLiterals",
     "RemoteDesktopHostTests/ComputerUseFieldCopyPlanTests/testFallbackAcceptsOnlyAWholeCopyPlanOrADeclineAndHonorsCancellation",
