@@ -2358,6 +2358,49 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
         await runtime.shutdown()
     }
 
+    func testTerminalOutcomeProofCannotSkipExplicitTaskPrerequisites() throws {
+        let observation = try OSAtlasAcceptanceFixtureRenderer.everydayOperation(.appointmentSummary)
+        let task = "Open Safari, click the Search field, type \"dentist appointment\", press Return, then tell me the dentist appointment."
+        let history = ["OPEN_APP [Safari]", "CLICK [[11,22]]", OSAtlasGUIAction.typeText("dentist appointment").historyEntry, "ENTER"]
+        for action in [OSAtlasGUIAction.complete, .report("DENTIST APPOINTMENT; Tuesday; 3:30 PM")] {
+            for count in 0..<history.count {
+                XCTAssertThrowsError(try OSAtlasComputerUseExecutor.evidenceCheckedTerminalAction(
+                    action, cameFromTypedSemanticRoute: true, hostVerifiedCompletion: true,
+                    trustedTask: task, observation: observation, hostHistory: Array(history.prefix(count)))) {
+                    XCTAssertEqual($0 as? OSAtlasComputerUseExecutor.RuntimeError, .unverifiedTerminalAction("PREREQUISITES"))
+                }
+            }
+            XCTAssertEqual(try OSAtlasComputerUseExecutor.evidenceCheckedTerminalAction(
+                action, cameFromTypedSemanticRoute: true, hostVerifiedCompletion: true,
+                trustedTask: task, observation: observation, hostHistory: history), action,
+                "Previously verified terminal evidence still needs every explicit prerequisite")
+        }
+        XCTAssertThrowsError(try OSAtlasComputerUseExecutor.evidenceCheckedTerminalAction(
+            .complete, cameFromTypedSemanticRoute: true, hostVerifiedCompletion: true,
+            trustedTask: task, observation: observation, isHostVerifiedObstacle: true)) {
+            XCTAssertEqual($0 as? OSAtlasComputerUseExecutor.RuntimeError, .unverifiedTerminalAction("PREREQUISITES"),
+                "Obstacle metadata cannot waive a COMPLETE prerequisite")
+        }
+    }
+
+    func testTerminalPrerequisitesDoNotReplaceOutcomeEvidenceOrBlockObstacleReports() throws {
+        let observation = try OSAtlasAcceptanceFixtureRenderer.everydayOperation(.appointmentSummary)
+        let task = "Click the appointment details button, then tell me the dentist appointment."
+        XCTAssertThrowsError(try OSAtlasComputerUseExecutor.evidenceCheckedTerminalAction(
+            .complete, cameFromTypedSemanticRoute: true, trustedTask: task,
+            observation: observation, hostHistory: ["CLICK [[11,22]]"])) {
+            XCTAssertEqual($0 as? OSAtlasComputerUseExecutor.RuntimeError, .unverifiedTerminalAction("COMPLETE"),
+                "A recorded click is not proof of the requested final outcome")
+        }
+        let obstacle = OSAtlasGUIAction.report("The appointment details are unavailable.")
+        XCTAssertEqual(try OSAtlasComputerUseExecutor.evidenceCheckedTerminalAction(
+            obstacle, cameFromTypedSemanticRoute: true, trustedTask: task, observation: observation,
+            isHostVerifiedObstacle: true), obstacle, "Independently verified inability may be reported before all actions")
+        let question = OSAtlasGUIAction.ask("Which appointment should I use?")
+        XCTAssertEqual(try OSAtlasComputerUseExecutor.evidenceCheckedTerminalAction(
+            question, cameFromTypedSemanticRoute: true, trustedTask: task, observation: observation), question)
+    }
+
     func testTerminalGateRequiresFocusedVisibleEvidenceAndHostCompletionProof() throws {
         let observation = try OSAtlasAcceptanceFixtureRenderer
             .everydayOperation(.appointmentSummary)
@@ -6781,6 +6824,35 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
                             .unsupportedAction("unsafe-visible-evidence"))
                     }
         }
+    }
+
+    func testVisibleAnswerCannotCompleteAnUnperformedRequestedClickThroughTheExecutor() async throws {
+        let fixture = makeCorrectionRuntime(completionResponses: [response("CLICK [[500,500]]")], port: 43149)
+        let observation = try OSAtlasAcceptanceFixtureRenderer.everydayOperation(.appointmentSummary)
+        let requests = SemanticRoutingRequestLog()
+        let router = StubSemanticActionRouter { request in
+            await requests.record(request)
+            return .init(directive: .answer, argument: .visibleAnswer(
+                summary: "DENTIST APPOINTMENT; Tuesday; 3:30 PM",
+                evidence: ["DENTIST APPOINTMENT", "Tuesday", "3:30 PM"]))
+        }
+        let executor = OSAtlasComputerUseExecutor.makeForTesting(
+            inputs: fixture.inputs, runtime: fixture.runtime, semanticRouter: router, maxSteps: 1)
+        do {
+            let result = try await executor.execute(
+                prompt: "Click the appointment details button, then tell me the dentist appointment.",
+                tools: correctionTestTools(observation: observation, actionPerformer: { _ in XCTFail("The proposed terminal answer must not emit input") }),
+                progress: { _ in })
+            XCTAssertEqual(result, .unableToComplete("I couldn't verify every requested step. The visible result alone does not establish that the full task is complete."))
+        } catch {
+            await fixture.runtime.shutdown()
+            throw error
+        }
+        await fixture.runtime.shutdown()
+        let routed = await requests.values()
+        XCTAssertEqual(routed.count, 1)
+        let inferenceCalls = await fixture.events.values().filter { $0 == "complete" }.count
+        XCTAssertEqual(inferenceCalls, 0, "The source fixture uses a proposal-only router and no visual inference")
     }
 
     func testVerifiedSemanticAnswerReturnsOnlyHostMatchedEvidence() async throws {

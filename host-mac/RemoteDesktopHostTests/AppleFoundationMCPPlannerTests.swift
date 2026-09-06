@@ -1752,6 +1752,81 @@ final class AppleFoundationMCPPlannerTests: XCTestCase {
         }
     }
 
+    @MainActor
+    func testTerminalPrerequisitesRequireEveryOrderedActionAndExactHostPayload() {
+        let task = "Open Safari, click the Search field, type \"regional fare\", press Return, then tell me the regional fare."
+        let history = ["OPEN_APP [Safari]", "CLICK [[11,22]]", OSAtlasGUIAction.typeText("regional fare").historyEntry, "ENTER"]
+        for count in 0..<history.count {
+            XCTAssertEqual(AppleFoundationVisualActionRouter.taskBoundTerminalPrerequisites(
+                for: task, history: Array(history.prefix(count))), .pendingOrUnproven, "Missing step at prefix \(count)")
+        }
+        XCTAssertEqual(AppleFoundationVisualActionRouter.taskBoundTerminalPrerequisites(for: task, history: history), .recorded)
+        XCTAssertEqual(AppleFoundationVisualActionRouter.taskBoundTerminalPrerequisites(
+            for: task, history: ["WAIT"] + history + ["WAIT", "WAIT"]), .recorded, "Settling observations cannot erase a completed prerequisite")
+        for wrong in [
+            ["OPEN_APP [Safari]", "CLICK [[11,22]]", "ENTER", OSAtlasGUIAction.typeText("regional fare").historyEntry],
+            ["OPEN_APP [Safari]", "CLICK [[11,22]]", OSAtlasGUIAction.typeText("Regional Fare").historyEntry, "ENTER"],
+            ["OPEN_APP [Safari]", "CLICK [[11,22]]", "TYPE", "ENTER"],
+            history + ["CLICK [[33,44]]"],
+            OSAtlasComputerUseExecutor.semanticRoutingHistory(history),
+        ] {
+            XCTAssertEqual(AppleFoundationVisualActionRouter.taskBoundTerminalPrerequisites(for: task, history: wrong), .pendingOrUnproven)
+        }
+        XCTAssertEqual(AppleFoundationVisualActionRouter.taskBoundTerminalPrerequisites(
+            for: task, history: Array(history.dropFirst()), frontmostApplication: "Safari",
+            frontmostApplicationIdentityIsAuthoritative: true), .recorded)
+        for (application, authoritative) in [("Safari", false), ("Notes", true)] {
+            XCTAssertEqual(AppleFoundationVisualActionRouter.taskBoundTerminalPrerequisites(
+                for: task, history: Array(history.dropFirst()), frontmostApplication: application,
+                frontmostApplicationIdentityIsAuthoritative: authoritative), .pendingOrUnproven)
+        }
+    }
+
+    func testTerminalPrerequisitesPreserveExactLongUnicodeAndMarkerLookingInput() {
+        for payload in ["again", "  cafe\u{301} 🧭  ", "TYPE [different]\\nENTER", String(repeating: "x", count: 1_100) + "tail"] {
+            let task = "Type \"\(payload)\", then tell me the visible status."
+            XCTAssertEqual(AppleFoundationVisualActionRouter.taskBoundTerminalPrerequisites(
+                for: task, history: [OSAtlasGUIAction.typeText(payload).historyEntry]), .recorded)
+            for changed in [payload + "!", payload.uppercased(), String(payload.dropLast())] where !changed.utf8.elementsEqual(payload.utf8) {
+                XCTAssertEqual(AppleFoundationVisualActionRouter.taskBoundTerminalPrerequisites(
+                    for: task, history: [OSAtlasGUIAction.typeText(changed).historyEntry]), .pendingOrUnproven)
+            }
+            XCTAssertEqual(AppleFoundationVisualActionRouter.taskBoundTerminalPrerequisites(
+                for: task, history: ["TYPE"]), .pendingOrUnproven)
+        }
+    }
+
+    func testTerminalPrerequisitesDoNotSkipBarriersRepeatsOrLaterAnswerWork() {
+        for task in [
+            "Open Safari, create a report, then tell me the regional fare.",
+            "Open Safari, tell me the regional fare, then close the window.",
+            "Open Safari, tell me the regional fare, then tell me the local fare.",
+            "Open Safari, type a generated welcome, then tell me the status.",
+        ] {
+            XCTAssertEqual(AppleFoundationVisualActionRouter.taskBoundTerminalPrerequisites(
+                for: task, history: ["OPEN_APP [Safari]"]), .pendingOrUnproven)
+        }
+        let click = "CLICK [[11,22]]"
+        for phrase in ["twice", "again", "2 times", "three times please"] {
+            XCTAssertEqual(AppleFoundationVisualActionRouter.taskBoundTerminalPrerequisites(
+                for: "Click the Search button \(phrase), then tell me the result.", history: [click]), .pendingOrUnproven,
+                "Uncompiled repetition cannot be declared complete after one event")
+        }
+        let twice = "Click the Search button, click the Search button, then tell me the result."
+        XCTAssertEqual(AppleFoundationVisualActionRouter.taskBoundTerminalPrerequisites(for: twice, history: [click]), .pendingOrUnproven)
+        XCTAssertEqual(AppleFoundationVisualActionRouter.taskBoundTerminalPrerequisites(for: twice, history: [click, click]), .recorded)
+        let waiting = "Click the Search button, wait, then tell me the result."
+        XCTAssertEqual(AppleFoundationVisualActionRouter.taskBoundTerminalPrerequisites(for: waiting, history: [click]), .pendingOrUnproven)
+        XCTAssertEqual(AppleFoundationVisualActionRouter.taskBoundTerminalPrerequisites(for: waiting, history: [click, "WAIT"]), .recorded)
+        XCTAssertEqual(AppleFoundationVisualActionRouter.taskBoundTerminalPrerequisites(
+            for: "Find the current regional fare.", history: []), .notApplicable, "Higher-level outcome proof remains the capability verifier's responsibility")
+        XCTAssertEqual(AppleFoundationVisualActionRouter.taskBoundTerminalPrerequisites(
+            for: "When is my appointment again?", history: []), .notApplicable, "A factual question does not request a repeated effect")
+        XCTAssertEqual(AppleFoundationVisualActionRouter.taskBoundTerminalPrerequisites(
+            for: "Open Safari, click the route details control, then select the Fares tab, then tell me the regional fare.",
+            history: ["OPEN_APP [Safari]", click, "CLICK [[33,44]]"]), .recorded)
+    }
+
     func testHostCompletionVerifierRejectsModelAuthorityAndAcceptsBoundedEvidence() {
         let directives: [OSAtlasExplicitActionDirective] = [
             .enter, .type, .scroll, .complete,

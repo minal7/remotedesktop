@@ -3842,9 +3842,20 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
         case rejected
     }
 
+    enum TaskBoundTerminalPrerequisites: Equatable {
+        /// No explicit low-level sequence is handled by this grammar. The
+        /// existing capability-specific outcome verifier is still required.
+        case notApplicable
+        /// All explicit prerequisites have matching raw host history. This
+        /// is necessary evidence, not proof of the final requested outcome.
+        case recorded
+        case pendingOrUnproven
+    }
+
     private enum TaskBoundOrderedActionResolution {
         case notApplicable
         case bound(TaskBoundOrderedAction)
+        case recorded
         case rejected
     }
 
@@ -4185,7 +4196,7 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
                 frontmostApplicationIdentityIsAuthoritative) {
         case .notApplicable:
             return .notApplicable
-        case .rejected:
+        case .rejected, .recorded:
             return .rejected
         case .bound(let action):
             guard let next = action.pointerClause,
@@ -4220,7 +4231,7 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
                 frontmostApplicationIdentityIsAuthoritative) {
         case .notApplicable:
             return .notApplicable
-        case .rejected:
+        case .rejected, .recorded:
             return .rejected
         case .bound(let action):
             guard action.directive == directive,
@@ -4229,11 +4240,32 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
         }
     }
 
+    /// Terminal evidence cannot skip a requested operation just because some
+    /// earlier action ran. Reuse the input/pointer command grammar and exact
+    /// raw history; compacted model history is never prerequisite evidence.
+    static func taskBoundTerminalPrerequisites(
+        for task: String,
+        history: [String],
+        frontmostApplication: String? = nil,
+        frontmostApplicationIdentityIsAuthoritative: Bool = false
+    ) -> TaskBoundTerminalPrerequisites {
+        switch taskBoundOrderedActionResolution(
+            for: task, history: history, historyIsComplete: true,
+            requiresPointerClause: false, terminalCheck: true,
+            frontmostApplication: frontmostApplication,
+            frontmostApplicationIdentityIsAuthoritative: frontmostApplicationIdentityIsAuthoritative) {
+        case .notApplicable: return .notApplicable
+        case .recorded: return .recorded
+        case .bound, .rejected: return .pendingOrUnproven
+        }
+    }
+
     private static func taskBoundOrderedActionResolution(
         for task: String,
         history: [String],
         historyIsComplete: Bool,
         requiresPointerClause: Bool,
+        terminalCheck: Bool = false,
         frontmostApplication: String?,
         frontmostApplicationIdentityIsAuthoritative: Bool
     ) -> TaskBoundOrderedActionResolution {
@@ -4291,6 +4323,22 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
             let commandIndex = taskBoundCommandWordIndex(
                 in: words,
                 endsAsQuestion: segment.endsAsQuestion)
+            if terminalCheck, let commandIndex,
+               pointerVerbs.contains(words[commandIndex]) || orderedNonPointerVerbs[words[commandIndex]] != nil
+                || ["copy", "paste", "open", "launch", "foreground", "repeat"].contains(words[commandIndex]) {
+                let suffix = words.last == "please" ? Array(words.dropLast()) : words
+                let countWords: Set<String> = ["two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"]
+                let countedRepeat = suffix.count >= 2 && suffix.last == "times"
+                    && (countWords.contains(suffix[suffix.count - 2])
+                        || Int(suffix[suffix.count - 2]).map({ $0 != 1 }) == true)
+                if suffix.last == "twice" || suffix.last == "again" || countedRepeat
+                    || words[commandIndex] == "repeat" {
+                    // The visual action grammar has no repeated-step contract
+                    // yet. One matching history entry cannot discharge an
+                    // explicit repeat; native form repeats use their compiler.
+                    return .rejected
+                }
+            }
             if let commandIndex,
                let applicationName = taskBoundPureApplicationName(
                     in: words,
@@ -4539,7 +4587,15 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
             }
             let verb = words[commandIndex]
             let wordSet = Set(words)
-            if verb == "use",
+            if terminalCheck,
+               ["answer", "check", "confirm", "find", "get", "inspect", "read",
+                "report", "show", "summarize", "tell", "verify"].contains(verb) {
+                // This is an answer candidate, never an effect receipt. It
+                // can be terminal only after every earlier action and only
+                // when no later clause remains. Facts still require the
+                // independent current-screen/capability outcome verifier.
+                actions.append(.init(directive: .answer, pointerClause: nil))
+            } else if verb == "use",
                wordSet.contains("loaded"),
                !wordSet.isDisjoint(with: [
                    "already", "current", "currently",
@@ -4611,6 +4667,9 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
             }
         }
 
+        if terminalCheck, !actions.contains(where: { $0.directive != .ask && $0.directive != .answer }) {
+            return .notApplicable
+        }
         if requiresPointerClause {
             guard sawPointerWords else { return .notApplicable }
             guard actions.contains(where: { $0.pointerClause != nil }) else {
@@ -4635,7 +4694,7 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
                 (directive: $0, entry: entry)
             }
         }
-        guard completed.count <= actions.count else { return .rejected }
+        guard terminalCheck || completed.count <= actions.count else { return .rejected }
         var actionIndex = actions.startIndex
         func currentApplicationSatisfiesNextOpen() -> Bool {
             guard frontmostApplicationIdentityIsAuthoritative,
@@ -4647,6 +4706,12 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
                 matches: applicationName)
         }
         for completedAction in completed {
+            if terminalCheck, completedAction.directive == .wait,
+               !actions.indices.contains(actionIndex) || actions[actionIndex].directive != .wait {
+                // Settling observations make no requested effect complete.
+                // An explicitly requested WAIT still consumes its own entry.
+                continue
+            }
             if actions.indices.contains(actionIndex),
                actions[actionIndex].directive == .openApplication,
                completedAction.directive != .openApplication,
@@ -4687,6 +4752,12 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
            actions[actionIndex].directive == .openApplication,
            currentApplicationSatisfiesNextOpen() {
             actionIndex += 1
+        }
+        if terminalCheck {
+            if actionIndex == actions.endIndex { return .recorded }
+            if actionIndex == actions.count - 1,
+               actions[actionIndex].directive == .answer { return .recorded }
+            return .rejected
         }
         guard actions.indices.contains(actionIndex) else {
             return .rejected

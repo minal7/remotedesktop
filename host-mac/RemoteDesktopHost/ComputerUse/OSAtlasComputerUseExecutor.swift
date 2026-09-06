@@ -1964,7 +1964,12 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
                Self.visibleDeliveryQuote(
                     visibleQuote,
                     matchesRequest: trustedUserPrompt),
-               Self.deliveryQuoteMayTerminateTask(trustedUserPrompt) {
+               Self.deliveryQuoteMayTerminateTask(trustedUserPrompt),
+               AppleFoundationVisualActionRouter.taskBoundTerminalPrerequisites(
+                    for: trustedUserPrompt, history: history,
+                    frontmostApplication: planningCapture.frontmostApplication.policyName,
+                    frontmostApplicationIdentityIsAuthoritative: planningCapture.frontmostApplication.identityIsAuthoritative)
+                    != .pendingOrUnproven {
                 progress("Step \(step): reading the complete delivery quote…")
                 return .completed(visibleQuote)
             }
@@ -2529,24 +2534,33 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
                     .hostVerifiesCompletion(
                         for: activeTask,
                         visibleText: focusedVisibleText,
-                        history: Self.semanticRoutingHistory(history),
+                        history: history,
                         availableDirectives: Self.semanticRoutingDirectives(
                             actionContract: actionContract))
             } else {
                 hostVerifiedCompletion = false
             }
-            let evidenceCheckedAction = try Self.evidenceCheckedTerminalAction(
-                action,
-                cameFromTypedSemanticRoute: semanticRoute != nil,
-                hostVerifiedCompletion: hostVerifiedCompletion,
-                trustedTask: activeTask,
-                observation: observation)
             let isHostVerifiedObstacle: Bool
             if let semanticRoute,
                case .visibleObstacle = semanticRoute.argument {
                 isHostVerifiedObstacle = true
             } else {
                 isHostVerifiedObstacle = false
+            }
+            let evidenceCheckedAction: OSAtlasGUIAction
+            do {
+                evidenceCheckedAction = try Self.evidenceCheckedTerminalAction(
+                    action,
+                    cameFromTypedSemanticRoute: semanticRoute != nil,
+                    hostVerifiedCompletion: hostVerifiedCompletion,
+                    trustedTask: trustedUserPrompt,
+                    observation: observation,
+                    hostHistory: history,
+                    frontmostApplication: planningCapture.frontmostApplication.policyName,
+                    frontmostApplicationIdentityIsAuthoritative: planningCapture.frontmostApplication.identityIsAuthoritative,
+                    isHostVerifiedObstacle: isHostVerifiedObstacle)
+            } catch RuntimeError.unverifiedTerminalAction("PREREQUISITES") {
+                return .unableToComplete("I couldn't verify every requested step. The visible result alone does not establish that the full task is complete.")
             }
             if let terminalResult = Self.terminalResult(
                 for: evidenceCheckedAction,
@@ -5598,8 +5612,25 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
         cameFromTypedSemanticRoute: Bool,
         hostVerifiedCompletion: Bool = false,
         trustedTask: String,
-        observation: ComputerUseScreenObservation
+        observation: ComputerUseScreenObservation,
+        hostHistory: [String] = [],
+        frontmostApplication: String? = nil,
+        frontmostApplicationIdentityIsAuthoritative: Bool = false,
+        isHostVerifiedObstacle: Bool = false
     ) throws -> OSAtlasGUIAction {
+        let needsPrerequisiteEvidence: Bool
+        switch action {
+        case .complete: needsPrerequisiteEvidence = true
+        case .report: needsPrerequisiteEvidence = !isHostVerifiedObstacle
+        default: needsPrerequisiteEvidence = false
+        }
+        if needsPrerequisiteEvidence {
+            guard AppleFoundationVisualActionRouter.taskBoundTerminalPrerequisites(
+                for: trustedTask, history: hostHistory,
+                frontmostApplication: frontmostApplication,
+                frontmostApplicationIdentityIsAuthoritative: frontmostApplicationIdentityIsAuthoritative)
+                != .pendingOrUnproven else { throw RuntimeError.unverifiedTerminalAction("PREREQUISITES") }
+        }
         switch action {
         case .complete:
             guard hostVerifiedCompletion else {
