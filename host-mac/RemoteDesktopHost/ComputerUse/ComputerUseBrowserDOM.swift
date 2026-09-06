@@ -33,6 +33,25 @@ struct ComputerUseBrowserPageSnapshot: Decodable, Equatable, Sendable, CustomStr
     }
     var debugDescription: String { description }
 
+    /// Internal verification input, never an unqualified page summary or a
+    /// model instruction. Join only adjacent fragments of the same retained
+    /// DOM container so a fact split across inline spans remains readable.
+    var answerVerificationText: String {
+        var lines: [String] = []
+        var container: String?
+        var fragments: [String] = []
+        for item in texts {
+            if container != item.containerID {
+                if !fragments.isEmpty { lines.append(fragments.joined(separator: " ")) }
+                fragments = []
+                container = item.containerID
+            }
+            fragments.append(item.text)
+        }
+        if !fragments.isEmpty { lines.append(fragments.joined(separator: " ")) }
+        return lines.joined(separator: "\n")
+    }
+
     var isWellFormed: Bool {
         func identifier(_ value: String, prefix: String) -> Bool {
             value.hasPrefix(prefix) && value.utf8.count <= 32

@@ -1788,6 +1788,17 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
                 throw RuntimeError.planningStateChanged
             }
         }
+        func browserEvidenceIsCurrent(_ evidence: ComputerUseBrowserPageEvidence?) async throws -> Bool {
+            guard let evidence else { return true }
+            do {
+                try await tools.validateOwnedBrowserPageEvidence(evidence)
+                return true
+            } catch ComputerUseBrowserError.pageChanged {
+                return false
+            } catch ComputerUseBrowserError.windowNotActive {
+                return false
+            }
+        }
         func revalidationBinding(
             for route: OSAtlasSemanticActionRoute,
             verifiedPostActionAnswer: Bool = false,
@@ -2124,12 +2135,19 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
                     .PlannerProvenance.nonFoundation
             var semanticRouteUsesVerifiedPostActionAnswer = false
             var semanticRouteUsesVerifiedPendingWait = false
+            var browserPageEvidence: ComputerUseBrowserPageEvidence?
             var visibleText = ""
             if let explicitDirective {
                 requiredRoute = OSAtlasSemanticActionRoute(
                     directive: explicitDirective)
             } else if let semanticRouter {
                 progress("Step \(step): understanding the requested action…")
+                do {
+                    browserPageEvidence = try await tools.observeOwnedBrowserPage(taskID: taskID)
+                } catch ComputerUseBrowserError.pageChanged {
+                    try recordPlanningStateRetry()
+                    continue
+                }
                 visibleText = try await Self.visibleTextOffMainActor(
                     from: observation.image)
                 let routeFrontmostApplication =
@@ -2184,6 +2202,11 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
                         request: routingRequest,
                         rawHistory: history)
                     try Task.checkCancellation()
+                    guard try await browserEvidenceIsCurrent(browserPageEvidence) else {
+                        try recordPlanningStateRetry()
+                        progress("Step \(step): the browser page changed while planning; checking again…")
+                        continue
+                    }
                     let selectedRouteIsVerifiedPostActionAnswer =
                         hostVerifiesPostActionAnswer(
                             selectedRoute,
@@ -2349,7 +2372,8 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
                             visibleText: visibleText,
                             observation: observation,
                             endpoint: endpoint,
-                            formattedHistory: history)
+                            formattedHistory: history,
+                            browserPageEvidence: browserPageEvidence)
                     } catch let error as RuntimeError {
                         guard Self.isUnsafeVisibleEvidence(error) else {
                             throw error
@@ -2369,7 +2393,8 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
                             visibleText: visibleText,
                             observation: observation,
                             endpoint: endpoint,
-                            formattedHistory: history)
+                            formattedHistory: history,
+                            browserPageEvidence: browserPageEvidence)
                     } catch let error as RuntimeError {
                         guard Self.isUnsafeVisibleEvidence(error) else {
                             throw error
@@ -2594,6 +2619,11 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
                 for: evidenceCheckedAction,
                 step: step,
                 isHostVerifiedObstacle: isHostVerifiedObstacle) {
+                guard try await browserEvidenceIsCurrent(browserPageEvidence) else {
+                    try recordPlanningStateRetry()
+                    progress("Step \(step): the browser result changed before reporting; checking again…")
+                    continue
+                }
                 guard try revalidatedPlanningState(
                     expected: planningCapture.fingerprint,
                     binding: .strictVisual) != nil else {
@@ -2805,6 +2835,11 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
                     ? Set<String>()
                     : Self.normalizedVisibleLineKeys(
                         try await Self.visibleTextOffMainActor(from: observation.image))
+                guard try await browserEvidenceIsCurrent(browserPageEvidence) else {
+                    try recordPlanningStateRetry()
+                    progress("Step \(step): the browser page changed before input; checking again…")
+                    continue
+                }
                 // OCR is asynchronous. Bind the effect again after it returns
                 // so a takeover or changed field cannot inherit old authority.
                 guard try revalidatedPlanningState(
@@ -2887,7 +2922,8 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
         visibleText: String,
         observation: ComputerUseScreenObservation,
         endpoint: OSAtlasLlamaEndpoint,
-        formattedHistory: [String]
+        formattedHistory: [String],
+        browserPageEvidence: ComputerUseBrowserPageEvidence? = nil
     ) async throws -> ComposedSemanticAction {
         func composed(
             _ action: OSAtlasGUIAction,
@@ -2990,22 +3026,34 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
                         availableDirectives: Self.semanticRoutingDirectives(
                             actionContract: actionContract))
                 ? .verifiedPostAction : .answer
+            if let browserPageEvidence {
+                _ = try Self.verifiedVisibleAnswer(summary: summary, evidence: evidence,
+                    visibleText: browserPageEvidence.page.answerVerificationText,
+                    trustedTask: trustedTask, verificationMode: verificationMode)
+            }
             return composed(.report(try Self.verifiedVisibleAnswer(
                 summary: summary,
                 evidence: evidence,
                 visibleText: focusedVisibleText,
                 trustedTask: trustedTask,
-                verificationMode: verificationMode)))
+                verificationMode: verificationMode,
+                supportingPageText: browserPageEvidence?.page.answerVerificationText)))
         case (.answer, .visibleObstacle(let summary, let evidence)),
              (.report, .visibleObstacle(let summary, let evidence)):
             let focusedVisibleText = try await Self.focusedVisibleTextOffMainActor(
                 from: observation)
+            if let browserPageEvidence {
+                _ = try Self.verifiedVisibleAnswer(summary: summary, evidence: evidence,
+                    visibleText: browserPageEvidence.page.answerVerificationText,
+                    trustedTask: trustedTask, verificationMode: .obstacle)
+            }
             return composed(.report(try Self.verifiedVisibleAnswer(
                 summary: summary,
                 evidence: evidence,
                 visibleText: focusedVisibleText,
                 trustedTask: trustedTask,
-                verificationMode: .obstacle)))
+                verificationMode: .obstacle,
+                supportingPageText: browserPageEvidence?.page.answerVerificationText)))
         default:
             throw RuntimeError.unsupportedAction(
                 "semantic-plan-arguments")
@@ -3579,8 +3627,17 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
         evidence: [String],
         visibleText: String,
         trustedTask: String,
-        verificationMode: VisibleAnswerVerificationMode = .answer
+        verificationMode: VisibleAnswerVerificationMode = .answer,
+        supportingPageText: String? = nil
     ) throws -> String {
+        func pageSupports(_ selectedLines: [String]) -> Bool {
+            guard let supportingPageText else { return true }
+            let pageLines = supportingPageText.split(separator: "\n").map { evidenceWords(String($0)) }
+            return selectedLines.allSatisfy { line in
+                let words = evidenceWords(line)
+                return !words.isEmpty && pageLines.contains { containsTokenPhrase(words, in: $0) }
+            }
+        }
         let boundedSummary = summary.trimmingCharacters(
             in: .whitespacesAndNewlines)
         guard !boundedSummary.isEmpty,
@@ -3601,6 +3658,9 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
                 evidence: evidence,
                 visibleText: visibleText,
                 trustedTask: trustedTask) {
+            guard pageSupports([selfBoundReport]) else {
+                throw RuntimeError.unsupportedAction("unverified-visible-answer")
+            }
             return selfBoundReport
         }
         if verificationMode == .obstacle {
@@ -3701,6 +3761,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
         struct VerifiedGroup {
             let score: Int
             let output: String
+            let sourceLines: [String]
         }
         var groupsByOutput: [String: VerifiedGroup] = [:]
         let maximumEvidenceSpan = 4
@@ -3856,7 +3917,8 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
             if groupsByOutput[output]?.score ?? Int.min < score {
                 groupsByOutput[output] = VerifiedGroup(
                     score: score,
-                    output: output)
+                    output: output,
+                    sourceLines: orderedIndices.map { lines[$0].raw })
             }
         }
 
@@ -3870,6 +3932,9 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
         guard bestGroups.count == 1 else {
             throw RuntimeError.unsupportedAction(
                 "ambiguous-visible-answer")
+        }
+        guard pageSupports(bestGroups[0].sourceLines) else {
+            throw RuntimeError.unsupportedAction("unverified-visible-answer")
         }
         // The model-authored summary and fragments are not returned. The host
         // emits complete OCR lines, including an adjacent task qualifier when

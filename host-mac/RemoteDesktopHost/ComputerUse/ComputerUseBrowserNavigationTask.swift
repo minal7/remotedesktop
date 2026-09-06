@@ -156,7 +156,9 @@ final class ComputerUseBrowserNavigationTask {
     }
 
     func pageEvidenceIfFrontmost(taskID: String) async throws -> ComputerUseBrowserPageEvidence? {
-        guard browser.isFrontmostWindow else { return nil }
+        // Production requires the actual foreground browser window. An
+        // explicitly headless fixture uses the same document/ownership path.
+        guard browser.hasRequiredPresentation, browser.taskID != nil else { return nil }
         return try await browser.observePage(document: browser.acquireCurrentDocument(taskID: taskID))
     }
 

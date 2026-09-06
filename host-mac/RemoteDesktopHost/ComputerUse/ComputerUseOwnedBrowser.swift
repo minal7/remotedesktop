@@ -95,7 +95,7 @@ struct ComputerUseBrowserPageEvidence: Sendable, CustomStringConvertible, Custom
 }
 
 enum ComputerUseBrowserError: Error, LocalizedError, Equatable {
-    case invalidURL, busy, ownershipLost, pageChanged, navigationFailed, deadlineExceeded, closed, unsupportedDocument, documentUnresponsive, windowNotActive, authenticationRequired, signInWindowOpen
+    case invalidURL, busy, ownershipLost, pageChanged, navigationFailed, deadlineExceeded, closed, unsupportedDocument, pageEvidenceUnavailable, documentUnresponsive, windowNotActive, authenticationRequired, signInWindowOpen
     var errorDescription: String? {
         switch self {
         case .invalidURL: return "The browser needs an HTTP or HTTPS URL without embedded credentials."
@@ -106,6 +106,7 @@ enum ComputerUseBrowserError: Error, LocalizedError, Equatable {
         case .deadlineExceeded: return "The browser did not finish opening the page before the deadline."
         case .closed: return "The AI browser window was closed."
         case .unsupportedDocument: return "This page does not expose a complete supported text form in the AI browser."
+        case .pageEvidenceUnavailable: return "I couldn't read the current browser page well enough to verify this task."
         case .documentUnresponsive: return "The AI browser page did not respond before the deadline. Check it before continuing."
         case .windowNotActive: return "The AI browser is open, but another Mac window still has focus. Select the AI browser, then continue."
         case .authenticationRequired: return "Sign in or complete verification yourself in the AI browser, then choose Let AI continue. AI will check the page again before continuing your request."
@@ -338,7 +339,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         let result = try await callDOM(.pageSnapshot, arguments: [:], document: expected)
         guard hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
         guard result.status == "page-snapshot", result.fields == nil,
-              let page = result.page, page.isWellFormed else { throw ComputerUseBrowserError.unsupportedDocument }
+              let page = result.page, page.isWellFormed else { throw ComputerUseBrowserError.pageEvidenceUnavailable }
         return ComputerUseBrowserPageEvidence(document: expected, documentID: result.documentID, page: page)
     }
 

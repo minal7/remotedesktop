@@ -2769,6 +2769,190 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
             "One shared generic noun cannot attest a contradictory control")
     }
 
+    func testOwnedBrowserAnswerRequiresMatchingDOMFactsAlongsideScreenEvidence() async throws {
+        let fact = "Support phone: 415-555-0142"
+        for (index, body) in ["<p>Support <span>phone: 415-555-0142</span></p>",
+                              "<p>Support phone: 415-555-0199</p>",
+                              "<input aria-label='Search' value='Support phone: 415-555-0142'>"].enumerated() {
+            let server = try OwnedBrowserHTTPFixture(routes: ["/results": .init(body: body)])
+            let base = try await server.start()
+            defer { server.stop() }
+            let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+            defer { browser.close() }
+            try browser.claim(taskID: "browser-answer")
+            _ = try await browser.navigate(taskID: "browser-answer", operationID: "page", to: base.appendingPathComponent("results"))
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let navigation = ComputerUseBrowserNavigationTask(browser: browser, journalDirectory: directory)
+            let fixture = makeCorrectionRuntime(completionResponses: [], port: UInt16(43_740 + index))
+            let requests = SemanticRoutingRequestLog()
+            let executor = OSAtlasComputerUseExecutor.makeForTesting(inputs: fixture.inputs, runtime: fixture.runtime,
+                semanticRouter: StubSemanticActionRouter { request in
+                    await requests.record(request)
+                    return .init(directive: .answer, argument: .visibleAnswer(summary: fact, evidence: [fact]))
+                }, maxSteps: 1)
+            let observation = try OSAtlasAcceptanceFixtureRenderer.localBrowserEvidence(lines: [fact])
+            do {
+                let result = try await executor.execute(taskID: "browser-answer", prompt: "What is the support phone number?",
+                    trustedUserPrompt: "What is the support phone number?",
+                    tools: correctionTestTools(observation: observation, browserNavigationTask: navigation,
+                        actionPerformer: { _ in XCTFail("An observed answer never posts input") }), progress: { _ in })
+                if index == 0 { XCTAssertEqual(result, .completed(fact)) }
+                else if case .unableToComplete = result { }
+                else { XCTFail("Screen evidence alone cannot report a fact absent from the owned page") }
+            } catch let error as OSAtlasComputerUseExecutor.RuntimeError {
+                XCTAssertNotEqual(index, 0)
+                XCTAssertTrue(error == .unsupportedAction("unverified-visible-answer") || error == .malformedAction)
+            } catch { await fixture.runtime.shutdown(); throw error }
+            await fixture.runtime.shutdown()
+            let recorded = await requests.values()
+            XCTAssertEqual(recorded.count, 1)
+            XCTAssertEqual(server.count("/results"), 1)
+        }
+    }
+
+    func testOwnedBrowserInvisibleDestinationChangeRestartsPlanningBeforeTyping() async throws {
+        let server = try OwnedBrowserHTTPFixture(routes: ["/results": .init(body: """
+            <label>Search<input></label><a id='result' href='/event?opaque=first'>Event</a>
+            <script>fetch('/change').then(() => { document.getElementById('result').href='/event?opaque=second'; fetch('/changed'); });</script>
+            """), "/change": .init(held: true)])
+        let base = try await server.start()
+        defer { server.stop() }
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+        defer { browser.close() }
+        try browser.claim(taskID: "browser-plan")
+        _ = try await browser.navigate(taskID: "browser-plan", operationID: "page", to: base.appendingPathComponent("results"))
+        try await waitForBrowserEvidenceFixture { server.count("/change") == 1 }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let navigation = ComputerUseBrowserNavigationTask(browser: browser, journalDirectory: directory)
+        let fixture = makeCorrectionRuntime(completionResponses: [], port: 43_743)
+        let requests = SemanticRoutingRequestLog()
+        let executor = OSAtlasComputerUseExecutor.makeForTesting(inputs: fixture.inputs, runtime: fixture.runtime,
+            semanticRouter: StubSemanticActionRouter { request in
+                await requests.record(request)
+                if await requests.values().count == 1 {
+                    server.releaseHeldResponses()
+                    let deadline = ContinuousClock.now + .seconds(5)
+                    while server.count("/changed") == 0 {
+                        guard ContinuousClock.now < deadline else { throw OSAtlasComputerUseExecutor.RuntimeError.planningStateChanged }
+                        try await Task.sleep(for: .milliseconds(10))
+                    }
+                }
+                return .init(directive: .type, argument: .text("Paris"))
+            }, maxSteps: 1)
+        var actions: [ComputerUsePredictedAction] = []
+        do {
+            _ = try await executor.execute(taskID: "browser-plan", prompt: "Type \"Paris\".", trustedUserPrompt: "Type \"Paris\".",
+                tools: correctionTestTools(browserNavigationTask: navigation,
+                    accessibilityContext: "AXSearchField • Search • focused • editable=true",
+                    actionPerformer: { actions.append($0) }), progress: { _ in })
+            XCTFail("The bounded fixture stops after its one verified effect")
+        } catch OSAtlasComputerUseExecutor.RuntimeError.stepLimit { }
+        catch { await fixture.runtime.shutdown(); throw error }
+        await fixture.runtime.shutdown()
+        XCTAssertEqual(actions, [.typeText("Paris")])
+        let recorded = await requests.values()
+        XCTAssertEqual(recorded.count, 2, "A URL-only page change must invalidate the first proposal despite identical screen pixels")
+        XCTAssertFalse(recorded.contains { $0.visibleText.contains("opaque=") })
+    }
+
+    func testOwnedBrowserAuthenticationPreventsTheSemanticProposalDespiteUnrelatedScreenText() async throws {
+        let server = try OwnedBrowserHTTPFixture(routes: ["/login": .init(body: "<input type='password' value='private-password'>")])
+        let base = try await server.start()
+        defer { server.stop() }
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+        defer { browser.close() }
+        try browser.claim(taskID: "browser-auth")
+        _ = try await browser.navigate(taskID: "browser-auth", operationID: "page", to: base.appendingPathComponent("login"))
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let navigation = ComputerUseBrowserNavigationTask(browser: browser, journalDirectory: directory)
+        let fixture = makeCorrectionRuntime(completionResponses: [], port: 43_744)
+        let requests = SemanticRoutingRequestLog()
+        let executor = OSAtlasComputerUseExecutor.makeForTesting(inputs: fixture.inputs, runtime: fixture.runtime,
+            semanticRouter: StubSemanticActionRouter { request in
+                await requests.record(request)
+                return .init(directive: .type, argument: .text("Paris"))
+            }, maxSteps: 1)
+        do {
+            _ = try await executor.execute(taskID: "browser-auth", prompt: "Type \"Paris\".", trustedUserPrompt: "Type \"Paris\".",
+                tools: correctionTestTools(browserNavigationTask: navigation,
+                    accessibilityContext: "AXSearchField • Search • focused • editable=true",
+                    actionPerformer: { _ in XCTFail("Authentication requires handoff before input") }), progress: { _ in })
+            XCTFail("The browser authentication signal must reach the host's existing handoff path")
+        } catch ComputerUseBrowserError.authenticationRequired { }
+        catch { await fixture.runtime.shutdown(); throw error }
+        await fixture.runtime.shutdown()
+        let recorded = await requests.values()
+        XCTAssertTrue(recorded.isEmpty)
+    }
+
+    func testOwnedBrowserControlLossAtFinalEvidenceCheckCannotPublishTheAnswer() async throws {
+        let fact = "Support phone: 415-555-0142"
+        let server = try OwnedBrowserHTTPFixture(routes: ["/results": .init(body: "<p>\(fact)</p>")])
+        let base = try await server.start()
+        defer { server.stop() }
+        var allowed = true
+        var validations = 0
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, domScriptDidDispatch: { command in
+            if command == .validatePageSnapshot {
+                validations += 1
+                if validations == 2 { allowed = false }
+            }
+        }, mayAct: { allowed })
+        defer { browser.close() }
+        try browser.claim(taskID: "browser-answer-stop")
+        _ = try await browser.navigate(taskID: "browser-answer-stop", operationID: "page", to: base.appendingPathComponent("results"))
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let navigation = ComputerUseBrowserNavigationTask(browser: browser, journalDirectory: directory)
+        let fixture = makeCorrectionRuntime(completionResponses: [], port: 43_745)
+        let requests = SemanticRoutingRequestLog()
+        let executor = OSAtlasComputerUseExecutor.makeForTesting(inputs: fixture.inputs, runtime: fixture.runtime,
+            semanticRouter: StubSemanticActionRouter { request in
+                await requests.record(request)
+                return .init(directive: .answer, argument: .visibleAnswer(summary: fact, evidence: [fact]))
+            }, maxSteps: 1)
+        let observation = try OSAtlasAcceptanceFixtureRenderer.localBrowserEvidence(lines: [fact])
+        do {
+            _ = try await executor.execute(taskID: "browser-answer-stop", prompt: "What is the support phone number?",
+                trustedUserPrompt: "What is the support phone number?",
+                tools: correctionTestTools(observation: observation, browserNavigationTask: navigation,
+                    actionPerformer: { _ in XCTFail("Reporting performs no input") }), progress: { _ in })
+            XCTFail("The final browser gate must prevent publication")
+        } catch OSAtlasComputerUseExecutor.RuntimeError.planningStateChanged { }
+        catch { await fixture.runtime.shutdown(); throw error }
+        await fixture.runtime.shutdown()
+        XCTAssertEqual(validations, 2)
+        let recorded = await requests.values()
+        XCTAssertEqual(recorded.count, 1, "Losing page ownership cannot prompt another proposal")
+    }
+
+    private func waitForBrowserEvidenceFixture(_ condition: () -> Bool) async throws {
+        let deadline = ContinuousClock.now + .seconds(5)
+        while !condition() {
+            guard ContinuousClock.now < deadline else { throw OSAtlasComputerUseExecutor.RuntimeError.planningStateChanged }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+    }
+
+    func testBrowserSupportMustCoverEveryHostSelectedAnswerLine() throws {
+        let fact = "Support phone: 415-555-0142"
+        XCTAssertEqual(try OSAtlasComputerUseExecutor.verifiedVisibleAnswer(summary: fact, evidence: [fact],
+            visibleText: fact, trustedTask: "What is the support phone number?", supportingPageText: fact), fact)
+        XCTAssertThrowsError(try OSAtlasComputerUseExecutor.verifiedVisibleAnswer(summary: fact, evidence: [fact],
+            visibleText: fact + " extension 999", trustedTask: "What is the support phone number?", supportingPageText: fact))
+        XCTAssertThrowsError(try OSAtlasComputerUseExecutor.verifiedVisibleAnswer(
+            summary: "Tuesday at 3:30 PM", evidence: ["Tuesday", "3:30 PM"],
+            visibleText: "Dentist Appointment\nTuesday\n3:30 PM", trustedTask: "When is my dentist appointment?",
+            supportingPageText: "Tuesday\n3:30 PM"), "A host-added task qualifier also needs page support")
+        let obstacle = "Quarterly report no longer available"
+        XCTAssertThrowsError(try OSAtlasComputerUseExecutor.verifiedVisibleAnswer(summary: obstacle, evidence: [obstacle],
+            visibleText: obstacle, trustedTask: "Summarize the quarterly report.", verificationMode: .obstacle,
+            supportingPageText: "Quarterly report available"), "The early obstacle path cannot bypass page support")
+    }
+
     func testVisibleAnswerEvidenceIsSubstantiveStructuredAndTaskBound() throws {
         XCTAssertEqual(
             try OSAtlasComputerUseExecutor.verifiedVisibleAnswer(
@@ -9808,6 +9992,7 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
         frontmostApplicationIdentity:
             ComputerUseApplicationIdentity? = nil,
         applicationOpener: ((String) async throws -> Void)? = nil,
+        browserNavigationTask: ComputerUseBrowserNavigationTask? = nil,
         semanticAccessibilityClickScope:
             ((ComputerUsePredictedAction, String)
                 -> OSAtlasSemanticAccessibilityClickScope?)? = nil,
@@ -9836,6 +10021,7 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
                 XCTFail("Correction tests must not open an application")
             },
             actionPerformer: actionPerformer,
+            browserNavigationTask: browserNavigationTask,
             screenProvider: { observation },
             conservativeActionAdjustmentProvider:
                 conservativeActionAdjustment,
