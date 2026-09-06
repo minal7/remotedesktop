@@ -15,7 +15,7 @@ final class ComputerUseNativeTextExecutor {
     }
     private struct PendingClarification {
         let info: Clarification
-        let browser: ComputerUseBrowserTextTarget
+        let form: ClarificationForm
         let originatingTaskID: String?
         let expiryNonce: UUID
     }
@@ -23,10 +23,90 @@ final class ComputerUseNativeTextExecutor {
         let taskID: String
         let originatingTaskID: String
         let goal: ComputerUseUnresolvedTextGoal
-        let browser: ComputerUseBrowserTextTarget
+        let form: ClarificationForm
         let scope: String
         let expiresAt: Date
         let expiryNonce: UUID
+    }
+
+    /// Both adapters retain existing objects. Native AX has no browser lease
+    /// to transfer; the executor's exact answer-task/goal binding owns its
+    /// continuation, and each observation must still prove the same form.
+    @MainActor private enum ClarificationForm {
+        case browser(ComputerUseBrowserTextTarget)
+        case native(NativeClarificationForm)
+
+        var browserTarget: ComputerUseBrowserTextTarget? {
+            if case .browser(let target) = self { return target }
+            return nil
+        }
+
+        func scope() throws -> String {
+            switch self {
+            case .browser(let target): return try target.clarificationScope()
+            case .native(let form):
+                _ = try form.reobserve()
+                return form.identity
+            }
+        }
+
+        func transfer(taskID: String) throws -> Self {
+            switch self {
+            case .browser(let target): return .browser(try target.transferForClarification(taskID: taskID))
+            case .native: return self
+            }
+        }
+
+        func reobserve() async throws -> [ComputerUseTextField] {
+            switch self {
+            case .browser(let target): return try await target.reobserveRetainedFields()
+            case .native(let form): return try form.reobserve()
+            }
+        }
+    }
+
+    @MainActor private struct NativeClarificationForm {
+        struct Reference { let id: String; let label: String }
+        let target: any ComputerUseNativeTextTarget
+        let references: [Reference]
+        let identity: String
+
+        init(target: any ComputerUseNativeTextTarget, fields: [ComputerUseTextField]) throws {
+            guard !fields.isEmpty, fields.count <= 16,
+                  Set(fields.map { $0.snapshot.targetID }).count == fields.count,
+                  fields.allSatisfy({ !$0.snapshot.targetID.isEmpty && !$0.label.isEmpty
+                      && $0.label.utf8.count <= 256 && $0.snapshot.isEditable && !$0.snapshot.isSecure }) else {
+                throw Failure.invalidClarification
+            }
+            self.target = target
+            let references = fields.map { Reference(id: $0.snapshot.targetID, label: $0.label) }
+            self.references = references
+            // Values and selections may legitimately change while the user
+            // answers. Neither belongs in the controller-visible scope.
+            identity = ComputerUseTaskContract.digest(["native-form-clarification-v1", String(fields.count)]
+                + references.sorted { $0.id < $1.id }.flatMap { [$0.id, $0.label] })
+        }
+
+        func reobserve() throws -> [ComputerUseTextField] {
+            // Discovery is only a membership check. Equal labels on new
+            // objects cannot replace any of the retained AX reference IDs.
+            let current = target.fields()
+            guard current.count == references.count,
+                  Set(current.map { $0.snapshot.targetID }) == Set(references.map(\.id)) else {
+                throw Failure.invalidClarification
+            }
+            var refreshed: [ComputerUseTextField] = []
+            for reference in references {
+                guard let field = current.first(where: { $0.snapshot.targetID == reference.id }),
+                      field.label.utf8.elementsEqual(reference.label.utf8),
+                      field.snapshot.isEditable, !field.snapshot.isSecure,
+                      target.snapshot(targetID: reference.id) == field.snapshot else {
+                    throw Failure.invalidClarification
+                }
+                refreshed.append(field)
+            }
+            return refreshed
+        }
     }
     private static let clarificationQuestion = "Which field should I edit, and what exact text should it contain?"
     private let target: any ComputerUseNativeTextTarget
@@ -107,13 +187,14 @@ final class ComputerUseNativeTextExecutor {
     }
 
     /// The manager may issue a controller/session-bound reference for this
-    /// exact no-effect question. Native AX continuation needs a separate scope
-    /// adapter; only retained owned-browser forms expose this capability.
+    /// exact no-effect question. Scope checks are read-only while paused;
+    /// continuing the answer still requires the action gate and fresh fields.
     func clarification(taskID: String) throws -> Clarification? {
         guard let pending = pendingClarification, pending.info.taskID == taskID else { return nil }
         guard now() < pending.info.expiresAt else { invalidateClarification(); return nil }
         do {
-            guard try pending.browser.clarificationScope() == pending.info.scope else { throw Failure.invalidClarification }
+            guard try pending.form.scope() == pending.info.scope,
+                  now() < pending.info.expiresAt else { throw Failure.invalidClarification }
             return pending.info
         } catch { invalidateClarification(); throw error }
     }
@@ -176,20 +257,23 @@ final class ComputerUseNativeTextExecutor {
             invalidateClarification()
             retainedTask = nil
             retainedTaskOriginID = nil
-            let next = try pending.browser.transferForClarification(taskID: taskID)
+            let next = try pending.form.transfer(taskID: taskID)
             let nonce = UUID()
             preparedClarification = PreparedClarification(taskID: taskID, originatingTaskID: originatingTaskID,
-                goal: goal, browser: next, scope: pending.info.scope, expiresAt: pending.info.expiresAt, expiryNonce: nonce)
+                goal: goal, form: next, scope: pending.info.scope, expiresAt: pending.info.expiresAt, expiryNonce: nonce)
             expireClarification(at: pending.info.expiresAt, nonce: nonce)
         }
         guard let prepared = preparedClarification, prepared.taskID == taskID,
               prepared.originatingTaskID == originatingTaskID, prepared.goal == goal else { throw Failure.invalidClarification }
         do {
             guard now() < prepared.expiresAt,
-                  try prepared.browser.clarificationScope() == prepared.scope else { throw Failure.invalidClarification }
-            let fields = try await prepared.browser.reobserveRetainedFields()
+                  try prepared.form.scope() == prepared.scope,
+                  now() < prepared.expiresAt else { throw Failure.invalidClarification }
+            let fields = try await prepared.form.reobserve()
+            guard preparedClarification?.expiryNonce == prepared.expiryNonce,
+                  now() < prepared.expiresAt else { throw Failure.invalidClarification }
             let result = try await planAndRun(taskID: taskID, goal: goal, originatingTaskID: originatingTaskID,
-                browserTarget: prepared.browser, fields: fields, verifiedStep: verifiedStep, progress: progress)
+                browserTarget: prepared.form.browserTarget, fields: fields, verifiedStep: verifiedStep, progress: progress)
                 ?? .unableToComplete("I couldn't resolve this form edit from your answer. Start a new request with the field and exact text.")
             // A newly issued question has its own expiry and must survive.
             if preparedClarification?.expiryNonce == prepared.expiryNonce {
@@ -221,6 +305,15 @@ final class ComputerUseNativeTextExecutor {
         else { proposal = try await planner.propose(goal: goal, fields: fields) }
         try Task.checkCancellation()
         guard mayAct() else { throw ComputerUseTextEditError.interrupted }
+        // Expiry/invalidation during planning applies to every outcome,
+        // including another question. It cannot mint replacement authority.
+        if originatingTaskID != nil {
+            guard let prepared = preparedClarification, prepared.taskID == taskID,
+                  prepared.originatingTaskID == originatingTaskID, prepared.goal == goal,
+                  now() < prepared.expiresAt,
+                  try prepared.form.scope() == prepared.scope,
+                  now() < prepared.expiresAt else { throw Failure.invalidClarification }
+        }
         let operations: [ComputerUseTextGoalOperation]
         let unchanged: [String]
         switch proposal {
@@ -229,15 +322,23 @@ final class ComputerUseNativeTextExecutor {
             guard goal.userTurns.count < ComputerUseUnresolvedTextGoal.maximumUserTurns else {
                 return .unableToComplete("I still couldn't determine the complete form edit. Start a new request with the field and exact text.")
             }
-            if let browserTarget {
-                let info = Clarification(taskID: taskID, goal: goal, question: Self.clarificationQuestion,
-                    scope: try browserTarget.clarificationScope(), expiresAt: now().addingTimeInterval(clarificationLifetime))
-                invalidateClarification()
-                let nonce = UUID()
-                pendingClarification = PendingClarification(info: info, browser: browserTarget,
-                    originatingTaskID: originatingTaskID, expiryNonce: nonce)
-                expireClarification(at: info.expiresAt, nonce: nonce)
+            let form: ClarificationForm
+            if let prepared = preparedClarification, prepared.taskID == taskID { form = prepared.form }
+            else if let browserTarget { form = .browser(browserTarget) }
+            else { form = .native(try NativeClarificationForm(target: target, fields: fields)) }
+            let scope = try form.scope()
+            if originatingTaskID != nil {
+                guard let prepared = preparedClarification, prepared.taskID == taskID,
+                      prepared.goal == goal, prepared.scope == scope,
+                      now() < prepared.expiresAt else { throw Failure.invalidClarification }
             }
+            let info = Clarification(taskID: taskID, goal: goal, question: Self.clarificationQuestion,
+                scope: scope, expiresAt: now().addingTimeInterval(clarificationLifetime))
+            invalidateClarification()
+            let nonce = UUID()
+            pendingClarification = PendingClarification(info: info, form: form,
+                originatingTaskID: originatingTaskID, expiryNonce: nonce)
+            expireClarification(at: info.expiresAt, nonce: nonce)
             return .clarificationRequired(Self.clarificationQuestion)
         case .edits(let edits, let retained):
             operations = edits.map(ComputerUseTextGoalOperation.enterText); unchanged = retained
@@ -253,7 +354,9 @@ final class ComputerUseNativeTextExecutor {
         }
         if originatingTaskID != nil {
             guard let prepared = preparedClarification, prepared.taskID == taskID,
-                  prepared.goal == goal, now() < prepared.expiresAt else { throw Failure.invalidClarification }
+                  prepared.goal == goal, now() < prepared.expiresAt,
+                  try prepared.form.scope() == prepared.scope,
+                  now() < prepared.expiresAt else { throw Failure.invalidClarification }
         }
         let contract = try ComputerUseTextTaskContract(taskID: taskID, prompt: goal.taskIdentityText,
                                                        fields: fields, operations: operations,
@@ -268,7 +371,9 @@ final class ComputerUseNativeTextExecutor {
         guard mayAct() else { throw ComputerUseTextEditError.interrupted }
         if originatingTaskID != nil {
             guard let prepared = preparedClarification, prepared.taskID == taskID,
-                  prepared.goal == goal, now() < prepared.expiresAt else { throw Failure.invalidClarification }
+                  prepared.goal == goal, now() < prepared.expiresAt,
+                  try prepared.form.scope() == prepared.scope,
+                  now() < prepared.expiresAt else { throw Failure.invalidClarification }
         }
         let store = try ComputerUseTextStepStore(directory: journalDirectory)
         let task = try ComputerUseTextTask(contract: contract, recovered: store.load(taskID: taskID),

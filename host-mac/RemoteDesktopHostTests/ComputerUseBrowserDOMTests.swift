@@ -634,6 +634,36 @@ final class ComputerUseBrowserDOMTests: XCTestCase {
         }
     }
 
+    func testBrowserClarificationCannotRenewExpiredOrInvalidatedAuthorityFromAPlannerOutcome() async throws {
+        for invalidation in ["expiry", "explicit"] {
+            for outcome in ["question", "unsupported", "edits"] {
+                let fixture = try await DOMFixture(body: """
+                    <label>Destination<input value="old"></label>
+                    <script>document.querySelector('input').addEventListener('input', () => fetch('/input-event'));</script>
+                    """)
+                defer { fixture.close() }
+                let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+                defer { try? FileManager.default.removeItem(at: directory) }
+                var now = Date(timeIntervalSince1970: 1_000)
+                let planner = DOMClarificationFixturePlanner(declinesAnswer: outcome == "unsupported")
+                if outcome == "question" { planner.answerProposal = .clarification }
+                let executor = clarificationExecutor(fixture: fixture, planner: planner, directory: directory, now: { now })
+                _ = try await executor.execute(taskID: "question", prompt: "Put \"blue\" in a field.", progress: { _ in })
+                let pending = try XCTUnwrap(executor.clarification(taskID: "question"))
+                planner.beforeAnswer = { [weak executor] in
+                    if invalidation == "expiry" { now = pending.expiresAt }
+                    else { executor?.invalidateClarification(taskID: "answer") }
+                }
+                let answer = try pending.goal.answering(pending.question, with: "Destination")
+                do { _ = try await executor.continueClarification(taskID: "answer", originatingTaskID: "question", goal: answer, progress: { _ in }); XCTFail("Every planner outcome must respect the original clarification lifetime") }
+                catch { XCTAssertEqual(error as? ComputerUseNativeTextExecutor.Failure, .invalidClarification) }
+                XCTAssertNil(try executor.clarification(taskID: "question")); XCTAssertNil(try executor.clarification(taskID: "answer"))
+                XCTAssertEqual(planner.goals.count, 2); XCTAssertEqual(fixture.server.count("/input-event"), 0)
+                XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+            }
+        }
+    }
+
     private func clarificationExecutor(fixture: DOMFixture, planner: DOMClarificationFixturePlanner, directory: URL,
                                        now: @escaping () -> Date = Date.init) -> ComputerUseNativeTextExecutor {
         ComputerUseNativeTextExecutor(injector: InputInjector(), mayAct: { true }, journalDirectory: directory,
@@ -1396,6 +1426,7 @@ private final class DOMClarificationFixturePlanner: ComputerUseTextGoalPlanning 
     var goals: [ComputerUseUnresolvedTextGoal] = []
     var fieldValues: [[String]] = []
     var beforeAnswer: (() async throws -> Void)?
+    var answerProposal: ComputerUseTextGoalProposal?
     init(answersNeeded: Int = 1, declinesAnswer: Bool = false) { self.answersNeeded = answersNeeded; self.declinesAnswer = declinesAnswer }
     func propose(prompt: String, fields: [ComputerUseTextField]) async throws -> ComputerUseTextGoalProposal {
         try await propose(goal: ComputerUseUnresolvedTextGoal(userRequest: prompt), fields: fields)
@@ -1404,6 +1435,7 @@ private final class DOMClarificationFixturePlanner: ComputerUseTextGoalPlanning 
         goals.append(goal); fieldValues.append(fields.map { $0.snapshot.value })
         if goal.userTurns.count <= answersNeeded { return .clarification }
         try await beforeAnswer?()
+        if let answerProposal { return answerProposal }
         if declinesAnswer { return .unsupported }
         let target = try XCTUnwrap(fields.first(where: { $0.label == "Destination" }))
         let catalog = try ComputerUseTextPayloadCatalog(goal: goal)
