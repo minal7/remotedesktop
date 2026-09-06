@@ -1,10 +1,165 @@
 import AppKit
+import Combine
 import Network
 import XCTest
 @testable import RemoteDesktopHost
 
 @MainActor
 final class ComputerUseOwnedBrowserTests: XCTestCase {
+    func testWebsiteProjectionAndDocumentDescriptionsOmitOpaqueURLComponents() throws {
+        let rows = [
+            ("https://example.test/private-path?arbitrary=private-query#private-fragment", "https://example.test"),
+            ("https://example.test:8443/a%2Fb;opaque=private-path?next=%2Fprivate-query#private-fragment", "https://example.test:8443"),
+            ("http://[::1]:8080/private-path?x=private-query#private-fragment", "http://[::1]:8080"),
+            ("https://xn--bcher-kva.example/search?q=books", "https://xn--bcher-kva.example"),
+        ]
+        for (raw, expected) in rows {
+            let url = try XCTUnwrap(URL(string: raw))
+            XCTAssertEqual(ComputerUseBrowserSite.displayName(for: url), expected)
+            let document = ComputerUseBrowserDocument(contextID: "private-context", taskID: "private-task",
+                generation: 1, operationID: "private-operation", requestedURL: url, committedURL: url)
+            for description in [String(describing: document), String(reflecting: document)] {
+                XCTAssertEqual(description, "ComputerUseBrowserDocument(site: \(expected), source: automationNavigation)")
+                XCTAssertFalse(description.contains("private-"))
+            }
+            XCTAssertEqual(document.requestedURL, url)
+            XCTAssertEqual(document.committedURL, url, "Descriptions must not rewrite the retained page identity")
+        }
+        for raw in ["https://private-user:private-password@example.test/private-path",
+                    "https://@example.test/private-path", "file:///tmp/private-path",
+                    "data:text/plain,private-path", "/private-path?x=private-query",
+                    "https://example.test/" + String(repeating: "x", count: 8_192)] {
+            XCTAssertEqual(ComputerUseBrowserSite.displayName(for: try XCTUnwrap(URL(string: raw))), "Website unavailable")
+        }
+        XCTAssertEqual(ComputerUseBrowserSite.displayName(for: nil), "Website unavailable")
+    }
+
+    func testRedirectDisplayOmitsCallbackSecretsWithoutChangingRequestsOrDocumentIdentity() async throws {
+        let search = "/search?q=origin%20city&sort=price"
+        let callback = "/callback/private-path?payload=private-query#private-fragment"
+        let server = try OwnedBrowserHTTPFixture(routes: [search: .init(status: 302, location: callback, held: true)])
+        let base = try await server.start()
+        defer { server.stop() }
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+        defer { browser.close() }
+        var sites: [String] = []
+        let observation = browser.$displayedSite.sink { sites.append($0) }
+        defer { observation.cancel() }
+        let requested = try XCTUnwrap(URL(string: search, relativeTo: base)?.absoluteURL)
+        let committed = try XCTUnwrap(URL(string: callback, relativeTo: base)?.absoluteURL)
+        try browser.claim(taskID: "callback")
+        let navigation = Task { try await browser.navigate(taskID: "callback", operationID: "open", to: requested) }
+        try await waitUntil { server.count(search) == 1 }
+        XCTAssertEqual(browser.displayedSite, base.absoluteString, "Even the pending destination is a website-only label")
+        server.releaseHeldResponses()
+        let document = try await navigation.value
+        XCTAssertEqual(document.requestedURL, requested, "Search parameters still reach navigation exactly")
+        XCTAssertEqual(document.committedURL, committed, "Callback identity includes path, query and fragment")
+        XCTAssertEqual(browser.displayedSite, base.absoluteString)
+        XCTAssertEqual(server.count("/callback/private-path?payload=private-query"), 1)
+        XCTAssertEqual(browser.receipt(taskID: "callback", operationID: "open"), document)
+        for changeRequested in [false, true] {
+            let other = try XCTUnwrap(URL(string: "/other?payload=other#other", relativeTo: base)?.absoluteURL)
+            let altered = ComputerUseBrowserDocument(contextID: document.contextID, taskID: document.taskID,
+                generation: document.generation, operationID: document.operationID,
+                requestedURL: changeRequested ? other : document.requestedURL,
+                committedURL: changeRequested ? document.committedURL : other)
+            XCTAssertNotEqual(document, altered)
+            XCTAssertFalse(browser.validate(altered), "Equal displayed websites cannot confer document authority")
+        }
+        XCTAssertTrue(browser.validate(document))
+        browser.close()
+        XCTAssertEqual(browser.displayedSite, "Website unavailable")
+        XCTAssertTrue(sites.allSatisfy { $0 == base.absoluteString || $0 == "Website unavailable" })
+    }
+
+    func testResponseMatchingExcludesOnlyFragmentAndNeverReplacesExactDocumentMatching() throws {
+        let resource = try XCTUnwrap(URL(string: "https://example.test:8443/callback?opaque=expected"))
+        let documentURL = try XCTUnwrap(URL(string: resource.absoluteString + "#private-fragment"))
+        XCTAssertTrue(ComputerUseOwnedBrowser.responseURL(resource, matchesDocumentURL: documentURL))
+        XCTAssertTrue(ComputerUseOwnedBrowser.responseURL(documentURL, matchesDocumentURL: documentURL))
+        XCTAssertFalse(ComputerUseOwnedBrowser.responseURL(nil, matchesDocumentURL: documentURL))
+        for raw in ["http://example.test:8443/callback?opaque=expected",
+                    "https://other.test:8443/callback?opaque=expected",
+                    "https://example.test:9443/callback?opaque=expected",
+                    "https://example.test:8443/other?opaque=expected",
+                    "https://example.test:8443/callback?opaque=changed",
+                    "https://example.test:8443/callback",
+                    "https://user@example.test:8443/callback?opaque=expected"] {
+            XCTAssertFalse(ComputerUseOwnedBrowser.responseURL(try XCTUnwrap(URL(string: raw)), matchesDocumentURL: documentURL))
+        }
+        let first = ComputerUseBrowserDocument(contextID: "context", taskID: "task", generation: 1,
+            operationID: "operation", requestedURL: resource, committedURL: documentURL)
+        let differentFragment = try XCTUnwrap(URL(string: resource.absoluteString + "#other"))
+        let second = ComputerUseBrowserDocument(contextID: first.contextID, taskID: first.taskID,
+            generation: first.generation, operationID: first.operationID,
+            requestedURL: first.requestedURL, committedURL: differentFragment)
+        XCTAssertNotEqual(first, second, "A fragment change still invalidates a retained exact document reference")
+    }
+
+    func testManualCallbackHandbackRetainsExactURLWithoutPublishingIt() async throws {
+        let callback = "/account/private-path?opaque=private-query#private-fragment"
+        let server = try OwnedBrowserHTTPFixture(routes: [
+            "/login": .init(body: "<script>fetch('/signal').then(() => location.href = '\(callback)');</script>"),
+            "/signal": .init(held: true),
+        ])
+        let base = try await server.start()
+        defer { server.stop() }
+        var allowed = true
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { allowed })
+        defer { browser.close() }
+        var sites: [String] = []
+        let observation = browser.$displayedSite.sink { sites.append($0) }
+        defer { observation.cancel() }
+        try browser.claim(taskID: "handoff-callback")
+        let original = try await browser.navigate(taskID: "handoff-callback", operationID: "login",
+            to: base.appendingPathComponent("login"))
+        try await waitUntil { server.count("/signal") == 1 }
+        allowed = false
+        server.releaseHeldResponses()
+        try await waitUntil { browser.hasPageAwaitingHandback }
+        XCTAssertEqual(browser.displayedSite, base.absoluteString)
+        XCTAssertFalse(browser.validate(original))
+        XCTAssertThrowsError(try browser.reacquireAfterUserControl(taskID: "handoff-callback"))
+        allowed = true
+        XCTAssertNil(browser.currentDocument(taskID: "handoff-callback"))
+        try browser.reacquireAfterUserControl(taskID: "handoff-callback")
+        let current = try XCTUnwrap(browser.currentDocument(taskID: "handoff-callback"))
+        let expected = try XCTUnwrap(URL(string: callback, relativeTo: base)?.absoluteURL)
+        XCTAssertEqual(current.committedURL, expected)
+        XCTAssertEqual(current.source, .userControlObservation)
+        XCTAssertNil(browser.receipt(taskID: "handoff-callback", operationID: current.operationID))
+        XCTAssertEqual(browser.receipt(taskID: "handoff-callback", operationID: "login"), original)
+        XCTAssertEqual(server.count("/account/private-path?opaque=private-query"), 1)
+        XCTAssertEqual(server.count("/login"), 1)
+        XCTAssertTrue(sites.allSatisfy { $0 == base.absoluteString || $0 == "Website unavailable" })
+        XCTAssertFalse(String(reflecting: current).contains("private-"))
+    }
+
+    func testFailedCallbackKeepsAddressAndErrorProjectionsFreeOfOpaqueValues() async throws {
+        let path = "/private-path?opaque=private-query"
+        let server = try OwnedBrowserHTTPFixture(routes: [path: .init(status: 404)])
+        let base = try await server.start()
+        defer { server.stop() }
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+        defer { browser.close() }
+        try browser.claim(taskID: "failed-callback")
+        do {
+            _ = try await browser.navigate(taskID: "failed-callback", operationID: "open",
+                to: XCTUnwrap(URL(string: path + "#private-fragment", relativeTo: base)?.absoluteURL))
+            XCTFail("An HTTP failure cannot produce a successful callback receipt")
+        } catch {
+            XCTAssertEqual(error as? ComputerUseBrowserError, .navigationFailed)
+            XCTAssertFalse(error.localizedDescription.contains("private-"))
+            XCTAssertFalse(String(reflecting: error).contains("private-"))
+        }
+        XCTAssertTrue([base.absoluteString, "Website unavailable"].contains(browser.displayedSite))
+        XCTAssertFalse(browser.detail.contains("private-"))
+        XCTAssertNil(browser.currentDocument(taskID: "failed-callback"))
+        XCTAssertNil(browser.receipt(taskID: "failed-callback", operationID: "open"))
+        XCTAssertEqual(server.count(path), 1)
+    }
+
     func testNavigationGrammarRequiresACompleteCurrentTurnCommand() {
         for prompt in ["Open https://example.test/a", "navigate to https://example.test/a",
                        "Go to https://example.test/a", "visit https://example.test/a", "https://example.test/a"] {
@@ -346,7 +501,8 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
         allowed = true
         for _ in 0..<2 {
             let result = try await execution.execute(taskID: "resume", prompt: prompt, progress: { _ in })
-            guard case .completed = result else { return XCTFail("Both requested navigations should be verified") }
+            guard case .completed(let text) = result else { return XCTFail("Both requested navigations should be verified") }
+            XCTAssertEqual(text, "Opened all 2 pages in the AI browser. Website: \(base.absoluteString)")
         }
         XCTAssertEqual(server.count("/private-search-token"), 2)
         let store = try ComputerUseTaskJournalStore(directory: directory)

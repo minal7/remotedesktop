@@ -12,7 +12,26 @@ struct ComputerUseBrowserTaskControls: Equatable {
     let canResume: Bool
 }
 
-struct ComputerUseBrowserDocument: Equatable, Sendable {
+/// A display projection, never a navigation target or document identity. Page
+/// paths, queries and fragments may carry opaque login values under any name.
+/// Keep only website identity; never fall back to the original URL string.
+enum ComputerUseBrowserSite {
+    static func displayName(for url: URL?) -> String {
+        guard let url, let validated = ComputerUseOwnedBrowser.validatedURL(url),
+              var components = URLComponents(url: validated, resolvingAgainstBaseURL: false) else {
+            return "Website unavailable"
+        }
+        components.scheme = components.scheme?.lowercased()
+        components.user = nil
+        components.password = nil
+        components.path = ""
+        components.query = nil
+        components.fragment = nil
+        return components.url?.absoluteString ?? "Website unavailable"
+    }
+}
+
+struct ComputerUseBrowserDocument: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     enum Source: Equatable, Sendable {
         case automationNavigation
         case userControlObservation
@@ -24,6 +43,13 @@ struct ComputerUseBrowserDocument: Equatable, Sendable {
     let requestedURL: URL
     let committedURL: URL
     let source: Source
+
+    // Standard interpolation and debug logging must not expand retained URLs
+    // (or caller-supplied task/operation IDs) into callback secrets.
+    var description: String {
+        "ComputerUseBrowserDocument(site: \(ComputerUseBrowserSite.displayName(for: committedURL)), source: \(source))"
+    }
+    var debugDescription: String { description }
 
     init(contextID: String, taskID: String, generation: UInt64, operationID: String,
          requestedURL: URL, committedURL: URL, source: Source = .automationNavigation) {
@@ -62,7 +88,7 @@ enum ComputerUseBrowserError: Error, LocalizedError, Equatable {
 @MainActor
 final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDelegate, NSWindowDelegate {
     let contextID = UUID().uuidString
-    @Published private(set) var displayedURL = ""
+    @Published private(set) var displayedSite = ComputerUseBrowserSite.displayName(for: nil)
     @Published private(set) var detail = "Ready"
     @Published private(set) var taskControls: ComputerUseBrowserTaskControls?
     private var taskControlHandler: ((ComputerUseBrowserTaskControls, ComputerUseBrowserTaskControls.Action) -> Void)?
@@ -131,6 +157,19 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
               !url.absoluteString.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains),
               let result = components.url else { return nil }
         return result
+    }
+
+    /// HTTP response identity excludes the client-side fragment (RFC 3986
+    /// sections 3.5 and 6.1). This comparison is only for a successful response
+    /// on the observed WKNavigation; retained document checks stay exact.
+    nonisolated static func responseURL(_ responseURL: URL?, matchesDocumentURL documentURL: URL) -> Bool {
+        guard let responseURL, let response = validatedURL(responseURL), let document = validatedURL(documentURL),
+              var responseParts = URLComponents(url: response, resolvingAgainstBaseURL: false),
+              var documentParts = URLComponents(url: document, resolvingAgainstBaseURL: false) else { return false }
+        responseParts.fragment = nil
+        documentParts.fragment = nil
+        guard let responseResource = responseParts.url, let documentResource = documentParts.url else { return false }
+        return responseResource == documentResource
     }
 
     func updateTaskControls(_ controls: ComputerUseBrowserTaskControls?,
@@ -336,7 +375,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         }
         generation &+= 1
         document = nil
-        displayedURL = url.absoluteString
+        displayedSite = ComputerUseBrowserSite.displayName(for: url)
         detail = "Opening page…"
         let id = UUID()
         return try await withTaskCancellationHandler {
@@ -399,6 +438,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         urlObservation = nil
         browser?.navigationDelegate = nil
         browser = nil
+        displayedSite = ComputerUseBrowserSite.displayName(for: nil)
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -424,7 +464,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             let url = change.newValue ?? nil
             Task { @MainActor [weak self] in
                 guard let self, browser?.url == url else { return }
-                if let url { displayedURL = url.absoluteString }
+                displayedSite = ComputerUseBrowserSite.displayName(for: url)
                 let currentLocationChanged = document.map { $0.committedURL != url } ?? false
                 let observedLocationChanged = observedUserPage.map { $0.url != url } ?? false
                 if pending == nil, currentLocationChanged || observedLocationChanged {
@@ -537,10 +577,10 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
                   navigation === observed.navigation else { return }
             userNavigation = nil
             guard !mayAct(), observed.generation == generation,
-                  let url = webView.url, observed.successfulResponseURL == url,
+                  let url = webView.url, Self.responseURL(observed.successfulResponseURL, matchesDocumentURL: url),
                   Self.validatedURL(url) != nil else { return }
             observedUserPage = ObservedUserPage(id: UUID(), generation: generation, url: url)
-            displayedURL = url.absoluteString
+            displayedSite = ComputerUseBrowserSite.displayName(for: url)
             detail = "Page ready — choose Resume when you are finished"
             return
         }
@@ -556,7 +596,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         pending.timeout?.cancel()
         document = receipt
         receipts[pending.operationID] = receipt
-        displayedURL = url.absoluteString
+        displayedSite = ComputerUseBrowserSite.displayName(for: url)
         detail = "Page opened"
         pending.continuation.resume(returning: receipt)
     }
@@ -594,7 +634,8 @@ private struct OwnedBrowserContent: View {
             HStack(spacing: 10) {
                 Image(systemName: "globe")
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(context.displayedURL).lineLimit(1).truncationMode(.middle).textSelection(.enabled)
+                    Text(context.displayedSite).lineLimit(1).truncationMode(.middle).textSelection(.enabled)
+                        .accessibilityLabel("Website: \(context.displayedSite)")
                     Text(context.detail).font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 0)

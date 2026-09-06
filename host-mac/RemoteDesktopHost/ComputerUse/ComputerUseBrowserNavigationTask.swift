@@ -123,7 +123,7 @@ final class ComputerUseBrowserNavigationTask {
         do {
             try await execution.run { completed, total in progress("Opened page \(completed) of \(total)…") }
             guard let document = browser.currentDocument(taskID: taskID) else { throw ComputerUseBrowserError.pageChanged }
-            return .completed("Opened \(retainedURLs.count == 1 ? "the page" : "all \(retainedURLs.count) pages") in the AI browser. Current page: \(document.committedURL.absoluteString)")
+            return .completed("Opened \(retainedURLs.count == 1 ? "the page" : "all \(retainedURLs.count) pages") in the AI browser. Website: \(ComputerUseBrowserSite.displayName(for: document.committedURL))")
         } catch is CancellationError {
             throw CancellationError()
         } catch ComputerUseBrowserError.windowNotActive {

@@ -9,6 +9,68 @@ import XCTest
 
 @MainActor
 final class ComputerUseTests: XCTestCase {
+    func test_ownedBrowserCallbackReplyAndDurableReplayContainOnlyWebsiteIdentity() async throws {
+        let requestedPath = "/start/private-request-path?arbitrary=private-request-query"
+        let callback = "/callback/private-callback-path?arbitrary=private-callback-query#private-callback-fragment"
+        let server = try OwnedBrowserHTTPFixture(routes: [requestedPath: .init(status: 302, location: callback)])
+        let base = try await server.start()
+        defer { server.stop() }
+        let url = temporaryLedgerURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        var fallbackCalls = 0
+        let coordinator = ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in
+            fallbackCalls += 1
+            XCTFail("Complete URL navigation must remain in the owned browser")
+            return .unableToComplete("Unexpected native route")
+        }, desktopFactory: { _ in
+            fallbackCalls += 1
+            XCTFail("Complete URL navigation cannot need a desktop model")
+            return ImmediateComputerUseExecutor(results: [.completed("Unexpected desktop route")])
+        })
+        let fixture = try browserControlFixture(executor: coordinator, ledgerURL: url)
+        defer { fixture.manager.stop(); fixture.browser.close() }
+        let requested = try XCTUnwrap(URL(string: requestedPath + "#private-request-fragment", relativeTo: base)?.absoluteURL)
+        let prompt = makeEnvelope(id: "callback-reply", kind: .prompt, body: "Open \(requested.absoluteString)")
+        fixture.manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(fixture.manager.handle(prompt, channel: fixture.channel))
+        await waitUntil(timeoutIterations: 1_000) { await fixture.channel.sentMessages().contains { $0.kind == .assistant } }
+        let messages = await fixture.channel.sentMessages()
+        let terminal = try ComputerUseTaskUpdate.decodeBody(XCTUnwrap(messages.first { $0.kind == .assistant }).body)
+        XCTAssertEqual(terminal.outcome, .taskCompleted)
+        XCTAssertEqual(terminal.text, "Opened the page in the AI browser. Website: \(base.absoluteString)")
+        XCTAssertFalse(messages.contains { $0.body.contains("private-") })
+        let document = try XCTUnwrap(fixture.browser.currentDocument(taskID: prompt.id))
+        XCTAssertEqual(document.requestedURL, requested)
+        XCTAssertEqual(document.committedURL, try XCTUnwrap(URL(string: callback, relativeTo: base)?.absoluteURL))
+        XCTAssertEqual(server.count(requestedPath), 1)
+        XCTAssertEqual(server.count("/callback/private-callback-path?arbitrary=private-callback-query"), 1)
+        XCTAssertEqual(fallbackCalls, 0)
+        fixture.manager.stop()
+
+        let restored = ComputerUseTaskLedger(fileURL: url)
+        XCTAssertEqual(try restored.claim(taskID: prompt.id, senderID: prompt.senderID,
+            sessionID: prompt.sessionID, promptBody: prompt.body), .completed(terminal.text))
+        XCTAssertFalse(try String(contentsOf: url, encoding: .utf8).contains("private-"))
+        for file in try FileManager.default.contentsOfDirectory(
+            at: url.deletingLastPathComponent().appendingPathComponent("browser"), includingPropertiesForKeys: nil) {
+            XCTAssertFalse(try String(contentsOf: file, encoding: .utf8).contains("private-"))
+        }
+        let replayExecutor = SuspendingComputerUseExecutor(), replayChannel = FakeHostComputerUseChannel()
+        let replayManager = HostComputerUseManager(injector: InputInjector(), executor: replayExecutor,
+            taskLedger: restored, allowsExternalServices: false, channelFactory: { _ in replayChannel })
+        defer { replayManager.stop() }
+        replayManager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(replayManager.handle(prompt, channel: replayChannel))
+        await waitUntil { await replayChannel.sentMessages().contains { $0.kind == .assistant } }
+        let replayMessages = await replayChannel.sentMessages()
+        let replay = try ComputerUseTaskUpdate.decodeBody(XCTUnwrap(replayMessages.first { $0.kind == .assistant }).body)
+        XCTAssertEqual(replay.text, terminal.text)
+        XCTAssertEqual(replay.outcome, .taskCompleted)
+        XCTAssertFalse(replayMessages.contains { $0.body.contains("private-") })
+        XCTAssertEqual(replayExecutor.callCount, 0)
+        XCTAssertEqual(server.count(requestedPath), 1, "Durable reply replay cannot reopen the callback")
+    }
+
     func test_ownedBrowserAuthenticationPausesBeforeNativePlanningAndRechecksOnHandback() async throws {
         let secret = "fixture-private-verification-917263"
         let server = try OwnedBrowserHTTPFixture(routes: [
