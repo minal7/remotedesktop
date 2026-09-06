@@ -1204,8 +1204,8 @@ final class ComputerUseHostTools {
         browserNavigationTask = nil
     }
 
-    func reacquireOwnedBrowserAfterUserControl(taskID: String) throws {
-        try browserNavigationTask?.reacquireAfterUserControl(taskID: taskID)
+    func reacquireOwnedBrowserAfterUserControl(taskID: String) async throws {
+        try await browserNavigationTask?.reacquireAfterUserControl(taskID: taskID)
     }
 
     func bindOwnedBrowserTaskControls(
@@ -6059,7 +6059,7 @@ final class HostComputerUseManager: ObservableObject {
                 } else {
                     if isResuming {
                         do {
-                            try tools.reacquireOwnedBrowserAfterUserControl(taskID: envelope.id)
+                            try await tools.reacquireOwnedBrowserAfterUserControl(taskID: envelope.id)
                         } catch {
                             try acceptExecutionResult(.userInterventionRequired(
                                 "The AI browser is not ready to continue. Finish signing in or loading the page, then choose Resume."),
@@ -6067,6 +6067,8 @@ final class HostComputerUseManager: ObservableObject {
                             return
                         }
                     }
+                    try Task.checkCancellation()
+                    guard currentExecutionToken == token else { throw CancellationError() }
                     if let textClarification {
                         guard let continuing = executor as? any ComputerUseTextClarificationContinuing else {
                             throw ComputerUseTextClarificationStore.Failure.invalidReference

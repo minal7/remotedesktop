@@ -6,6 +6,197 @@ import XCTest
 
 @MainActor
 final class ComputerUseOwnedBrowserTests: XCTestCase {
+    func testHistoryHandbackCreatesFreshTargetsWithoutReloadOrNavigationProof() async throws {
+        let changes = [
+            "history.pushState({}, '', '/account?opaque=private-query#private-fragment');",
+            "history.replaceState({}, '', '/account?opaque=private-query#private-fragment');",
+            "location.hash = 'private-fragment';",
+            "history.pushState({}, '', '/temporary'); history.replaceState({}, '', '/login');",
+        ]
+        for change in changes {
+            let server = try OwnedBrowserHTTPFixture(routes: [
+                "/login": .init(body: """
+                    <label>Origin<input value="old"></label><script>
+                    fetch('/signal').then(() => {
+                        document.body.innerHTML = '<label>Origin<input id="fresh" value="retained"></label>';
+                        document.getElementById('fresh').addEventListener('input', e => fetch('/edited?value=' + encodeURIComponent(e.target.value)));
+                        \(change)
+                        fetch('/changed');
+                    });
+                    </script>
+                    """), "/signal": .init(held: true),
+            ])
+            let base = try await server.start()
+            defer { server.stop() }
+            var allowed = true
+            let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { allowed })
+            defer { browser.close() }
+            try browser.claim(taskID: "history")
+            let original = try await browser.navigate(taskID: "history", operationID: "login", to: base.appendingPathComponent("login"))
+            let oldTarget = ComputerUseBrowserTextTarget(browser: browser, document: original, requiresFrontmost: false)
+            let oldFields = try await oldTarget.fieldsIfSupported()
+            let oldField = try XCTUnwrap(oldFields?.first)
+            try await waitUntil { server.count("/signal") == 1 }
+            allowed = false
+            server.releaseHeldResponses()
+            try await waitUntil { server.count("/changed") == 1 && browser.hasPageAwaitingHandback }
+            XCTAssertFalse(browser.validate(original))
+            allowed = true
+            XCTAssertNil(browser.currentDocument(taskID: "history"), "Opening the action gate does not accept the history change")
+            try await browser.reacquireAfterUserControl(taskID: "history")
+            let current = try XCTUnwrap(browser.currentDocument(taskID: "history"))
+            XCTAssertNotEqual(current.generation, original.generation, "A -> B -> A cannot revive the old reference")
+            XCTAssertEqual(current.source, .userControlObservation)
+            XCTAssertEqual(browser.receipt(taskID: "history", operationID: "login"), original)
+            XCTAssertNil(browser.receipt(taskID: "history", operationID: current.operationID))
+            do {
+                _ = try await oldTarget.read(targetID: oldField.snapshot.targetID)
+                XCTFail("Pre-login targets cannot read the replacement form")
+            } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+            let freshTarget = ComputerUseBrowserTextTarget(browser: browser, document: current, requiresFrontmost: false)
+            let freshFields = try await freshTarget.fieldsIfSupported()
+            let freshField = try XCTUnwrap(freshFields?.first)
+            XCTAssertNotEqual(freshField.snapshot.targetID, oldField.snapshot.targetID)
+            XCTAssertEqual(freshField.snapshot.value, "retained")
+            try await freshTarget.apply(.init(targetID: freshField.snapshot.targetID, mode: .replaceAll, text: "Paris"),
+                expected: freshField.snapshot, operationID: ComputerUseTaskContract.digest(["fresh-edit"]))
+            try await waitUntil { server.count("/edited?value=Paris") == 1 }
+            XCTAssertEqual(server.count("/login"), 1)
+            XCTAssertEqual(server.count("/account?opaque=private-query"), 0)
+            XCTAssertEqual(server.count("/temporary"), 0)
+            XCTAssertEqual(browser.displayedSite, base.absoluteString)
+        }
+    }
+
+    func testHistoryChangesDuringAutomationCannotBecomeLaterHandbackObservations() async throws {
+        for change in ["history.replaceState({}, '', '/account');",
+                       "history.pushState({}, '', '/other'); history.replaceState({}, '', '/login');"] {
+            let server = try OwnedBrowserHTTPFixture(routes: [
+                "/login": .init(body: "<script>fetch('/signal').then(() => { \(change) fetch('/changed'); });</script>"),
+                "/signal": .init(held: true),
+            ])
+            let base = try await server.start()
+            defer { server.stop() }
+            var allowed = true
+            let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { allowed })
+            defer { browser.close() }
+            try browser.claim(taskID: "active-history")
+            let original = try await browser.navigate(taskID: "active-history", operationID: "login", to: base.appendingPathComponent("login"))
+            try await waitUntil { server.count("/signal") == 1 }
+            server.releaseHeldResponses()
+            try await waitUntil { server.count("/changed") == 1 && !browser.validate(original) }
+            allowed = false
+            XCTAssertFalse(browser.hasPageAwaitingHandback)
+            allowed = true
+            do {
+                try await browser.reacquireAfterUserControl(taskID: "active-history")
+                XCTFail("A later Pause/Resume cannot reclassify an automation-time history change")
+            } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+            XCTAssertNil(browser.currentDocument(taskID: "active-history"))
+            XCTAssertEqual(browser.receipt(taskID: "active-history", operationID: "login"), original)
+            XCTAssertEqual(server.count("/login"), 1)
+        }
+    }
+
+    func testHistoryIdentityCheckCannotPublishAfterCancellationStopOrClose() async throws {
+        for interruption in ["cancel", "stop", "close"] {
+            let server = try OwnedBrowserHTTPFixture(routes: [
+                "/login": .init(body: "<script>fetch('/signal').then(() => { history.replaceState({}, '', '/account'); fetch('/changed'); });</script>"),
+                "/signal": .init(held: true),
+            ])
+            let base = try await server.start()
+            defer { server.stop() }
+            var allowed = true, shouldInterrupt = false
+            var running: Task<Void, Error>?
+            var owned: ComputerUseOwnedBrowser?
+            let browser = ComputerUseOwnedBrowser(presentsWindow: false, domScriptDidDispatch: { command in
+                guard command == .pageIdentity, shouldInterrupt else { return }
+                shouldInterrupt = false
+                if interruption == "cancel" { running?.cancel() }
+                else if interruption == "stop" { owned?.stop() }
+                else { owned?.close() }
+            }, mayAct: { allowed })
+            owned = browser
+            defer { browser.close() }
+            try browser.claim(taskID: "interrupted-history")
+            let original = try await browser.navigate(taskID: "interrupted-history", operationID: "login", to: base.appendingPathComponent("login"))
+            try await waitUntil { server.count("/signal") == 1 }
+            allowed = false
+            server.releaseHeldResponses()
+            try await waitUntil { server.count("/changed") == 1 && browser.hasPageAwaitingHandback }
+            allowed = true
+            shouldInterrupt = true
+            let handback = Task { try await browser.reacquireAfterUserControl(taskID: "interrupted-history") }
+            running = handback
+            do { try await handback.value; XCTFail("An interrupted identity query cannot publish a document") }
+            catch is CancellationError { XCTAssertEqual(interruption, "cancel") }
+            catch {
+                let failure = try XCTUnwrap(error as? ComputerUseBrowserError)
+                XCTAssertTrue([ComputerUseBrowserError.ownershipLost, .closed, .pageChanged].contains(failure))
+            }
+            XCTAssertNil(browser.currentDocument(taskID: "interrupted-history"))
+            XCTAssertFalse(browser.validate(original))
+            if interruption == "cancel" {
+                // The read owns its DOM slot until its real callback. A later
+                // explicit handback may retry only after that slot is free.
+                let deadline = ContinuousClock.now + .seconds(5)
+                while true {
+                    do { try await browser.reacquireAfterUserControl(taskID: "interrupted-history"); break }
+                    catch ComputerUseBrowserError.busy {
+                        guard ContinuousClock.now < deadline else { throw FixtureError.deadline }
+                        try await Task.sleep(for: .milliseconds(10))
+                    }
+                }
+                XCTAssertEqual(browser.currentDocument(taskID: "interrupted-history")?.source, .userControlObservation)
+            } else {
+                XCTAssertFalse(browser.hasPageAwaitingHandback)
+                XCTAssertNil(browser.taskID)
+            }
+            XCTAssertEqual(server.count("/login"), 1)
+            XCTAssertEqual(server.count("/account"), 0)
+        }
+    }
+
+    func testLoadedDocumentIdentityReadsNoAuthenticationValuesAndSurvivesOnlyThatDocument() async throws {
+        let secret = "private-authentication-fixture"
+        let server = try OwnedBrowserHTTPFixture(routes: [
+            "/login": .init(body: """
+                <input type="password" value="\(secret)"><script>
+                fetch('/signal').then(() => {
+                    const root = document.createElement('html');
+                    root.innerHTML = '<body><input autocomplete="one-time-code" value="\(secret)"></body>';
+                    document.replaceChild(root, document.documentElement); fetch('/changed');
+                });
+                </script>
+                """), "/signal": .init(held: true),
+            "/second": .init(body: "<input type='password' value='\(secret)'>"),
+        ])
+        let base = try await server.start()
+        defer { server.stop() }
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+        defer { browser.close() }
+        try browser.claim(taskID: "identity")
+        let first = try await browser.navigate(taskID: "identity", operationID: "first", to: base.appendingPathComponent("login"))
+        let before = try await browser.callDOM(.pageIdentity, arguments: [:], document: first)
+        XCTAssertEqual(before.status, "page-identity")
+        XCTAssertNil(before.fields)
+        try await waitUntil { server.count("/signal") == 1 }
+        server.releaseHeldResponses()
+        try await waitUntil { server.count("/changed") == 1 }
+        let afterRootChange = try await browser.callDOM(.pageIdentity, arguments: [:], document: first)
+        XCTAssertEqual(afterRootChange.documentID, before.documentID)
+        XCTAssertNil(afterRootChange.fields)
+        do {
+            _ = try await browser.callDOM(.fields, arguments: [:], document: first)
+            XCTFail("Document identity does not grant access to authentication fields")
+        } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .authenticationRequired) }
+        let second = try await browser.navigate(taskID: "identity", operationID: "second", to: base.appendingPathComponent("second"))
+        let reloaded = try await browser.callDOM(.pageIdentity, arguments: [:], document: second)
+        XCTAssertNotEqual(reloaded.documentID, before.documentID)
+        XCTAssertNil(reloaded.fields)
+        XCTAssertFalse(browser.validate(first))
+    }
+
     func testWebsiteProjectionAndDocumentDescriptionsOmitOpaqueURLComponents() throws {
         let rows = [
             ("https://example.test/private-path?arbitrary=private-query#private-fragment", "https://example.test"),
@@ -120,10 +311,13 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
         try await waitUntil { browser.hasPageAwaitingHandback }
         XCTAssertEqual(browser.displayedSite, base.absoluteString)
         XCTAssertFalse(browser.validate(original))
-        XCTAssertThrowsError(try browser.reacquireAfterUserControl(taskID: "handoff-callback"))
+        do {
+            try await browser.reacquireAfterUserControl(taskID: "handoff-callback")
+            XCTFail("A closed gate cannot hand back control")
+        } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .ownershipLost) }
         allowed = true
         XCTAssertNil(browser.currentDocument(taskID: "handoff-callback"))
-        try browser.reacquireAfterUserControl(taskID: "handoff-callback")
+        try await browser.reacquireAfterUserControl(taskID: "handoff-callback")
         let current = try XCTUnwrap(browser.currentDocument(taskID: "handoff-callback"))
         let expected = try XCTUnwrap(URL(string: callback, relativeTo: base)?.absoluteURL)
         XCTAssertEqual(current.committedURL, expected)
@@ -421,13 +615,14 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
             server.releaseHeldResponses()
             try await waitUntil { browser.hasPageAwaitingHandback }
             XCTAssertFalse(browser.validate(original))
-            XCTAssertThrowsError(try browser.reacquireAfterUserControl(taskID: "handoff")) {
-                XCTAssertEqual($0 as? ComputerUseBrowserError, .ownershipLost)
-            }
+            do {
+                try await browser.reacquireAfterUserControl(taskID: "handoff")
+                XCTFail("A closed gate cannot hand back control")
+            } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .ownershipLost) }
             allowed = true
             XCTAssertNil(browser.currentDocument(taskID: "handoff"), "Opening the gate is not handback")
             XCTAssertThrowsError(try browser.acquireCurrentDocument(taskID: "handoff"))
-            try browser.reacquireAfterUserControl(taskID: "handoff")
+            try await browser.reacquireAfterUserControl(taskID: "handoff")
             let current = try XCTUnwrap(browser.currentDocument(taskID: "handoff"))
             XCTAssertEqual(current.source, .userControlObservation)
             XCTAssertEqual(current.committedURL.path, destination)
@@ -470,9 +665,10 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
             server.releaseHeldResponses()
             try await waitUntil { server.count("/destination") == 1 && !browser.isLoadingPage }
             allowed = true
-            XCTAssertThrowsError(try browser.reacquireAfterUserControl(taskID: "rejected-handoff")) {
-                XCTAssertEqual($0 as? ComputerUseBrowserError, .pageChanged)
-            }
+            do {
+                try await browser.reacquireAfterUserControl(taskID: "rejected-handoff")
+                XCTFail("An unobserved or failed navigation cannot be adopted")
+            } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
             XCTAssertNil(browser.currentDocument(taskID: "rejected-handoff"))
             XCTAssertFalse(browser.hasPageAwaitingHandback)
             XCTAssertEqual(browser.receipt(taskID: "rejected-handoff", operationID: "original"), original)

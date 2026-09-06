@@ -108,6 +108,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     private var pendingDOM: PendingDOM?
     private var userNavigation: UserNavigation?
     private var observedUserPage: ObservedUserPage?
+    private var loadedPageIdentity: String?
 
     private struct UserNavigation {
         let navigation: WKNavigation
@@ -116,9 +117,11 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     }
 
     private struct ObservedUserPage {
+        enum Proof { case navigation, sameDocument(String) }
         let id: UUID
         let generation: UInt64
         let url: URL
+        let proof: Proof
     }
 
     private struct PendingDOM {
@@ -233,7 +236,8 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             && browser?.url == observedUserPage.url
     }
 
-    func reacquireAfterUserControl(taskID: String) throws {
+    func reacquireAfterUserControl(taskID: String) async throws {
+        try Task.checkCancellation()
         guard browser != nil, self.taskID == taskID || isFrontmostWindow else { return }
         guard mayAct() else { throw ComputerUseBrowserError.ownershipLost }
         guard pending == nil, pendingDOM == nil, userNavigation == nil,
@@ -243,6 +247,30 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         guard let observed = observedUserPage, hasPageAwaitingHandback else {
             throw ComputerUseBrowserError.pageChanged
         }
+        let owner = self.taskID
+        let view = browser
+        func isCurrentObservation() -> Bool {
+            mayAct() && self.taskID == owner && browser === view
+                && observedUserPage?.id == observed.id && hasPageAwaitingHandback
+        }
+        let identity: String?
+        do {
+            identity = try await readPageIdentity(validateContext: isCurrentObservation)
+        } catch {
+            try Task.checkCancellation()
+            guard isCurrentObservation() else { throw ComputerUseBrowserError.pageChanged }
+            // A completed HTTP navigation remains independently observable
+            // for non-DOM content. History changes require identity proof.
+            guard case .navigation = observed.proof else { throw error }
+            identity = nil
+        }
+        try Task.checkCancellation()
+        guard isCurrentObservation() else { throw ComputerUseBrowserError.pageChanged }
+        if case .sameDocument(let expectedIdentity) = observed.proof, identity != expectedIdentity {
+            observedUserPage = nil
+            loadedPageIdentity = nil
+            throw ComputerUseBrowserError.pageChanged
+        }
         try claim(taskID: taskID)
         document = ComputerUseBrowserDocument(contextID: contextID, taskID: taskID,
             generation: generation, operationID: "user-observation-\(observed.id.uuidString)",
@@ -250,13 +278,25 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         // This observation is deliberately absent from `receipts`. The URL
         // records observed location, not a requested/executed navigation.
         observedUserPage = nil
+        loadedPageIdentity = identity
         detail = "Control returned — checking the current page"
     }
 
     func callDOM(_ command: ComputerUseBrowserDOMCommand, arguments: [String: Any],
                  document expected: ComputerUseBrowserDocument) async throws -> ComputerUseBrowserDOMReply {
+        try await callDOM(command, arguments: arguments, validateContext: { self.validate(expected) })
+    }
+
+    private func readPageIdentity(validateContext: () -> Bool) async throws -> String {
+        let reply = try await callDOM(.pageIdentity, arguments: [:], validateContext: validateContext)
+        guard reply.status == "page-identity", reply.fields == nil else { throw ComputerUseBrowserError.pageChanged }
+        return reply.documentID
+    }
+
+    private func callDOM(_ command: ComputerUseBrowserDOMCommand, arguments: [String: Any],
+                         validateContext: () -> Bool) async throws -> ComputerUseBrowserDOMReply {
         try Task.checkCancellation()
-        guard validate(expected), let browser else { throw ComputerUseBrowserError.pageChanged }
+        guard validateContext(), let browser else { throw ComputerUseBrowserError.pageChanged }
         guard pendingDOM == nil else { throw ComputerUseBrowserError.busy }
         let id = UUID()
         let source = try await withTaskCancellationHandler {
@@ -293,7 +333,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         } onCancel: {
             Task { @MainActor [weak self] in self?.interruptDOM(id: id, error: CancellationError()) }
         }
-        guard validate(expected) else { throw ComputerUseBrowserError.pageChanged }
+        guard validateContext() else { throw ComputerUseBrowserError.pageChanged }
         let result = try JSONDecoder().decode(ComputerUseBrowserDOMReply.self, from: Data(source.utf8))
         guard result.documentID.utf8.count == 32,
               result.documentID.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else {
@@ -375,6 +415,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         }
         generation &+= 1
         document = nil
+        loadedPageIdentity = nil
         displayedSite = ComputerUseBrowserSite.displayName(for: url)
         detail = "Opening page…"
         let id = UUID()
@@ -399,6 +440,16 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
                 try Task.checkCancellation()
                 guard validate(result) else { throw ComputerUseBrowserError.ownershipLost }
                 guard hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
+                do {
+                    loadedPageIdentity = try await readPageIdentity(validateContext: { self.validate(result) })
+                } catch {
+                    try Task.checkCancellation()
+                    guard validate(result) else { throw ComputerUseBrowserError.pageChanged }
+                    // Opening a PDF or other non-DOM resource does not depend
+                    // on the text adapter. Such pages have no history proof.
+                    loadedPageIdentity = nil
+                }
+                guard hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
                 return result
             } catch {
                 try Task.checkCancellation()
@@ -417,6 +468,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         document = nil
         userNavigation = nil
         observedUserPage = nil
+        loadedPageIdentity = nil
         browser?.stopLoading()
         detail = "Stopped"
     }
@@ -435,6 +487,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         pendingDOM = nil
         userNavigation = nil
         observedUserPage = nil
+        loadedPageIdentity = nil
         urlObservation = nil
         browser?.navigationDelegate = nil
         browser = nil
@@ -460,23 +513,46 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             injectionTime: .atDocumentStart, forMainFrameOnly: true, in: ComputerUseBrowserDOM.world))
         let view = WKWebView(frame: NSRect(x: 0, y: 0, width: 960, height: 640), configuration: configuration)
         view.navigationDelegate = self
-        urlObservation = view.observe(\.url, options: [.new]) { [weak self] _, change in
+        urlObservation = view.observe(\.url, options: [.new]) { [weak self] view, change in
             let url = change.newValue ?? nil
-            Task { @MainActor [weak self] in
-                guard let self, browser?.url == url else { return }
-                displayedSite = ComputerUseBrowserSite.displayName(for: url)
-                let currentLocationChanged = document.map { $0.committedURL != url } ?? false
-                let observedLocationChanged = observedUserPage.map { $0.url != url } ?? false
-                if pending == nil, currentLocationChanged || observedLocationChanged {
-                    generation &+= 1
-                    self.document = nil
-                    observedUserPage = nil
-                    detail = "Page changed"
+            if Thread.isMainThread {
+                // Snapshot the gate at the URL event itself. Queuing this
+                // until after Pause would misclassify an earlier AI-time
+                // change, and could lose an A -> B -> A history transition.
+                MainActor.assumeIsolated {
+                    self?.locationChanged(in: view, to: url, ordered: true)
+                }
+            } else {
+                Task { @MainActor [weak self, weak view] in
+                    guard let view else { return }
+                    // An unexpectedly unordered notification cannot confer
+                    // handback authority. Invalidate using the current URL.
+                    self?.locationChanged(in: view, to: view.url, ordered: false)
                 }
             }
         }
         browser = view
         return view
+    }
+
+    private func locationChanged(in view: WKWebView, to url: URL?, ordered: Bool) {
+        guard browser === view, view.url == url else { return }
+        displayedSite = ComputerUseBrowserSite.displayName(for: url)
+        let changed = document.map { $0.committedURL != url } ?? false
+        let observedChanged = observedUserPage.map { $0.url != url } ?? false
+        guard pending == nil, changed || observedChanged || !ordered else { return }
+        let previousIdentity = loadedPageIdentity
+        generation &+= 1
+        document = nil
+        observedUserPage = nil
+        if ordered, !mayAct(), taskID != nil, !view.isLoading, userNavigation == nil,
+           let previousIdentity, let url, Self.validatedURL(url) != nil {
+            observedUserPage = ObservedUserPage(id: UUID(), generation: generation,
+                url: url, proof: .sameDocument(previousIdentity))
+        } else {
+            loadedPageIdentity = nil
+        }
+        detail = "Page changed"
     }
 
     private func presentIfNeeded(_ browser: WKWebView) {
@@ -506,6 +582,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         pending.timeout?.cancel()
         generation &+= 1
         document = nil
+        loadedPageIdentity = nil
         detail = error.localizedDescription
         browser?.stopLoading()
         pending.continuation.resume(throwing: error)
@@ -559,6 +636,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         guard let pending else {
             generation &+= 1
             document = nil
+            loadedPageIdentity = nil
             observedUserPage = nil
             userNavigation = nil
             if !mayAct(), let navigation {
@@ -579,9 +657,9 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             guard !mayAct(), observed.generation == generation,
                   let url = webView.url, Self.responseURL(observed.successfulResponseURL, matchesDocumentURL: url),
                   Self.validatedURL(url) != nil else { return }
-            observedUserPage = ObservedUserPage(id: UUID(), generation: generation, url: url)
+            observedUserPage = ObservedUserPage(id: UUID(), generation: generation, url: url, proof: .navigation)
             displayedSite = ComputerUseBrowserSite.displayName(for: url)
-            detail = "Page ready — choose Resume when you are finished"
+            detail = "Page ready — choose Let AI continue when you are finished"
             return
         }
         guard let pending, navigation === pending.navigation else { return }
@@ -620,6 +698,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         if let pending { failPending(id: pending.id, error: .navigationFailed) }
         generation &+= 1
         document = nil
+        loadedPageIdentity = nil
         userNavigation = nil
         observedUserPage = nil
         detail = "Browser process stopped"

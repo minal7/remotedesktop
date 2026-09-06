@@ -146,8 +146,8 @@ final class ComputerUseBrowserNavigationTask {
         browser.updateTaskControls(controls, handler: handler)
     }
 
-    func reacquireAfterUserControl(taskID: String) throws {
-        try browser.reacquireAfterUserControl(taskID: taskID)
+    func reacquireAfterUserControl(taskID: String) async throws {
+        try await browser.reacquireAfterUserControl(taskID: taskID)
     }
 
     func textTargetIfFrontmost(taskID: String) throws -> ComputerUseBrowserTextTarget? {

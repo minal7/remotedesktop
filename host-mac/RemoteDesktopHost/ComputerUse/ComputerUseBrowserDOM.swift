@@ -1,7 +1,7 @@
 import Foundation
 import WebKit
 
-enum ComputerUseBrowserDOMCommand: String { case fields, read, edit, receipt, reobserve, preflight }
+enum ComputerUseBrowserDOMCommand: String { case fields, read, edit, receipt, reobserve, preflight, pageIdentity }
 
 struct ComputerUseBrowserDOMReply: Decodable {
     struct Field: Decodable {
@@ -27,6 +27,7 @@ enum ComputerUseBrowserDOM {
       const doc = document;
       const encoder = new TextEncoder();
       const nonce = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), n => n.toString(16).padStart(2, '0')).join('');
+      const pageID = nonce();
       let documentID = nonce(), root = null, nextID = 0;
       const bindings = new Map(), operations = new Map();
       const protectedTypes = new Set(['password', 'hidden', 'file']);
@@ -226,6 +227,13 @@ enum ComputerUseBrowserDOM {
         return reply('ok', found);
       }
       function run(command, args) {
+        // Read only the identity of this loaded Document, before inspecting
+        // any form metadata/value or draining target mutation records. Root
+        // replacement still retires field bindings through synchronize().
+        if (command === 'pageIdentity') {
+          return {status: doc === document && doc.documentElement && doc.readyState === 'complete'
+            ? 'page-identity' : 'stale', documentID: pageID};
+        }
         synchronize();
         if (!root || doc !== document) return reply('stale');
         if (command !== 'fields' && args.documentID !== documentID) return reply('stale');

@@ -9,6 +9,89 @@ import XCTest
 
 @MainActor
 final class ComputerUseTests: XCTestCase {
+    func test_managerResumesExactNativeGoalAfterHistoryLoginWithoutReloadOrOldTargets() async throws {
+        let secret = "private-history-verification"
+        let server = try OwnedBrowserHTTPFixture(routes: [
+            "/login": .init(body: """
+                <label>Origin<input value="old"></label><input aria-label="Verification code" value="\(secret)">
+                <script>fetch('/signal').then(() => {
+                    document.body.innerHTML = '<label>Origin<input id="fresh" value="retained"></label>';
+                    document.getElementById('fresh').addEventListener('input', e => fetch('/edited?value=' + encodeURIComponent(e.target.value)));
+                    history.replaceState({}, '', '/account?opaque=private-callback#private-fragment');
+                    fetch('/changed');
+                });</script>
+                """), "/signal": .init(held: true),
+        ])
+        let base = try await server.start()
+        defer { server.stop() }
+        let ledgerURL = temporaryLedgerURL()
+        defer { try? FileManager.default.removeItem(at: ledgerURL.deletingLastPathComponent()) }
+        let taskID = "native-history-login"
+        var browser: ComputerUseOwnedBrowser?
+        var original: ComputerUseBrowserDocument?
+        let planner = BrowserAuthenticationForbiddenPlanner()
+        let native = ComputerUseNativeTextExecutor(injector: InputInjector(),
+            mayAct: { browser?.hasOwnership(taskID: taskID) == true },
+            journalDirectory: ledgerURL.deletingLastPathComponent().appendingPathComponent("text"), planner: planner,
+            browserTargetProvider: { taskID in
+                let owned = try XCTUnwrap(browser)
+                return ComputerUseBrowserTextTarget(browser: owned,
+                    document: try owned.acquireCurrentDocument(taskID: taskID), requiresFrontmost: false)
+            })
+        var taskIDs: [String] = [], prompts: [String] = []
+        let coordinator = ComputerUseCapabilityExecutor(nativeExecution: { taskID, prompt, progress in
+            taskIDs.append(taskID); prompts.append(prompt)
+            if original == nil {
+                let owned = try XCTUnwrap(browser)
+                try owned.claim(taskID: taskID)
+                original = try await owned.navigate(taskID: taskID, operationID: "fixture-login", to: base.appendingPathComponent("login"))
+            }
+            return try await native.execute(taskID: taskID, prompt: prompt, progress: progress)
+        }, desktopFactory: { _ in
+            XCTFail("Login handback must not reconstruct the task through desktop fallback")
+            return ImmediateComputerUseExecutor(results: [.unableToComplete("Unexpected fallback")])
+        })
+        let fixture = try browserControlFixture(executor: coordinator, ledgerURL: ledgerURL)
+        browser = fixture.browser
+        defer { fixture.manager.stop(); fixture.browser.close() }
+        let prompt = makeEnvelope(id: taskID, kind: .prompt, body: "Set \"Origin\" to \"Paris\"")
+        fixture.manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(fixture.manager.handle(prompt, channel: fixture.channel))
+        await waitUntil(timeoutIterations: 1_000) { fixture.manager.activity == .paused && server.count("/signal") == 1 }
+        XCTAssertEqual(taskIDs, [taskID])
+        XCTAssertEqual(planner.calls, 0)
+        XCTAssertEqual(fixture.ledger.hostControlEpoch(taskID: taskID), 1)
+        server.releaseHeldResponses()
+        await waitUntil(timeoutIterations: 1_000) { fixture.browser.hasPageAwaitingHandback && server.count("/changed") == 1 }
+        let pausedMessages = await fixture.channel.sentMessages()
+        XCTAssertFalse(pausedMessages.contains { $0.kind == .assistant })
+        XCTAssertFalse(fixture.browser.validate(try XCTUnwrap(original)))
+        XCTAssertTrue(fixture.manager.handle(try makeControlEnvelope(kind: .resume, taskID: taskID,
+            revision: 1, hostEpoch: 1), channel: fixture.channel))
+        await waitUntil(timeoutIterations: 1_000) {
+            guard fixture.manager.activity == .idle, server.count("/edited?value=Paris") == 1 else { return false }
+            return await fixture.channel.sentMessages().contains { $0.kind == .assistant }
+        }
+        let current = try XCTUnwrap(fixture.browser.currentDocument(taskID: taskID))
+        XCTAssertEqual(current.source, .userControlObservation)
+        XCTAssertEqual(current.committedURL.path, "/account")
+        XCTAssertNil(fixture.browser.receipt(taskID: taskID, operationID: current.operationID))
+        XCTAssertEqual(fixture.browser.receipt(taskID: taskID, operationID: "fixture-login"), original)
+        XCTAssertEqual(taskIDs, [taskID, taskID])
+        XCTAssertEqual(prompts, [prompt.body, prompt.body])
+        XCTAssertEqual(planner.calls, 0)
+        let messages = await fixture.channel.sentMessages()
+        let terminal = try ComputerUseTaskUpdate.decodeBody(XCTUnwrap(messages.first { $0.kind == .assistant }).body)
+        XCTAssertEqual(terminal.outcome, .taskCompleted)
+        XCTAssertFalse(messages.contains { $0.body.contains("private-") })
+        XCTAssertTrue(fixture.manager.handle(prompt, channel: fixture.channel))
+        await Task.yield()
+        XCTAssertEqual(taskIDs.count, 2)
+        XCTAssertEqual(server.count("/edited?value=Paris"), 1)
+        XCTAssertEqual(server.count("/login"), 1)
+        XCTAssertEqual(server.count("/account?opaque=private-callback"), 0)
+    }
+
     func test_ownedBrowserCallbackReplyAndDurableReplayContainOnlyWebsiteIdentity() async throws {
         let requestedPath = "/start/private-request-path?arbitrary=private-request-query"
         let callback = "/callback/private-callback-path?arbitrary=private-callback-query#private-callback-fragment"
