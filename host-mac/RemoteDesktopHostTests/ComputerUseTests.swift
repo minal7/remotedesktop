@@ -9,6 +9,182 @@ import XCTest
 
 @MainActor
 final class ComputerUseTests: XCTestCase {
+    func test_localStopRemainsAbsorbingAtExhaustedRemoteRevision() throws {
+        let url = temporaryLedgerURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let ledger = ComputerUseTaskLedger(fileURL: url)
+        _ = try ledger.claim(taskID: "last-revision", senderID: "phone", sessionID: "session", promptBody: "Find tickets")
+        _ = try ledger.applyControl(.resume, taskID: "last-revision", revision: UInt64.max,
+                                    senderID: "phone", sessionID: "session")
+        let rejected = try ledger.cancelLocally(taskID: "last-revision", senderID: "other", sessionID: "session")
+        XCTAssertEqual(rejected.disposition, .identityMismatch)
+        let cancelled = try ledger.cancelLocally(taskID: "last-revision", senderID: "phone", sessionID: "session")
+        XCTAssertEqual(cancelled.state, .cancelled)
+        XCTAssertEqual(cancelled.appliedRevision, UInt64.max)
+        XCTAssertEqual(cancelled.terminalResponse, ComputerUseTaskLedger.stoppedResponse)
+        let restored = ComputerUseTaskLedger(fileURL: url)
+        let replay = try restored.applyControl(.resume, taskID: "last-revision", revision: UInt64.max,
+                                               senderID: "phone", sessionID: "session")
+        XCTAssertEqual(replay.state, .cancelled)
+        XCTAssertEqual(replay.terminalResponse, ComputerUseTaskLedger.stoppedResponse)
+        XCTAssertEqual(try restored.claim(taskID: "last-revision", senderID: "phone", sessionID: "session",
+                                         promptBody: "Find tickets"), .completed(ComputerUseTaskLedger.stoppedResponse))
+    }
+
+    func test_localBrowserControlsPauseResumeAndStopOnlyTheirDisplayedRun() async throws {
+        let url = temporaryLedgerURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let executor = SuspendingComputerUseExecutor()
+        let fixture = try browserControlFixture(executor: executor, ledgerURL: url)
+        defer { fixture.browser.close() }
+        let prompt = makeEnvelope(id: "local-browser-controls", kind: .prompt, body: "Find concert tickets")
+        fixture.manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(fixture.manager.handle(prompt, channel: fixture.channel))
+        await waitUntil { executor.callCount == 1 }
+        let first = try XCTUnwrap(fixture.browser.taskControls)
+        XCTAssertEqual(first.phase, .working)
+        fixture.browser.requestTaskControl(.takeControl, displayed: first)
+        XCTAssertEqual(fixture.manager.activity, .paused)
+        await waitUntil { executor.cancellationCount == 1 }
+        let paused = try XCTUnwrap(fixture.browser.taskControls)
+        XCTAssertEqual(paused.phase, .paused)
+        XCTAssertTrue(paused.canResume)
+        XCTAssertEqual(paused.scopeID, first.scopeID)
+        XCTAssertNotEqual(paused.presentationID, first.presentationID)
+        fixture.browser.requestTaskControl(.resume, displayed: first)
+        XCTAssertEqual(fixture.manager.activity, .paused, "An old working presentation cannot authorize handback")
+        fixture.browser.requestTaskControl(.resume, displayed: paused)
+        await waitUntil { executor.callCount == 2 }
+        let resumed = try XCTUnwrap(fixture.browser.taskControls)
+        XCTAssertNotEqual(resumed.scopeID, first.scopeID)
+        fixture.browser.requestTaskControl(.stop, displayed: first)
+        fixture.browser.requestTaskControl(.takeControl, displayed: paused)
+        fixture.browser.requestTaskControl(.resume, displayed: paused)
+        XCTAssertEqual(fixture.browser.taskControls, resumed)
+        XCTAssertNil(fixture.ledger.appliedControlRevision(taskID: prompt.id),
+                     "Local takeover and handback must not consume the phone's revision numbers")
+        // A real mouse-down can trigger the host input monitor before Stop's
+        // mouse-up handler. That pause must not make Stop silently disappear.
+        fixture.manager.userIntervened()
+        XCTAssertEqual(fixture.manager.activity, .paused)
+        fixture.browser.requestTaskControl(.stop, displayed: resumed)
+        XCTAssertEqual(fixture.manager.activity, .idle)
+        XCTAssertNil(fixture.browser.taskControls)
+        await waitUntil { executor.cancellationCount == 2 }
+        XCTAssertEqual(fixture.ledger.appliedControlRevision(taskID: prompt.id), 1)
+        XCTAssertEqual(try ComputerUseTaskLedger(fileURL: url).claim(taskID: prompt.id,
+            senderID: prompt.senderID, sessionID: prompt.sessionID, promptBody: prompt.body),
+            .completed(ComputerUseTaskLedger.stoppedResponse))
+        XCTAssertTrue(fixture.manager.handle(try makeControlEnvelope(kind: .resume,
+            taskID: prompt.id, revision: 1), channel: fixture.channel))
+        XCTAssertEqual(fixture.ledger.appliedControlRevision(taskID: prompt.id), 1)
+        XCTAssertEqual(fixture.manager.activity, .idle)
+        XCTAssertEqual(executor.callCount, 2, "A delayed phone Resume cannot revive a locally stopped task")
+        XCTAssertTrue(fixture.manager.handle(try makeControlEnvelope(kind: .resume,
+            taskID: prompt.id, revision: 5), channel: fixture.channel))
+        await waitUntil {
+            await fixture.channel.sentMessages().contains { message in
+                guard message.kind == .assistant,
+                      let update = try? ComputerUseTaskUpdate.decodeBody(message.body) else { return false }
+                return update.taskID == prompt.id && update.appliedControlRevision == 5
+                    && update.text == ComputerUseTaskLedger.stoppedResponse
+            }
+        }
+        XCTAssertEqual(executor.callCount, 2)
+    }
+
+    func test_localBrowserHandbackRequiresCurrentPeerAndStaleWindowCallbacksCannotStopNewTask() async throws {
+        let url = temporaryLedgerURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let executor = SuspendingComputerUseExecutor()
+        let fixture = try browserControlFixture(executor: executor, ledgerURL: url)
+        defer { fixture.browser.close() }
+        let firstPrompt = makeEnvelope(id: "first-browser-task", kind: .prompt, body: "Find movie times")
+        fixture.manager.authorizePeer(senderID: firstPrompt.senderID)
+        XCTAssertTrue(fixture.manager.handle(firstPrompt, channel: fixture.channel))
+        await waitUntil { executor.callCount == 1 }
+        let working = try XCTUnwrap(fixture.browser.taskControls)
+        fixture.browser.requestTaskControl(.takeControl, displayed: working)
+        let authorized = try XCTUnwrap(fixture.browser.taskControls)
+        fixture.manager.revokePeerAuthorization()
+        let revoked = try XCTUnwrap(fixture.browser.taskControls)
+        XCTAssertFalse(revoked.canResume)
+        fixture.browser.requestTaskControl(.resume, displayed: authorized)
+        fixture.browser.requestTaskControl(.resume, displayed: revoked)
+        XCTAssertEqual(fixture.manager.activity, .paused)
+        XCTAssertEqual(executor.callCount, 1)
+        fixture.manager.authorizePeer(senderID: firstPrompt.senderID)
+        let restored = try XCTUnwrap(fixture.browser.taskControls)
+        XCTAssertTrue(restored.canResume)
+        fixture.browser.requestTaskControl(.stop, displayed: restored)
+        let second = makeEnvelope(id: "second-browser-task", kind: .prompt, body: "Find flights")
+        XCTAssertTrue(fixture.manager.handle(second, channel: fixture.channel))
+        await waitUntil { executor.callCount == 2 }
+        let replacement = try XCTUnwrap(fixture.browser.taskControls)
+        fixture.browser.requestTaskControl(.stop, displayed: restored)
+        fixture.browser.requestTaskControl(.resume, displayed: authorized)
+        fixture.browser.windowWillClose(Notification(name: NSNotification.Name("NSWindowWillCloseNotification"), object: NSObject()))
+        XCTAssertEqual(fixture.browser.taskControls, replacement)
+        XCTAssertEqual(replacement.taskID, second.id)
+        fixture.browser.requestTaskControl(.stop, displayed: replacement)
+        await waitUntil { executor.cancellationCount == 2 }
+        XCTAssertEqual(fixture.manager.activity, .idle)
+    }
+
+    func test_localBrowserStopClosesEffectsEvenWhenTerminalPersistenceFails() async throws {
+        let url = temporaryLedgerURL()
+        let directory = url.deletingLastPathComponent()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let executor = StopJoinProbeExecutor()
+        var postedActions: [ComputerUsePredictedAction] = []
+        let fixture = try browserControlFixture(executor: executor, ledgerURL: url,
+                                               actionPerformer: { postedActions.append($0) })
+        defer { fixture.browser.close(); executor.releaseFirstExecution() }
+        let prompt = makeEnvelope(id: "local-stop-storage-failure", kind: .prompt, body: "Find available tickets")
+        fixture.manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(fixture.manager.handle(prompt, channel: fixture.channel))
+        await waitUntil { executor.firstExecutionStarted }
+        let displayed = try XCTUnwrap(fixture.browser.taskControls)
+        try FileManager.default.removeItem(at: directory)
+        try Data("blocked fixture directory".utf8).write(to: directory)
+        fixture.browser.requestTaskControl(.stop, displayed: displayed)
+        XCTAssertEqual(fixture.manager.activity, .idle)
+        XCTAssertNil(fixture.browser.taskControls)
+        executor.releaseFirstExecution()
+        await waitUntil { executor.staleActionAttempted }
+        XCTAssertTrue(executor.staleActionWasBlocked)
+        XCTAssertTrue(postedActions.isEmpty)
+        await waitUntil {
+            await fixture.channel.sentMessages().contains { message in
+                guard message.kind == .assistant,
+                      let update = try? ComputerUseTaskUpdate.decodeBody(message.body) else { return false }
+                return update.taskID == prompt.id
+                    && update.text == HostComputerUseManager.terminalPersistenceFailureResponse
+                    && update.outcome == .unableToComplete
+            }
+        }
+        XCTAssertThrowsError(try fixture.ledger.claim(taskID: prompt.id, senderID: prompt.senderID,
+            sessionID: prompt.sessionID, promptBody: prompt.body))
+    }
+
+    private func browserControlFixture(executor: any ComputerUseExecuting, ledgerURL: URL,
+        actionPerformer: ((ComputerUsePredictedAction) throws -> Void)? = nil) throws
+        -> (manager: HostComputerUseManager, browser: ComputerUseOwnedBrowser,
+            channel: FakeHostComputerUseChannel, ledger: ComputerUseTaskLedger) {
+        let ledger = ComputerUseTaskLedger(fileURL: ledgerURL)
+        let channel = FakeHostComputerUseChannel()
+        var browser: ComputerUseOwnedBrowser?
+        let manager = HostComputerUseManager(injector: InputInjector(), executor: executor,
+            taskLedger: ledger, browserNavigationFactory: { mayAct in
+                let owned = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: mayAct)
+                browser = owned
+                return ComputerUseBrowserNavigationTask(browser: owned,
+                    journalDirectory: ledgerURL.deletingLastPathComponent().appendingPathComponent("browser"))
+            }, allowsExternalServices: false, actionPerformer: actionPerformer,
+            channelFactory: { _ in channel })
+        return (manager, try XCTUnwrap(browser), channel, ledger)
+    }
+
     func test_managerLoginHandbackWaitsForPageAndPreservesTaskAndBrowserSession() async throws {
         let server = try OwnedBrowserHTTPFixture(routes: [
             "/login": .init(body: """

@@ -2,6 +2,16 @@ import AppKit
 import SwiftUI
 import WebKit
 
+struct ComputerUseBrowserTaskControls: Equatable {
+    enum Phase: Equatable { case working, paused, awaitingApproval }
+    enum Action { case takeControl, resume, stop }
+    let taskID: String
+    let scopeID: UUID
+    let presentationID: UUID
+    let phase: Phase
+    let canResume: Bool
+}
+
 struct ComputerUseBrowserDocument: Equatable, Sendable {
     enum Source: Equatable, Sendable {
         case automationNavigation
@@ -53,6 +63,8 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     let contextID = UUID().uuidString
     @Published private(set) var displayedURL = ""
     @Published private(set) var detail = "Ready"
+    @Published private(set) var taskControls: ComputerUseBrowserTaskControls?
+    private var taskControlHandler: ((ComputerUseBrowserTaskControls, ComputerUseBrowserTaskControls.Action) -> Void)?
     private(set) var taskID: String?
     private var generation: UInt64 = 0
     private var document: ComputerUseBrowserDocument?
@@ -118,6 +130,19 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
               !url.absoluteString.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains),
               let result = components.url else { return nil }
         return result
+    }
+
+    func updateTaskControls(_ controls: ComputerUseBrowserTaskControls?,
+        handler: @escaping (ComputerUseBrowserTaskControls, ComputerUseBrowserTaskControls.Action) -> Void) {
+        taskControlHandler = handler
+        if taskControls != controls { taskControls = controls }
+    }
+
+    func requestTaskControl(_ action: ComputerUseBrowserTaskControls.Action,
+                            displayed controls: ComputerUseBrowserTaskControls) {
+        // Pass the rendered snapshot unchanged. The host validates its run and
+        // presentation identity; a stale view cannot select the current task.
+        taskControlHandler?(controls, action)
     }
 
     func claim(taskID: String) throws {
@@ -372,6 +397,9 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     }
 
     func windowWillClose(_ notification: Notification) {
+        guard let closingWindow = notification.object as? NSWindow,
+              closingWindow === window else { return }
+        if let controls = taskControls { requestTaskControl(.stop, displayed: controls) }
         stop()
         window?.contentView = nil
         window = nil
@@ -565,7 +593,15 @@ private struct OwnedBrowserContent: View {
                     Text(context.detail).font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 0)
-                Button("Stop") { context.stop() }
+                if let controls = context.taskControls {
+                    if controls.phase == .paused {
+                        Button("Let AI continue") { context.requestTaskControl(.resume, displayed: controls) }
+                            .disabled(!controls.canResume)
+                    } else {
+                        Button("Take control") { context.requestTaskControl(.takeControl, displayed: controls) }
+                    }
+                    Button("Stop AI") { context.requestTaskControl(.stop, displayed: controls) }
+                }
             }.padding(12)
             Divider()
             OwnedBrowserWebView(browser: browser)

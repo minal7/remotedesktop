@@ -139,6 +139,13 @@ final class ComputerUseBrowserNavigationTask {
 
     func close() { browser.close() }
 
+    func stopBrowserActivity() { browser.stop() }
+
+    func updateTaskControls(_ controls: ComputerUseBrowserTaskControls?,
+        handler: @escaping (ComputerUseBrowserTaskControls, ComputerUseBrowserTaskControls.Action) -> Void) {
+        browser.updateTaskControls(controls, handler: handler)
+    }
+
     func reacquireAfterUserControl(taskID: String) throws {
         try browser.reacquireAfterUserControl(taskID: taskID)
     }

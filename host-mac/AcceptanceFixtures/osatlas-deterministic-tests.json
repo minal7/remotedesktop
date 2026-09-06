@@ -149,7 +149,11 @@
     "RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests/testCompiledContactEntitiesRejectPartialOrPunctuationChangedQueriesBeforeAccess",
     "RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests/testUncompiledContactEntityClausesCannotBecomePartialCompletion",
     "RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests/testQuotedContactEntityKeepsItsConjunctionInsideOneQuery",
-    "RemoteDesktopHostTests/ComputerUseTests/test_managerLoginHandbackWaitsForPageAndPreservesTaskAndBrowserSession"
+    "RemoteDesktopHostTests/ComputerUseTests/test_managerLoginHandbackWaitsForPageAndPreservesTaskAndBrowserSession",
+    "RemoteDesktopHostTests/ComputerUseTests/test_localStopRemainsAbsorbingAtExhaustedRemoteRevision",
+    "RemoteDesktopHostTests/ComputerUseTests/test_localBrowserControlsPauseResumeAndStopOnlyTheirDisplayedRun",
+    "RemoteDesktopHostTests/ComputerUseTests/test_localBrowserHandbackRequiresCurrentPeerAndStaleWindowCallbacksCannotStopNewTask",
+    "RemoteDesktopHostTests/ComputerUseTests/test_localBrowserStopClosesEffectsEvenWhenTerminalPersistenceFails"
   ],
   "expectedTests": [
     "RemoteDesktopHostTests/AppleFoundationMCPPlannerTests/testOrderedInputDistinguishesReturnKeyFromControlLabelAndRequiresSignedAppScope",
@@ -376,6 +380,10 @@
     "RemoteDesktopHostTests/ComputerUseTests/test_lateApprovedMCPConfirmationIsRetainedAfterTransportStopWithoutAnotherTerminal",
     "RemoteDesktopHostTests/ComputerUseTests/test_legacyApprovedActionClientReceivesNoEvidenceOnlyStatus",
     "RemoteDesktopHostTests/ComputerUseTests/test_legacyClaimedPromptCannotAcquireIdentityFromRetryOrDispatchApproval",
+    "RemoteDesktopHostTests/ComputerUseTests/test_localBrowserControlsPauseResumeAndStopOnlyTheirDisplayedRun",
+    "RemoteDesktopHostTests/ComputerUseTests/test_localBrowserHandbackRequiresCurrentPeerAndStaleWindowCallbacksCannotStopNewTask",
+    "RemoteDesktopHostTests/ComputerUseTests/test_localBrowserStopClosesEffectsEvenWhenTerminalPersistenceFails",
+    "RemoteDesktopHostTests/ComputerUseTests/test_localStopRemainsAbsorbingAtExhaustedRemoteRevision",
     "RemoteDesktopHostTests/ComputerUseTests/test_malformedPromptDigestCannotTurnExistingLedgerIntoUnclaimedWork",
     "RemoteDesktopHostTests/ComputerUseTests/test_managerChangedPromptCannotReplacePausedContextOrTerminalizeActiveTask",
     "RemoteDesktopHostTests/ComputerUseTests/test_managerChangedPromptCannotReplayTerminalClarificationOrApprovedActionEvidence",

@@ -291,6 +291,22 @@ final class ComputerUseTaskLedger {
         senderID: String,
         sessionID: String
     ) throws -> ControlResolution {
+        try reduceControl(control, taskID: taskID, revision: revision,
+                          senderID: senderID, sessionID: sessionID, permitsFinalLocalCancel: false)
+    }
+
+    /// A local Stop is absorbing, including when the remote counter is
+    /// exhausted. It never grants Pause/Resume permission to reuse a revision.
+    func cancelLocally(taskID: String, senderID: String, sessionID: String) throws -> ControlResolution {
+        let previous = appliedControlRevision(taskID: taskID) ?? 0
+        return try reduceControl(.cancel, taskID: taskID,
+            revision: previous == UInt64.max ? previous : previous + 1,
+            senderID: senderID, sessionID: sessionID, permitsFinalLocalCancel: true)
+    }
+
+    private func reduceControl(_ control: Control, taskID: String, revision: UInt64,
+                               senderID: String, sessionID: String,
+                               permitsFinalLocalCancel: Bool) throws -> ControlResolution {
         try ensureAvailable()
         guard Self.validIdentity(
             taskID: taskID,
@@ -318,7 +334,10 @@ final class ComputerUseTaskLedger {
                 promptClaimed: record.promptClaimed)
         }
 
-        if let applied = record.control, revision <= applied.revision {
+        let canCancelAtExhaustedRevision = permitsFinalLocalCancel && control == .cancel
+            && revision == UInt64.max && record.control?.revision == UInt64.max
+            && record.control?.state != .cancelled
+        if let applied = record.control, revision <= applied.revision, !canCancelAtExhaustedRevision {
             return ControlResolution(
                 disposition: .duplicateOrStale,
                 state: applied.state,

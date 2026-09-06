@@ -1002,6 +1002,8 @@ final class ComputerUseHostTools {
     private let textTarget: any ComputerUseNativeTextTarget
     private let textEditorOverride: ComputerUseTextEditor?
     private var browserNavigationTask: ComputerUseBrowserNavigationTask?
+    private var browserTaskControls: ComputerUseBrowserTaskControls?
+    private var browserTaskControlHandler: ((ComputerUseBrowserTaskControls, ComputerUseBrowserTaskControls.Action) -> Void)?
     /// Deterministic seam used to exercise a gate close after one low-level
     /// event has posted but before the rest of an approved action is emitted.
     /// Production leaves this nil.
@@ -1190,6 +1192,7 @@ final class ComputerUseHostTools {
             browserNavigationTask = ComputerUseBrowserNavigationTask(
                 browser: ComputerUseOwnedBrowser(mayAct: mayAct),
                 journalDirectory: ComputerUseBrowserNavigationTask.journalDirectory)
+            publishOwnedBrowserTaskControls()
         }
         try Task.checkCancellation()
         guard mayAct() else { throw ToolError.paused }
@@ -1203,6 +1206,24 @@ final class ComputerUseHostTools {
 
     func reacquireOwnedBrowserAfterUserControl(taskID: String) throws {
         try browserNavigationTask?.reacquireAfterUserControl(taskID: taskID)
+    }
+
+    func bindOwnedBrowserTaskControls(
+        handler: @escaping (ComputerUseBrowserTaskControls, ComputerUseBrowserTaskControls.Action) -> Void) {
+        browserTaskControlHandler = handler
+        publishOwnedBrowserTaskControls()
+    }
+
+    func updateOwnedBrowserTaskControls(_ controls: ComputerUseBrowserTaskControls?) {
+        browserTaskControls = controls
+        publishOwnedBrowserTaskControls()
+    }
+
+    func stopOwnedBrowserActivity() { browserNavigationTask?.stopBrowserActivity() }
+
+    private func publishOwnedBrowserTaskControls() {
+        guard let browserTaskControlHandler else { return }
+        browserNavigationTask?.updateTaskControls(browserTaskControls, handler: browserTaskControlHandler)
     }
 
     /// Checks whether a transient macOS notification owns the exact pointer
@@ -3511,7 +3532,29 @@ final class HostComputerUseManager: ObservableObject {
     }
 
     @Published private(set) var modelState: ModelState = .downloadRequired
-    @Published private(set) var activity: Activity = .idle
+    @Published private(set) var activity: Activity = .idle {
+        didSet { refreshBrowserTaskControls() }
+    }
+
+    private struct BrowserControlIdentity: Equatable {
+        let taskID: String
+        let senderID: String
+        let sessionID: String
+        var executionToken: UUID?
+        let authorizationGeneration: UInt64
+        let transportGeneration: UInt64
+        let remoteRevision: UInt64?
+        let phase: ComputerUseBrowserTaskControls.Phase
+        let canResume: Bool
+
+        func sameOwner(as other: Self) -> Bool {
+            taskID == other.taskID && senderID == other.senderID && sessionID == other.sessionID
+                && authorizationGeneration == other.authorizationGeneration
+                && transportGeneration == other.transportGeneration
+        }
+    }
+    private var browserControlIdentity: BrowserControlIdentity?
+    private var browserControlSnapshot: ComputerUseBrowserTaskControls?
 
     private var executorIsReady: Bool {
         guard let executor, executor.isReady else { return false }
@@ -3716,8 +3759,12 @@ final class HostComputerUseManager: ObservableObject {
     private var setupRecipients = ComputerUseSetupRecipientRegistry()
     private var currentSetupProgress: ComputerUseSetupProgress?
     private var macControlReceipt: MacControlMCPInstallationReceipt?
-    private var authorizedPeerID: String?
-    private var authorizedPeerSupportsOrderedComputerUseControls = false
+    private var authorizedPeerID: String? {
+        didSet { refreshBrowserTaskControls() }
+    }
+    private var authorizedPeerSupportsOrderedComputerUseControls = false {
+        didSet { refreshBrowserTaskControls() }
+    }
     /// Authorization sources are tracked independently so expiry of the LAN
     /// lease cannot revoke an authenticated WebRTC connection (or vice versa).
     /// Both sources may coexist only for the same stable device identity.
@@ -3802,6 +3849,10 @@ final class HostComputerUseManager: ObservableObject {
             refreshModelState()
             installLocalInterventionMonitors()
         }
+        tools.bindOwnedBrowserTaskControls { [weak self] controls, action in
+            self?.handleBrowserTaskControl(action, displayed: controls)
+        }
+        refreshBrowserTaskControls()
     }
 
     func refreshModelState() {
@@ -4498,10 +4549,91 @@ final class HostComputerUseManager: ObservableObject {
         }
     }
 
+    private func refreshBrowserTaskControls() {
+        let context: ExecutionContext?
+        let phase: ComputerUseBrowserTaskControls.Phase
+        switch activity {
+        case .working: context = currentExecution; phase = .working
+        case .paused: context = pausedExecution; phase = .paused
+        case .awaitingApproval: context = pendingApproval?.context; phase = .awaitingApproval
+        case .idle: context = nil; phase = .paused
+        }
+        guard !isShuttingDown, let context else {
+            browserControlIdentity = nil
+            browserControlSnapshot = nil
+            tools.updateOwnedBrowserTaskControls(nil)
+            return
+        }
+        var identity = BrowserControlIdentity(taskID: context.envelope.id,
+            senderID: context.envelope.senderID, sessionID: context.envelope.sessionID,
+            executionToken: currentExecutionToken,
+            authorizationGeneration: actionEvidenceAuthorizationGeneration,
+            transportGeneration: transportGeneration,
+            remoteRevision: taskLedger.appliedControlRevision(taskID: context.envelope.id),
+            phase: phase, canResume: phase == .paused
+                && isPeerAuthorizedForComputerUse(senderID: context.envelope.senderID))
+        if identity.executionToken == nil, let previous = browserControlIdentity,
+           identity.sameOwner(as: previous) {
+            identity.executionToken = previous.executionToken
+        }
+        guard identity != browserControlIdentity else { return }
+        let sameRun = browserControlIdentity.map {
+            identity.sameOwner(as: $0) && identity.executionToken == $0.executionToken
+        } ?? false
+        let snapshot = ComputerUseBrowserTaskControls(taskID: identity.taskID,
+            scopeID: sameRun ? (browserControlSnapshot?.scopeID ?? UUID()) : UUID(),
+            presentationID: UUID(), phase: phase, canResume: identity.canResume)
+        browserControlIdentity = identity
+        browserControlSnapshot = snapshot
+        tools.updateOwnedBrowserTaskControls(snapshot)
+    }
+
+    private func handleBrowserTaskControl(_ action: ComputerUseBrowserTaskControls.Action,
+                                         displayed: ComputerUseBrowserTaskControls) {
+        refreshBrowserTaskControls()
+        guard let current = browserControlSnapshot,
+              current.taskID == displayed.taskID, current.scopeID == displayed.scopeID,
+              let context = currentExecution ?? pausedExecution ?? pendingApproval?.context,
+              context.envelope.id == current.taskID else { return }
+        switch action {
+        case .takeControl:
+            guard current.phase != .paused else { return }
+            pauseExecution(context)
+        case .resume:
+            // Resume uses the exact rendered state. Local input may have
+            // paused a run between mouse-down and a Stop click, so Stop below
+            // instead accepts that same run's earlier presentation.
+            guard displayed == current, current.phase == .paused, current.canResume,
+                  isPeerAuthorizedForComputerUse(senderID: context.envelope.senderID) else { return }
+            resumeExecution(context)
+        case .stop:
+            // Stop is absorbing. Its durable Cancel must be replayable with
+            // the revision of a delayed phone control; an unversioned local
+            // terminal alone could be ignored by a phone awaiting that control.
+            actionGate.endAutomation(allowsActions: false)
+            do {
+                let resolution = try taskLedger.cancelLocally(taskID: context.envelope.id,
+                    senderID: context.envelope.senderID, sessionID: context.envelope.sessionID)
+                guard resolution.disposition != .identityMismatch, resolution.state == .cancelled else {
+                    throw ComputerUseTaskLedger.LedgerError.invalidIdentity
+                }
+                sendDurableTerminal(ComputerUseTaskLedger.stoppedResponse, outcome: .unableToComplete,
+                                    replyingTo: context.envelope, channel: context.channel)
+            } catch {
+                send(kind: .assistant, body: Self.terminalPersistenceFailureResponse,
+                     replyingTo: context.envelope, channel: context.channel, outcome: .unableToComplete)
+            }
+            stopExecution(context)
+            tools.stopOwnedBrowserActivity()
+            sendStatus("ready", replyingTo: context.envelope, channel: context.channel)
+        }
+    }
+
     private func handleControl(
         _ envelope: ComputerUseEnvelope,
         channel: any HostComputerUseChannel
     ) -> Bool {
+        defer { refreshBrowserTaskControls() }
         guard let control = ledgerControl(for: envelope.kind) else { return true }
 
         if envelope.body.isEmpty {
@@ -4742,10 +4874,15 @@ final class HostComputerUseManager: ObservableObject {
         _ context: ExecutionContext,
         controlEnvelope: ComputerUseEnvelope
     ) {
+        guard context.belongs(to: controlEnvelope) else { return }
+        resumeExecution(context)
+    }
+
+    private func resumeExecution(_ context: ExecutionContext) {
         guard case .paused = activity,
               let pausedExecution,
               pausedExecution.envelope.id == context.envelope.id,
-              pausedExecution.belongs(to: controlEnvelope) else {
+              pausedExecution.belongs(to: context.envelope) else {
             sendCurrentStatus(
                 for: context,
                 fallback: "ready",
