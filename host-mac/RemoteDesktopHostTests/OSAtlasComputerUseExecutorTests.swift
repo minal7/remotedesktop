@@ -9579,6 +9579,47 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
         await fixture.runtime.shutdown()
     }
 
+    func testOwnedBrowserVisualApprovalRetainsPageBindingAndRejectsAStrippedToken() async throws {
+        let server = try OwnedBrowserHTTPFixture(routes: ["/compose": .init(body: "<label>Message<textarea>Private draft</textarea></label><a href='/submit?opaque=private-callback'>Send message</a>")])
+        let base = try await server.start()
+        defer { server.stop() }
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+        defer { browser.close() }
+        try browser.claim(taskID: "approval-page-token")
+        let document = try await browser.navigate(taskID: "approval-page-token", operationID: "compose", to: base.appendingPathComponent("compose"))
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let navigation = ComputerUseBrowserNavigationTask(browser: browser, journalDirectory: directory)
+        let fixture = makeCorrectionRuntime(completionResponses: [], port: 43_746)
+        let executor = OSAtlasComputerUseExecutor.makeForTesting(inputs: fixture.inputs, runtime: fixture.runtime,
+            semanticRouter: StubSemanticActionRouter { _ in .init(directive: .enter) }, maxSteps: 1)
+        let tools = correctionTestTools(browserNavigationTask: navigation,
+            accessibilityContext: "AXTextArea • Message • Send message • focused • editable=true",
+            actionPerformer: { _ in XCTFail("The fixture stops before any approved input") })
+        do {
+            let result = try await executor.execute(taskID: "approval-page-token", prompt: "Press Return.",
+                trustedUserPrompt: "Press Return.", tools: tools, progress: { _ in })
+            guard case .approvalRequired(_, let action, let token) = result else {
+                XCTFail("Sending through Return must retain a pending approval")
+                await fixture.runtime.shutdown()
+                return
+            }
+            let retained = try XCTUnwrap(token.browserPageEvidence)
+            XCTAssertEqual(retained.document, document)
+            XCTAssertTrue(retained.page.links.contains { $0.destination.contains("private-callback") })
+            XCTAssertFalse(String(reflecting: token).contains("private-callback"))
+            XCTAssertFalse(String(reflecting: token).contains("Private draft"))
+            let stripped = ComputerUseVisualApprovalContinuation(taskID: token.taskID, nonce: token.nonce)
+            XCTAssertNotEqual(token, stripped)
+            do {
+                _ = try await executor.continueAfterApprovedVisualAction(stripped, action: action, tools: tools, progress: { _ in })
+                XCTFail("Matching nonce/task IDs cannot discard the browser binding")
+            } catch OSAtlasComputerUseExecutor.RuntimeError.invalidApprovalContinuation { }
+            executor.cancelVisualApprovalContinuation(token)
+        } catch { await fixture.runtime.shutdown(); throw error }
+        await fixture.runtime.shutdown()
+    }
+
     func testVisualApprovalContinuationRejectsWrongAndDuplicateAuthority()
         async throws {
         let taskID = "approval-one-shot-\(UUID().uuidString)"

@@ -5,9 +5,21 @@ import Foundation
 /// Opaque, task-scoped authority to resume the exact visual execution that
 /// produced an approval request. The nonce prevents a delayed or duplicate
 /// approval response from being applied to a later visual session.
-struct ComputerUseVisualApprovalContinuation: Equatable, Sendable {
+struct ComputerUseVisualApprovalContinuation: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     let taskID: String
     let nonce: UUID
+    /// Process-local evidence from the proposal, never part of the phone's
+    /// approval payload. The host must validate it before posting the action.
+    let browserPageEvidence: ComputerUseBrowserPageEvidence?
+
+    init(taskID: String, nonce: UUID, browserPageEvidence: ComputerUseBrowserPageEvidence? = nil) {
+        self.taskID = taskID
+        self.nonce = nonce
+        self.browserPageEvidence = browserPageEvidence
+    }
+
+    var description: String { "ComputerUseVisualApprovalContinuation(browserBound: \(browserPageEvidence != nil))" }
+    var debugDescription: String { description }
 }
 
 /// A screen image paired with the global-display coordinates used by the

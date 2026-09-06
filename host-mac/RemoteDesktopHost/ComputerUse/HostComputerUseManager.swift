@@ -2148,12 +2148,34 @@ final class ComputerUseHostTools {
 
     fileprivate func performApproved(
         _ action: ComputerUsePredictedAction,
-        fingerprint: ComputerUseApprovalFingerprint
+        fingerprint: ComputerUseApprovalFingerprint,
+        browserPageEvidence: ComputerUseBrowserPageEvidence?,
+        willBeginEffect: () -> Void
     ) async throws {
+        try Task.checkCancellation()
+        guard mayAct() else { throw ToolError.paused }
+        if let browserPageEvidence {
+            do { try await validateOwnedBrowserPageEvidence(browserPageEvidence) }
+            catch {
+                try Task.checkCancellation()
+                guard mayAct() else { throw ToolError.paused }
+                switch error as? ComputerUseBrowserError {
+                case .authenticationRequired: throw ComputerUseBrowserError.authenticationRequired
+                case .pageChanged, .windowNotActive, .closed, .ownershipLost, .signInWindowOpen:
+                    throw ToolError.approvalTargetChanged
+                default: throw error
+                }
+            }
+        }
+        try Task.checkCancellation()
+        guard mayAct() else { throw ToolError.paused }
+        // Recheck AX/pixels after the asynchronous browser read. The approved
+        // page and the current native target must both still match.
         let current = try prepareApproval(for: action).fingerprint
         guard current == fingerprint else {
             throw ToolError.approvalTargetChanged
         }
+        willBeginEffect()
         if case .typeText = action {
             try await performVerified(action)
         } else {
@@ -6199,12 +6221,21 @@ final class HostComputerUseManager: ObservableObject {
                 return
             }
 
-            // Mark the task before an effect can start. Text verification can
-            // suspend after delivery, so takeover during verification must
-            // retain the same honest may-have-occurred classification.
-            postedApprovedVisualTaskID = context.envelope.id
             do {
-                try await tools.performApproved(action, fingerprint: fingerprint)
+                try await tools.performApproved(action, fingerprint: fingerprint,
+                    browserPageEvidence: continuationToken.browserPageEvidence,
+                    willBeginEffect: { [weak self] in
+                        // Browser validation can suspend without posting any
+                        // input. Only cross into may-have-occurred tracking
+                        // after those checks and immediately before dispatch.
+                        self?.postedApprovedVisualTaskID = context.envelope.id
+                    })
+            } catch ComputerUseBrowserError.authenticationRequired {
+                postedApprovedVisualTaskID = nil
+                guard currentExecutionToken == executionToken else { return }
+                cancelActiveVisualApprovalContinuation()
+                pauseForLocalIntervention(context, guidance: ComputerUseBrowserError.authenticationRequired.localizedDescription)
+                return
             } catch ComputerUseHostTools.ToolError.approvalTargetChanged {
                 postedApprovedVisualTaskID = nil
                 guard currentExecutionToken == executionToken else { return }
@@ -6563,7 +6594,8 @@ final class HostComputerUseManager: ObservableObject {
                     executor as? any ComputerUseVisualApprovalContinuing else {
                 throw VisualApprovalContinuationError.invalidContinuation
             }
-            guard continuationToken.taskID == envelope.id else {
+            guard continuationToken.taskID == envelope.id,
+                  continuationToken.browserPageEvidence.map({ $0.document.taskID == envelope.id }) ?? true else {
                 continuationExecutor.cancelVisualApprovalContinuation(
                     continuationToken)
                 throw VisualApprovalContinuationError.invalidContinuation

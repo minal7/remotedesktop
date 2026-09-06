@@ -79,7 +79,7 @@ struct ComputerUseBrowserDocument: Equatable, Sendable, CustomStringConvertible,
 /// Keeps the navigation/document authority beside the DOM observation. A
 /// model sees a bounded projection only after a capability chooses one; this
 /// object itself is never a completion or an input authorization.
-struct ComputerUseBrowserPageEvidence: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+struct ComputerUseBrowserPageEvidence: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     let document: ComputerUseBrowserDocument
     let documentID: String
     let page: ComputerUseBrowserPageSnapshot

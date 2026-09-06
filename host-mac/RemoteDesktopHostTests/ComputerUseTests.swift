@@ -9,6 +9,171 @@ import XCTest
 
 @MainActor
 final class ComputerUseTests: XCTestCase {
+    func test_browserApprovalRequiresFreshApprovalAfterInvisibleDestinationOrRootChange() async throws {
+        for mutation in ["document.querySelector('a').href='/event?opaque=changed-secret';",
+                         "document.documentElement.replaceWith(document.documentElement.cloneNode(true));"] {
+            let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: """
+                <p>Review search</p><a href='/event?opaque=original-secret'>Event</a>
+                <script>fetch('/change').then(() => { \(mutation) fetch('/changed'); });</script>
+                """), "/change": .init(held: true)])
+            let base = try await server.start()
+            defer { server.stop() }
+            let executor = BrowserPageApprovalTestExecutor(pageURL: base.appendingPathComponent("page"))
+            let url = temporaryLedgerURL()
+            defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+            var posted: [ComputerUsePredictedAction] = []
+            let fixture = try browserControlFixture(executor: executor, ledgerURL: url,
+                actionPerformer: { posted.append($0) }, approvalTargetProvider: { _ in
+                    .init(context: "Submit search", applicationID: "fixture.browser", accessibilityIdentity: "unchanged-target")
+                })
+            defer { fixture.manager.stop(); fixture.browser.close() }
+            let prompt = makeEnvelope(id: "browser-approval", kind: .prompt, body: "Submit the search")
+            fixture.manager.authorizePeer(senderID: prompt.senderID)
+            XCTAssertTrue(fixture.manager.handle(prompt, channel: fixture.channel))
+            await waitUntil(timeoutIterations: 1_000) { await fixture.channel.sentMessages().contains { $0.kind == .approvalRequest } && server.count("/change") == 1 }
+            let firstMessages = await fixture.channel.sentMessages()
+            let first = try ComputerUseApprovalRequest.decodeBody(XCTUnwrap(firstMessages.first { $0.kind == .approvalRequest }).body)
+            server.releaseHeldResponses()
+            await waitUntil(timeoutIterations: 1_000) { server.count("/changed") == 1 }
+            let oldResponse = try approvalEnvelope(first)
+            XCTAssertTrue(fixture.manager.handle(oldResponse, channel: fixture.channel))
+            await waitUntil(timeoutIterations: 1_000) { await fixture.channel.sentMessages().filter { $0.kind == .approvalRequest }.count == 2 }
+            XCTAssertTrue(posted.isEmpty)
+            XCTAssertEqual(executor.cancelled.count, 1)
+            XCTAssertTrue(executor.continued.isEmpty)
+            XCTAssertEqual(executor.trustedPrompts, [prompt.body, prompt.body])
+            let firstToken = try XCTUnwrap(executor.issued.first)
+            let secondToken = try XCTUnwrap(executor.issued.dropFirst().first)
+            XCTAssertNotEqual(firstToken.browserPageEvidence?.page.id, secondToken.browserPageEvidence?.page.id)
+            XCTAssertTrue(fixture.manager.handle(oldResponse, channel: fixture.channel))
+            XCTAssertTrue(posted.isEmpty, "A consumed card cannot authorize the replacement page")
+            let secondMessages = await fixture.channel.sentMessages()
+            let second = try ComputerUseApprovalRequest.decodeBody(XCTUnwrap(secondMessages.last { $0.kind == .approvalRequest }).body)
+            XCTAssertTrue(fixture.manager.handle(try approvalEnvelope(second), channel: fixture.channel))
+            await waitUntil { fixture.manager.activity == .idle && executor.continued.count == 1 }
+            XCTAssertEqual(posted, [BrowserPageApprovalTestExecutor.action])
+            XCTAssertEqual(executor.continued, [secondToken])
+            let messages = await fixture.channel.sentMessages()
+            XCTAssertFalse(messages.contains { $0.body.contains("opaque=") || $0.body.contains("original-secret") || $0.body.contains("changed-secret") })
+            XCTAssertEqual(server.count("/page"), 1)
+        }
+    }
+
+    func test_browserApprovalAuthenticationHandsBackBeforePostingAndNeedsANewCard() async throws {
+        let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: """
+            <p>Review search</p><script>fetch('/change').then(() => {
+                const input = document.createElement('input'); input.id='auth'; input.type='password'; input.value='private-password'; document.body.append(input);
+                fetch('/finish').then(() => { input.remove(); fetch('/finished'); });
+            });</script>
+            """), "/change": .init(held: true), "/finish": .init(held: true)])
+        let base = try await server.start()
+        defer { server.stop() }
+        let executor = BrowserPageApprovalTestExecutor(pageURL: base.appendingPathComponent("page"))
+        let url = temporaryLedgerURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        var posted: [ComputerUsePredictedAction] = []
+        let fixture = try browserControlFixture(executor: executor, ledgerURL: url,
+            actionPerformer: { posted.append($0) }, approvalTargetProvider: { _ in
+                .init(context: "Submit search", applicationID: "fixture.browser", accessibilityIdentity: "unchanged-target")
+            })
+        defer { fixture.manager.stop(); fixture.browser.close() }
+        let prompt = makeEnvelope(id: "approval-auth", kind: .prompt, body: "Submit the search")
+        fixture.manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(fixture.manager.handle(prompt, channel: fixture.channel))
+        await waitUntil(timeoutIterations: 1_000) { await fixture.channel.sentMessages().contains { $0.kind == .approvalRequest } && server.count("/change") == 1 }
+        let messages = await fixture.channel.sentMessages()
+        let first = try ComputerUseApprovalRequest.decodeBody(XCTUnwrap(messages.first { $0.kind == .approvalRequest }).body)
+        server.releaseHeldResponses()
+        await waitUntil(timeoutIterations: 1_000) { server.count("/finish") == 1 }
+        XCTAssertTrue(fixture.manager.handle(try approvalEnvelope(first), channel: fixture.channel))
+        await waitUntil { fixture.manager.activity == .paused && fixture.ledger.hostControlEpoch(taskID: prompt.id) == 1 }
+        await waitUntil {
+            await fixture.channel.sentMessages().contains {
+                $0.kind == .status && (try? ComputerUseTaskUpdate.decodeBody($0.body))?.outcome == .userInterventionRequired
+            }
+        }
+        XCTAssertTrue(posted.isEmpty)
+        XCTAssertEqual(executor.cancelled.count, 1)
+        XCTAssertTrue(executor.continued.isEmpty)
+        server.releaseHeldResponses()
+        await waitUntil(timeoutIterations: 1_000) { server.count("/finished") == 1 }
+        XCTAssertTrue(fixture.manager.handle(try makeControlEnvelope(kind: .resume, taskID: prompt.id, revision: 1, hostEpoch: 1), channel: fixture.channel))
+        await waitUntil(timeoutIterations: 1_000) { await fixture.channel.sentMessages().filter { $0.kind == .approvalRequest }.count == 2 }
+        let resumed = await fixture.channel.sentMessages()
+        let second = try ComputerUseApprovalRequest.decodeBody(XCTUnwrap(resumed.last { $0.kind == .approvalRequest }).body)
+        XCTAssertEqual(second.hostControlEpoch, 1)
+        XCTAssertTrue(fixture.manager.handle(try approvalEnvelope(second), channel: fixture.channel))
+        await waitUntil { fixture.manager.activity == .idle && executor.continued.count == 1 }
+        XCTAssertEqual(posted, [BrowserPageApprovalTestExecutor.action])
+        XCTAssertEqual(executor.trustedPrompts, [prompt.body, prompt.body])
+        let finalMessages = await fixture.channel.sentMessages()
+        XCTAssertFalse(finalMessages.contains { $0.body.contains("private-password") || $0.body.contains("may have been performed") })
+    }
+
+    func test_browserApprovalInterventionDuringValidationDoesNotClaimAnInputAttempt() async throws {
+        let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: "<p>Review search</p>")])
+        let base = try await server.start()
+        defer { server.stop() }
+        let executor = BrowserPageApprovalTestExecutor(pageURL: base.appendingPathComponent("page"))
+        let url = temporaryLedgerURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        var posted: [ComputerUsePredictedAction] = []
+        var manager: HostComputerUseManager?
+        let fixture = try browserControlFixture(executor: executor, ledgerURL: url,
+            actionPerformer: { posted.append($0) }, approvalTargetProvider: { _ in
+                .init(context: "Submit search", applicationID: "fixture.browser", accessibilityIdentity: "unchanged-target")
+            }, domScriptDidDispatch: { command in
+                if command == .validatePageSnapshot { manager?.userIntervened() }
+            })
+        manager = fixture.manager
+        defer { fixture.manager.stop(); fixture.browser.close() }
+        let prompt = makeEnvelope(id: "approval-read-intervention", kind: .prompt, body: "Submit the search")
+        fixture.manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(fixture.manager.handle(prompt, channel: fixture.channel))
+        await waitUntil(timeoutIterations: 1_000) { await fixture.channel.sentMessages().contains { $0.kind == .approvalRequest } }
+        let messages = await fixture.channel.sentMessages()
+        let request = try ComputerUseApprovalRequest.decodeBody(XCTUnwrap(messages.first { $0.kind == .approvalRequest }).body)
+        XCTAssertTrue(fixture.manager.handle(try approvalEnvelope(request), channel: fixture.channel))
+        await waitUntil { fixture.manager.activity == .paused && executor.cancelled.count == 1 }
+        await waitUntil {
+            await fixture.channel.sentMessages().contains {
+                $0.kind == .status && (try? ComputerUseTaskUpdate.decodeBody($0.body))?.outcome == .userInterventionRequired
+            }
+        }
+        XCTAssertTrue(posted.isEmpty)
+        XCTAssertTrue(executor.continued.isEmpty)
+        let paused = await fixture.channel.sentMessages()
+        XCTAssertFalse(paused.contains { $0.body.contains("may have been performed") })
+        XCTAssertEqual(executor.trustedPrompts, [prompt.body])
+    }
+
+    func test_browserApprovalRejectsEvidenceFromAnotherTaskBeforePresentingACard() async throws {
+        let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: "<p>Review search</p>")])
+        let base = try await server.start()
+        defer { server.stop() }
+        let executor = BrowserPageApprovalTestExecutor(pageURL: base.appendingPathComponent("page"), evidenceTaskID: "different-task")
+        let url = temporaryLedgerURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let fixture = try browserControlFixture(executor: executor, ledgerURL: url,
+            actionPerformer: { _ in XCTFail("Mismatched task evidence cannot post input") }, approvalTargetProvider: { _ in
+                XCTFail("Reject the mismatched browser scope before preparing a native target")
+                return .init(context: "Submit search", applicationID: "fixture.browser", accessibilityIdentity: "unchanged-target")
+            })
+        defer { fixture.manager.stop(); fixture.browser.close() }
+        let prompt = makeEnvelope(id: "approval-wrong-scope", kind: .prompt, body: "Submit the search")
+        fixture.manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(fixture.manager.handle(prompt, channel: fixture.channel))
+        await waitUntil(timeoutIterations: 1_000) { fixture.manager.activity == .idle && executor.cancelled.count == 1 }
+        let messages = await fixture.channel.sentMessages()
+        XCTAssertFalse(messages.contains { $0.kind == .approvalRequest })
+        XCTAssertTrue(executor.continued.isEmpty)
+    }
+
+    private func approvalEnvelope(_ request: ComputerUseApprovalRequest) throws -> ComputerUseEnvelope {
+        makeEnvelope(kind: .approvalResponse, body: try ComputerUseApprovalResponse(requestID: request.requestID, approved: true,
+            taskID: request.taskID, appliedControlRevision: request.appliedControlRevision, hostControlEpoch: request.hostControlEpoch).encodedBody())
+    }
+
     func test_managerRejectsEarlyPopupHandbackThenContinuesTheExactNativeGoal() async throws {
         let secret = "private-popup-verification"
         let server = try OwnedBrowserHTTPFixture(routes: [
@@ -710,7 +875,9 @@ final class ComputerUseTests: XCTestCase {
     }
 
     private func browserControlFixture(executor: any ComputerUseExecuting, ledgerURL: URL,
-        actionPerformer: ((ComputerUsePredictedAction) throws -> Void)? = nil) throws
+        actionPerformer: ((ComputerUsePredictedAction) throws -> Void)? = nil,
+        approvalTargetProvider: ((ComputerUsePredictedAction) throws -> ComputerUseApprovalTargetSnapshot)? = nil,
+        domScriptDidDispatch: ((ComputerUseBrowserDOMCommand) -> Void)? = nil) throws
         -> (manager: HostComputerUseManager, browser: ComputerUseOwnedBrowser,
             channel: FakeHostComputerUseChannel, ledger: ComputerUseTaskLedger) {
         let ledger = ComputerUseTaskLedger(fileURL: ledgerURL)
@@ -718,11 +885,11 @@ final class ComputerUseTests: XCTestCase {
         var browser: ComputerUseOwnedBrowser?
         let manager = HostComputerUseManager(injector: InputInjector(), executor: executor,
             taskLedger: ledger, browserNavigationFactory: { mayAct in
-                let owned = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: mayAct)
+                let owned = ComputerUseOwnedBrowser(presentsWindow: false, domScriptDidDispatch: domScriptDidDispatch, mayAct: mayAct)
                 browser = owned
                 return ComputerUseBrowserNavigationTask(browser: owned,
                     journalDirectory: ledgerURL.deletingLastPathComponent().appendingPathComponent("browser"))
-            }, allowsExternalServices: false, actionPerformer: actionPerformer,
+            }, allowsExternalServices: false, approvalTargetProvider: approvalTargetProvider, actionPerformer: actionPerformer,
             channelFactory: { _ in channel })
         return (manager, try XCTUnwrap(browser), channel, ledger)
     }
@@ -8438,6 +8605,49 @@ private final class BrowserLoginHandoffTestExecutor: ComputerUseExecuting {
 }
 
 @MainActor
+private final class BrowserPageApprovalTestExecutor: ComputerUseExecuting, ComputerUseVisualApprovalContinuing {
+    static let action = ComputerUsePredictedAction.key(usage: 0x28, modifiers: 0)
+    let isReady = true
+    let runtimeName = "Browser page approval fixture"
+    let pageURL: URL
+    let evidenceTaskID: String?
+    private(set) var trustedPrompts: [String] = []
+    private(set) var issued: [ComputerUseVisualApprovalContinuation] = []
+    private(set) var cancelled: [ComputerUseVisualApprovalContinuation] = []
+    private(set) var continued: [ComputerUseVisualApprovalContinuation] = []
+
+    init(pageURL: URL, evidenceTaskID: String? = nil) { self.pageURL = pageURL; self.evidenceTaskID = evidenceTaskID }
+
+    func execute(prompt: String, tools: ComputerUseHostTools, progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
+        XCTFail("The host must retain the original task identity")
+        return .unableToComplete("Missing fixture task identity")
+    }
+
+    func execute(taskID: String, prompt: String, trustedUserPrompt: String, tools: ComputerUseHostTools,
+                 progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
+        trustedPrompts.append(trustedUserPrompt)
+        if trustedPrompts.count == 1 {
+            _ = try await tools.executeOwnedBrowserTaskIfSupported(taskID: taskID, prompt: "Open \(pageURL.absoluteString)", progress: progress)
+        }
+        let observed = try await tools.observeOwnedBrowserPage(taskID: evidenceTaskID ?? taskID)
+        let evidence = try XCTUnwrap(observed)
+        let token = ComputerUseVisualApprovalContinuation(taskID: taskID, nonce: UUID(), browserPageEvidence: evidence)
+        issued.append(token)
+        return .approvalRequired(message: "Submit fixture search", action: Self.action, continuation: token)
+    }
+
+    func continueAfterApprovedVisualAction(_ continuation: ComputerUseVisualApprovalContinuation, action: ComputerUsePredictedAction,
+        tools: ComputerUseHostTools, progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
+        XCTAssertEqual(continuation, issued.last)
+        XCTAssertEqual(action, Self.action)
+        continued.append(continuation)
+        return .completed("Approved fixture input observed")
+    }
+
+    func cancelVisualApprovalContinuation(_ continuation: ComputerUseVisualApprovalContinuation) { cancelled.append(continuation) }
+}
+
+@MainActor
 private final class ImmediateComputerUseExecutor:
     ComputerUseExecuting,
     ComputerUseVisualApprovalContinuing
@@ -8509,7 +8719,8 @@ private final class ImmediateComputerUseExecutor:
             action: action,
             continuation: .init(
                 taskID: taskID,
-                nonce: continuation.nonce))
+                nonce: continuation.nonce,
+                browserPageEvidence: continuation.browserPageEvidence))
     }
 }
 

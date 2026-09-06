@@ -2784,10 +2784,19 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
                         "grounded-target-mismatch")
                 }
                 if let reason = tools.approvalReason(for: predicted) {
+                    let approvalVisibleLineKeys = Self.normalizedVisibleLineKeys(
+                        try await Self.visibleTextOffMainActor(from: observation.image))
+                    guard try await browserEvidenceIsCurrent(browserPageEvidence),
+                          try revalidatedPlanningState(expected: planningCapture.fingerprint,
+                              binding: inputRevalidation) != nil else {
+                        try recordPlanningStateRetry()
+                        continue
+                    }
                     let continuation =
                         ComputerUseVisualApprovalContinuation(
                             taskID: taskID,
-                            nonce: UUID())
+                            nonce: UUID(),
+                            browserPageEvidence: browserPageEvidence)
                     pendingVisualApproval = PendingVisualApproval(
                         continuation: continuation,
                         message: reason,
@@ -2801,10 +2810,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
                         action: predicted,
                         guiHistoryEntry: action.historyEntry,
                         semanticRoute: semanticRoute,
-                        preEffectVisibleLineKeys:
-                            Self.normalizedVisibleLineKeys(
-                                try await Self.visibleTextOffMainActor(
-                                    from: observation.image)),
+                        preEffectVisibleLineKeys: approvalVisibleLineKeys,
                         groundingDrafts: actionGroundingDrafts,
                         plannerProvenance:
                             semanticRoutePlannerProvenance)

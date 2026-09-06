@@ -167,7 +167,11 @@
     "RemoteDesktopHostTests/AppleFoundationMCPPlannerTests/testOrderedRepeatedInputConsumesEveryOccurrenceAndRejectsAnExhaustedSequence",
     "RemoteDesktopHostTests/AppleFoundationMCPPlannerTests/testOrderedInputCannotDiscardUnknownOrTerminalHistoryWhenAuthorizingRepetition",
     "RemoteDesktopHostTests/AppleFoundationMCPPlannerTests/testCountedInputExpandsBeforeEffectAndTerminalQueries",
-    "RemoteDesktopHostTests/AppleFoundationMCPPlannerTests/testCountedInputRejectsUncompiledCountsAndProtectsQuotedData"
+    "RemoteDesktopHostTests/AppleFoundationMCPPlannerTests/testCountedInputRejectsUncompiledCountsAndProtectsQuotedData",
+    "RemoteDesktopHostTests/ComputerUseTests/test_browserApprovalRequiresFreshApprovalAfterInvisibleDestinationOrRootChange",
+    "RemoteDesktopHostTests/ComputerUseTests/test_browserApprovalAuthenticationHandsBackBeforePostingAndNeedsANewCard",
+    "RemoteDesktopHostTests/ComputerUseTests/test_browserApprovalInterventionDuringValidationDoesNotClaimAnInputAttempt",
+    "RemoteDesktopHostTests/ComputerUseTests/test_browserApprovalRejectsEvidenceFromAnotherTaskBeforePresentingACard"
   ],
   "expectedTests": [
     "RemoteDesktopHostTests/AppleFoundationMCPPlannerTests/testCountedInputExpandsBeforeEffectAndTerminalQueries",
@@ -411,6 +415,10 @@
     "RemoteDesktopHostTests/ComputerUseTests/test_approvedActionRecordRejectsForeignOrUnclaimedResultsAndConflictingConfirmation",
     "RemoteDesktopHostTests/ComputerUseTests/test_approvedActionStorageFailureDoesNotPublishClaimOrResultAndPoisonsFurtherWork",
     "RemoteDesktopHostTests/ComputerUseTests/test_approvedMCPConfirmationSurvivesPauseAndResumeThroughCapabilityWrapperWithoutReplay",
+    "RemoteDesktopHostTests/ComputerUseTests/test_browserApprovalAuthenticationHandsBackBeforePostingAndNeedsANewCard",
+    "RemoteDesktopHostTests/ComputerUseTests/test_browserApprovalInterventionDuringValidationDoesNotClaimAnInputAttempt",
+    "RemoteDesktopHostTests/ComputerUseTests/test_browserApprovalRejectsEvidenceFromAnotherTaskBeforePresentingACard",
+    "RemoteDesktopHostTests/ComputerUseTests/test_browserApprovalRequiresFreshApprovalAfterInvisibleDestinationOrRootChange",
     "RemoteDesktopHostTests/ComputerUseTests/test_browserLocalControlEpochRejectsDelayedPhoneChoices",
     "RemoteDesktopHostTests/ComputerUseTests/test_computerUseCommandShiftHotkeyPostsSKeyWithModifiers",
     "RemoteDesktopHostTests/ComputerUseTests/test_computerUseDoubleClickCarriesNativeClickCount",
@@ -655,6 +663,7 @@
     "RemoteDesktopHostTests/OSAtlasComputerUseExecutorTests/testOwnedBrowserAuthenticationPreventsTheSemanticProposalDespiteUnrelatedScreenText",
     "RemoteDesktopHostTests/OSAtlasComputerUseExecutorTests/testOwnedBrowserControlLossAtFinalEvidenceCheckCannotPublishTheAnswer",
     "RemoteDesktopHostTests/OSAtlasComputerUseExecutorTests/testOwnedBrowserInvisibleDestinationChangeRestartsPlanningBeforeTyping",
+    "RemoteDesktopHostTests/OSAtlasComputerUseExecutorTests/testOwnedBrowserVisualApprovalRetainsPageBindingAndRejectsAStrippedToken",
     "RemoteDesktopHostTests/OSAtlasComputerUseExecutorTests/testParserRejectsMultipleOrMalformedActionsBeforeExecution",
     "RemoteDesktopHostTests/OSAtlasComputerUseExecutorTests/testParserRejectsOptionalActionsUnlessPromptDeclaredThem",
     "RemoteDesktopHostTests/OSAtlasComputerUseExecutorTests/testPendingStateThatResolvesBeforeThirdWaitCompletesNormally",
