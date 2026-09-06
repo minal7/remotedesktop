@@ -72,7 +72,9 @@
     "RemoteDesktopHostTests/ComputerUseTests/test_managerResumesClaimedAnswerWithTypedGoalAndRejectsRestartedReference",
     "RemoteDesktopHostTests/ComputerUseTests/test_managerRetiresReferencesOnExpiryNewRequestRevocationAndTransportStop",
     "RemoteDesktopHostTests/ComputerUseTests/test_managerDoesNotExposeOrRetainAClarificationWhoseTerminalWriteFailed",
-    "RemoteDesktopHostTests/ComputerUseClarificationCompositionTests/testBrowserFactoryReceivesTheManagerActionGate"
+    "RemoteDesktopHostTests/ComputerUseClarificationCompositionTests/testBrowserFactoryReceivesTheManagerActionGate",
+    "RemoteDesktopHostTests/OSAtlasModelAccessGateTests",
+    "RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testCancellingQueuedActivationAndInferenceDoesNotCancelTheCurrentModelOwner"
   ],
   "expectedTests": [
     "RemoteDesktopHostTests/ComputerUseActionTextPlanTests/testActionPlannerKeepsExactBudgetAndEligibilityChecksBeforeInference",
@@ -457,6 +459,7 @@
     "RemoteDesktopHostTests/OSAtlasComputerUseExecutorTests/testVisibleQuoteExtractorUsesDistinctGeometryNotCuisineKeywords",
     "RemoteDesktopHostTests/OSAtlasComputerUseExecutorTests/testVisualApprovalContinuationRejectsWrongAndDuplicateAuthority",
     "RemoteDesktopHostTests/OSAtlasComputerUseExecutorTests/testVisualGroundingRevalidatesAgainImmediatelyBeforeInput",
+    "RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testCancellingQueuedActivationAndInferenceDoesNotCancelTheCurrentModelOwner",
     "RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testCompletionRequestIsAuthenticatedLoopbackOnlyAndDeterministic",
     "RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testLaunchArgumentsPinLoopbackAuthNoLogsAndInferenceBudget",
     "RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testNativeTextAndVisualShareOneLifecycleAndRejectCrossModelOrStaleRequests",
@@ -468,6 +471,10 @@
     "RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testRuntimeClarificationRetainsTurnsAndUsesTheExistingManagedModelLease",
     "RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testRuntimeQuotationSyntaxCandidateUsesTheSameLeaseAndCannotEnableCopyFallback",
     "RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testRuntimeTextPlannerUsesFrozenContractAndHostOwnedLiteral",
+    "RemoteDesktopHostTests/OSAtlasModelAccessGateTests/testCancellationAtHandoffDoesNotStrandTheFollowingRequest",
+    "RemoteDesktopHostTests/OSAtlasModelAccessGateTests/testCancellationBeforeAdmissionDoesNotOccupyTheModel",
+    "RemoteDesktopHostTests/OSAtlasModelAccessGateTests/testFIFOReservationAndStaleReleaseCannotGiveTwoCallersAccess",
+    "RemoteDesktopHostTests/OSAtlasModelAccessGateTests/testQueuedCancellationFinishesWhileTheOwnerStillHoldsAccess",
     "RemoteDesktopHostTests/OSAtlasRuntimeInstallationTests/testNativeTextReceiptResolvesWithoutVisualArtifactsAndCannotBecomeVisualPackage",
     "RemoteDesktopHostTests/OSAtlasRuntimeInstallationTests/testNativeTextResolverRejectsStaleReceiptChangedDataSymlinksAndExternalExecutable"
   ]

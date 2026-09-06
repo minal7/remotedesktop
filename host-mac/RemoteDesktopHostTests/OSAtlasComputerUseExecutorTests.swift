@@ -9110,6 +9110,154 @@ private struct StubSemanticActionRouter: OSAtlasSemanticActionRouting {
     }
 }
 
+private enum ModelAccessTestFailure: Error { case queueDeadline, completionDeadline }
+
+private func waitForModelAccessQueue(_ expected: Int,
+                                     count: () async -> Int) async throws {
+    let deadline = ContinuousClock.now + .seconds(2)
+    while await count() != expected {
+        guard ContinuousClock.now < deadline else { throw ModelAccessTestFailure.queueDeadline }
+        try await Task.sleep(for: .milliseconds(1))
+    }
+}
+
+private func waitForModelAccessExpectations(_ expectations: [XCTestExpectation]) async throws {
+    guard await XCTWaiter().fulfillment(of: expectations, timeout: 2) == .completed else {
+        throw ModelAccessTestFailure.completionDeadline
+    }
+}
+
+final class OSAtlasModelAccessGateTests: XCTestCase {
+    func testCancellationBeforeAdmissionDoesNotOccupyTheModel() async throws {
+        let gate = OSAtlasModelAccessGate()
+        let cancelled = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await gate.acquire()
+        }
+        do {
+            let unexpected = try await cancelled.value
+            gate.release(unexpected)
+            XCTFail("A pre-cancelled request acquired model access")
+        } catch is CancellationError {}
+        let next = try await gate.acquire()
+        gate.release(next)
+        XCTAssertEqual(gate.queuedRequestCount, 0)
+    }
+
+    func testQueuedCancellationFinishesWhileTheOwnerStillHoldsAccess() async throws {
+        let gate = OSAtlasModelAccessGate()
+        let owner = try await gate.acquire()
+        let finished = expectation(description: "Cancelled waiter finishes before owner release")
+        let queued = Task {
+            defer { finished.fulfill() }
+            return try await gate.acquire()
+        }
+        do {
+            try await waitForModelAccessQueue(1) { gate.queuedRequestCount }
+            queued.cancel()
+            try await waitForModelAccessExpectations([finished])
+            XCTAssertEqual(gate.queuedRequestCount, 0)
+        } catch {
+            queued.cancel()
+            gate.release(owner)
+            if let acquired = try? await queued.value { gate.release(acquired) }
+            throw error
+        }
+        // Cleanup follows the deadline, so a regression reports a failure
+        // without keeping a test task suspended behind the original owner.
+        gate.release(owner)
+        do {
+            let unexpected = try await queued.value
+            gate.release(unexpected)
+            XCTFail("Cancelled waiter returned a lease")
+        } catch is CancellationError {}
+        let next = try await gate.acquire()
+        gate.release(next)
+    }
+
+    func testFIFOReservationAndStaleReleaseCannotGiveTwoCallersAccess() async throws {
+        let gate = OSAtlasModelAccessGate()
+        let owner = try await gate.acquire()
+        let firstFinished = expectation(description: "First waiter receives the reservation")
+        let first = Task {
+            defer { firstFinished.fulfill() }
+            return try await gate.acquire()
+        }
+        var second: Task<UUID, Error>?
+        var firstLease: UUID?
+        do {
+            try await waitForModelAccessQueue(1) { gate.queuedRequestCount }
+            let secondFinished = expectation(description: "Second waiter receives the next reservation")
+            let secondRequest = Task {
+                defer { secondFinished.fulfill() }
+                return try await gate.acquire()
+            }
+            second = secondRequest
+            try await waitForModelAccessQueue(2) { gate.queuedRequestCount }
+            gate.release(owner)
+            try await waitForModelAccessExpectations([firstFinished])
+            firstLease = try await first.value
+            XCTAssertEqual(gate.queuedRequestCount, 1)
+            gate.release(owner)
+            gate.release(UUID())
+            XCTAssertEqual(gate.queuedRequestCount, 1, "Stale or unrelated release must preserve the new owner")
+            gate.release(try XCTUnwrap(firstLease))
+            try await waitForModelAccessExpectations([secondFinished])
+            let secondLease = try await secondRequest.value
+            XCTAssertNotEqual(try XCTUnwrap(firstLease), secondLease)
+            gate.release(secondLease)
+        } catch {
+            first.cancel()
+            second?.cancel()
+            gate.release(owner)
+            if let firstLease { gate.release(firstLease) }
+            if let acquired = try? await first.value { gate.release(acquired) }
+            if let second, let acquired = try? await second.value { gate.release(acquired) }
+            throw error
+        }
+        XCTAssertEqual(gate.queuedRequestCount, 0)
+    }
+
+    func testCancellationAtHandoffDoesNotStrandTheFollowingRequest() async throws {
+        let gate = OSAtlasModelAccessGate()
+        let owner = try await gate.acquire()
+        let firstFinished = expectation(description: "First request releases its reservation")
+        let first = Task {
+            defer { firstFinished.fulfill() }
+            let lease = try await gate.acquire()
+            defer { gate.release(lease) }
+            try Task.checkCancellation()
+        }
+        var second: Task<Void, Error>?
+        do {
+            try await waitForModelAccessQueue(1) { gate.queuedRequestCount }
+            let secondFinished = expectation(description: "Following request obtains exclusive access")
+            let secondRequest = Task {
+                defer { secondFinished.fulfill() }
+                let lease = try await gate.acquire()
+                gate.release(lease)
+            }
+            second = secondRequest
+            try await waitForModelAccessQueue(2) { gate.queuedRequestCount }
+            gate.release(owner)
+            first.cancel()
+            // Either acquisition won the cancellation race and its defer
+            // releases, or acquire itself returns the cancelled reservation.
+            try await waitForModelAccessExpectations([firstFinished, secondFinished])
+            _ = try? await first.value
+            try await secondRequest.value
+        } catch {
+            first.cancel()
+            second?.cancel()
+            gate.release(owner)
+            _ = try? await first.value
+            _ = try? await second?.value
+            throw error
+        }
+        XCTAssertEqual(gate.queuedRequestCount, 0)
+    }
+}
+
 final class OSAtlasLlamaRuntimeTests: XCTestCase {
 
     private var nativeTextInputs: ComputerUseNativeTextRuntimeInputs {
@@ -9329,6 +9477,60 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
         XCTAssertLessThan(try XCTUnwrap(values.firstIndex(of: "wait-finished:Qwen3.5-4B-Q4_K_M.gguf")),
                           try XCTUnwrap(values.firstIndex(of: "launch:replacement-Q4_K_M-00001-of-00002.gguf")))
         await runtime.shutdown()
+    }
+
+    func testCancellingQueuedActivationAndInferenceDoesNotCancelTheCurrentModelOwner() async throws {
+        let events = RuntimeEventLog()
+        let launcher = FakeLlamaLauncher(events: events)
+        let transport = FakeTransportMaker(events: events, blocksCompletion: true)
+        let runtime = textRuntime(launcher, transports: transport)
+        let endpoint = try await runtime.activateNativeText(nativeTextInputs)
+        let fields = nativeTextFields
+        let owner = Task { try await runtime.proposeNativeText(endpoint: endpoint,
+            prompt: "Set Origin to Oslo.", fields: fields) }
+        await transport.waitUntilCompletionStarted()
+        let activationFinished = expectation(description: "Queued activation cancels without owner release")
+        let replacementInputs = inputs(variant: .pro4B, name: "replacement")
+        let activation = Task {
+            defer { activationFinished.fulfill() }
+            return try await runtime.activate(replacementInputs)
+        }
+        let inferenceFinished = expectation(description: "Queued inference cancels without owner release")
+        let inference = Task {
+            defer { inferenceFinished.fulfill() }
+            return try await runtime.proposeNativeText(endpoint: endpoint,
+                prompt: "Set Origin to Paris.", fields: fields)
+        }
+        do {
+            try await waitForModelAccessQueue(2) { await runtime.queuedModelAccessRequestCount }
+            activation.cancel()
+            inference.cancel()
+            try await waitForModelAccessExpectations([activationFinished, inferenceFinished])
+            let queuedCount = await runtime.queuedModelAccessRequestCount
+            XCTAssertEqual(queuedCount, 0)
+            let beforeShutdown = await events.values()
+            XCTAssertFalse(beforeShutdown.contains("cancel-http"))
+            XCTAssertFalse(beforeShutdown.contains(where: { $0.hasPrefix("terminate:") }))
+            let launches = await launcher.configurations()
+            XCTAssertEqual(launches.count, 1)
+            XCTAssertEqual(transport.recordedCompletionRequests().count, 1)
+        } catch {
+            activation.cancel()
+            inference.cancel()
+            await runtime.shutdown()
+            _ = try? await owner.value
+            _ = try? await activation.value
+            _ = try? await inference.value
+            throw error
+        }
+        // The deliberately blocked owner exits only through explicit teardown.
+        // A timeout above must not cause this test to hang during final joins.
+        await runtime.shutdown()
+        _ = try? await owner.value
+        do { _ = try await activation.value; XCTFail("Cancelled activation returned a replacement") }
+        catch is CancellationError {}
+        do { _ = try await inference.value; XCTFail("Cancelled inference returned a proposal") }
+        catch is CancellationError {}
     }
 
     func testNativeTextFailedReadinessRemovesPrivateCredentialAndRejectsUnknownModel() async throws {

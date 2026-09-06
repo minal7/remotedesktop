@@ -939,6 +939,82 @@ enum OSAtlasLlamaRuntimeError: Error, LocalizedError, Equatable {
     }
 }
 
+/// Serializes model access across actor suspension points. All ownership and
+/// queue state is protected by the lock; continuations always resume outside
+/// it. Cancellation can remove a queued request without touching the owner.
+final class OSAtlasModelAccessGate: @unchecked Sendable {
+    private struct Waiter {
+        let id: UUID
+        let continuation: CheckedContinuation<UUID, Error>
+    }
+    private enum Admission { case granted, queued, cancelled }
+    private let lock = NSLock()
+    private var owner: UUID?
+    private var waiters: [Waiter] = []
+
+    var queuedRequestCount: Int { lock.withLock { waiters.count } }
+
+    func acquire() async throws -> UUID {
+        let id = UUID()
+        let lease: UUID = try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let admission = lock.withLock { () -> Admission in
+                    // Check inside the same critical section as registration.
+                    // Cancellation before registration cannot be lost between
+                    // an earlier check and inserting this continuation.
+                    guard !Task.isCancelled else { return .cancelled }
+                    if owner == nil {
+                        owner = id
+                        return .granted
+                    }
+                    waiters.append(Waiter(id: id, continuation: continuation))
+                    return .queued
+                }
+                switch admission {
+                case .granted: continuation.resume(returning: id)
+                case .queued: break
+                case .cancelled: continuation.resume(throwing: CancellationError())
+                }
+            }
+        } onCancel: {
+            self.cancelQueuedRequest(id)
+        }
+        do {
+            // Release may have reserved the slot just before cancellation.
+            // Return that reservation before exposing it to model work.
+            try Task.checkCancellation()
+            return lease
+        } catch {
+            release(lease)
+            throw error
+        }
+    }
+
+    func release(_ lease: UUID) {
+        let next = lock.withLock { () -> Waiter? in
+            guard owner == lease else { return nil }
+            guard !waiters.isEmpty else {
+                owner = nil
+                return nil
+            }
+            let waiter = waiters.removeFirst()
+            // Reserve ownership before resuming. New callers cannot overtake
+            // the selected waiter, and an old release cannot clear its lease.
+            owner = waiter.id
+            return waiter
+        }
+        if let next { next.continuation.resume(returning: next.id) }
+    }
+
+    private func cancelQueuedRequest(_ id: UUID) {
+        let removed = lock.withLock { () -> Waiter? in
+            guard let index = waiters.firstIndex(where: { $0.id == id }) else { return nil }
+            return waiters.remove(at: index)
+        }
+        removed?.continuation.resume(throwing: CancellationError())
+    }
+}
+
 /// The sole owner of llama-server processes. Actor serialization plus the
 /// stop-and-await activation boundary guarantees that Base and Pro are never
 /// resident at the same time.
@@ -1039,9 +1115,7 @@ actor OSAtlasLlamaRuntime {
     /// Inference and cached activation checks must not overlap a compact-model
     /// switch. Actor methods are reentrant at HTTP awaits, so an explicit lease
     /// keeps another request from unloading the worker currently completing.
-    private var modelAccessLease: UInt64?
-    private var nextModelAccessLease: UInt64 = 0
-    private var modelAccessWaiters: [CheckedContinuation<Void, Never>] = []
+    private let modelAccessGate = OSAtlasModelAccessGate()
 
     init() {
         launcher = FoundationOSAtlasLlamaServerLauncher()
@@ -1449,6 +1523,8 @@ actor OSAtlasLlamaRuntime {
         active?.endpoint.variant
     }
 
+    var queuedModelAccessRequestCount: Int { modelAccessGate.queuedRequestCount }
+
     func residencyGeneration(
         endpoint: OSAtlasLlamaEndpoint
     ) throws -> UInt64 {
@@ -1458,28 +1534,20 @@ actor OSAtlasLlamaRuntime {
         return active.residencyGeneration
     }
 
-    private func acquireModelAccessLease() async throws -> UInt64 {
-        try Task.checkCancellation()
-        while modelAccessLease != nil {
-            await withCheckedContinuation { continuation in
-                modelAccessWaiters.append(continuation)
-            }
+    private func acquireModelAccessLease() async throws -> UUID {
+        let lease = try await modelAccessGate.acquire()
+        do {
+            // Cancellation may arrive while returning to this runtime actor.
             try Task.checkCancellation()
+            return lease
+        } catch {
+            modelAccessGate.release(lease)
+            throw error
         }
-        nextModelAccessLease &+= 1
-        let lease = nextModelAccessLease
-        modelAccessLease = lease
-        return lease
     }
 
-    private func releaseModelAccessLease(_ lease: UInt64) {
-        guard modelAccessLease == lease else { return }
-        modelAccessLease = nil
-        let waiters = modelAccessWaiters
-        modelAccessWaiters.removeAll(keepingCapacity: true)
-        for waiter in waiters {
-            waiter.resume()
-        }
+    private func releaseModelAccessLease(_ lease: UUID) {
+        modelAccessGate.release(lease)
     }
 
     private func ensureModelResident(
