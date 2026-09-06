@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 1,
+  "reason": "Reclaim this task\u2019s diagnostic storage after ENOSPC; retain all evidence losslessly. Passing compact result bundles remain unarchived.",
+  "archives": [
+    {
+      "originalResultPath": "/tmp/remotedesktop-field-operations-v8-batch-1-first.xcresult",
+      "losslessArchive": "/tmp/remotedesktop-field-operations-v8-batch-1-first.xcresult.tar.gz",
+      "sha256": "ae7c4697a5c43de3561981a4d21774657dd970dc90908ede8c2b7a5e3561834a",
+      "bytes": 67699773,
+      "verifiedMembers": 2050,
+      "verification": "Exact member inventory, directory/symlink type and every regular-file SHA256 verified against the stopped test bundle before source removal."
+    },
+    {
+      "originalResultPath": "/tmp/remotedesktop-field-operations-v8-batch-3-first.xcresult",
+      "losslessArchive": "/tmp/remotedesktop-field-operations-v8-batch-3-first.xcresult.tar.gz",
+      "sha256": "d8fdbeb4861fc27cc0bde476f102ad8a8bc701ff1f4e2c37208e51d6604e47bb",
+      "bytes": 67671214,
+      "verifiedMembers": 2068,
+      "verification": "Exact member inventory, directory/symlink type and every regular-file SHA256 verified against the stopped test bundle before source removal."
+    },
+    {
+      "originalResultPath": "/tmp/remotedesktop-field-operations-v8-batch-4-first.xcresult",
+      "losslessArchive": "/tmp/remotedesktop-field-operations-v8-batch-4-first.xcresult.tar.gz",
+      "sha256": "24aa5731d5c74efc8fdc69b7fb2c3f507069e546162093965948a7cd44138134",
+      "bytes": 69725617,
+      "verifiedMembers": 2056,
+      "verification": "Exact member inventory, directory/symlink type and every regular-file SHA256 verified against the stopped test bundle before source removal."
+    },
+    {
+      "originalResultPath": "/tmp/remotedesktop-field-operations-v8-batch-7-first.xcresult",
+      "losslessArchive": "/tmp/remotedesktop-field-operations-v8-batch-7-first.xcresult.tar.gz",
+      "sha256": "4bb9be2f914b2fae30ed8121d9ce040bbb6c5afe0f7a2873300dcfa430859784",
+      "bytes": 67624997,
+      "verifiedMembers": 2058,
+      "verification": "Exact member inventory, directory/symlink type and every regular-file SHA256 verified against the stopped test bundle before source removal."
+    },
+    {
+      "originalResultPath": "/tmp/remotedesktop-field-operations-v8-batch-8-first.xcresult",
+      "losslessArchive": "/tmp/remotedesktop-field-operations-v8-batch-8-first.xcresult.tar.gz",
+      "sha256": "8483237d0f046079cbfd29ac64ec5f5c4c760b5fb9df8e435a4ca834c890d4cb",
+      "bytes": 69944479,
+      "verifiedMembers": 2056,
+      "verification": "Exact member inventory, directory/symlink type and every regular-file SHA256 verified against the stopped test bundle before source removal."
+    },
+    {
+      "originalResultPath": "/tmp/remotedesktop-field-operations-v8-batch-9-first.xcresult",
+      "losslessArchive": "/tmp/remotedesktop-field-operations-v8-batch-9-first.xcresult.tar.gz",
+      "sha256": "6456d4df29360366d78a6b07d4d6d07b211a2f697ad638d42b19eb4fc7f292c7",
+      "bytes": 68809650,
+      "verifiedMembers": 2052,
+      "verification": "Exact member inventory, directory/symlink type and every regular-file SHA256 verified against the stopped test bundle before source removal."
+    },
+    {
+      "originalResultPath": "/tmp/remotedesktop-field-operations-v8-batch-11-first.xcresult",
+      "losslessArchive": "/tmp/remotedesktop-field-operations-v8-batch-11-first.xcresult.tar.gz",
+      "sha256": "e298febddc594d79ae70c0e5384ea0ffa713fc9a86eee763afa0e611521990ad",
+      "bytes": 77483510,
+      "verifiedMembers": 2329,
+      "verification": "Exact member inventory, directory/symlink type and every regular-file SHA256 verified against the stopped test bundle before source removal."
+    }
+  ]
+}

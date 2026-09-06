@@ -1,0 +1,154 @@
+{
+  "allowFieldCopy" : false,
+  "cases" : [
+    {
+      "disposition" : "supported",
+      "edits" : [
+        {
+          "field" : 0,
+          "mode" : "replaceAll",
+          "value" : "Delta"
+        },
+        {
+          "field" : 1,
+          "mode" : "replaceAll",
+          "value" : "47-B"
+        }
+      ],
+      "elapsedSeconds" : 13.556775625009323,
+      "id" : "H502",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\"disposition\":\"supported\",\"operations\":[{\"fieldID\":\"f1\",\"mode\":\"replaceAll\",\"payload\":{\"kind\":\"suppliedText\",\"value\":\"Delta\"}},{\"fieldID\":\"f2\",\"mode\":\"replaceAll\",\"payload\":{\"kind\":\"suppliedText\",\"value\":\"47-B\"}}]}",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\"disposition\":\"supported\",\"operations\":[{\"fieldID\":\"f1\",\"mode\":\"replaceAll\",\"payload\":{\"kind\":\"suppliedText\",\"value\":\"Delta\"}},{\"fieldID\":\"f2\",\"mode\":\"replaceAll\",\"payload\":{\"kind\":\"suppliedText\",\"value\":\"47-B\"}}]}",
+          "finishReason" : "stop"
+        }
+      ],
+      "verified" : true
+    },
+    {
+      "disposition" : "supported",
+      "edits" : [
+        {
+          "field" : 0,
+          "mode" : "replaceAll",
+          "value" : "Ghent"
+        },
+        {
+          "field" : 1,
+          "mode" : "replaceAll",
+          "value" : "Ghent"
+        }
+      ],
+      "elapsedSeconds" : 12.399573500006227,
+      "id" : "H503",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\"disposition\":\"supported\",\"operations\":[{\"fieldID\":\"f1\",\"mode\":\"replaceAll\",\"payload\":{\"kind\":\"suppliedText\",\"value\":\"p1\"}},{\"fieldID\":\"f2\",\"mode\":\"replaceAll\",\"payload\":{\"kind\":\"suppliedText\",\"value\":\"p1\"}}]}",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\"disposition\":\"supported\",\"operations\":[{\"fieldID\":\"f1\",\"mode\":\"replaceAll\",\"payload\":{\"kind\":\"suppliedText\",\"value\":\"p1\"}},{\"fieldID\":\"f2\",\"mode\":\"replaceAll\",\"payload\":{\"kind\":\"suppliedText\",\"value\":\"p1\"}}]}",
+          "finishReason" : "stop"
+        }
+      ],
+      "verified" : true
+    },
+    {
+      "disposition" : "supported",
+      "edits" : [
+        {
+          "field" : 0,
+          "mode" : "replaceAll",
+          "value" : "draft"
+        },
+        {
+          "field" : 0,
+          "mode" : "append",
+          "value" : " \/ checked"
+        }
+      ],
+      "elapsedSeconds" : 12.513437499990687,
+      "id" : "H504",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\"disposition\":\"supported\",\"operations\":[{\"fieldID\":\"f1\",\"mode\":\"replaceAll\",\"payload\":{\"kind\":\"suppliedText\",\"value\":\"p1\"}},{\"fieldID\":\"f1\",\"mode\":\"append\",\"payload\":{\"kind\":\"suppliedText\",\"value\":\"p2\"}}]}",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\"disposition\":\"supported\",\"operations\":[{\"fieldID\":\"f1\",\"mode\":\"replaceAll\",\"payload\":{\"kind\":\"suppliedText\",\"value\":\"p1\"}},{\"fieldID\":\"f1\",\"mode\":\"append\",\"payload\":{\"kind\":\"suppliedText\",\"value\":\"p2\"}}]}",
+          "finishReason" : "stop"
+        }
+      ],
+      "verified" : true
+    },
+    {
+      "disposition" : "supported",
+      "edits" : [
+        {
+          "field" : 0,
+          "mode" : "append",
+          "value" : " +"
+        },
+        {
+          "field" : 0,
+          "mode" : "append",
+          "value" : " +"
+        }
+      ],
+      "elapsedSeconds" : 12.924413250002544,
+      "id" : "H505",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\"disposition\":\"supported\",\"operations\":[{\"fieldID\":\"f1\",\"mode\":\"append\",\"payload\":{\"kind\":\"suppliedText\",\"value\":\"p1\"}},{\"fieldID\":\"f1\",\"mode\":\"append\",\"payload\":{\"kind\":\"suppliedText\",\"value\":\"p2\"}}]}",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\"disposition\":\"supported\",\"operations\":[{\"fieldID\":\"f1\",\"mode\":\"append\",\"payload\":{\"kind\":\"suppliedText\",\"value\":\"p1\"}},{\"fieldID\":\"f1\",\"mode\":\"append\",\"payload\":{\"kind\":\"suppliedText\",\"value\":\"p2\"}}]}",
+          "finishReason" : "stop"
+        }
+      ],
+      "verified" : true
+    },
+    {
+      "elapsedSeconds" : 12.684641583327902,
+      "error" : "invalidResponse",
+      "id" : "H506",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\"disposition\":\"supported\",\"operations\":[{\"fieldID\":\"f1\",\"mode\":\"replaceAll\",\"payload\":{\"kind\":\"fieldValue\",\"fieldID\":\"f2\"}}]}",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\"disposition\":\"supported\",\"operations\":[{\"fieldID\":\"f1\",\"mode\":\"replaceAll\",\"payload\":{\"kind\":\"fieldValue\",\"fieldID\":\"f2\"}}]}",
+          "finishReason" : "stop"
+        }
+      ],
+      "verified" : false
+    }
+  ],
+  "contract" : "field-operations-v8",
+  "corpusSHA256" : "341bfb9ed64df9eb940fc2a2465130e6a5616166cc1461522cc570a7eda88349",
+  "desktopEffects" : false,
+  "expectedCaseIDs" : [
+    "H502",
+    "H503",
+    "H504",
+    "H505",
+    "H506"
+  ],
+  "modelSHA256FromVerifiedManifest" : "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
+  "oracle" : "exact-disposition-and-complete-operation-sequences-including-count-mode-target-payload-origin-exact-bytes-and-order",
+  "quotedCommandFastPath" : false,
+  "runtimeBinarySHA256" : "5769f5a9954ac8a2584a167aa62fd5c99aaab1a07bbcce9eb694d0096595f668",
+  "schemaVersion" : 1,
+  "scope" : "Known 54-case regression comparison for unified typed field operations v8; combines 20 copy and 34 earlier literal\/decline cases; not held-out qualification; preselected batch 8\/11"
+}

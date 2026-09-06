@@ -1,0 +1,8 @@
+{
+  "selectors": [
+    "RemoteDesktopHostTests/ComputerUseFieldOperationsBrowserAcceptanceTests/testIndependentCopyOracleRequiresOriginAndEveryExactIntermediateState"
+  ],
+  "expectedTests": [
+    "RemoteDesktopHostTests/ComputerUseFieldOperationsBrowserAcceptanceTests/testIndependentCopyOracleRequiresOriginAndEveryExactIntermediateState"
+  ]
+}

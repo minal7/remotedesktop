@@ -58,7 +58,8 @@
     "RemoteDesktopHostTests/ComputerUseSourceBoundTextPlanTests",
     "RemoteDesktopHostTests/ComputerUseOwnedBrowserModelAcceptanceTests/testIndependentSequenceOracleRejectsExtraWrongTargetReorderedAndNormalizedIntermediateStates",
     "RemoteDesktopHostTests/ComputerUseFieldCopyPlanTests",
-    "RemoteDesktopHostTests/ComputerUseSourceBoundTextModelAcceptanceTests/testOperationOracleDistinguishesCopiedSourcesLiteralPayloadsAndExactBytes"
+    "RemoteDesktopHostTests/ComputerUseSourceBoundTextModelAcceptanceTests/testOperationOracleDistinguishesCopiedSourcesLiteralPayloadsAndExactBytes",
+    "RemoteDesktopHostTests/ComputerUseFieldOperationsBrowserAcceptanceTests/testIndependentCopyOracleRequiresOriginAndEveryExactIntermediateState"
   ],
   "expectedTests": [
     "RemoteDesktopHostTests/ComputerUseBrowserDOMTests/testBrowserCopyReceiptDistinguishesUnsentNoOpFromCancelledDeliveredInput",
@@ -94,6 +95,7 @@
     "RemoteDesktopHostTests/ComputerUseFieldCopyPlanTests/testQuotedSourceLabelsAndAmbiguousSourcesHaveDistinctOutcomes",
     "RemoteDesktopHostTests/ComputerUseFieldCopyPlanTests/testUnifiedPlannerRejectsUntaggedMixedAndUnownedLiteralPayloads",
     "RemoteDesktopHostTests/ComputerUseFieldCopyPlanTests/testUnifiedPlannerRetainsLiteralAndCopiedOriginsWhenTheirBytesWouldMatch",
+    "RemoteDesktopHostTests/ComputerUseFieldOperationsBrowserAcceptanceTests/testIndependentCopyOracleRequiresOriginAndEveryExactIntermediateState",
     "RemoteDesktopHostTests/ComputerUseLicenseComplianceTests/testModelPackagesContainOnlyPinnedGGUFDownloads",
     "RemoteDesktopHostTests/ComputerUseLicenseComplianceTests/testNativeTextPackageInstallsItsOwnVerifiedLegalDocumentsIndependently",
     "RemoteDesktopHostTests/ComputerUseLicenseComplianceTests/testOnlyChecksumVerifiedCompletePackageCanUseMetadataSpaceBudget",

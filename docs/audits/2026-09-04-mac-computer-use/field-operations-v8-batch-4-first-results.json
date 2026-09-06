@@ -1,0 +1,130 @@
+{
+  "allowFieldCopy" : false,
+  "cases" : [
+    {
+      "disposition" : "clarification",
+      "edits" : [
+
+      ],
+      "elapsedSeconds" : 13.448065750009846,
+      "id" : "C16",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\"disposition\":\"clarification\",\"operations\":[]}",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\"disposition\":\"clarification\",\"operations\":[]}",
+          "finishReason" : "stop"
+        }
+      ],
+      "verified" : true
+    },
+    {
+      "disposition" : "unsupported",
+      "edits" : [
+
+      ],
+      "elapsedSeconds" : 13.779073458339553,
+      "id" : "C17",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\"disposition\":\"unsupported\",\"operations\":[]}",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\"disposition\":\"unsupported\",\"operations\":[]}",
+          "finishReason" : "stop"
+        }
+      ],
+      "verified" : true
+    },
+    {
+      "disposition" : "unsupported",
+      "edits" : [
+
+      ],
+      "elapsedSeconds" : 13.663974083348876,
+      "id" : "C18",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\"disposition\":\"unsupported\",\"operations\":[]}",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\"disposition\":\"unsupported\",\"operations\":[]}",
+          "finishReason" : "stop"
+        }
+      ],
+      "verified" : true
+    },
+    {
+      "disposition" : "unsupported",
+      "edits" : [
+
+      ],
+      "elapsedSeconds" : 12.577417249995051,
+      "id" : "C19",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\"disposition\":\"unsupported\",\"operations\":[]}",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\"disposition\":\"unsupported\",\"operations\":[]}",
+          "finishReason" : "stop"
+        }
+      ],
+      "verified" : true
+    },
+    {
+      "disposition" : "supported",
+      "edits" : [
+        {
+          "field" : 0,
+          "mode" : "replaceAll",
+          "sourceField" : 1
+        },
+        {
+          "field" : 1,
+          "mode" : "replaceAll",
+          "sourceField" : 0
+        }
+      ],
+      "elapsedSeconds" : 13.695509625016712,
+      "id" : "C20",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\"disposition\":\"supported\",\"operations\":[{\"fieldID\":\"f1\",\"mode\":\"replaceAll\",\"payload\":{\"kind\":\"fieldValue\",\"fieldID\":\"f2\"}},{\"fieldID\":\"f2\",\"mode\":\"replaceAll\",\"payload\":{\"kind\":\"fieldValue\",\"fieldID\":\"f1\"}}]}",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\"disposition\":\"supported\",\"operations\":[{\"fieldID\":\"f1\",\"mode\":\"replaceAll\",\"payload\":{\"kind\":\"fieldValue\",\"fieldID\":\"f2\"}},{\"fieldID\":\"f2\",\"mode\":\"replaceAll\",\"payload\":{\"kind\":\"fieldValue\",\"fieldID\":\"f1\"}}]}",
+          "finishReason" : "stop"
+        }
+      ],
+      "verified" : false
+    }
+  ],
+  "contract" : "field-operations-v8",
+  "corpusSHA256" : "225128e5f0691a24351cf210e393001ad9b8f6ab1028d874ba7397377ca6634a",
+  "desktopEffects" : false,
+  "expectedCaseIDs" : [
+    "C16",
+    "C17",
+    "C18",
+    "C19",
+    "C20"
+  ],
+  "modelSHA256FromVerifiedManifest" : "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
+  "oracle" : "exact-disposition-and-complete-operation-sequences-including-count-mode-target-payload-origin-exact-bytes-and-order",
+  "quotedCommandFastPath" : false,
+  "runtimeBinarySHA256" : "5769f5a9954ac8a2584a167aa62fd5c99aaab1a07bbcce9eb694d0096595f668",
+  "schemaVersion" : 1,
+  "scope" : "Known 54-case regression comparison for unified typed field operations v8; combines 20 copy and 34 earlier literal\/decline cases; not held-out qualification; preselected batch 4\/11"
+}

@@ -1,0 +1,151 @@
+{
+  "allowFieldCopy" : false,
+  "cases" : [
+    {
+      "disposition" : "supported",
+      "edits" : [
+        {
+          "field" : 1,
+          "mode" : "replaceAll",
+          "sourceField" : 0
+        }
+      ],
+      "elapsedSeconds" : 12.950087416684255,
+      "id" : "C06",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\"disposition\":\"supported\",\"operations\":[{\"fieldID\":\"f2\",\"mode\":\"replaceAll\",\"payload\":{\"kind\":\"fieldValue\",\"fieldID\":\"f1\"}}]}",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\"disposition\":\"supported\",\"operations\":[{\"fieldID\":\"f2\",\"mode\":\"replaceAll\",\"payload\":{\"kind\":\"fieldValue\",\"fieldID\":\"f1\"}}]}",
+          "finishReason" : "stop"
+        }
+      ],
+      "verified" : true
+    },
+    {
+      "disposition" : "supported",
+      "edits" : [
+        {
+          "field" : 1,
+          "mode" : "replaceAll",
+          "sourceField" : 0
+        },
+        {
+          "field" : 2,
+          "mode" : "replaceAll",
+          "sourceField" : 1
+        }
+      ],
+      "elapsedSeconds" : 12.299194874998648,
+      "id" : "C07",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\"disposition\":\"supported\",\"operations\":[{\"fieldID\":\"f2\",\"mode\":\"replaceAll\",\"payload\":{\"kind\":\"fieldValue\",\"fieldID\":\"f1\"}},{\"fieldID\":\"f3\",\"mode\":\"replaceAll\",\"payload\":{\"kind\":\"fieldValue\",\"fieldID\":\"f2\"}}]}",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\"disposition\":\"supported\",\"operations\":[{\"fieldID\":\"f2\",\"mode\":\"replaceAll\",\"payload\":{\"kind\":\"fieldValue\",\"fieldID\":\"f1\"}},{\"fieldID\":\"f3\",\"mode\":\"replaceAll\",\"payload\":{\"kind\":\"fieldValue\",\"fieldID\":\"f2\"}}]}",
+          "finishReason" : "stop"
+        }
+      ],
+      "verified" : true
+    },
+    {
+      "disposition" : "supported",
+      "edits" : [
+        {
+          "field" : 1,
+          "mode" : "replaceAll",
+          "sourceField" : 0
+        },
+        {
+          "field" : 2,
+          "mode" : "replaceAll",
+          "sourceField" : 0
+        }
+      ],
+      "elapsedSeconds" : 14.026994791667676,
+      "id" : "C08",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\n      \"disposition\": \"supported\",\n      \"operations\": [\n        {\n          \"fieldID\": \"f2\",\n          \"mode\": \"replaceAll\",\n          \"payload\": {\n            \"kind\": \"fieldValue\",\n            \"fieldID\": \"f1\"\n          }\n        },\n        {\n          \"fieldID\": \"f3\",\n          \"mode\": \"replaceAll\",\n          \"payload\": {\n            \"kind\": \"fieldValue\",\n            \"fieldID\": \"f1\"\n          }\n        }\n      ]\n    }",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\n      \"disposition\": \"supported\",\n      \"operations\": [\n        {\n          \"fieldID\": \"f2\",\n          \"mode\": \"replaceAll\",\n          \"payload\": {\n            \"kind\": \"fieldValue\",\n            \"fieldID\": \"f1\"\n          }\n        },\n        {\n          \"fieldID\": \"f3\",\n          \"mode\": \"replaceAll\",\n          \"payload\": {\n            \"kind\": \"fieldValue\",\n            \"fieldID\": \"f1\"\n          }\n        }\n      ]\n    }",
+          "finishReason" : "stop"
+        }
+      ],
+      "verified" : true
+    },
+    {
+      "disposition" : "supported",
+      "edits" : [
+        {
+          "field" : 0,
+          "mode" : "append",
+          "sourceField" : 0
+        }
+      ],
+      "elapsedSeconds" : 12.465392833313672,
+      "id" : "C09",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\"disposition\":\"supported\",\"operations\":[{\"fieldID\":\"f1\",\"mode\":\"append\",\"payload\":{\"kind\":\"fieldValue\",\"fieldID\":\"f1\"}}]}",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\"disposition\":\"supported\",\"operations\":[{\"fieldID\":\"f1\",\"mode\":\"append\",\"payload\":{\"kind\":\"fieldValue\",\"fieldID\":\"f1\"}}]}",
+          "finishReason" : "stop"
+        }
+      ],
+      "verified" : true
+    },
+    {
+      "disposition" : "supported",
+      "edits" : [
+        {
+          "field" : 1,
+          "mode" : "replaceAll",
+          "sourceField" : 0
+        }
+      ],
+      "elapsedSeconds" : 11.801857708342141,
+      "id" : "C10",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\"disposition\":\"supported\",\"operations\":[{\"fieldID\":\"f2\",\"mode\":\"replaceAll\",\"payload\":{\"kind\":\"fieldValue\",\"fieldID\":\"f1\"}}]}",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\"disposition\":\"supported\",\"operations\":[{\"fieldID\":\"f2\",\"mode\":\"replaceAll\",\"payload\":{\"kind\":\"fieldValue\",\"fieldID\":\"f1\"}}]}",
+          "finishReason" : "stop"
+        }
+      ],
+      "verified" : true
+    }
+  ],
+  "contract" : "field-operations-v8",
+  "corpusSHA256" : "3da0c242f37be780761a6b1e24ffdbd69b1e2acf2aa76b031e6b5f88575c2ea8",
+  "desktopEffects" : false,
+  "expectedCaseIDs" : [
+    "C06",
+    "C07",
+    "C08",
+    "C09",
+    "C10"
+  ],
+  "modelSHA256FromVerifiedManifest" : "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
+  "oracle" : "exact-disposition-and-complete-operation-sequences-including-count-mode-target-payload-origin-exact-bytes-and-order",
+  "quotedCommandFastPath" : false,
+  "runtimeBinarySHA256" : "5769f5a9954ac8a2584a167aa62fd5c99aaab1a07bbcce9eb694d0096595f668",
+  "schemaVersion" : 1,
+  "scope" : "Known 54-case regression comparison for unified typed field operations v8; combines 20 copy and 34 earlier literal\/decline cases; not held-out qualification; preselected batch 2\/11"
+}

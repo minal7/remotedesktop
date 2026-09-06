@@ -25,3 +25,27 @@ The first holdout run also exhausted disk space while saving its nineteenth resu
 7. **Qualify before switching production.** Preserve the frozen candidate, first-run failures, incomplete infrastructure run and continuation as separate evidence. Any corpus used to revise the next candidate becomes regression data. Test fresh phrasing before adoption, then exercise the selected planner through the actual coordinator and browser/native adapters. Zero accepted incorrect plans in this corpus is a necessary gate; a small passing corpus does not establish general natural-language reliability, mobile transport, interruption recovery or release readiness.
 
 The broader [repair TODO](../../../TODO.md) and [original audit](AUDIT.md) remain authoritative. These steps refine F02 and the qualification work; they do not replace the remaining product repairs.
+
+## Payload-origin implementation and the routing failure
+
+The host now has a typed whole-field copy operation. It resolves source bytes from the ordered observed state, binds source and destination identities and values, and requires dispatch evidence in addition to exact resulting values. Owned WebKit documents can supply an independent operation receipt after a lost callback. An adapter without that receipt can prove dispatch only from a successful call in the live task. Copy-source values and exact literals stay outside model context and raw journal records.
+
+The first model composition nevertheless failed **5/20** initial cases. It invoked existing v2 first and considered the copy capability only after an unsupported result. For `Copy the "Origin" field into the "Destination" field.`, v2 accepted the literal `Origin`, so the copy interpreter never ran. This is an incorrect accepted plan in the baseline itself, independent of the earlier v6 failure. Preserving an existing planner as a baseline does not justify trusting its classification as an irreversible routing decision. See [all first-run results](field-copy-v7-results.json).
+
+The opt-in v8 candidate therefore makes one whole-goal decision with tagged supplied-text and field-value payloads. It shares the strict decoder and execution contract; normal composition remains v2 pending qualification. The revised instructions address source labels, literal words, self-copy, and unsupported conditions. These instructions guide the model; they are not independent proofs of intent. The frozen comparison contains all 20 copy cases and 34 earlier regressions. A separate 20-case phrasing corpus and six controlled browser cases were frozen before their inference.
+
+V8 then passed only **44/54** known cases and accepted five wrong plans. Three confuse a supplied literal label with a copied field value, one reverses a repeated copy, and one emits extra intermediate edits for quoted field names. The typed representation exposes these mistakes but does not prevent them. Keep the unseen corpus unrun while repairing the regression failures. One hypothesis to test separately is that replacing every quotation with a payload marker, then supplying label matches indirectly, loses useful target/value syntax. Preserve host ownership of exact bytes while testing a clearer reference representation; do not assume another instruction paragraph resolves the information loss. Complete command grammars may bind unambiguous requests directly, as the existing quoted `set` compiler already does, provided they consume the entire request and preserve every ordered operation. Broader English interpretation still needs independent qualification.
+
+Follow these gates before adoption:
+
+- [x] Compile copied data from host-owned observations and preserve ordered source dependencies.
+- [x] Check retained source/destination identity and exact bytes immediately before owned-browser input.
+- [x] Require independent dispatch receipts for recovered copy operations, including equal-value/no-op copies.
+- [x] Test literal and copy origins separately even when they produce identical bytes.
+- [ ] Pass the fixed complete-plan comparison without accepted wrong operations; retain all conservative failures too.
+- [ ] Pass independent phrasing under unchanged source, model, sampling and expected outcomes.
+- [ ] Execute the frozen visible browser cases through the actual runtime, coordinator and DOM adapter; verify typed origins, every intermediate full-form state and no replay.
+- [ ] Extend dispatch/recovery qualification to ordinary text operations and native AX adapters; the copy receipt change alone does not close F26.
+- [ ] Add generated drafts as an explicit capability with reviewed content and outcome predicates.
+- [ ] Compile preservation, forbidden-value and conditional requirements at their actual scope before supporting them.
+- [ ] Qualify external native targets, mobile-to-Mac transport, interruption points and supported hardware before a release claim.
