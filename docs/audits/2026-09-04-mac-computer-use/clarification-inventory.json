@@ -1,0 +1,26 @@
+{
+  "selectors": [
+    "RemoteDesktopHostTests/ComputerUseTextClarificationTests",
+    "RemoteDesktopHostTests/ComputerUseTests/test_orderedControlAndApprovalPayloadsRemainWireCompatible",
+    "RemoteDesktopHostTests/ComputerUseTests/test_managerUsesClarificationConversationWhenAnswerIsComplete",
+    "RemoteDesktopHostTests/ComputerUseTests/test_legacyExecutorDefaultReceivesOnlyTrustedCurrentUserPrompt",
+    "RemoteDesktopHostTests/ComputerUseTests/test_structuredConversationPauseBeforePromptResumeKeepsTrustedTurnSeparate",
+    "RemoteDesktopHostTests/ComputerUseTests/test_taskLedgerPersistsAtMostOnceClaimAndTerminalReplay",
+    "RemoteDesktopHostTests/ComputerUseTests/test_taskLedgerBindsControlAndPromptToSenderAndSession"
+  ],
+  "expectedTests": [
+    "RemoteDesktopHostTests/ComputerUseTests/test_legacyExecutorDefaultReceivesOnlyTrustedCurrentUserPrompt",
+    "RemoteDesktopHostTests/ComputerUseTests/test_managerUsesClarificationConversationWhenAnswerIsComplete",
+    "RemoteDesktopHostTests/ComputerUseTests/test_orderedControlAndApprovalPayloadsRemainWireCompatible",
+    "RemoteDesktopHostTests/ComputerUseTests/test_structuredConversationPauseBeforePromptResumeKeepsTrustedTurnSeparate",
+    "RemoteDesktopHostTests/ComputerUseTests/test_taskLedgerBindsControlAndPromptToSenderAndSession",
+    "RemoteDesktopHostTests/ComputerUseTests/test_taskLedgerPersistsAtMostOnceClaimAndTerminalReplay",
+    "RemoteDesktopHostTests/ComputerUseTextClarificationTests/testAnswerWirePreservesExactBytesAndRejectsOversizeInsteadOfTruncating",
+    "RemoteDesktopHostTests/ComputerUseTextClarificationTests/testCancellationMatchesTheOriginatingRequestAndNewTaskCanClearAllRetention",
+    "RemoteDesktopHostTests/ComputerUseTextClarificationTests/testExpiryRestartReplacementAndDocumentChangeCannotReviveOriginalGoal",
+    "RemoteDesktopHostTests/ComputerUseTextClarificationTests/testInputBudgetRejectsOverflowBeforeConsumingAValidQuestion",
+    "RemoteDesktopHostTests/ComputerUseTextClarificationTests/testOnlyMatchingInterventionUpdateCarriesAReferenceAndLegacyWireStillDecodes",
+    "RemoteDesktopHostTests/ComputerUseTextClarificationTests/testReferenceCannotCrossSenderSessionNonceOrBeConsumedTwice",
+    "RemoteDesktopHostTests/ComputerUseTextClarificationTests/testRetainedGoalSurvivesTwoAnswersWithoutTruncatingOrMixingQuestionsIntoUserText"
+  ]
+}

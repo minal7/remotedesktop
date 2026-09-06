@@ -60,7 +60,8 @@
     "RemoteDesktopHostTests/ComputerUseFieldCopyPlanTests",
     "RemoteDesktopHostTests/ComputerUseSourceBoundTextModelAcceptanceTests/testOperationOracleDistinguishesCopiedSourcesLiteralPayloadsAndExactBytes",
     "RemoteDesktopHostTests/ComputerUseFieldOperationsBrowserAcceptanceTests/testIndependentCopyOracleRequiresOriginAndEveryExactIntermediateState",
-    "RemoteDesktopHostTests/ComputerUseActionTextPlanTests"
+    "RemoteDesktopHostTests/ComputerUseActionTextPlanTests",
+    "RemoteDesktopHostTests/ComputerUseTextClarificationTests"
   ],
   "expectedTests": [
     "RemoteDesktopHostTests/ComputerUseActionTextPlanTests/testActionPlannerKeepsExactBudgetAndEligibilityChecksBeforeInference",
@@ -192,6 +193,13 @@
     "RemoteDesktopHostTests/ComputerUseTests/test_virtualScreenAndAccessibilityContextKeepModelTestsOffTheDesktop",
     "RemoteDesktopHostTests/ComputerUseTests/test_visualOpenAppRejectsPathsAndPausedAutomationBeforeOpening",
     "RemoteDesktopHostTests/ComputerUseTests/test_visualOpenAppUsesValidatedNativeApplicationOpener",
+    "RemoteDesktopHostTests/ComputerUseTextClarificationTests/testAnswerWirePreservesExactBytesAndRejectsOversizeInsteadOfTruncating",
+    "RemoteDesktopHostTests/ComputerUseTextClarificationTests/testCancellationMatchesTheOriginatingRequestAndNewTaskCanClearAllRetention",
+    "RemoteDesktopHostTests/ComputerUseTextClarificationTests/testExpiryRestartReplacementAndDocumentChangeCannotReviveOriginalGoal",
+    "RemoteDesktopHostTests/ComputerUseTextClarificationTests/testInputBudgetRejectsOverflowBeforeConsumingAValidQuestion",
+    "RemoteDesktopHostTests/ComputerUseTextClarificationTests/testOnlyMatchingInterventionUpdateCarriesAReferenceAndLegacyWireStillDecodes",
+    "RemoteDesktopHostTests/ComputerUseTextClarificationTests/testReferenceCannotCrossSenderSessionNonceOrBeConsumedTwice",
+    "RemoteDesktopHostTests/ComputerUseTextClarificationTests/testRetainedGoalSurvivesTwoAnswersWithoutTruncatingOrMixingQuestionsIntoUserText",
     "RemoteDesktopHostTests/ComputerUseTextEditorTests/testAXEditIsReadBackWithoutPostingUnicode",
     "RemoteDesktopHostTests/ComputerUseTextEditorTests/testAccessibilitySetterCannotStartAfterTakeoverClosesInputGate",
     "RemoteDesktopHostTests/ComputerUseTextEditorTests/testApprovalTextDigestChangesForSelectionContentAndDocument",

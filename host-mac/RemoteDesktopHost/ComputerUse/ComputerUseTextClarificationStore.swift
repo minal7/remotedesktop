@@ -1,0 +1,104 @@
+import Foundation
+
+/// User-authored inputs remain separate, with exact bytes and explicit turn
+/// boundaries. Questions are context, never a source of text-edit authority.
+struct ComputerUseUnresolvedTextGoal: Equatable, Sendable {
+    static let maximumUserTurns = 4
+    static let maximumUserBytes = 32 * 1_024
+    let userTurns: [String]
+    let questions: [String]
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.userTurns.count == rhs.userTurns.count && lhs.questions.count == rhs.questions.count
+            && zip(lhs.userTurns, rhs.userTurns).allSatisfy { $0.utf8.elementsEqual($1.utf8) }
+            && zip(lhs.questions, rhs.questions).allSatisfy { $0.utf8.elementsEqual($1.utf8) }
+    }
+
+    init(userRequest: String) throws {
+        try Self.validate(userTurns: [userRequest], questions: [])
+        userTurns = [userRequest]
+        questions = []
+    }
+
+    private init(userTurns: [String], questions: [String]) throws {
+        try Self.validate(userTurns: userTurns, questions: questions)
+        self.userTurns = userTurns
+        self.questions = questions
+    }
+
+    func answering(_ question: String, with answer: String) throws -> Self {
+        try .init(userTurns: userTurns + [answer], questions: questions + [question])
+    }
+
+    private static func validate(userTurns: [String], questions: [String]) throws {
+        guard (1...maximumUserTurns).contains(userTurns.count), questions.count == userTurns.count - 1,
+              userTurns.allSatisfy({ !$0.isEmpty && $0.count <= ComputerUsePromptRequest.maximumPromptLength }),
+              userTurns.reduce(0, { $0 + $1.utf8.count }) <= maximumUserBytes,
+              questions.allSatisfy({ !$0.isEmpty && $0.utf8.count <= 8 * 1_024 }) else {
+            throw ComputerUseTextClarificationStore.Failure.inputLimit
+        }
+    }
+}
+
+/// At most one in-memory, expiring clarification. Recreating this store after
+/// a host restart expires all previous references; no transcript can rebuild
+/// their authority. The caller still claims the answer's stable task ID in
+/// the durable task ledger before consuming a reference.
+@MainActor
+final class ComputerUseTextClarificationStore {
+    enum Failure: Error, Equatable { case invalidReference, expired, scopeChanged, inputLimit }
+    private struct Pending {
+        let reference: ComputerUseClarificationReference
+        let senderID: String
+        let sessionID: String
+        let scope: String
+        let question: String
+        let goal: ComputerUseUnresolvedTextGoal
+    }
+    private var pending: Pending?
+    private let now: () -> Date
+
+    init(now: @escaping () -> Date = Date.init) { self.now = now }
+
+    func issue(goal: ComputerUseUnresolvedTextGoal, question: String, scope: String,
+               for request: ComputerUseEnvelope) throws -> ComputerUseClarificationReference {
+        guard !request.senderID.isEmpty, !request.sessionID.isEmpty, Self.validScope(scope),
+              !question.isEmpty, question.utf8.count <= 8 * 1_024,
+              goal.userTurns.count < ComputerUseUnresolvedTextGoal.maximumUserTurns else { throw Failure.inputLimit }
+        let reference = try ComputerUseClarificationReference(taskID: request.id, expiresAt: now().addingTimeInterval(600))
+        pending = Pending(reference: reference, senderID: request.senderID, sessionID: request.sessionID,
+            scope: scope, question: question, goal: goal)
+        return reference
+    }
+
+    func consume(_ reference: ComputerUseClarificationReference, answer: String, scope: String,
+                 for request: ComputerUseEnvelope) throws -> ComputerUseUnresolvedTextGoal {
+        guard let pending, pending.reference == reference,
+              pending.senderID == request.senderID, pending.sessionID == request.sessionID,
+              !request.id.isEmpty, request.id != reference.taskID else { throw Failure.invalidReference }
+        guard now() < reference.expiresAt else { self.pending = nil; throw Failure.expired }
+        guard pending.scope == scope else { self.pending = nil; throw Failure.scopeChanged }
+        let goal = try pending.goal.answering(pending.question, with: answer)
+        self.pending = nil
+        return goal
+    }
+
+    func reference(for request: ComputerUseEnvelope) -> ComputerUseClarificationReference? {
+        guard let pending, pending.reference.taskID == request.id,
+              pending.senderID == request.senderID, pending.sessionID == request.sessionID else { return nil }
+        guard now() < pending.reference.expiresAt else { self.pending = nil; return nil }
+        return pending.reference
+    }
+
+    func invalidate(for request: ComputerUseEnvelope) {
+        guard let pending, pending.reference.taskID == request.id,
+              pending.senderID == request.senderID, pending.sessionID == request.sessionID else { return }
+        self.pending = nil
+    }
+
+    func invalidate() { pending = nil }
+
+    private static func validScope(_ value: String) -> Bool {
+        value.utf8.count == 64 && value.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
+    }
+}

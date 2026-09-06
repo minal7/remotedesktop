@@ -560,6 +560,31 @@ public enum ComputerUseTerminalOutcome: String, Codable, Equatable, Sendable {
     case unableToComplete
 }
 
+/// A host-issued reference to one retained unresolved request. It carries no
+/// original text. The host must also match its retained sender/session/scope;
+/// knowing a reference alone cannot authorize a continuation.
+public struct ComputerUseClarificationReference: Codable, Equatable, Sendable {
+    public let taskID: String
+    public let nonce: UUID
+    public let expiresAt: Date
+
+    public init(taskID: String, nonce: UUID = UUID(), expiresAt: Date) throws {
+        guard !taskID.isEmpty, taskID.utf8.count <= 256,
+              !taskID.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains),
+              expiresAt.timeIntervalSince1970.isFinite else { throw ComputerUsePayloadError.invalidIdentifier }
+        self.taskID = taskID
+        self.nonce = nonce
+        self.expiresAt = expiresAt
+    }
+
+    private enum CodingKeys: String, CodingKey { case taskID, nonce, expiresAt }
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(taskID: values.decode(String.self, forKey: .taskID),
+            nonce: values.decode(UUID.self, forKey: .nonce), expiresAt: values.decode(Date.self, forKey: .expiresAt))
+    }
+}
+
 /// Correlates assistant/status traffic with the stable privileged prompt ID.
 /// This lets iOS safely ignore a delayed replay from an older task after the
 /// user has already started a newer one in the same chat session.
@@ -574,17 +599,20 @@ public struct ComputerUseTaskUpdate: Codable, Equatable, Sendable {
     /// person-only status updates. `nil` preserves wire compatibility with
     /// peers that only understand the existing text and status prefix.
     public let outcome: ComputerUseTerminalOutcome?
+    public let clarification: ComputerUseClarificationReference?
 
     public init(
         taskID: String,
         text: String,
         appliedControlRevision: UInt64? = nil,
-        outcome: ComputerUseTerminalOutcome? = nil
+        outcome: ComputerUseTerminalOutcome? = nil,
+        clarification: ComputerUseClarificationReference? = nil
     ) {
         self.taskID = taskID
         self.text = String(text.prefix(8_000))
         self.appliedControlRevision = appliedControlRevision
         self.outcome = outcome
+        self.clarification = outcome == .userInterventionRequired && clarification?.taskID == taskID ? clarification : nil
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -592,6 +620,7 @@ public struct ComputerUseTaskUpdate: Codable, Equatable, Sendable {
         case text
         case appliedControlRevision
         case outcome
+        case clarification
     }
 
     public init(from decoder: Decoder) throws {
@@ -611,6 +640,8 @@ public struct ComputerUseTaskUpdate: Codable, Equatable, Sendable {
         } else {
             outcome = nil
         }
+        let reference = try values.decodeIfPresent(ComputerUseClarificationReference.self, forKey: .clarification)
+        clarification = outcome == .userInterventionRequired && reference?.taskID == taskID ? reference : nil
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -621,6 +652,7 @@ public struct ComputerUseTaskUpdate: Codable, Equatable, Sendable {
             appliedControlRevision,
             forKey: .appliedControlRevision)
         try values.encodeIfPresent(outcome?.rawValue, forKey: .outcome)
+        try values.encodeIfPresent(clarification, forKey: .clarification)
     }
 
     public func encodedBody() throws -> String {
@@ -693,6 +725,7 @@ public struct ComputerUsePromptRequest: Codable, Equatable, Sendable {
     public let version: Int
     public let prompt: String
     public let conversation: [ComputerUseConversationTurn]
+    public let clarification: ComputerUseClarificationReference?
 
     public init(
         prompt: String,
@@ -701,6 +734,27 @@ public struct ComputerUsePromptRequest: Codable, Equatable, Sendable {
         version = Self.currentVersion
         self.prompt = Self.boundedPrompt(prompt)
         self.conversation = Self.boundedConversation(conversation)
+        clarification = nil
+    }
+
+    /// A clarification answer is exact user input, not a bounded chat-history
+    /// excerpt. Reject an oversized answer instead of truncating its payload.
+    public static func answering(_ reference: ComputerUseClarificationReference, text: String) throws -> Self {
+        try Self(exactAnswer: text, reference: reference)
+    }
+
+    private init(exactAnswer: String, reference: ComputerUseClarificationReference) throws {
+        try Self.validateExactAnswer(exactAnswer)
+        version = Self.currentVersion
+        prompt = exactAnswer
+        conversation = []
+        clarification = reference
+    }
+
+    private static func validateExactAnswer(_ text: String) throws {
+        guard !text.isEmpty, text.count <= maximumPromptLength, text.utf8.count <= 32 * 1_024 else {
+            throw ComputerUsePayloadError.payloadTooLarge
+        }
     }
 
     public func encodedBody() throws -> String {
@@ -734,14 +788,21 @@ public struct ComputerUsePromptRequest: Codable, Equatable, Sendable {
         case version
         case prompt
         case conversation
+        case clarification
     }
 
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         version = try values.decodeIfPresent(Int.self, forKey: .version)
             ?? Self.currentVersion
-        prompt = Self.boundedPrompt(
-            try values.decode(String.self, forKey: .prompt))
+        clarification = try values.decodeIfPresent(ComputerUseClarificationReference.self, forKey: .clarification)
+        let rawPrompt = try values.decode(String.self, forKey: .prompt)
+        if clarification != nil {
+            try Self.validateExactAnswer(rawPrompt)
+            prompt = rawPrompt
+        } else {
+            prompt = Self.boundedPrompt(rawPrompt)
+        }
         conversation = Self.boundedConversation(
             try values.decodeIfPresent(
                 [ComputerUseConversationTurn].self,
@@ -753,6 +814,7 @@ public struct ComputerUsePromptRequest: Codable, Equatable, Sendable {
         try values.encode(version, forKey: .version)
         try values.encode(prompt, forKey: .prompt)
         try values.encode(conversation, forKey: .conversation)
+        try values.encodeIfPresent(clarification, forKey: .clarification)
     }
 
     private static func boundedPrompt(_ value: String) -> String {

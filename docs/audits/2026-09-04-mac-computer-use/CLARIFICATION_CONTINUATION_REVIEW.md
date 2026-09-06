@@ -31,4 +31,14 @@ Relevant production code:
 - A new unrelated request does not inherit the prior field, literal or other authority.
 - The signed host and matching mobile client complete the supported flow through the real local model and transport; a stubbed planner test alone does not qualify natural-language continuation.
 
-This refines F02/F04 and the mobile qualification gate in `TODO.md`. It remains open; no continuation implementation or passing end-to-end evidence is claimed here.
+## Implementation checkpoint
+
+The shared protocol now supports a host-issued clarification reference containing the originating task ID, a fresh nonce and expiry. Only a matching typed intervention update retains that reference. Referenced answers preserve exact bytes, including whitespace and Unicode, and reject oversize input rather than silently shortening it. Existing unreferenced prompt/update decoding remains compatible.
+
+`ComputerUseTextClarificationStore` retains one bounded unresolved goal in memory. Original user text, subsequent answers and host questions remain separate. Consumption checks reference, originating controller/session, a new answer request ID, expiry and the current scope digest; it consumes once. Replacement, explicit cancellation and scope change invalidate the prior reference. A new store after restart has no authority for old references. Input/turn-limit failures do not consume an otherwise valid question. Goal equality distinguishes different Unicode byte representations.
+
+All **13 focused signed methods pass**, verified against exact source/result identifiers with zero skips: seven new retention/wire methods and six existing protocol, trusted-input, pause and ledger methods. See [the foundation result](clarification-foundation-v1-results.json). This is a tested primitive, not a functioning continuation flow: host questions and client answers do not yet use it, and the local planner still accepts a single current-user string.
+
+Next, connect actual adapter scope to the retained request, carry typed user turns into planning without turning host question text or synthetic separators into payload authority, issue/replay references through the host ledger, and attach them to client answers. Malformed or expired references must be rejected before normal/paused execution; the legacy JSON-to-plain-prompt fallback cannot handle them. The client also needs an explicit way to start an unrelated request and discard the pending reference. Then test the real model and owned-browser continuation before claiming T29, and qualify native/mobile flows separately.
+
+This refines F02/F04 and the mobile qualification gate in `TODO.md`. They remain open; no passing end-to-end continuation evidence is claimed here.

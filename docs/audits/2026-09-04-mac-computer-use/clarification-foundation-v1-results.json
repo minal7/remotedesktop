@@ -1,0 +1,82 @@
+{
+  "schemaVersion": 1,
+  "sourceBaseCommit": "269f4490c4ed7a02fbc4a2005e850a383fd72001",
+  "scope": "Exact clarification answer wire types and bounded host retention primitive; client/manager/planner integration is not implemented yet.",
+  "buildLog": "/tmp/remotedesktop-clarification-foundation-build-v1.log",
+  "resultBundle": "/tmp/remotedesktop-clarification-foundation-unit-v1.xcresult",
+  "inventorySnapshot": {
+    "selectors": [
+      "RemoteDesktopHostTests/ComputerUseTextClarificationTests",
+      "RemoteDesktopHostTests/ComputerUseTests/test_orderedControlAndApprovalPayloadsRemainWireCompatible",
+      "RemoteDesktopHostTests/ComputerUseTests/test_managerUsesClarificationConversationWhenAnswerIsComplete",
+      "RemoteDesktopHostTests/ComputerUseTests/test_legacyExecutorDefaultReceivesOnlyTrustedCurrentUserPrompt",
+      "RemoteDesktopHostTests/ComputerUseTests/test_structuredConversationPauseBeforePromptResumeKeepsTrustedTurnSeparate",
+      "RemoteDesktopHostTests/ComputerUseTests/test_taskLedgerPersistsAtMostOnceClaimAndTerminalReplay",
+      "RemoteDesktopHostTests/ComputerUseTests/test_taskLedgerBindsControlAndPromptToSenderAndSession"
+    ],
+    "expectedTests": [
+      "RemoteDesktopHostTests/ComputerUseTests/test_legacyExecutorDefaultReceivesOnlyTrustedCurrentUserPrompt",
+      "RemoteDesktopHostTests/ComputerUseTests/test_managerUsesClarificationConversationWhenAnswerIsComplete",
+      "RemoteDesktopHostTests/ComputerUseTests/test_orderedControlAndApprovalPayloadsRemainWireCompatible",
+      "RemoteDesktopHostTests/ComputerUseTests/test_structuredConversationPauseBeforePromptResumeKeepsTrustedTurnSeparate",
+      "RemoteDesktopHostTests/ComputerUseTests/test_taskLedgerBindsControlAndPromptToSenderAndSession",
+      "RemoteDesktopHostTests/ComputerUseTests/test_taskLedgerPersistsAtMostOnceClaimAndTerminalReplay",
+      "RemoteDesktopHostTests/ComputerUseTextClarificationTests/testAnswerWirePreservesExactBytesAndRejectsOversizeInsteadOfTruncating",
+      "RemoteDesktopHostTests/ComputerUseTextClarificationTests/testCancellationMatchesTheOriginatingRequestAndNewTaskCanClearAllRetention",
+      "RemoteDesktopHostTests/ComputerUseTextClarificationTests/testExpiryRestartReplacementAndDocumentChangeCannotReviveOriginalGoal",
+      "RemoteDesktopHostTests/ComputerUseTextClarificationTests/testInputBudgetRejectsOverflowBeforeConsumingAValidQuestion",
+      "RemoteDesktopHostTests/ComputerUseTextClarificationTests/testOnlyMatchingInterventionUpdateCarriesAReferenceAndLegacyWireStillDecodes",
+      "RemoteDesktopHostTests/ComputerUseTextClarificationTests/testReferenceCannotCrossSenderSessionNonceOrBeConsumedTwice",
+      "RemoteDesktopHostTests/ComputerUseTextClarificationTests/testRetainedGoalSurvivesTwoAnswersWithoutTruncatingOrMixingQuestionsIntoUserText"
+    ]
+  },
+  "sourceSHA256": {
+    "protocol/Swift/ComputerUseProtocol.swift": "89d27013dc501ea0c45fc1bf2878cbaed4a26d1f09b25b5d6fd1f0adb2b219a2",
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseTextClarificationStore.swift": "04256f80855b004a3062de32ed0124c1970763093f001eb8901d269a956dda6f",
+    "host-mac/RemoteDesktopHostTests/ComputerUseTextClarificationTests.swift": "d35157da4da2a65a644ae9a515e0bfdbd0660a6a9a06d97b3b963568e64cf02d",
+    "host-mac/RemoteDesktopHost.xcodeproj/project.pbxproj": "31484e456a877dbf1c5caa5d2e689217e5deace3114e16f23d3d3e48ec66c114",
+    "host-mac/AcceptanceFixtures/osatlas-deterministic-tests.json": "fc50d48df42b75210a8fe4b3b7a47e4550f2f2498cf3971a8df3824c0be320f5"
+  },
+  "summary": {
+    "devicesAndConfigurations": [
+      {
+        "device": {
+          "architecture": "arm64",
+          "deviceId": "00006021-000821AC02BB401E",
+          "deviceName": "My Mac",
+          "modelName": "MacBook Pro",
+          "osBuildNumber": "26A5406e",
+          "osVersion": "27.0",
+          "platform": "macOS"
+        },
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "passedTests": 13,
+        "skippedTests": 0,
+        "testPlanConfiguration": {
+          "configurationId": "1",
+          "configurationName": "Test Scheme Action"
+        }
+      }
+    ],
+    "environmentDescription": "RemoteDesktopHost \u00b7 Built with macOS 27.0",
+    "expectedFailures": 0,
+    "failedTests": 0,
+    "finishTime": 1788659839.37,
+    "passedTests": 13,
+    "result": "Passed",
+    "skippedTests": 0,
+    "startTime": 1788659837.675,
+    "statistics": [],
+    "testFailures": [],
+    "title": "Test - RemoteDesktopHost",
+    "topInsights": [],
+    "totalTestCount": 13
+  },
+  "limitations": [
+    "No host-issued question or client answer currently uses these new fields. T29 remains open.",
+    "No actual model, browser/native continuation, mobile transport or restart flow was exercised.",
+    "The existing manager still uses its legacy prompt decoder and conversation path; integration must reject malformed/expired references instead of treating their JSON or answer as a standalone goal.",
+    "Questions and user-turn boundaries must remain separate during planner/catalog integration."
+  ]
+}
