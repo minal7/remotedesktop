@@ -22,6 +22,27 @@ final class ComputerUseTaskJournalStore {
 
     deinit { close(descriptor) }
 
+    /// A capability may decline only a task it has never accepted. Probe
+    /// without creating storage or following a journal symlink. Even a corrupt
+    /// or dangling entry is evidence that the task is not known to be fresh;
+    /// only ENOENT means absent. Recovery still uses the strict load() path.
+    static func hasJournal(taskID: String, directory: URL) throws -> Bool {
+        let fd = directory.path.withCString { Darwin.open($0, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC) }
+        if fd < 0 {
+            if errno == ENOENT { return false }
+            throw StoreError.unavailable
+        }
+        defer { close(fd) }
+        var info = stat()
+        guard fstat(fd, &info) == 0, info.st_uid == getuid(), info.st_mode & 0o777 == 0o700 else {
+            throw StoreError.invalidFile
+        }
+        let name = ComputerUseTextTaskContract.digest(taskID) + ".json"
+        if fstatat(fd, name, &info, AT_SYMLINK_NOFOLLOW) == 0 { return true }
+        guard errno == ENOENT else { throw StoreError.unavailable }
+        return false
+    }
+
     func load(taskID: String) throws -> ComputerUseTaskJournal? {
         let name = ComputerUseTextTaskContract.digest(taskID) + ".json"
         let fd = openat(descriptor, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)

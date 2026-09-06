@@ -126,14 +126,25 @@ final class ComputerUseCapabilityExecutorTests: XCTestCase {
 
     func testNativeErrorCannotReplayGoalThroughDesktopAndSameIDCannotChangeGoal() async throws {
         var loads = 0
+        var nativeFailure: any Error = ComputerUseTextEditError.deliveryUncertain
         let executor = ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in
-            throw ComputerUseTextEditError.deliveryUncertain
+            throw nativeFailure
         }, desktopFactory: { _ in loads += 1; return RoutingDesktopFixture() })
-        do {
-            _ = try await executor.execute(taskID: "t1", prompt: "text", trustedUserPrompt: "Append x.",
-                tools: tools(), progress: { _ in })
-            XCTFail("Uncertain text must not fall back")
-        } catch { XCTAssertEqual(error as? ComputerUseTextEditError, .deliveryUncertain) }
+        // An error with this name can also originate in response decoding,
+        // snapshot validation or preflight. It is not a no-effect decline.
+        let failures: [any Error] = [ComputerUseTextEditError.deliveryUncertain,
+            ComputerUseBrowserError.unsupportedDocument, ComputerUseBrowserError.pageChanged]
+        for failure in failures {
+            nativeFailure = failure
+            do {
+                _ = try await executor.execute(taskID: "t1", prompt: "text", trustedUserPrompt: "Append x.",
+                    tools: tools(), progress: { _ in })
+                XCTFail("A native error must not fall back")
+            } catch {
+                if let expected = failure as? ComputerUseTextEditError { XCTAssertEqual(error as? ComputerUseTextEditError, expected) }
+                else { XCTAssertEqual(error as? ComputerUseBrowserError, failure as? ComputerUseBrowserError) }
+            }
+        }
         do {
             _ = try await executor.execute(taskID: "t1", prompt: "new", trustedUserPrompt: "Append y.",
                 tools: tools(), progress: { _ in })

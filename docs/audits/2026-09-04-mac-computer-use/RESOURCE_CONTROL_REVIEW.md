@@ -1,6 +1,8 @@
 # Resource control repair review
 
-Status: source review and implementation in progress. No build, test, inference, app launch or computer-use interaction was performed for this review. The user's real flight, concert and movie scenarios remain deferred until development readiness is established and the user explicitly permits execution. This review does not identify the cause of the reported fan spike.
+Status: further performance optimization is deferred until the correctness repairs are complete, following the user's latest instruction. No build, test, inference, app launch or computer-use interaction was performed for this review. The user's real flight, concert and movie scenarios remain deferred until development readiness is established and the user explicitly permits execution. This review does not identify the cause of the reported fan spike.
+
+The unfinished native model demand-loading implementation is preserved in local stash `f11908b0e0617388bec0a3d4a9542c9c5694f174`, outside the active worktree. It modifies the native loader, manager and three test files, and has not been compiled or executed. Review it against subsequent correctness changes before applying it in the later performance phase. The ordering below applies within that deferred phase; it is not the current task priority.
 
 ## What the observation establishes
 
@@ -33,7 +35,7 @@ Paths below are relative to `host-mac/RemoteDesktopHost/ComputerUse/` unless oth
 
 The first change uses the pinned upstream behavior: [argument definitions](https://github.com/ggml-org/llama.cpp/blob/6eddde06a4f25d55d538b5d15628dcc2b6882147/common/arg.cpp#L1257) accept zero polling for both pools; [CPU parameter defaults](https://github.com/ggml-org/llama.cpp/blob/6eddde06a4f25d55d538b5d15628dcc2b6882147/common/common.h#L61) use level 50; [worker scheduling](https://github.com/ggml-org/llama.cpp/blob/6eddde06a4f25d55d538b5d15628dcc2b6882147/ggml/src/ggml-cpu/ggml-cpu.c#L2975) falls through from the polling loop to a condition-variable wait. This removes that polling budget, not all runtime CPU use or GPU work. Wake-up latency may change and must be measured.
 
-## Idle retirement contract to implement next
+## Idle retirement contract for the deferred phase
 
 1. The manager owns a generation-scoped activity lease covering setup, execution, approval continuation and teardown. Merely seeing `.idle` at one await boundary cannot authorize shutdown of newer work.
 2. An idle deadline captures its generation. New admitted work invalidates the deadline synchronously. Expiration rechecks ownership before starting runtime cleanup, and new activation joins that cleanup barrier.
@@ -44,7 +46,7 @@ The first change uses the pinned upstream behavior: [argument definitions](https
 
 ## Current change and deferred validation
 
-The candidate edits `OSAtlasLlamaRuntime.swift` and `OSAtlasComputerUseExecutorTests.swift`. The polling change updates four existing launch/preset checks. The cancellation change adds four gate regressions and one composed runtime regression with fake processes/HTTP. The default inventory now selects exactly 400 source methods; `resource-control-inventory.json` selects 17 focused methods including existing shutdown, stale-generation and process-exclusion checks. Both inventories match source. No model, executable, prompt contract, input/output token limit, installed app or runtime artifact was replaced. `git diff --check` passes; compilation and test execution remain pending during the current pause.
+The resource checkpoint at `02e4356` edits `OSAtlasLlamaRuntime.swift` and `OSAtlasComputerUseExecutorTests.swift`. The polling change updates four existing launch/preset checks. The cancellation change adds four gate regressions and one composed runtime regression with fake processes/HTTP. At that checkpoint the default inventory selected exactly 400 source methods; `resource-control-inventory.json` selected 17 focused methods including existing shutdown, stale-generation and process-exclusion checks. Both inventories matched source. No model, executable, prompt contract, input/output token limit, installed app or runtime artifact was replaced. `git diff --check` passed; compilation and test execution remain pending during the current pause.
 
 The source review covers these cancellation orderings: cancellation before registration is checked under the registration lock; cancellation while queued removes exactly its own continuation; handoff reserves the next caller before wake-up; cancellation after reservation releases that reservation before model work; returning to the runtime actor repeats the cancellation check; stale or unrelated release cannot clear another owner's UUID. Continuations resume outside the lock. Cancelling queued work neither cancels HTTP nor stops the current process. These are reviewed invariants, not a substitute for running the frozen regression selection.
 

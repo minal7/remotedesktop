@@ -70,6 +70,8 @@ final class ComputerUseNativeTextExecutor {
         guard !isExecuting else { throw Failure.alreadyExecuting }
         isExecuting = true
         defer { isExecuting = false }
+        try Task.checkCancellation()
+        guard mayAct() else { throw ComputerUseTextEditError.interrupted }
         if preparedClarification?.taskID == taskID {
             throw ComputerUseTextTaskError.journalMismatch
         }
@@ -90,9 +92,14 @@ final class ComputerUseNativeTextExecutor {
         retainedTaskOriginID = nil
         invalidateClarification()
         let browserTarget = try browserTargetProvider?(taskID)
-        let fields: [ComputerUseTextField]
-        if let browserTarget { fields = try await browserTarget.fields() }
+        let fields: [ComputerUseTextField]?
+        if let browserTarget { fields = try await browserTarget.fieldsIfSupported() }
         else { fields = target.fields() }
+        try Task.checkCancellation()
+        guard mayAct() else { throw ComputerUseTextEditError.interrupted }
+        // This decline precedes planning, contract persistence and input.
+        // Never convert a later execution/continuation error into fallback.
+        guard let fields else { return try decline(taskID: taskID) }
         return try await planAndRun(taskID: taskID, goal: goal, originatingTaskID: nil,
             browserTarget: browserTarget, fields: fields, verifiedStep: verifiedStep, progress: progress)
     }
@@ -203,7 +210,7 @@ final class ComputerUseNativeTextExecutor {
             if let browserTarget { return try await browserTarget.read(targetID: id) }
             return target.snapshot(targetID: id)
         }
-        guard !fields.isEmpty else { return nil }
+        guard !fields.isEmpty else { return try decline(taskID: taskID) }
         try Task.checkCancellation()
         guard mayAct() else { throw ComputerUseTextEditError.interrupted }
         let proposal: ComputerUseTextGoalProposal
@@ -215,7 +222,7 @@ final class ComputerUseNativeTextExecutor {
         let operations: [ComputerUseTextGoalOperation]
         let unchanged: [String]
         switch proposal {
-        case .unsupported: return nil
+        case .unsupported: return try decline(taskID: taskID)
         case .clarification:
             guard goal.userTurns.count < ComputerUseUnresolvedTextGoal.maximumUserTurns else {
                 return .unableToComplete("I still couldn't determine the complete form edit. Start a new request with the field and exact text.")
@@ -285,6 +292,17 @@ final class ComputerUseNativeTextExecutor {
         retainedTaskOriginID = originatingTaskID
         invalidateClarification(taskID: taskID)
         return try await run(task, verifiedStep: verifiedStep, progress: progress)
+    }
+
+    private func decline(taskID: String) throws -> ComputerUseExecutionResult? {
+        try Task.checkCancellation()
+        guard mayAct() else { throw ComputerUseTextEditError.interrupted }
+        // A new executor has no in-memory contract, but an earlier one may
+        // already have attempted input. Absence of current effects alone does
+        // not permit reconstructing that task through another capability.
+        let hasJournal = try ComputerUseTextStepStore.hasJournal(taskID: taskID, directory: journalDirectory)
+        guard !hasJournal else { throw ComputerUseTextTaskError.journalMismatch }
+        return nil
     }
 
     private func run(_ task: ComputerUseTextTask, verifiedStep: (Int, Int) -> Void,

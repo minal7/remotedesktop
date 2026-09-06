@@ -254,10 +254,24 @@ final class ComputerUseBrowserTextTarget {
     }
 
     func fields() async throws -> [ComputerUseTextField] {
+        guard let fields = try await fieldsIfSupported() else { throw ComputerUseBrowserError.unsupportedDocument }
+        return fields
+    }
+
+    /// Only an explicit, complete no-effect discovery decline permits another
+    /// capability to consider a fresh task. Transport/decoding failures, stale
+    /// documents and invalid snapshots remain errors, even before an edit.
+    /// Retained tasks and clarification answers must not use this entrypoint.
+    func fieldsIfSupported() async throws -> [ComputerUseTextField]? {
         try validate()
         guard documentID == nil else { throw ComputerUseBrowserError.pageChanged }
         let reply = try await browser.callDOM(.fields, arguments: [:], document: document)
         try validate()
+        if reply.status == "unsupported" || reply.status == "limit" {
+            guard reply.fields == nil else { throw ComputerUseBrowserError.unsupportedDocument }
+            return nil
+        }
+        if reply.status == "stale" { throw ComputerUseBrowserError.pageChanged }
         guard reply.status == "ok", let fields = reply.fields, fields.count <= 16 else {
             throw ComputerUseBrowserError.unsupportedDocument
         }

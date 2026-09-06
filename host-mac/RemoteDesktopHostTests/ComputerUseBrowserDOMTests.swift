@@ -318,8 +318,13 @@ final class ComputerUseBrowserDOMTests: XCTestCase {
                     ComputerUseBrowserTextTarget(browser: fixture.browser,
                         document: try fixture.browser.acquireCurrentDocument(taskID: taskID), requiresFrontmost: false)
                 })
-            let result = try await executor.execute(taskID: "whole-plan", prompt: "Carry out the planned form edits", progress: { _ in })
+            var desktopLoads = 0
+            let coordinator = ComputerUseCapabilityExecutor(native: executor, desktopFactory: { _ in desktopLoads += 1; return DOMRoutingDesktopFixture() })
+            let result = try await coordinator.execute(taskID: "whole-plan", prompt: "Carry out the planned form edits",
+                trustedUserPrompt: "Carry out the planned form edits",
+                tools: ComputerUseHostTools(injector: InputInjector(), mayAct: { true }), progress: { _ in })
             guard case .unableToComplete = result else { return XCTFail("The complete plan is incompatible before its first edit") }
+            XCTAssertEqual(desktopLoads, 0, "An exact-text constraint failure cannot be routed around")
             XCTAssertEqual(planner.calls, 1)
             XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
             try await fixture.wait { fixture.server.count("/signal") == 1 }
@@ -877,6 +882,170 @@ final class ComputerUseBrowserDOMTests: XCTestCase {
         }
     }
 
+    func testUnsupportedInitialBrowserFormPreservesWholeGoalThroughDesktopRouting() async throws {
+        for body in ["<p>No form</p>", "<label>Named<input></label><input>",
+                     String(repeating: "<label>Field<input></label>", count: 17)] {
+            var discoveries = 0
+            let fixture = try await DOMFixture(body: body + """
+                <script>document.addEventListener('input', () => fetch('/input-event'));</script>
+                """, domScriptDidDispatch: { if $0 == .fields { discoveries += 1 } })
+            defer { fixture.close() }
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let planner = DOMFixturePlanner()
+            let native = ComputerUseNativeTextExecutor(injector: InputInjector(), mayAct: { true }, journalDirectory: directory,
+                planner: planner, editOverride: { _, _ in XCTFail("Discovery must not emit AX input") },
+                browserTargetProvider: { taskID in ComputerUseBrowserTextTarget(browser: fixture.browser,
+                    document: try fixture.browser.acquireCurrentDocument(taskID: taskID), requiresFrontmost: false) })
+            let desktop = DOMRoutingDesktopFixture()
+            var desktopLoads = 0
+            let executor = ComputerUseCapabilityExecutor(native: native, desktopFactory: { _ in desktopLoads += 1; return desktop })
+            let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true })
+            let goal = "Find flights from San Francisco to Los Angeles and compare prices. Do not book."
+            let modelContext = "Earlier context\nCurrent request: " + goal
+            let conversation = [ComputerUseConversationTurn(role: .assistant, text: "Earlier context")]
+            for _ in 0..<2 {
+                let result = try await executor.execute(taskID: "whole-goal", modelPrompt: modelContext,
+                    currentUserPrompt: goal, conversation: conversation, tools: tools, progress: { _ in })
+                XCTAssertEqual(result, desktop.result, "Declining a form is not completion of the whole task")
+            }
+            XCTAssertEqual(discoveries, 1, "Resume must retain the desktop route without rediscovering the form")
+            XCTAssertEqual(desktopLoads, 1); XCTAssertEqual(planner.calls, 0)
+            XCTAssertEqual(desktop.taskIDs, ["whole-goal", "whole-goal"])
+            XCTAssertEqual(desktop.currentPrompts, [goal, goal])
+            XCTAssertEqual(desktop.modelPrompts, [modelContext, modelContext])
+            XCTAssertEqual(desktop.conversations, [conversation, conversation])
+            XCTAssertNil(try executor.clarification(taskID: "whole-goal"))
+            XCTAssertEqual(fixture.server.count("/input-event"), 0)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+        }
+    }
+
+    func testInterruptedInitialBrowserDiscoveryCannotEnterDesktopFallback() async throws {
+        for reason in ["before", "cancel", "takeover", "ownership"] {
+            var allowed = reason != "before", browserAllowed = true, discoveries = 0
+            var request: Task<ComputerUseExecutionResult, Error>?
+            defer { request?.cancel(); request = nil }
+            let fixture = try await DOMFixture(body: "<input>", domScriptDidDispatch: { command in
+                guard command == .fields else { return }
+                discoveries += 1
+                if reason == "cancel" { request?.cancel() }
+                if reason == "takeover" { allowed = false }
+                if reason == "ownership" { browserAllowed = false }
+            }, mayAct: { browserAllowed })
+            defer { fixture.close() }
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let planner = DOMFixturePlanner()
+            let native = ComputerUseNativeTextExecutor(injector: InputInjector(), mayAct: { allowed }, journalDirectory: directory,
+                planner: planner, browserTargetProvider: { taskID in ComputerUseBrowserTextTarget(browser: fixture.browser,
+                    document: try fixture.browser.acquireCurrentDocument(taskID: taskID), requiresFrontmost: false) })
+            var desktopLoads = 0
+            let executor = ComputerUseCapabilityExecutor(native: native, desktopFactory: { _ in desktopLoads += 1; return DOMRoutingDesktopFixture() })
+            let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { allowed })
+            request = Task { try await executor.execute(taskID: "interrupted", prompt: "Find movie showtimes",
+                trustedUserPrompt: "Find movie showtimes", tools: tools, progress: { _ in }) }
+            do { _ = try await request?.value; XCTFail("An interruption cannot become capability fallback") }
+            catch {
+                if reason == "cancel" { XCTAssertTrue(error is CancellationError) }
+                else if reason == "ownership" { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+                else { XCTAssertEqual(error as? ComputerUseTextEditError, .interrupted) }
+            }
+            XCTAssertEqual(discoveries, reason == "before" ? 0 : 1)
+            XCTAssertEqual(desktopLoads, 0); XCTAssertEqual(planner.calls, 0)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+        }
+    }
+
+    func testScopedAnswerCannotFallBackWhenPlannerDeclinesOrFormBecomesUnsupported() async throws {
+        for changedForm in [false, true] {
+            let fixture = try await DOMFixture(body: """
+                <label>Origin<input value="old"></label><label>Destination<input value="keep"></label>
+                <script>document.addEventListener('input', () => fetch('/input-event'));
+                fetch('/signal').then(() => { document.body.append(document.createElement('input')); fetch('/changed'); });</script>
+                """, heldSignal: true)
+            defer { fixture.close() }
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let planner = DOMClarificationFixturePlanner(declinesAnswer: true)
+            let native = clarificationExecutor(fixture: fixture, planner: planner, directory: directory)
+            var desktopLoads = 0
+            let executor = ComputerUseCapabilityExecutor(native: native, desktopFactory: { _ in desktopLoads += 1; return DOMRoutingDesktopFixture() })
+            let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true })
+            let prompt = "Put \"blue\" in a field."
+            _ = try await executor.execute(taskID: "question", prompt: prompt, trustedUserPrompt: prompt, tools: tools, progress: { _ in })
+            let pending = try XCTUnwrap(executor.clarification(taskID: "question"))
+            let answer = try pending.goal.answering(pending.question, with: "Destination")
+            if changedForm {
+                try await fixture.wait { fixture.server.count("/signal") == 1 }
+                fixture.server.releaseHeldResponses()
+                try await fixture.wait { fixture.server.count("/changed") == 1 }
+                do {
+                    _ = try await executor.continueClarification(taskID: "answer", originatingTaskID: "question", goal: answer, progress: { _ in })
+                    XCTFail("A scoped answer cannot rediscover an unsupported form or enter desktop routing")
+                } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+            } else {
+                let result = try await executor.continueClarification(taskID: "answer", originatingTaskID: "question", goal: answer, progress: { _ in })
+                guard case .unableToComplete = result else { return XCTFail("A declined answer stays within its retained goal") }
+            }
+            XCTAssertEqual(planner.goals.count, changedForm ? 1 : 2)
+            XCTAssertEqual(desktopLoads, 0); XCTAssertEqual(fixture.server.count("/input-event"), 0)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+        }
+    }
+
+    func testNativeInputUncertaintyCannotReenterDesktopRouting() async throws {
+        let fixture = try await DOMFixture(body: """
+            <label>Origin<input value="old"></label><label>Destination<input value="keep"></label>
+            <script>document.querySelector('input').addEventListener('input', e => { e.target.value = 'rejected'; fetch('/input-event'); });
+            fetch('/signal').then(() => { document.body.append(document.createElement('input')); fetch('/changed'); });</script>
+            """, heldSignal: true)
+        defer { fixture.close() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let planner = DOMFixturePlanner()
+        var discoveries = 0, desktopLoads = 0
+        func makeExecutor(planner: any ComputerUseTextGoalPlanning) -> ComputerUseCapabilityExecutor {
+            let native = ComputerUseNativeTextExecutor(injector: InputInjector(), mayAct: { true }, journalDirectory: directory,
+                planner: planner, browserTargetProvider: { taskID in
+                    discoveries += 1
+                    return ComputerUseBrowserTextTarget(browser: fixture.browser,
+                        document: try fixture.browser.acquireCurrentDocument(taskID: taskID), requiresFrontmost: false)
+                })
+            return ComputerUseCapabilityExecutor(native: native, desktopFactory: { _ in desktopLoads += 1; return DOMRoutingDesktopFixture() })
+        }
+        let executor = makeExecutor(planner: planner)
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true })
+        let prompt = "Set Origin to Paris and leave Destination unchanged"
+        for _ in 0..<2 {
+            do {
+                _ = try await executor.execute(taskID: "uncertain", prompt: prompt, trustedUserPrompt: prompt, tools: tools, progress: { _ in })
+                XCTFail("An uncertain native effect must not be repeated by either route")
+            } catch { XCTAssertEqual(error as? ComputerUseTextTaskError, .uncertainEffect) }
+        }
+        try await fixture.wait { fixture.server.count("/input-event") == 1 }
+        XCTAssertEqual(fixture.server.count("/input-event"), 1)
+        XCTAssertEqual(discoveries, 1); XCTAssertEqual(planner.calls, 1); XCTAssertEqual(desktopLoads, 0)
+        // A recreated executor must check durable ownership before declining,
+        // whether its new planner declines or the page no longer has a form
+        // this capability can observe completely.
+        let decliningPlanner = DOMRepresentabilityFixturePlanner { _ in .unsupported }
+        for unsupportedForm in [false, true] {
+            if unsupportedForm {
+                try await fixture.wait { fixture.server.count("/signal") == 1 }
+                fixture.server.releaseHeldResponses()
+                try await fixture.wait { fixture.server.count("/changed") == 1 }
+            }
+            let recreated = makeExecutor(planner: decliningPlanner)
+            do {
+                _ = try await recreated.execute(taskID: "uncertain", prompt: prompt, trustedUserPrompt: prompt, tools: tools, progress: { _ in })
+                XCTFail("A persisted attempt cannot become a fresh desktop task after executor replacement")
+            } catch { XCTAssertEqual(error as? ComputerUseTextTaskError, .journalMismatch) }
+        }
+        XCTAssertEqual(discoveries, 3); XCTAssertEqual(planner.calls, 1); XCTAssertEqual(decliningPlanner.calls, 1)
+        XCTAssertEqual(desktopLoads, 0); XCTAssertEqual(fixture.server.count("/input-event"), 1)
+    }
+
     func testCancellationAndDeadlineKeepInFlightScriptOwnedUntilItsCallbackWithoutReplay() async throws {
         for cancellation in [true, false] {
             var allowed = true
@@ -947,6 +1116,29 @@ final class ComputerUseBrowserDOMTests: XCTestCase {
         }
         try await fixture.wait { fixture.server.count("/input-event") == 1 }
         XCTAssertEqual(fixture.server.count("/input-event"), 1)
+    }
+}
+
+@MainActor
+private final class DOMRoutingDesktopFixture: ComputerUseExecuting {
+    let isReady = true
+    let runtimeName = "Routing fixture"
+    let result = ComputerUseExecutionResult.unableToComplete("Recording handoff only; no desktop task is performed by this fixture.")
+    var taskIDs: [String] = [], currentPrompts: [String] = [], modelPrompts: [String] = []
+    var conversations: [[ComputerUseConversationTurn]] = []
+
+    func execute(prompt: String, tools: ComputerUseHostTools,
+                 progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
+        XCTFail("Routing must retain the structured task boundary")
+        return result
+    }
+
+    func execute(taskID: String, modelPrompt: String, currentUserPrompt: String,
+                 conversation: [ComputerUseConversationTurn], tools: ComputerUseHostTools,
+                 progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
+        taskIDs.append(taskID); currentPrompts.append(currentUserPrompt)
+        modelPrompts.append(modelPrompt); conversations.append(conversation)
+        return result
     }
 }
 
