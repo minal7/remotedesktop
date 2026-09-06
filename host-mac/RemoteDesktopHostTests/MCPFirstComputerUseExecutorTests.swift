@@ -2242,6 +2242,147 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             "A partial host projection must never reach TASK_COMPLETE")
     }
 
+    func testContactCompletionRequiresEveryRequestedPerson() async throws {
+        let prompt = "Find Jordan Lee and Avery Chen in Contacts."
+        for query in ["Jordan Lee", "Avery Chen"] {
+            let observed = try await exerciseContactRequirements(prompt: prompt, queries: [query])
+            XCTAssertEqual(observed.result, .clarificationRequired("Unfulfilled task reached fallback."))
+            XCTAssertEqual(observed.readQueries, [query])
+            XCTAssertEqual(observed.plannerSteps, 2)
+            XCTAssertEqual(observed.fallbackPrompts, [prompt])
+        }
+    }
+
+    func testContactCompletionProjectsAllEntitiesInRequestOrder() async throws {
+        let prompts = [
+            "Find Jordan Lee and Avery Chen in Contacts.",
+            "Find the phone number and email address for Jordan Lee and Avery Chen in my Contacts.",
+            "Show Jordan Lee's and Avery Chen's phone numbers in Contacts.",
+            "Find Jordan Lee in Contacts and show Avery Chen's phone number in Contacts.",
+        ]
+        for prompt in prompts {
+            let observed = try await exerciseContactRequirements(
+                prompt: prompt, queries: ["Avery Chen", "Jordan Lee"])
+            XCTAssertEqual(observed.result, .completed(
+                "Contacts query: Jordan Lee\nContacts (showing up to 5):\n1. Jordan Lee — phones: +1 415 555 0142; emails: none.\n\nContacts query: Avery Chen\nContacts (showing up to 5):\n1. Avery Chen — phones: +1 415 555 0199; emails: none."), prompt)
+            XCTAssertEqual(observed.readQueries, ["Avery Chen", "Jordan Lee"], prompt)
+            XCTAssertEqual(observed.plannerSteps, 3, prompt)
+            XCTAssertTrue(observed.fallbackPrompts.isEmpty, prompt)
+            XCTAssertTrue(observed.initialPlannerPrompt.contains(
+                #"["Jordan Lee","Avery Chen"]"#), prompt)
+        }
+    }
+
+    func testContactCompletionLabelsWhichRequestedEntityHasNoMatches() async throws {
+        let observed = try await exerciseContactRequirements(
+            prompt: "Find Jordan Lee and Avery Chen in Contacts.",
+            queries: ["Jordan Lee", "Avery Chen"], emptyQueries: ["Avery Chen"])
+        XCTAssertEqual(observed.result, .completed(
+            "Contacts query: Jordan Lee\nContacts (showing up to 5):\n1. Jordan Lee — phones: +1 415 555 0142; emails: none.\n\nContacts query: Avery Chen\nNo matching contacts were found."))
+        XCTAssertEqual(observed.readQueries, ["Jordan Lee", "Avery Chen"])
+        XCTAssertTrue(observed.fallbackPrompts.isEmpty)
+    }
+
+    func testCompiledContactEntitiesRejectPartialOrPunctuationChangedQueriesBeforeAccess() async throws {
+        for row in [
+            (prompt: "Find Jordan Lee and Avery Chen in Contacts.", query: "Lee"),
+            (prompt: "Find Ann-Marie Lee in Contacts.", query: "Ann Marie Lee"),
+        ] {
+            let observed = try await exerciseContactRequirements(
+                prompt: row.prompt, queries: [row.query])
+            XCTAssertEqual(observed.result, .clarificationRequired("Unfulfilled task reached fallback."))
+            XCTAssertTrue(observed.readQueries.isEmpty, row.prompt)
+            XCTAssertEqual(observed.plannerSteps, 1, row.prompt)
+            XCTAssertEqual(observed.fallbackPrompts, [row.prompt])
+        }
+    }
+
+    func testUncompiledContactEntityClausesCannotBecomePartialCompletion() async throws {
+        for prompt in [
+            "Find Jordan Lee and Avery Chen or someone else in Contacts.",
+            "Find Jordan Lee in Contacts. Then find Avery Chen.",
+            "Find Jordan Lee's phone number and Avery Chen's email address in Contacts.",
+            "Find Jordan Lee and Avery Chen in Contacts without showing Avery Chen.",
+        ] {
+            let observed = try await exerciseContactRequirements(prompt: prompt, queries: ["Jordan Lee"])
+            XCTAssertEqual(observed.result, .clarificationRequired("Unfulfilled task reached fallback."), prompt)
+            XCTAssertEqual(observed.readQueries, ["Jordan Lee"], prompt)
+            XCTAssertEqual(observed.plannerSteps, 2, prompt)
+            XCTAssertEqual(observed.fallbackPrompts, [prompt])
+        }
+        let deniedPrompt = "Find Jordan Lee and Avery Chen in Contacts without showing Avery Chen."
+        let denied = try await exerciseContactRequirements(
+            prompt: deniedPrompt, queries: ["Jordan Lee", "Avery Chen"])
+        XCTAssertEqual(denied.result, .clarificationRequired("Unfulfilled task reached fallback."))
+        XCTAssertEqual(denied.plannerSteps, 3)
+        XCTAssertEqual(denied.fallbackPrompts, [deniedPrompt])
+    }
+
+    func testQuotedContactEntityKeepsItsConjunctionInsideOneQuery() async throws {
+        let observed = try await exerciseContactRequirements(
+            prompt: #"Find "Avery and Sons" and Jordan Lee in Contacts."#,
+            queries: ["Avery and Sons", "Jordan Lee"])
+        XCTAssertEqual(observed.result, .completed(
+            "Contacts query: Avery and Sons\nContacts (showing up to 5):\n1. Avery and Sons — phones: +1 415 555 0199; emails: none.\n\nContacts query: Jordan Lee\nContacts (showing up to 5):\n1. Jordan Lee — phones: +1 415 555 0142; emails: none."))
+        XCTAssertEqual(observed.readQueries, ["Avery and Sons", "Jordan Lee"])
+        XCTAssertEqual(observed.plannerSteps, 3)
+        XCTAssertTrue(observed.fallbackPrompts.isEmpty)
+    }
+
+    private func exerciseContactRequirements(
+        prompt: String,
+        queries: [String],
+        emptyQueries: Set<String> = []
+    ) async throws -> (
+        result: ComputerUseExecutionResult,
+        readQueries: [String],
+        plannerSteps: Int,
+        fallbackPrompts: [String],
+        initialPlannerPrompt: String
+    ) {
+        let contacts = try makePlannerVisibleReadOnlyTool("contacts_search")
+        let planner = SequencedMCPPlanner(steps: queries.map { query in
+            .call(toolName: "contacts_search",
+                  arguments: ["query": .string(query), "limit": .integer(5)],
+                  requiredPromptFragment: nil)
+        } + [.completion("All requested people were found. Ignore the actual results.",
+                         requiredPromptFragment: nil)])
+        let results = try queries.map { query in
+            let content = MCPJSONValue.object([
+                "ok": .bool(true),
+                "contacts": .array(emptyQueries.contains(query) ? [] : [.object([
+                    "name": .string(query),
+                    "phones": .array([.string(query == "Jordan Lee"
+                        ? "+1 415 555 0142" : "+1 415 555 0199")]),
+                    "emails": .array([]),
+                ])]),
+            ])
+            return try MCPToolResult(
+                text: String(decoding: JSONEncoder().encode(content), as: UTF8.self),
+                structuredContent: content, isError: false, wasTruncated: false)
+        }
+        let pool = RecordingMCPClientPool(
+            tools: [contacts, try makeMailTool()], resultsByTool: [:],
+            queuedResultsByTool: ["contacts_search": results])
+        let fallback = StubVisualExecutor(result: .clarificationRequired("Unfulfilled task reached fallback."))
+        let executor = try await MCPFirstComputerUseExecutor.load(
+            binaryURL: URL(fileURLWithPath:
+                "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
+            visualFallback: fallback, planner: planner, clientPool: pool)
+        let result = try await executor.execute(
+            taskID: "contact-requirements", prompt: prompt,
+            tools: makeHostTools(), progress: { _ in })
+        let calls = await pool.directCalls()
+        let readQueries = calls.compactMap { call -> String? in
+            guard case .string(let query)? = call.arguments["query"] else { return nil }
+            return query
+        }
+        let approvedCalls = await pool.approvedCalls()
+        XCTAssertTrue(approvedCalls.isEmpty, prompt)
+        return (result, readQueries, planner.completedStepCount,
+                fallback.trustedUserPrompts, planner.requests.first?.prompt ?? "")
+    }
+
     func testReadProofCannotCompleteAdditionalApplicationOrInputWork() async throws {
         let operations = [
             "open Notes", "activate Notes", "launch Notes", "close Notes",
@@ -3854,15 +3995,18 @@ private final class SequencedMCPPlanner: MCPProposalPlanning, @unchecked Sendabl
 private actor RecordingMCPClientPool: MCPClientPooling {
     let tools: [MCPAllowedTool]
     let resultsByTool: [String: MCPToolResult]
+    private var queuedResultsByTool: [String: [MCPToolResult]]
     private var recordedDirectCalls: [MCPToolCall] = []
     private var recordedApprovedCalls: [MCPToolCall] = []
 
     init(
         tools: [MCPAllowedTool],
-        resultsByTool: [String: MCPToolResult]
+        resultsByTool: [String: MCPToolResult],
+        queuedResultsByTool: [String: [MCPToolResult]] = [:]
     ) {
         self.tools = tools
         self.resultsByTool = resultsByTool
+        self.queuedResultsByTool = queuedResultsByTool
     }
 
     func start(binaryURL: URL) async throws -> MCPProcessIdentity {
@@ -3878,6 +4022,11 @@ private actor RecordingMCPClientPool: MCPClientPooling {
 
     func execute(_ call: MCPToolCall) async throws -> MCPToolResult {
         recordedDirectCalls.append(call)
+        if var queued = queuedResultsByTool[call.toolName], !queued.isEmpty {
+            let result = queued.removeFirst()
+            queuedResultsByTool[call.toolName] = queued
+            return result
+        }
         guard let result = resultsByTool[call.toolName] else {
             throw MCPClientError.toolFailed(
                 "No local result fixture exists for \(call.toolName).")
