@@ -6,6 +6,62 @@ import XCTest
 
 @MainActor
 final class ComputerUseLocalTextGoalPlannerTests: XCTestCase {
+    func testQuotationSyntaxCandidateChangesOnlyTheQuotedMarkersInSingleAndAnsweredRequests() async throws {
+        let examples: [(ComputerUseUnresolvedTextGoal, [String])] = [
+            (try .init(userRequest: "Set \"Origin\" to “private Ω”."), ["Set \"[exact quoted payload p1]\" to “[exact quoted payload p2]”."]),
+            (try ComputerUseUnresolvedTextGoal(userRequest: "Put “private Ω” in a field.").answering("Which field?", with: "Destination"),
+             ["Put “[exact quoted payload p1]” in a field.", "Destination"]),
+            (try .init(userRequest: "Set Origin to Oslo."), ["Set Origin to Oslo."]),
+            (try ComputerUseUnresolvedTextGoal(userRequest: "Set Origin to a value.").answering("What exact text?", with: "Oslo"),
+             ["Set Origin to a value.", "Oslo"]),
+            (try .init(userRequest: "Keep p1. Set \"Origin\" to \"private Ω\"."),
+             ["Keep p1. Set \"[exact quoted payload p2]\" to \"[exact quoted payload p3]\"."])
+        ]
+        for (goal, expectedTurns) in examples {
+            let transport = FixedTextTransport(response: try envelope(#"{"disposition":"unsupported","edits":[]}"#))
+            _ = try await planner(transport: transport, contract: .candidateV2).propose(goal: goal, fields: fields())
+            _ = try await planner(transport: transport, contract: .quotedReferencesV12).propose(goal: goal, fields: fields())
+            let requests = await transport.requests
+            XCTAssertEqual(requests.count, 2)
+            var roots = try requests.map { try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap($0.httpBody)) as? [String: Any]) }
+            let messages = try roots.map { try XCTUnwrap($0["messages"] as? [[String: String]]) }
+            XCTAssertEqual(messages[0][0], messages[1][0], "Instructions must remain identical")
+            var contexts = try messages.map { try XCTUnwrap(JSONSerialization.jsonObject(with: Data(XCTUnwrap($0[1]["content"]).utf8)) as? [String: Any]) }
+            if goal.userTurns.count == 1 { XCTAssertEqual(contexts[1]["task"] as? String, expectedTurns[0]) }
+            else { XCTAssertEqual(contexts[1]["userTurns"] as? [String], expectedTurns) }
+            for index in roots.indices {
+                roots[index].removeValue(forKey: "messages")
+                contexts[index].removeValue(forKey: "task"); contexts[index].removeValue(forKey: "userTurns")
+            }
+            XCTAssertTrue(NSDictionary(dictionary: roots[0]).isEqual(to: roots[1]), "Schema, sampling and model must remain identical")
+            XCTAssertTrue(NSDictionary(dictionary: contexts[0]).isEqual(to: contexts[1]), "Labels, literal IDs, matches and questions must remain identical")
+            XCTAssertFalse(try XCTUnwrap(messages[1][1]["content"]).contains("private Ω"))
+            let catalog = try ComputerUseTextPayloadCatalog(goal: goal)
+            if catalog.payloads.isEmpty { XCTAssertEqual(requests[0].httpBody, requests[1].httpBody) }
+        }
+    }
+
+    func testQuotationSyntaxCandidateKeepsHostPayloadAuthorityAndExactContextPreflight() async throws {
+        let goal = try ComputerUseUnresolvedTextGoal(userRequest: "Put \"  e\u{301} 😀\n\" in a field.")
+            .answering("Which field?", with: "Destination")
+        let valid = FixedTextTransport(response: try envelope(#"{"disposition":"supported","edits":[{"fieldID":"f2","mode":"replaceAll","value":"p1"}]}"#))
+        let result = try await planner(transport: valid, contract: .quotedReferencesV12).propose(goal: goal, fields: fields())
+        guard case .edits(let edits, let unchanged) = result else { return XCTFail("The host must resolve the exact retained payload") }
+        XCTAssertEqual(edits.count, 1); XCTAssertTrue(edits[0].text.utf8.elementsEqual("  e\u{301} 😀\n".utf8))
+        XCTAssertEqual(edits[0].targetID, "private-ax-1"); XCTAssertEqual(unchanged, ["private-ax-0"])
+        let catalog = try ComputerUseTextPayloadCatalog(goal: goal)
+        for invalid in ["[exact quoted payload p1]", "\"[exact quoted payload p1]\"", "Which field?"] {
+            XCTAssertNil(catalog.resolveUnquoted(invalid), "Retained quotation syntax does not create a supplied value")
+        }
+        let overflow = FixedTextTransport(tokens: 3_009)
+        do {
+            _ = try await planner(transport: overflow, contract: .quotedReferencesV12).propose(goal: goal, fields: fields())
+            XCTFail("The changed input must pass the exact token budget")
+        } catch { XCTAssertEqual(error as? ComputerUseLocalTextPlanError, .contextLimit) }
+        let calls = await overflow.completions
+        XCTAssertEqual(calls, 0)
+    }
+
     func testObservedWholeInstructionProposalAsksBeforeAnyBrowserInputOrJournal() async throws {
         var stage = "start fixture"
         do {

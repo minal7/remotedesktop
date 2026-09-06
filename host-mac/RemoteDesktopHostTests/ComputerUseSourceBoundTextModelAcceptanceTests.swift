@@ -139,7 +139,7 @@ final class ComputerUseSourceBoundTextModelAcceptanceTests: XCTestCase {
               Set(corpus.cases.map(\.id)).count == corpus.cases.count,
               corpus.cases.allSatisfy({ item in
                   (1...16).contains(item.fields.count) && ["supported", "unsupported", "clarification"].contains(item.expectedDisposition)
-                  && (item.clarificationAnswers == nil || (contract == .candidateV2 && !allowFieldCopy))
+                  && (item.clarificationAnswers == nil || (contract.supportsClarificationInput && !allowFieldCopy))
                   && (item.expectedDisposition == "supported" ? !(item.allowedPlans ?? []).isEmpty : item.allowedPlans == nil)
                   && (item.allowedPlans ?? []).allSatisfy { plan in
                       (1...8).contains(plan.count) && plan.allSatisfy { edit in

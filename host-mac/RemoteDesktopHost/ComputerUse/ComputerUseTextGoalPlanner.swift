@@ -55,6 +55,7 @@ struct ComputerUseTextGoalPlanner: ComputerUseTextGoalPlanning {
 struct ComputerUseTextPayloadCatalog {
     let projectedTask: String
     let projectedUserTurns: [String]
+    let quotationPreservingUserTurns: [String]
     let payloads: [String: String]
     private let unquotedSegments: [(turn: Int, text: String)]
     private let originalRequest: String
@@ -71,17 +72,20 @@ struct ComputerUseTextPayloadCatalog {
         guard (1...ComputerUseUnresolvedTextGoal.maximumUserTurns).contains(userTurns.count),
               userTurns.reduce(0, { $0 + $1.utf8.count }) <= 32 * 1_024 else { throw ComputerUseTextTaskError.invalidPlan }
         var projections: [String] = []
+        var quotationPreservingProjections: [String] = []
         var values: [String: String] = [:]
         var nextPayloadID = 1
         var segments: [(turn: Int, text: String)] = []
         for (turn, task) in userTurns.enumerated() {
             var projection = ""
+            var quotationPreservingProjection = ""
             var cursor = task.startIndex
             var segment = ""
             while cursor < task.endIndex {
                 let opening = task[cursor]
                 guard opening == "\"" || opening == "“" else {
                     projection.append(opening)
+                    quotationPreservingProjection.append(opening)
                     segment.append(opening)
                     cursor = task.index(after: cursor)
                     continue
@@ -104,13 +108,17 @@ struct ComputerUseTextPayloadCatalog {
                 if !segment.isEmpty { segments.append((turn, segment)); segment = "" }
                 // The position of the reference preserves which field/clause owns
                 // the literal. The model never has to reproduce its bytes.
-                projection += "[exact quoted payload \(id)]"
+                let marker = "[exact quoted payload \(id)]"
+                projection += marker
+                quotationPreservingProjection += String(opening) + marker + String(close)
                 cursor = task.index(after: end)
             }
             if !segment.isEmpty { segments.append((turn, segment)) }
             projections.append(projection)
+            quotationPreservingProjections.append(quotationPreservingProjection)
         }
         projectedUserTurns = projections
+        quotationPreservingUserTurns = quotationPreservingProjections
         // This joined form supports existing reference checks only. The
         // clarification request sends separate turns to the model, and the
         // authority segments above never cross a turn boundary.

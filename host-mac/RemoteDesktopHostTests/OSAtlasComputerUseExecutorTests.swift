@@ -9255,6 +9255,35 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
         await runtime.shutdown()
     }
 
+    func testRuntimeQuotationSyntaxCandidateUsesTheSameLeaseAndCannotEnableCopyFallback() async throws {
+        let events = RuntimeEventLog()
+        let response = try JSONSerialization.data(withJSONObject: ["model": ComputerUseNativeTextRuntimeInputs.modelAlias,
+            "choices": [["finish_reason": "stop", "message": ["role": "assistant",
+                "content": #"{"disposition":"supported","edits":[{"fieldID":"f1","mode":"replaceAll","value":"p1"}]}"#]]]])
+        let transport = FakeTransportMaker(events: events, completionDataResponses: [response])
+        let runtime = textRuntime(FakeLlamaLauncher(events: events), transports: transport)
+        let endpoint = try await runtime.activateNativeText(nativeTextInputs)
+        let goal = try ComputerUseUnresolvedTextGoal(userRequest: "Set Origin to a value")
+            .answering("What exact text?", with: "\"  東京\n\"")
+        let result = try await runtime.proposeNativeText(endpoint: endpoint, prompt: goal.userTurns[0], fields: nativeTextFields,
+            contract: .quotedReferencesV12, clarificationGoal: goal)
+        guard case .edits(let edits, _) = result else { await runtime.shutdown(); return XCTFail("The candidate lost its literal") }
+        XCTAssertTrue(try XCTUnwrap(edits.first).text.utf8.elementsEqual("  東京\n".utf8))
+        let requests = transport.recordedCompletionRequests()
+        XCTAssertEqual(requests.count, 1)
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(requests.first?.httpBody)) as? [String: Any])
+        let messages = try XCTUnwrap(body["messages"] as? [[String: String]])
+        let context = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(XCTUnwrap(messages[1]["content"]).utf8)) as? [String: Any])
+        XCTAssertEqual(context["userTurns"] as? [String], ["Set Origin to a value", "\"[exact quoted payload p1]\""])
+        do {
+            _ = try await runtime.proposeNativeText(endpoint: endpoint, prompt: goal.userTurns[0], fields: nativeTextFields,
+                contract: .quotedReferencesV12, allowFieldCopy: true, clarificationGoal: goal)
+            XCTFail("The quotation-only candidate cannot inherit the experimental copy fallback")
+        } catch { XCTAssertEqual(error as? ComputerUseLocalTextPlanError, .invalidResponse) }
+        XCTAssertEqual(transport.recordedCompletionRequests().count, 1)
+        await runtime.shutdown()
+    }
+
     func testRuntimeClarificationRejectsAnUnrelatedOriginalAndChecksExactContextLimit() async throws {
         for mismatchedOriginal in [false, true] {
             let events = RuntimeEventLog()

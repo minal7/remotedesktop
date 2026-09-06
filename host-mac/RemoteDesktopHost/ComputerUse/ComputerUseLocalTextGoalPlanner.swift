@@ -57,6 +57,9 @@ struct ComputerUseLocalTextGoalPlanner: ComputerUseTextGoalPlanning {
         case fieldOperationsV9 = "field-operations-v9"
         case textActionsV10 = "text-actions-v10"
         case textActionsV11 = "text-actions-v11"
+        case quotedReferencesV12 = "quoted-references-v12"
+
+        var supportsClarificationInput: Bool { self == .candidateV2 || self == .quotedReferencesV12 }
     }
     static let contextTokens = 4_096
     static let outputTokens = 1_024
@@ -83,8 +86,8 @@ struct ComputerUseLocalTextGoalPlanner: ComputerUseTextGoalPlanning {
     func propose(goal: ComputerUseUnresolvedTextGoal, fields: [ComputerUseTextField]) async throws -> ComputerUseTextGoalProposal {
         guard goal.userTurns.count > 1 else { return try await propose(prompt: goal.userTurns[0], fields: fields) }
         // Qualification of experimental schemas does not silently extend to a
-        // new input contract. This continuation uses the normal v2 schema.
-        guard contract == .candidateV2 else { return .unsupported }
+        // new input contract. Both eligible inputs use the v2 output schema.
+        guard contract.supportsClarificationInput else { return .unsupported }
         return try await propose(makeCatalog: { try ComputerUseTextPayloadCatalog(goal: goal) }, fields: fields, clarification: goal)
     }
 
@@ -124,7 +127,7 @@ struct ComputerUseLocalTextGoalPlanner: ComputerUseTextGoalPlanning {
             throw ComputerUseLocalTextPlanError.invalidResponse
         }
         context.removeValue(forKey: "task")
-        context["userTurns"] = catalog.projectedUserTurns
+        context["userTurns"] = contract == .quotedReferencesV12 ? catalog.quotationPreservingUserTurns : catalog.projectedUserTurns
         context["questionsBeforeAnswers"] = goal.questions
         messages[0]["content"] = Self.candidateV2Instructions + "\n" + Self.clarificationInstructions
         messages[1]["content"] = String(decoding: try JSONSerialization.data(withJSONObject: context, options: [.sortedKeys]), as: UTF8.self)
@@ -186,7 +189,8 @@ struct ComputerUseLocalTextGoalPlanner: ComputerUseTextGoalPlanning {
             "model": connection.modelAlias,
             "messages": [["role": "system", "content": contract == .frozenV1 ? Self.instructions : Self.candidateV2Instructions],
                          ["role": "user", "content": try Self.context(catalog: catalog, fields: fields,
-                                                                      includeQuotedFieldMatches: contract == .candidateV2)]],
+                                                                      includeQuotedFieldMatches: contract.supportsClarificationInput,
+                                                                      preserveLiteralQuotationSyntax: contract == .quotedReferencesV12)]],
             "temperature": 0, "top_p": 1, "top_k": 0,
             "max_tokens": Self.outputTokens, "cache_prompt": false,
             "response_format": ["type": "json_schema", "json_schema": [
@@ -206,8 +210,9 @@ struct ComputerUseLocalTextGoalPlanner: ComputerUseTextGoalPlanning {
     /// model-visible context. Individual strings are always JSON-encoded.
     static func context(catalog: ComputerUseTextPayloadCatalog, fields: [ComputerUseTextField],
                         includeQuotedFieldMatches: Bool = false, preserveQuotedFieldNames: Bool = false,
-                        includeLiteralTextLookup: Bool = false) throws -> String {
-        guard !(includeQuotedFieldMatches && includeLiteralTextLookup) else { throw ComputerUseLocalTextPlanError.invalidResponse }
+                        includeLiteralTextLookup: Bool = false, preserveLiteralQuotationSyntax: Bool = false) throws -> String {
+        guard !(includeQuotedFieldMatches && includeLiteralTextLookup),
+              !(preserveQuotedFieldNames && preserveLiteralQuotationSyntax) else { throw ComputerUseLocalTextPlanError.invalidResponse }
         func quote(_ value: String) throws -> String {
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.withoutEscapingSlashes]
@@ -220,7 +225,7 @@ struct ComputerUseLocalTextGoalPlanner: ComputerUseTextGoalPlanning {
             Int($0.dropFirst())! < Int($1.dropFirst())!
         }
         let ids = try literalIDs.map(quote).joined(separator: ", ")
-        var task = catalog.projectedTask
+        var task = preserveLiteralQuotationSyntax ? catalog.quotationPreservingUserTurns.joined(separator: "\n") : catalog.projectedTask
         if preserveQuotedFieldNames {
             // Keep the user's quoted name in its original syntactic position.
             // These names already appear in the observed labels; other literal

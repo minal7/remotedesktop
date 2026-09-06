@@ -1266,7 +1266,7 @@ actor OSAtlasLlamaRuntime {
         do {
             guard !allowFieldCopy || contract == .candidateV2 else { throw ComputerUseLocalTextPlanError.invalidResponse }
             if let clarificationGoal {
-                guard !allowFieldCopy, contract == .candidateV2,
+                guard !allowFieldCopy, contract.supportsClarificationInput,
                       prompt.utf8.elementsEqual(clarificationGoal.userTurns[0].utf8) else {
                     throw ComputerUseLocalTextPlanError.invalidResponse
                 }
