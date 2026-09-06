@@ -1,0 +1,80 @@
+{
+  "schemaVersion": 1,
+  "status": "frozen-before-heldout-inference",
+  "candidateSourceCommit": "461e599",
+  "candidate": "field-operations-candidate-v8.json",
+  "corpus": {
+    "path": "host-mac/AcceptanceFixtures/native-field-operations-v8-heldout.json",
+    "sha256": "e65d403771bc7b2388f2a3f5fa3f75619b5870d05d85144feff043148d582b93",
+    "caseIDs": [
+      "H801",
+      "H802",
+      "H803",
+      "H804",
+      "H805",
+      "H806",
+      "H807",
+      "H808",
+      "H809",
+      "H810",
+      "H811",
+      "H812",
+      "H813",
+      "H814",
+      "H815",
+      "H816",
+      "H817",
+      "H818",
+      "H819",
+      "H820"
+    ]
+  },
+  "batches": [
+    {
+      "path": "host-mac/AcceptanceFixtures/native-field-operations-v8-heldout-batch-1.json",
+      "sha256": "b0eda095fd94e7f883e3ed67dd8fe69cddb5a2387346f3f36b4ccb838f791650",
+      "caseIDs": [
+        "H801",
+        "H802",
+        "H803",
+        "H804",
+        "H805"
+      ]
+    },
+    {
+      "path": "host-mac/AcceptanceFixtures/native-field-operations-v8-heldout-batch-2.json",
+      "sha256": "6a46670641cb36a1931830e2653fc4f210459a310d6ad465acfc362d738939b7",
+      "caseIDs": [
+        "H806",
+        "H807",
+        "H808",
+        "H809",
+        "H810"
+      ]
+    },
+    {
+      "path": "host-mac/AcceptanceFixtures/native-field-operations-v8-heldout-batch-3.json",
+      "sha256": "f81ddc4cdc1e8cb380ce99995f8715cf2dcc93f618d33b53401dbd121fbb2b19",
+      "caseIDs": [
+        "H811",
+        "H812",
+        "H813",
+        "H814",
+        "H815"
+      ]
+    },
+    {
+      "path": "host-mac/AcceptanceFixtures/native-field-operations-v8-heldout-batch-4.json",
+      "sha256": "90a1c840602489c7a2b2752c10dc9d521d18abf05d51f4139dd70a53657f2921",
+      "caseIDs": [
+        "H816",
+        "H817",
+        "H818",
+        "H819",
+        "H820"
+      ]
+    }
+  ],
+  "inspectionBoundary": "No v8 per-case proposal/result inspected before authoring this corpus; the already-running v8 known regression run was not changed.",
+  "qualificationRule": "Run unchanged v8 once across all cases, retain failures, no prompt or expected-result changes mid-run. If revised after seeing these results, this corpus becomes regression data."
+}
