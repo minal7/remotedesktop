@@ -117,7 +117,7 @@ final class ComputerUseNativeTextExecutor {
     private let planningWorker: ComputerUsePlanningWorker
     private let planningTimeout: TimeInterval
     private let editOverride: ((ComputerUseTextPlanEdit, ComputerUseTextSnapshot) async throws -> Void)?
-    private let browserTargetProvider: ((String) throws -> ComputerUseBrowserTextTarget?)?
+    private let browserTargetProvider: (@MainActor (String) async throws -> ComputerUseBrowserTextTarget?)?
     private let now: () -> Date
     private let clarificationLifetime: TimeInterval
     private var retainedTask: ComputerUseTextTask?
@@ -131,7 +131,7 @@ final class ComputerUseNativeTextExecutor {
          journalDirectory: URL = ComputerUseTextStepStore.defaultDirectory,
          planner: any ComputerUseTextGoalPlanning,
          editOverride: ((ComputerUseTextPlanEdit, ComputerUseTextSnapshot) async throws -> Void)? = nil,
-         browserTargetProvider: ((String) throws -> ComputerUseBrowserTextTarget?)? = nil,
+         browserTargetProvider: (@MainActor (String) async throws -> ComputerUseBrowserTextTarget?)? = nil,
          now: @escaping () -> Date = Date.init, clarificationLifetime: TimeInterval = 600,
          nativeTarget: (any ComputerUseNativeTextTarget)? = nil,
          planningWorker: ComputerUsePlanningWorker = .shared,
@@ -179,7 +179,7 @@ final class ComputerUseNativeTextExecutor {
         retainedTask = nil
         retainedTaskOriginID = nil
         invalidateClarification()
-        let browserTarget = try browserTargetProvider?(taskID)
+        let browserTarget = try await browserTargetProvider?(taskID)
         let fields: [ComputerUseTextField]?
         if let browserTarget { fields = try await browserTarget.fieldsIfSupported() }
         else { fields = target.fields() }

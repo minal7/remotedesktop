@@ -2811,6 +2811,55 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
         }
     }
 
+    func testOwnedBrowserPlanningContinuesOnObservedNetworkAndHistoryResultPages() async throws {
+        let fact = "Support phone: 415-555-0142"
+        for (index, history) in [false, true].enumerated() {
+            let transition = history ? "history.replaceState({}, '', '/results'); document.querySelector('p').textContent='\(fact)'; fetch('/changed');"
+                : "document.querySelector('a').click();"
+            let server = try OwnedBrowserHTTPFixture(routes: [
+                "/start": .init(body: "<p>Loading results</p><a href='/results'>Results</a><script>fetch('/signal').then(() => { \(transition) });</script>"),
+                "/signal": .init(held: true), "/results": .init(body: "<p>\(fact)</p>")])
+            let base = try await server.start()
+            defer { server.stop() }
+            let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+            defer { browser.close() }
+            try browser.claim(taskID: "active-browser-answer")
+            let original = try await browser.navigate(taskID: "active-browser-answer", operationID: "open", to: base.appendingPathComponent("start"))
+            try await waitForBrowserEvidenceFixture { server.count("/signal") == 1 }
+            server.releaseHeldResponses()
+            try await waitForBrowserEvidenceFixture {
+                server.count(history ? "/changed" : "/results") == 1 && !browser.isLoadingPage && !browser.validate(original)
+            }
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let navigation = ComputerUseBrowserNavigationTask(browser: browser, journalDirectory: directory)
+            let fixture = makeCorrectionRuntime(completionResponses: [], port: UInt16(43_790 + index))
+            let requests = SemanticRoutingRequestLog()
+            let executor = OSAtlasComputerUseExecutor.makeForTesting(inputs: fixture.inputs, runtime: fixture.runtime,
+                semanticRouter: StubSemanticActionRouter { request in
+                    await requests.record(request)
+                    return .init(directive: .answer, argument: .visibleAnswer(summary: fact, evidence: [fact]))
+                }, maxSteps: 1)
+            let observation = try OSAtlasAcceptanceFixtureRenderer.localBrowserEvidence(lines: [fact])
+            let prompt = "What is the support phone number?"
+            do {
+                let result = try await executor.execute(taskID: "active-browser-answer", prompt: prompt, trustedUserPrompt: prompt,
+                    tools: correctionTestTools(observation: observation, browserNavigationTask: navigation,
+                        actionPerformer: { _ in XCTFail("Refreshing page observation must not replay an input") }), progress: { _ in })
+                XCTAssertEqual(result, .completed(fact))
+            } catch { await fixture.runtime.shutdown(); throw error }
+            await fixture.runtime.shutdown()
+            let recorded = await requests.values()
+            XCTAssertEqual(recorded.count, 1, "Fresh page acquisition must not exhaust the planning retry budget")
+            XCTAssertEqual(recorded.first?.task, prompt)
+            XCTAssertTrue(try XCTUnwrap(recorded.first?.browserPageContext).serialized().contains(fact))
+            let current = try XCTUnwrap(browser.currentDocument(taskID: "active-browser-answer"))
+            XCTAssertEqual(current.source, .activePageObservation)
+            XCTAssertNil(browser.receipt(taskID: "active-browser-answer", operationID: current.operationID))
+            XCTAssertEqual(server.count("/results"), history ? 0 : 1)
+        }
+    }
+
     func testOwnedBrowserInvisibleDestinationChangeRestartsPlanningBeforeTyping() async throws {
         let server = try OwnedBrowserHTTPFixture(routes: ["/results": .init(body: """
             <label>Search<input></label><a id='result' href='/event?opaque=first'>Event</a>

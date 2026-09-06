@@ -47,6 +47,7 @@ enum ComputerUseBrowserSite {
 struct ComputerUseBrowserDocument: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     enum Source: Equatable, Sendable {
         case automationNavigation
+        case activePageObservation
         case userControlObservation
     }
     let contextID: String
@@ -129,6 +130,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     private var taskControlHandler: ((ComputerUseBrowserTaskControls, ComputerUseBrowserTaskControls.Action) -> Void)?
     private(set) var taskID: String?
     private var generation: UInt64 = 0
+    private var ownershipEpoch = UUID()
     private var document: ComputerUseBrowserDocument?
     private var receipts: [String: ComputerUseBrowserDocument] = [:]
     private let mayAct: () -> Bool
@@ -141,26 +143,30 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     private var urlObservation: NSKeyValueObservation?
     private var pending: PendingNavigation?
     private var pendingDOM: PendingDOM?
-    private var userNavigation: UserNavigation?
-    private var observedUserPage: ObservedUserPage?
+    private var observedNavigation: ObservedNavigation?
+    private var observedUserPage: ObservedPage?
+    private var observedActivePage: ObservedPage?
     private var loadedPageIdentity: String?
     private var signInBrowser: WKWebView?
     private var signInWindow: NSWindow?
     private var signInURLObservation: NSKeyValueObservation?
     private var signInScope: (taskID: String, ownerID: UUID)?
 
-    private struct UserNavigation {
+    private struct ObservedNavigation {
         let navigation: WKNavigation
         let generation: UInt64
+        let taskID: String
+        let startedWhileActive: Bool
         var successfulResponseURL: URL?
     }
 
-    private struct ObservedUserPage {
+    private struct ObservedPage {
         enum Proof { case navigation, sameDocument(String) }
         let id: UUID
         let generation: UInt64
         let url: URL
         let proof: Proof
+        var requiresExplicitHandback = false
     }
 
     private struct PendingDOM {
@@ -233,13 +239,15 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
 
     func claim(taskID: String) throws {
         guard !hasOpenSignInWindow else { throw ComputerUseBrowserError.signInWindowOpen }
-        guard pending == nil, pendingDOM == nil, userNavigation == nil else { throw ComputerUseBrowserError.busy }
+        guard pending == nil, pendingDOM == nil, observedNavigation == nil else { throw ComputerUseBrowserError.busy }
         guard mayAct(), !taskID.isEmpty else { throw ComputerUseBrowserError.ownershipLost }
         if self.taskID != taskID {
+            ownershipEpoch = UUID()
             self.taskID = taskID
             generation &+= 1
             document = nil
             observedUserPage = nil
+            observedActivePage = nil
             receipts.removeAll()
         }
     }
@@ -273,13 +281,53 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     /// A paused person's navigation is observable, but has no automation
     /// authority until the host accepts an authenticated explicit Resume and
     /// joins the previous executor. Merely opening the action gate is not enough.
-    var isLoadingPage: Bool { browser?.isLoading == true || pending != nil || userNavigation != nil }
+    var isLoadingPage: Bool { browser?.isLoading == true || pending != nil || observedNavigation != nil }
 
     var hasPageAwaitingHandback: Bool {
         guard let observedUserPage else { return false }
-        return observedUserPage.generation == generation && pending == nil
-            && userNavigation == nil && browser?.isLoading == false
-            && browser?.url == observedUserPage.url
+        return isCurrentPageObservation(observedUserPage)
+    }
+
+    private func isCurrentPageObservation(_ page: ObservedPage) -> Bool {
+        page.generation == generation && pending == nil
+            && observedNavigation == nil && browser?.isLoading == false
+            && browser?.url == page.url
+    }
+
+    /// A completed page may be observed after a link, form or site script
+    /// navigates while this task is active. This mints no action receipt and
+    /// never adopts a page changed during user control without explicit Resume.
+    func acquireObservedDocument(taskID: String) async throws -> ComputerUseBrowserDocument {
+        try Task.checkCancellation()
+        guard let owner = self.taskID, hasOwnership(taskID: owner), let view = browser else {
+            throw ComputerUseBrowserError.ownershipLost
+        }
+        guard hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
+        guard pending == nil else { throw ComputerUseBrowserError.busy }
+        let epoch = ownershipEpoch
+        let deadline = ContinuousClock.now + navigationTimeout
+        while observedNavigation != nil || view.isLoading {
+            try Task.checkCancellation()
+            guard self.taskID == owner, ownershipEpoch == epoch, browser === view, hasOwnership(taskID: owner) else {
+                throw ComputerUseBrowserError.ownershipLost
+            }
+            guard hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
+            guard ContinuousClock.now < deadline else { throw ComputerUseBrowserError.deadlineExceeded }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        try Task.checkCancellation()
+        guard self.taskID == owner, ownershipEpoch == epoch, browser === view, hasOwnership(taskID: owner) else {
+            throw ComputerUseBrowserError.ownershipLost
+        }
+        guard pending == nil, pendingDOM == nil else { throw ComputerUseBrowserError.busy }
+        guard hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
+        if let document, validate(document) { return try acquireCurrentDocument(taskID: taskID) }
+        guard observedUserPage == nil, let observed = observedActivePage, !observed.requiresExplicitHandback else {
+            throw ComputerUseBrowserError.pageChanged
+        }
+        try await adoptPageObservation(observed, source: .activePageObservation, taskID: taskID)
+        guard let current = currentDocument(taskID: taskID) else { throw ComputerUseBrowserError.pageChanged }
+        return current
     }
 
     func reacquireAfterUserControl(taskID: String) async throws {
@@ -287,18 +335,29 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         guard browser != nil, self.taskID == taskID || isFrontmostWindow else { return }
         guard !hasOpenSignInWindow else { throw ComputerUseBrowserError.signInWindowOpen }
         guard mayAct() else { throw ComputerUseBrowserError.ownershipLost }
-        guard pending == nil, pendingDOM == nil, userNavigation == nil,
+        guard pending == nil, pendingDOM == nil, observedNavigation == nil,
               browser?.isLoading == false else { throw ComputerUseBrowserError.busy }
         // An unchanged document needs no new navigation or invented receipt.
         if let document, validate(document) { return }
-        guard let observed = observedUserPage, hasPageAwaitingHandback else {
-            throw ComputerUseBrowserError.pageChanged
-        }
-        let owner = self.taskID
-        let view = browser
+        if let observed = observedUserPage {
+            try await adoptPageObservation(observed, source: .userControlObservation, taskID: taskID)
+        } else if let observed = observedActivePage {
+            // A page observed during automation remains that kind of evidence
+            // when explicitly handed back later. It is never an action receipt.
+            try await adoptPageObservation(observed, source: .activePageObservation, taskID: taskID)
+        } else { throw ComputerUseBrowserError.pageChanged }
+        detail = "Control returned — checking the current page"
+    }
+
+    private func adoptPageObservation(_ observed: ObservedPage, source: ComputerUseBrowserDocument.Source,
+                                      taskID: String) async throws {
+        guard source != .automationNavigation, isCurrentPageObservation(observed) else { throw ComputerUseBrowserError.pageChanged }
+        let owner = self.taskID, view = browser, epoch = ownershipEpoch
         func isCurrentObservation() -> Bool {
-            mayAct() && self.taskID == owner && browser === view
-                && observedUserPage?.id == observed.id && hasPageAwaitingHandback
+            let retained = source == .userControlObservation ? observedUserPage : observedActivePage
+            return mayAct() && self.taskID == owner && ownershipEpoch == epoch && browser === view && !hasOpenSignInWindow
+                && (source != .activePageObservation || hasRequiredPresentation)
+                && retained?.id == observed.id && isCurrentPageObservation(observed)
         }
         let identity: String?
         do {
@@ -315,18 +374,20 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         guard isCurrentObservation() else { throw ComputerUseBrowserError.pageChanged }
         if case .sameDocument(let expectedIdentity) = observed.proof, identity != expectedIdentity {
             observedUserPage = nil
+            observedActivePage = nil
             loadedPageIdentity = nil
             throw ComputerUseBrowserError.pageChanged
         }
         try claim(taskID: taskID)
         document = ComputerUseBrowserDocument(contextID: contextID, taskID: taskID,
-            generation: generation, operationID: "user-observation-\(observed.id.uuidString)",
-            requestedURL: observed.url, committedURL: observed.url, source: .userControlObservation)
+            generation: generation, operationID: "page-observation-\(observed.id.uuidString)",
+            requestedURL: observed.url, committedURL: observed.url, source: source)
         // This observation is deliberately absent from `receipts`. The URL
         // records observed location, not a requested/executed navigation.
         observedUserPage = nil
+        observedActivePage = nil
         loadedPageIdentity = identity
-        detail = "Control returned — checking the current page"
+        detail = "Checking the current page"
     }
 
     func callDOM(_ command: ComputerUseBrowserDOMCommand, arguments: [String: Any],
@@ -461,7 +522,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
                   from expectedDocument: ComputerUseBrowserDocument? = nil) async throws -> ComputerUseBrowserDocument {
         try Task.checkCancellation()
         guard hasOwnership(taskID: taskID) else { throw ComputerUseBrowserError.ownershipLost }
-        guard pending == nil, pendingDOM == nil else { throw ComputerUseBrowserError.busy }
+        guard pending == nil, pendingDOM == nil, observedNavigation == nil else { throw ComputerUseBrowserError.busy }
         guard receipts[operationID] == nil, receipts.count < 64, !operationID.isEmpty else {
             // An uncertain navigation is reconciled by the step engine. This
             // adapter never reissues a completed operation ID on its own.
@@ -484,6 +545,8 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         generation &+= 1
         document = nil
         loadedPageIdentity = nil
+        observedActivePage = nil
+        observedUserPage = nil
         displayedSite = ComputerUseBrowserSite.displayName(for: url)
         detail = "Opening page…"
         let id = UUID()
@@ -533,10 +596,12 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         if let pending { failPending(id: pending.id, error: .ownershipLost) }
         if let pendingDOM { interruptDOM(id: pendingDOM.id, error: ComputerUseBrowserError.ownershipLost) }
         taskID = nil
+        ownershipEpoch = UUID()
         generation &+= 1
         document = nil
-        userNavigation = nil
+        observedNavigation = nil
         observedUserPage = nil
+        observedActivePage = nil
         loadedPageIdentity = nil
         browser?.stopLoading()
         detail = "Stopped"
@@ -555,8 +620,9 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         closeSignInWindow(restoreParent: false)
         if let pendingDOM { interruptDOM(id: pendingDOM.id, error: ComputerUseBrowserError.closed) }
         pendingDOM = nil
-        userNavigation = nil
+        observedNavigation = nil
         observedUserPage = nil
+        observedActivePage = nil
         loadedPageIdentity = nil
         urlObservation = nil
         browser?.navigationDelegate = nil
@@ -621,16 +687,20 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         guard browser === view, view.url == url else { return }
         displayedSite = ComputerUseBrowserSite.displayName(for: url)
         let changed = document.map { $0.committedURL != url } ?? false
-        let observedChanged = observedUserPage.map { $0.url != url } ?? false
+        let observedChanged = (observedUserPage.map { $0.url != url } ?? false)
+            || (observedActivePage.map { $0.url != url } ?? false)
         guard pending == nil, changed || observedChanged || !ordered else { return }
         let previousIdentity = loadedPageIdentity
         generation &+= 1
         document = nil
         observedUserPage = nil
-        if ordered, !mayAct(), taskID != nil, !view.isLoading, userNavigation == nil,
+        observedActivePage = nil
+        if ordered, taskID != nil, !view.isLoading, observedNavigation == nil,
            let previousIdentity, let url, Self.validatedURL(url) != nil {
-            observedUserPage = ObservedUserPage(id: UUID(), generation: generation,
+            let observation = ObservedPage(id: UUID(), generation: generation,
                 url: url, proof: .sameDocument(previousIdentity))
+            if mayAct() { observedActivePage = observation }
+            else { observedUserPage = observation }
         } else {
             loadedPageIdentity = nil
         }
@@ -831,13 +901,14 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
               (200...299).contains(response.statusCode),
               let url = response.url, Self.validatedURL(url) != nil else {
             decisionHandler(.cancel)
-            userNavigation = nil
+            observedNavigation = nil
             observedUserPage = nil
+            observedActivePage = nil
             if let pending { failPending(id: pending.id, error: .navigationFailed) }
             return
         }
         pending?.receivedSuccessfulResponse = true
-        userNavigation?.successfulResponseURL = response.url
+        observedNavigation?.successfulResponseURL = response.url
         decisionHandler(.allow)
     }
 
@@ -848,9 +919,11 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             document = nil
             loadedPageIdentity = nil
             observedUserPage = nil
-            userNavigation = nil
-            if !mayAct(), let navigation {
-                userNavigation = UserNavigation(navigation: navigation, generation: generation)
+            observedActivePage = nil
+            observedNavigation = nil
+            if let navigation, let taskID {
+                observedNavigation = ObservedNavigation(navigation: navigation, generation: generation,
+                    taskID: taskID, startedWhileActive: mayAct())
             }
             detail = "Page changed"
             return
@@ -861,15 +934,19 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         guard webView === browser else { return }
         if pending == nil {
-            guard let observed = userNavigation,
+            guard let observed = observedNavigation,
                   navigation === observed.navigation else { return }
-            userNavigation = nil
-            guard !mayAct(), observed.generation == generation,
+            observedNavigation = nil
+            guard taskID == observed.taskID, observed.generation == generation,
                   let url = webView.url, Self.responseURL(observed.successfulResponseURL, matchesDocumentURL: url),
                   Self.validatedURL(url) != nil else { return }
-            observedUserPage = ObservedUserPage(id: UUID(), generation: generation, url: url, proof: .navigation)
+            let page = ObservedPage(id: UUID(), generation: generation, url: url, proof: .navigation,
+                requiresExplicitHandback: !mayAct())
+            if observed.startedWhileActive { observedActivePage = page }
+            else { observedUserPage = page }
             displayedSite = ComputerUseBrowserSite.displayName(for: url)
-            detail = "Page ready — choose Let AI continue when you are finished"
+            detail = observed.startedWhileActive && mayAct() ? "Page ready — checking the current task"
+                : "Page ready — choose Let AI continue when you are finished"
             return
         }
         guard let pending, navigation === pending.navigation else { return }
@@ -895,8 +972,8 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             return
         }
         guard webView === browser else { return }
-        if let observed = userNavigation, navigation === observed.navigation {
-            userNavigation = nil; observedUserPage = nil
+        if let observed = observedNavigation, navigation === observed.navigation {
+            observedNavigation = nil; observedUserPage = nil; observedActivePage = nil
         }
         if let pending, navigation === pending.navigation { failPending(id: pending.id, error: .navigationFailed) }
     }
@@ -906,8 +983,8 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             return
         }
         guard webView === browser else { return }
-        if let observed = userNavigation, navigation === observed.navigation {
-            userNavigation = nil; observedUserPage = nil
+        if let observed = observedNavigation, navigation === observed.navigation {
+            observedNavigation = nil; observedUserPage = nil; observedActivePage = nil
         }
         if let pending, navigation === pending.navigation { failPending(id: pending.id, error: .navigationFailed) }
     }
@@ -923,8 +1000,9 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         generation &+= 1
         document = nil
         loadedPageIdentity = nil
-        userNavigation = nil
+        observedNavigation = nil
         observedUserPage = nil
+        observedActivePage = nil
         detail = "Browser process stopped"
     }
 }

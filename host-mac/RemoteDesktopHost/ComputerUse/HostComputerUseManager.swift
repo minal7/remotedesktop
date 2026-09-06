@@ -1178,7 +1178,7 @@ final class ComputerUseHostTools {
         ComputerUseNativeTextExecutor(injector: injector, mayAct: mayAct,
             journalDirectory: journalDirectory, planner: planner,
             browserTargetProvider: { [weak self] taskID in
-                try self?.browserNavigationTask?.textTargetIfFrontmost(taskID: taskID)
+                try await self?.browserNavigationTask?.textTargetIfFrontmost(taskID: taskID)
             })
     }
 

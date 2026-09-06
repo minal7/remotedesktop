@@ -601,6 +601,8 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
             XCTAssertFalse(browser.validate(original))
             allowed = true
             XCTAssertNil(browser.currentDocument(taskID: "history"), "Opening the action gate does not accept the history change")
+            do { _ = try await browser.acquireObservedDocument(taskID: "history"); XCTFail("Ordinary planning cannot adopt a page changed during user control") }
+            catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
             try await browser.reacquireAfterUserControl(taskID: "history")
             let current = try XCTUnwrap(browser.currentDocument(taskID: "history"))
             XCTAssertNotEqual(current.generation, original.generation, "A -> B -> A cannot revive the old reference")
@@ -626,7 +628,7 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
         }
     }
 
-    func testHistoryChangesDuringAutomationCannotBecomeLaterHandbackObservations() async throws {
+    func testHistoryChangesDuringAutomationRemainObservationOnlyAfterExplicitHandback() async throws {
         for change in ["history.replaceState({}, '', '/account');",
                        "history.pushState({}, '', '/other'); history.replaceState({}, '', '/login');"] {
             let server = try OwnedBrowserHTTPFixture(routes: [
@@ -646,13 +648,168 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
             allowed = false
             XCTAssertFalse(browser.hasPageAwaitingHandback)
             allowed = true
-            do {
-                try await browser.reacquireAfterUserControl(taskID: "active-history")
-                XCTFail("A later Pause/Resume cannot reclassify an automation-time history change")
-            } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
-            XCTAssertNil(browser.currentDocument(taskID: "active-history"))
+            try await browser.reacquireAfterUserControl(taskID: "active-history")
+            let current = try XCTUnwrap(browser.currentDocument(taskID: "active-history"))
+            XCTAssertEqual(current.source, .activePageObservation, "Handback cannot reclassify the earlier page change as a requested navigation or a user-time observation")
+            XCTAssertFalse(browser.validate(original), "An A -> B -> A history transition cannot revive an old document")
+            XCTAssertNil(browser.receipt(taskID: "active-history", operationID: current.operationID))
             XCTAssertEqual(browser.receipt(taskID: "active-history", operationID: "login"), original)
             XCTAssertEqual(server.count("/login"), 1)
+        }
+    }
+
+    func testActiveLinkAndSearchPagesBecomeFreshObservationsWithoutNavigationReceipts() async throws {
+        for action in ["document.querySelector('a').click();", "document.querySelector('form').requestSubmit();"] {
+            let server = try OwnedBrowserHTTPFixture(routes: [
+                "/start": .init(body: """
+                    <label>Origin<input value="old"></label><a href="/redirect">Results</a>
+                    <form action="/results" method="get"><input name="q" value="Paris"></form>
+                    <script>fetch('/signal').then(() => { \(action) });</script>
+                    """), "/signal": .init(held: true), "/redirect": .init(status: 302, location: "/results?q=Paris"),
+                "/results?q=Paris": .init(body: "<p>Paris results</p><label>Destination<input value='new'></label>")])
+            let base = try await server.start()
+            defer { server.stop() }
+            let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+            defer { browser.close() }
+            try browser.claim(taskID: "active-results")
+            let original = try await browser.navigate(taskID: "active-results", operationID: "open", to: base.appendingPathComponent("start"))
+            let oldTarget = ComputerUseBrowserTextTarget(browser: browser, document: original, requiresFrontmost: false)
+            // The unlabelled submitted input makes this whole text form
+            // unsupported; retain the actual document/page evidence instead.
+            let oldEvidence = try await browser.observePage(document: original)
+            try await waitUntil { server.count("/signal") == 1 }
+            server.releaseHeldResponses()
+            try await waitUntil { server.count("/results?q=Paris") == 1 && !browser.isLoadingPage }
+            XCTAssertNil(browser.currentDocument(taskID: "active-results"), "A callback alone cannot publish executable document authority")
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let navigation = ComputerUseBrowserNavigationTask(browser: browser, journalDirectory: directory)
+            let observed = try await navigation.pageEvidenceIfFrontmost(taskID: "active-results")
+            let fresh = try XCTUnwrap(observed)
+            XCTAssertEqual(fresh.document.source, .activePageObservation)
+            XCTAssertTrue(fresh.page.answerVerificationText.contains("Paris results"))
+            XCTAssertEqual(fresh.document.committedURL, base.appendingPathComponent("results").appending(queryItems: [.init(name: "q", value: "Paris")]))
+            XCTAssertEqual(browser.receipt(taskID: "active-results", operationID: "open"), original)
+            XCTAssertNil(browser.receipt(taskID: "active-results", operationID: fresh.document.operationID))
+            XCTAssertFalse(browser.validate(original))
+            do { try await browser.validatePageEvidence(oldEvidence); XCTFail("Old page evidence cannot survive the navigation") }
+            catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+            do { _ = try await oldTarget.fields(); XCTFail("Old field authority cannot transfer to the new document") }
+            catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+            let repeated = try await browser.acquireObservedDocument(taskID: "active-results")
+            XCTAssertEqual(repeated, fresh.document)
+            XCTAssertEqual(server.count("/start"), 1); XCTAssertEqual(server.count("/results?q=Paris"), 1)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path), "Observing a page cannot create an action journal")
+        }
+    }
+
+    func testActivePageObservationWaitsForSuccessAndTimeoutDoesNotReloadThePage() async throws {
+        for timeout in [false, true] {
+            let server = try OwnedBrowserHTTPFixture(routes: [
+                "/start": .init(body: "<script>fetch('/signal').then(() => location.href='/results');</script>"),
+                "/signal": .init(held: true), "/results": .init(status: timeout ? 200 : 503, body: "<p>Results</p>", held: timeout)])
+            let base = try await server.start()
+            defer { server.stop() }
+            let browser = ComputerUseOwnedBrowser(presentsWindow: false, navigationTimeout: .seconds(1), mayAct: { true })
+            defer { browser.close() }
+            try browser.claim(taskID: "waiting-results")
+            let original = try await browser.navigate(taskID: "waiting-results", operationID: "open", to: base.appendingPathComponent("start"))
+            try await waitUntil { server.count("/signal") == 1 }
+            server.releaseHeldResponses()
+            try await waitUntil { server.count("/results") == 1 }
+            if timeout {
+                do { _ = try await browser.navigate(taskID: "waiting-results", operationID: "competing", to: base.appendingPathComponent("replacement")); XCTFail("A tracked page load cannot be overtaken by another navigation") }
+                catch { XCTAssertEqual(error as? ComputerUseBrowserError, .busy) }
+                XCTAssertEqual(server.count("/replacement"), 0)
+            }
+            do { _ = try await browser.acquireObservedDocument(taskID: "waiting-results"); XCTFail("An unfinished or unsuccessful page is not ready evidence") }
+            catch { XCTAssertEqual(error as? ComputerUseBrowserError, timeout ? .deadlineExceeded : .pageChanged) }
+            XCTAssertNil(browser.currentDocument(taskID: "waiting-results"))
+            XCTAssertEqual(browser.receipt(taskID: "waiting-results", operationID: "open"), original)
+            if timeout {
+                server.releaseHeldResponses()
+                try await waitUntil { !browser.isLoadingPage }
+                let ready = try await browser.acquireObservedDocument(taskID: "waiting-results")
+                XCTAssertEqual(ready.source, .activePageObservation)
+                XCTAssertNil(browser.receipt(taskID: "waiting-results", operationID: ready.operationID))
+            }
+            XCTAssertEqual(server.count("/results"), 1, "An observation timeout is never a navigation retry")
+        }
+    }
+
+    func testActiveObservationWaitCannotCrossCancellationTakeoverOrSameTaskOwnershipRestart() async throws {
+        for interruption in ["cancel", "pause", "restart"] {
+            let server = try OwnedBrowserHTTPFixture(routes: [
+                "/start": .init(body: "<script>fetch('/signal').then(() => location.href='/results');</script>"),
+                "/signal": .init(held: true), "/results": .init(held: true)])
+            let base = try await server.start()
+            defer { server.stop() }
+            var allowed = true
+            let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { allowed })
+            defer { browser.close() }
+            try browser.claim(taskID: "interrupted-observation")
+            _ = try await browser.navigate(taskID: "interrupted-observation", operationID: "open", to: base.appendingPathComponent("start"))
+            try await waitUntil { server.count("/signal") == 1 }
+            server.releaseHeldResponses()
+            try await waitUntil { server.count("/results") == 1 && browser.isLoadingPage }
+            var started = false
+            let waiting = Task { started = true; return try await browser.acquireObservedDocument(taskID: "interrupted-observation") }
+            defer { waiting.cancel() }
+            try await waitUntil { started }
+            if interruption == "cancel" { waiting.cancel() }
+            else if interruption == "pause" { allowed = false }
+            else { browser.stop(); try browser.claim(taskID: "interrupted-observation") }
+            do { _ = try await waiting.value; XCTFail("An old observation must not publish across an ownership boundary") }
+            catch {
+                if interruption == "cancel" { XCTAssertTrue(error is CancellationError) }
+                else { XCTAssertEqual(error as? ComputerUseBrowserError, .ownershipLost) }
+            }
+            XCTAssertNil(browser.currentDocument(taskID: "interrupted-observation"))
+            if interruption != "restart" {
+                server.releaseHeldResponses()
+                try await waitUntil { !browser.isLoadingPage }
+                allowed = true
+                if interruption == "pause" {
+                    do { _ = try await browser.acquireObservedDocument(taskID: "interrupted-observation"); XCTFail("A load that completed under user control still needs explicit handback") }
+                    catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+                    try await browser.reacquireAfterUserControl(taskID: "interrupted-observation")
+                }
+                let fresh = try await browser.acquireObservedDocument(taskID: "interrupted-observation")
+                XCTAssertEqual(fresh.source, .activePageObservation)
+                XCTAssertNil(browser.receipt(taskID: "interrupted-observation", operationID: fresh.operationID))
+            }
+            XCTAssertEqual(server.count("/results"), 1)
+        }
+    }
+
+    func testActiveHistoryIdentityReadCannotPublishAfterTakeoverStopOrClose() async throws {
+        for interruption in ["pause", "stop", "close"] {
+            let server = try OwnedBrowserHTTPFixture(routes: [
+                "/start": .init(body: "<script>fetch('/signal').then(() => { history.replaceState({}, '', '/results'); fetch('/changed'); });</script>"),
+                "/signal": .init(held: true)])
+            let base = try await server.start()
+            defer { server.stop() }
+            var allowed = true, armed = false
+            var context: ComputerUseOwnedBrowser?
+            let browser = ComputerUseOwnedBrowser(presentsWindow: false, domScriptDidDispatch: { command in
+                guard armed, command == .pageIdentity else { return }
+                armed = false
+                if interruption == "pause" { allowed = false }
+                else if interruption == "stop" { context?.stop() }
+                else { context?.close() }
+            }, mayAct: { allowed })
+            context = browser
+            defer { browser.close(); context = nil }
+            try browser.claim(taskID: "history-read")
+            let original = try await browser.navigate(taskID: "history-read", operationID: "open", to: base.appendingPathComponent("start"))
+            try await waitUntil { server.count("/signal") == 1 }
+            server.releaseHeldResponses()
+            try await waitUntil { server.count("/changed") == 1 && !browser.validate(original) }
+            armed = true
+            do { _ = try await browser.acquireObservedDocument(taskID: "history-read"); XCTFail("The identity callback lost its observation scope") }
+            catch { XCTAssertTrue(error as? ComputerUseBrowserError == .pageChanged || error as? ComputerUseBrowserError == .ownershipLost) }
+            XCTAssertFalse(armed); XCTAssertNil(browser.currentDocument(taskID: "history-read"))
+            XCTAssertEqual(server.count("/results"), 0, "History verification must not load its URL")
         }
     }
 

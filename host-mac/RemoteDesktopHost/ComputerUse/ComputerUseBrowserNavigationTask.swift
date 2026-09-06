@@ -150,16 +150,17 @@ final class ComputerUseBrowserNavigationTask {
         try await browser.reacquireAfterUserControl(taskID: taskID)
     }
 
-    func textTargetIfFrontmost(taskID: String) throws -> ComputerUseBrowserTextTarget? {
+    func textTargetIfFrontmost(taskID: String) async throws -> ComputerUseBrowserTextTarget? {
         guard browser.isFrontmostWindow else { return nil }
-        return ComputerUseBrowserTextTarget(browser: browser, document: try browser.acquireCurrentDocument(taskID: taskID))
+        return ComputerUseBrowserTextTarget(browser: browser, document: try await browser.acquireObservedDocument(taskID: taskID))
     }
 
     func pageEvidenceIfFrontmost(taskID: String) async throws -> ComputerUseBrowserPageEvidence? {
         // Production requires the actual foreground browser window. An
         // explicitly headless fixture uses the same document/ownership path.
         guard browser.hasRequiredPresentation, browser.taskID != nil else { return nil }
-        return try await browser.observePage(document: browser.acquireCurrentDocument(taskID: taskID))
+        let document = try await browser.acquireObservedDocument(taskID: taskID)
+        return try await browser.observePage(document: document)
     }
 
     func validatePageEvidence(_ evidence: ComputerUseBrowserPageEvidence) async throws {
