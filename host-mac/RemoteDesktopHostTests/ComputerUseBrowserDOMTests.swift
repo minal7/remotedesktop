@@ -3,6 +3,52 @@ import XCTest
 
 @MainActor
 final class ComputerUseBrowserDOMTests: XCTestCase {
+    func testLiteralNoOpReceiptReconcilesCancelledInputAndRequiresEveryRepeatedEvent() async throws {
+        var running: Task<Void, Error>?
+        let fixture = try await DOMFixture(body: """
+            <label>Notes<input value="same"></label>
+            <script>document.querySelector('input').addEventListener('input', () => {
+              fetch('/input-event'); const until = performance.now() + 150; while (performance.now() < until) {}
+            });</script>
+            """, domScriptDidDispatch: { if $0 == .edit { running?.cancel() } })
+        defer { fixture.close() }
+        let fields = try await fixture.target.fields(), field = try XCTUnwrap(fields.first)
+        let contract = try ComputerUseTextTaskContract(taskID: "literal-noop", prompt: "Put same in Notes twice", fields: fields,
+            edits: Array(repeating: .init(targetID: field.snapshot.targetID, mode: .replaceAll, text: "same"), count: 2))
+        func task(recovered: ComputerUseTextStepJournal? = nil) throws -> ComputerUseTextTask {
+            try .init(contract: contract, recovered: recovered, read: { try await fixture.target.read(targetID: $0) },
+                apply: { _, _ in XCTFail("Use identified DOM input") },
+                applyWithIdentity: { try await fixture.target.apply($0, expected: $1, operationID: $2) },
+                didDispatchInput: { try await fixture.target.didDispatchInput(operationID: $0) },
+                persist: { _ in }, mayAct: { true })
+        }
+        let unsent = ComputerUseTextStepJournal(taskID: contract.taskID, promptDigest: contract.promptDigest,
+            contractDigest: contract.contractDigest, stepIDs: contract.steps.map(\.id), statuses: [.attempted, .planned])
+        do { try await task(recovered: unsent).run(); XCTFail("Matching values cannot prove the unsent first operation") }
+        catch { XCTAssertEqual(error as? ComputerUseTextTaskError, .uncertainEffect) }
+        XCTAssertEqual(fixture.server.count("/input-event"), 0)
+        let first = try task()
+        running = Task { try await first.run() }
+        do { try await running!.value; XCTFail("The first callback was cancelled") } catch is CancellationError {}
+        running = nil
+        try await fixture.wait { fixture.server.count("/input-event") == 1 }
+        let deadline = ContinuousClock.now + .seconds(5)
+        while true {
+            do { _ = try await fixture.target.read(targetID: field.snapshot.targetID); break }
+            catch ComputerUseBrowserError.busy {
+                guard ContinuousClock.now < deadline else { throw ComputerUseBrowserError.documentUnresponsive }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+        }
+        let resumed = try task(recovered: first.journal)
+        try await resumed.run(); try await resumed.run()
+        try await fixture.wait { fixture.server.count("/input-event") == 2 }
+        XCTAssertEqual(resumed.journal.statuses, [.verified, .verified])
+        let reconstructed = try task(recovered: resumed.journal)
+        try await reconstructed.run()
+        XCTAssertEqual(fixture.server.count("/input-event"), 2, "Both explicit operations ran once; recovery and replay added none")
+    }
+
     func testBrowserCopyReceiptDistinguishesUnsentNoOpFromCancelledDeliveredInput() async throws {
         var running: Task<Void, Error>?
         let fixture = try await DOMFixture(body: """
@@ -21,7 +67,7 @@ final class ComputerUseBrowserDOMTests: XCTestCase {
                 apply: { _, _ in XCTFail("Copy needs its bound source") },
                 applyCopyWithIdentity: { edit, before, source, operationID in
                     try await fixture.target.apply(edit, expected: before, operationID: operationID, copySource: source)
-                }, didDispatchCopy: { try await fixture.target.didDispatchCopy(operationID: $0) },
+                }, didDispatchInput: { try await fixture.target.didDispatchInput(operationID: $0) },
                 persist: { _ in }, mayAct: { true })
         }
         let unsent = ComputerUseTextStepJournal(taskID: contract.taskID, promptDigest: contract.promptDigest,
@@ -356,6 +402,7 @@ final class ComputerUseBrowserDOMTests: XCTestCase {
             let task = try ComputerUseTextTask(contract: contract, read: { try await fixture.target.read(targetID: $0) },
                 apply: { _, _ in XCTFail("DOM needs the shared operation identity") },
                 applyWithIdentity: { try await fixture.target.apply($0, expected: $1, operationID: $2) },
+                didDispatchInput: { try await fixture.target.didDispatchInput(operationID: $0) },
                 persist: { _ in }, mayAct: { allowed })
             running = Task { try await task.run() }
             do { try await running?.value; XCTFail("An interrupted in-flight script cannot complete its task") }

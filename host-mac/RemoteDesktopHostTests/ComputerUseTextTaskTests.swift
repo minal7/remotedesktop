@@ -3,6 +3,59 @@ import XCTest
 
 @MainActor
 final class ComputerUseTextTaskTests: XCTestCase {
+    func testMatchingLiteralValuesCannotProveUnsentOrReconstructedInput() async throws {
+        for initial in ["same", "different before external change"] {
+            let contract = try ComputerUseTextTaskContract(taskID: "literal-no-receipt", prompt: "Put same in Notes",
+                fields: [field("notes", initial)], edits: [.init(targetID: "notes", mode: .replaceAll, text: "same")])
+            for status in [ComputerUseTaskStepStatus.attempted, .uncertain, .verified] {
+                let journal = ComputerUseTextStepJournal(taskID: contract.taskID, promptDigest: contract.promptDigest,
+                    contractDigest: contract.contractDigest, stepIDs: contract.steps.map(\.id), statuses: [status])
+                let task = try ComputerUseTextTask(contract: contract, recovered: journal,
+                    read: { _ in self.field("notes", "same").snapshot },
+                    apply: { _, _ in XCTFail("Unproven input must not be replayed") }, persist: { _ in }, mayAct: { true })
+                do { try await task.run(); XCTFail("Current value alone cannot establish dispatch") }
+                catch { XCTAssertEqual(error as? ComputerUseTextTaskError, status == .verified ? .incompleteOutcome : .uncertainEffect) }
+            }
+        }
+    }
+
+    func testRepeatedLiteralNoOpsRequireSeparateReceiptsAcrossLostCompletionAndReplay() async throws {
+        let initial = field("notes", "same")
+        let contract = try ComputerUseTextTaskContract(taskID: "literal-twice", prompt: "Put same in Notes twice", fields: [initial],
+            edits: Array(repeating: .init(targetID: "notes", mode: .replaceAll, text: "same"), count: 2))
+        var receipts = Set<String>(), calls: [String] = []
+        func task(recovered: ComputerUseTextStepJournal? = nil) throws -> ComputerUseTextTask {
+            try .init(contract: contract, recovered: recovered, read: { _ in initial.snapshot },
+                apply: { _, _ in XCTFail("Use identified input") }, applyWithIdentity: { _, _, operationID in
+                    calls.append(operationID); receipts.insert(operationID)
+                    if calls.count == 1 { throw CancellationError() }
+                }, didDispatchInput: { receipts.contains($0) }, persist: { _ in }, mayAct: { true })
+        }
+        let first = try task()
+        do { try await first.run(); XCTFail("The first completion was lost") } catch is CancellationError {}
+        XCTAssertEqual(first.journal.statuses, [.attempted, .planned])
+        let resumed = try task(recovered: first.journal)
+        try await resumed.run(); try await resumed.run()
+        XCTAssertEqual(calls.count, 2); XCTAssertEqual(Set(calls).count, 2)
+        XCTAssertEqual(resumed.journal.statuses, [.verified, .verified])
+    }
+
+    func testLostLiteralReceiptStopsLaterInputEvenWhenAllValuesMatch() async throws {
+        let fields = [field("first", "same"), field("second", "same")]
+        let contract = try ComputerUseTextTaskContract(taskID: "lost-receipt", prompt: "Put same in both fields", fields: fields,
+            edits: fields.map { .init(targetID: $0.snapshot.targetID, mode: .replaceAll, text: "same") })
+        var receipts = Set<String>(), calls = 0
+        let task = try ComputerUseTextTask(contract: contract,
+            read: { id in fields.first { $0.snapshot.targetID == id }?.snapshot },
+            apply: { _, _ in XCTFail("Use identified input") }, applyWithIdentity: { _, _, id in calls += 1; receipts.insert(id) },
+            didDispatchInput: { receipts.contains($0) }, persist: { journal in
+                if journal.statuses == [.verified, .planned] { receipts.removeAll() }
+            }, mayAct: { true })
+        do { try await task.run(); XCTFail("A missing earlier receipt must stop the next effect") }
+        catch { XCTAssertEqual(error as? ComputerUseTextTaskError, .incompleteOutcome) }
+        XCTAssertEqual(calls, 1)
+    }
+
     func testMatchingCopyValuesCannotProveAnUnsentAttemptOrARecoveredDispatch() async throws {
         let fields = [field("origin", "same"), field("destination", "same")]
         let contract = try ComputerUseTextTaskContract(taskID: "copy-noop", prompt: "Copy Origin to Destination", fields: fields,
@@ -27,10 +80,10 @@ final class ComputerUseTextTaskTests: XCTestCase {
         let first = try ComputerUseTextTask(contract: contract, read: { values[$0] }, apply: { _, _ in XCTFail("Use bound copy adapter") },
             applyCopyWithIdentity: { _, _, _, operationID in
                 calls += 1; receipts.insert(operationID); throw CancellationError()
-            }, didDispatchCopy: { receipts.contains($0) }, persist: { _ in }, mayAct: { true })
+            }, didDispatchInput: { receipts.contains($0) }, persist: { _ in }, mayAct: { true })
         do { try await first.run(); XCTFail("The callback was lost") } catch is CancellationError {}
         let recovered = try ComputerUseTextTask(contract: contract, recovered: first.journal, read: { values[$0] },
-            apply: { _, _ in XCTFail("Receipt must prevent replay") }, didDispatchCopy: { receipts.contains($0) },
+            apply: { _, _ in XCTFail("Receipt must prevent replay") }, didDispatchInput: { receipts.contains($0) },
             persist: { _ in }, mayAct: { true })
         try await recovered.run()
         XCTAssertEqual(calls, 1); XCTAssertEqual(recovered.journal.statuses, [.verified])
@@ -232,11 +285,14 @@ final class ComputerUseTextTaskTests: XCTestCase {
         let contract = try ComputerUseTextTaskContract(taskID: "t", prompt: "Both Paris", fields: fields, edits: edits)
         var state = Dictionary(uniqueKeysWithValues: fields.map { ($0.snapshot.targetID, $0.snapshot) })
         var count = 0
-        let task = try ComputerUseTextTask(contract: contract, read: { state[$0] }, apply: { edit, _ in
+        var receipts = Set<String>()
+        let task = try ComputerUseTextTask(contract: contract, read: { state[$0] },
+            apply: { _, _ in XCTFail("Lost completion requires an independent receipt") }, applyWithIdentity: { edit, _, operationID in
             count += 1
             state[edit.targetID] = self.field(edit.targetID, edit.text).snapshot
+            receipts.insert(operationID)
             if count == 1 { throw CancellationError() }
-        }, persist: { _ in }, mayAct: { true })
+        }, didDispatchInput: { receipts.contains($0) }, persist: { _ in }, mayAct: { true })
         do { try await task.run(); XCTFail("Expected interruption") } catch is CancellationError {}
         XCTAssertEqual(task.journal.statuses, [.attempted, .planned])
         try await task.run()

@@ -240,7 +240,7 @@ final class ComputerUseBrowserTextTarget {
         return try snapshot(fields[0], targetID: targetID)
     }
 
-    func didDispatchCopy(operationID: String) async throws -> Bool {
+    func didDispatchInput(operationID: String) async throws -> Bool {
         try validate()
         guard let documentID else { return false }
         let reply = try await browser.callDOM(.receipt, arguments: ["documentID": documentID, "operationID": operationID], document: document)

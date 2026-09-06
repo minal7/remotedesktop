@@ -4,6 +4,19 @@ import XCTest
 
 @MainActor
 final class ComputerUseTextEditorTests: XCTestCase {
+    func testEmptyUnicodeFallbackCannotClaimInputButSupportedSetterCan() async throws {
+        for mode in [ComputerUseTextEditMode.insert, .replaceAll, .append] {
+            let field = Field()
+            await assertError(.selectionUnsupported) {
+                try await field.editor.edit("", mode: mode, expected: field.snapshot)
+            }
+            XCTAssertTrue(field.posted.isEmpty); XCTAssertEqual(field.axAttempts, 0)
+            field.axSupported = true
+            try await field.editor.edit("", mode: mode, expected: field.snapshot)
+            XCTAssertEqual(field.axAttempts, 1); XCTAssertTrue(field.posted.isEmpty)
+        }
+    }
+
     @MainActor private final class Field {
         var id = "app-launch/window/document/field"
         var value: String

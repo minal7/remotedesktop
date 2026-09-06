@@ -87,7 +87,7 @@ struct ComputerUseTextTaskContract: Sendable {
             }
             // Step index distinguishes legitimate repeated operations even when
             // target, operation and payload are identical. No history strings.
-            var identity = [taskID, String(index), field.targetID, edit.mode.rawValue,
+            var identity = ["text-input-dispatch-required-v2", taskID, String(index), field.targetID, edit.mode.rawValue,
                 edit.text, field.value, String(range.location), String(range.length), after]
             if let source { identity += ["copied-field-v2-dispatch-required", source.targetID, source.value] }
             let id = Self.framedDigest(identity)
@@ -140,8 +140,8 @@ enum ComputerUseTextTaskError: Error, Equatable {
 typealias ComputerUseTextStepJournal = ComputerUseTaskJournal
 
 /// Text capability compiler/adapter for the shared transaction engine. The
-/// existing private journal format remains compatible; its contract digest
-/// already covers all exact values, selections, constraints and ordered steps.
+/// private journal format is unchanged, but the versioned step identities
+/// reject older contracts that did not require dispatch evidence for all input.
 @MainActor
 final class ComputerUseTextTask {
     let contract: ComputerUseTextTaskContract
@@ -154,7 +154,7 @@ final class ComputerUseTextTask {
     private enum Check {
         case value(String)
         case selection(NSRange)
-        case copyReceipt(Int)
+        case inputReceipt(Int)
     }
 
     init(contract: ComputerUseTextTaskContract,
@@ -163,7 +163,7 @@ final class ComputerUseTextTask {
          apply: @escaping (ComputerUseTextPlanEdit, ComputerUseTextSnapshot) async throws -> Void,
          applyWithIdentity: ((ComputerUseTextPlanEdit, ComputerUseTextSnapshot, String) async throws -> Void)? = nil,
          applyCopyWithIdentity: ((ComputerUseTextPlanEdit, ComputerUseTextSnapshot, ComputerUseTextSnapshot, String) async throws -> Void)? = nil,
-         didDispatchCopy: ((String) async throws -> Bool)? = nil,
+         didDispatchInput: ((String) async throws -> Bool)? = nil,
          persist: @escaping (ComputerUseTextStepJournal) throws -> Void,
          mayAct: @escaping () -> Bool) throws {
         self.contract = contract
@@ -180,8 +180,8 @@ final class ComputerUseTextTask {
             case .selection(let range):
                 kind = "editable-text-selection"
                 digest = ComputerUseTaskContract.digest([String(range.location), String(range.length)])
-            case .copyReceipt(let index):
-                kind = "copied-field-input-dispatched"
+            case .inputReceipt(let index):
+                kind = "text-input-dispatched"
                 digest = contract.steps[index].id
             }
             predicates.append(.init(id: id, entityID: target, kind: kind, expectedDigest: digest))
@@ -192,11 +192,11 @@ final class ComputerUseTextTask {
             predicate("constraint-\(index)", target: id, check: .value(contract.unchangedValues[id]!))
         }
         var completedValues: [String: String] = [:]
-        var copyReceipts: [String] = []
+        var inputReceipts: [String] = []
         var steps: [ComputerUseTaskContract.Step] = []
         for (index, step) in contract.steps.enumerated() {
             var preconditions = [predicate("before-\(index)", target: step.targetID, check: .value(step.before))]
-            for receipt in copyReceipts { retained.insert(receipt); preconditions.append(receipt) }
+            for receipt in inputReceipts { retained.insert(receipt); preconditions.append(receipt) }
             if let selection = step.insertionSelection {
                 preconditions.append(predicate("selection-\(index)", target: step.targetID, check: .selection(selection)))
             }
@@ -206,10 +206,9 @@ final class ComputerUseTextTask {
                 if source.targetID != step.targetID {
                     sourcePostconditions.append(predicate("copy-source-after-\(index)", target: source.targetID, check: .value(source.value)))
                 }
-                let receipt = predicate("copy-dispatched-\(index)", target: step.targetID, check: .copyReceipt(index))
-                copyReceipts.append(receipt)
-                sourcePostconditions.append(receipt)
             }
+            let receipt = predicate("input-dispatched-\(index)", target: step.targetID, check: .inputReceipt(index))
+            inputReceipts.append(receipt)
             for (position, target) in completedValues.keys.sorted().enumerated() {
                 let id = predicate("retained-\(index)-\(position)", target: target, check: .value(completedValues[target]!))
                 retained.insert(id)
@@ -219,7 +218,7 @@ final class ComputerUseTextTask {
             steps.append(.init(id: step.id, dependencies: step.dependency.map { [$0] } ?? [],
                 operation: .init(capabilityID: (step.copySource == nil ? "text.edit." : "text.copy.") + step.mode.rawValue, entityID: step.targetID,
                     payloadDigest: ComputerUseTextTaskContract.digest(step.payload), payloadVersion: 1),
-                preconditions: preconditions, postconditions: [after] + sourcePostconditions))
+                preconditions: preconditions, postconditions: [after, receipt] + sourcePostconditions))
             completedValues[step.targetID] = step.after
         }
         let outcomes = contract.finalValues.keys.sorted().enumerated().map { index, id in
@@ -229,7 +228,7 @@ final class ComputerUseTextTask {
             ComputerUseTaskContract.Entity(id: $0, authorityDigest: ComputerUseTaskContract.digest(["retained-text-reference", $0]))
         }
         let compiled = try ComputerUseTaskContract(taskID: contract.taskID, promptDigest: contract.promptDigest,
-            entities: entities, predicates: predicates, steps: steps, invariants: invariants, outcomes: outcomes + copyReceipts)
+            entities: entities, predicates: predicates, steps: steps, invariants: invariants, outcomes: outcomes + inputReceipts)
         self.retainedPredicateIDs = retained
         var recoveredExecution: ComputerUseTaskJournal?
         if let recovered {
@@ -245,8 +244,10 @@ final class ComputerUseTextTask {
         let operationIDs = compiled.steps.map { compiled.effectIdentity(for: $0) }
         // Without a document-owned receipt, only a completed adapter call in
         // this live task proves dispatch. A rebuilt task must remain uncertain
-        // even if a no-op copy's before/after field values happen to match.
-        var locallyDispatchedCopies = Set<String>()
+        // even if the field already matches or somebody else changed it to
+        // the expected value. A successful adapter return is required to
+        // mean its input operation completed; an empty fallback is not input.
+        var locallyDispatchedInputs = Set<String>()
         do {
             execution = try ComputerUseTaskExecution(contract: compiled, recovered: recoveredExecution,
                 observe: { predicate in
@@ -255,9 +256,9 @@ final class ComputerUseTextTask {
                     switch check {
                     case .value(let value): return snapshot.value.utf8.elementsEqual(value.utf8)
                     case .selection(let selection): return snapshot.selection == selection
-                    case .copyReceipt(let index):
-                        if let didDispatchCopy { return try await didDispatchCopy(operationIDs[index]) }
-                        return locallyDispatchedCopies.contains(operationIDs[index])
+                    case .inputReceipt(let index):
+                        if let didDispatchInput { return try await didDispatchInput(operationIDs[index]) }
+                        return locallyDispatchedInputs.contains(operationIDs[index])
                     }
                 }, perform: { step, operationID in
                     guard let edit = edits[step.id], let current = try await read(edit.targetID), current.targetID == edit.targetID,
@@ -278,9 +279,9 @@ final class ComputerUseTextTask {
                         guard mayAct() else { throw ComputerUseTextEditError.interrupted }
                         if let applyCopyWithIdentity { try await applyCopyWithIdentity(plan, current, source, operationID) }
                         else { try await apply(plan, current) }
-                        locallyDispatchedCopies.insert(operationID)
                     } else if let applyWithIdentity { try await applyWithIdentity(plan, current, operationID) }
                     else { try await apply(plan, current) }
+                    locallyDispatchedInputs.insert(operationID)
                 }, persist: { try persist(Self.textJournal($0, contract: contract)) },
                 assertOwnership: { guard mayAct() else { throw ComputerUseTextEditError.interrupted } })
         } catch ComputerUseTaskExecutionError.journalMismatch {

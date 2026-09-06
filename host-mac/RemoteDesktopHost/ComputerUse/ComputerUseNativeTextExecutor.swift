@@ -90,8 +90,8 @@ final class ComputerUseNativeTextExecutor {
                     try await target.apply(edit, expected: expected, operationID: operationID, copySource: source)
                 }
             },
-            didDispatchCopy: browserTarget.map { target in
-                { operationID in try await target.didDispatchCopy(operationID: operationID) }
+            didDispatchInput: browserTarget.map { target in
+                { operationID in try await target.didDispatchInput(operationID: operationID) }
             },
             persist: { try store.save($0) }, mayAct: mayAct)
         retainedTask = task

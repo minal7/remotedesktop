@@ -143,9 +143,9 @@ struct ComputerUseTextEditor {
             return
         }
         guard !payload.isEmpty else {
-            // Deleting a selection requires a supported AX setter. Empty
-            // Unicode input cannot provide evidence of deletion.
-            if expectedValue.utf8.elementsEqual(selected.value.utf8) { return }
+            // Even an empty/no-op edit requires a supported setter. Returning
+            // success here would invent an input receipt without dispatching
+            // anything; an empty Unicode call cannot prove an operation.
             throw ComputerUseTextEditError.selectionUnsupported
         }
         var remaining = payload[...]
