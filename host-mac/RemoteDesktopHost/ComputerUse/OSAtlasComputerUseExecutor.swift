@@ -1627,22 +1627,27 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
                             tools: tools,
                             progress: progress)
                     }
+                // A verified terminal result remains a fact even if Stop
+                // arrives immediately after the effect returns. Retain it
+                // before honoring cancellation so resume cannot replay it.
+                switch result {
+                case .completed, .unableToComplete, .clarificationRequired:
+                    if let checkpoint = executionCheckpoint,
+                       checkpoint.taskID == taskID,
+                       checkpoint.trustedUserPrompt.utf8.elementsEqual(
+                            trustedUserPrompt.utf8) {
+                        executionCheckpoint?.terminalResult = result
+                    }
+                case .userInterventionRequired, .approvalRequired,
+                        .mcpApprovalRequired:
+                    break
+                }
                 try Task.checkCancellation()
                 return result
             } onCancel: {
                 _ = cancellationJoin.start()
             }
             try Task.checkCancellation()
-            switch result {
-            case .completed, .unableToComplete, .clarificationRequired:
-                if let checkpoint = executionCheckpoint, checkpoint.taskID == taskID,
-                   checkpoint.trustedUserPrompt.utf8.elementsEqual(trustedUserPrompt.utf8) {
-                    executionCheckpoint?.terminalResult = result
-                }
-            case .userInterventionRequired, .approvalRequired,
-                    .mcpApprovalRequired:
-                break
-            }
             return result
         } catch {
             if error is CancellationError || Task.isCancelled {
@@ -1827,6 +1832,15 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
             // capture and receives its own bounded retry allowance.
             planningStateRetries = 0
         }
+        func recordOpenedApplicationEffect(
+            named name: String,
+            identity: ComputerUseApplicationIdentity?
+        ) {
+            recordOpenedApplication(named: name, identity: identity)
+            history.append(OSAtlasGUIAction.openApplication(name).historyEntry)
+            recordPerformedEffect()
+            effectNeedsReconciliation = false
+        }
         func retainedExecutionState() -> ExecutionState {
             ExecutionState(
                 history: history,
@@ -1914,6 +1928,8 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
                 }
                 planningCapture = freshCapture
                 observation = freshCapture.observation
+                try Task.checkCancellation()
+                effectNeedsReconciliation = true
                 let openedIdentity = try await tools.openApplication(
                     named: browser)
                 // Mark the one-shot preflight only after the verified effect.
@@ -1921,11 +1937,9 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
                 // decision instead of inspecting authentication UI in the
                 // unrelated app that is still frontmost.
                 didForegroundDeliveryQuoteBrowser = true
-                recordOpenedApplication(
+                recordOpenedApplicationEffect(
                     named: browser,
                     identity: openedIdentity)
-                history.append("OPEN_APP [\(browser)]")
-                recordPerformedEffect()
                 try await Task.sleep(for: actionDelay)
                 continue
             }
@@ -2043,17 +2057,17 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
                                 }
                                 planningCapture = preEffectCapture
                                 observation = preEffectCapture.observation
+                                try Task.checkCancellation()
+                                effectNeedsReconciliation = true
                                 let openedIdentity = try await tools.openApplication(
                                     named: destination)
-                                recordOpenedApplication(
+                                recordOpenedApplicationEffect(
                                     named: destination,
                                     identity: openedIdentity)
                                 parsedActionObserver?(
                                     .openApplication(destination))
                                 progress(
                                     "Step \(step): switching to the task-relevant app…")
-                                history.append("OPEN_APP [\(destination)]")
-                                recordPerformedEffect()
                                 try await Task.sleep(for: actionDelay)
                                 continue
                             } catch is CancellationError {
@@ -2587,16 +2601,16 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
                     ? Set<String>()
                     : Self.normalizedVisibleLineKeys(
                         try await Self.visibleTextOffMainActor(from: observation.image))
+                try Task.checkCancellation()
+                effectNeedsReconciliation = true
                 let openedIdentity = try await tools.openApplication(
                     named: applicationName)
-                recordOpenedApplication(
+                recordOpenedApplicationEffect(
                     named: applicationName,
                     identity: openedIdentity)
                 if completesAfterOpeningApplication {
                     return .completed("Done. I opened the requested app.")
                 }
-                history.append(action.historyEntry)
-                recordPerformedEffect()
                 if let semanticRoute {
                     semanticEffectOutcome = SemanticEffectOutcome(
                         route: semanticRoute,

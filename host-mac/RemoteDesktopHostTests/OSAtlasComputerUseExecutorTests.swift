@@ -132,6 +132,175 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
         await fixture.runtime.shutdown()
     }
 
+    func testVisualApplicationOpenRecoveryAcrossMainPreflightAndAuthenticationPaths() async throws {
+        enum PathKind: CaseIterable, Equatable, Sendable { case terminal, intermediate, delivery, authentication }
+        enum Completion: CaseIterable, Equatable, Sendable { case verifiedAfterCancel, failedAfterCancel, failed, cancelledNativeWait }
+        var fixtureIndex = 0
+        for path in PathKind.allCases {
+            for completion in Completion.allCases {
+                let fixture = makeCorrectionRuntime(completionResponses: [], port: UInt16(43_650 + fixtureIndex))
+                fixtureIndex += 1
+                let taskID = "held-open-\(fixtureIndex)"
+                let task: String
+                let destination: String
+                switch path {
+                case .terminal:
+                    task = "Open Notes."
+                    destination = "Notes"
+                case .intermediate:
+                    task = "Open Notes, then type \"hello\"."
+                    destination = "Notes"
+                case .delivery:
+                    task = "Get the current DoorDash delivery quote and ETA, then stop before checkout."
+                    destination = "Safari"
+                case .authentication:
+                    task = "Read my email inbox and report the dentist appointment details from the school message."
+                    destination = "Mail"
+                }
+                let requests = SemanticRoutingRequestLog()
+                let router = StubSemanticActionRouter { request in
+                    await requests.record(request)
+                    if path == .intermediate,
+                       request.history.contains(where: { $0.hasPrefix("OPEN_APP [") }) {
+                        return .init(directive: .type, argument: .text("hello"))
+                    }
+                    return .init(directive: .openApplication, argument: .applicationName(destination))
+                }
+                let executor = OSAtlasComputerUseExecutor.makeForTesting(
+                    inputs: fixture.inputs, runtime: fixture.runtime, semanticRouter: router, maxSteps: 2)
+                let observation = ComputerUseScreenObservation(
+                    image: CIImage(color: .white).cropped(to: CGRect(x: 0, y: 0, width: 448, height: 320)),
+                    displayBounds: OSAtlasAcceptanceFixtureRenderer.hiddenDisplayBounds)
+                var pending: (() -> Void)?
+                var opened: [String] = []
+                var actions: [ComputerUsePredictedAction] = []
+                var frontmost = path == .authentication ? "Passwords" : "Hidden fixture"
+                var captures = 0
+                let tools = ComputerUseHostTools(
+                    injector: InputInjector(eventPoster: { _ in XCTFail("No native fixture input") }),
+                    mayAct: { true },
+                    applicationOpener: { name in
+                        opened.append(name)
+                        frontmost = name
+                        // The effect has happened, but its completion/proof is
+                        // still pending. Never hold an accidental replay.
+                        if opened.count == 1 {
+                            if completion == .cancelledNativeWait {
+                                let _: Void = try await ComputerUseApplicationOpenOperation.run { finish in
+                                    pending = { finish(.success(())) }
+                                }
+                            } else {
+                                await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                                    pending = { continuation.resume() }
+                                }
+                            }
+                        }
+                        if completion != .verifiedAfterCancel {
+                            throw ComputerUseHostTools.ToolError.applicationUnavailable
+                        }
+                    },
+                    actionPerformer: { actions.append($0) },
+                    screenProvider: { captures += 1; return observation },
+                    accessibilityContextProvider: { _ in "AXTextField • focused • editable=true" },
+                    authenticationContextProvider: {
+                        guard path == .authentication || path == .delivery else { return nil }
+                        return .init(
+                            focusedElement: "AXTextField • AXSecureTextField • Password",
+                            boundedWindowContext: "AXHeading • Sign In")
+                    },
+                    frontmostApplicationProvider: { frontmost })
+                let first = Task {
+                    try await executor.execute(taskID: taskID, prompt: task, trustedUserPrompt: task,
+                        tools: tools, progress: { _ in })
+                }
+                do {
+                    let deadline = ContinuousClock.now + .seconds(10)
+                    while pending == nil && ContinuousClock.now < deadline {
+                        try await Task.sleep(for: .milliseconds(5))
+                    }
+                    let release = try XCTUnwrap(pending, "The app-open path never reached dispatch")
+                    if completion != .failed { first.cancel() }
+                    if completion != .cancelledNativeWait {
+                        pending = nil
+                        release()
+                    }
+                    do {
+                        let result = try await first.value
+                        if completion == .failed, path == .authentication {
+                            guard case .userInterventionRequired = result else {
+                                XCTFail("An ambiguous authentication escape must pause")
+                                throw ComputerUseTaskExecutionError.invalidContract
+                            }
+                        } else {
+                            XCTFail("An interrupted or failed open must not finish the first call")
+                        }
+                    } catch is CancellationError {
+                        XCTAssertNotEqual(completion, .failed)
+                    } catch ComputerUseHostTools.ToolError.applicationUnavailable {
+                        XCTAssertEqual(completion, .failed)
+                        XCTAssertNotEqual(path, .authentication)
+                    }
+
+                    if completion == .cancelledNativeWait {
+                        // The production callback bridge must let cancellation
+                        // finish before the native callback is released.
+                        pending = nil
+                        release()
+                    }
+
+                    let eventsBefore = await fixture.events.values()
+                    let capturesBefore = captures
+                    let requestsBefore = await requests.values().count
+                    do {
+                        let result = try await executor.execute(taskID: taskID, prompt: task, trustedUserPrompt: task,
+                            tools: tools, progress: { _ in })
+                        if completion != .verifiedAfterCancel {
+                            guard case .clarificationRequired = result else {
+                                XCTFail("An uncertain open cannot gain retry authority")
+                                throw ComputerUseTaskExecutionError.invalidContract
+                            }
+                        } else if path == .terminal {
+                            XCTAssertEqual(result, .completed("Done. I opened the requested app."))
+                        } else if path == .intermediate {
+                            XCTFail("The two-effect fixture should stop at its step limit")
+                        } else {
+                            guard case .userInterventionRequired = result else {
+                                XCTFail("The verified open must resume at the requested app's sign-in boundary")
+                                throw ComputerUseTaskExecutionError.invalidContract
+                            }
+                        }
+                    } catch OSAtlasComputerUseExecutor.RuntimeError.stepLimit {
+                        XCTAssertEqual(completion, .verifiedAfterCancel)
+                        XCTAssertEqual(path, .intermediate)
+                    }
+                    XCTAssertEqual(opened, [destination], "A retained open must never dispatch twice")
+                    if completion == .verifiedAfterCancel && path == .intermediate {
+                        XCTAssertEqual(actions, [.typeText("hello")])
+                        let continuedRequests = await requests.values()
+                        XCTAssertEqual(continuedRequests.count, requestsBefore + 1)
+                        XCTAssertTrue(try XCTUnwrap(continuedRequests.last).history.contains("OPEN_APP [Notes]"))
+                    } else {
+                        XCTAssertTrue(actions.isEmpty)
+                    }
+                    if completion != .verifiedAfterCancel || path == .terminal {
+                        let eventsAfter = await fixture.events.values()
+                        let requestsAfter = await requests.values().count
+                        XCTAssertEqual(eventsAfter, eventsBefore, "No activation or inference is needed to replay retained state")
+                        XCTAssertEqual(captures, capturesBefore)
+                        XCTAssertEqual(requestsAfter, requestsBefore)
+                    }
+                } catch {
+                    first.cancel()
+                    if let release = pending { pending = nil; release() }
+                    _ = try? await first.value
+                    await fixture.runtime.shutdown()
+                    throw error
+                }
+                await fixture.runtime.shutdown()
+            }
+        }
+    }
+
     func testOfficialProActionsParseAsExactlyOneAction() throws {
         XCTAssertEqual(
             try parse("CLICK <point>[[101, 872]]</point>"),

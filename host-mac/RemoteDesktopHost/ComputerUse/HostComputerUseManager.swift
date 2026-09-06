@@ -862,6 +862,105 @@ struct ComputerUsePlanningStateFingerprint: Equatable {
     }
 }
 
+/// Bridges the native opener's callback without making Stop wait for Launch
+/// Services. Cancellation/deadline only ends this wait; the OS operation may
+/// still finish. The executor must retain that attempted effect as uncertain.
+enum ComputerUseApplicationOpenOperation {
+    enum Failure: Error, Equatable, LocalizedError {
+        case timedOut, busy
+        var errorDescription: String? {
+            switch self {
+            case .timedOut:
+                return "Opening the app took too long. It may still open; check its state before continuing."
+            case .busy:
+                return "An earlier app-open request is still finishing. Wait for it to settle before continuing."
+            }
+        }
+    }
+
+    private static let nativeFlight = NativeFlight()
+    static var hasPendingNativeOpen: Bool { nativeFlight.isOccupied }
+    static func beginNativeOpen() throws -> UUID { try nativeFlight.begin() }
+    static func finishNativeOpen(_ id: UUID) { nativeFlight.finish(id) }
+
+    /// Cancellation of the waiter must not release this lease. An outstanding
+    /// OS activation could steal focus from new automation; only its native
+    /// callback (or a failure before dispatch) can release the exact lease.
+    private final class NativeFlight: @unchecked Sendable {
+        private let lock = NSLock()
+        private var owner: UUID?
+        var isOccupied: Bool { lock.withLock { owner != nil } }
+        func begin() throws -> UUID {
+            try lock.withLock {
+                guard owner == nil else { throw Failure.busy }
+                let id = UUID()
+                owner = id
+                return id
+            }
+        }
+        func finish(_ id: UUID) {
+            lock.withLock { if owner == id { owner = nil } }
+        }
+    }
+
+    @MainActor
+    static func run<Value: Sendable>(
+        timeout: TimeInterval = 30,
+        start: (@escaping @Sendable (Result<Value, Error>) -> Void) throws -> Void
+    ) async throws -> Value {
+        try Task.checkCancellation()
+        guard timeout.isFinite, timeout > 0, timeout <= 30 else { throw Failure.timedOut }
+        let delivery = Delivery<Value>()
+        let deadline = DispatchWorkItem { delivery.finish(.failure(Failure.timedOut)) }
+        defer { deadline.cancel() }
+        // Return the winning completion without a later cancellation check.
+        // The caller must record verified success before honoring Stop.
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                delivery.install(continuation)
+                guard !delivery.isFinished else { return }
+                DispatchQueue.global(qos: .userInitiated).asyncAfter(
+                    deadline: .now() + timeout, execute: deadline)
+                do {
+                    try Task.checkCancellation()
+                    guard !delivery.isFinished else { return }
+                    try start { delivery.finish($0) }
+                } catch {
+                    delivery.finish(.failure(error))
+                }
+            }
+        } onCancel: {
+            delivery.finish(.failure(CancellationError()))
+        }
+    }
+
+    private final class Delivery<Value: Sendable>: @unchecked Sendable {
+        private let lock = NSLock()
+        private var result: Result<Value, Error>?
+        private var continuation: CheckedContinuation<Value, Error>?
+        var isFinished: Bool { lock.withLock { result != nil } }
+
+        func install(_ continuation: CheckedContinuation<Value, Error>) {
+            let finished = lock.withLock { () -> Result<Value, Error>? in
+                if let result { return result }
+                self.continuation = continuation
+                return nil
+            }
+            if let finished { continuation.resume(with: finished) }
+        }
+
+        func finish(_ result: Result<Value, Error>) {
+            let waiter = lock.withLock { () -> CheckedContinuation<Value, Error>? in
+                guard self.result == nil else { return nil }
+                self.result = result
+                defer { continuation = nil }
+                return continuation
+            }
+            waiter?.resume(with: result)
+        }
+    }
+}
+
 @MainActor
 final class ComputerUseHostTools {
     private static let semanticGroundingLog = Logger(
@@ -878,7 +977,7 @@ final class ComputerUseHostTools {
 
         var errorDescription: String? {
             switch self {
-            case .paused: return "AI Computer Use is paused by the user."
+            case .paused: return "AI Computer Use is paused."
             case .screenshotUnavailable: return "The Mac screen could not be captured."
             case .applicationUnavailable:
                 return "The requested Mac app could not be found or opened."
@@ -961,7 +1060,9 @@ final class ComputerUseHostTools {
         frontmostApplicationProvider: (() -> String?)? = nil
     ) {
         self.injector = injector
-        self.mayAct = mayAct
+        self.mayAct = {
+            mayAct() && !ComputerUseApplicationOpenOperation.hasPendingNativeOpen
+        }
         if let applicationIdentityOpener {
             self.applicationOpener = applicationIdentityOpener
             self.applicationOpenerProvidesCanonicalIdentity = true
@@ -973,7 +1074,8 @@ final class ComputerUseHostTools {
             self.applicationOpenerProvidesCanonicalIdentity = false
         } else {
             self.applicationOpener = {
-                try await ComputerUseHostTools.openInstalledApplication(named: $0)
+                try await ComputerUseHostTools.openInstalledApplication(
+                    named: $0, mayAct: mayAct)
             }
             self.applicationOpenerProvidesCanonicalIdentity = true
         }
@@ -1202,6 +1304,7 @@ final class ComputerUseHostTools {
     func openApplication(
         named rawName: String
     ) async throws -> ComputerUseApplicationIdentity? {
+        try Task.checkCancellation()
         guard mayAct() else { throw ToolError.paused }
         let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty,
@@ -1214,6 +1317,8 @@ final class ComputerUseHostTools {
               name.rangeOfCharacter(from: .controlCharacters) == nil else {
             throw ToolError.applicationUnavailable
         }
+        try Task.checkCancellation()
+        guard mayAct() else { throw ToolError.paused }
         let identity = try await applicationOpener(name)
         if applicationOpenerProvidesCanonicalIdentity {
             guard let identity, identity.codeIdentity != nil else {
@@ -1229,7 +1334,8 @@ final class ComputerUseHostTools {
     }
 
     private static func openInstalledApplication(
-        named name: String
+        named name: String,
+        mayAct: () -> Bool
     ) async throws -> ComputerUseApplicationIdentity {
         // Resolve only through the host-owned alias -> bundle-ID registry.
         // A localized application name is attacker-controlled, and the modern
@@ -1271,14 +1377,26 @@ final class ComputerUseHostTools {
 
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = true
-        return try await withCheckedThrowingContinuation {
-            (continuation: CheckedContinuation<ComputerUseApplicationIdentity, Error>) in
+        return try await ComputerUseApplicationOpenOperation.run { complete in
+            // Static bundle/code validation does not carry permission through
+            // to dispatch. Recheck immediately before Launch Services.
+            try Task.checkCancellation()
+            guard mayAct() else { throw ToolError.paused }
+            let flight = try ComputerUseApplicationOpenOperation.beginNativeOpen()
+            do {
+                try Task.checkCancellation()
+                guard mayAct() else { throw ToolError.paused }
+            } catch {
+                ComputerUseApplicationOpenOperation.finishNativeOpen(flight)
+                throw error
+            }
             NSWorkspace.shared.openApplication(
                 at: applicationURL,
                 configuration: configuration
             ) { application, error in
+                let result: Result<ComputerUseApplicationIdentity, Error>
                 if let error {
-                    continuation.resume(throwing: error)
+                    result = .failure(error)
                 } else if let application {
                     do {
                         let proof = try
@@ -1295,14 +1413,15 @@ final class ComputerUseHostTools {
                                 named: name) else {
                             throw ToolError.applicationUnavailable
                         }
-                        continuation.resume(returning: identity)
+                        result = .success(identity)
                     } catch {
-                        continuation.resume(
-                            throwing: ToolError.applicationUnavailable)
+                        result = .failure(ToolError.applicationUnavailable)
                     }
                 } else {
-                    continuation.resume(throwing: ToolError.applicationUnavailable)
+                    result = .failure(ToolError.applicationUnavailable)
                 }
+                ComputerUseApplicationOpenOperation.finishNativeOpen(flight)
+                complete(result)
             }
         }
     }

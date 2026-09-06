@@ -339,6 +339,202 @@ final class ComputerUseTests: XCTestCase {
         XCTAssertEqual(openedNames, ["Calculator"])
     }
 
+    func test_visualOpenAppChecksCancellationAndFinalGateWithoutDiscardingCompletedOpen() async throws {
+        enum Scenario: CaseIterable, Equatable, Sendable {
+            case alreadyCancelled, cancelledDuringAdmission, pausedDuringAdmission, completedDuringCancellation
+        }
+        for scenario in Scenario.allCases {
+            var gateReads = 0
+            var opened: [String] = []
+            let tools = ComputerUseHostTools(
+                injector: InputInjector(eventPoster: { _ in XCTFail("No fixture input") }),
+                mayAct: {
+                    gateReads += 1
+                    if scenario == .cancelledDuringAdmission {
+                        withUnsafeCurrentTask { $0?.cancel() }
+                    }
+                    return scenario != .pausedDuringAdmission || gateReads == 1
+                },
+                applicationOpener: { name in
+                    opened.append(name)
+                    if scenario == .completedDuringCancellation {
+                        withUnsafeCurrentTask { $0?.cancel() }
+                    }
+                })
+            let call = Task { try await tools.openApplication(named: "Notes") }
+            if scenario == .alreadyCancelled { call.cancel() }
+            do {
+                _ = try await call.value
+                XCTAssertEqual(scenario, .completedDuringCancellation,
+                    "Only a completed opener may return after cancellation; its caller must record that fact")
+            } catch is CancellationError {
+                XCTAssertTrue([.alreadyCancelled, .cancelledDuringAdmission].contains(scenario))
+            } catch ComputerUseHostTools.ToolError.paused {
+                XCTAssertEqual(scenario, .pausedDuringAdmission)
+            }
+            XCTAssertEqual(opened, scenario == .completedDuringCancellation ? ["Notes"] : [])
+            if scenario == .alreadyCancelled { XCTAssertEqual(gateReads, 0) }
+        }
+    }
+
+    func test_applicationOpenCallbackCancellationReturnsBeforeLateNativeCompletion() async throws {
+        var finish: (@Sendable (Result<Int, Error>) -> Void)?
+        var started = 0
+        let call = Task {
+            let result: Int = try await ComputerUseApplicationOpenOperation.run { callback in
+                started += 1
+                finish = callback
+            }
+            return result
+        }
+        do {
+            let deadline = ContinuousClock.now + .seconds(2)
+            while finish == nil && ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(1))
+            }
+            let lateCompletion = try XCTUnwrap(finish)
+            call.cancel()
+            do {
+                _ = try await call.value
+                XCTFail("Stop must end the wait before the native callback")
+            } catch is CancellationError {}
+            XCTAssertEqual(started, 1)
+            // Neither a delayed native result nor a duplicate callback may
+            // resume an already-cancelled continuation a second time.
+            lateCompletion(.success(42))
+            lateCompletion(.failure(ComputerUseHostTools.ToolError.applicationUnavailable))
+        } catch {
+            call.cancel()
+            finish?(.failure(CancellationError()))
+            _ = try? await call.value
+            throw error
+        }
+
+        let completed = Task {
+            let result: Int = try await ComputerUseApplicationOpenOperation.run { finish in
+                finish(.success(42))
+                withUnsafeCurrentTask { $0?.cancel() }
+                finish(.success(99))
+            }
+            return result
+        }
+        let result = try await completed.value
+        XCTAssertEqual(result, 42, "A completed effect must remain recordable when its result won before Stop")
+
+        var cancelledStarts = 0
+        let alreadyCancelled = Task {
+            let result: Int = try await ComputerUseApplicationOpenOperation.run { finish in
+                cancelledStarts += 1
+                finish(.success(42))
+            }
+            return result
+        }
+        alreadyCancelled.cancel()
+        do { _ = try await alreadyCancelled.value; XCTFail("A cancelled caller cannot dispatch") }
+        catch is CancellationError {}
+        XCTAssertEqual(cancelledStarts, 0)
+    }
+
+    func test_applicationOpenCallbackDeadlineAndFailuresCannotBecomeLateSuccess() async throws {
+        var lateCompletion: (@Sendable (Result<Int, Error>) -> Void)?
+        do {
+            let _: Int = try await ComputerUseApplicationOpenOperation.run(timeout: 0.01) { finish in
+                lateCompletion = finish
+            }
+            XCTFail("An unresponsive native opener must have a bounded wait")
+        } catch ComputerUseApplicationOpenOperation.Failure.timedOut {}
+        let finish = try XCTUnwrap(lateCompletion)
+        finish(.success(42))
+        finish(.success(99))
+
+        do {
+            let _: Int = try await ComputerUseApplicationOpenOperation.run { finish in
+                finish(.failure(ComputerUseHostTools.ToolError.applicationUnavailable))
+                finish(.success(42))
+            }
+            XCTFail("A later callback cannot replace the first failure")
+        } catch ComputerUseHostTools.ToolError.applicationUnavailable {}
+        do {
+            let _: Int = try await ComputerUseApplicationOpenOperation.run { _ in
+                throw ComputerUseHostTools.ToolError.paused
+            }
+            XCTFail("A dispatch admission error must finish the waiter")
+        } catch ComputerUseHostTools.ToolError.paused {}
+        for invalidTimeout in [0, -1, .nan, .infinity, 31] as [TimeInterval] {
+            do {
+                let _: Int = try await ComputerUseApplicationOpenOperation.run(timeout: invalidTimeout) { finish in
+                    XCTFail("Invalid deadlines must be rejected before dispatch")
+                    finish(.success(42))
+                }
+                XCTFail("An invalid deadline cannot disable the bound")
+            } catch ComputerUseApplicationOpenOperation.Failure.timedOut {}
+        }
+    }
+
+    func test_pendingNativeOpenBlocksNewAutomationUntilItsExactCallbackSettles() async throws {
+        var userAllowsActions = true
+        var actions: [ComputerUsePredictedAction] = []
+        var opens = 0
+        func makeTools() -> ComputerUseHostTools {
+            ComputerUseHostTools(
+                injector: InputInjector(eventPoster: { _ in XCTFail("No fixture input") }),
+                mayAct: { userAllowsActions },
+                applicationOpener: { _ in opens += 1 },
+                actionPerformer: { actions.append($0) })
+        }
+        let oldTools = makeTools()
+        var completeNativeOpen: (() -> Void)?
+        var lease: UUID?
+        let call = Task {
+            let result: Int = try await ComputerUseApplicationOpenOperation.run { complete in
+                let id = try ComputerUseApplicationOpenOperation.beginNativeOpen()
+                lease = id
+                completeNativeOpen = {
+                    ComputerUseApplicationOpenOperation.finishNativeOpen(id)
+                    complete(.success(42))
+                }
+            }
+            return result
+        }
+        defer {
+            call.cancel()
+            completeNativeOpen?()
+            if let lease { ComputerUseApplicationOpenOperation.finishNativeOpen(lease) }
+        }
+        let deadline = ContinuousClock.now + .seconds(2)
+        while completeNativeOpen == nil && ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        let nativeCallback = try XCTUnwrap(completeNativeOpen)
+        call.cancel()
+        do { _ = try await call.value; XCTFail("The cancelled wait must finish independently of the native lease") }
+        catch is CancellationError {}
+
+        let newTools = makeTools()
+        for tools in [oldTools, newTools] {
+            XCTAssertThrowsError(try tools.perform(.typeText("new task")))
+            do { _ = try await tools.openApplication(named: "Notes"); XCTFail("An unsettled native open must block another open") }
+            catch ComputerUseHostTools.ToolError.paused {}
+        }
+        XCTAssertTrue(actions.isEmpty)
+        XCTAssertEqual(opens, 0)
+        XCTAssertThrowsError(try ComputerUseApplicationOpenOperation.beginNativeOpen())
+
+        nativeCallback()
+        try newTools.perform(.typeText("new task"))
+        XCTAssertEqual(actions, [.typeText("new task")])
+        let replacement = try ComputerUseApplicationOpenOperation.beginNativeOpen()
+        defer { ComputerUseApplicationOpenOperation.finishNativeOpen(replacement) }
+        nativeCallback()
+        XCTAssertThrowsError(try oldTools.perform(.typeText("stale callback")),
+            "An old native callback must not release a later open's lease")
+        ComputerUseApplicationOpenOperation.finishNativeOpen(replacement)
+        userAllowsActions = false
+        XCTAssertThrowsError(try newTools.perform(.typeText("paused")),
+            "Finishing native work must never reopen a closed user action gate")
+        XCTAssertEqual(actions, [.typeText("new task")])
+    }
+
     func test_visualOpenAppRejectsPathsAndPausedAutomationBeforeOpening() async {
         var openCount = 0
         var allowed = true
