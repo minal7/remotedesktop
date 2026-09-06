@@ -1,0 +1,16 @@
+{
+  "selectors": [
+    "RemoteDesktopTests/ComputerUseClarificationClientTests"
+  ],
+  "expectedTests": [
+    "RemoteDesktopTests/ComputerUseClarificationClientTests/testAnswerRetriesAndRelaunchReuseExactBodyAndTaskIDEvenAfterReferenceExpiry",
+    "RemoteDesktopTests/ComputerUseClarificationClientTests/testCancellationOrCompletionPreventsQuestionTextFromBecomingNewTaskContext",
+    "RemoteDesktopTests/ComputerUseClarificationClientTests/testExpiryOrDisconnectRequiresExplicitNewRequestWithoutReusingHistory",
+    "RemoteDesktopTests/ComputerUseClarificationClientTests/testExpiryTimerReleasesQuestionAndCannotInvalidateAnAlreadyClaimedAnswer",
+    "RemoteDesktopTests/ComputerUseClarificationClientTests/testExplicitReferenceCarriesExactAnswersAcrossTwoQuestionsWithoutChatTruncation",
+    "RemoteDesktopTests/ComputerUseClarificationClientTests/testInvalidOrUnsavedAnswerKeepsTheQuestionAndSendsNoTruncatedText",
+    "RemoteDesktopTests/ComputerUseClarificationClientTests/testLegacyQuestionRetainsItsExistingConversationAndMailPrivacyBehavior",
+    "RemoteDesktopTests/ComputerUseClarificationClientTests/testMalformedAndUnrelatedResponsesCannotSelectAContinuation",
+    "RemoteDesktopTests/ComputerUseClarificationClientTests/testNewRequestDiscardsScopedOrLegacyQuestionAndIgnoresLateReplay"
+  ]
+}

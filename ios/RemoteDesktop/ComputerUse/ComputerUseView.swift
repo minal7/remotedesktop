@@ -779,6 +779,25 @@ struct ComputerUseView: View {
 
     private var composer: some View {
         VStack(spacing: 8) {
+            if model.canStartNewRequest {
+                HStack {
+                    Text(model.composerMode == .expiredAnswer ? "Question expired" : "Replying to your Mac")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Start a new request") {
+                        if model.startNewRequest() { draft = ""; composerFocused = true }
+                    }
+                    .font(.caption.weight(.semibold))
+                    .accessibilityIdentifier("computer-use-new-request")
+                }
+            }
+            if !draft.isEmpty, let message = model.promptValidationMessage(draft) {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
             if model.retryPrompt != nil {
                 Button {
                     model.retryLastPrompt()
@@ -809,6 +828,10 @@ struct ComputerUseView: View {
                         ? "Resume AI to send another request"
                         : model.hasActivePrompt
                             ? "Waiting for the current request"
+                        : model.isAnsweringClarification
+                            ? "Answer your Mac's question"
+                        : model.composerMode == .expiredAnswer
+                            ? "Start a new request to continue"
                         : "Tell your Mac what to do",
                     text: $draft,
                     axis: .vertical)
@@ -821,6 +844,7 @@ struct ComputerUseView: View {
                         isTakingControl
                             || isAwaitingApproval
                             || model.hasActivePrompt
+                            || model.composerMode == .expiredAnswer
                             || !model.isConnected
                             || !session.isComputerUsePromptTransportReady)
                     .padding(.horizontal, 14)
@@ -837,7 +861,7 @@ struct ComputerUseView: View {
                 .buttonStyle(.plain)
                 .disabled(!canSend)
                 .opacity(canSend ? 1 : 0.45)
-                .accessibilityLabel("Send request")
+                .accessibilityLabel(model.isAnsweringClarification ? "Send answer" : "Send request")
             }
         }
         .padding(.horizontal, 14)
@@ -858,15 +882,16 @@ struct ComputerUseView: View {
             return false
         }
         guard !model.hasActivePrompt else { return false }
-        return !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        return model.promptValidationMessage(draft) == nil
     }
 
     private func sendDraft() {
         guard canSend else { return }
         let prompt = draft
-        draft = ""
-        composerFocused = false
-        model.sendPrompt(prompt)
+        if model.sendPrompt(prompt) {
+            draft = ""
+            composerFocused = false
+        }
     }
 
     private func screenHeight(for size: CGSize) -> CGFloat {

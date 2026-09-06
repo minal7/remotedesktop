@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 
 protocol ComputerUseSessionChannel: Sendable {
     @discardableResult
@@ -53,6 +54,13 @@ final class ComputerUseSessionModel: ObservableObject {
         case error(String)
     }
 
+    enum ComposerMode: Equatable {
+        case request
+        case legacyAnswer
+        case answer(ComputerUseClarificationReference, validUntil: Date)
+        case expiredAnswer
+    }
+
     @Published private(set) var messages: [ChatMessage] = []
     @Published private(set) var state: State = .ready
     @Published private(set) var statusText = "Ready for a request"
@@ -62,6 +70,7 @@ final class ComputerUseSessionModel: ObservableObject {
     /// path acceptance must still be able to inspect every completed step.
     @Published private(set) var taskProgressHistory: [String] = []
     @Published private(set) var retryPrompt: String?
+    @Published private(set) var composerMode: ComposerMode = .request
     /// The newest machine-readable result received for the active or most
     /// recently finished request. Legacy hosts leave this `nil`.
     @Published private(set) var latestTerminalOutcome: ComputerUseTerminalOutcome?
@@ -80,6 +89,11 @@ final class ComputerUseSessionModel: ObservableObject {
         activePromptID != nil && lastControlKind == .cancel
     }
     var interventionGuidance: String? { userInterventionGuidance }
+    var isAnsweringClarification: Bool {
+        if case .answer = composerMode { return true }
+        return composerMode == .legacyAnswer
+    }
+    var canStartNewRequest: Bool { activePromptID == nil && composerMode != .request }
 
     let hostName: String
     private let channel: any ComputerUseSessionChannel
@@ -92,6 +106,7 @@ final class ComputerUseSessionModel: ObservableObject {
     private var responseTimeoutTask: Task<Void, Never>?
     private var promptRefreshTask: Task<Void, Never>?
     private var controlRetryTask: Task<Void, Never>?
+    private var clarificationExpiryTask: Task<Void, Never>?
     private var outboundTasks: [UUID: Task<Void, Never>] = [:]
     /// Monotonically identifies the newest local intent or authoritative host
     /// state. An older CloudKit completion may arrive after a person resumes,
@@ -100,6 +115,7 @@ final class ComputerUseSessionModel: ObservableObject {
     private var isStopped = true
     private let responseTimeoutDuration: Duration
     private let promptRefreshInterval: Duration
+    private let now: () -> Date
     private var transportNotice: String?
     private var retryMessageID: String?
     private var retryWireBody: String?
@@ -130,7 +146,8 @@ final class ComputerUseSessionModel: ObservableObject {
         pendingStore: any ComputerUsePendingPromptStoring = ComputerUsePendingPromptStore.shared,
         channel: any ComputerUseSessionChannel,
         responseTimeoutDuration: Duration = .seconds(20 * 60),
-        promptRefreshInterval: Duration = .seconds(30)
+        promptRefreshInterval: Duration = .seconds(30),
+        now: @escaping () -> Date = Date.init
     ) {
         let restored = pendingStore.load(
             hostID: hostID,
@@ -147,6 +164,7 @@ final class ComputerUseSessionModel: ObservableObject {
         self.localAccountBinding = localAccountBinding
         self.responseTimeoutDuration = responseTimeoutDuration
         self.promptRefreshInterval = promptRefreshInterval
+        self.now = now
         self.channel = channel
 
         if let restored {
@@ -228,6 +246,7 @@ final class ComputerUseSessionModel: ObservableObject {
     }
 
     func stop() {
+        if case .answer = composerMode { expireClarification() }
         advanceStateGeneration()
         isStopped = true
         isConnected = false
@@ -246,18 +265,42 @@ final class ComputerUseSessionModel: ObservableObject {
         approvalResponseInFlightRequestID = nil
     }
 
-    func sendPrompt(_ rawPrompt: String) {
-        guard !isStopped else { return }
-        let prompt = String(rawPrompt
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .prefix(8_000))
-        guard !prompt.isEmpty, activePromptID == nil else { return }
+    /// Invalid or unsaved input stays in the composer. Exact answers never
+    /// pass through trimming, truncation or the legacy chat-history path.
+    @discardableResult
+    func sendPrompt(_ rawPrompt: String) -> Bool {
+        guard !isStopped, activePromptID == nil else { return false }
         switch state {
         case .ready, .error:
             break
         case .working, .paused, .approvalRequired:
-            return
+            return false
         }
+        if case .answer(_, let deadline) = composerMode, now() >= deadline { expireClarification() }
+        if let message = promptValidationMessage(rawPrompt) {
+            state = .error(message)
+            statusText = message
+            return false
+        }
+        let request: ComputerUsePromptRequest
+        let wireBody: String
+        do {
+            switch composerMode {
+            case .answer(let reference, _):
+                request = try .answering(reference, text: rawPrompt)
+            case .legacyAnswer:
+                request = .init(prompt: rawPrompt, conversation: recentConversation())
+            case .request:
+                request = .init(prompt: rawPrompt)
+            case .expiredAnswer: return false
+            }
+            wireBody = try request.encodedBody()
+        } catch {
+            state = .error("This request couldn't be prepared. Your text has not been sent.")
+            statusText = "Request not sent"
+            return false
+        }
+        let prompt = request.prompt
 
         // A valid new submission attempt supersedes the presentation of the
         // previous task's terminal result even if durable recovery storage is
@@ -267,10 +310,6 @@ final class ComputerUseSessionModel: ObservableObject {
         taskProgressHistory.removeAll(keepingCapacity: true)
         let operationGeneration = advanceStateGeneration()
         let messageID = UUID().uuidString
-        let request = ComputerUsePromptRequest(
-            prompt: prompt,
-            conversation: recentConversation())
-        let wireBody = (try? request.encodedBody()) ?? prompt
         if Self.requiresPersistentPrivacyShield(request) {
             // This is deliberately synchronous: do not expose unrelated Mac
             // pixels while the embedded Mail request is in flight or being
@@ -281,7 +320,7 @@ final class ComputerUseSessionModel: ObservableObject {
             id: messageID,
             author: .user,
             text: prompt,
-            createdAt: Date())
+            createdAt: now())
         messages.append(message)
         guard rememberActivePrompt(
             prompt,
@@ -291,8 +330,9 @@ final class ComputerUseSessionModel: ObservableObject {
             messages.removeAll { $0.id == messageID }
             state = .error("Couldn’t securely save this request, so it was not sent.")
             statusText = "Request not sent — secure recovery storage is unavailable"
-            return
+            return false
         }
+        resetComposerMode()
         state = .working
         statusText = "Sending securely to your Mac…"
         startPromptRefresh(resendImmediately: false)
@@ -328,6 +368,59 @@ final class ComputerUseSessionModel: ObservableObject {
                 model.retryWireBody = wireBody
                 model.show(error)
             }
+        }
+        return true
+    }
+
+    func promptValidationMessage(_ text: String) -> String? {
+        if composerMode == .expiredAnswer { return "This question is no longer active. Start a new request." }
+        if case .answer(_, let deadline) = composerMode, now() >= deadline {
+            return "This question has expired. Start a new request."
+        }
+        let value: String
+        if case .answer = composerMode { value = text }
+        else { value = text.trimmingCharacters(in: .whitespacesAndNewlines) }
+        guard !value.isEmpty else { return "Enter a request or answer first." }
+        guard value.count <= ComputerUsePromptRequest.maximumPromptLength, value.utf8.count <= 32 * 1_024 else {
+            return "This text is too long. Shorten it before sending."
+        }
+        return nil
+    }
+
+    @discardableResult
+    func startNewRequest() -> Bool {
+        guard activePromptID == nil else { return false }
+        advanceStateGeneration()
+        resetComposerMode()
+        latestTerminalOutcome = nil
+        state = .ready
+        statusText = "Ready for a new request"
+        return true
+    }
+
+    private func resetComposerMode() {
+        clarificationExpiryTask?.cancel()
+        clarificationExpiryTask = nil
+        composerMode = .request
+    }
+
+    private func expireClarification() {
+        resetComposerMode()
+        composerMode = .expiredAnswer
+        statusText = "This question is no longer active. Start a new request."
+    }
+
+    private func awaitClarification(_ reference: ComputerUseClarificationReference) {
+        resetComposerMode()
+        let current = now(), deadline = min(reference.expiresAt, current.addingTimeInterval(600))
+        guard deadline > current else { expireClarification(); return }
+        composerMode = .answer(reference, validUntil: deadline)
+        statusText = "Answer the question to continue the original request"
+        clarificationExpiryTask = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(deadline.timeIntervalSince(current))) } catch { return }
+            guard let self, case .answer(let currentReference, _) = self.composerMode,
+                  currentReference == reference else { return }
+            self.expireClarification()
         }
     }
 
@@ -729,6 +822,8 @@ final class ComputerUseSessionModel: ObservableObject {
             switch envelope.kind {
             case .assistant:
                 let update = try? ComputerUseTaskUpdate.decodeBody(envelope.body)
+                let trimmed = envelope.body.trimmingCharacters(in: .whitespacesAndNewlines)
+                if update == nil && (trimmed.first == "{" || trimmed.first == "[") { continue }
                 let taskID = update?.taskID ?? activePromptID
                 guard let activePromptID,
                       taskID == activePromptID else { continue }
@@ -759,7 +854,7 @@ final class ComputerUseSessionModel: ObservableObject {
                     author: .assistant,
                     text: assistantText,
                     createdAt: envelope.createdAt))
-                applyAssistantOutcome(update?.outcome, text: assistantText)
+                applyAssistantOutcome(update?.outcome, text: assistantText, clarification: update?.clarification)
             case .status:
                 if let update = try? ComputerUseTaskUpdate.decodeBody(envelope.body) {
                     guard update.taskID == activePromptID else { continue }
@@ -1056,8 +1151,13 @@ final class ComputerUseSessionModel: ObservableObject {
 
     private func applyAssistantOutcome(
         _ outcome: ComputerUseTerminalOutcome?,
-        text: String
+        text: String,
+        clarification: ComputerUseClarificationReference?
     ) {
+        let acceptsAnswer = lastControlKind != .cancel && pendingControlIntent?.kind != .cancel
+        let reference = acceptsAnswer && outcome == .userInterventionRequired
+            && clarification?.taskID == activePromptID ? clarification : nil
+        resetComposerMode()
         latestTerminalOutcome = outcome
         // Assistant envelopes are conversational task boundaries. Even a
         // typed intervention outcome is a terminal clarification whose answer
@@ -1080,6 +1180,12 @@ final class ComputerUseSessionModel: ObservableObject {
                 : "Ready for another request"
         }
         clearActivePrompt()
+        if let reference {
+            awaitClarification(reference)
+        } else if acceptsAnswer, outcome == nil || outcome == .userInterventionRequired,
+                  text.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix("?") {
+            composerMode = .legacyAnswer
+        }
     }
 
     private func enterUserIntervention(_ status: String) {
@@ -1363,7 +1469,13 @@ final class ComputerUseSessionModel: ObservableObject {
 
     private func restoreStatusText() {
         switch state {
-        case .ready: statusText = "Ready for a request"
+        case .ready:
+            switch composerMode {
+            case .answer: statusText = "Answer the question to continue the original request"
+            case .legacyAnswer: statusText = "Answer the question or start a new request"
+            case .expiredAnswer: statusText = "This question is no longer active. Start a new request."
+            case .request: statusText = "Ready for a request"
+            }
         case .working: statusText = "Your Mac is working on it…"
         case .paused:
             statusText = userInterventionGuidance

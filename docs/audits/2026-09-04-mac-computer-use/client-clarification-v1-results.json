@@ -1,0 +1,372 @@
+{
+  "schemaVersion": 1,
+  "sourceBaseCommit": "f1aac7293dd4cb1b2fae0ec7f6dea6ff12d622e1",
+  "sourceSHA256": {
+    "ios/RemoteDesktop/ComputerUse/ComputerUseSessionModel.swift": "0fcac5a73125bc6763f1b6aed4bbeabcbd4f1e1731127defc25fcab11013cea7",
+    "ios/RemoteDesktop/ComputerUse/ComputerUseView.swift": "250f915458625b6d91c02c5e632c516974afe668d1a68e19aff995792b453dd2",
+    "ios/RemoteDesktopTests/ComputerUseClarificationClientTests.swift": "dd9c94215a9d40e344b25a2456d88223d14ed19276fa6377aa82058704faf411",
+    "ios/scripts/run_computer_use_client_core_tests.py": "156925b6954f8ddf8000047347850a52ea14ae326e1cc327a83ff57d11849f7c",
+    "ios/AcceptanceFixtures/computer-use-client-core-tests.json": "5efc007df1fc020a6e1116ce1cc125080e5631c0098e4e334ddf9be0ce875cfc"
+  },
+  "scope": "Phone composer and task-state integration of explicit host clarification references, exact answers, durable retry, expiry, and unrelated new requests.",
+  "portableClientStateRun": {
+    "schemaVersion": 1,
+    "scope": "Actual client state/protocol sources on macOS; no mobile UI or live transport qualification.",
+    "passed": true,
+    "commandExitCode": 0,
+    "sourceUnchangedDuringRun": true,
+    "sourceSHA256": {
+      "protocol/Swift/CloudKitComputerUseChannel.swift": "ada4c53898352c7035da588ea9095dc51849d110a957c9ac32241ec2d1aaaedb",
+      "protocol/Swift/CloudKitLocalComputerUsePairing.swift": "011f5836e2f07183c5c29295888c0cbf72c05a98d920102870a4337d4dce7ba9",
+      "protocol/Swift/CloudKitSignalingClient.swift": "20cff7566c45ce854dff909fba34039c706faf85ad01d0c3b733dee6bc48bdd7",
+      "protocol/Swift/ComputerUseProtocol.swift": "89d27013dc501ea0c45fc1bf2878cbaed4a26d1f09b25b5d6fd1f0adb2b219a2",
+      "protocol/Swift/DeviceIdentity.swift": "657151daa313df556ff564591f756c1aa94cfa1ece09e3920bddb7abb41a1ccb",
+      "protocol/Swift/ICEConfigFetcher.swift": "4170a3fb301d2b03693155be9d893f5c73bc730cf393df9a005b03e88f860744",
+      "protocol/Swift/LocalComputerUseCredentials.swift": "fe2d03367da7289a750c812efdaa5dd96e8e7e37e54f21c399b28a687f6ba99b",
+      "protocol/Swift/LocalComputerUseRPC.swift": "f2ea658ab6cb44cdce7890f768aa007e4dae573c46c8511b2f7dd48961b3e8da",
+      "protocol/Swift/LocalComputerUseTLS.swift": "4b830b997f29a77d36a30d8fe1d1992d3706fdfcf2d05cf504ae041897633345",
+      "protocol/Swift/SignalingEnvelope.swift": "e69dfc9e621628880d423ec050d4e181fcfa40e2aca814a7ef78da0e6581c544",
+      "ios/RemoteDesktop/ComputerUse/ComputerUseSessionModel.swift": "0fcac5a73125bc6763f1b6aed4bbeabcbd4f1e1731127defc25fcab11013cea7",
+      "ios/RemoteDesktop/ComputerUse/ComputerUsePendingPromptStore.swift": "36006c311b81c8ec8aed0fd260ed25f0032238721a474b127f7022bf3a5099d2",
+      "ios/RemoteDesktopTests/ComputerUseClarificationClientTests.swift": "dd9c94215a9d40e344b25a2456d88223d14ed19276fa6377aa82058704faf411"
+    },
+    "expectedTests": [
+      "ComputerUseClarificationClientTests/testAnswerRetriesAndRelaunchReuseExactBodyAndTaskIDEvenAfterReferenceExpiry",
+      "ComputerUseClarificationClientTests/testCancellationOrCompletionPreventsQuestionTextFromBecomingNewTaskContext",
+      "ComputerUseClarificationClientTests/testExpiryOrDisconnectRequiresExplicitNewRequestWithoutReusingHistory",
+      "ComputerUseClarificationClientTests/testExpiryTimerReleasesQuestionAndCannotInvalidateAnAlreadyClaimedAnswer",
+      "ComputerUseClarificationClientTests/testExplicitReferenceCarriesExactAnswersAcrossTwoQuestionsWithoutChatTruncation",
+      "ComputerUseClarificationClientTests/testInvalidOrUnsavedAnswerKeepsTheQuestionAndSendsNoTruncatedText",
+      "ComputerUseClarificationClientTests/testLegacyQuestionRetainsItsExistingConversationAndMailPrivacyBehavior",
+      "ComputerUseClarificationClientTests/testMalformedAndUnrelatedResponsesCannotSelectAContinuation",
+      "ComputerUseClarificationClientTests/testNewRequestDiscardsScopedOrLegacyQuestionAndIgnoresLateReplay"
+    ],
+    "observedTests": [
+      {
+        "id": "ComputerUseClarificationClientTests/testAnswerRetriesAndRelaunchReuseExactBodyAndTaskIDEvenAfterReferenceExpiry",
+        "passed": true,
+        "seconds": "0.100051583"
+      },
+      {
+        "id": "ComputerUseClarificationClientTests/testCancellationOrCompletionPreventsQuestionTextFromBecomingNewTaskContext",
+        "passed": true,
+        "seconds": "0.126917917"
+      },
+      {
+        "id": "ComputerUseClarificationClientTests/testExpiryOrDisconnectRequiresExplicitNewRequestWithoutReusingHistory",
+        "passed": true,
+        "seconds": "0.11478025"
+      },
+      {
+        "id": "ComputerUseClarificationClientTests/testExpiryTimerReleasesQuestionAndCannotInvalidateAnAlreadyClaimedAnswer",
+        "passed": true,
+        "seconds": "0.521000334"
+      },
+      {
+        "id": "ComputerUseClarificationClientTests/testExplicitReferenceCarriesExactAnswersAcrossTwoQuestionsWithoutChatTruncation",
+        "passed": true,
+        "seconds": "0.145193042"
+      },
+      {
+        "id": "ComputerUseClarificationClientTests/testInvalidOrUnsavedAnswerKeepsTheQuestionAndSendsNoTruncatedText",
+        "passed": true,
+        "seconds": "0.095893833"
+      },
+      {
+        "id": "ComputerUseClarificationClientTests/testLegacyQuestionRetainsItsExistingConversationAndMailPrivacyBehavior",
+        "passed": true,
+        "seconds": "0.090256375"
+      },
+      {
+        "id": "ComputerUseClarificationClientTests/testMalformedAndUnrelatedResponsesCannotSelectAContinuation",
+        "passed": true,
+        "seconds": "0.102835792"
+      },
+      {
+        "id": "ComputerUseClarificationClientTests/testNewRequestDiscardsScopedOrLegacyQuestionAndIgnoresLateReplay",
+        "passed": true,
+        "seconds": "0.128037166"
+      }
+    ],
+    "inventorySnapshot": {
+      "selectors": [
+        "RemoteDesktopTests/ComputerUseClarificationClientTests"
+      ],
+      "expectedTests": [
+        "RemoteDesktopTests/ComputerUseClarificationClientTests/testAnswerRetriesAndRelaunchReuseExactBodyAndTaskIDEvenAfterReferenceExpiry",
+        "RemoteDesktopTests/ComputerUseClarificationClientTests/testCancellationOrCompletionPreventsQuestionTextFromBecomingNewTaskContext",
+        "RemoteDesktopTests/ComputerUseClarificationClientTests/testExpiryOrDisconnectRequiresExplicitNewRequestWithoutReusingHistory",
+        "RemoteDesktopTests/ComputerUseClarificationClientTests/testExpiryTimerReleasesQuestionAndCannotInvalidateAnAlreadyClaimedAnswer",
+        "RemoteDesktopTests/ComputerUseClarificationClientTests/testExplicitReferenceCarriesExactAnswersAcrossTwoQuestionsWithoutChatTruncation",
+        "RemoteDesktopTests/ComputerUseClarificationClientTests/testInvalidOrUnsavedAnswerKeepsTheQuestionAndSendsNoTruncatedText",
+        "RemoteDesktopTests/ComputerUseClarificationClientTests/testLegacyQuestionRetainsItsExistingConversationAndMailPrivacyBehavior",
+        "RemoteDesktopTests/ComputerUseClarificationClientTests/testMalformedAndUnrelatedResponsesCannotSelectAContinuation",
+        "RemoteDesktopTests/ComputerUseClarificationClientTests/testNewRequestDiscardsScopedOrLegacyQuestionAndIgnoresLateReplay"
+      ]
+    },
+    "inventorySHA256": "5efc007df1fc020a6e1116ce1cc125080e5631c0098e4e334ddf9be0ce875cfc",
+    "command": [
+      "swift",
+      "test",
+      "--package-path",
+      "/private/tmp/remotedesktop-client-clarification-core",
+      "--disable-sandbox",
+      "--jobs",
+      "2",
+      "--disable-swift-testing",
+      "--parallel",
+      "--num-workers",
+      "1",
+      "--filter",
+      "ComputerUseClarificationClientTests",
+      "--xunit-output",
+      "/private/tmp/remotedesktop-client-clarification-core/v4.xml"
+    ],
+    "log": "/private/tmp/remotedesktop-client-clarification-core/v4.log",
+    "xunit": "/private/tmp/remotedesktop-client-clarification-core/v4.xml"
+  },
+  "priorPortableRuns": [
+    {
+      "schemaVersion": 1,
+      "scope": "Actual client state/protocol sources on macOS; no mobile UI or live transport qualification.",
+      "passed": false,
+      "commandExitCode": 1,
+      "sourceUnchangedDuringRun": true,
+      "sourceSHA256": {
+        "protocol/Swift/CloudKitComputerUseChannel.swift": "ada4c53898352c7035da588ea9095dc51849d110a957c9ac32241ec2d1aaaedb",
+        "protocol/Swift/CloudKitLocalComputerUsePairing.swift": "011f5836e2f07183c5c29295888c0cbf72c05a98d920102870a4337d4dce7ba9",
+        "protocol/Swift/CloudKitSignalingClient.swift": "20cff7566c45ce854dff909fba34039c706faf85ad01d0c3b733dee6bc48bdd7",
+        "protocol/Swift/ComputerUseProtocol.swift": "89d27013dc501ea0c45fc1bf2878cbaed4a26d1f09b25b5d6fd1f0adb2b219a2",
+        "protocol/Swift/DeviceIdentity.swift": "657151daa313df556ff564591f756c1aa94cfa1ece09e3920bddb7abb41a1ccb",
+        "protocol/Swift/ICEConfigFetcher.swift": "4170a3fb301d2b03693155be9d893f5c73bc730cf393df9a005b03e88f860744",
+        "protocol/Swift/LocalComputerUseCredentials.swift": "fe2d03367da7289a750c812efdaa5dd96e8e7e37e54f21c399b28a687f6ba99b",
+        "protocol/Swift/LocalComputerUseRPC.swift": "f2ea658ab6cb44cdce7890f768aa007e4dae573c46c8511b2f7dd48961b3e8da",
+        "protocol/Swift/LocalComputerUseTLS.swift": "4b830b997f29a77d36a30d8fe1d1992d3706fdfcf2d05cf504ae041897633345",
+        "protocol/Swift/SignalingEnvelope.swift": "e69dfc9e621628880d423ec050d4e181fcfa40e2aca814a7ef78da0e6581c544",
+        "ios/RemoteDesktop/ComputerUse/ComputerUseSessionModel.swift": "0fcac5a73125bc6763f1b6aed4bbeabcbd4f1e1731127defc25fcab11013cea7",
+        "ios/RemoteDesktop/ComputerUse/ComputerUsePendingPromptStore.swift": "36006c311b81c8ec8aed0fd260ed25f0032238721a474b127f7022bf3a5099d2",
+        "ios/RemoteDesktopTests/ComputerUseClarificationClientTests.swift": "dd9c94215a9d40e344b25a2456d88223d14ed19276fa6377aa82058704faf411"
+      },
+      "expectedTests": [
+        "ComputerUseClarificationClientTests/testAnswerRetriesAndRelaunchReuseExactBodyAndTaskIDEvenAfterReferenceExpiry",
+        "ComputerUseClarificationClientTests/testCancellationOrCompletionPreventsQuestionTextFromBecomingNewTaskContext",
+        "ComputerUseClarificationClientTests/testExpiryOrDisconnectRequiresExplicitNewRequestWithoutReusingHistory",
+        "ComputerUseClarificationClientTests/testExpiryTimerReleasesQuestionAndCannotInvalidateAnAlreadyClaimedAnswer",
+        "ComputerUseClarificationClientTests/testExplicitReferenceCarriesExactAnswersAcrossTwoQuestionsWithoutChatTruncation",
+        "ComputerUseClarificationClientTests/testInvalidOrUnsavedAnswerKeepsTheQuestionAndSendsNoTruncatedText",
+        "ComputerUseClarificationClientTests/testLegacyQuestionRetainsItsExistingConversationAndMailPrivacyBehavior",
+        "ComputerUseClarificationClientTests/testMalformedAndUnrelatedResponsesCannotSelectAContinuation",
+        "ComputerUseClarificationClientTests/testNewRequestDiscardsScopedOrLegacyQuestionAndIgnoresLateReplay"
+      ],
+      "observedTests": [],
+      "command": [
+        "swift",
+        "test",
+        "--package-path",
+        "/private/tmp/remotedesktop-client-clarification-core",
+        "--disable-sandbox",
+        "--filter",
+        "ComputerUseClarificationClientTests",
+        "--xunit-output",
+        "/private/tmp/remotedesktop-client-clarification-core/v1.xml"
+      ],
+      "log": "/private/tmp/remotedesktop-client-clarification-core/v1.log",
+      "xunit": "/private/tmp/remotedesktop-client-clarification-core/v1.xml"
+    },
+    {
+      "schemaVersion": 1,
+      "scope": "Actual client state/protocol sources on macOS; no mobile UI or live transport qualification.",
+      "passed": false,
+      "commandExitCode": 0,
+      "sourceUnchangedDuringRun": true,
+      "sourceSHA256": {
+        "protocol/Swift/CloudKitComputerUseChannel.swift": "ada4c53898352c7035da588ea9095dc51849d110a957c9ac32241ec2d1aaaedb",
+        "protocol/Swift/CloudKitLocalComputerUsePairing.swift": "011f5836e2f07183c5c29295888c0cbf72c05a98d920102870a4337d4dce7ba9",
+        "protocol/Swift/CloudKitSignalingClient.swift": "20cff7566c45ce854dff909fba34039c706faf85ad01d0c3b733dee6bc48bdd7",
+        "protocol/Swift/ComputerUseProtocol.swift": "89d27013dc501ea0c45fc1bf2878cbaed4a26d1f09b25b5d6fd1f0adb2b219a2",
+        "protocol/Swift/DeviceIdentity.swift": "657151daa313df556ff564591f756c1aa94cfa1ece09e3920bddb7abb41a1ccb",
+        "protocol/Swift/ICEConfigFetcher.swift": "4170a3fb301d2b03693155be9d893f5c73bc730cf393df9a005b03e88f860744",
+        "protocol/Swift/LocalComputerUseCredentials.swift": "fe2d03367da7289a750c812efdaa5dd96e8e7e37e54f21c399b28a687f6ba99b",
+        "protocol/Swift/LocalComputerUseRPC.swift": "f2ea658ab6cb44cdce7890f768aa007e4dae573c46c8511b2f7dd48961b3e8da",
+        "protocol/Swift/LocalComputerUseTLS.swift": "4b830b997f29a77d36a30d8fe1d1992d3706fdfcf2d05cf504ae041897633345",
+        "protocol/Swift/SignalingEnvelope.swift": "e69dfc9e621628880d423ec050d4e181fcfa40e2aca814a7ef78da0e6581c544",
+        "ios/RemoteDesktop/ComputerUse/ComputerUseSessionModel.swift": "0fcac5a73125bc6763f1b6aed4bbeabcbd4f1e1731127defc25fcab11013cea7",
+        "ios/RemoteDesktop/ComputerUse/ComputerUsePendingPromptStore.swift": "36006c311b81c8ec8aed0fd260ed25f0032238721a474b127f7022bf3a5099d2",
+        "ios/RemoteDesktopTests/ComputerUseClarificationClientTests.swift": "dd9c94215a9d40e344b25a2456d88223d14ed19276fa6377aa82058704faf411"
+      },
+      "expectedTests": [
+        "ComputerUseClarificationClientTests/testAnswerRetriesAndRelaunchReuseExactBodyAndTaskIDEvenAfterReferenceExpiry",
+        "ComputerUseClarificationClientTests/testCancellationOrCompletionPreventsQuestionTextFromBecomingNewTaskContext",
+        "ComputerUseClarificationClientTests/testExpiryOrDisconnectRequiresExplicitNewRequestWithoutReusingHistory",
+        "ComputerUseClarificationClientTests/testExpiryTimerReleasesQuestionAndCannotInvalidateAnAlreadyClaimedAnswer",
+        "ComputerUseClarificationClientTests/testExplicitReferenceCarriesExactAnswersAcrossTwoQuestionsWithoutChatTruncation",
+        "ComputerUseClarificationClientTests/testInvalidOrUnsavedAnswerKeepsTheQuestionAndSendsNoTruncatedText",
+        "ComputerUseClarificationClientTests/testLegacyQuestionRetainsItsExistingConversationAndMailPrivacyBehavior",
+        "ComputerUseClarificationClientTests/testMalformedAndUnrelatedResponsesCannotSelectAContinuation",
+        "ComputerUseClarificationClientTests/testNewRequestDiscardsScopedOrLegacyQuestionAndIgnoresLateReplay"
+      ],
+      "observedTests": [],
+      "command": [
+        "swift",
+        "test",
+        "--package-path",
+        "/private/tmp/remotedesktop-client-clarification-core",
+        "--disable-sandbox",
+        "--jobs",
+        "2",
+        "--filter",
+        "ComputerUseClarificationClientTests",
+        "--xunit-output",
+        "/private/tmp/remotedesktop-client-clarification-core/v2.xml"
+      ],
+      "log": "/private/tmp/remotedesktop-client-clarification-core/v2.log",
+      "xunit": "/private/tmp/remotedesktop-client-clarification-core/v2.xml"
+    },
+    {
+      "schemaVersion": 1,
+      "scope": "Actual client state/protocol sources on macOS; no mobile UI or live transport qualification.",
+      "passed": true,
+      "commandExitCode": 0,
+      "sourceUnchangedDuringRun": true,
+      "sourceSHA256": {
+        "protocol/Swift/CloudKitComputerUseChannel.swift": "ada4c53898352c7035da588ea9095dc51849d110a957c9ac32241ec2d1aaaedb",
+        "protocol/Swift/CloudKitLocalComputerUsePairing.swift": "011f5836e2f07183c5c29295888c0cbf72c05a98d920102870a4337d4dce7ba9",
+        "protocol/Swift/CloudKitSignalingClient.swift": "20cff7566c45ce854dff909fba34039c706faf85ad01d0c3b733dee6bc48bdd7",
+        "protocol/Swift/ComputerUseProtocol.swift": "89d27013dc501ea0c45fc1bf2878cbaed4a26d1f09b25b5d6fd1f0adb2b219a2",
+        "protocol/Swift/DeviceIdentity.swift": "657151daa313df556ff564591f756c1aa94cfa1ece09e3920bddb7abb41a1ccb",
+        "protocol/Swift/ICEConfigFetcher.swift": "4170a3fb301d2b03693155be9d893f5c73bc730cf393df9a005b03e88f860744",
+        "protocol/Swift/LocalComputerUseCredentials.swift": "fe2d03367da7289a750c812efdaa5dd96e8e7e37e54f21c399b28a687f6ba99b",
+        "protocol/Swift/LocalComputerUseRPC.swift": "f2ea658ab6cb44cdce7890f768aa007e4dae573c46c8511b2f7dd48961b3e8da",
+        "protocol/Swift/LocalComputerUseTLS.swift": "4b830b997f29a77d36a30d8fe1d1992d3706fdfcf2d05cf504ae041897633345",
+        "protocol/Swift/SignalingEnvelope.swift": "e69dfc9e621628880d423ec050d4e181fcfa40e2aca814a7ef78da0e6581c544",
+        "ios/RemoteDesktop/ComputerUse/ComputerUseSessionModel.swift": "0fcac5a73125bc6763f1b6aed4bbeabcbd4f1e1731127defc25fcab11013cea7",
+        "ios/RemoteDesktop/ComputerUse/ComputerUsePendingPromptStore.swift": "36006c311b81c8ec8aed0fd260ed25f0032238721a474b127f7022bf3a5099d2",
+        "ios/RemoteDesktopTests/ComputerUseClarificationClientTests.swift": "dd9c94215a9d40e344b25a2456d88223d14ed19276fa6377aa82058704faf411"
+      },
+      "expectedTests": [
+        "ComputerUseClarificationClientTests/testAnswerRetriesAndRelaunchReuseExactBodyAndTaskIDEvenAfterReferenceExpiry",
+        "ComputerUseClarificationClientTests/testCancellationOrCompletionPreventsQuestionTextFromBecomingNewTaskContext",
+        "ComputerUseClarificationClientTests/testExpiryOrDisconnectRequiresExplicitNewRequestWithoutReusingHistory",
+        "ComputerUseClarificationClientTests/testExpiryTimerReleasesQuestionAndCannotInvalidateAnAlreadyClaimedAnswer",
+        "ComputerUseClarificationClientTests/testExplicitReferenceCarriesExactAnswersAcrossTwoQuestionsWithoutChatTruncation",
+        "ComputerUseClarificationClientTests/testInvalidOrUnsavedAnswerKeepsTheQuestionAndSendsNoTruncatedText",
+        "ComputerUseClarificationClientTests/testLegacyQuestionRetainsItsExistingConversationAndMailPrivacyBehavior",
+        "ComputerUseClarificationClientTests/testMalformedAndUnrelatedResponsesCannotSelectAContinuation",
+        "ComputerUseClarificationClientTests/testNewRequestDiscardsScopedOrLegacyQuestionAndIgnoresLateReplay"
+      ],
+      "observedTests": [
+        {
+          "id": "ComputerUseClarificationClientTests/testAnswerRetriesAndRelaunchReuseExactBodyAndTaskIDEvenAfterReferenceExpiry",
+          "passed": true,
+          "seconds": "0.100290542"
+        },
+        {
+          "id": "ComputerUseClarificationClientTests/testCancellationOrCompletionPreventsQuestionTextFromBecomingNewTaskContext",
+          "passed": true,
+          "seconds": "0.119638584"
+        },
+        {
+          "id": "ComputerUseClarificationClientTests/testExpiryOrDisconnectRequiresExplicitNewRequestWithoutReusingHistory",
+          "passed": true,
+          "seconds": "0.118484791"
+        },
+        {
+          "id": "ComputerUseClarificationClientTests/testExpiryTimerReleasesQuestionAndCannotInvalidateAnAlreadyClaimedAnswer",
+          "passed": true,
+          "seconds": "0.5091835"
+        },
+        {
+          "id": "ComputerUseClarificationClientTests/testExplicitReferenceCarriesExactAnswersAcrossTwoQuestionsWithoutChatTruncation",
+          "passed": true,
+          "seconds": "0.142839834"
+        },
+        {
+          "id": "ComputerUseClarificationClientTests/testInvalidOrUnsavedAnswerKeepsTheQuestionAndSendsNoTruncatedText",
+          "passed": true,
+          "seconds": "0.092586541"
+        },
+        {
+          "id": "ComputerUseClarificationClientTests/testLegacyQuestionRetainsItsExistingConversationAndMailPrivacyBehavior",
+          "passed": true,
+          "seconds": "0.0890355"
+        },
+        {
+          "id": "ComputerUseClarificationClientTests/testMalformedAndUnrelatedResponsesCannotSelectAContinuation",
+          "passed": true,
+          "seconds": "0.098069958"
+        },
+        {
+          "id": "ComputerUseClarificationClientTests/testNewRequestDiscardsScopedOrLegacyQuestionAndIgnoresLateReplay",
+          "passed": true,
+          "seconds": "0.124456166"
+        }
+      ],
+      "command": [
+        "swift",
+        "test",
+        "--package-path",
+        "/private/tmp/remotedesktop-client-clarification-core",
+        "--disable-sandbox",
+        "--jobs",
+        "2",
+        "--disable-swift-testing",
+        "--parallel",
+        "--num-workers",
+        "1",
+        "--filter",
+        "ComputerUseClarificationClientTests",
+        "--xunit-output",
+        "/private/tmp/remotedesktop-client-clarification-core/v3.xml"
+      ],
+      "log": "/private/tmp/remotedesktop-client-clarification-core/v3.log",
+      "xunit": "/private/tmp/remotedesktop-client-clarification-core/v3.xml"
+    }
+  ],
+  "iosCompileOnly": {
+    "buildLog": "/tmp/remotedesktop-ios-clarification-build-v1.log",
+    "resultBundle": "/tmp/remotedesktop-ios-clarification-build-v1.xcresult",
+    "buildSucceeded": true,
+    "compiledClientTests": {
+      "binary": "/tmp/remotedesktop-ios-repair-derived-data/Build/Products/Debug-iphonesimulator/RemoteDesktop.app/PlugIns/RemoteDesktopTests.xctest/RemoteDesktopTests",
+      "compiledMethods": [
+        "testAnswerRetriesAndRelaunchReuseExactBodyAndTaskIDEvenAfterReferenceExpiry",
+        "testCancellationOrCompletionPreventsQuestionTextFromBecomingNewTaskContext",
+        "testExpiryOrDisconnectRequiresExplicitNewRequestWithoutReusingHistory",
+        "testExpiryTimerReleasesQuestionAndCannotInvalidateAnAlreadyClaimedAnswer",
+        "testExplicitReferenceCarriesExactAnswersAcrossTwoQuestionsWithoutChatTruncation",
+        "testInvalidOrUnsavedAnswerKeepsTheQuestionAndSendsNoTruncatedText",
+        "testLegacyQuestionRetainsItsExistingConversationAndMailPrivacyBehavior",
+        "testMalformedAndUnrelatedResponsesCannotSelectAContinuation",
+        "testNewRequestDiscardsScopedOrLegacyQuestionAndIgnoresLateReplay"
+      ]
+    },
+    "testBinarySHA256": "da703ecd38491ec80410f978bdf956195f1181f6e84a72738f08325ce07b2bc9",
+    "xctestrun": "/tmp/remotedesktop-ios-repair-derived-data/Build/Products/RemoteDesktop_iphonesimulator26.5-arm64.xctestrun",
+    "simulatorExecution": false,
+    "bootedSimulatorsAtFinalCheck": []
+  },
+  "behaviorVerified": [
+    "An explicit host reference selects answer mode even when the host question has no trailing question mark.",
+    "Exact leading/trailing whitespace, newlines, combining Unicode, emoji, and values beyond the old conversation limit are preserved in referenced requests with empty conversation history.",
+    "Two successive questions attach their own originating task references and distinct answer task IDs.",
+    "Secure storage receives the exact encoded body before send; ambiguous delivery, manual retry, and app relaunch reuse the same bytes and task ID even after the original reference expires, allowing the host to replay an existing result.",
+    "Empty or oversized input and secure-save failure send nothing, do not truncate the payload, and retain the pending question; the view keeps the draft unless sendPrompt accepts it.",
+    "Unclaimed questions expire after their bounded deadline or session stop. Expired answers cannot fall back to ordinary tasks; Start a new request clears both reference and legacy conversation selection.",
+    "Malformed structured and wrong-task replies cannot create a new answer context; cancelled and completed requests cannot promote question-looking text into later task context.",
+    "Legacy clarification and Mail privacy behavior remain available for unreferenced hosts; scoped answers never borrow that history.",
+    "An old expiry timer cannot invalidate an answer already durably claimed for delivery."
+  ],
+  "qualificationLimits": [
+    "No Simulator or physical-device test executed; SwiftUI layout and interaction remain unverified at runtime.",
+    "The macOS core tests compile the actual client state, recovery store and shared protocol sources, using an in-memory store and a controlled channel. They do not qualify Keychain behavior, authentication, live networking, the host/local model or desktop effects.",
+    "Actual manager/model/browser plus mobile transport continuation and the broader TODO gates remain open."
+  ],
+  "verificationIssues": [
+    "XcodeBuildMCP build_sim twice rejected a missing scheme despite successful set/show defaults; compile-only verification used direct xcodebuild with the same verified project/scheme/destination.",
+    "Portable run v1 ran out of disk while compiling XCTest, with zero tests executed. Rebuildable module/intermediate caches were removed and compilation was bounded to two jobs. The unchanged iOS build products, model and test evidence remain retained.",
+    "Portable run v2 logged nine passing XCTest methods but serial SwiftPM emitted no XCTest XML; only its unused Swift Testing runner wrote an empty suffixed report. The verifier rejected that run. Single-worker XCTest with Swift Testing disabled emitted the expected XML in v3. Final v4 also verifies the checked-in exact inventory.",
+    "Copy-on-write replacement of one verified identical temporary GGUF preserved bytes and independent inodes but reclaimed no material space; it was not credited as disk recovery."
+  ],
+  "normalPlanner": "candidate-v2, unchanged",
+  "newModelInferenceCalls": 0
+}
