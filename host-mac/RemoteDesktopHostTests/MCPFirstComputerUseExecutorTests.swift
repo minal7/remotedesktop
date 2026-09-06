@@ -2242,6 +2242,187 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             "A partial host projection must never reach TASK_COMPLETE")
     }
 
+    func testReadProofCannotCompleteAdditionalApplicationOrInputWork() async throws {
+        let operations = [
+            "open Notes", "activate Notes", "launch Notes", "close Notes",
+            "quit Notes", "switch to Notes", "click the Search button",
+            "type \"hello\" into the focused field", "press Return",
+            "scroll down", "drag the window", "resize the window",
+            "copy the phone number", "paste it into Notes",
+            "save it to a file", "print the result",
+        ]
+        for operation in operations {
+            let prompt = "Find Jordan Lee's phone number in Contacts and \(operation)."
+            try await assertContactReadCompletion(
+                prompt: prompt,
+                trustedPrompt: prompt,
+                expectsFallback: true)
+        }
+        // Separate sentences and an ordinary polite question still ask for work.
+        for suffix in ["Open Notes.", "Could you open Notes?"] {
+            let prompt = "Find Jordan Lee's phone number in Contacts. \(suffix)"
+            try await assertContactReadCompletion(
+                prompt: prompt,
+                trustedPrompt: prompt,
+                expectsFallback: true)
+        }
+    }
+
+    func testReadCompletionPreservesNegatedAndQuotedActionWords() async throws {
+        for suffix in [
+            "without editing the contact.",
+            "and do not open Notes.",
+            ". Do not, even after the lookup, open Notes.",
+            ". The quoted label is \"open Notes\".",
+        ] {
+            let prompt = "Find Jordan Lee's phone number in Contacts \(suffix)"
+            try await assertContactReadCompletion(
+                prompt: prompt,
+                trustedPrompt: prompt,
+                expectsFallback: false)
+        }
+    }
+
+    func testReadCompletionUsesCurrentInstructionForAdditionalWork() async throws {
+        let readPrompt = "Find Jordan Lee's phone number in Contacts."
+        let compoundPrompt = "Find Jordan Lee's phone number in Contacts and open Notes."
+        try await assertContactReadCompletion(
+            prompt: readPrompt,
+            trustedPrompt: compoundPrompt,
+            expectsFallback: true)
+        try await assertContactReadCompletion(
+            prompt: "Earlier request: open Notes. Current request: \(readPrompt)",
+            trustedPrompt: readPrompt,
+            expectsFallback: false)
+    }
+
+    func testReadCompletionDistinguishesOpenWindowInventoryFromOpeningWindows() async throws {
+        let rows: [(prompt: String, expectsFallback: Bool)] = [
+            ("List open windows.", false),
+            ("Please show all open windows.", false),
+            ("Could you list the currently open windows?", false),
+            ("Please list open windows and open Notes.", true),
+            ("Please list open windows. Open Notes.", true),
+            ("Please list\nopen windows.", true),
+        ]
+        for row in rows {
+            let tool = try makePlannerVisibleReadOnlyTool("list_windows")
+            let resultText = #"{"ok":true,"windows":[{"pid":4242,"index":0,"title":"Packing list"}]}"#
+            let planner = SequencedMCPPlanner(steps: [
+                .call(toolName: "list_windows", arguments: [:], requiredPromptFragment: nil),
+                .completion("Everything is done.", requiredPromptFragment: resultText),
+            ])
+            let pool = RecordingMCPClientPool(
+                tools: [tool, try makeMailTool()],
+                resultsByTool: [
+                    "list_windows": try MCPToolResult(
+                        text: resultText,
+                        structuredContent: .object([
+                            "ok": .bool(true),
+                            "windows": .array([.object([
+                                "pid": .integer(4_242),
+                                "index": .integer(0),
+                                "title": .string("Packing list"),
+                            ])]),
+                        ]),
+                        isError: false,
+                        wasTruncated: false),
+                ])
+            let fallbackResult = ComputerUseExecutionResult.clarificationRequired(
+                "Fixture fallback received the full request.")
+            let fallback = StubVisualExecutor(result: fallbackResult)
+            let executor = try await MCPFirstComputerUseExecutor.load(
+                binaryURL: URL(fileURLWithPath:
+                    "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
+                visualFallback: fallback,
+                planner: planner,
+                clientPool: pool)
+            let result = try await executor.execute(
+                taskID: "read-completion-open-windows",
+                prompt: row.prompt,
+                tools: makeHostTools(),
+                progress: { _ in })
+
+            XCTAssertEqual(result, row.expectsFallback ? fallbackResult : .completed(
+                "Open windows:\n1. Packing list — PID 4242; index 0."), row.prompt)
+            XCTAssertEqual(fallback.callCount, row.expectsFallback ? 1 : 0, row.prompt)
+            XCTAssertEqual(fallback.trustedUserPrompts,
+                           row.expectsFallback ? [row.prompt] : [], row.prompt)
+            let directCalls = await pool.directCalls()
+            XCTAssertEqual(directCalls.map(\.toolName), ["list_windows"], row.prompt)
+            let approvedCalls = await pool.approvedCalls()
+            XCTAssertTrue(approvedCalls.isEmpty, row.prompt)
+            XCTAssertEqual(planner.completedStepCount, 2, row.prompt)
+        }
+    }
+
+    private func assertContactReadCompletion(
+        prompt: String,
+        trustedPrompt: String,
+        expectsFallback: Bool,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        let contacts = try makePlannerVisibleReadOnlyTool("contacts_search")
+        let resultText = #"{"ok":true,"contacts":[{"name":"Jordan Lee","phones":["+1 415 555 0142"],"emails":[]}]}"#
+        let planner = SequencedMCPPlanner(steps: [
+            .call(
+                toolName: "contacts_search",
+                arguments: ["query": .string("Jordan Lee"), "limit": .integer(5)],
+                requiredPromptFragment: nil),
+            .completion("Everything is done.", requiredPromptFragment: resultText),
+        ])
+        let pool = RecordingMCPClientPool(
+            tools: [contacts, try makeMailTool()],
+            resultsByTool: [
+                "contacts_search": try MCPToolResult(
+                    text: resultText,
+                    structuredContent: .object([
+                        "ok": .bool(true),
+                        "contacts": .array([.object([
+                            "name": .string("Jordan Lee"),
+                            "phones": .array([.string("+1 415 555 0142")]),
+                            "emails": .array([]),
+                        ])]),
+                    ]),
+                    isError: false,
+                    wasTruncated: false),
+            ])
+        let fallbackResult = ComputerUseExecutionResult.clarificationRequired(
+            "Fixture fallback received the full request.")
+        let fallback = StubVisualExecutor(result: fallbackResult)
+        let executor = try await MCPFirstComputerUseExecutor.load(
+            binaryURL: URL(fileURLWithPath:
+                "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
+            visualFallback: fallback,
+            planner: planner,
+            clientPool: pool)
+        let result = try await executor.execute(
+            taskID: "read-completion-additional-work",
+            prompt: prompt,
+            trustedUserPrompt: trustedPrompt,
+            tools: makeHostTools(),
+            progress: { _ in })
+
+        XCTAssertEqual(result, expectsFallback ? fallbackResult : .completed(
+            "Contacts (showing up to 5):\n1. Jordan Lee — phones: +1 415 555 0142; emails: none."),
+            trustedPrompt, file: file, line: line)
+        XCTAssertEqual(fallback.callCount, expectsFallback ? 1 : 0,
+                       trustedPrompt, file: file, line: line)
+        XCTAssertEqual(fallback.prompts, expectsFallback ? [prompt] : [],
+                       trustedPrompt, file: file, line: line)
+        XCTAssertEqual(fallback.trustedUserPrompts, expectsFallback ? [trustedPrompt] : [],
+                       trustedPrompt, file: file, line: line)
+        XCTAssertEqual(fallback.taskIDs, expectsFallback ? ["read-completion-additional-work"] : [],
+                       trustedPrompt, file: file, line: line)
+        let directCalls = await pool.directCalls()
+        XCTAssertEqual(directCalls.map(\.toolName), ["contacts_search"],
+                       trustedPrompt, file: file, line: line)
+        let approvedCalls = await pool.approvedCalls()
+        XCTAssertTrue(approvedCalls.isEmpty, trustedPrompt, file: file, line: line)
+        XCTAssertEqual(planner.completedStepCount, 2, trustedPrompt, file: file, line: line)
+    }
+
     func testTwoDomainPromptCannotCompleteFromOnlyOneDomain() async throws {
         let contacts = try makePlannerVisibleReadOnlyTool("contacts_search")
         let resultText = #"{"ok":true,"contacts":[{"name":"Jordan Lee","phones":["+1 415 555 0142"],"emails":[]}]}"#

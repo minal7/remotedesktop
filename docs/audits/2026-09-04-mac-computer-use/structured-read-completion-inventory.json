@@ -1,0 +1,28 @@
+{
+  "selectors": [
+    "RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests/testReadProofCannotCompleteAdditionalApplicationOrInputWork",
+    "RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests/testReadCompletionPreservesNegatedAndQuotedActionWords",
+    "RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests/testReadCompletionUsesCurrentInstructionForAdditionalWork",
+    "RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests/testReadCompletionDistinguishesOpenWindowInventoryFromOpeningWindows",
+    "RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests/testTwoDomainPromptCannotCompleteFromOnlyOneDomain",
+    "RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests/testTwoDomainPromptCombinesOnlyHostProjectedProofs",
+    "RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests/testEveryPlannerVisibleReadOnlyOperationTraversesProductionExecutor",
+    "RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests/testNegatedPrivateReadClausesCannotAuthorizeContactsOrReminders",
+    "RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests/testContactResultMustMatchTrustedQueryEntity",
+    "RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests/testPlannerCannotRecombineFieldsAcrossTypedContacts",
+    "RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests/testPlannerFindsNamedContactThenStopsAtExactMailApprovalBeforeSending"
+  ],
+  "expectedTests": [
+    "RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests/testContactResultMustMatchTrustedQueryEntity",
+    "RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests/testEveryPlannerVisibleReadOnlyOperationTraversesProductionExecutor",
+    "RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests/testNegatedPrivateReadClausesCannotAuthorizeContactsOrReminders",
+    "RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests/testPlannerCannotRecombineFieldsAcrossTypedContacts",
+    "RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests/testPlannerFindsNamedContactThenStopsAtExactMailApprovalBeforeSending",
+    "RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests/testReadCompletionDistinguishesOpenWindowInventoryFromOpeningWindows",
+    "RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests/testReadCompletionPreservesNegatedAndQuotedActionWords",
+    "RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests/testReadCompletionUsesCurrentInstructionForAdditionalWork",
+    "RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests/testReadProofCannotCompleteAdditionalApplicationOrInputWork",
+    "RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests/testTwoDomainPromptCannotCompleteFromOnlyOneDomain",
+    "RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests/testTwoDomainPromptCombinesOnlyHostProjectedProofs"
+  ]
+}

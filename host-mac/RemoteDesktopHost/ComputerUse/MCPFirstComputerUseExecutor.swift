@@ -1574,10 +1574,13 @@ final class MCPFirstComputerUseExecutor:
     /// A TASK_COMPLETE signal is accepted only after every read domain the
     /// current user explicitly requested has its own host-reviewed proof.
     /// Dependency reads never appear in the final answer and cannot substitute
-    /// for a requested domain.
+    /// for a requested domain or for an additional non-read operation.
     private static func hostProjectedReadOnlyAnswer(
         state: PlanningState
     ) -> String? {
+        guard !requestsUnverifiedNonReadWork(state.trustedUserPrompt) else {
+            return nil
+        }
         let requiredDomains = explicitlyRequestedReadDomains(
             state.trustedUserPrompt)
         guard !requiredDomains.isEmpty else { return nil }
@@ -1598,6 +1601,48 @@ final class MCPFirstComputerUseExecutor:
             sections.append(projections.joined(separator: "\n"))
         }
         return sections.joined(separator: "\n\n")
+    }
+
+    /// Read provenance proves only the read. Until structured execution has a
+    /// complete goal contract, an affirmative additional operation must prevent
+    /// a read-only TASK_COMPLETE from ending the whole task. This is a bounded
+    /// rejection rule, not a compiler or authority to execute these operations.
+    private static func requestsUnverifiedNonReadWork(_ prompt: String) -> Bool {
+        var authorityText = AppleFoundationVisualActionRouter
+            .taskTextMaskingQuotedContent(prompt)
+
+        // In an inventory request, OPEN can describe windows/apps rather than
+        // request an effect. Mask only this contiguous read noun phrase, never
+        // across a conjunction, punctuation or a newline into a later command.
+        // Preserve the surrounding denial/question scope for the shared parser.
+        let inventoryPattern = #"\b(?:list|show|display|report|get|which|what)(?:[ \t]+(?:me|my|the|all|your|current|currently|any|available|of|these|those))*[ \t]+(open)[ \t]+(?:apps?|applications?|windows?)\b"#
+        if let expression = try? NSRegularExpression(
+            pattern: inventoryPattern,
+            options: [.caseInsensitive]) {
+            let masked = NSMutableString(string: authorityText)
+            let matches = expression.matches(
+                in: authorityText,
+                range: NSRange(location: 0, length: masked.length))
+            for match in matches.reversed() {
+                masked.replaceCharacters(in: match.range(at: 1), with: "visible")
+            }
+            authorityText = masked as String
+        }
+
+        return AppleFoundationVisualActionRouter
+            .taskAffirmativelyRequestsOperation(
+                authorityText,
+                operationVerbs: [
+                    "open", "activate", "launch", "close", "quit", "switch",
+                    "click", "doubleclick", "tap", "type", "enter", "press",
+                    "scroll", "drag", "move", "resize", "minimize", "maximize",
+                    "copy", "paste", "select", "save", "rename", "delete",
+                    "remove", "edit", "change", "set", "fill", "replace",
+                    "append", "insert", "send", "compose", "draft", "create",
+                    "add", "schedule", "run", "order", "buy", "purchase",
+                    "pay", "submit", "book", "reserve", "download", "upload",
+                    "install", "uninstall", "enable", "disable", "print",
+                ])
     }
 
     /// Turns one exact, pre-reviewed read call and its typed result into prose.
