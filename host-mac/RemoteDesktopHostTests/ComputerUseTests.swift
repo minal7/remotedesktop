@@ -9,6 +9,87 @@ import XCTest
 
 @MainActor
 final class ComputerUseTests: XCTestCase {
+    func test_ownedBrowserAuthenticationPausesBeforeNativePlanningAndRechecksOnHandback() async throws {
+        let secret = "fixture-private-verification-917263"
+        let server = try OwnedBrowserHTTPFixture(routes: [
+            "/form": .init(body: """
+                <label>Origin<input id="origin" value="old"></label>
+                <input id="auth" aria-label="Verification code" value="\(secret)">
+                <script>
+                document.querySelector('#origin').addEventListener('input', e => fetch('/edited?value=' + encodeURIComponent(e.target.value)));
+                fetch('/signal').then(() => { document.querySelector('#auth').remove(); fetch('/auth-cleared'); });
+                </script>
+                """),
+            "/signal": .init(held: true),
+        ])
+        let base = try await server.start()
+        defer { server.stop() }
+        let url = temporaryLedgerURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let channel = FakeHostComputerUseChannel(), planner = BrowserAuthenticationForbiddenPlanner()
+        var browser: ComputerUseOwnedBrowser?
+        var mayAct: () -> Bool = { false }
+        let native = ComputerUseNativeTextExecutor(injector: InputInjector(), mayAct: { mayAct() },
+            journalDirectory: url.deletingLastPathComponent().appendingPathComponent("text"), planner: planner,
+            browserTargetProvider: { taskID in
+                let owned = try XCTUnwrap(browser)
+                return ComputerUseBrowserTextTarget(browser: owned,
+                    document: try owned.acquireCurrentDocument(taskID: taskID), requiresFrontmost: false)
+            })
+        var nativeEntries = 0
+        let coordinator = ComputerUseCapabilityExecutor(nativeExecution: { taskID, prompt, progress in
+            nativeEntries += 1
+            let owned = try XCTUnwrap(browser)
+            if owned.currentDocument(taskID: taskID) == nil {
+                try owned.claim(taskID: taskID)
+                _ = try await owned.navigate(taskID: taskID, operationID: "fixture-page", to: base.appendingPathComponent("form"))
+            }
+            return try await native.execute(taskID: taskID, prompt: prompt, progress: progress)
+        }, desktopFactory: { _ in
+            XCTFail("Authentication cannot fall through to another planner or execution route")
+            return ImmediateComputerUseExecutor(results: [.completed("Unexpected fallback")])
+        })
+        let ledger = ComputerUseTaskLedger(fileURL: url)
+        let manager = HostComputerUseManager(injector: InputInjector(), executor: coordinator, taskLedger: ledger,
+            browserNavigationFactory: { gate in
+                mayAct = gate
+                let owned = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: gate)
+                browser = owned
+                return ComputerUseBrowserNavigationTask(browser: owned,
+                    journalDirectory: url.deletingLastPathComponent().appendingPathComponent("navigation"))
+            }, allowsExternalServices: false, channelFactory: { _ in channel })
+        defer { manager.stop(); browser?.close() }
+        let prompt = makeEnvelope(id: "owned-auth-handoff", kind: .prompt, body: "Set \"Origin\" to \"Paris\"")
+        manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(manager.handle(prompt, channel: channel))
+        await waitUntil(timeoutIterations: 1_000) { manager.activity == .paused && server.count("/signal") == 1 }
+        XCTAssertEqual(nativeEntries, 1)
+        XCTAssertEqual(planner.calls, 0)
+        XCTAssertEqual(ledger.hostControlEpoch(taskID: prompt.id), 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.deletingLastPathComponent().appendingPathComponent("text").path))
+        XCTAssertTrue(manager.handle(try makeControlEnvelope(kind: .resume, taskID: prompt.id,
+            revision: 1, hostEpoch: 1), channel: channel))
+        await waitUntil { manager.activity == .paused && ledger.hostControlEpoch(taskID: prompt.id) == 2 }
+        XCTAssertEqual(nativeEntries, 2)
+        XCTAssertEqual(planner.calls, 0, "Resume does not prove that verification finished")
+        let beforeHandback = await channel.sentMessages()
+        XCTAssertFalse(beforeHandback.contains { $0.kind == .assistant })
+        XCTAssertFalse(beforeHandback.contains { $0.body.contains(secret) })
+        XCTAssertEqual(server.count("/form"), 1)
+        server.releaseHeldResponses()
+        await waitUntil { server.count("/auth-cleared") == 1 }
+        XCTAssertTrue(manager.handle(try makeControlEnvelope(kind: .resume, taskID: prompt.id,
+            revision: 2, hostEpoch: 2), channel: channel))
+        await waitUntil(timeoutIterations: 1_000) { manager.activity == .idle && server.count("/edited?value=Paris") == 1 }
+        XCTAssertEqual(nativeEntries, 3)
+        XCTAssertEqual(planner.calls, 0, "The unchanged literal task can compile after the manual step")
+        XCTAssertEqual(server.count("/form"), 1, "Handback must not replay navigation")
+        XCTAssertTrue(manager.handle(prompt, channel: channel))
+        await Task.yield()
+        XCTAssertEqual(nativeEntries, 3)
+        XCTAssertEqual(server.count("/edited?value=Paris"), 1)
+    }
+
     func test_localControlEpochOrdersBothSidesAndSurvivesRestart() throws {
         for phoneArrivesFirst in [false, true] {
             let url = temporaryLedgerURL()
@@ -8799,4 +8880,14 @@ private actor CancellationIgnoringPollComputerUseChannel:
     }
 
     func acknowledgedEnvelopeIDs() -> [String] { acknowledgedIDs }
+}
+
+@MainActor
+private final class BrowserAuthenticationForbiddenPlanner: ComputerUseTextGoalPlanning {
+    private(set) var calls = 0
+    func propose(prompt: String, fields: [ComputerUseTextField]) async throws -> ComputerUseTextGoalProposal {
+        calls += 1
+        XCTFail("Authentication must stop before planning; the later exact literal needs no model")
+        return .unsupported
+    }
 }

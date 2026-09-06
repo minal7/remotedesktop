@@ -3,6 +3,167 @@ import XCTest
 
 @MainActor
 final class ComputerUseBrowserDOMTests: XCTestCase {
+    func testVisibleAuthenticationMetadataBlocksAllFormValuesIncludingEarlierFields() async throws {
+        let controls = [
+            #"<input type="password" value="private-password">"#,
+            #"<input autocomplete="section-login one-time-code" value="123456">"#,
+            #"<label>Enter your 6-digit verification code<input type="number" value="123456"></label>"#,
+            #"<input aria-label="Password" aria-hidden="true" value="revealed-password">"#,
+            #"<input id="otpCode" name="otp" value="123456">"#,
+            #"<input placeholder="Authentication code" value="123456">"#,
+            #"<input autocomplete="username" value="private-login-name">"#,
+            #"<div role="textbox" aria-label="Verification code" contenteditable>123456</div>"#,
+            #"<div id="auth-shadow"></div><script>document.querySelector('#auth-shadow').attachShadow({mode:'open'}).innerHTML = '<input aria-label="Recovery code" value="private-recovery">';</script>"#,
+        ]
+        for control in controls {
+            let fixture = try await DOMFixture(body: "<label>Origin<input value='must-not-return'></label>" + control)
+            defer { fixture.close() }
+            do { _ = try await fixture.target.fieldsIfSupported(); XCTFail("Authentication must precede discovery, including fallback") }
+            catch { XCTAssertEqual(error as? ComputerUseBrowserError, .authenticationRequired, control) }
+            XCTAssertTrue(fixture.editedValues.isEmpty)
+        }
+    }
+
+    func testHiddenAuthenticationAndOrdinaryCodeOrPolicyLabelsDoNotBlockForms() async throws {
+        let fixture = try await DOMFixture(body: """
+            <input type="password" hidden value="hidden-secret">
+            <input type="password" readonly value="saved-password">
+            <fieldset disabled><input aria-label="Verification code" value="123456"></fieldset>
+            <div style="display:none"><input autocomplete="one-time-code" value="123456"></div>
+            <div style="opacity:0"><input aria-label="Verification code" value="123456"></div>
+            <label>Airport code<input value="SFO"></label>
+            <label>Password policy<textarea>Use a long password.</textarea></label>
+            <label>Postal code<input value="94103"></label>
+            """)
+        defer { fixture.close() }
+        let fields = try await fixture.target.fields()
+        XCTAssertEqual(fields.map(\.label), ["Airport code", "Password policy", "Postal code"])
+        XCTAssertEqual(fields.map { $0.snapshot.value }, ["SFO", "Use a long password.", "94103"])
+    }
+
+    func testAuthenticationAppearingAfterDiscoveryBlocksReadsAndDispatchWithoutConsumingReceipt() async throws {
+        let fixture = try await DOMFixture(body: """
+            <label>Origin<input id="origin" value="old"></label>
+            <script>
+            document.addEventListener('input', e => fetch('/edited?value=' + encodeURIComponent(e.target.value)));
+            fetch('/signal').then(() => {
+              const auth = document.createElement('input'); auth.type = 'password'; auth.value = 'private';
+              document.body.append(auth); fetch('/auth-shown');
+              fetch('/signal').then(() => { auth.remove(); fetch('/auth-cleared'); });
+            });
+            </script>
+            """, heldSignal: true)
+        defer { fixture.close() }
+        let discovered = try await fixture.target.fields()
+        let field = try XCTUnwrap(discovered.first).snapshot
+        let edit = ComputerUseTextPlanEdit(targetID: field.targetID, mode: .replaceAll, text: "Paris")
+        let operationID = ComputerUseTextTaskContract.digest("authentication-before-dispatch")
+        let contract = try ComputerUseTextTaskContract(taskID: "authentication-fixture", prompt: "Set Origin to Paris",
+            fields: [.init(label: "Origin", snapshot: field)], edits: [edit], unchangedTargetIDs: [])
+        try await fixture.wait { fixture.server.count("/signal") == 1 }
+        fixture.server.releaseHeldResponses()
+        try await fixture.wait { fixture.server.count("/auth-shown") == 1 && fixture.server.count("/signal") == 2 }
+        let blocked: [() async throws -> Void] = [
+            { _ = try await fixture.target.read(targetID: field.targetID) },
+            { _ = try await fixture.target.reobserveRetainedFields() },
+            { try await fixture.target.validateRepresentability(of: contract) },
+            { try await fixture.target.apply(edit, expected: field, operationID: operationID) },
+        ]
+        for operation in blocked {
+            do { try await operation(); XCTFail("A fresh authentication barrier must block every value/edit path") }
+            catch { XCTAssertEqual(error as? ComputerUseBrowserError, .authenticationRequired) }
+        }
+        let dispatched = try await fixture.target.didDispatchInput(operationID: operationID)
+        XCTAssertFalse(dispatched)
+        XCTAssertTrue(fixture.editedValues.isEmpty)
+        fixture.server.releaseHeldResponses()
+        try await fixture.wait { fixture.server.count("/auth-cleared") == 1 }
+        let after = try await fixture.target.read(targetID: field.targetID)
+        XCTAssertEqual(after, field)
+        // Direct adapter admission did not reserve an input identity. This is
+        // not permission for a task journal to replay an uncertain attempt.
+        try await fixture.target.apply(edit, expected: field, operationID: operationID)
+        try await fixture.wait { fixture.editedValues.count == 1 }
+        XCTAssertEqual(fixture.editedValues, ["Paris"])
+    }
+
+    func testAuthenticationAfterInputRetainsReceiptAndResumesRemainingNativeStepsOnce() async throws {
+        let fixture = try await DOMFixture(body: """
+            <label>Origin<input id="origin" value="old"></label>
+            <script>let count = 0; document.querySelector('#origin').addEventListener('input', e => {
+              fetch('/edited?value=' + encodeURIComponent(e.target.value));
+              if (++count !== 1) return;
+              const auth = document.createElement('input'); auth.setAttribute('aria-label', 'Verification code');
+              auth.value = '123456'; document.body.append(auth);
+              fetch('/signal').then(() => { auth.remove(); fetch('/auth-cleared'); });
+            });</script>
+            """, heldSignal: true)
+        defer { fixture.close() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let planner = DOMRepresentabilityFixturePlanner { fields in
+            let field = try XCTUnwrap(fields.first).snapshot
+            return .edits([.init(targetID: field.targetID, mode: .replaceAll, text: "Paris"),
+                           .init(targetID: field.targetID, mode: .append, text: "!")], unchangedTargetIDs: [])
+        }
+        let executor = ComputerUseNativeTextExecutor(injector: InputInjector(), mayAct: { true }, journalDirectory: directory,
+            planner: planner, browserTargetProvider: { taskID in
+                ComputerUseBrowserTextTarget(browser: fixture.browser,
+                    document: try fixture.browser.acquireCurrentDocument(taskID: taskID), requiresFrontmost: false)
+            })
+        let prompt = "Set Origin to Paris, then append !"
+        do { _ = try await executor.execute(taskID: "auth-after-input", prompt: prompt, progress: { _ in }); XCTFail("Authentication blocks verification and the next input") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .authenticationRequired) }
+        try await fixture.wait { fixture.server.count("/signal") == 1 && fixture.editedValues.count == 1 }
+        let paused = try XCTUnwrap(try ComputerUseTextStepStore(directory: directory).load(taskID: "auth-after-input"))
+        XCTAssertEqual(paused.statuses, [.uncertain, .planned])
+        XCTAssertEqual(fixture.editedValues, ["Paris"])
+        fixture.server.releaseHeldResponses()
+        try await fixture.wait { fixture.server.count("/auth-cleared") == 1 }
+        let result = try await executor.execute(taskID: "auth-after-input", prompt: prompt, progress: { _ in })
+        guard case .completed = result else { return XCTFail("Fresh values plus the original receipt must reconcile the first edit") }
+        try await fixture.wait { fixture.editedValues.count == 2 }
+        _ = try await executor.execute(taskID: "auth-after-input", prompt: prompt, progress: { _ in })
+        XCTAssertEqual(fixture.editedValues, ["Paris", "Paris!"])
+        XCTAssertEqual(planner.calls, 1)
+    }
+
+    func testAuthenticationDuringClarificationKeepsExactAnswerForExplicitResume() async throws {
+        let fixture = try await DOMFixture(body: """
+            <label>Origin<input value="old"></label><label>Destination<input value="keep"></label>
+            <script>
+            document.addEventListener('input', e => fetch('/edited?value=' + encodeURIComponent(e.target.value)));
+            fetch('/signal').then(() => {
+              const auth = document.createElement('input'); auth.autocomplete = 'one-time-code';
+              auth.value = '123456'; document.body.append(auth); fetch('/auth-shown');
+              fetch('/signal').then(() => { auth.remove(); fetch('/auth-cleared'); });
+            });</script>
+            """, heldSignal: true)
+        defer { fixture.close() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let planner = DOMClarificationFixturePlanner()
+        let executor = clarificationExecutor(fixture: fixture, planner: planner, directory: directory)
+        _ = try await executor.execute(taskID: "question", prompt: "Put \"blue\" in a field.", progress: { _ in })
+        let question = try XCTUnwrap(executor.clarification(taskID: "question"))
+        let answer = try question.goal.answering(question.question, with: "Destination")
+        try await fixture.wait { fixture.server.count("/signal") == 1 }
+        fixture.server.releaseHeldResponses()
+        try await fixture.wait { fixture.server.count("/auth-shown") == 1 && fixture.server.count("/signal") == 2 }
+        do { _ = try await executor.continueClarification(taskID: "answer", originatingTaskID: "question", goal: answer, progress: { _ in }); XCTFail("Do not plan with authentication values") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .authenticationRequired) }
+        XCTAssertEqual(planner.goals.count, 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+        fixture.server.releaseHeldResponses()
+        try await fixture.wait { fixture.server.count("/auth-cleared") == 1 }
+        let result = try await executor.continueClarification(taskID: "answer", originatingTaskID: "question", goal: answer, progress: { _ in })
+        guard case .completed = result else { return XCTFail("The same retained answer must resume") }
+        try await fixture.wait { fixture.editedValues.count == 1 }
+        XCTAssertEqual(planner.goals.last, answer)
+        XCTAssertEqual(planner.fieldValues.last, ["old", "keep"])
+        XCTAssertEqual(fixture.editedValues, ["blue"])
+    }
+
     func testRetainedFieldDriftAtDOMDispatchPreventsLiteralAndCopiedInputWithoutReplay() async throws {
         let cases: [(earlierEdit: Bool, copy: Bool, change: String)] = [
             (false, false, "field.value = 'changed';"),
@@ -924,8 +1085,8 @@ final class ComputerUseBrowserDOMTests: XCTestCase {
     func testIsolatedWorldReadsNativeValuesAndOmitsProtectedHiddenAndDisabledFields() async throws {
         let fixture = try await DOMFixture(body: """
             <label for="origin">Origin</label><input id="origin" value="Oslo">
-            <input aria-label="Password" type="password" value="never expose this">
-            <input aria-label="Code" autocomplete="one-time-code" value="123456">
+            <input aria-label="Password" type="password" hidden value="never expose this">
+            <input aria-label="Code" autocomplete="one-time-code" hidden value="123456">
             <input aria-label="Card" autocomplete="cc-number" value="4111111111111111">
             <input aria-label="Hidden" hidden value="hidden"><input aria-label="Locked" readonly value="locked">
             <input aria-label="Disabled" disabled value="disabled"><div style="opacity:0"><input aria-label="Invisible" value="invisible"></div>

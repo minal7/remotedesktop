@@ -289,7 +289,8 @@ final class ComputerUseNativeTextExecutor {
         } catch {
             let planningFailure = error as? ComputerUsePlanningWorker.Failure
             let mayRetryPlanning = planningFailure == .busy || planningFailure == .timedOut
-            if !(error is CancellationError) && error as? ComputerUseTextEditError != .interrupted && !mayRetryPlanning {
+            if !(error is CancellationError) && error as? ComputerUseTextEditError != .interrupted
+                && error as? ComputerUseBrowserError != .authenticationRequired && !mayRetryPlanning {
                 invalidateClarification(taskID: taskID)
             }
             throw error

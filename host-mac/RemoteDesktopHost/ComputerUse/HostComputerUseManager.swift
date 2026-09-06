@@ -6099,6 +6099,9 @@ final class HostComputerUseManager: ObservableObject {
                     context: context,
                     token: token)
                 return
+            } catch ComputerUseBrowserError.authenticationRequired {
+                guard currentExecutionToken == token else { return }
+                pauseForLocalIntervention(context, guidance: ComputerUseBrowserError.authenticationRequired.localizedDescription)
             } catch ComputerUseHostTools.ToolError.paused, ComputerUseTextEditError.interrupted {
                 // The injection gate can close synchronously on local input or
                 // WebRTC disconnect before its MainActor lifecycle callback.

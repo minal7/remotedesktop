@@ -66,16 +66,24 @@ enum ComputerUseBrowserDOM {
         if (!(element instanceof HTMLInputElement) || protectedTypes.has(element.type) || !textTypes.has(element.type)) return -1;
         return 0;
       }
-      function editable(element) {
-        if (!element.isConnected || element.ownerDocument !== doc || kind(element) < 0 || element.matches(':disabled') || element.readOnly) return false;
-        const autocomplete = (element.autocomplete || '').toLowerCase().split(/\s+/);
-        if (autocomplete.some(t => t === 'one-time-code' || t.includes('password') || t.startsWith('cc-'))) return false;
+      function rendered(element) {
+        if (!element.isConnected || element.ownerDocument !== doc) return false;
         if (element.getClientRects().length === 0) return false;
         let node = element;
         for (let i = 0; node && i < 128; i++, node = parent(node)) {
-          if (node.hidden || node.inert || node.getAttribute('aria-hidden') === 'true') return false;
+          if (node.hidden) return false;
           const style = getComputedStyle(node);
           if (style.display === 'none' || style.visibility !== 'visible' || Number(style.opacity) === 0) return false;
+          if (node === root) return true;
+        }
+        return false;
+      }
+      function editable(element) {
+        if (kind(element) < 0 || element.matches(':disabled') || element.readOnly || !rendered(element)) return false;
+        const autocomplete = (element.autocomplete || '').toLowerCase().split(/\s+/);
+        if (autocomplete.some(t => t === 'one-time-code' || t.includes('password') || t.startsWith('cc-'))) return false;
+        for (let node = element, i = 0; node && i < 128; i++, node = parent(node)) {
+          if (node.inert || node.getAttribute('aria-hidden') === 'true') return false;
           if (node === root) return true;
         }
         return false;
@@ -107,6 +115,50 @@ enum ComputerUseBrowserDOM {
         }
         if (!label) label = (element.getAttribute('placeholder') || '').trim();
         return {label, labels};
+      }
+      const credentialMarkers = ['password', 'passcode', 'verification code', 'verification field',
+        'one time code', 'one time password', 'otp', 'otp code', 'two factor code', 'authentication code',
+        'two factor authentication code', 'security code', 'security pin', 'recovery code',
+        'backup code', '2fa code', 'mfa code', 'password reset code', 'password reset token'];
+      function credentialLabel(value) {
+        let words = value.replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+          .replace(/([a-z0-9])([A-Z])/g, '$1 $2').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+        for (let i = 0; i < 4; i++) {
+          words = words.replace(/^(?:enter|type|provide|input|txt|your|current|new|confirm|repeat|account|[0-9]{1,2} digit) /, '')
+            .replace(/ (?:required|optional|field|input|below|here)$/, '');
+        }
+        // Whole labels avoid turning ordinary fields such as "Password policy"
+        // or "Airport code" into authentication merely because of one word.
+        return credentialMarkers.includes(words);
+      }
+      function authenticationStatus() {
+        // Inspect metadata across the whole bounded document BEFORE reading
+        // any field value. A later password/code field must protect earlier
+        // ordinary-looking inputs too. Re-run before every value/edit command.
+        const walkers = [doc.createTreeWalker(doc, NodeFilter.SHOW_ELEMENT)];
+        let count = 0;
+        while (walkers.length) {
+          const walker = walkers[walkers.length - 1], element = walker.nextNode();
+          if (!element) { walkers.pop(); continue; }
+          if (++count > 10000) return 'limit';
+          if (element.shadowRoot) walkers.push(doc.createTreeWalker(element.shadowRoot, NodeFilter.SHOW_ELEMENT));
+          const control = element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement
+            || element.getAttribute('role') === 'textbox' || element.isContentEditable;
+          // Disabled/read-only controls are already excluded from all value
+          // reads and edits. A saved-password display is not a login challenge.
+          if (!control || !rendered(element) || element.matches(':disabled') || element.readOnly) continue;
+          const autocomplete = (element.getAttribute('autocomplete') || '').toLowerCase().split(/\s+/);
+          if ((element instanceof HTMLInputElement && element.type === 'password')
+              || autocomplete.some(t => t === 'one-time-code' || t === 'username' || t.includes('password'))) {
+            return 'authentication-required';
+          }
+          // Revealed passwords and poorly annotated OTP inputs can be plain
+          // text/number fields. Labels and identifiers are data, never code.
+          const metadata = [labelFor(element).label, element.getAttribute('id') || '', element.getAttribute('name') || ''];
+          if (metadata.some(value => value.length > 1024)) return 'limit';
+          if (metadata.some(credentialLabel)) return 'authentication-required';
+        }
+        return null;
       }
       function shape(element) {
         return [element.tagName, element.type || '', element.name || '', element.id || '',
@@ -176,15 +228,21 @@ enum ComputerUseBrowserDOM {
       function run(command, args) {
         synchronize();
         if (!root || doc !== document) return reply('stale');
-        if (command === 'fields') return fields();
-        if (args.documentID !== documentID) return reply('stale');
-        if (command === 'reobserve') {
-          if (!Array.isArray(args.ids)) return reply('unsupported');
-          return fields(args.ids);
-        }
+        if (command !== 'fields' && args.documentID !== documentID) return reply('stale');
+        // Historical dispatch evidence reads no form values and must survive
+        // a login overlay appearing after an earlier input was dispatched.
         if (command === 'receipt') {
           if (typeof args.operationID !== 'string' || args.operationID.length !== 64) return reply('unsupported');
           return reply(operations.get(args.operationID) === 'dispatched' ? 'dispatched' : 'unproven');
+        }
+        if (['fields', 'read', 'edit', 'reobserve', 'preflight'].includes(command)) {
+          const status = authenticationStatus();
+          if (status) return reply(status);
+        }
+        if (command === 'fields') return fields();
+        if (command === 'reobserve') {
+          if (!Array.isArray(args.ids)) return reply('unsupported');
+          return fields(args.ids);
         }
         if (command === 'preflight') {
           if (!Array.isArray(args.steps) || args.steps.length < 1 || args.steps.length > 8) return reply('unsupported');

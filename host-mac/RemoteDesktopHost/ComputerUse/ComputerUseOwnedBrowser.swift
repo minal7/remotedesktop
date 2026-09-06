@@ -38,7 +38,7 @@ struct ComputerUseBrowserDocument: Equatable, Sendable {
 }
 
 enum ComputerUseBrowserError: Error, LocalizedError, Equatable {
-    case invalidURL, busy, ownershipLost, pageChanged, navigationFailed, deadlineExceeded, closed, unsupportedDocument, documentUnresponsive, windowNotActive
+    case invalidURL, busy, ownershipLost, pageChanged, navigationFailed, deadlineExceeded, closed, unsupportedDocument, documentUnresponsive, windowNotActive, authenticationRequired
     var errorDescription: String? {
         switch self {
         case .invalidURL: return "The browser needs an HTTP or HTTPS URL without embedded credentials."
@@ -51,6 +51,7 @@ enum ComputerUseBrowserError: Error, LocalizedError, Equatable {
         case .unsupportedDocument: return "This page does not expose a complete supported text form in the AI browser."
         case .documentUnresponsive: return "The AI browser page did not respond before the deadline. Check it before continuing."
         case .windowNotActive: return "The AI browser is open, but another Mac window still has focus. Select the AI browser, then continue."
+        case .authenticationRequired: return "Sign in or complete verification yourself in the AI browser, then choose Let AI continue. AI will check the page again before continuing your request."
         }
     }
 }
@@ -258,6 +259,10 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         guard result.documentID.utf8.count == 32,
               result.documentID.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else {
             throw ComputerUseBrowserError.pageChanged
+        }
+        if result.status == "authentication-required" {
+            guard result.fields == nil else { throw ComputerUseBrowserError.unsupportedDocument }
+            throw ComputerUseBrowserError.authenticationRequired
         }
         return result
     }
