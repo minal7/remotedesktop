@@ -73,6 +73,73 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
         XCTAssertEqual(server.requestCount, 0)
     }
 
+    func testBoundNavigationRequiresTheExactCurrentDocumentBeforeLoading() async throws {
+        let server = try OwnedBrowserHTTPFixture()
+        let base = try await server.start()
+        defer { server.stop() }
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+        defer { browser.close() }
+        try browser.claim(taskID: "bound")
+        let url = base.appendingPathComponent("same-url")
+        let first = try await browser.navigate(taskID: "bound", operationID: "first", to: url)
+        let current = try await browser.navigate(taskID: "bound", operationID: "second", to: url, from: first)
+        XCTAssertNotEqual(current.generation, first.generation)
+        let foreign = ComputerUseBrowserDocument(contextID: "different-context", taskID: current.taskID,
+            generation: current.generation, operationID: current.operationID,
+            requestedURL: current.requestedURL, committedURL: current.committedURL)
+        let wrongTask = ComputerUseBrowserDocument(contextID: current.contextID, taskID: "another-task",
+            generation: current.generation, operationID: current.operationID,
+            requestedURL: current.requestedURL, committedURL: current.committedURL)
+        for (index, prerequisite) in [first, foreign, wrongTask].enumerated() {
+            let operation = "rejected-\(index)"
+            do {
+                _ = try await browser.navigate(taskID: "bound", operationID: operation,
+                    to: base.appendingPathComponent("must-not-open"), from: prerequisite)
+                XCTFail("An equal URL cannot replace document, context or task identity")
+            } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+            XCTAssertEqual(browser.currentDocument(taskID: "bound"), current)
+            XCTAssertNil(browser.receipt(taskID: "bound", operationID: operation))
+        }
+        XCTAssertEqual(server.count("/same-url"), 2); XCTAssertEqual(server.count("/must-not-open"), 0)
+        let next = try await browser.navigate(taskID: "bound", operationID: "next",
+            to: base.appendingPathComponent("next"), from: current)
+        XCTAssertTrue(browser.validate(next)); XCTAssertEqual(server.count("/next"), 1)
+    }
+
+    func testPageReloadAfterDurableAttemptCannotStartTheNextPlannedNavigation() async throws {
+        let body = "<h1>First page</h1><script>if (!sessionStorage.reloaded) { sessionStorage.reloaded = 'yes'; fetch('/signal').then(() => location.reload()); }</script>"
+        let server = try OwnedBrowserHTTPFixture(routes: ["/first": .init(body: body), "/signal": .init(held: true)])
+        let base = try await server.start()
+        defer { server.stop() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+        var dispatchChecks = 0
+        let execution = ComputerUseBrowserNavigationTask(browser: browser, journalDirectory: directory,
+            beforeNavigationDispatch: { index in
+                guard index == 1 else { return }
+                dispatchChecks += 1
+                let journal = try XCTUnwrap(ComputerUseTaskJournalStore(directory: directory).load(taskID: "ordered"))
+                XCTAssertEqual(journal.statuses, [.verified, .attempted], "The fault must occur after the durable attempt")
+                let original = try XCTUnwrap(browser.currentDocument(taskID: "ordered"))
+                try await self.waitUntil { server.count("/signal") == 1 }
+                server.releaseHeldResponses()
+                try await self.waitUntil { server.count("/first") == 2 && !browser.validate(original) }
+                XCTAssertTrue(browser.hasOwnership(taskID: "ordered"), "The task still owns this browser despite the document change")
+                XCTAssertEqual(browser.receipt(taskID: "ordered", operationID: original.operationID), original)
+            })
+        defer { execution.close() }
+        let prompt = "Open \(base.appendingPathComponent("first").absoluteString) then \(base.appendingPathComponent("must-not-open").absoluteString)"
+        for _ in 0..<2 {
+            let result = try await execution.execute(taskID: "ordered", prompt: prompt, progress: { _ in })
+            guard case .userInterventionRequired = result else { return XCTFail("The changed prerequisite cannot authorize a later navigation") }
+        }
+        XCTAssertEqual(dispatchChecks, 1, "Resume must reconcile the retained attempt without dispatching again")
+        XCTAssertEqual(server.count("/first"), 2); XCTAssertEqual(server.count("/must-not-open"), 0)
+        let saved = try XCTUnwrap(ComputerUseTaskJournalStore(directory: directory).load(taskID: "ordered"))
+        XCTAssertEqual(saved.statuses, [.verified, .uncertain])
+    }
+
     func testRedirectRecordsCommittedURLAndSubframesCannotFailMainNavigation() async throws {
         let server = try OwnedBrowserHTTPFixture(routes: [
             "/redirect": .init(status: 302, location: "/destination"),

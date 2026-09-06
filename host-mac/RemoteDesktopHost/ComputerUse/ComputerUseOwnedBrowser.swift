@@ -216,7 +216,8 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         currentDocument(taskID: expected.taskID) == expected
     }
 
-    func navigate(taskID: String, operationID: String, to url: URL) async throws -> ComputerUseBrowserDocument {
+    func navigate(taskID: String, operationID: String, to url: URL,
+                  from expectedDocument: ComputerUseBrowserDocument? = nil) async throws -> ComputerUseBrowserDocument {
         try Task.checkCancellation()
         guard hasOwnership(taskID: taskID) else { throw ComputerUseBrowserError.ownershipLost }
         guard pending == nil, pendingDOM == nil else { throw ComputerUseBrowserError.busy }
@@ -226,10 +227,19 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             throw ComputerUseBrowserError.pageChanged
         }
         guard let url = Self.validatedURL(url) else { throw ComputerUseBrowserError.invalidURL }
+        if let expectedDocument, !validate(expectedDocument) { throw ComputerUseBrowserError.pageChanged }
         let browser = makeBrowser()
         presentIfNeeded(browser)
         try Task.checkCancellation()
         guard hasOwnership(taskID: taskID) else { throw ComputerUseBrowserError.ownershipLost }
+        // A later workflow step must still start from its exact prerequisite
+        // document at dispatch. A historical receipt or equal URL is not a
+        // current-document check. Keep this after presentation and before any
+        // generation change, pending operation or WebKit load is created.
+        if let expectedDocument {
+            guard validate(expectedDocument) else { throw ComputerUseBrowserError.pageChanged }
+            guard hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
+        }
         generation &+= 1
         document = nil
         displayedURL = url.absoluteString

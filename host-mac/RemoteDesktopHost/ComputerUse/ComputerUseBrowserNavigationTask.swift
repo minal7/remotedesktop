@@ -43,12 +43,18 @@ enum ComputerUseBrowserNavigationRequest {
 final class ComputerUseBrowserNavigationTask {
     private let browser: ComputerUseOwnedBrowser
     private let journalDirectory: URL
+    /// Controlled fixtures can suspend after the durable attempt and before
+    /// dispatch. Production supplies no callback; document validation always
+    /// remains inside the browser's actual navigation boundary.
+    private let beforeNavigationDispatch: (@MainActor (Int) async throws -> Void)?
     private var execution: ComputerUseTaskExecution?
     private var retainedURLs: [URL] = []
 
-    init(browser: ComputerUseOwnedBrowser, journalDirectory: URL) {
+    init(browser: ComputerUseOwnedBrowser, journalDirectory: URL,
+         beforeNavigationDispatch: (@MainActor (Int) async throws -> Void)? = nil) {
         self.browser = browser
         self.journalDirectory = journalDirectory
+        self.beforeNavigationDispatch = beforeNavigationDispatch
     }
 
     func execute(taskID: String, prompt: String, progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult? {
@@ -89,9 +95,19 @@ final class ComputerUseBrowserNavigationTask {
                     guard let receipt = browser.receipt(taskID: taskID, operationID: operationID),
                           receipt.requestedURL == urls[index] else { return false }
                     return predicate.kind == "navigation-receipt" || (browser.validate(receipt) && browser.hasRequiredPresentation)
-                }, perform: { [browser] step, operationID in
+                }, perform: { [browser, beforeNavigationDispatch] step, operationID in
                     guard let index = indices[step.id] else { throw ComputerUseTaskExecutionError.invalidContract }
-                    _ = try await browser.navigate(taskID: taskID, operationID: operationID, to: urls[index])
+                    let prerequisite: ComputerUseBrowserDocument?
+                    if index > 0 {
+                        let previousOperation = contract.effectIdentity(for: contract.steps[index - 1])
+                        guard let previous = browser.receipt(taskID: taskID, operationID: previousOperation) else {
+                            throw ComputerUseTaskExecutionError.preconditionFailed("current-\(index - 1)")
+                        }
+                        prerequisite = previous
+                    } else { prerequisite = nil }
+                    if let beforeNavigationDispatch { try await beforeNavigationDispatch(index) }
+                    _ = try await browser.navigate(taskID: taskID, operationID: operationID,
+                        to: urls[index], from: prerequisite)
                 }, persist: { try store.save($0) }, assertOwnership: { [browser] in
                     guard browser.hasOwnership(taskID: taskID) else { throw ComputerUseBrowserError.ownershipLost }
                 })
@@ -109,6 +125,8 @@ final class ComputerUseBrowserNavigationTask {
         } catch ComputerUseTaskExecutionError.uncertainEffect {
             return .userInterventionRequired("The browser navigation was interrupted and cannot be verified. Check the AI browser before starting a new request.")
         } catch ComputerUseTaskExecutionError.preconditionFailed {
+            return .userInterventionRequired("The AI browser page changed before the next navigation. Check it before starting a new request.")
+        } catch ComputerUseBrowserError.pageChanged {
             return .userInterventionRequired("The AI browser page changed before the next navigation. Check it before starting a new request.")
         }
     }
