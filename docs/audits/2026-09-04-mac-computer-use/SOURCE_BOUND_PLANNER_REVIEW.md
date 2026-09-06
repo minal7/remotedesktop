@@ -51,7 +51,8 @@ The shared host source-byte check is a separate completed repair: generated prom
 - [ ] Pass the fixed complete-plan comparison without accepted wrong operations; retain all conservative failures too.
 - [ ] Pass independent phrasing under unchanged source, model, sampling and expected outcomes.
 - [ ] Execute the frozen visible browser cases through the actual runtime, coordinator and DOM adapter; verify typed origins, every intermediate full-form state and no replay.
-- [ ] Extend dispatch/recovery qualification to ordinary text operations and native AX adapters; the copy receipt change alone does not close F26.
+- [x] Extend dispatch requirements to ordinary literal text operations and qualify the owned-browser path: 126 focused signed methods and 14/14 actual-model production browser cases pass, including all 16 intermediate input events. See [the receipt result](browser-input-receipts-results.json).
+- [ ] Qualify independent native AX dispatch/restart receipts and visual input recovery; successful owned-browser recovery alone does not close F26.
 - [ ] Add generated drafts as an explicit capability with reviewed content and outcome predicates.
 - [ ] Compile preservation, forbidden-value and conditional requirements at their actual scope before supporting them.
 - [ ] Qualify external native targets, mobile-to-Mac transport, interruption points and supported hardware before a release claim.
