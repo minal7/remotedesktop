@@ -1,0 +1,138 @@
+{
+  "allowFieldCopy" : false,
+  "cases" : [
+    {
+      "disposition" : "supported",
+      "edits" : [
+        {
+          "field" : 0,
+          "mode" : "replaceAll",
+          "value" : "Oslo"
+        },
+        {
+          "field" : 1,
+          "mode" : "replaceAll",
+          "value" : "Bergen"
+        }
+      ],
+      "elapsedSeconds" : 12.825691875012126,
+      "id" : "N12",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterUnquoted\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"text\":\"Oslo\"},{\"action\":\"enterUnquoted\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\",\"text\":\"Bergen\"}]}",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterUnquoted\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"text\":\"Oslo\"},{\"action\":\"enterUnquoted\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\",\"text\":\"Bergen\"}]}",
+          "finishReason" : "stop"
+        }
+      ],
+      "verified" : true
+    },
+    {
+      "disposition" : "clarification",
+      "edits" : [
+
+      ],
+      "elapsedSeconds" : 11.859412166668335,
+      "id" : "R15",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\"disposition\":\"clarification\",\"operations\":[]}",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\"disposition\":\"clarification\",\"operations\":[]}",
+          "finishReason" : "stop"
+        }
+      ],
+      "verified" : false
+    },
+    {
+      "disposition" : "supported",
+      "edits" : [
+        {
+          "field" : 1,
+          "mode" : "replaceAll",
+          "sourceField" : 0
+        }
+      ],
+      "elapsedSeconds" : 7.4370657916588243,
+      "id" : "R16",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"copyField\",\"sourceFieldID\":\"f1\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\"}]}",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"copyField\",\"sourceFieldID\":\"f1\",\"targetFieldID\":\"f2\",\"mode\":\"replaceAll\"}]}",
+          "finishReason" : "stop"
+        }
+      ],
+      "verified" : false
+    },
+    {
+      "disposition" : "clarification",
+      "edits" : [
+
+      ],
+      "elapsedSeconds" : 10.134612750000088,
+      "id" : "R17",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\"disposition\":\"clarification\",\"operations\":[]}",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\"disposition\":\"clarification\",\"operations\":[]}",
+          "finishReason" : "stop"
+        }
+      ],
+      "verified" : false
+    },
+    {
+      "disposition" : "supported",
+      "edits" : [
+        {
+          "field" : 0,
+          "mode" : "replaceAll",
+          "value" : "amber"
+        }
+      ],
+      "elapsedSeconds" : 11.972674333344912,
+      "id" : "H501",
+      "modelResponses" : 1,
+      "proposal" : {
+        "content" : "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterUnquoted\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"text\":\"amber\"}]}",
+        "finishReason" : "stop"
+      },
+      "proposals" : [
+        {
+          "content" : "{\"disposition\":\"supported\",\"operations\":[{\"action\":\"enterUnquoted\",\"targetFieldID\":\"f1\",\"mode\":\"replaceAll\",\"text\":\"amber\"}]}",
+          "finishReason" : "stop"
+        }
+      ],
+      "verified" : true
+    }
+  ],
+  "contract" : "text-actions-v11",
+  "corpusSHA256" : "067f0473da25e8155b7eda917a4053114edf2d945155a6faadc4a2506428141f",
+  "desktopEffects" : false,
+  "expectedCaseIDs" : [
+    "N12",
+    "R15",
+    "R16",
+    "R17",
+    "H501"
+  ],
+  "modelSHA256FromVerifiedManifest" : "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
+  "oracle" : "exact-disposition-and-complete-operation-sequences-including-count-mode-target-payload-origin-exact-bytes-and-order",
+  "quotedCommandFastPath" : false,
+  "runtimeBinarySHA256" : "4a6c539b0be3c03cc1ce1df8f464f914d054b5215f9e7d1484d249e2b74c406f",
+  "schemaVersion" : 1,
+  "scope" : "Known 54-case regression comparison for unified typed field operations v8; combines 20 copy and 34 earlier literal\/decline cases; not held-out qualification; preselected batch 7\/11"
+}

@@ -18,7 +18,7 @@ Exit criterion: the current package has runnable, correctly named gates; documen
 - [ ] **F01:** Add TaskContract and Step records with IDs, outcomes, dependencies, entity bindings, constraints, preconditions, expected effects, and postconditions. The shared contract/transaction engine now runs production native form tasks and explicit owned-browser navigation, with dependency validation, complete contract fingerprints and adapter-owned predicates. Visual and structured whole-goal compilation is still required; the controlled two-submission fixture does not establish browser search support.
 - [ ] **F02:** Compile goal-authorized intermediate actions through reviewed capabilities. Separate literal payloads, generated drafts, and observed data. Independent browser input-event checks caught an extra intermediate edit in R15 that earlier final-value qualification missed. Complete quoted `set` commands now compile target/value roles directly from the entire current request, preserving ordered repetitions and rejecting mixed-command prefixes. The experimental source-bound compiler passed known regressions but accepted literal `a warm welcome` for a request to generate writing in the new corpus. Source occurrence and coverage do not prove semantic authority. Follow the [planner repair order](docs/audits/2026-09-04-mac-computer-use/SOURCE_BOUND_PLANNER_REVIEW.md); keep the candidate out of production until these failures are resolved and independently qualified.
 - [ ] **F03:** Replace task-global TYPE/ENTER suppression with idempotency per step, target, operation, and payload version.
-- [ ] **F04:** Preserve task and step state through pause/resume. Re-observe and reconcile on resume; invalidate old coordinates and approval tokens.
+- [ ] **F04:** Preserve task and step state through pause/resume. Re-observe and reconcile on resume; invalidate old coordinates and approval tokens. Native form clarification also needs an explicit retained goal: a short answer currently loses the original request in this route. Implement the [bounded clarification continuation design](docs/audits/2026-09-04-mac-computer-use/CLARIFICATION_CONTINUATION_REVIEW.md), including exact payload retention and task/session binding; do not promote general chat history into edit authority.
 - [ ] **F26:** Add attempted/verified/uncertain step states and durable recovery for effects that can outlive the host process.
 - [ ] **F24:** Pass reviewed typed evidence and step progress across structured and visual executors.
 - [ ] **F16:** Define completion as all requested outcome predicates proven, rather than a model stop token or a broad success phrase.
@@ -118,6 +118,7 @@ Exit criterion: all critical regressions pass, all supported task families meet 
 | T26 | Network transition, lease expiry, reconnect | Consistent ownership and no duplicate task/effect |
 | T27 | Physical low-memory Mac under browser/media load | Measured latency/memory and deliberate degradation |
 | T28 | Actual production manifest through mobile-to-Mac flow | No stubbed planner/grounder or wrong-package substitution |
+| T29 | Answer a field/value clarification without repeating the original request | Exact original goal retained, fresh target binding, one execution; stale or unrelated answers cannot inherit authority |
 
 Use native/browser fixtures and test accounts for controlled effects. Real user emails, purchases, or credential entry are not required to exercise the transaction and approval design.
 
@@ -137,6 +138,8 @@ Only then broaden capabilities and evaluate whether an additional model pays for
 
 
 **Work log**
+
+- 2026-09-05: V11 completed its first 54-case comparison with 39 passes, one accepted incorrect copy and fourteen conservative failures. All responses and eleven signed result bundles are retained; the candidate remains disabled and the frozen unseen/browser cases remain unrun. The next independent execution repair extends dispatch evidence from copies to literal edits. Also documented the native clarification continuation gap and added T29; exact retained goal/task/session binding is required before short answers can safely resume native form requests. See [v11 results](docs/audits/2026-09-04-mac-computer-use/text-actions-v11-results.json).
 
 - 2026-09-05: The shared source-byte repair passed all 14 actual-model production browser cases and all 16 expected input events. The separate action-based planner passed 51/54 full known proposals; two literal field names still became copies and one missing-field request got the wrong decline. Keep that planner disabled, preserve the unseen corpus, and repair literal metadata and disposition semantics next. All raw results and signed summaries are retained in [the v10 result record](docs/audits/2026-09-04-mac-computer-use/text-actions-v10-results.json).
 
