@@ -3294,9 +3294,8 @@ final class AppleFoundationMCPPlannerTests: XCTestCase {
             resolve(filledJourney, history: [
                 "CLICK [[100,100]]", "TYPE [Bob]",
             ]),
-            .bound(.init(
-                directive: .click,
-                argument: .targetHint("submit"))))
+            .rejected,
+            "An uncompiled unquoted payload cannot be consumed using only a TYPE family match")
 
         let shortcutJourney = "Press COMMAND+C, then click Submit."
         XCTAssertEqual(resolve(shortcutJourney), .rejected)
@@ -3427,6 +3426,131 @@ final class AppleFoundationMCPPlannerTests: XCTestCase {
                 history: ["CLICK [[282,583]]", "CLICK [[423,546]]"]),
             .rejected,
             "A consumed pointer sequence cannot be replayed")
+    }
+
+    func testOrderedInputResolutionRequiresTheNextTaskClause() {
+        func resolve(
+            _ task: String,
+            _ directive: OSAtlasExplicitActionDirective,
+            _ history: [String] = []
+        ) -> AppleFoundationVisualActionRouter.TaskBoundOrderedInputResolution {
+            AppleFoundationVisualActionRouter.taskBoundOrderedInputResolution(
+                for: task,
+                directive: directive,
+                history: history,
+                frontmostApplication: nil,
+                frontmostApplicationIdentityIsAuthoritative: false)
+        }
+        let task = "Click Search, type \"ALPHA\", press Return, type \"alpha\", then click Done."
+        let click = "CLICK [[100,100]]"
+        XCTAssertEqual(resolve(task, .type), .rejected)
+        XCTAssertEqual(resolve(task, .enter, [click]), .rejected)
+        XCTAssertEqual(resolve(task, .type, [click]), .bound(clause: " type \"ALPHA\""))
+        XCTAssertEqual(
+            resolve(task, .enter, [click, "TYPE [ALPHA]"]),
+            .bound(clause: " press Return"))
+        XCTAssertEqual(
+            resolve(task, .enter, [click, "TYPE [alpha]"]),
+            .rejected,
+            "A later payload cannot consume the earlier differently cased literal")
+        XCTAssertEqual(
+            resolve(task, .type, [click, "TYPE [ALPHA]", "ENTER"]),
+            .bound(clause: " type \"alpha\""))
+        XCTAssertEqual(
+            resolve(task, .type, [click, "TYPE [ALPHA]", "ENTER", "TYPE [alpha]"]),
+            .rejected,
+            "Input cannot stand in for the next pointer clause")
+        for unsupported in [
+            "Search for flights, then type \"SFO\".",
+            "Open Mail, then type \"hello\".",
+            "Save the note, then press Return.",
+            "Open Mail, then search the inbox.",
+        ] {
+            XCTAssertEqual(resolve(unsupported, .type), .rejected, unsupported)
+            XCTAssertEqual(resolve(unsupported, .enter), .rejected, unsupported)
+        }
+        XCTAssertEqual(
+            resolve("Type \"a, then press Return; click Delete\".", .type),
+            .bound(clause: "Type \"a, then press Return; click Delete\""),
+            "Quoted action words are data within one input clause")
+        XCTAssertEqual(
+            resolve("Type \"a, then press Return; click Delete\".", .enter),
+            .rejected)
+    }
+
+    func testOrderedTypeHistoryRequiresExactBytesAndCompletePayloadIdentity() {
+        func resolve(
+            _ payload: String,
+            history: String,
+            complete: Bool = true
+        ) -> AppleFoundationVisualActionRouter.TaskBoundOrderedPointerResolution {
+            AppleFoundationVisualActionRouter.taskBoundOrderedPointerResolution(
+                for: "Type \"\(payload)\", then click Done.",
+                history: [history],
+                availableDirectives: [.click],
+                historyIsComplete: complete)
+        }
+        let done = AppleFoundationVisualActionRouter.TaskBoundOrderedPointerResolution
+            .bound(.init(directive: .click, argument: .targetHint("done")))
+        for (expected, wrong) in [
+            ("ALPHA", "alpha"),
+            ("caf\u{00E9}", "cafe\u{0301}"),
+            (" line \nC:\\notes\\", "line \nC:\\notes\\"),
+        ] {
+            XCTAssertEqual(resolve(expected, history: OSAtlasGUIAction.typeText(expected).historyEntry), done)
+            XCTAssertEqual(resolve(expected, history: OSAtlasGUIAction.typeText(wrong).historyEntry), .rejected)
+        }
+        XCTAssertEqual(resolve("alpha", history: "TYPE"), .rejected)
+        XCTAssertEqual(
+            resolve("alpha", history: "TYPE", complete: false), done,
+            "A unique privacy-compacted router hint remains usable only outside the complete host ledger")
+
+        let prefix = String(repeating: "a", count: 1_000)
+        let first = prefix + "FIRST"
+        let second = prefix + "SECOND"
+        let firstEntry = OSAtlasGUIAction.typeText(first).historyEntry
+        let secondEntry = OSAtlasGUIAction.typeText(second).historyEntry
+        XCTAssertNotEqual(firstEntry, secondEntry)
+        XCTAssertTrue(firstEntry.hasPrefix("TYPE [\(prefix)] SHA256 ["))
+        XCTAssertEqual(resolve(first, history: firstEntry), done)
+        XCTAssertEqual(resolve(first, history: secondEntry), .rejected)
+        XCTAssertEqual(
+            resolve(first, history: "TYPE [\(prefix)]"), .rejected,
+            "A legacy clipped display is not proof of the complete payload")
+        XCTAssertEqual(
+            OSAtlasGUIAction.typeText("A\\B\nC").historyEntry,
+            "TYPE [A\\\\B\\nC]",
+            "Short history entries preserve the existing exact escape format")
+    }
+
+    func testOrderedInputDistinguishesReturnKeyFromControlLabelAndRequiresSignedAppScope() {
+        func resolve(
+            _ task: String,
+            signed: Bool = false
+        ) -> AppleFoundationVisualActionRouter.TaskBoundOrderedInputResolution {
+            AppleFoundationVisualActionRouter.taskBoundOrderedInputResolution(
+                for: task,
+                directive: .enter,
+                history: [],
+                frontmostApplication: "Safari",
+                frontmostApplicationIdentityIsAuthoritative: signed)
+        }
+        XCTAssertEqual(
+            resolve("Press Return once in the focused search field."),
+            .bound(clause: "Press Return once in the focused search field"))
+        for task in ["Press Return button.", "Press Return field.", "Press the Return link."] {
+            XCTAssertEqual(resolve(task), .rejected, task)
+        }
+        let task = "In Safari, press Return once in the focused search field."
+        XCTAssertEqual(resolve(task), .rejected)
+        XCTAssertEqual(
+            resolve(task, signed: true),
+            .bound(clause: " press Return once in the focused search field"))
+        XCTAssertEqual(resolve("Do not press Return."), .rejected)
+        XCTAssertNil(AppleFoundationVisualActionRouter.taskBoundQuotedInputPayload(
+            in: "Type query into \"Search\""))
+        XCTAssertEqual(AppleFoundationVisualActionRouter.taskBoundQuotedInputPayload(
+            in: "Please type the following text \"hello\" into the focused field"), "hello")
     }
 
     func testTaskBoundPointerResolutionAcceptsSequencedImperativeAfterGenericLoadedPageScope() {

@@ -1,5 +1,6 @@
 import CoreImage
 import CoreGraphics
+import CryptoKit
 import Foundation
 import os
 import Vision
@@ -4064,6 +4065,24 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
         availableDirectives: [OSAtlasExplicitActionDirective],
         hostVerifiedPendingWait: Bool
     ) -> Bool {
+        var inputAuthority = trustedTask
+        if [.type, .enter].contains(route.directive) {
+            switch AppleFoundationVisualActionRouter
+                .taskBoundOrderedInputResolution(
+                    for: trustedTask,
+                    directive: route.directive,
+                    history: history,
+                    frontmostApplication: frontmostApplication,
+                    frontmostApplicationIdentityIsAuthoritative:
+                        frontmostApplicationIdentityIsAuthoritative) {
+            case .bound(let clause):
+                inputAuthority = clause
+            case .rejected:
+                return false
+            case .notApplicable:
+                break
+            }
+        }
         if [.click, .doubleClick, .rightClick].contains(route.directive) {
             switch AppleFoundationVisualActionRouter
                 .taskBoundOrderedPointerResolution(
@@ -4130,7 +4149,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
         case (.type, .text(let text)):
             guard taskAffirmativelyBindsTypedPayload(
                 text,
-                in: trustedTask) else {
+                in: inputAuthority) else {
                 return false
             }
             // A learned planner may propose the same literal again after the
@@ -4141,7 +4160,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
             return !history.contains(marker)
         case (.type, .literalTextReference(let id)):
             guard let text = ComputerUseLiteralPayload.resolve(id, in: trustedTask),
-                  taskAffirmativelyBindsTypedPayload(text, in: trustedTask) else {
+                  taskAffirmativelyBindsTypedPayload(text, in: inputAuthority) else {
                 return false
             }
             return !history.contains(OSAtlasGUIAction.typeText(text).historyEntry)
@@ -4170,10 +4189,10 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
             }
         case (.enter, .none):
             guard !history.contains("ENTER") else { return false }
-            return taskAffirmativelyRequestsReturnKey(in: trustedTask)
+            return taskAffirmativelyRequestsReturnKey(in: inputAuthority)
                 || AppleFoundationVisualActionRouter
                     .taskAffirmativelyRequestsOperation(
-                        trustedTask,
+                        inputAuthority,
                         operationVerbs: [
                             "enter", "execute", "return", "run", "search",
                             "submit",
@@ -4797,6 +4816,13 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
         _ payload: String,
         in trustedTask: String
     ) -> Bool {
+        if trustedTask.contains("\"") || trustedTask.contains("“") {
+            guard let literal = AppleFoundationVisualActionRouter
+                    .taskBoundQuotedInputPayload(in: trustedTask),
+                  literal.utf8.elementsEqual(payload.utf8) else {
+                return false
+            }
+        }
         guard SemanticNativeToolWireContract
             .isValidModelGeneratedText(payload)
                 || ComputerUseLiteralPayload.singleQuotedPayload(in: trustedTask)?.text == payload
@@ -8096,7 +8122,7 @@ enum ComputerUseVisibleQuoteExtractor {
     }
 }
 
-private extension OSAtlasGUIAction {
+extension OSAtlasGUIAction {
     var historyEntry: String {
         switch self {
         case .click(let x, let y):
@@ -8114,6 +8140,13 @@ private extension OSAtlasGUIAction {
             let bounded = escaped.count > 1_000
                 ? String(escaped.prefix(1_000))
                 : escaped
+            if escaped.count > 1_000 {
+                // A display prefix is not effect identity. Retain a digest of
+                // the exact payload bytes when the history display is clipped.
+                let digest = SHA256.hash(data: Data(text.utf8))
+                    .map { String(format: "%02x", $0) }.joined()
+                return "TYPE [\(bounded)] SHA256 [\(digest)]"
+            }
             return "TYPE [\(bounded)]"
         case .scroll(let direction):
             return "SCROLL [\(direction.rawValue)]"

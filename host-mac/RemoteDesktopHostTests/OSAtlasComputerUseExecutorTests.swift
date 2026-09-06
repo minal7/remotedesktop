@@ -4224,7 +4224,7 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
                 "launch checklist",
                 "AXTextField • focused launch checklist"),
             (
-                "Please open Safari and use the local directory page already loaded there. Activate the visible Search field, type \"downtown branch hours\" exactly once, press Return once to submit it, and tell me today's downtown branch hours.",
+                "Type \"downtown branch hours\" exactly once, press Return once to submit it, and tell me today's downtown branch hours.",
                 "downtown branch hours",
                 "AXSearchField • focused • downtown branch hours"),
             (
@@ -4320,9 +4320,143 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
         }
     }
 
+    func testSemanticInputCannotSkipEarlierEffectsOrBorrowAnotherClausePayload()
+        async throws {
+        let cases: [(task: String, route: OSAtlasSemanticActionRoute)] = [
+            ("Type \"ALPHA\", then type \"alpha\".",
+             .init(directive: .type, argument: .text("alpha"))),
+            ("Type \"whole literal\" into the focused field.",
+             .init(directive: .type, argument: .text("whole"))),
+            ("Type query into \"Search\".",
+             .init(directive: .type, argument: .text("Search"))),
+            ("Type \"hello\" into \"Name\".",
+             .init(directive: .type, argument: .text("Name"))),
+            ("The caret is already active in my errands note. Add a line with exactly \"Pick up oat milk at 6 PM\".",
+             .init(directive: .type, argument: .text("Pick up oat milk at 6 PM"))),
+            ("Type \"caf\u{00E9}\" into the focused field.",
+             .init(directive: .type, argument: .text("cafe\u{0301}"))),
+            ("Click Search, then type \"query\".",
+             .init(directive: .type, argument: .text("query"))),
+            ("Type \"query\", then press Return.",
+             .init(directive: .enter)),
+            ("Search for flights, then type \"SFO\".",
+             .init(directive: .type, argument: .text("SFO"))),
+            ("Open Mail, then search the inbox.",
+             .init(directive: .enter)),
+            ("Press Return button.", .init(directive: .enter)),
+        ]
+        var allCases = cases
+        let referencedTask = "Click Search, then type \"query\"."
+        let literal = try XCTUnwrap(
+            ComputerUseLiteralPayload.singleQuotedPayload(in: referencedTask))
+        allCases.append((referencedTask, .init(
+            directive: .type,
+            argument: .literalTextReference(literal.id))))
+        for (index, testCase) in allCases.enumerated() {
+            let fixture = makeCorrectionRuntime(
+                completionResponses: [response("WAIT")],
+                port: UInt16(43_600 + index))
+            let router = StubSemanticActionRouter { _ in testCase.route }
+            var actions: [ComputerUsePredictedAction] = []
+            let executor = OSAtlasComputerUseExecutor.makeForTesting(
+                inputs: fixture.inputs,
+                runtime: fixture.runtime,
+                semanticRouter: router,
+                maxSteps: 1)
+            do {
+                _ = try await executor.execute(
+                    prompt: testCase.task,
+                    tools: correctionTestTools(
+                        accessibilityContext: "AXSearchField • Search • focused • editable=true",
+                        actionPerformer: { actions.append($0) }),
+                    progress: { _ in })
+                XCTFail("Out-of-order input executed: \(testCase.task)")
+            } catch let error as OSAtlasComputerUseExecutor.RuntimeError {
+                XCTAssertEqual(error, .unsupportedAction("untrusted-semantic-route"), testCase.task)
+            } catch {
+                await fixture.runtime.shutdown()
+                throw error
+            }
+            await fixture.runtime.shutdown()
+            XCTAssertTrue(actions.isEmpty, testCase.task)
+            let runtimeEvents = await fixture.events.values()
+            XCTAssertFalse(runtimeEvents.contains("complete"), testCase.task)
+        }
+    }
+
+    func testSemanticOrderedInputUsesRecordedEffectsAndKeepsRepeatSuppression()
+        async throws {
+        let cases: [(task: String, routes: [OSAtlasSemanticActionRoute], expected: [ComputerUsePredictedAction], repeats: Bool)] = [
+            (
+                "Type \"ALPHA\", press Return, then type \"alpha\".",
+                [.init(directive: .type, argument: .text("ALPHA")),
+                 .init(directive: .enter),
+                 .init(directive: .type, argument: .text("alpha"))],
+                [.typeText("ALPHA"), .key(usage: 0x28, modifiers: 0), .typeText("alpha")],
+                false
+            ),
+            (
+                "Type \"repeat\", then type \"repeat\".",
+                Array(repeating: .init(directive: .type, argument: .text("repeat")), count: 2),
+                [.typeText("repeat")],
+                true
+            ),
+            (
+                "Press Return, then press Return.",
+                Array(repeating: .init(directive: .enter), count: 2),
+                [.key(usage: 0x28, modifiers: 0)],
+                true
+            ),
+        ]
+        for (index, testCase) in cases.enumerated() {
+            let fixture = makeCorrectionRuntime(
+                completionResponses: [response("WAIT")],
+                port: UInt16(43_620 + index))
+            let requests = SemanticRoutingRequestLog()
+            let router = StubSemanticActionRouter { request in
+                await requests.record(request)
+                let count = await requests.values().count
+                return testCase.routes[min(count - 1, testCase.routes.count - 1)]
+            }
+            var actions: [ComputerUsePredictedAction] = []
+            let executor = OSAtlasComputerUseExecutor.makeForTesting(
+                inputs: fixture.inputs,
+                runtime: fixture.runtime,
+                semanticRouter: router,
+                maxSteps: testCase.routes.count)
+            do {
+                _ = try await executor.execute(
+                    prompt: testCase.task,
+                    tools: correctionTestTools(
+                        accessibilityContext: "AXSearchField • Search • focused • editable=true",
+                        actionPerformer: { actions.append($0) }),
+                    progress: { _ in })
+                XCTFail("The bounded fixture should stop after its exact effect prefix")
+            } catch let error as OSAtlasComputerUseExecutor.RuntimeError {
+                XCTAssertEqual(
+                    error,
+                    testCase.repeats ? .unsupportedAction("untrusted-semantic-route") : .stepLimit,
+                    testCase.task)
+            } catch {
+                await fixture.runtime.shutdown()
+                throw error
+            }
+            await fixture.runtime.shutdown()
+            XCTAssertEqual(actions, testCase.expected, testCase.task)
+            let recorded = await requests.values()
+            XCTAssertEqual(recorded.count, testCase.routes.count, testCase.task)
+            if !testCase.repeats {
+                XCTAssertTrue(recorded[1].history.contains("TYPE"))
+                XCTAssertTrue(recorded[2].history.contains("ENTER"))
+            }
+            let runtimeEvents = await fixture.events.values()
+            XCTAssertFalse(runtimeEvents.contains("complete"))
+        }
+    }
+
     func testSemanticTypeAndReturnCannotReplayOneShotHostLedgerEffects()
         async throws {
-        let searchPrompt = "Please open Safari and use the local directory page already loaded there. Activate the visible Search field, type \"downtown branch hours\" exactly once, press Return once to submit it, and tell me today's downtown branch hours."
+        let searchPrompt = "Type \"downtown branch hours\" exactly once, press Return once to submit it, and tell me today's downtown branch hours."
 
         do {
             let fixture = makeCorrectionRuntime(
@@ -4490,20 +4624,24 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
 
     func testReturnKeyAuthorizationHandlesCommaSeparatedBrowserWorkflow()
         async throws {
-        let acceptedPrompt = "Please open Safari and use the local directory page already loaded there. Activate the visible Search field, type \"downtown branch hours\" exactly once, press Return once to submit it, and tell me today's downtown branch hours."
+        let acceptedPrompt = "Type \"downtown branch hours\" exactly once, press Return once to submit it, and tell me today's downtown branch hours."
         do {
             let fixture = makeCorrectionRuntime(
                 completionResponses: [response("CLICK [[500,500]]")],
                 port: 43_380)
-            let router = StubSemanticActionRouter { _ in
-                OSAtlasSemanticActionRoute(directive: .enter)
+            let router = StubSemanticActionRouter { request in
+                request.history.contains("TYPE")
+                    ? OSAtlasSemanticActionRoute(directive: .enter)
+                    : OSAtlasSemanticActionRoute(
+                        directive: .type,
+                        argument: .text("downtown branch hours"))
             }
             var performedActions: [ComputerUsePredictedAction] = []
             let executor = OSAtlasComputerUseExecutor.makeForTesting(
                 inputs: fixture.inputs,
                 runtime: fixture.runtime,
                 semanticRouter: router,
-                maxSteps: 1)
+                maxSteps: 2)
             do {
                 _ = try await executor.execute(
                     prompt: acceptedPrompt,
@@ -4512,9 +4650,9 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
                             "AXSearchField • focused • downtown branch hours",
                         actionPerformer: { performedActions.append($0) }),
                     progress: { _ in })
-                XCTFail("One accepted Return should reach the step limit")
+                XCTFail("Typing followed by Return should reach the step limit")
             } catch OSAtlasComputerUseExecutor.RuntimeError.stepLimit {
-                // Expected after one host-owned Return key event.
+                // Expected after the ordered TYPE and Return effects.
             } catch {
                 await fixture.runtime.shutdown()
                 throw error
@@ -4522,7 +4660,7 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
             await fixture.runtime.shutdown()
             XCTAssertEqual(
                 performedActions,
-                [.key(usage: 0x28, modifiers: 0)])
+                [.typeText("downtown branch hours"), .key(usage: 0x28, modifiers: 0)])
         }
 
         for (index, rejectedPrompt) in [
@@ -6014,7 +6152,7 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
 
         do {
             _ = try await executor.execute(
-                prompt: "The caret is already active in my errands note. Add a line with exactly \"Pick up oat milk at 6 PM\".",
+                prompt: "Type \"Pick up oat milk at 6 PM\" into the focused errands note.",
                 tools: correctionTestTools(
                     accessibilityContext:
                         "AXTextArea • focused errands note",
@@ -7282,7 +7420,7 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
         let result: ComputerUseExecutionResult
         do {
             result = try await executor.execute(
-                prompt: "Please open Safari and use the local directory page already loaded there. Activate the visible Search field, type \"downtown branch hours\" exactly once, press Return once to submit it, and tell me today's downtown branch hours.",
+                prompt: "Please open Safari and use the local directory page already loaded there. Type \"downtown branch hours\" exactly once, press Return once to submit it, and tell me today's downtown branch hours.",
                 tools: tools,
                 progress: { _ in })
         } catch {

@@ -75,9 +75,15 @@
     "RemoteDesktopHostTests/ComputerUseClarificationCompositionTests/testBrowserFactoryReceivesTheManagerActionGate",
     "RemoteDesktopHostTests/OSAtlasModelAccessGateTests",
     "RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testCancellingQueuedActivationAndInferenceDoesNotCancelTheCurrentModelOwner",
-    "RemoteDesktopHostTests/ComputerUseAccessibilityTextTargetTests"
+    "RemoteDesktopHostTests/ComputerUseAccessibilityTextTargetTests",
+    "RemoteDesktopHostTests/AppleFoundationMCPPlannerTests/testOrderedInputResolutionRequiresTheNextTaskClause",
+    "RemoteDesktopHostTests/AppleFoundationMCPPlannerTests/testOrderedTypeHistoryRequiresExactBytesAndCompletePayloadIdentity",
+    "RemoteDesktopHostTests/AppleFoundationMCPPlannerTests/testOrderedInputDistinguishesReturnKeyFromControlLabelAndRequiresSignedAppScope"
   ],
   "expectedTests": [
+    "RemoteDesktopHostTests/AppleFoundationMCPPlannerTests/testOrderedInputDistinguishesReturnKeyFromControlLabelAndRequiresSignedAppScope",
+    "RemoteDesktopHostTests/AppleFoundationMCPPlannerTests/testOrderedInputResolutionRequiresTheNextTaskClause",
+    "RemoteDesktopHostTests/AppleFoundationMCPPlannerTests/testOrderedTypeHistoryRequiresExactBytesAndCompletePayloadIdentity",
     "RemoteDesktopHostTests/ComputerUseAccessibilityTextTargetTests/testNativePlanningLabelsDoNotReadProtectedOrEditableTitleValues",
     "RemoteDesktopHostTests/ComputerUseAccessibilityTextTargetTests/testNativePlanningUsesTheLabelBoundByItsSnapshot",
     "RemoteDesktopHostTests/ComputerUseAccessibilityTextTargetTests/testNativeReferenceRejectsSemanticOrParentChangesWithIdenticalValues",
@@ -436,7 +442,9 @@
     "RemoteDesktopHostTests/OSAtlasComputerUseExecutorTests/testSemanticDragTreatsPurchaseWordsInSourceCardAsEntityLabel",
     "RemoteDesktopHostTests/OSAtlasComputerUseExecutorTests/testSemanticEffectsRejectNegatedExplanatoryAndUnreviewedRequests",
     "RemoteDesktopHostTests/OSAtlasComputerUseExecutorTests/testSemanticGroundingTaskPreservesNaturalRequestAndAppendsExactRoute",
+    "RemoteDesktopHostTests/OSAtlasComputerUseExecutorTests/testSemanticInputCannotSkipEarlierEffectsOrBorrowAnotherClausePayload",
     "RemoteDesktopHostTests/OSAtlasComputerUseExecutorTests/testSemanticNextWeekNavigationUsesOnlyOneClickCarrier",
+    "RemoteDesktopHostTests/OSAtlasComputerUseExecutorTests/testSemanticOrderedInputUsesRecordedEffectsAndKeepsRepeatSuppression",
     "RemoteDesktopHostTests/OSAtlasComputerUseExecutorTests/testSemanticPointerAttestationPreservesMatchingAndUnlabeledControls",
     "RemoteDesktopHostTests/OSAtlasComputerUseExecutorTests/testSemanticPointerAttestationRejectsContradictoryActionableLabelsBeforeInput",
     "RemoteDesktopHostTests/OSAtlasComputerUseExecutorTests/testSemanticPointerAttestationRejectsContradictoryOCRLabelBeforeInput",

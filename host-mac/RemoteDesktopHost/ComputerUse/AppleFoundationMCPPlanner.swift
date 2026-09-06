@@ -3836,6 +3836,18 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
         case rejected
     }
 
+    enum TaskBoundOrderedInputResolution: Equatable {
+        case notApplicable
+        case bound(clause: String)
+        case rejected
+    }
+
+    private enum TaskBoundOrderedActionResolution {
+        case notApplicable
+        case bound(TaskBoundOrderedAction)
+        case rejected
+    }
+
     private struct TaskBoundCommandSegment {
         let raw: String
         let words: [String]
@@ -3852,17 +3864,20 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
         let pointerClause: TaskBoundOrderedPointerClause?
         let applicationName: String?
         let expectedHistoryEntry: String?
+        let inputClause: String?
 
         init(
             directive: OSAtlasExplicitActionDirective,
             pointerClause: TaskBoundOrderedPointerClause?,
             applicationName: String? = nil,
-            expectedHistoryEntry: String? = nil
+            expectedHistoryEntry: String? = nil,
+            inputClause: String? = nil
         ) {
             self.directive = directive
             self.pointerClause = pointerClause
             self.applicationName = applicationName
             self.expectedHistoryEntry = expectedHistoryEntry
+            self.inputClause = inputClause
         }
     }
 
@@ -4096,15 +4111,32 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
     private static func taskBoundExpectedTypedHistoryEntry(
         in rawSegment: String
     ) -> String? {
-        guard let text = exactDoubleQuotedText(in: rawSegment) else {
+        guard let text = taskBoundQuotedInputPayload(in: rawSegment) else {
             return nil
         }
-        let escaped = text
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\n", with: "\\n")
-        let bounded = escaped.count > 1_000
-            ? String(escaped.prefix(1_000)) : escaped
-        return "TYPE [\(bounded)]"
+        return OSAtlasGUIAction.typeText(text).historyEntry
+    }
+
+    /// Quotation alone does not assign a payload role: in `type query into
+    /// "Search"`, the quote names a target. Only an unambiguous direct text
+    /// object can supply literal completion evidence in this bounded grammar.
+    static func taskBoundQuotedInputPayload(in clause: String) -> String? {
+        guard let literal = exactDoubleQuotedText(in: clause),
+              let opening = clause.firstIndex(where: { $0 == "\"" || $0 == "“" }) else {
+            return nil
+        }
+        let prefix = normalizedWords(String(clause[..<opening]))
+        guard let commandIndex = taskBoundCommandWordIndex(
+            in: prefix, endsAsQuestion: false),
+              ["add", "enter", "input", "insert", "put", "type", "write"]
+                .contains(prefix[commandIndex]) else { return nil }
+        let literalIntroducers: Set<String> = [
+            "exact", "exactly", "following", "literal", "string", "text",
+            "the", "value",
+        ]
+        guard prefix.dropFirst(commandIndex + 1)
+            .allSatisfy(literalIntroducers.contains) else { return nil }
+        return literal
     }
 
     private static func taskBoundHistoryDirective(
@@ -4143,6 +4175,68 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
         frontmostApplication: String? = nil,
         frontmostApplicationIdentityIsAuthoritative: Bool = false
     ) -> TaskBoundOrderedPointerResolution {
+        switch taskBoundOrderedActionResolution(
+            for: task,
+            history: history,
+            historyIsComplete: historyIsComplete,
+            requiresPointerClause: true,
+            frontmostApplication: frontmostApplication,
+            frontmostApplicationIdentityIsAuthoritative:
+                frontmostApplicationIdentityIsAuthoritative) {
+        case .notApplicable:
+            return .notApplicable
+        case .rejected:
+            return .rejected
+        case .bound(let action):
+            guard let next = action.pointerClause,
+                  availableDirectives.contains(next.directive) else {
+                return .rejected
+            }
+            return .bound(.init(
+                directive: next.directive,
+                argument: .targetHint(next.targetHint)))
+        }
+    }
+
+    /// Returns only the next input clause, never all task text. The caller
+    /// still binds the exact payload and focused target before any input.
+    /// This shares the pointer grammar and does not mint step receipts or
+    /// authorize replay of earlier TYPE/ENTER effects.
+    static func taskBoundOrderedInputResolution(
+        for task: String,
+        directive: OSAtlasExplicitActionDirective,
+        history: [String],
+        frontmostApplication: String?,
+        frontmostApplicationIdentityIsAuthoritative: Bool
+    ) -> TaskBoundOrderedInputResolution {
+        guard [.type, .enter].contains(directive) else { return .rejected }
+        switch taskBoundOrderedActionResolution(
+            for: task,
+            history: history,
+            historyIsComplete: true,
+            requiresPointerClause: false,
+            frontmostApplication: frontmostApplication,
+            frontmostApplicationIdentityIsAuthoritative:
+                frontmostApplicationIdentityIsAuthoritative) {
+        case .notApplicable:
+            return .notApplicable
+        case .rejected:
+            return .rejected
+        case .bound(let action):
+            guard action.directive == directive,
+                  let clause = action.inputClause else { return .rejected }
+            return .bound(clause: clause)
+        }
+    }
+
+    private static func taskBoundOrderedActionResolution(
+        for task: String,
+        history: [String],
+        historyIsComplete: Bool,
+        requiresPointerClause: Bool,
+        frontmostApplication: String?,
+        frontmostApplicationIdentityIsAuthoritative: Bool
+    ) -> TaskBoundOrderedActionResolution {
         guard task.utf8.count <= OSAtlasSemanticRoutingRequest.maximumTaskBytes,
               !history.isEmpty || !task.isEmpty else {
             return .rejected
@@ -4225,14 +4319,20 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
                 let hasConcretePointerNoun = !Set(targetWordsAfterVerb)
                     .isDisjoint(with: concreteTargetNouns)
                 if words[verbIndex] == "press",
-                   commandIndex == verbIndex,
-                   !hasConcretePointerNoun {
+                   commandIndex == verbIndex {
+                    let keyObjectSuffix = targetWordsAfterVerb.dropFirst()
+                        .prefix {
+                            !["in", "inside", "on", "to", "once", "now", "please"]
+                                .contains($0)
+                        }
                     if let first = targetWordsAfterVerb.first,
-                       ["enter", "return"].contains(first) {
+                       ["enter", "return"].contains(first),
+                       keyObjectSuffix.allSatisfy({ $0 == "key" }) {
                         actions.append(.init(
                             directive: .enter,
                             pointerClause: nil,
-                            expectedHistoryEntry: "ENTER"))
+                            expectedHistoryEntry: "ENTER",
+                            inputClause: segment.raw))
                         continue
                     }
                     let keyboardWords: Set<String> = [
@@ -4241,13 +4341,14 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
                         "end", "esc", "escape", "home", "left", "option",
                         "right", "shift", "space", "spacebar", "tab", "up",
                     ]
-                    if !Set(targetWordsAfterVerb).isDisjoint(
-                        with: keyboardWords)
+                    let namesKeyboardKey = !Set(targetWordsAfterVerb)
+                        .isDisjoint(with: keyboardWords)
                         || (targetWordsAfterVerb.count == 1
                             && (targetWordsAfterVerb[0].count == 1
                                 || (targetWordsAfterVerb[0].hasPrefix("f")
                                     && Int(targetWordsAfterVerb[0].dropFirst())
-                                        != nil))) {
+                                        != nil)))
+                    if !hasConcretePointerNoun && namesKeyboardKey {
                         if let expected = taskBoundExpectedHotkey(
                             in: words,
                             after: verbIndex) {
@@ -4458,7 +4559,8 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
                 actions.append(.init(
                     directive: .enter,
                     pointerClause: nil,
-                    expectedHistoryEntry: "ENTER"))
+                    expectedHistoryEntry: "ENTER",
+                    inputClause: segment.raw))
             } else if verb == "copy" || verb == "paste" {
                 actions.append(.init(
                     directive: .hotkey,
@@ -4488,7 +4590,8 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
                 actions.append(.init(
                     directive: directive,
                     pointerClause: nil,
-                    expectedHistoryEntry: expectedHistoryEntry))
+                    expectedHistoryEntry: expectedHistoryEntry,
+                    inputClause: directive == .type ? segment.raw : nil))
             } else if unsupportedOrderedEffectVerbs.contains(verb) {
                 // The pointer resolver cannot prove completion of these
                 // higher-level operations from one raw history marker. Keep a
@@ -4508,9 +4611,13 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
             }
         }
 
-        guard sawPointerWords else { return .notApplicable }
-        guard actions.contains(where: { $0.pointerClause != nil }) else {
-            return .rejected
+        if requiresPointerClause {
+            guard sawPointerWords else { return .notApplicable }
+            guard actions.contains(where: { $0.pointerClause != nil }) else {
+                return .rejected
+            }
+        } else if !sawPointerWords, actions.isEmpty {
+            return .notApplicable
         }
         for directive in [
             OSAtlasExplicitActionDirective.drag,
@@ -4551,12 +4658,23 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
             else {
                 return .rejected
             }
+            // A family-only TYPE marker cannot prove which unquoted/generated
+            // payload was applied. Such clauses need a compiled input contract
+            // before a later effect can consume them as completed.
+            if completedAction.directive == .type,
+               actions[actionIndex].expectedHistoryEntry == nil {
+                return .rejected
+            }
             if let expectedHistoryEntry =
                 actions[actionIndex].expectedHistoryEntry,
-               completedAction.entry.caseInsensitiveCompare(
-                    expectedHistoryEntry) != .orderedSame {
+               !(completedAction.directive == .type
+                    ? completedAction.entry.utf8.elementsEqual(
+                        expectedHistoryEntry.utf8)
+                    : completedAction.entry.caseInsensitiveCompare(
+                        expectedHistoryEntry) == .orderedSame) {
                 let uniquelyCompactedTypedPayload =
-                    completedAction.entry == "TYPE"
+                    !historyIsComplete
+                    && completedAction.entry == "TYPE"
                     && expectedHistoryEntry.hasPrefix("TYPE [")
                     && actions.filter({ $0.directive == .type }).count == 1
                 guard uniquelyCompactedTypedPayload else {
@@ -4570,14 +4688,10 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
            currentApplicationSatisfiesNextOpen() {
             actionIndex += 1
         }
-        guard actions.indices.contains(actionIndex),
-              let next = actions[actionIndex].pointerClause,
-              availableDirectives.contains(next.directive) else {
+        guard actions.indices.contains(actionIndex) else {
             return .rejected
         }
-        return .bound(.init(
-            directive: next.directive,
-            argument: .targetHint(next.targetHint)))
+        return .bound(actions[actionIndex])
     }
 
     /// Keeps exact user-authored strings and explicit missing-field labels
