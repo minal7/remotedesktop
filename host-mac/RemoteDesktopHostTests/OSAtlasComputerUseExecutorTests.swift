@@ -51,6 +51,183 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
         await fixture.runtime.shutdown()
     }
 
+    func testSemanticPlanningDeadlineDiscardsLateRouteAndBlocksReplacementBeforeRuntimeActivation() async throws {
+        let fixture = makeCorrectionRuntime(completionResponses: [response("CLICK [[500,500]]")], port: 43_680)
+        let worker = ComputerUsePlanningWorker()
+        let lateRoute = OSAtlasSemanticActionRoute(directive: .click, argument: .targetHint("Continue"))
+        let gate = ComputerUsePlanningTestGate<OSAtlasSemanticActionRoute>(
+            started: expectation(description: "old planner started"),
+            returned: expectation(description: "old planner returned"))
+        defer { gate.finish(lateRoute) }
+        let executor = OSAtlasComputerUseExecutor.makeForTesting(
+            inputs: fixture.inputs, runtime: fixture.runtime,
+            semanticRouter: StubSemanticActionRouter { _ in await gate.wait() },
+            maxSteps: 1, semanticPlanningWorker: worker, semanticPlanningTimeout: 0.1)
+        let replacement = OSAtlasComputerUseExecutor.makeForTesting(
+            inputs: fixture.inputs, runtime: fixture.runtime,
+            semanticRouter: StubSemanticActionRouter { _ in .init(directive: .type, argument: .text("fresh marker")) },
+            maxSteps: 1, semanticPlanningWorker: worker)
+        var actions: [ComputerUsePredictedAction] = []
+        let tools = correctionTestTools(
+            accessibilityContext: "AXTextField • focused • editable=true",
+            actionPerformer: { actions.append($0) })
+        do {
+            do {
+                _ = try await executor.execute(prompt: "Click Continue.", tools: tools, progress: { _ in })
+                XCTFail("A stalled proposal must not complete the task")
+            } catch let error as ComputerUsePlanningWorker.Failure {
+                XCTAssertEqual(error, .timedOut)
+            }
+            await fulfillment(of: [gate.started], timeout: 1)
+            XCTAssertTrue(actions.isEmpty)
+            let beforeReplacement = await fixture.events.values()
+            do {
+                _ = try await replacement.execute(prompt: "Type \"fresh marker\" into the focused field.", tools: tools, progress: { _ in })
+                XCTFail("A new executor must share the outstanding planner's permit")
+            } catch let error as ComputerUsePlanningWorker.Failure {
+                XCTAssertEqual(error, .busy)
+            }
+            let afterReplacement = await fixture.events.values()
+            XCTAssertEqual(afterReplacement, beforeReplacement, "Busy admission must precede runtime activation")
+            gate.finish(lateRoute)
+            await fulfillment(of: [gate.returned], timeout: 1)
+            try await waitForAvailablePlanningWorker(worker)
+            do {
+                _ = try await replacement.execute(prompt: "Type \"fresh marker\" into the focused field.", tools: tools, progress: { _ in })
+                XCTFail("The fresh typed effect should reach the one-step bound")
+            } catch OSAtlasComputerUseExecutor.RuntimeError.stepLimit { }
+            XCTAssertEqual(actions, [.typeText("fresh marker")], "The obsolete click must never be performed")
+            let events = await fixture.events.values()
+            XCTAssertFalse(events.contains("complete"), "The late pointer must not trigger visual grounding")
+        } catch {
+            gate.finish(lateRoute)
+            await fixture.runtime.shutdown()
+            throw error
+        }
+        await fixture.runtime.shutdown()
+    }
+
+    func testCancelledSemanticPlanningCannotCompleteOrReplayBeforeItsLateCallReturns() async throws {
+        let fixture = makeCorrectionRuntime(completionResponses: [], port: 43_681)
+        let worker = ComputerUsePlanningWorker()
+        let gate = ComputerUsePlanningTestGate<OSAtlasSemanticActionRoute>(
+            started: expectation(description: "planner started"),
+            returned: expectation(description: "planner returned"))
+        defer { gate.finish(.init(directive: .complete)) }
+        let requests = SemanticRoutingRequestLog()
+        let executor = OSAtlasComputerUseExecutor.makeForTesting(
+            inputs: fixture.inputs, runtime: fixture.runtime,
+            semanticRouter: StubSemanticActionRouter { request in
+                await requests.record(request)
+                let count = await requests.values().count
+                if count == 1 { return .init(directive: .type, argument: .text("resume marker")) }
+                if count == 2 { return await gate.wait() }
+                return .init(directive: .enter)
+            }, maxSteps: 2, semanticPlanningWorker: worker, semanticPlanningTimeout: 5)
+        let task = "Type \"resume marker\" into the focused field, then press Return."
+        var actions: [ComputerUsePredictedAction] = []
+        let tools = correctionTestTools(
+            accessibilityContext: "AXTextField • focused • editable=true",
+            actionPerformer: { actions.append($0) })
+        let delivered = expectation(description: "cancelled executor returned")
+        let first = Task { () -> Result<ComputerUseExecutionResult, Error> in
+            defer { delivered.fulfill() }
+            do { return .success(try await executor.execute(taskID: "stalled-resume", prompt: task,
+                trustedUserPrompt: task, tools: tools, progress: { _ in })) }
+            catch { return .failure(error) }
+        }
+        do {
+            await fulfillment(of: [gate.started], timeout: 2)
+            first.cancel()
+            await fulfillment(of: [delivered], timeout: 2)
+            XCTAssertEqual(actions, [.typeText("resume marker")])
+            XCTAssertThrowsError(try worker.requireAvailable()) {
+                XCTAssertEqual($0 as? ComputerUsePlanningWorker.Failure, .busy)
+            }
+            do {
+                _ = try await executor.execute(taskID: "not-admitted", prompt: "Type \"different\".",
+                    trustedUserPrompt: "Type \"different\".", tools: tools, progress: { _ in })
+                XCTFail("Busy admission cannot replace the existing task checkpoint")
+            } catch let error as ComputerUsePlanningWorker.Failure {
+                XCTAssertEqual(error, .busy)
+            }
+            gate.finish(.init(directive: .complete))
+            switch await first.value {
+            case .failure(let error): XCTAssertTrue(error is CancellationError)
+            case .success: XCTFail("Cancellation cannot return a late completion")
+            }
+            await fulfillment(of: [gate.returned], timeout: 1)
+            try await waitForAvailablePlanningWorker(worker)
+            do {
+                _ = try await executor.execute(taskID: "stalled-resume", prompt: task,
+                    trustedUserPrompt: task, tools: tools, progress: { _ in })
+                XCTFail("The resumed task must actually perform its pending step")
+            } catch OSAtlasComputerUseExecutor.RuntimeError.stepLimit { }
+            XCTAssertEqual(actions, [.typeText("resume marker"), .key(usage: 0x28, modifiers: 0)])
+            let recorded = await requests.values()
+            XCTAssertEqual(recorded.count, 3)
+            XCTAssertTrue(recorded.last?.history.contains("TYPE") == true,
+                "Rejected replacement and a late completion cannot erase the performed input")
+        } catch {
+            first.cancel()
+            gate.finish(.init(directive: .complete))
+            _ = await first.value
+            await fixture.runtime.shutdown()
+            throw error
+        }
+        await fixture.runtime.shutdown()
+    }
+
+    func testAuthenticationEscapePlanningDeadlineCannotOpenALateApplication() async throws {
+        let fixture = makeCorrectionRuntime(completionResponses: [], port: 43_682)
+        let worker = ComputerUsePlanningWorker()
+        let lateRoute = OSAtlasSemanticActionRoute(directive: .openApplication, argument: .applicationName("Mail"))
+        let gate = ComputerUsePlanningTestGate<OSAtlasSemanticActionRoute>(
+            started: expectation(description: "escape planner started"),
+            returned: expectation(description: "escape planner returned"))
+        defer { gate.finish(lateRoute) }
+        let executor = OSAtlasComputerUseExecutor.makeForTesting(
+            inputs: fixture.inputs, runtime: fixture.runtime,
+            semanticRouter: StubSemanticActionRouter { request in
+                XCTAssertEqual(request.availableDirectives, [.openApplication])
+                XCTAssertEqual(request.visibleText, "")
+                return await gate.wait()
+            }, maxSteps: 1, semanticPlanningWorker: worker, semanticPlanningTimeout: 0.1)
+        let observation = ComputerUseScreenObservation(
+            image: CIImage(color: .white).cropped(to: CGRect(x: 0, y: 0, width: 448, height: 320)),
+            displayBounds: OSAtlasAcceptanceFixtureRenderer.hiddenDisplayBounds)
+        let tools = ComputerUseHostTools(
+            injector: InputInjector(eventPoster: { _ in XCTFail("No native input") }), mayAct: { true },
+            applicationOpener: { _ in XCTFail("A late escape proposal cannot open an app") },
+            actionPerformer: { _ in XCTFail("A timed-out escape cannot post input") },
+            screenProvider: { observation },
+            authenticationContextProvider: { .init(
+                focusedElement: "AXTextField • AXSecureTextField • Password",
+                boundedWindowContext: "AXHeading • Sign In") },
+            frontmostApplicationProvider: { "Passwords" })
+        do {
+            do {
+                _ = try await executor.execute(
+                    prompt: "Read my email inbox and report the dentist appointment details from the school message.",
+                    tools: tools, progress: { _ in })
+                XCTFail("The escape planner must have a bounded wait")
+            } catch let error as ComputerUsePlanningWorker.Failure {
+                XCTAssertEqual(error, .timedOut)
+            }
+            await fulfillment(of: [gate.started], timeout: 1)
+            gate.finish(lateRoute)
+            await fulfillment(of: [gate.returned], timeout: 1)
+            try await waitForAvailablePlanningWorker(worker)
+            let events = await fixture.events.values()
+            XCTAssertFalse(events.contains("complete"))
+        } catch {
+            gate.finish(lateRoute)
+            await fixture.runtime.shutdown()
+            throw error
+        }
+        await fixture.runtime.shutdown()
+    }
+
     func testVisualTaskCannotReplaceExactRequestBytesUnderTheSameIdentity() async throws {
         let fixture = makeCorrectionRuntime(completionResponses: [], port: 43_391)
         let executor = OSAtlasComputerUseExecutor.makeForTesting(inputs: fixture.inputs, runtime: fixture.runtime, maxSteps: 0)

@@ -923,6 +923,8 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
     private let maxSteps: Int
     private let actionDelay: Duration
     private let waitDelay: Duration
+    private let semanticPlanningWorker: ComputerUsePlanningWorker
+    private let semanticPlanningTimeout: TimeInterval
     private let parsedActionObserver: ((OSAtlasGUIAction) -> Void)?
     private let rawVisualGroundingPointObserver: ((Int, Int) -> Void)?
     private let actionTokenObserver: ((String) -> Void)?
@@ -1067,6 +1069,8 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
         maxSteps: Int,
         actionDelay: Duration,
         waitDelay: Duration,
+        semanticPlanningWorker: ComputerUsePlanningWorker = .shared,
+        semanticPlanningTimeout: TimeInterval = ComputerUsePlanningWorker.maximumWait,
         parsedActionObserver: ((OSAtlasGUIAction) -> Void)? = nil,
         rawVisualGroundingPointObserver: ((Int, Int) -> Void)? = nil,
         actionTokenObserver: ((String) -> Void)? = nil,
@@ -1090,6 +1094,8 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
         self.maxSteps = maxSteps
         self.actionDelay = actionDelay
         self.waitDelay = waitDelay
+        self.semanticPlanningWorker = semanticPlanningWorker
+        self.semanticPlanningTimeout = semanticPlanningTimeout
         self.parsedActionObserver = parsedActionObserver
         self.rawVisualGroundingPointObserver =
             rawVisualGroundingPointObserver
@@ -1200,6 +1206,8 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
         maxSteps: Int = maximumSteps,
         actionDelay: Duration = .zero,
         waitDelay: Duration = .zero,
+        semanticPlanningWorker: ComputerUsePlanningWorker = ComputerUsePlanningWorker(),
+        semanticPlanningTimeout: TimeInterval = ComputerUsePlanningWorker.maximumWait,
         parsedActionObserver: ((OSAtlasGUIAction) -> Void)? = nil,
         rawVisualGroundingPointObserver: ((Int, Int) -> Void)? = nil,
         actionTokenObserver: ((String) -> Void)? = nil,
@@ -1220,6 +1228,8 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
             maxSteps: maxSteps,
             actionDelay: actionDelay,
             waitDelay: waitDelay,
+            semanticPlanningWorker: semanticPlanningWorker,
+            semanticPlanningTimeout: semanticPlanningTimeout,
             parsedActionObserver: parsedActionObserver,
             rawVisualGroundingPointObserver:
                 rawVisualGroundingPointObserver,
@@ -1507,6 +1517,10 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
                     continuation: pending.continuation)
             }
         }
+        // Do not replace retained progress or activate another endpoint while
+        // an expired proposal call is still unwinding. Terminal replay above
+        // remains available because it requires no planner or effects.
+        try semanticPlanningWorker.requireAvailable()
         if let cancellationBarrier = endpointCancellationBarrier {
             await cancellationBarrier.start().value
             if endpointCancellationBarrier === cancellationBarrier {
@@ -2002,7 +2016,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
                    let semanticRouter {
                     didAttemptAuthenticationEscape = true
                     do {
-                        let escapeRoute = try await Self.semanticActionRoute(
+                        let escapeRoute = try await boundedSemanticActionRoute(
                             using: semanticRouter,
                             request: OSAtlasSemanticRoutingRequest(
                                 task: trustedUserPrompt,
@@ -2084,6 +2098,8 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
                         }
                     } catch is CancellationError {
                         throw CancellationError()
+                    } catch let error as ComputerUsePlanningWorker.Failure {
+                        throw error
                     } catch let error as AppleFoundationVisualActionRouterError {
                         if error == .cancelled {
                             throw CancellationError()
@@ -2141,7 +2157,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
                         openedApplications: openedApplications.sorted(),
                         openedApplicationIdentities:
                             sortedOpenedApplicationIdentities())
-                    let rawSelectedRoute = try await Self.semanticActionRoute(
+                    let rawSelectedRoute = try await boundedSemanticActionRoute(
                         using: semanticRouter,
                         request: routingRequest,
                         rawHistory: history)
@@ -7047,6 +7063,17 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
                 semanticRoutingHistory(rawHistory)),
             selectorRequest: request.replacingHistory(
                 semanticRoutingHistoryV5(rawHistory)))
+    }
+
+    private func boundedSemanticActionRoute(
+        using router: any OSAtlasSemanticActionRouting,
+        request: OSAtlasSemanticRoutingRequest,
+        rawHistory: [String]
+    ) async throws -> OSAtlasSemanticActionRoute {
+        try await semanticPlanningWorker.perform(timeout: semanticPlanningTimeout) {
+            try await Self.semanticActionRoute(
+                using: router, request: request, rawHistory: rawHistory)
+        }
     }
 
     /// The executor is the sole owner of the raw action ledger, so it is also
