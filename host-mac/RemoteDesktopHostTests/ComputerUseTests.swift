@@ -1992,6 +1992,175 @@ final class ComputerUseTests: XCTestCase {
         XCTAssertEqual(executor.callCount, 0, "ledger replay must not turn a question into an action")
     }
 
+    func test_managerContinuesExactReferencedGoalThroughTwoQuestionsAndDurableReplays() async throws {
+        let executor = ScopedClarificationTestExecutor(), channel = FakeHostComputerUseChannel()
+        let ledgerURL = temporaryLedgerURL()
+        defer { try? FileManager.default.removeItem(at: ledgerURL.deletingLastPathComponent()) }
+        let manager = HostComputerUseManager(injector: InputInjector(), executor: executor,
+            taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL), allowsExternalServices: false, channelFactory: { _ in channel })
+        defer { manager.stop() }
+        let original = "Put \"  e\u{301} 😀\n" + String(repeating: "x", count: 5_000) + "  \" in a field."
+        let prompt = makeEnvelope(id: "q1", kind: .prompt, body: try ComputerUsePromptRequest(prompt: original).encodedBody())
+        manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(manager.handle(prompt, channel: channel))
+        let first = try await clarificationUpdate(taskID: "q1", channel: channel)
+        XCTAssertTrue(manager.handle(prompt, channel: channel))
+        await waitUntil { await channel.sentMessages().filter { $0.kind == .assistant }.count == 2 }
+        let replays = await channel.sentMessages().filter { $0.kind == .assistant }
+        XCTAssertEqual(try ComputerUseTaskUpdate.decodeBody(replays[1].body).clarification, first.clarification)
+        let answer = makeEnvelope(id: "a1", kind: .prompt,
+            body: try ComputerUsePromptRequest.answering(XCTUnwrap(first.clarification), text: "  Destination  ").encodedBody())
+        XCTAssertTrue(manager.handle(answer, channel: channel))
+        let second = try await clarificationUpdate(taskID: "a1", channel: channel)
+        let final = makeEnvelope(id: "a2", kind: .prompt,
+            body: try ComputerUsePromptRequest.answering(XCTUnwrap(second.clarification), text: "International").encodedBody())
+        XCTAssertTrue(manager.handle(final, channel: channel))
+        let completed = try await clarificationUpdate(taskID: "a2", channel: channel)
+        XCTAssertEqual(completed.outcome, .taskCompleted); XCTAssertNil(completed.clarification)
+        XCTAssertTrue(manager.handle(final, channel: channel))
+        await waitUntil { await channel.sentMessages().filter { $0.kind == .assistant }.count == 5 }
+        XCTAssertEqual(executor.normalPrompts, [original]); XCTAssertEqual(executor.answers.count, 2)
+        XCTAssertEqual(executor.answers.map(\.origin), ["q1", "a1"])
+        XCTAssertEqual(executor.answers.last?.goal.userTurns, [original, "  Destination  ", "International"])
+        XCTAssertEqual(executor.effects, 1)
+    }
+
+    func test_managerRejectsMalformedForgedSessionMismatchedAndCancelledAnswersWithoutFallback() async throws {
+        let executor = ScopedClarificationTestExecutor(), channel = FakeHostComputerUseChannel()
+        let ledgerURL = temporaryLedgerURL()
+        defer { try? FileManager.default.removeItem(at: ledgerURL.deletingLastPathComponent()) }
+        let manager = HostComputerUseManager(injector: InputInjector(), executor: executor,
+            taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL), allowsExternalServices: false, channelFactory: { _ in channel })
+        defer { manager.stop() }
+        let prompt = makeEnvelope(id: "q", kind: .prompt, body: "Put blue in a field.")
+        manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(manager.handle(prompt, channel: channel))
+        let first = try await clarificationUpdate(taskID: "q", channel: channel), reference = try XCTUnwrap(first.clarification)
+        let forged = try ComputerUseClarificationReference(taskID: "q", expiresAt: reference.expiresAt)
+        for (index, body) in ["{malformed", #"{"version":2,"prompt":"Open Calculator"}"#,
+            try ComputerUsePromptRequest.answering(forged, text: "Destination").encodedBody()].enumerated() {
+            let invalid = makeEnvelope(id: "invalid-\(index)", kind: .prompt, body: body)
+            XCTAssertTrue(manager.handle(invalid, channel: channel))
+            let update = try await clarificationUpdate(taskID: invalid.id, channel: channel)
+            XCTAssertEqual(update.outcome, .unableToComplete); XCTAssertNil(update.clarification)
+        }
+        let wrongSession = ComputerUseEnvelope(id: "session-mismatch", senderID: prompt.senderID, targetID: prompt.targetID,
+            pairingCode: prompt.pairingCode, sessionID: "other", kind: .prompt,
+            body: try ComputerUsePromptRequest.answering(reference, text: "Destination").encodedBody())
+        XCTAssertTrue(manager.handle(wrongSession, channel: channel))
+        let wrongSessionResult = try await clarificationUpdate(taskID: wrongSession.id, channel: channel)
+        XCTAssertEqual(wrongSessionResult.outcome, .unableToComplete)
+        XCTAssertNotNil(try executor.clarification(taskID: "q"), "Forged answers must not erase the valid owner's question")
+        XCTAssertTrue(manager.handle(try makeControlEnvelope(kind: .cancel, taskID: "q", revision: 1), channel: channel))
+        let late = makeEnvelope(id: "late", kind: .prompt, body: try ComputerUsePromptRequest.answering(reference, text: "Destination").encodedBody())
+        XCTAssertTrue(manager.handle(late, channel: channel))
+        let lateResult = try await clarificationUpdate(taskID: late.id, channel: channel)
+        XCTAssertEqual(lateResult.outcome, .unableToComplete)
+        XCTAssertEqual(executor.normalPrompts.count, 1); XCTAssertTrue(executor.answers.isEmpty); XCTAssertEqual(executor.effects, 0)
+    }
+
+    func test_managerResumesClaimedAnswerWithTypedGoalAndRejectsRestartedReference() async throws {
+        let executor = ScopedClarificationTestExecutor(), channel = FakeHostComputerUseChannel()
+        executor.pauseFirstAnswer = true
+        let ledgerURL = temporaryLedgerURL()
+        defer { try? FileManager.default.removeItem(at: ledgerURL.deletingLastPathComponent()) }
+        let manager = HostComputerUseManager(injector: InputInjector(), executor: executor,
+            taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL), allowsExternalServices: false, channelFactory: { _ in channel })
+        defer { manager.stop() }
+        let prompt = makeEnvelope(id: "q", kind: .prompt, body: "Put blue in a field.")
+        manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(manager.handle(prompt, channel: channel))
+        let first = try await clarificationUpdate(taskID: "q", channel: channel)
+        let answer = makeEnvelope(id: "a", kind: .prompt,
+            body: try ComputerUsePromptRequest.answering(XCTUnwrap(first.clarification), text: "Destination").encodedBody())
+        XCTAssertTrue(manager.handle(try makeControlEnvelope(kind: .pause, taskID: "a", revision: 1), channel: channel))
+        XCTAssertTrue(manager.handle(answer, channel: channel)); XCTAssertEqual(manager.activity, .paused)
+        XCTAssertTrue(executor.answers.isEmpty)
+        XCTAssertTrue(manager.handle(try makeControlEnvelope(kind: .resume, taskID: "a", revision: 2), channel: channel))
+        await waitUntil { manager.activity == .paused && executor.answers.count == 1 }
+        XCTAssertTrue(manager.handle(try makeControlEnvelope(kind: .resume, taskID: "a", revision: 3), channel: channel))
+        let next = try await clarificationUpdate(taskID: "a", channel: channel)
+        XCTAssertEqual(executor.answers.count, 2); XCTAssertEqual(executor.answers.first?.goal, executor.answers.last?.goal)
+        XCTAssertEqual(executor.answers.last?.goal.userTurns, [prompt.body, "Destination"])
+        XCTAssertEqual(executor.normalPrompts, [prompt.body]); XCTAssertEqual(executor.effects, 0)
+        let restartedExecutor = ScopedClarificationTestExecutor()
+        let restarted = HostComputerUseManager(injector: InputInjector(), executor: restartedExecutor,
+            taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL), allowsExternalServices: false, channelFactory: { _ in channel })
+        defer { restarted.stop() }
+        restarted.authorizePeer(senderID: prompt.senderID)
+        let afterRestart = makeEnvelope(id: "after-restart", kind: .prompt,
+            body: try ComputerUsePromptRequest.answering(XCTUnwrap(next.clarification), text: "International").encodedBody())
+        XCTAssertTrue(restarted.handle(afterRestart, channel: channel))
+        let restartResult = try await clarificationUpdate(taskID: afterRestart.id, channel: channel)
+        XCTAssertEqual(restartResult.outcome, .unableToComplete)
+        XCTAssertTrue(restartedExecutor.normalPrompts.isEmpty); XCTAssertTrue(restartedExecutor.answers.isEmpty)
+    }
+
+    func test_managerRetiresReferencesOnExpiryNewRequestRevocationAndTransportStop() async throws {
+        for reason in ["expiry", "new-request", "new-request-unready", "revocation", "transport-stop"] {
+            let executor = ScopedClarificationTestExecutor(), channel = FakeHostComputerUseChannel()
+            var now = Date()
+            let ledgerURL = temporaryLedgerURL()
+            defer { try? FileManager.default.removeItem(at: ledgerURL.deletingLastPathComponent()) }
+            let manager = HostComputerUseManager(injector: InputInjector(), executor: executor,
+                taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL), textClarifications: ComputerUseTextClarificationStore(now: { now }),
+                allowsExternalServices: false, channelFactory: { _ in channel })
+            defer { manager.stop() }
+            let prompt = makeEnvelope(id: "q", kind: .prompt, body: "Put blue in a field.")
+            manager.authorizePeer(senderID: prompt.senderID)
+            XCTAssertTrue(manager.handle(prompt, channel: channel))
+            let first = try await clarificationUpdate(taskID: "q", channel: channel), reference = try XCTUnwrap(first.clarification)
+            switch reason {
+            case "expiry": now = reference.expiresAt
+            case "new-request", "new-request-unready":
+                if reason == "new-request-unready" { executor.isReady = false }
+                XCTAssertTrue(manager.handle(makeEnvelope(id: "new", kind: .prompt, body: "Put red in a field."), channel: channel))
+                _ = try await clarificationUpdate(taskID: "new", channel: channel)
+                executor.isReady = true
+            case "revocation": manager.revokePeerAuthorization(); manager.authorizePeer(senderID: prompt.senderID)
+            default: manager.stop(); manager.authorizePeer(senderID: prompt.senderID)
+            }
+            let late = makeEnvelope(id: "late", kind: .prompt, body: try ComputerUsePromptRequest.answering(reference, text: "Destination").encodedBody())
+            XCTAssertTrue(manager.handle(late, channel: channel))
+            let update = try await clarificationUpdate(taskID: "late", channel: channel)
+            XCTAssertEqual(update.outcome, .unableToComplete, reason); XCTAssertNil(update.clarification)
+            XCTAssertTrue(executor.answers.isEmpty); XCTAssertEqual(executor.effects, 0)
+            XCTAssertEqual(executor.normalPrompts.count, reason == "new-request" ? 2 : 1)
+        }
+    }
+
+    func test_managerDoesNotExposeOrRetainAClarificationWhoseTerminalWriteFailed() async throws {
+        let executor = ScopedClarificationTestExecutor(), channel = FakeHostComputerUseChannel()
+        let ledgerURL = temporaryLedgerURL(), directory = ledgerURL.deletingLastPathComponent()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let manager = HostComputerUseManager(injector: InputInjector(), executor: executor,
+            taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL), allowsExternalServices: false, channelFactory: { _ in channel })
+        defer { manager.stop() }
+        executor.beforeQuestion = {
+            try FileManager.default.removeItem(at: directory)
+            try Data("not a directory".utf8).write(to: directory)
+        }
+        let prompt = makeEnvelope(id: "q", kind: .prompt, body: "Put blue in a field.")
+        manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(manager.handle(prompt, channel: channel))
+        let update = try await clarificationUpdate(taskID: "q", channel: channel)
+        XCTAssertEqual(update.outcome, .unableToComplete); XCTAssertNil(update.clarification)
+        XCTAssertEqual(update.text, HostComputerUseManager.terminalPersistenceFailureResponse)
+        XCTAssertNil(try executor.clarification(taskID: "q")); XCTAssertEqual(executor.effects, 0)
+        XCTAssertTrue(manager.handle(prompt, channel: channel))
+        await waitUntil { await channel.sentMessages().filter { $0.kind == .assistant }.count == 2 }
+        XCTAssertEqual(executor.normalPrompts.count, 1)
+    }
+
+    private func clarificationUpdate(taskID: String, channel: FakeHostComputerUseChannel) async throws -> ComputerUseTaskUpdate {
+        await waitUntil { await channel.sentMessages().contains {
+            $0.kind == .assistant && (try? ComputerUseTaskUpdate.decodeBody($0.body).taskID) == taskID
+        } }
+        let messages = await channel.sentMessages()
+        return try XCTUnwrap(messages.filter { $0.kind == .assistant }.compactMap { try? ComputerUseTaskUpdate.decodeBody($0.body) }
+            .first { $0.taskID == taskID })
+    }
+
     func test_managerUsesClarificationConversationWhenAnswerIsComplete() async throws {
         let executor = ImmediateComputerUseExecutor(results: [.completed("Ready for approval")])
         let channel = FakeHostComputerUseChannel()
@@ -6586,6 +6755,47 @@ private final class HandoffSuspendingVisualApprovalExecutor:
     func releaseContinuation() {
         release?.resume()
         release = nil
+    }
+}
+
+@MainActor
+private final class ScopedClarificationTestExecutor: ComputerUseExecuting, ComputerUseTextClarificationContinuing {
+    var isReady = true
+    let runtimeName = "Scoped clarification fixture"
+    var pending: ComputerUseNativeTextExecutor.Clarification?
+    var normalPrompts: [String] = []
+    var answers: [(taskID: String, origin: String, goal: ComputerUseUnresolvedTextGoal)] = []
+    var effects = 0
+    var pauseFirstAnswer = false
+    var beforeQuestion: (() throws -> Void)?
+    func execute(prompt: String, tools: ComputerUseHostTools, progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
+        XCTFail("The manager must preserve task identity")
+        return .unableToComplete("Missing task")
+    }
+    func execute(taskID: String, prompt: String, trustedUserPrompt: String, tools: ComputerUseHostTools,
+                 progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
+        normalPrompts.append(trustedUserPrompt)
+        try beforeQuestion?()
+        return try question(taskID: taskID, goal: ComputerUseUnresolvedTextGoal(userRequest: trustedUserPrompt))
+    }
+    func clarification(taskID: String) throws -> ComputerUseNativeTextExecutor.Clarification? {
+        pending?.taskID == taskID ? pending : nil
+    }
+    func invalidateClarification(taskID: String?) {
+        if taskID == nil || pending?.taskID == taskID { pending = nil }
+    }
+    func continueClarification(taskID: String, originatingTaskID: String, goal: ComputerUseUnresolvedTextGoal,
+                               progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
+        answers.append((taskID, originatingTaskID, goal))
+        if pauseFirstAnswer { pauseFirstAnswer = false; return .userInterventionRequired("Please check the form and resume.") }
+        if goal.userTurns.count == 2 { return question(taskID: taskID, goal: goal) }
+        pending = nil; effects += 1
+        return .completed("Verified")
+    }
+    private func question(taskID: String, goal: ComputerUseUnresolvedTextGoal) -> ComputerUseExecutionResult {
+        pending = .init(taskID: taskID, goal: goal, question: "Which field?", scope: String(repeating: "a", count: 64),
+                        expiresAt: Date().addingTimeInterval(300))
+        return .clarificationRequired("Which field?")
     }
 }
 

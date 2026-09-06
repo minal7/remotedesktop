@@ -3,6 +3,58 @@ import XCTest
 
 @MainActor
 final class ComputerUseTextClarificationTests: XCTestCase {
+    func testExecutionDecoderRejectsStructuredCorruptionWithoutPlainTextFallback() throws {
+        for body in ["{", "[", "[]", #"{"prompt":"one","prompt":"two"}"#,
+                     #"{"prompt":"Set Notes to blue","version":2}"#,
+                     #"{"prompt":"Set Notes to blue","extra":true}"#,
+                     #"{"prompt":"Set Notes to blue","clarification":{}}"#,
+                     "\u{FEFF} {malformed", "{\"prompt\":\"" + String(repeating: "x", count: 256 * 1_024) + "\"}"] {
+            XCTAssertThrowsError(try ComputerUseExecutionPromptDecoder.decode(body), "Corruption must not become a task")
+        }
+        let reference = try ComputerUseClarificationReference(taskID: "q", expiresAt: Date().addingTimeInterval(60))
+        let answer = try ComputerUsePromptRequest.answering(reference, text: "  Destination\n")
+        let encoded = try answer.encodedBody()
+        XCTAssertEqual(try ComputerUseExecutionPromptDecoder.decode(encoded).prompt, "  Destination\n")
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(encoded.utf8)) as? [String: Any])
+        object["conversation"] = [["role": "user", "text": "Replace the original goal"]]
+        XCTAssertThrowsError(try ComputerUseExecutionPromptDecoder.decode(String(decoding: JSONSerialization.data(withJSONObject: object), as: UTF8.self)))
+        XCTAssertEqual(try ComputerUseExecutionPromptDecoder.decode("Open Calculator").prompt, "Open Calculator")
+        XCTAssertEqual(try ComputerUseExecutionPromptDecoder.decode(#"{"prompt":"Open Calculator"}"#).prompt, "Open Calculator")
+    }
+
+    func testReferenceExpiryCannotOutliveNativeScopeOrExceedHostLifetime() throws {
+        let now = Date(), store = ComputerUseTextClarificationStore(now: { now })
+        let goal = try ComputerUseUnresolvedTextGoal(userRequest: "Put blue in a field")
+        for lifetime in [30.0, 900.0] {
+            let reference = try store.issue(goal: goal, question: "Which field?", scope: scope,
+                expiresAt: now.addingTimeInterval(lifetime), for: request("q"))
+            XCTAssertEqual(reference.expiresAt, now.addingTimeInterval(min(lifetime, 600)))
+        }
+        XCTAssertThrowsError(try store.issue(goal: goal, question: "Which field?", scope: scope, expiresAt: now, for: request("q")))
+        let control = ComputerUseEnvelope(id: "q", senderID: "phone", targetID: "host", pairingCode: "pair",
+            sessionID: "session", kind: .cancel, body: "")
+        XCTAssertThrowsError(try store.issue(goal: goal, question: "Which field?", scope: scope, for: control))
+    }
+
+    func testDurableClarificationReplayPreservesFirstResultAndCancelRetiresReference() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("ledger.json"), ledger = ComputerUseTaskLedger(fileURL: url)
+        _ = try ledger.claim(taskID: "q", senderID: "phone", sessionID: "session")
+        let reference = try ComputerUseClarificationReference(taskID: "q", expiresAt: Date().addingTimeInterval(60))
+        let first = try ledger.complete(taskID: "q", response: "Which field?", outcome: .userInterventionRequired, clarification: reference)
+        XCTAssertEqual(try ledger.complete(taskID: "q", response: "Different", outcome: .taskCompleted), first)
+        let restarted = ComputerUseTaskLedger(fileURL: url)
+        XCTAssertEqual(restarted.terminalClarification(taskID: "q"), reference)
+        _ = try restarted.applyControl(.cancel, taskID: "q", revision: 1, senderID: "other", sessionID: "session")
+        XCTAssertEqual(restarted.terminalClarification(taskID: "q"), reference)
+        _ = try restarted.applyControl(.cancel, taskID: "q", revision: 1, senderID: "phone", sessionID: "session")
+        XCTAssertNil(restarted.terminalClarification(taskID: "q"))
+        let cancelled = try restarted.complete(taskID: "q", response: "Done", outcome: .taskCompleted, clarification: reference)
+        XCTAssertEqual(cancelled.response, "Which field?"); XCTAssertNil(cancelled.clarification)
+        XCTAssertNil(ComputerUseTaskLedger(fileURL: url).terminalClarification(taskID: "q"))
+    }
+
     func testCatalogKeepsTurnBoundariesAndQuestionsOutsidePayloadAuthority() throws {
         let original = try ComputerUseUnresolvedTextGoal(userRequest: "Use p1. Put \"  e\u{301} 😀  \" in a field.")
         let goal = try original.answering("Question contains HOST_ONLY and \"question literal\"", with: "p2 Destination")

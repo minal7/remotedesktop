@@ -3,6 +3,92 @@ import XCTest
 
 @MainActor
 final class ComputerUseBrowserDOMTests: XCTestCase {
+    func testClaimedClarificationResumesSameFormAfterObservationOrPlanningCancellation() async throws {
+        for stage in ["observation", "planning"] {
+            var answerTask: Task<ComputerUseExecutionResult, Error>?
+            var shouldCancelObservation = stage == "observation"
+            let fixture = try await DOMFixture(body: """
+                <label>Origin<input value="old"></label><label>Destination<textarea>keep</textarea></label>
+                <script>document.querySelector('textarea').addEventListener('input', e => fetch('/edited?value=' + encodeURIComponent(e.target.value)));</script>
+                """, domScriptDidDispatch: { command in
+                    if command == .reobserve && shouldCancelObservation { shouldCancelObservation = false; answerTask?.cancel() }
+                })
+            defer { fixture.close() }
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let planner = DOMClarificationFixturePlanner()
+            let native = clarificationExecutor(fixture: fixture, planner: planner, directory: directory)
+            var desktopCalls = 0
+            let executor = ComputerUseCapabilityExecutor(native: native, desktopFactory: { _ in
+                desktopCalls += 1
+                throw ComputerUseNativeTextExecutor.Failure.invalidClarification
+            })
+            let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true })
+            _ = try await executor.execute(taskID: "q", prompt: "Put \"  blue\n\" in a field.", trustedUserPrompt: "Put \"  blue\n\" in a field.", tools: tools, progress: { _ in })
+            let pending = try XCTUnwrap(executor.clarification(taskID: "q"))
+            let goal = try pending.goal.answering(pending.question, with: "Destination")
+            if stage == "planning" { planner.beforeAnswer = { try await Task.sleep(for: .seconds(30)) } }
+            answerTask = Task { try await executor.continueClarification(taskID: "a", originatingTaskID: "q", goal: goal, progress: { _ in }) }
+            if stage == "planning" { try await fixture.wait { planner.goals.count == 2 }; answerTask?.cancel() }
+            do { _ = try await answerTask?.value; XCTFail("The answer must pause before input") }
+            catch { XCTAssertTrue(error is CancellationError, "Unexpected cancellation result: \(error)") }
+            planner.beforeAnswer = nil
+            XCTAssertTrue(fixture.editedValues.isEmpty)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+            do {
+                _ = try await executor.execute(taskID: "a", prompt: goal.taskIdentityText,
+                    trustedUserPrompt: goal.taskIdentityText, tools: tools, progress: { _ in })
+                XCTFail("A raw prompt cannot replace a claimed answer before its edit contract exists")
+            } catch { XCTAssertEqual(error as? ComputerUseTextTaskError, .journalMismatch) }
+            let result: ComputerUseExecutionResult
+            do { result = try await executor.continueClarification(taskID: "a", originatingTaskID: "q", goal: goal, progress: { _ in }) }
+            catch { return XCTFail("Resume after \(stage) cancellation failed: \(error)") }
+            guard case .completed = result else { return XCTFail("The same answer must resume") }
+            _ = try await executor.continueClarification(taskID: "a", originatingTaskID: "q", goal: goal, progress: { _ in })
+            try await fixture.wait { fixture.editedValues == ["  blue\n"] }
+            XCTAssertEqual(fixture.editedValues.count, 1); XCTAssertEqual(desktopCalls, 0)
+            XCTAssertEqual(planner.goals.last, goal)
+        }
+    }
+
+    func testPreparedClarificationCannotResumeAfterCancellationExpiryOrFormReplacement() async throws {
+        for reason in ["cancel", "expiry", "replacement"] {
+            let fixture = try await DOMFixture(body: """
+                <label>Origin<input value="old"></label><label>Destination<textarea>keep</textarea></label>
+                <script>document.querySelector('textarea').addEventListener('input', () => fetch('/input-event'));
+                fetch('/signal').then(() => { const e = document.querySelector('textarea'); e.replaceWith(e.cloneNode(true)); fetch('/changed'); });</script>
+                """, heldSignal: true)
+            defer { fixture.close() }
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let planner = DOMClarificationFixturePlanner()
+            var now = Date()
+            let executor = clarificationExecutor(fixture: fixture, planner: planner, directory: directory, now: { now })
+            _ = try await executor.execute(taskID: "q", prompt: "Put \"blue\" in a field.", progress: { _ in })
+            let pending = try XCTUnwrap(executor.clarification(taskID: "q"))
+            let goal = try pending.goal.answering(pending.question, with: "Destination")
+            planner.beforeAnswer = { try await Task.sleep(for: .seconds(30)) }
+            let task = Task { try await executor.continueClarification(taskID: "a", originatingTaskID: "q", goal: goal, progress: { _ in }) }
+            try await fixture.wait { planner.goals.count == 2 }; task.cancel()
+            do { _ = try await task.value; XCTFail("Planning should be cancelled") } catch { XCTAssertTrue(error is CancellationError) }
+            planner.beforeAnswer = nil
+            switch reason {
+            case "cancel": executor.invalidateClarification(taskID: "a")
+            case "expiry": now = pending.expiresAt
+            default:
+                try await fixture.wait { fixture.server.count("/signal") == 1 }
+                fixture.server.releaseHeldResponses()
+                try await fixture.wait { fixture.server.count("/changed") == 1 }
+            }
+            for _ in 0..<2 {
+                do { _ = try await executor.continueClarification(taskID: "a", originatingTaskID: "q", goal: goal, progress: { _ in }); XCTFail("Invalidated prepared state must not run: \(reason)") }
+                catch { XCTAssertTrue(error as? ComputerUseNativeTextExecutor.Failure == .invalidClarification || error as? ComputerUseBrowserError == .pageChanged) }
+            }
+            XCTAssertEqual(planner.goals.count, 2); XCTAssertEqual(fixture.server.count("/input-event"), 0)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+        }
+    }
+
     func testNativeClarificationExpiryRejectsAnswersAndReleasesTheRetainedTargetWithoutAnotherRequest() async throws {
         let fixture = try await DOMFixture(body: "<label>Origin<input value='old'></label><label>Destination<input value='keep'></label>")
         defer { fixture.close() }
@@ -761,6 +847,7 @@ private final class DOMClarificationFixturePlanner: ComputerUseTextGoalPlanning 
     let declinesAnswer: Bool
     var goals: [ComputerUseUnresolvedTextGoal] = []
     var fieldValues: [[String]] = []
+    var beforeAnswer: (() async throws -> Void)?
     init(answersNeeded: Int = 1, declinesAnswer: Bool = false) { self.answersNeeded = answersNeeded; self.declinesAnswer = declinesAnswer }
     func propose(prompt: String, fields: [ComputerUseTextField]) async throws -> ComputerUseTextGoalProposal {
         try await propose(goal: ComputerUseUnresolvedTextGoal(userRequest: prompt), fields: fields)
@@ -768,6 +855,7 @@ private final class DOMClarificationFixturePlanner: ComputerUseTextGoalPlanning 
     func propose(goal: ComputerUseUnresolvedTextGoal, fields: [ComputerUseTextField]) async throws -> ComputerUseTextGoalProposal {
         goals.append(goal); fieldValues.append(fields.map { $0.snapshot.value })
         if goal.userTurns.count <= answersNeeded { return .clarification }
+        try await beforeAnswer?()
         if declinesAnswer { return .unsupported }
         let target = try XCTUnwrap(fields.first(where: { $0.label == "Destination" }))
         let catalog = try ComputerUseTextPayloadCatalog(goal: goal)

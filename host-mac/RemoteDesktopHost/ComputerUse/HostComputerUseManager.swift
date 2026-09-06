@@ -2983,7 +2983,8 @@ enum ComputerUseExecutionResult: Equatable {
     case unableToComplete(String)
     /// The task cannot proceed until the user supplies missing information.
     /// Unlike live-screen intervention, this terminalizes the stable task ID;
-    /// the answer arrives as a new prompt with recent conversation context.
+    /// A retained native form issues a scoped reference for the answer task;
+    /// other capabilities may use recent conversation as planning context.
     case clarificationRequired(String)
     /// The requested task is still active, but the next step must be performed
     /// by the person (for example, entering account credentials). The manager
@@ -3443,6 +3444,11 @@ final class HostComputerUseManager: ObservableObject {
         let sessionID: String
     }
 
+    private struct TextClarificationContinuation {
+        let originatingTaskID: String
+        let goal: ComputerUseUnresolvedTextGoal
+    }
+
     private struct ExecutionContext {
         let envelope: ComputerUseEnvelope
         let channel: any HostComputerUseChannel
@@ -3452,6 +3458,7 @@ final class HostComputerUseManager: ObservableObject {
         /// Typed prior chat supplied by the signed prompt payload. Host-authored
         /// resume/replan prose is deliberately not inserted into these turns.
         let conversation: [ComputerUseConversationTurn]
+        let textClarification: TextClarificationContinuation?
         /// False only when a versioned Pause reached the durable ledger before
         /// its Prompt. Resume can then claim and start that Prompt exactly once
         /// instead of treating it as work that needs a continuation replan.
@@ -3462,6 +3469,7 @@ final class HostComputerUseManager: ObservableObject {
             channel: any HostComputerUseChannel,
             trustedUserPrompt: String? = nil,
             conversation: [ComputerUseConversationTurn]? = nil,
+            textClarification: TextClarificationContinuation? = nil,
             hasStarted: Bool = true
         ) {
             self.envelope = envelope
@@ -3473,6 +3481,7 @@ final class HostComputerUseManager: ObservableObject {
                 ?? ComputerUsePromptRequest.decodeCompatibleBody(
                     envelope.body).conversation
             self.hasStarted = hasStarted
+            self.textClarification = textClarification
         }
 
         func belongs(to control: ComputerUseEnvelope) -> Bool {
@@ -3520,6 +3529,7 @@ final class HostComputerUseManager: ObservableObject {
     private let visualExecutorLoader: any ComputerUseVisualExecutorLoading
     private let executorComposer: ComputerUseExecutorComposer
     private let taskLedger: ComputerUseTaskLedger
+    private let textClarifications: ComputerUseTextClarificationStore
     private let transportTeardownTimeout: Duration
     /// False only for app-hosted test sessions. Direct manager constructions
     /// keep the production default so their installer lifecycle tests retain
@@ -3597,6 +3607,7 @@ final class HostComputerUseManager: ObservableObject {
         visualExecutorLoader: (any ComputerUseVisualExecutorLoading)? = nil,
         executorComposer: ComputerUseExecutorComposer? = nil,
         taskLedger: ComputerUseTaskLedger = ComputerUseTaskLedger(),
+        textClarifications: ComputerUseTextClarificationStore? = nil,
         transportTeardownTimeout: Duration = .seconds(5),
         allowsExternalServices: Bool = true,
         approvalTargetProvider:
@@ -3641,6 +3652,7 @@ final class HostComputerUseManager: ObservableObject {
                 clientPool: MCPClientPool())
         }
         self.taskLedger = taskLedger
+        self.textClarifications = textClarifications ?? ComputerUseTextClarificationStore()
         self.transportTeardownTimeout = transportTeardownTimeout
         self.allowsExternalServices = allowsExternalServices
         self.channelFactory = channelFactory
@@ -3907,6 +3919,7 @@ final class HostComputerUseManager: ObservableObject {
     }
 
     func revokePeerAuthorization() {
+        invalidateTextClarification()
         authorizedPeerID = nil
         authorizedPeerSupportsOrderedComputerUseControls = false
         _ = blockActionsForUserIntervention()
@@ -4133,6 +4146,7 @@ final class HostComputerUseManager: ObservableObject {
 
     @discardableResult
     private func stopTransport() -> Task<Void, Never> {
+        invalidateTextClarification()
         // Fence an in-flight poll before doing anything that can yield. A
         // cancellation-ignoring channel may still return, but its generation
         // can no longer enter `handle` or acknowledge stale envelopes.
@@ -4394,6 +4408,11 @@ final class HostComputerUseManager: ObservableObject {
                 basedOn: envelope)
         let replyChannel = context?.channel ?? channel
 
+        if resolution.state == .cancelled {
+            textClarifications.invalidate(for: replyEnvelope)
+            (executor as? any ComputerUseTextClarificationContinuing)?.invalidateClarification(taskID: request.taskID)
+        }
+
         if let terminalResponse = resolution.terminalResponse {
             if resolution.state == .cancelled, let context {
                 stopExecution(context)
@@ -4634,6 +4653,7 @@ final class HostComputerUseManager: ObservableObject {
             for: resumed,
             trustedUserPrompt: pausedExecution.trustedUserPrompt,
             conversation: pausedExecution.conversation,
+            textClarification: pausedExecution.textClarification,
             channel: pausedExecution.channel,
             isResuming: true)
     }
@@ -4643,6 +4663,8 @@ final class HostComputerUseManager: ObservableObject {
             ?? pausedExecution?.envelope.id
             ?? pendingApproval?.context.envelope.id
         guard activeTaskID == context.envelope.id else { return }
+        textClarifications.invalidate(for: context.envelope)
+        (executor as? any ComputerUseTextClarificationContinuing)?.invalidateClarification(taskID: context.envelope.id)
         // Cancel is terminal for this execution. Keep the automation gate
         // closed until a later, separately claimed Prompt explicitly begins;
         // never let cancellation-ignoring work inject during unwind.
@@ -5546,7 +5568,8 @@ final class HostComputerUseManager: ObservableObject {
                     body: response,
                     replyingTo: envelope,
                     channel: channel,
-                    outcome: taskLedger.terminalOutcome(taskID: envelope.id))
+                    outcome: taskLedger.terminalOutcome(taskID: envelope.id),
+                    clarification: taskLedger.terminalClarification(taskID: envelope.id))
                 sendStatus("ready", replyingTo: envelope, channel: channel)
                 return
             case .accepted:
@@ -5605,6 +5628,18 @@ final class HostComputerUseManager: ObservableObject {
                 outcome: .unableToComplete)
             return
         }
+        let request: ComputerUsePromptRequest
+        do {
+            request = try ComputerUseExecutionPromptDecoder.decode(envelope.body)
+        } catch {
+            sendDurableTerminal("I couldn't validate this request or its clarification. Start a new request with the complete instruction.",
+                outcome: .unableToComplete, replyingTo: envelope, channel: channel)
+            sendStatus("ready", replyingTo: envelope, channel: channel)
+            return
+        }
+        // A newly claimed ordinary request retires the old question even if
+        // setup/readiness prevents the new request from executing.
+        if request.clarification == nil { invalidateTextClarification() }
         guard setupTask == nil else {
             sendDurableTerminal("AI setup is still running. Wait for setup to finish, then send this as a new request.",
                 outcome: .userInterventionRequired, replyingTo: envelope, channel: channel)
@@ -5620,9 +5655,29 @@ final class HostComputerUseManager: ObservableObject {
             return
         }
 
-        let request = ComputerUsePromptRequest.decodeCompatibleBody(envelope.body)
+        let continuation: TextClarificationContinuation?
+        do {
+            if let reference = request.clarification {
+                guard let continuing = executor as? any ComputerUseTextClarificationContinuing,
+                      let pending = try continuing.clarification(taskID: reference.taskID) else {
+                    throw ComputerUseTextClarificationStore.Failure.invalidReference
+                }
+                let goal = try textClarifications.consume(reference, answer: request.prompt,
+                    scope: pending.scope, for: envelope)
+                continuation = TextClarificationContinuation(originatingTaskID: reference.taskID, goal: goal)
+            } else {
+                continuation = nil
+            }
+        } catch {
+            sendDurableTerminal("I couldn't validate this request or its clarification. Start a new request with the complete instruction.",
+                outcome: .unableToComplete, replyingTo: envelope, channel: channel)
+            sendStatus("ready", replyingTo: envelope, channel: channel)
+            return
+        }
         let clarification: String?
-        if request.prompt.isEmpty {
+        if continuation != nil {
+            clarification = nil
+        } else if request.prompt.isEmpty {
             clarification = "What would you like me to do on your Mac?"
         } else {
             clarification = ComputerUseClarificationPolicy.question(for: request)
@@ -5658,6 +5713,7 @@ final class HostComputerUseManager: ObservableObject {
             for: executionEnvelope,
             trustedUserPrompt: request.prompt,
             conversation: request.conversation,
+            textClarification: continuation,
             channel: channel)
     }
 
@@ -5666,6 +5722,7 @@ final class HostComputerUseManager: ObservableObject {
         for envelope: ComputerUseEnvelope,
         trustedUserPrompt: String,
         conversation: [ComputerUseConversationTurn],
+        textClarification: TextClarificationContinuation? = nil,
         channel: any HostComputerUseChannel,
         isResuming: Bool = false
     ) {
@@ -5679,7 +5736,8 @@ final class HostComputerUseManager: ObservableObject {
             envelope: envelope,
             channel: channel,
             trustedUserPrompt: trustedUserPrompt,
-            conversation: conversation)
+            conversation: conversation,
+            textClarification: textClarification)
         let token = UUID()
         currentExecution = context
         currentExecutionToken = token
@@ -5705,13 +5763,22 @@ final class HostComputerUseManager: ObservableObject {
                     self?.activity = .working(value)
                     self?.sendStatus(value, replyingTo: envelope, channel: channel)
                 }
-                let result = try await executor.execute(
-                    taskID: envelope.id,
-                    modelPrompt: envelope.body,
-                    currentUserPrompt: trustedUserPrompt,
-                    conversation: conversation,
-                    tools: tools,
-                    progress: progress)
+                let result: ComputerUseExecutionResult
+                if let textClarification {
+                    guard let continuing = executor as? any ComputerUseTextClarificationContinuing else {
+                        throw ComputerUseTextClarificationStore.Failure.invalidReference
+                    }
+                    result = try await continuing.continueClarification(taskID: envelope.id,
+                        originatingTaskID: textClarification.originatingTaskID, goal: textClarification.goal, progress: progress)
+                } else {
+                    result = try await executor.execute(
+                        taskID: envelope.id,
+                        modelPrompt: envelope.body,
+                        currentUserPrompt: trustedUserPrompt,
+                        conversation: conversation,
+                        tools: tools,
+                        progress: progress)
+                }
                 guard !Task.isCancelled,
                       currentExecutionToken == token else { return }
                 try acceptExecutionResult(
@@ -5728,7 +5795,7 @@ final class HostComputerUseManager: ObservableObject {
                     context: context,
                     token: token)
                 return
-            } catch ComputerUseHostTools.ToolError.paused {
+            } catch ComputerUseHostTools.ToolError.paused, ComputerUseTextEditError.interrupted {
                 // The injection gate can close synchronously on local input or
                 // WebRTC disconnect before its MainActor lifecycle callback.
                 // Preserve the task for explicit Resume instead of recording
@@ -5978,6 +6045,7 @@ final class HostComputerUseManager: ObservableObject {
             for: replanned,
             trustedUserPrompt: context.trustedUserPrompt,
             conversation: context.conversation,
+            textClarification: context.textClarification,
             channel: context.channel,
             isResuming: true)
     }
@@ -6085,11 +6153,26 @@ final class HostComputerUseManager: ObservableObject {
             sendStatus("ready", replyingTo: envelope, channel: context.channel)
 
         case .clarificationRequired(let response):
+            let reference: ComputerUseClarificationReference?
+            if let pending = try (executor as? any ComputerUseTextClarificationContinuing)?.clarification(taskID: envelope.id) {
+                let goal = try context.textClarification?.goal
+                    ?? ComputerUseUnresolvedTextGoal(userRequest: context.trustedUserPrompt)
+                guard pending.taskID == envelope.id, pending.goal == goal,
+                      pending.question.utf8.elementsEqual(response.utf8) else {
+                    throw ComputerUseTextClarificationStore.Failure.invalidReference
+                }
+                reference = try textClarifications.issue(goal: goal, question: response, scope: pending.scope,
+                    expiresAt: pending.expiresAt, for: envelope)
+            } else {
+                guard context.textClarification == nil else { throw ComputerUseTextClarificationStore.Failure.invalidReference }
+                reference = nil
+            }
             sendDurableTerminal(
                 response,
                 outcome: .userInterventionRequired,
                 replyingTo: envelope,
-                channel: context.channel)
+                channel: context.channel,
+                clarification: reference)
             currentExecution = nil
             currentExecutionToken = nil
             executionTask = nil
@@ -6257,20 +6340,29 @@ final class HostComputerUseManager: ObservableObject {
         _ response: String,
         outcome: ComputerUseTerminalOutcome,
         replyingTo envelope: ComputerUseEnvelope,
-        channel: any HostComputerUseChannel
+        channel: any HostComputerUseChannel,
+        clarification: ComputerUseClarificationReference? = nil
     ) {
         do {
             let terminal = try taskLedger.complete(
                 taskID: envelope.id,
                 response: response,
-                outcome: outcome)
+                outcome: outcome,
+                clarification: clarification)
+            if terminal.clarification == nil || (clarification != nil && terminal.clarification != clarification) {
+                textClarifications.invalidate(for: envelope)
+                (executor as? any ComputerUseTextClarificationContinuing)?.invalidateClarification(taskID: envelope.id)
+            }
             send(
                 kind: .assistant,
                 body: terminal.response,
                 replyingTo: envelope,
                 channel: channel,
-                outcome: terminal.outcome)
+                outcome: terminal.outcome,
+                clarification: terminal.clarification)
         } catch {
+            textClarifications.invalidate(for: envelope)
+            (executor as? any ComputerUseTextClarificationContinuing)?.invalidateClarification(taskID: envelope.id)
             send(
                 kind: .assistant,
                 body: Self.terminalPersistenceFailureResponse,
@@ -6278,6 +6370,11 @@ final class HostComputerUseManager: ObservableObject {
                 channel: channel,
                 outcome: .unableToComplete)
         }
+    }
+
+    private func invalidateTextClarification() {
+        textClarifications.invalidate()
+        (executor as? any ComputerUseTextClarificationContinuing)?.invalidateClarification(taskID: nil)
     }
 
     private func startApprovalDelivery(_ approval: PendingApproval) {
@@ -6307,7 +6404,8 @@ final class HostComputerUseManager: ObservableObject {
         body: String,
         replyingTo envelope: ComputerUseEnvelope,
         channel: any HostComputerUseChannel,
-        outcome: ComputerUseTerminalOutcome? = nil
+        outcome: ComputerUseTerminalOutcome? = nil,
+        clarification: ComputerUseClarificationReference? = nil
     ) {
         let wireBody: String
         switch kind {
@@ -6317,7 +6415,7 @@ final class HostComputerUseManager: ObservableObject {
                 text: body,
                 appliedControlRevision: taskLedger.appliedControlRevision(
                     taskID: envelope.id),
-                outcome: outcome).encodedBody()) ?? body
+                outcome: outcome, clarification: clarification).encodedBody()) ?? body
         default:
             wireBody = body
         }

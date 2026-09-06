@@ -173,6 +173,21 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         return result
     }
 
+    /// A cancelled caller cannot retract a WebKit script. A continuation of
+    /// the same document may wait for that callback before observing again;
+    /// ownership and cancellation remain checked throughout this bounded wait.
+    func waitForDOMCompletion(document expected: ComputerUseBrowserDocument) async throws {
+        let deadline = ContinuousClock.now + domTimeout
+        while pendingDOM != nil {
+            try Task.checkCancellation()
+            guard validate(expected) else { throw ComputerUseBrowserError.pageChanged }
+            guard ContinuousClock.now < deadline else { throw ComputerUseBrowserError.documentUnresponsive }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        try Task.checkCancellation()
+        guard validate(expected) else { throw ComputerUseBrowserError.pageChanged }
+    }
+
     private func interruptDOM(id: UUID, error: Error) {
         guard var pending = pendingDOM, pending.id == id else { return }
         let continuation = pending.continuation

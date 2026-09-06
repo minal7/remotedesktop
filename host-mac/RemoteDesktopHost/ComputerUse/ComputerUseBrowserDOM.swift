@@ -262,6 +262,13 @@ final class ComputerUseBrowserTextTarget {
     /// or clearing operation receipts. A failed transfer starts no input.
     func continuingForClarification(taskID: String) async throws
         -> (target: ComputerUseBrowserTextTarget, fields: [ComputerUseTextField]) {
+        let next = try transferForClarification(taskID: taskID)
+        return (next, try await next.reobserveRetainedFields())
+    }
+
+    /// Transfer synchronously so the executor can retain the new owner before
+    /// cancellation can interrupt its first asynchronous observation.
+    func transferForClarification(taskID: String) throws -> ComputerUseBrowserTextTarget {
         try validate()
         guard !taskID.isEmpty, taskID != document.taskID, let documentID, !targets.isEmpty else {
             throw ComputerUseBrowserError.pageChanged
@@ -270,9 +277,17 @@ final class ComputerUseBrowserTextTarget {
         let next = ComputerUseBrowserTextTarget(browser: browser, document: nextDocument, requiresFrontmost: requiresFrontmost)
         next.documentID = documentID
         next.targets = targets
+        return next
+    }
+
+    func reobserveRetainedFields() async throws -> [ComputerUseTextField] {
+        try validate()
+        guard let documentID, !targets.isEmpty else { throw ComputerUseBrowserError.pageChanged }
+        try await browser.waitForDOMCompletion(document: document)
+        try validate()
         let reply = try await browser.callDOM(.reobserve,
-            arguments: ["documentID": documentID, "ids": targets.values.sorted()], document: nextDocument)
-        try next.validate()
+            arguments: ["documentID": documentID, "ids": targets.values.sorted()], document: document)
+        try validate()
         guard reply.status == "ok", reply.documentID == documentID, let fields = reply.fields,
               fields.count == targets.count, Set(fields.map(\.id)) == Set(targets.values) else {
             throw ComputerUseBrowserError.pageChanged
@@ -280,9 +295,9 @@ final class ComputerUseBrowserTextTarget {
         let identities = Dictionary(uniqueKeysWithValues: targets.map { ($0.value, $0.key) })
         let refreshed = try fields.map { field -> ComputerUseTextField in
             guard let id = identities[field.id] else { throw ComputerUseBrowserError.pageChanged }
-            return .init(label: field.label, snapshot: try next.snapshot(field, targetID: id))
+            return .init(label: field.label, snapshot: try snapshot(field, targetID: id))
         }
-        return (next, refreshed)
+        return refreshed
     }
 
     func read(targetID: String) async throws -> ComputerUseTextSnapshot? {

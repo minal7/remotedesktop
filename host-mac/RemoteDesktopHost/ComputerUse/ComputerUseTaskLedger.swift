@@ -48,6 +48,7 @@ final class ComputerUseTaskLedger {
     struct TerminalResult: Equatable {
         let response: String
         let outcome: ComputerUseTerminalOutcome?
+        let clarification: ComputerUseClarificationReference?
     }
 
     static let stoppedResponse = "Stopped. You're in control of the Mac."
@@ -65,6 +66,7 @@ final class ComputerUseTaskLedger {
         var executionStarted: Bool
         var response: String?
         var outcome: ComputerUseTerminalOutcome?
+        var clarification: ComputerUseClarificationReference?
         var control: ControlSnapshot?
 
         init(
@@ -84,6 +86,7 @@ final class ComputerUseTaskLedger {
             self.executionStarted = executionStarted
             self.response = response
             self.outcome = outcome
+            self.clarification = nil
             self.control = control
         }
 
@@ -95,6 +98,7 @@ final class ComputerUseTaskLedger {
             case executionStarted
             case response
             case outcome
+            case clarification
             case control
         }
 
@@ -111,6 +115,7 @@ final class ComputerUseTaskLedger {
             } else {
                 outcome = nil
             }
+            clarification = try values.decodeIfPresent(ComputerUseClarificationReference.self, forKey: .clarification)
             control = try values.decodeIfPresent(
                 ControlSnapshot.self,
                 forKey: .control)
@@ -278,6 +283,7 @@ final class ComputerUseTaskLedger {
         record.control = ControlSnapshot(
             revision: revision,
             state: reducedState)
+        if reducedState == .cancelled { record.clarification = nil }
         if reducedState == .cancelled, record.response == nil {
             // Persist the terminal result before the manager cancels any
             // active executor. A delayed completion can no longer overwrite
@@ -298,7 +304,8 @@ final class ComputerUseTaskLedger {
     func complete(
         taskID: String,
         response: String,
-        outcome: ComputerUseTerminalOutcome? = nil
+        outcome: ComputerUseTerminalOutcome? = nil,
+        clarification: ComputerUseClarificationReference? = nil
     ) throws -> TerminalResult {
         try ensureAvailable()
         guard var record = records[taskID] else {
@@ -309,19 +316,27 @@ final class ComputerUseTaskLedger {
         if let existingResponse = record.response {
             return TerminalResult(
                 response: existingResponse,
-                outcome: record.outcome)
+                outcome: record.outcome, clarification: record.clarification)
         }
         record.response = String(response.prefix(4_000))
         record.outcome = outcome
+        record.clarification = outcome == .userInterventionRequired && clarification?.taskID == taskID ? clarification : nil
         try commit(record, for: taskID)
         return TerminalResult(
             response: record.response ?? "",
-            outcome: record.outcome)
+            outcome: record.outcome, clarification: record.clarification)
     }
 
     func terminalOutcome(taskID: String) -> ComputerUseTerminalOutcome? {
         guard initializationError == nil else { return nil }
         return records[taskID]?.outcome
+    }
+
+    func terminalClarification(taskID: String) -> ComputerUseClarificationReference? {
+        guard initializationError == nil, let record = records[taskID], record.response != nil,
+              record.outcome == .userInterventionRequired, record.control?.state != .cancelled,
+              record.clarification?.taskID == taskID else { return nil }
+        return record.clarification
     }
 
     func appliedControlRevision(taskID: String) -> UInt64? {

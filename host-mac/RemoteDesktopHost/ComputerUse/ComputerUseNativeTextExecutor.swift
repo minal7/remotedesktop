@@ -19,6 +19,15 @@ final class ComputerUseNativeTextExecutor {
         let originatingTaskID: String?
         let expiryNonce: UUID
     }
+    private struct PreparedClarification {
+        let taskID: String
+        let originatingTaskID: String
+        let goal: ComputerUseUnresolvedTextGoal
+        let browser: ComputerUseBrowserTextTarget
+        let scope: String
+        let expiresAt: Date
+        let expiryNonce: UUID
+    }
     private static let clarificationQuestion = "Which field should I edit, and what exact text should it contain?"
     private let target = ComputerUseAccessibilityTextTarget()
     private let injector: InputInjector
@@ -32,6 +41,7 @@ final class ComputerUseNativeTextExecutor {
     private var retainedTask: ComputerUseTextTask?
     private var retainedTaskOriginID: String?
     private var pendingClarification: PendingClarification?
+    private var preparedClarification: PreparedClarification?
     private var isExecuting = false
     private var clarificationExpiryTask: Task<Void, Never>?
 
@@ -60,6 +70,9 @@ final class ComputerUseNativeTextExecutor {
         guard !isExecuting else { throw Failure.alreadyExecuting }
         isExecuting = true
         defer { isExecuting = false }
+        if preparedClarification?.taskID == taskID {
+            throw ComputerUseTextTaskError.journalMismatch
+        }
         if let retainedTask, retainedTask.contract.taskID == taskID {
             guard retainedTaskOriginID == nil,
                   retainedTask.contract.promptDigest == ComputerUseTextTaskContract.digest(prompt) else {
@@ -97,10 +110,26 @@ final class ComputerUseNativeTextExecutor {
     }
 
     func invalidateClarification(taskID: String? = nil) {
+        if taskID == nil || preparedClarification?.taskID == taskID {
+            preparedClarification = nil
+        }
         if taskID == nil || pendingClarification?.info.taskID == taskID {
             pendingClarification = nil
+        }
+        if pendingClarification == nil && preparedClarification == nil {
             clarificationExpiryTask?.cancel()
             clarificationExpiryTask = nil
+        }
+    }
+
+    private func expireClarification(at expiry: Date, nonce: UUID) {
+        clarificationExpiryTask?.cancel()
+        let lifetime = max(0, expiry.timeIntervalSince(now()))
+        clarificationExpiryTask = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(lifetime)) } catch { return }
+            guard let self, self.pendingClarification?.expiryNonce == nonce
+                    || self.preparedClarification?.expiryNonce == nonce else { return }
+            self.invalidateClarification()
         }
     }
 
@@ -128,20 +157,42 @@ final class ComputerUseNativeTextExecutor {
             guard try clarification(taskID: taskID) != nil else { throw Failure.invalidClarification }
             return .clarificationRequired(pending.info.question)
         }
-        guard let pending = pendingClarification, pending.info.taskID == originatingTaskID,
+        if preparedClarification == nil {
+            guard let pending = pendingClarification, pending.info.taskID == originatingTaskID,
               let answer = goal.userTurns.last,
               try pending.info.goal.answering(pending.info.question, with: answer) == goal else { throw Failure.invalidClarification }
-        guard try clarification(taskID: originatingTaskID) != nil else { throw Failure.invalidClarification }
-        // Consume before the first suspension. A failed transfer cannot fall
-        // back to fresh discovery or let another answer inherit these objects.
-        invalidateClarification()
-        retainedTask = nil
-        retainedTaskOriginID = nil
-        let next = try await pending.browser.continuingForClarification(taskID: taskID)
-        guard try next.target.clarificationScope() == pending.info.scope else { throw Failure.invalidClarification }
-        return try await planAndRun(taskID: taskID, goal: goal, originatingTaskID: originatingTaskID,
-            browserTarget: next.target, fields: next.fields, verifiedStep: verifiedStep, progress: progress)
-            ?? .unableToComplete("I couldn't resolve this form edit from your answer. Start a new request with the field and exact text.")
+            guard try clarification(taskID: originatingTaskID) != nil else { throw Failure.invalidClarification }
+            // Consume and retain ownership before any suspension. Only this
+            // exact answer task may resume the observation or planning stage.
+            invalidateClarification()
+            retainedTask = nil
+            retainedTaskOriginID = nil
+            let next = try pending.browser.transferForClarification(taskID: taskID)
+            let nonce = UUID()
+            preparedClarification = PreparedClarification(taskID: taskID, originatingTaskID: originatingTaskID,
+                goal: goal, browser: next, scope: pending.info.scope, expiresAt: pending.info.expiresAt, expiryNonce: nonce)
+            expireClarification(at: pending.info.expiresAt, nonce: nonce)
+        }
+        guard let prepared = preparedClarification, prepared.taskID == taskID,
+              prepared.originatingTaskID == originatingTaskID, prepared.goal == goal else { throw Failure.invalidClarification }
+        do {
+            guard now() < prepared.expiresAt,
+                  try prepared.browser.clarificationScope() == prepared.scope else { throw Failure.invalidClarification }
+            let fields = try await prepared.browser.reobserveRetainedFields()
+            let result = try await planAndRun(taskID: taskID, goal: goal, originatingTaskID: originatingTaskID,
+                browserTarget: prepared.browser, fields: fields, verifiedStep: verifiedStep, progress: progress)
+                ?? .unableToComplete("I couldn't resolve this form edit from your answer. Start a new request with the field and exact text.")
+            // A newly issued question has its own expiry and must survive.
+            if preparedClarification?.expiryNonce == prepared.expiryNonce {
+                invalidateClarification(taskID: taskID)
+            }
+            return result
+        } catch {
+            if !(error is CancellationError) && error as? ComputerUseTextEditError != .interrupted {
+                invalidateClarification(taskID: taskID)
+            }
+            throw error
+        }
     }
 
     private func planAndRun(taskID: String, goal: ComputerUseUnresolvedTextGoal, originatingTaskID: String?,
@@ -176,14 +227,7 @@ final class ComputerUseNativeTextExecutor {
                 let nonce = UUID()
                 pendingClarification = PendingClarification(info: info, browser: browserTarget,
                     originatingTaskID: originatingTaskID, expiryNonce: nonce)
-                // The timer captures only a nonce and weak owner, so private
-                // goal text can be released even if no later request arrives.
-                let lifetime = clarificationLifetime
-                clarificationExpiryTask = Task { [weak self] in
-                    do { try await Task.sleep(for: .seconds(lifetime)) } catch { return }
-                    guard let self, self.pendingClarification?.expiryNonce == nonce else { return }
-                    self.invalidateClarification()
-                }
+                expireClarification(at: info.expiresAt, nonce: nonce)
             }
             return .clarificationRequired(Self.clarificationQuestion)
         case .edits(let edits, let retained):
@@ -197,6 +241,10 @@ final class ComputerUseNativeTextExecutor {
             guard try await read(field.snapshot.targetID) == field.snapshot else {
                 throw ComputerUseTextTaskError.staleTarget
             }
+        }
+        if originatingTaskID != nil {
+            guard let prepared = preparedClarification, prepared.taskID == taskID,
+                  prepared.goal == goal, now() < prepared.expiresAt else { throw Failure.invalidClarification }
         }
         let contract = try ComputerUseTextTaskContract(taskID: taskID, prompt: goal.taskIdentityText,
                                                        fields: fields, operations: operations,
@@ -223,6 +271,7 @@ final class ComputerUseNativeTextExecutor {
             persist: { try store.save($0) }, mayAct: mayAct)
         retainedTask = task
         retainedTaskOriginID = originatingTaskID
+        invalidateClarification(taskID: taskID)
         return try await run(task, verifiedStep: verifiedStep, progress: progress)
     }
 
