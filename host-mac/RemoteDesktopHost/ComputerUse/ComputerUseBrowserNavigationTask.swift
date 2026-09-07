@@ -47,14 +47,17 @@ final class ComputerUseBrowserNavigationTask {
     /// dispatch. Production supplies no callback; document validation always
     /// remains inside the browser's actual navigation boundary.
     private let beforeNavigationDispatch: (@MainActor (Int) async throws -> Void)?
+    private let observedNavigationStore: (URL) throws -> ComputerUseTaskJournalStore
     private var execution: ComputerUseTaskExecution?
     private var retainedURLs: [URL] = []
 
     init(browser: ComputerUseOwnedBrowser, journalDirectory: URL,
-         beforeNavigationDispatch: (@MainActor (Int) async throws -> Void)? = nil) {
+         beforeNavigationDispatch: (@MainActor (Int) async throws -> Void)? = nil,
+         observedNavigationStore: @escaping (URL) throws -> ComputerUseTaskJournalStore = { try .init(directory: $0) }) {
         self.browser = browser
         self.journalDirectory = journalDirectory
         self.beforeNavigationDispatch = beforeNavigationDispatch
+        self.observedNavigationStore = observedNavigationStore
     }
 
     func execute(taskID: String, prompt: String, progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult? {
@@ -175,9 +178,81 @@ final class ComputerUseBrowserNavigationTask {
         try await browser.prepareFormQuery(controlID: controlID, evidence: evidence)
     }
 
-    func openObservedDestination(_ target: ComputerUseBrowserNavigationTarget, operationID: String,
-                             willBeginEffect: () -> Void) async throws -> ComputerUseBrowserNavigationReceipt {
-        try await browser.openObservedDestination(target, operationID: operationID, willBeginEffect: willBeginEffect)
+    /// Persist one host-selected effect independently of the whole task's
+    /// remaining goals. The caller must supply the original prompt digest and
+    /// a stable task-step operation ID; a page reference supplies neither.
+    /// This journal records only identities/status, never URLs or form values.
+    func openObservedDestination(_ target: ComputerUseBrowserNavigationTarget, promptDigest: String, operationID: String,
+                                 willBeginEffect: () -> Void) async throws -> ComputerUseBrowserNavigationReceipt {
+        func validDigest(_ value: String) -> Bool {
+            value.utf8.count == 64 && value.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
+        }
+        func checkOwnership() throws {
+            try Task.checkCancellation()
+            guard browser.contextID == target.contextID, browser.hasOwnership(taskID: target.taskID) else {
+                throw ComputerUseBrowserError.ownershipLost
+            }
+        }
+        try checkOwnership()
+        guard validDigest(promptDigest), validDigest(operationID) else { throw ComputerUseTaskExecutionError.invalidContract }
+        // The lookup key excludes document/context/payload: replacement
+        // browsers and newly prepared targets must find the earlier record
+        // and reject changed identity instead of treating it as a new effect.
+        let journalID = ComputerUseTaskContract.digest(["observed-browser-effect-record-v1", target.taskID, operationID])
+        let identity = ComputerUseTaskJournal(taskID: journalID, promptDigest: promptDigest,
+            contractDigest: ComputerUseTaskContract.digest(["observed-browser-effect-binding-v1", target.taskID, operationID, target.payloadDigest]),
+            stepIDs: [operationID], statuses: [.planned])
+        let store = try observedNavigationStore(journalDirectory.appendingPathComponent("Observed Destinations", isDirectory: true))
+        var persisted = try store.load(taskID: journalID)
+        if let persisted {
+            guard persisted.taskID == identity.taskID, persisted.promptDigest == identity.promptDigest,
+                  persisted.contractDigest == identity.contractDigest, persisted.stepIDs == identity.stepIDs,
+                  persisted.statuses.count == 1 else { throw ComputerUseTaskExecutionError.journalMismatch }
+        }
+        let lease = try store.acquireExecution(taskID: journalID, expected: persisted)
+        defer { lease.release() }
+        func save(_ status: ComputerUseTaskStepStatus) throws {
+            try lease.assertOwnership()
+            var next = identity
+            next.statuses = [status]
+            try store.save(next, replacing: persisted)
+            persisted = next
+        }
+        try checkOwnership()
+        if let status = persisted?.statuses.first, status != .planned {
+            // No call to the effectful API during recovery. Even a verified
+            // journal is insufficient to recreate a lost browser document.
+            guard let receipt = browser.observedNavigationReceipt(for: target, operationID: operationID) else {
+                if status == .attempted { try save(.uncertain) }
+                throw ComputerUseBrowserError.observedNavigationUncertain
+            }
+            if status != .verified { try save(.verified) }
+            try checkOwnership()
+            return receipt
+        }
+        if persisted == nil { try save(.planned) }
+        do {
+            let receipt = try await browser.openObservedDestination(target, operationID: operationID, willBeginEffect: {
+                try checkOwnership()
+                // This throwing callback runs after DOM validation and before
+                // any WebKit load. Storage failure cannot authorize a request.
+                try save(.attempted)
+                willBeginEffect()
+            })
+            guard browser.observedNavigationReceipt(for: target, operationID: operationID) == receipt,
+                  persisted?.statuses.first == .attempted else { throw ComputerUseBrowserError.observedNavigationUncertain }
+            try save(.verified)
+            try checkOwnership()
+            return receipt
+        } catch {
+            // Keep late native confirmation without converting Pause/Stop or
+            // cancellation into a successful caller result. Failed persistence
+            // leaves the durable attempt to be reconciled, never replayed.
+            if persisted?.statuses.first == .attempted {
+                try? save(browser.observedNavigationReceipt(for: target, operationID: operationID) == nil ? .uncertain : .verified)
+            }
+            throw error
+        }
     }
 
     func scrollViewport(_ direction: OSAtlasScrollDirection, evidence: ComputerUseBrowserPageEvidence,

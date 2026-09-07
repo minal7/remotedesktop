@@ -114,6 +114,8 @@ struct ComputerUseBrowserNavigationTarget: Equatable, Sendable, CustomStringConv
     fileprivate let source: Source
     fileprivate let destination: URL
     let payloadDigest: String
+    var taskID: String { evidence.document.taskID }
+    var contextID: String { evidence.document.contextID }
 
     fileprivate init(evidence: ComputerUseBrowserPageEvidence, source: Source, destination: URL) {
         self.evidence = evidence; self.source = source; self.destination = destination
@@ -534,7 +536,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     /// semantics: it dispatches no click, submit, formdata, or invalid event.
     /// A returned receipt proves one navigation, never the complete task.
     func openObservedDestination(_ target: ComputerUseBrowserNavigationTarget, operationID: String,
-                             willBeginEffect: () -> Void = {}) async throws -> ComputerUseBrowserNavigationReceipt {
+                             willBeginEffect: () throws -> Void = {}) async throws -> ComputerUseBrowserNavigationReceipt {
         try Task.checkCancellation()
         guard hasOwnership(taskID: target.evidence.document.taskID),
               target.evidence.document.contextID == contextID else { throw ComputerUseBrowserError.ownershipLost }
@@ -554,7 +556,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             let document = try await navigate(taskID: target.evidence.document.taskID, operationID: operationID,
                 to: target.destination, from: target.evidence.document, willBeginEffect: {
                     self.observedNavigationAttempts[operationID] = ObservedNavigationAttempt(payloadDigest: target.payloadDigest)
-                    willBeginEffect()
+                    try willBeginEffect()
                 })
             let receipt = ComputerUseBrowserNavigationReceipt(payloadDigest: target.payloadDigest, document: document)
             observedNavigationAttempts[operationID]?.receipt = receipt
@@ -570,6 +572,19 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             }
             throw error
         }
+    }
+
+    /// Historical native evidence only. Reading it cannot start a request or
+    /// establish that the destination is still the current page. Control may
+    /// already have changed while a caller saves a late confirmed fact.
+    func observedNavigationReceipt(for target: ComputerUseBrowserNavigationTarget,
+                                   operationID: String) -> ComputerUseBrowserNavigationReceipt? {
+        guard target.contextID == contextID, target.taskID == taskID,
+              let attempt = observedNavigationAttempts[operationID], attempt.payloadDigest == target.payloadDigest,
+              let receipt = attempt.receipt, receipt.payloadDigest == target.payloadDigest,
+              receipt.document.contextID == contextID, receipt.document.taskID == target.taskID,
+              receipt.document.operationID == operationID, receipt.document.requestedURL == target.destination else { return nil }
+        return receipt
     }
 
     func scrollViewport(_ direction: OSAtlasScrollDirection, evidence: ComputerUseBrowserPageEvidence,
@@ -718,7 +733,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
 
     func navigate(taskID: String, operationID: String, to url: URL,
                   from expectedDocument: ComputerUseBrowserDocument? = nil,
-                  willBeginEffect: () -> Void = {}) async throws -> ComputerUseBrowserDocument {
+                  willBeginEffect: () throws -> Void = {}) async throws -> ComputerUseBrowserDocument {
         try Task.checkCancellation()
         guard hasOwnership(taskID: taskID) else { throw ComputerUseBrowserError.ownershipLost }
         guard pending == nil, pendingDOM == nil, observedNavigation == nil else { throw ComputerUseBrowserError.busy }
@@ -741,9 +756,15 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             guard validate(expectedDocument) else { throw ComputerUseBrowserError.pageChanged }
             guard hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
         }
-        willBeginEffect()
+        try willBeginEffect()
         try Task.checkCancellation()
         guard hasOwnership(taskID: taskID) else { throw ComputerUseBrowserError.ownershipLost }
+        // Reacquiring the same task ID after a callback retires its earlier
+        // document. Ownership alone cannot validate that prerequisite.
+        if let expectedDocument {
+            guard validate(expectedDocument) else { throw ComputerUseBrowserError.pageChanged }
+            guard hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
+        }
         generation &+= 1
         document = nil
         loadedPageIdentity = nil

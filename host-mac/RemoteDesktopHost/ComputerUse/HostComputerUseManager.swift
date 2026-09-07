@@ -1237,12 +1237,13 @@ final class ComputerUseHostTools {
         return try await browserNavigationTask.prepareLinkNavigation(linkID: linkID, evidence: evidence)
     }
 
-    func openOwnedBrowserDestination(_ target: ComputerUseBrowserNavigationTarget, operationID: String,
+    func openOwnedBrowserDestination(_ target: ComputerUseBrowserNavigationTarget, promptDigest: String, operationID: String,
                                         willBeginEffect: () -> Void) async throws -> ComputerUseBrowserNavigationReceipt {
         try Task.checkCancellation()
         guard mayAct() else { throw ToolError.paused }
         guard let browserNavigationTask else { throw ComputerUseBrowserError.closed }
-        return try await browserNavigationTask.openObservedDestination(target, operationID: operationID, willBeginEffect: willBeginEffect)
+        return try await browserNavigationTask.openObservedDestination(target, promptDigest: promptDigest,
+            operationID: operationID, willBeginEffect: willBeginEffect)
     }
 
     func prepareOwnedBrowserFormQuery(controlID: String, evidence: ComputerUseBrowserPageEvidence) async throws -> ComputerUseBrowserNavigationTarget {
