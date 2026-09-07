@@ -128,6 +128,28 @@ struct ComputerUseBrowserNavigationTarget: Equatable, Sendable, CustomStringConv
     var debugDescription: String { description }
 }
 
+/// A handoff binds the live browser session and ownership epoch, not the old
+/// document: signing in may legitimately navigate to a newly observed page.
+struct ComputerUseBrowserHandbackRequirement: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    let taskID: String
+    fileprivate let contextID: String?
+    fileprivate let sessionID: UUID?
+    fileprivate let ownershipEpoch: UUID?
+    fileprivate let requiresPresentation: Bool
+
+    fileprivate init(taskID: String, contextID: String?, sessionID: UUID?, ownershipEpoch: UUID?, requiresPresentation: Bool) {
+        self.taskID = taskID; self.contextID = contextID; self.sessionID = sessionID
+        self.ownershipEpoch = ownershipEpoch; self.requiresPresentation = requiresPresentation
+    }
+
+    static func unavailable(taskID: String) -> Self {
+        .init(taskID: taskID, contextID: nil, sessionID: nil, ownershipEpoch: nil, requiresPresentation: true)
+    }
+
+    var description: String { "BrowserHandbackRequirement" }
+    var debugDescription: String { description }
+}
+
 struct ComputerUseBrowserNavigationReceipt: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     let payloadDigest: String
     let document: ComputerUseBrowserDocument
@@ -136,7 +158,7 @@ struct ComputerUseBrowserNavigationReceipt: Equatable, Sendable, CustomStringCon
 }
 
 enum ComputerUseBrowserError: Error, LocalizedError, Equatable {
-    case invalidURL, busy, ownershipLost, pageChanged, navigationFailed, deadlineExceeded, closed, unsupportedDocument, pageEvidenceUnavailable, documentUnresponsive, windowNotActive, authenticationRequired, signInWindowOpen, viewportScrollUnavailable, viewportScrollUncertain, linkNavigationUnavailable, observedNavigationUnavailable, observedNavigationUncertain, formQueryUnavailable, formQueryInvalid
+    case invalidURL, busy, ownershipLost, pageChanged, navigationFailed, deadlineExceeded, closed, unsupportedDocument, pageEvidenceUnavailable, documentUnresponsive, windowNotActive, authenticationRequired, signInWindowOpen, handbackContextLost, viewportScrollUnavailable, viewportScrollUncertain, linkNavigationUnavailable, observedNavigationUnavailable, observedNavigationUncertain, formQueryUnavailable, formQueryInvalid
     var errorDescription: String? {
         switch self {
         case .invalidURL: return "The browser needs an HTTP or HTTPS URL without embedded credentials."
@@ -157,6 +179,7 @@ enum ComputerUseBrowserError: Error, LocalizedError, Equatable {
         case .linkNavigationUnavailable: return "This page link cannot be opened as a document in the current AI browser."
         case .observedNavigationUnavailable: return "This browser destination cannot be opened with its current reference."
         case .observedNavigationUncertain: return "I couldn't verify the navigation. Check the AI browser before continuing."
+        case .handbackContextLost: return "The AI browser session for this task was closed or replaced. Start a new browser task to continue."
         case .formQueryUnavailable: return "This form cannot be opened as a verified query in the AI browser."
         case .formQueryInvalid: return "The form contains a value that does not meet its requirements. Check the form before continuing."
         }
@@ -178,6 +201,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     private(set) var taskID: String?
     private var generation: UInt64 = 0
     private var ownershipEpoch = UUID()
+    private var browserSessionID = UUID()
     private var document: ComputerUseBrowserDocument?
     private var receipts: [String: ComputerUseBrowserDocument] = [:]
     private struct ObservedNavigationAttempt {
@@ -383,10 +407,23 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         return current
     }
 
-    func reacquireAfterUserControl(taskID: String) async throws {
-        try Task.checkCancellation()
-        guard browser != nil, self.taskID == taskID || isFrontmostWindow else { return }
+    func handbackRequirement(taskID: String, required: Bool = false) -> ComputerUseBrowserHandbackRequirement? {
+        guard browser != nil, self.taskID == taskID else { return required ? .unavailable(taskID: taskID) : nil }
+        return .init(taskID: taskID, contextID: contextID, sessionID: browserSessionID, ownershipEpoch: ownershipEpoch,
+            requiresPresentation: required || hasRequiredPresentation || hasOpenSignInWindow)
+    }
+
+    private func validateHandback(_ requirement: ComputerUseBrowserHandbackRequirement, taskID: String) throws {
+        guard requirement.taskID == taskID, requirement.contextID == contextID,
+              requirement.sessionID == browserSessionID, requirement.ownershipEpoch == ownershipEpoch,
+              browser != nil, self.taskID == taskID else { throw ComputerUseBrowserError.handbackContextLost }
         guard !hasOpenSignInWindow else { throw ComputerUseBrowserError.signInWindowOpen }
+        if requirement.requiresPresentation, !hasRequiredPresentation { throw ComputerUseBrowserError.windowNotActive }
+    }
+
+    func reacquireAfterUserControl(taskID: String, requirement: ComputerUseBrowserHandbackRequirement) async throws {
+        try Task.checkCancellation()
+        try validateHandback(requirement, taskID: taskID)
         guard mayAct() else { throw ComputerUseBrowserError.ownershipLost }
         guard pending == nil, pendingDOM == nil, observedNavigation == nil,
               browser?.isLoading == false else { throw ComputerUseBrowserError.busy }
@@ -399,6 +436,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             // when explicitly handed back later. It is never an action receipt.
             try await adoptPageObservation(observed, source: .activePageObservation, taskID: taskID)
         } else { throw ComputerUseBrowserError.pageChanged }
+        try validateHandback(requirement, taskID: taskID)
         detail = "Control returned — checking the current page"
     }
 
@@ -874,6 +912,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
 
     private func makeBrowser() -> WKWebView {
         if let browser { return browser }
+        browserSessionID = UUID()
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .nonPersistent()
         // Provider flows may open their window after an asynchronous response.

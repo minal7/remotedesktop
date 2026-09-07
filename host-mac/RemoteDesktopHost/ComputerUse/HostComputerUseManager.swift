@@ -1253,8 +1253,16 @@ final class ComputerUseHostTools {
         return try await browserNavigationTask.prepareFormQuery(controlID: controlID, evidence: evidence)
     }
 
-    func reacquireOwnedBrowserAfterUserControl(taskID: String) async throws {
-        try await browserNavigationTask?.reacquireAfterUserControl(taskID: taskID)
+    func ownedBrowserHandbackRequirement(taskID: String, required: Bool = false) -> ComputerUseBrowserHandbackRequirement? {
+        guard let browserNavigationTask else { return required ? .unavailable(taskID: taskID) : nil }
+        return browserNavigationTask.handbackRequirement(taskID: taskID, required: required)
+    }
+
+    func reacquireOwnedBrowserAfterUserControl(_ requirement: ComputerUseBrowserHandbackRequirement) async throws {
+        try Task.checkCancellation()
+        guard mayAct() else { throw ToolError.paused }
+        guard let browserNavigationTask else { throw ComputerUseBrowserError.handbackContextLost }
+        try await browserNavigationTask.reacquireAfterUserControl(requirement)
     }
 
     func bindOwnedBrowserTaskControls(
@@ -3716,6 +3724,7 @@ final class HostComputerUseManager: ObservableObject {
         /// its Prompt. Resume can then claim and start that Prompt exactly once
         /// instead of treating it as work that needs a continuation replan.
         let hasStarted: Bool
+        let browserHandbackRequirement: ComputerUseBrowserHandbackRequirement?
 
         init(
             envelope: ComputerUseEnvelope,
@@ -3723,7 +3732,8 @@ final class HostComputerUseManager: ObservableObject {
             trustedUserPrompt: String? = nil,
             conversation: [ComputerUseConversationTurn]? = nil,
             textClarification: TextClarificationContinuation? = nil,
-            hasStarted: Bool = true
+            hasStarted: Bool = true,
+            browserHandbackRequirement: ComputerUseBrowserHandbackRequirement? = nil
         ) {
             self.envelope = envelope
             self.channel = channel
@@ -3735,6 +3745,13 @@ final class HostComputerUseManager: ObservableObject {
                     envelope.body).conversation
             self.hasStarted = hasStarted
             self.textClarification = textClarification
+            self.browserHandbackRequirement = browserHandbackRequirement
+        }
+
+        func retainingBrowserHandback(_ requirement: ComputerUseBrowserHandbackRequirement?) -> Self {
+            .init(envelope: envelope, channel: channel, trustedUserPrompt: trustedUserPrompt,
+                conversation: conversation, textClarification: textClarification,
+                hasStarted: hasStarted, browserHandbackRequirement: requirement)
         }
 
         func belongs(to control: ComputerUseEnvelope) -> Bool {
@@ -4905,19 +4922,27 @@ final class HostComputerUseManager: ObservableObject {
         }
     }
 
-    private func pauseForLocalIntervention(_ context: ExecutionContext, guidance: String? = nil) {
+    private func pauseForLocalIntervention(_ context: ExecutionContext, guidance: String? = nil,
+                                            requiresBrowserHandback: Bool = false) {
+        let context = context.retainingBrowserHandback(context.browserHandbackRequirement
+            ?? (requiresBrowserHandback ? tools.ownedBrowserHandbackRequirement(taskID: context.envelope.id, required: true) : nil))
         actionGate.endAutomation(allowsActions: false)
         let persisted = persistLocalControl(.pause, context: context)
         pauseExecution(context, guidance: persisted ? guidance : Self.localControlPersistenceFailureGuidance)
     }
 
     private func pauseExecution(_ context: ExecutionContext, guidance: String? = nil) {
+        let context = context.retainingBrowserHandback(context.browserHandbackRequirement
+            ?? (context.hasStarted ? tools.ownedBrowserHandbackRequirement(taskID: context.envelope.id) : nil))
         let guidance = guidance ?? Self.userInterventionGuidance
         if postedApprovedVisualTaskID == context.envelope.id {
             terminalizePostedVisualActionForIntervention(context: context)
             return
         }
         if pausedExecution?.envelope.id == context.envelope.id {
+            if let pausedExecution, pausedExecution.browserHandbackRequirement == nil {
+                self.pausedExecution = pausedExecution.retainingBrowserHandback(context.browserHandbackRequirement)
+            }
             if guidance == Self.userInterventionGuidance {
                 sendStatus("paused", replyingTo: context.envelope, channel: context.channel)
             } else {
@@ -5008,6 +5033,7 @@ final class HostComputerUseManager: ObservableObject {
             trustedUserPrompt: pausedExecution.trustedUserPrompt,
             conversation: pausedExecution.conversation,
             textClarification: pausedExecution.textClarification,
+            browserHandbackRequirement: pausedExecution.browserHandbackRequirement,
             channel: pausedExecution.channel,
             isResuming: true)
     }
@@ -6087,6 +6113,7 @@ final class HostComputerUseManager: ObservableObject {
         trustedUserPrompt: String,
         conversation: [ComputerUseConversationTurn],
         textClarification: TextClarificationContinuation? = nil,
+        browserHandbackRequirement: ComputerUseBrowserHandbackRequirement? = nil,
         channel: any HostComputerUseChannel,
         isResuming: Bool = false
     ) {
@@ -6101,14 +6128,17 @@ final class HostComputerUseManager: ObservableObject {
             channel: channel,
             trustedUserPrompt: trustedUserPrompt,
             conversation: conversation,
-            textClarification: textClarification)
+            textClarification: textClarification,
+            browserHandbackRequirement: browserHandbackRequirement)
         let token = UUID()
         currentExecution = context
         currentExecutionToken = token
         activity = .working(isResuming ? "Continuing…" : "Starting…")
         sendStatus("working", replyingTo: envelope, channel: channel)
+        let capturedContext = context
         executionTask = Task { [weak self] in
             guard let self else { return }
+            var context = capturedContext
             // Cancellation is a lifecycle barrier, not merely a signal. The
             // previous executor joins its runtime-cancel child before this
             // separately claimed prompt is allowed to activate/reuse a model.
@@ -6135,13 +6165,17 @@ final class HostComputerUseManager: ObservableObject {
                     // to reconstruct or repeat this consequential task.
                     result = Self.resultForApprovedAction(action, trustedUserPrompt: context.trustedUserPrompt)
                 } else {
-                    if isResuming {
+                    if isResuming, let requirement = context.browserHandbackRequirement {
                         do {
-                            try await tools.reacquireOwnedBrowserAfterUserControl(taskID: envelope.id)
+                            try await tools.reacquireOwnedBrowserAfterUserControl(requirement)
                         } catch {
-                            let guidance = error as? ComputerUseBrowserError == .signInWindowOpen
-                                ? ComputerUseBrowserError.signInWindowOpen.localizedDescription
-                                : "The AI browser is not ready to continue. Finish signing in or loading the page, then choose Resume."
+                            let guidance: String
+                            switch error as? ComputerUseBrowserError {
+                            case .signInWindowOpen?, .handbackContextLost?, .windowNotActive?:
+                                guidance = error.localizedDescription
+                            default:
+                                guidance = "The AI browser is not ready to continue. Finish signing in or loading the page, then choose Resume."
+                            }
                             try acceptExecutionResult(.userInterventionRequired(
                                 guidance),
                                 executor: executor, context: context, token: token)
@@ -6150,6 +6184,10 @@ final class HostComputerUseManager: ObservableObject {
                     }
                     try Task.checkCancellation()
                     guard currentExecutionToken == token else { throw CancellationError() }
+                    // The requirement protects this handback only. A later
+                    // pause captures the session then owned by the same task.
+                    context = context.retainingBrowserHandback(nil)
+                    currentExecution = context
                     if let textClarification {
                         guard let continuing = executor as? any ComputerUseTextClarificationContinuing else {
                             throw ComputerUseTextClarificationStore.Failure.invalidReference
@@ -6184,7 +6222,8 @@ final class HostComputerUseManager: ObservableObject {
                 return
             } catch ComputerUseBrowserError.authenticationRequired {
                 guard currentExecutionToken == token else { return }
-                pauseForLocalIntervention(context, guidance: ComputerUseBrowserError.authenticationRequired.localizedDescription)
+                pauseForLocalIntervention(context, guidance: ComputerUseBrowserError.authenticationRequired.localizedDescription,
+                    requiresBrowserHandback: true)
             } catch ComputerUseHostTools.ToolError.paused, ComputerUseTextEditError.interrupted {
                 // The injection gate can close synchronously on local input or
                 // WebRTC disconnect before its MainActor lifecycle callback.
@@ -6273,7 +6312,8 @@ final class HostComputerUseManager: ObservableObject {
                 postedApprovedVisualTaskID = nil
                 guard currentExecutionToken == executionToken else { return }
                 cancelActiveVisualApprovalContinuation()
-                pauseForLocalIntervention(context, guidance: ComputerUseBrowserError.authenticationRequired.localizedDescription)
+                pauseForLocalIntervention(context, guidance: ComputerUseBrowserError.authenticationRequired.localizedDescription,
+                    requiresBrowserHandback: true)
                 return
             } catch ComputerUseHostTools.ToolError.approvalTargetChanged {
                 postedApprovedVisualTaskID = nil

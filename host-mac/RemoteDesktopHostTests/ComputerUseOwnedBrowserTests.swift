@@ -310,13 +310,14 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
         defer { browser.close() }
         try browser.claim(taskID: "login-evidence")
         let original = try await browser.navigate(taskID: "login-evidence", operationID: "results", to: base.appendingPathComponent("results"))
+        let requirement = try XCTUnwrap(browser.handbackRequirement(taskID: "login-evidence", required: true))
         try await waitUntil { server.count("/go") == 1 }
         let beforeLogin = try await browser.observePage(document: original)
         allowed = false
         server.releaseHeldResponses()
         try await waitUntil { server.count("/finish") == 1 && browser.hasPageAwaitingHandback }
         allowed = true
-        try await browser.reacquireAfterUserControl(taskID: "login-evidence")
+        try await browser.reacquireAfterUserControl(taskID: "login-evidence", requirement: requirement)
         let login = try XCTUnwrap(browser.currentDocument(taskID: "login-evidence"))
         do { _ = try await browser.observePage(document: login); XCTFail("Early handback still stops at authentication") }
         catch { XCTAssertEqual(error as? ComputerUseBrowserError, .authenticationRequired) }
@@ -325,7 +326,7 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
         try await waitUntil { server.count("/account") == 1 && browser.hasPageAwaitingHandback }
         allowed = true
         XCTAssertNil(browser.currentDocument(taskID: "login-evidence"), "Opening the gate alone cannot adopt the person's page")
-        try await browser.reacquireAfterUserControl(taskID: "login-evidence")
+        try await browser.reacquireAfterUserControl(taskID: "login-evidence", requirement: requirement)
         let account = try XCTUnwrap(browser.currentDocument(taskID: "login-evidence"))
         let current = try await browser.observePage(document: account)
         XCTAssertEqual(account.source, .userControlObservation)
@@ -353,6 +354,7 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
         defer { browser.close() }
         try browser.claim(taskID: "incomplete-login")
         let original = try await browser.navigate(taskID: "incomplete-login", operationID: "login", to: base.appendingPathComponent("login"))
+        let requirement = try XCTUnwrap(browser.handbackRequirement(taskID: "incomplete-login", required: true))
         try await waitUntil { server.count("/signal") == 1 }
         allowed = false
         browser.updateTaskControls(.init(taskID: "incomplete-login", scopeID: UUID(), presentationID: UUID(),
@@ -362,7 +364,7 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
         browser.closeSignInWindow()
         XCTAssertNil(browser.currentDocument(taskID: "incomplete-login"))
         allowed = true
-        try await browser.reacquireAfterUserControl(taskID: "incomplete-login")
+        try await browser.reacquireAfterUserControl(taskID: "incomplete-login", requirement: requirement)
         XCTAssertEqual(browser.currentDocument(taskID: "incomplete-login"), original)
         let target = ComputerUseBrowserTextTarget(browser: browser, document: original, requiresFrontmost: false)
         do {
@@ -414,6 +416,7 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
             defer { browser.close() }
             try browser.claim(taskID: "popup-login")
             let original = try await browser.navigate(taskID: "popup-login", operationID: "login", to: base.appendingPathComponent("login"))
+            let requirement = try XCTUnwrap(browser.handbackRequirement(taskID: "popup-login", required: true))
             try await waitUntil { server.count("/open-signal") == 1 }
             let beforePause = commands
             allowed = false
@@ -431,7 +434,7 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
                 XCTAssertEqual($0 as? ComputerUseBrowserError, .signInWindowOpen)
             }
             do {
-                try await browser.reacquireAfterUserControl(taskID: "popup-login")
+                try await browser.reacquireAfterUserControl(taskID: "popup-login", requirement: requirement)
                 XCTFail("Resume cannot bypass an open sign-in window")
             } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .signInWindowOpen) }
             do {
@@ -446,7 +449,7 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
             XCTAssertNil(browser.currentDocument(taskID: "popup-login"))
             allowed = true
             XCTAssertNil(browser.currentDocument(taskID: "popup-login"))
-            try await browser.reacquireAfterUserControl(taskID: "popup-login")
+            try await browser.reacquireAfterUserControl(taskID: "popup-login", requirement: requirement)
             let current = try XCTUnwrap(browser.currentDocument(taskID: "popup-login"))
             XCTAssertEqual(current.source, .userControlObservation)
             XCTAssertFalse(browser.validate(original))
@@ -523,6 +526,7 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
             defer { browser.close() }
             try browser.claim(taskID: "popup-owner")
             let original = try await browser.navigate(taskID: "popup-owner", operationID: "login", to: base.appendingPathComponent("login"))
+            let requirement = try XCTUnwrap(browser.handbackRequirement(taskID: "popup-owner", required: true))
             try await waitUntil { server.count("/signal") == 1 }
             let ownerID = UUID()
             allowed = false
@@ -535,7 +539,7 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
             XCTAssertTrue(browser.hasOpenSignInWindow, "A successor execution must not silently dismiss an unfinished login")
             allowed = true
             do {
-                try await browser.reacquireAfterUserControl(taskID: "popup-owner")
+                try await browser.reacquireAfterUserControl(taskID: "popup-owner", requirement: requirement)
                 XCTFail("Early handback must retain the child and pause again")
             } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .signInWindowOpen) }
             allowed = false
@@ -591,6 +595,7 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
             defer { browser.close() }
             try browser.claim(taskID: "history")
             let original = try await browser.navigate(taskID: "history", operationID: "login", to: base.appendingPathComponent("login"))
+            let requirement = try XCTUnwrap(browser.handbackRequirement(taskID: "history"))
             let oldTarget = ComputerUseBrowserTextTarget(browser: browser, document: original, requiresFrontmost: false)
             let oldFields = try await oldTarget.fieldsIfSupported()
             let oldField = try XCTUnwrap(oldFields?.first)
@@ -603,7 +608,7 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
             XCTAssertNil(browser.currentDocument(taskID: "history"), "Opening the action gate does not accept the history change")
             do { _ = try await browser.acquireObservedDocument(taskID: "history"); XCTFail("Ordinary planning cannot adopt a page changed during user control") }
             catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
-            try await browser.reacquireAfterUserControl(taskID: "history")
+            try await browser.reacquireAfterUserControl(taskID: "history", requirement: requirement)
             let current = try XCTUnwrap(browser.currentDocument(taskID: "history"))
             XCTAssertNotEqual(current.generation, original.generation, "A -> B -> A cannot revive the old reference")
             XCTAssertEqual(current.source, .userControlObservation)
@@ -642,13 +647,14 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
             defer { browser.close() }
             try browser.claim(taskID: "active-history")
             let original = try await browser.navigate(taskID: "active-history", operationID: "login", to: base.appendingPathComponent("login"))
+            let requirement = try XCTUnwrap(browser.handbackRequirement(taskID: "active-history", required: true))
             try await waitUntil { server.count("/signal") == 1 }
             server.releaseHeldResponses()
             try await waitUntil { server.count("/changed") == 1 && !browser.validate(original) }
             allowed = false
             XCTAssertFalse(browser.hasPageAwaitingHandback)
             allowed = true
-            try await browser.reacquireAfterUserControl(taskID: "active-history")
+            try await browser.reacquireAfterUserControl(taskID: "active-history", requirement: requirement)
             let current = try XCTUnwrap(browser.currentDocument(taskID: "active-history"))
             XCTAssertEqual(current.source, .activePageObservation, "Handback cannot reclassify the earlier page change as a requested navigation or a user-time observation")
             XCTAssertFalse(browser.validate(original), "An A -> B -> A history transition cannot revive an old document")
@@ -749,6 +755,7 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
             defer { browser.close() }
             try browser.claim(taskID: "interrupted-observation")
             _ = try await browser.navigate(taskID: "interrupted-observation", operationID: "open", to: base.appendingPathComponent("start"))
+            let requirement = try XCTUnwrap(browser.handbackRequirement(taskID: "interrupted-observation", required: true))
             try await waitUntil { server.count("/signal") == 1 }
             server.releaseHeldResponses()
             try await waitUntil { server.count("/results") == 1 && browser.isLoadingPage }
@@ -772,7 +779,7 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
                 if interruption == "pause" {
                     do { _ = try await browser.acquireObservedDocument(taskID: "interrupted-observation"); XCTFail("A load that completed under user control still needs explicit handback") }
                     catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
-                    try await browser.reacquireAfterUserControl(taskID: "interrupted-observation")
+                    try await browser.reacquireAfterUserControl(taskID: "interrupted-observation", requirement: requirement)
                 }
                 let fresh = try await browser.acquireObservedDocument(taskID: "interrupted-observation")
                 XCTAssertEqual(fresh.source, .activePageObservation)
@@ -835,19 +842,20 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
             defer { browser.close() }
             try browser.claim(taskID: "interrupted-history")
             let original = try await browser.navigate(taskID: "interrupted-history", operationID: "login", to: base.appendingPathComponent("login"))
+            let requirement = try XCTUnwrap(browser.handbackRequirement(taskID: "interrupted-history"))
             try await waitUntil { server.count("/signal") == 1 }
             allowed = false
             server.releaseHeldResponses()
             try await waitUntil { server.count("/changed") == 1 && browser.hasPageAwaitingHandback }
             allowed = true
             shouldInterrupt = true
-            let handback = Task { try await browser.reacquireAfterUserControl(taskID: "interrupted-history") }
+            let handback = Task { try await browser.reacquireAfterUserControl(taskID: "interrupted-history", requirement: requirement) }
             running = handback
             do { try await handback.value; XCTFail("An interrupted identity query cannot publish a document") }
             catch is CancellationError { XCTAssertEqual(interruption, "cancel") }
             catch {
                 let failure = try XCTUnwrap(error as? ComputerUseBrowserError)
-                XCTAssertTrue([ComputerUseBrowserError.ownershipLost, .closed, .pageChanged].contains(failure))
+                XCTAssertTrue([ComputerUseBrowserError.ownershipLost, .closed, .pageChanged, .handbackContextLost].contains(failure))
             }
             XCTAssertNil(browser.currentDocument(taskID: "interrupted-history"))
             XCTAssertFalse(browser.validate(original))
@@ -856,7 +864,7 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
                 // explicit handback may retry only after that slot is free.
                 let deadline = ContinuousClock.now + .seconds(5)
                 while true {
-                    do { try await browser.reacquireAfterUserControl(taskID: "interrupted-history"); break }
+                    do { try await browser.reacquireAfterUserControl(taskID: "interrupted-history", requirement: requirement); break }
                     catch ComputerUseBrowserError.busy {
                         guard ContinuousClock.now < deadline else { throw FixtureError.deadline }
                         try await Task.sleep(for: .milliseconds(10))
@@ -1020,6 +1028,7 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
         try browser.claim(taskID: "handoff-callback")
         let original = try await browser.navigate(taskID: "handoff-callback", operationID: "login",
             to: base.appendingPathComponent("login"))
+        let requirement = try XCTUnwrap(browser.handbackRequirement(taskID: "handoff-callback", required: true))
         try await waitUntil { server.count("/signal") == 1 }
         allowed = false
         server.releaseHeldResponses()
@@ -1027,12 +1036,12 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
         XCTAssertEqual(browser.displayedSite, base.absoluteString)
         XCTAssertFalse(browser.validate(original))
         do {
-            try await browser.reacquireAfterUserControl(taskID: "handoff-callback")
+            try await browser.reacquireAfterUserControl(taskID: "handoff-callback", requirement: requirement)
             XCTFail("A closed gate cannot hand back control")
         } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .ownershipLost) }
         allowed = true
         XCTAssertNil(browser.currentDocument(taskID: "handoff-callback"))
-        try await browser.reacquireAfterUserControl(taskID: "handoff-callback")
+        try await browser.reacquireAfterUserControl(taskID: "handoff-callback", requirement: requirement)
         let current = try XCTUnwrap(browser.currentDocument(taskID: "handoff-callback"))
         let expected = try XCTUnwrap(URL(string: callback, relativeTo: base)?.absoluteURL)
         XCTAssertEqual(current.committedURL, expected)
@@ -1299,6 +1308,80 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
             "The historical navigation receipt must not masquerade as the current document")
     }
 
+    func testHandbackRequirementBindsTaskBrowserAndOwnershipWithoutReloading() async throws {
+        let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: "<p>Current page</p>")])
+        let base = try await server.start()
+        defer { server.stop() }
+        var commands: [ComputerUseBrowserDOMCommand] = []
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false,
+            domScriptDidDispatch: { commands.append($0) }, mayAct: { true })
+        let other = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+        defer { browser.close(); other.close() }
+        XCTAssertNil(browser.handbackRequirement(taskID: "root"))
+        try browser.claim(taskID: "root")
+        let original = try await browser.navigate(taskID: "root", operationID: "open", to: base.appendingPathComponent("page"))
+        let requirement = try XCTUnwrap(browser.handbackRequirement(taskID: "root"))
+        XCTAssertNil(browser.handbackRequirement(taskID: "unrelated"))
+        XCTAssertEqual(String(describing: requirement), "BrowserHandbackRequirement")
+        XCTAssertEqual(String(reflecting: requirement), "BrowserHandbackRequirement")
+        let before = commands
+        try await browser.reacquireAfterUserControl(taskID: "root", requirement: requirement)
+        XCTAssertEqual(browser.currentDocument(taskID: "root"), original)
+        XCTAssertEqual(commands, before, "Unchanged handback needs no DOM read or request")
+        do {
+            try await browser.reacquireAfterUserControl(taskID: "unrelated", requirement: requirement)
+            XCTFail("A token cannot be applied to another task")
+        } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .handbackContextLost) }
+        try other.claim(taskID: "root")
+        _ = try await other.navigate(taskID: "root", operationID: "open", to: base.appendingPathComponent("page"))
+        do {
+            try await other.reacquireAfterUserControl(taskID: "root", requirement: requirement)
+            XCTFail("Matching task and URL do not identify the same browser")
+        } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .handbackContextLost) }
+        try browser.claim(taskID: "another-owner")
+        try browser.claim(taskID: "root")
+        do {
+            try await browser.reacquireAfterUserControl(taskID: "root", requirement: requirement)
+            XCTFail("Returning to the old task ID cannot restore retired ownership")
+        } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .handbackContextLost) }
+        XCTAssertEqual(commands, before)
+        XCTAssertEqual(server.count("/page"), 2)
+    }
+
+    func testHandbackRequirementCannotSurviveStoppedOrRecreatedSession() async throws {
+        for ending in ["stop", "close"] {
+            let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: "<p>Current page</p>")])
+            let base = try await server.start()
+            defer { server.stop() }
+            let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+            defer { browser.close() }
+            let missing = try XCTUnwrap(browser.handbackRequirement(taskID: "root", required: true))
+            try browser.claim(taskID: "root")
+            _ = try await browser.navigate(taskID: "root", operationID: "first", to: base.appendingPathComponent("page"))
+            let old = try XCTUnwrap(browser.handbackRequirement(taskID: "root"))
+            if ending == "stop" { browser.stop() } else { browser.close() }
+            for requirement in [old, missing] {
+                do {
+                    try await browser.reacquireAfterUserControl(taskID: "root", requirement: requirement)
+                    XCTFail("A missing browser must fail explicitly")
+                } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .handbackContextLost) }
+            }
+            try browser.claim(taskID: "root")
+            let replacement = try await browser.navigate(taskID: "root", operationID: "second", to: base.appendingPathComponent("page"))
+            for requirement in [old, missing] {
+                do {
+                    try await browser.reacquireAfterUserControl(taskID: "root", requirement: requirement)
+                    XCTFail("A later same-task browser cannot satisfy the earlier handoff")
+                } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .handbackContextLost) }
+            }
+            let fresh = try XCTUnwrap(browser.handbackRequirement(taskID: "root"))
+            XCTAssertNotEqual(fresh, old)
+            try await browser.reacquireAfterUserControl(taskID: "root", requirement: fresh)
+            XCTAssertEqual(browser.currentDocument(taskID: "root"), replacement)
+            XCTAssertEqual(server.count("/page"), 2, "Handback validation cannot create a third navigation")
+        }
+    }
+
     func testUserControlPageNeedsExplicitHandbackAndNeverBecomesNavigationProof() async throws {
         for destination in ["/login", "/account"] {
             let body = """
@@ -1325,19 +1408,20 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
             try browser.claim(taskID: "handoff")
             let original = try await browser.navigate(taskID: "handoff", operationID: "opened-login",
                 to: base.appendingPathComponent("login"))
+            let requirement = try XCTUnwrap(browser.handbackRequirement(taskID: "handoff"))
             try await waitUntil { server.count("/signal") == 1 }
             allowed = false
             server.releaseHeldResponses()
             try await waitUntil { browser.hasPageAwaitingHandback }
             XCTAssertFalse(browser.validate(original))
             do {
-                try await browser.reacquireAfterUserControl(taskID: "handoff")
+                try await browser.reacquireAfterUserControl(taskID: "handoff", requirement: requirement)
                 XCTFail("A closed gate cannot hand back control")
             } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .ownershipLost) }
             allowed = true
             XCTAssertNil(browser.currentDocument(taskID: "handoff"), "Opening the gate is not handback")
             XCTAssertThrowsError(try browser.acquireCurrentDocument(taskID: "handoff"))
-            try await browser.reacquireAfterUserControl(taskID: "handoff")
+            try await browser.reacquireAfterUserControl(taskID: "handoff", requirement: requirement)
             let current = try XCTUnwrap(browser.currentDocument(taskID: "handoff"))
             XCTAssertEqual(current.source, .userControlObservation)
             XCTAssertEqual(current.committedURL.path, destination)
@@ -1375,13 +1459,14 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
             try browser.claim(taskID: "rejected-handoff")
             let original = try await browser.navigate(taskID: "rejected-handoff", operationID: "original",
                 to: base.appendingPathComponent("login"))
+            let requirement = try XCTUnwrap(browser.handbackRequirement(taskID: "rejected-handoff", required: true))
             try await waitUntil { server.count("/signal") == 1 }
             allowed = !row.pause
             server.releaseHeldResponses()
             try await waitUntil { server.count("/destination") == 1 && !browser.isLoadingPage }
             allowed = true
             do {
-                try await browser.reacquireAfterUserControl(taskID: "rejected-handoff")
+                try await browser.reacquireAfterUserControl(taskID: "rejected-handoff", requirement: requirement)
                 XCTFail("An unobserved or failed navigation cannot be adopted")
             } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
             XCTAssertNil(browser.currentDocument(taskID: "rejected-handoff"))
@@ -1517,6 +1602,7 @@ final class ComputerUseOwnedBrowserVisibleAcceptanceTests: XCTestCase {
         defer { browser.close() }
         try browser.claim(taskID: "visible-popup")
         let original = try await browser.navigate(taskID: "visible-popup", operationID: "login", to: base.appendingPathComponent("login"))
+        let requirement = try XCTUnwrap(browser.handbackRequirement(taskID: "visible-popup", required: true))
         let parent = try XCTUnwrap(NSApp.windows.first { $0.title == "AI Browser — Remote Desktop" })
         let controls = ComputerUseBrowserTaskControls(taskID: "visible-popup", scopeID: UUID(),
             presentationID: UUID(), phase: .paused, canResume: true)
@@ -1551,7 +1637,7 @@ final class ComputerUseOwnedBrowserVisibleAcceptanceTests: XCTestCase {
         XCTAssertEqual(browser.taskControls, controls)
         XCTAssertNil(browser.currentDocument(taskID: "visible-popup"))
         allowed = true
-        try await browser.reacquireAfterUserControl(taskID: "visible-popup")
+        try await browser.reacquireAfterUserControl(taskID: "visible-popup", requirement: requirement)
         XCTAssertEqual(browser.currentDocument(taskID: "visible-popup"), original)
         XCTAssertEqual(server.count("/login"), 1)
     }

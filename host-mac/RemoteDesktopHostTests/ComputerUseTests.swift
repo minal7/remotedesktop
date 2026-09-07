@@ -966,6 +966,133 @@ final class ComputerUseTests: XCTestCase {
         XCTAssertEqual(server.count("/lost-session"), 0)
     }
 
+    func test_managerCannotResumeLoginAfterThePausedBrowserIsStoppedOrClosed() async throws {
+        for ending in ["stop", "close"] {
+            let server = try OwnedBrowserHTTPFixture(routes: ["/login": .init(body: "<p>Manual login fixture</p>")])
+            let base = try await server.start()
+            defer { server.stop() }
+            let url = temporaryLedgerURL()
+            defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+            var browser: ComputerUseOwnedBrowser?
+            let executor = BrowserLoginHandoffTestExecutor(loginURL: base.appendingPathComponent("login"), browser: { browser })
+            let fixture = try browserControlFixture(executor: executor, ledgerURL: url)
+            browser = fixture.browser
+            defer { fixture.manager.stop(); fixture.browser.close() }
+            let prompt = makeEnvelope(id: "closed-login-\(ending)", kind: .prompt, body: "Find travel options after I sign in.")
+            fixture.manager.authorizePeer(senderID: prompt.senderID)
+            XCTAssertTrue(fixture.manager.handle(prompt, channel: fixture.channel))
+            await waitUntil { fixture.manager.activity == .paused }
+            XCTAssertEqual(executor.callCount, 1)
+            if ending == "stop" { fixture.browser.stop() } else { fixture.browser.close() }
+            for revision in 1...2 {
+                XCTAssertTrue(fixture.manager.handle(try makeControlEnvelope(kind: .resume,
+                    taskID: prompt.id, revision: UInt64(revision), hostEpoch: UInt64(revision)), channel: fixture.channel))
+                await waitUntil { fixture.manager.activity == .paused && fixture.ledger.hostControlEpoch(taskID: prompt.id) == UInt64(revision + 1) }
+                XCTAssertEqual(executor.callCount, 1, "Failed Resume must retain the original requirement and never reach a fallback executor")
+            }
+            let messages = await fixture.channel.sentMessages()
+            XCTAssertTrue(messages.contains { $0.body.contains(ComputerUseBrowserError.handbackContextLost.localizedDescription) })
+            XCTAssertFalse(messages.contains { $0.kind == .assistant })
+            XCTAssertEqual(server.count("/login"), 1)
+        }
+    }
+
+    func test_managerAuthenticationWithoutABrowserCannotSilentlyResume() async throws {
+        let url = temporaryLedgerURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        var calls = 0
+        let executor = ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in
+            calls += 1
+            if calls == 1 { throw ComputerUseBrowserError.authenticationRequired }
+            return .completed("Unexpected continuation")
+        })
+        let fixture = try browserControlFixture(executor: executor, ledgerURL: url)
+        defer { fixture.manager.stop(); fixture.browser.close() }
+        let prompt = makeEnvelope(id: "missing-login-session", kind: .prompt, body: "Continue after I sign in.")
+        fixture.manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(fixture.manager.handle(prompt, channel: fixture.channel))
+        await waitUntil { fixture.manager.activity == .paused }
+        XCTAssertEqual(calls, 1)
+        XCTAssertTrue(fixture.manager.handle(try makeControlEnvelope(kind: .resume,
+            taskID: prompt.id, revision: 1, hostEpoch: 1), channel: fixture.channel))
+        await waitUntil { fixture.manager.activity == .paused && fixture.ledger.hostControlEpoch(taskID: prompt.id) == 2 }
+        XCTAssertEqual(calls, 1)
+        let messages = await fixture.channel.sentMessages()
+        XCTAssertTrue(messages.contains { $0.body.contains(ComputerUseBrowserError.handbackContextLost.localizedDescription) })
+        XCTAssertFalse(messages.contains { $0.kind == .assistant })
+    }
+
+    func test_managerNativeResumeDoesNotAcquireAnUnrelatedBrowser() async throws {
+        let server = try OwnedBrowserHTTPFixture(routes: ["/unrelated": .init(body: "<p>Another task's page</p>")])
+        let base = try await server.start()
+        defer { server.stop() }
+        let url = temporaryLedgerURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let executor = ImmediateComputerUseExecutor(results: [.userInterventionRequired("Finish the native step."), .completed("Native step checked.")])
+        let fixture = try browserControlFixture(executor: executor, ledgerURL: url)
+        defer { fixture.manager.stop(); fixture.browser.close() }
+        try fixture.browser.claim(taskID: "unrelated")
+        _ = try await fixture.browser.navigate(taskID: "unrelated", operationID: "other-page", to: base.appendingPathComponent("unrelated"))
+        let prompt = makeEnvelope(id: "native-handoff", kind: .prompt, body: "Continue the task in Notes after I finish the manual step.")
+        fixture.manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(fixture.manager.handle(prompt, channel: fixture.channel))
+        await waitUntil { fixture.manager.activity == .paused }
+        XCTAssertEqual(executor.callCount, 1)
+        fixture.browser.close()
+        XCTAssertTrue(fixture.manager.handle(try makeControlEnvelope(kind: .resume,
+            taskID: prompt.id, revision: 1, hostEpoch: 1), channel: fixture.channel))
+        await waitUntil { fixture.manager.activity == .idle && executor.callCount == 2 }
+        XCTAssertEqual(executor.trustedUserPrompts, [prompt.body, prompt.body])
+        XCTAssertNil(fixture.browser.taskID)
+        XCTAssertEqual(server.count("/unrelated"), 1)
+    }
+
+    func test_managerConsumesSuccessfulHandbackBeforeCapturingTheNextSession() async throws {
+        let server = try OwnedBrowserHTTPFixture(routes: [
+            "/first": .init(body: "<p>First page</p>"), "/second": .init(body: "<p>Next session</p>")])
+        let base = try await server.start()
+        defer { server.stop() }
+        let url = temporaryLedgerURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        var browser: ComputerUseOwnedBrowser?
+        var taskIDs: [String] = [], trustedPrompts: [String] = []
+        let executor = ComputerUseCapabilityExecutor(nativeExecution: { taskID, prompt, _ in
+            taskIDs.append(taskID); trustedPrompts.append(prompt)
+            let owned = try XCTUnwrap(browser)
+            if taskIDs.count <= 2 {
+                if taskIDs.count == 2 {
+                    XCTAssertEqual(owned.currentDocument(taskID: taskID)?.committedURL.path, "/first")
+                    owned.close()
+                }
+                try owned.claim(taskID: taskID)
+                let path = taskIDs.count == 1 ? "first" : "second"
+                _ = try await owned.navigate(taskID: taskID, operationID: path, to: base.appendingPathComponent(path))
+                return .userInterventionRequired("Finish this manual step, then Resume.")
+            }
+            XCTAssertEqual(owned.currentDocument(taskID: taskID)?.committedURL.path, "/second")
+            return .completed("Both fixture handoffs checked.")
+        })
+        let fixture = try browserControlFixture(executor: executor, ledgerURL: url)
+        browser = fixture.browser
+        defer { fixture.manager.stop(); fixture.browser.close() }
+        let prompt = makeEnvelope(id: "successive-handoffs", kind: .prompt, body: "Continue the fixture after each manual handoff.")
+        fixture.manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(fixture.manager.handle(prompt, channel: fixture.channel))
+        await waitUntil { fixture.manager.activity == .paused }
+        XCTAssertEqual(taskIDs.count, 1)
+        XCTAssertTrue(fixture.manager.handle(try makeControlEnvelope(kind: .resume,
+            taskID: prompt.id, revision: 1, hostEpoch: 1), channel: fixture.channel))
+        await waitUntil { fixture.manager.activity == .paused && fixture.ledger.hostControlEpoch(taskID: prompt.id) == 2 }
+        XCTAssertEqual(taskIDs.count, 2)
+        XCTAssertTrue(fixture.manager.handle(try makeControlEnvelope(kind: .resume,
+            taskID: prompt.id, revision: 2, hostEpoch: 2), channel: fixture.channel))
+        await waitUntil { fixture.manager.activity == .idle && taskIDs.count == 3 }
+        XCTAssertEqual(taskIDs, Array(repeating: prompt.id, count: 3))
+        XCTAssertEqual(trustedPrompts, Array(repeating: prompt.body, count: 3))
+        XCTAssertEqual(server.count("/first"), 1)
+        XCTAssertEqual(server.count("/second"), 1)
+    }
+
     func test_taskLedgerRequiresExactWireBodyBeforeAcceptedOrTerminalReplay() throws {
         let url = temporaryLedgerURL()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }

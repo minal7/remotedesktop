@@ -149,8 +149,12 @@ final class ComputerUseBrowserNavigationTask {
         browser.updateTaskControls(controls, handler: handler)
     }
 
-    func reacquireAfterUserControl(taskID: String) async throws {
-        try await browser.reacquireAfterUserControl(taskID: taskID)
+    func handbackRequirement(taskID: String, required: Bool = false) -> ComputerUseBrowserHandbackRequirement? {
+        browser.handbackRequirement(taskID: taskID, required: required)
+    }
+
+    func reacquireAfterUserControl(_ requirement: ComputerUseBrowserHandbackRequirement) async throws {
+        try await browser.reacquireAfterUserControl(taskID: requirement.taskID, requirement: requirement)
     }
 
     func textTargetIfFrontmost(taskID: String) async throws -> ComputerUseBrowserTextTarget? {
