@@ -3,6 +3,117 @@ import XCTest
 
 @MainActor
 final class ComputerUseBrowserDOMTests: XCTestCase {
+    func testResearchOwnerReadsCanonicalGoalAndClearsStaleCandidateCache() async throws {
+        let fixture = try await DOMFixture(body: """
+            <article><h2>Concert Alpha</h2><p id='price'>USD 35</p></article>
+            <script>fetch('/signal').then(() => { document.getElementById('price').textContent = 'USD 45'; fetch('/changed'); });</script>
+            """, heldSignal: true)
+        defer { fixture.close() }
+        let goal = try browserResultGoal(), planner = BrowserResearchGoalFixture(), reader = BrowserResearchResultFixture()
+        let owner = ComputerUseBrowserResearchTask(input: goal, browser: fixture.browser, goalPlanner: planner, resultPlanner: reader, mayAct: { true })
+        _ = try await owner.interpretGoal()
+        let first = try await owner.readCandidates()
+        XCTAssertTrue(first.candidates[0].texts.contains { $0.text == "USD 35" })
+        _ = try await owner.revalidateCandidates()
+        XCTAssertEqual(planner.inputs, [goal]); XCTAssertEqual(reader.inputs, [goal])
+        try await fixture.wait { fixture.server.count("/signal") == 1 }
+        fixture.server.releaseHeldResponses()
+        try await fixture.wait { fixture.server.count("/changed") == 1 }
+        do { _ = try await owner.revalidateCandidates(); XCTFail("A price change must invalidate the retained reading") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+        do { _ = try await owner.revalidateCandidates(); XCTFail("Failed validation must clear the old cache") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserResearchTask.Failure, .interpretationRequired) }
+        let fresh = try await owner.readCandidates()
+        XCTAssertTrue(fresh.candidates[0].texts.contains { $0.text == "USD 45" })
+        XCTAssertNotEqual(first.candidates[0].id, fresh.candidates[0].id)
+        XCTAssertEqual(reader.inputs, [goal, goal])
+    }
+
+    func testResearchOwnerPauseDuringReadingKeepsSlotUntilUnwindAndRequiresHandback() async throws {
+        var mayAct = true
+        let fixture = try await DOMFixture(body: "<article><h2>Concert Alpha</h2><p>USD 35</p></article>", mayAct: { mayAct })
+        let gate = BrowserResearchGate(), planner = BrowserResearchGoalFixture(), reader = BrowserResearchResultFixture()
+        defer { gate.release(); fixture.close() }
+        reader.beforeReply = { await gate.suspend() }
+        let goal = try browserResultGoal()
+        let owner = ComputerUseBrowserResearchTask(input: goal, browser: fixture.browser, goalPlanner: planner, resultPlanner: reader, mayAct: { mayAct })
+        _ = try await owner.interpretGoal()
+        let running = Task { try await owner.readCandidates() }
+        try await gate.waitUntilStarted()
+        mayAct = false; owner.pause()
+        XCTAssertTrue(owner.isOperating)
+        do { try await owner.resumeAfterUserControl(); XCTFail("A cancelled read retains ownership until its callback finishes") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserResearchTask.Failure, .busy) }
+        gate.release()
+        do { _ = try await running.value; XCTFail("The cancelled reading cannot publish candidates") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        do { try await owner.resumeAfterUserControl(); XCTFail("Handback cannot bypass the host action gate") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .ownershipLost) }
+        mayAct = true
+        reader.beforeReply = nil
+        try await owner.resumeAfterUserControl()
+        do { _ = try await owner.revalidateCandidates(); XCTFail("Pause discarded speculative candidates") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserResearchTask.Failure, .interpretationRequired) }
+        _ = try await owner.readCandidates()
+        XCTAssertEqual(planner.inputs, [goal]); XCTAssertEqual(reader.inputs, [goal, goal])
+        XCTAssertEqual(owner.input, goal)
+    }
+
+    func testResearchOwnerPauseDuringHandbackCannotBeOverwrittenByItsLateCompletion() async throws {
+        var owner: ComputerUseBrowserResearchTask?
+        var pauseAtSnapshot = false, interruptedWhileOperating = false
+        let fixture = try await DOMFixture(body: "<article><h2>Concert Alpha</h2></article>", domScriptDidDispatch: { command in
+            guard command == .pageSnapshot, pauseAtSnapshot, let owner else { return }
+            pauseAtSnapshot = false
+            interruptedWhileOperating = owner.isOperating
+            owner.pause()
+            XCTAssertTrue(owner.isOperating, "Pause cannot release a handback that is still awaiting its page read")
+        })
+        defer { owner?.retire(); owner = nil; fixture.close() }
+        let goal = try browserResultGoal(), planner = BrowserResearchGoalFixture()
+        let prepared = ComputerUseBrowserResearchTask(input: goal, browser: fixture.browser, goalPlanner: planner,
+            resultPlanner: BrowserResearchResultFixture(), mayAct: { true })
+        owner = prepared
+        _ = try await prepared.interpretGoal()
+        prepared.pause(); pauseAtSnapshot = true
+        do { try await prepared.resumeAfterUserControl(); XCTFail("A later Pause must invalidate the in-flight handback") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertTrue(interruptedWhileOperating)
+        do { _ = try await prepared.interpretGoal(); XCTFail("The late handback callback must leave the owner paused") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserResearchTask.Failure, .paused) }
+        XCTAssertEqual(planner.inputs, [goal])
+    }
+
+    func testResearchOwnerHandbackRejectsClosedBrowserAndUnfinishedLoginBeforePlanning() async throws {
+        for mode in ["close", "authentication"] {
+            let fixture = try await DOMFixture(body: """
+                <article><h2>Concert Alpha</h2></article><div id='login'></div>
+                <script>fetch('/signal').then(() => {
+                    document.getElementById('login').innerHTML = '<label>Password<input type=password autocomplete=current-password></label>';
+                    fetch('/changed');
+                });</script>
+                """, heldSignal: true)
+            defer { fixture.close() }
+            let goal = try browserResultGoal(), planner = BrowserResearchGoalFixture(), reader = BrowserResearchResultFixture()
+            let owner = ComputerUseBrowserResearchTask(input: goal, browser: fixture.browser, goalPlanner: planner, resultPlanner: reader, mayAct: { true })
+            _ = try await owner.interpretGoal()
+            owner.pause()
+            if mode == "close" { fixture.browser.close() }
+            else {
+                try await fixture.wait { fixture.server.count("/signal") == 1 }
+                fixture.server.releaseHeldResponses()
+                try await fixture.wait { fixture.server.count("/changed") == 1 }
+            }
+            do { try await owner.resumeAfterUserControl(); XCTFail("A new session or visible login cannot count as handback") }
+            catch {
+                XCTAssertEqual(error as? ComputerUseBrowserError, mode == "close" ? .handbackContextLost : .authenticationRequired)
+            }
+            do { _ = try await owner.interpretGoal(); XCTFail("Failed handback leaves the owner paused") }
+            catch { XCTAssertEqual(error as? ComputerUseBrowserResearchTask.Failure, .paused) }
+            XCTAssertEqual(planner.inputs, [goal]); XCTAssertTrue(reader.inputs.isEmpty)
+        }
+    }
+
     func testResultCandidatesRetainEverySourceFragmentAndKeepOfferAndGlobalContextSeparate() async throws {
         let fixture = try await DOMFixture(body: """
             <p>Global date: September 20</p><article><h2>Concert Alpha</h2><p>USD 35</p><p>Excluding fees</p>

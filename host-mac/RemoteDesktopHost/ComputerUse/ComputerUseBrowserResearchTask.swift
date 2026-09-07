@@ -1,0 +1,241 @@
+import Foundation
+
+/// Owns the canonical goal revision and read/planning work for one browser
+/// research task. It does not compile actions or terminal research answers.
+@MainActor
+final class ComputerUseBrowserResearchTask {
+    enum Failure: Error, Equatable { case busy, paused, retired, goalChanged, interpretationRequired, questionPending, browserRequired }
+    struct Interpretation: Sendable {
+        let proposal: ComputerUseBrowserGoalProposal
+        let scalars: ComputerUseBrowserScalarRequirements
+    }
+    let taskID: String
+    private let browser: ComputerUseOwnedBrowser
+    private let goalPlanner: any ComputerUseBrowserGoalPlanning
+    private let resultPlanner: any ComputerUseBrowserResultPlanning
+    private let mayAct: @MainActor () -> Bool
+    private let clarification: ComputerUseBrowserGoalClarification
+    private var interpretation: Interpretation?
+    private var latestCandidates: ComputerUseBrowserResultCandidates?
+    private var session: ComputerUseBrowserHandbackRequirement?
+    private var handback: ComputerUseBrowserHandbackRequirement?
+    private var isPaused = false
+    private var isRetired = false
+    private var operationID: UUID?
+    private var cancelOperation: (() -> Void)?
+    private var controlEpoch = UUID()
+    private var hasQuestion = false
+
+    var input: ComputerUseBrowserGoalInput { clarification.input }
+    var isOperating: Bool { operationID != nil }
+
+    init(input: ComputerUseBrowserGoalInput, browser: ComputerUseOwnedBrowser,
+         goalPlanner: any ComputerUseBrowserGoalPlanning, resultPlanner: any ComputerUseBrowserResultPlanning,
+         mayAct: @escaping @MainActor () -> Bool, now: @escaping () -> Date = Date.init) {
+        taskID = input.taskID; self.browser = browser; self.goalPlanner = goalPlanner; self.resultPlanner = resultPlanner
+        self.mayAct = mayAct; clarification = .init(input: input, now: now)
+    }
+
+    func interpretGoal() async throws -> Interpretation {
+        try requireIdle()
+        guard !hasQuestion else { throw Failure.questionPending }
+        if let interpretation, interpretation.proposal.input.digest == input.digest { return interpretation }
+        let captured = input
+        let result = try await operate { [self] in
+            // When this task already owns a page, discover login/control loss
+            // before asking the model. No browser is created or claimed here.
+            if browser.taskID == taskID { _ = try await observeOwnedPage(goal: captured) }
+            let proposal = try await goalPlanner.propose(captured)
+            try checkCurrent(captured)
+            guard proposal.input.digest == captured.digest else { throw Failure.goalChanged }
+            return Interpretation(proposal: proposal, scalars: .init(proposal: proposal))
+        }
+        interpretation = result
+        return result
+    }
+
+    func readCandidates() async throws -> ComputerUseBrowserResultCandidates {
+        try requireIdle()
+        guard !hasQuestion else { throw Failure.questionPending }
+        guard let interpretation, interpretation.proposal.input.digest == input.digest,
+              interpretation.proposal.disposition == .research else { throw Failure.interpretationRequired }
+        let captured = input
+        latestCandidates = nil
+        let batch = try await operate { [self] in
+            let evidence = try await observeOwnedPage(goal: captured)
+            let page = try ComputerUseBrowserResultPageInput(page: evidence.page)
+            let proposal = try await resultPlanner.propose(goal: captured, page: page)
+            try checkCurrent(captured)
+            let bound = try await browser.prepareResultCandidates(proposal, goal: captured, evidence: evidence)
+            try checkCurrent(captured)
+            return bound
+        }
+        latestCandidates = batch
+        return batch
+    }
+
+    /// Returns only a newly revalidated reading, still not verified offer
+    /// semantics or a complete answer. Failed validation retires the cache.
+    func revalidateCandidates() async throws -> ComputerUseBrowserResultCandidates {
+        try requireIdle()
+        guard !hasQuestion else { throw Failure.questionPending }
+        guard let retained = latestCandidates else { throw Failure.interpretationRequired }
+        let captured = input
+        latestCandidates = nil
+        let batch = try await operate { [self] in
+            try checkCurrent(captured)
+            try await browser.validateResultCandidates(retained, goal: captured)
+            try checkCurrent(captured)
+            return retained
+        }
+        latestCandidates = batch
+        return batch
+    }
+
+    /// Controller identifiers must come from authenticated host transport.
+    /// Browser scope is derived here from this owner's actual live session,
+    /// never accepted as a client-supplied digest.
+    func issueQuestion(topic: ComputerUseBrowserClarificationTopic, requirementIDs: [String],
+                       controllerID: String, controllerSessionID: String) throws -> ComputerUseBrowserGoalClarification.Question {
+        try requireIdle()
+        guard let interpretation, interpretation.proposal.input.digest == input.digest else { throw Failure.interpretationRequired }
+        let context = try questionContext(controllerID: controllerID, controllerSessionID: controllerSessionID)
+        let question = try clarification.issue(proposal: interpretation.proposal, topic: topic, requirementIDs: requirementIDs, context: context)
+        hasQuestion = true; latestCandidates = nil
+        return question
+    }
+
+    func answerQuestion(questionID: String, answerTaskID: String, answer: String,
+                        controllerID: String, controllerSessionID: String) throws -> ComputerUseBrowserGoalInput {
+        try requireIdle()
+        let context = try questionContext(controllerID: controllerID, controllerSessionID: controllerSessionID)
+        let updated: ComputerUseBrowserGoalInput
+        do { updated = try clarification.consume(questionID: questionID, answerTaskID: answerTaskID, answer: answer, context: context) }
+        catch ComputerUseBrowserGoalClarification.Failure.expired {
+            hasQuestion = false
+            throw ComputerUseBrowserGoalClarification.Failure.expired
+        }
+        interpretation = nil; latestCandidates = nil; hasQuestion = false
+        return updated
+    }
+
+    func pendingQuestion(controllerID: String, controllerSessionID: String) throws -> ComputerUseBrowserGoalClarification.Question? {
+        try requireIdle()
+        let context = try questionContext(controllerID: controllerID, controllerSessionID: controllerSessionID)
+        do {
+            let pending = try clarification.pendingQuestion(context: context)
+            hasQuestion = pending != nil
+            return pending
+        } catch ComputerUseBrowserGoalClarification.Failure.expired {
+            hasQuestion = false
+            throw ComputerUseBrowserGoalClarification.Failure.expired
+        }
+    }
+
+    /// Invalidate speculative results/questions immediately, but hold the
+    /// operation slot until the actual child task unwinds after cancellation.
+    func pause() {
+        guard !isRetired else { return }
+        isPaused = true; controlEpoch = UUID()
+        if handback == nil {
+            handback = session ?? (browser.taskID == taskID ? browser.handbackRequirement(taskID: taskID, required: true) : nil)
+        }
+        latestCandidates = nil; clarification.invalidateQuestion(); hasQuestion = false
+        cancelOperation?()
+    }
+
+    /// Called only for an explicit handback. The same session may have moved
+    /// through a login redirect; a stopped/replaced browser cannot be adopted.
+    func resumeAfterUserControl() async throws {
+        guard !isRetired else { throw Failure.retired }
+        guard operationID == nil else { throw Failure.busy }
+        guard isPaused else { return }
+        try Task.checkCancellation()
+        guard mayAct() else { throw ComputerUseBrowserError.ownershipLost }
+        let epoch = controlEpoch, id = UUID(), captured = input
+        let expected = handback
+        operationID = id
+        let child = Task<ComputerUseBrowserHandbackRequirement?, Error> { @MainActor [self] in
+            if let expected {
+                try await browser.reacquireAfterUserControl(taskID: taskID, requirement: expected)
+                try Task.checkCancellation()
+                let document = try await browser.acquireObservedDocument(taskID: taskID)
+                try Task.checkCancellation()
+                _ = try await browser.observePage(document: document)
+                try Task.checkCancellation()
+                try browser.validateWorkflowSession(expected)
+                return expected
+            }
+            guard session == nil, browser.taskID == nil else { throw ComputerUseBrowserError.handbackContextLost }
+            return nil
+        }
+        cancelOperation = { child.cancel() }
+        defer { if operationID == id { operationID = nil; cancelOperation = nil } }
+        let resumed = try await withTaskCancellationHandler { try await child.value } onCancel: { child.cancel() }
+        try Task.checkCancellation()
+        guard !isRetired, isPaused, epoch == controlEpoch, operationID == id, input.digest == captured.digest, mayAct() else { throw Failure.paused }
+        session = resumed; self.handback = nil; isPaused = false
+    }
+
+    func retire() {
+        isRetired = true; controlEpoch = UUID(); latestCandidates = nil; interpretation = nil
+        clarification.retire(); hasQuestion = false; cancelOperation?()
+    }
+
+    private func questionContext(controllerID: String, controllerSessionID: String) throws -> ComputerUseBrowserGoalClarification.Context {
+        if browser.taskID == taskID { try captureSession() }
+        else if session != nil { throw ComputerUseBrowserError.handbackContextLost }
+        return try .init(controllerID: controllerID, controllerSessionID: controllerSessionID, browserSessionDigest: session?.sessionBindingDigest)
+    }
+
+    private func captureSession() throws {
+        guard browser.taskID == taskID else { throw Failure.browserRequired }
+        if let session { try browser.validateWorkflowSession(session) }
+        else {
+            guard let captured = browser.handbackRequirement(taskID: taskID, required: true) else { throw Failure.browserRequired }
+            try browser.validateWorkflowSession(captured)
+            session = captured
+        }
+    }
+
+    private func observeOwnedPage(goal: ComputerUseBrowserGoalInput) async throws -> ComputerUseBrowserPageEvidence {
+        try checkCurrent(goal); try captureSession()
+        let document = try await browser.acquireObservedDocument(taskID: taskID)
+        try checkCurrent(goal)
+        let evidence = try await browser.observePage(document: document)
+        try checkCurrent(goal)
+        return evidence
+    }
+
+    private func requireIdle() throws {
+        try Task.checkCancellation()
+        guard !isRetired else { throw Failure.retired }
+        guard !isPaused else { throw Failure.paused }
+        guard mayAct() else { throw ComputerUseBrowserError.ownershipLost }
+        guard operationID == nil else { throw Failure.busy }
+    }
+
+    private func checkCurrent(_ goal: ComputerUseBrowserGoalInput) throws {
+        try Task.checkCancellation()
+        guard !isRetired else { throw Failure.retired }
+        guard !isPaused else { throw Failure.paused }
+        guard mayAct() else { throw ComputerUseBrowserError.ownershipLost }
+        guard goal.digest == input.digest, goal.taskID.utf8.elementsEqual(taskID.utf8) else { throw Failure.goalChanged }
+        if let session { try browser.validateWorkflowSession(session) }
+    }
+
+    private func operate<Value: Sendable>(_ body: @escaping @MainActor @Sendable () async throws -> Value) async throws -> Value {
+        try requireIdle()
+        let id = UUID(), epoch = controlEpoch, captured = input
+        operationID = id
+        let child = Task { @MainActor in try await body() }
+        cancelOperation = { child.cancel() }
+        defer {
+            if operationID == id { operationID = nil; cancelOperation = nil }
+        }
+        let value = try await withTaskCancellationHandler { try await child.value } onCancel: { child.cancel() }
+        try checkCurrent(captured)
+        guard controlEpoch == epoch, operationID == id else { throw Failure.paused }
+        return value
+    }
+}

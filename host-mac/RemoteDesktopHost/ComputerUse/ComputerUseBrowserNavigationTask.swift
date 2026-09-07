@@ -52,6 +52,7 @@ final class ComputerUseBrowserNavigationTask {
     private var execution: ComputerUseTaskExecution?
     private var retainedURLs: [URL] = []
     private var workflow: ComputerUseBrowserWorkflowTask?
+    private var research: ComputerUseBrowserResearchTask?
 
     init(browser: ComputerUseOwnedBrowser, journalDirectory: URL, effectNamespace: String? = nil,
          beforeNavigationDispatch: (@MainActor (Int) async throws -> Void)? = nil,
@@ -72,6 +73,7 @@ final class ComputerUseBrowserNavigationTask {
             }
         }
         let promptDigest = ComputerUseTextTaskContract.digest(prompt)
+        if let research, research.taskID != taskID { research.retire() }
         if let execution, execution.contract.taskID == taskID {
             guard execution.contract.promptDigest == promptDigest else { throw ComputerUseTaskExecutionError.journalMismatch }
         } else {
@@ -152,6 +154,7 @@ final class ComputerUseBrowserNavigationTask {
 
     func executeWorkflow(taskID: String, request: ComputerUseBrowserWorkflowRequest, injector: InputInjector,
                          progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
+        if let research, research.taskID != taskID { research.retire() }
         if let workflow, workflow.taskID == taskID {
             guard workflow.request.prompt.utf8.elementsEqual(request.prompt.utf8) else {
                 throw ComputerUseTaskExecutionError.journalMismatch
@@ -176,9 +179,32 @@ final class ComputerUseBrowserNavigationTask {
         }
     }
 
-    func close() { browser.close() }
+    /// The first call fixes the goal's clock. Resume/retrieval never rebuilds
+    /// it from a later wall clock or replaces the exact original request.
+    func prepareResearchTask(taskID: String, prompt: String, goalPlanner: any ComputerUseBrowserGoalPlanning,
+                             resultPlanner: any ComputerUseBrowserResultPlanning, mayAct: @escaping @MainActor () -> Bool,
+                             referenceDate: Date = Date(), timeZoneIdentifier: String = TimeZone.current.identifier) throws -> ComputerUseBrowserResearchTask {
+        if let research, research.taskID == taskID {
+            guard research.input.prompt.utf8.elementsEqual(prompt.utf8) else { throw ComputerUseBrowserResearchTask.Failure.goalChanged }
+            return research
+        }
+        let input = try ComputerUseBrowserGoalInput(taskID: taskID, prompt: prompt, referenceDate: referenceDate, timeZoneIdentifier: timeZoneIdentifier)
+        let replacement = ComputerUseBrowserResearchTask(input: input, browser: browser, goalPlanner: goalPlanner,
+            resultPlanner: resultPlanner, mayAct: mayAct)
+        research?.retire()
+        research = replacement
+        return replacement
+    }
 
-    func stopBrowserActivity() { browser.stop() }
+    func pauseResearchTask(taskID: String) { if research?.taskID == taskID { research?.pause() } }
+    func resumeResearchTask(taskID: String) async throws {
+        if research?.taskID == taskID { try await research?.resumeAfterUserControl() }
+    }
+    func retireResearchTask(taskID: String) { if research?.taskID == taskID { research?.retire() } }
+
+    func close() { research?.retire(); browser.close() }
+
+    func stopBrowserActivity() { research?.retire(); browser.stop() }
 
     func updateTaskControls(_ controls: ComputerUseBrowserTaskControls?,
         handler: @escaping (ComputerUseBrowserTaskControls, ComputerUseBrowserTaskControls.Action) -> Void) {

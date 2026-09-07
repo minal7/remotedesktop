@@ -741,6 +741,62 @@ final class ComputerUseTests: XCTestCase {
                                          promptBody: "Find tickets"), .completed(ComputerUseTaskLedger.stoppedResponse))
     }
 
+    func test_managerRetainsResearchOwnerThroughExplicitHandbackAndRetiresOnStopOrDisconnect() async throws {
+        for terminal in ["stop", "disconnect"] {
+            let url = temporaryLedgerURL()
+            defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+            let executor = ResearchOwnerLifecycleExecutor()
+            let fixture = try browserControlFixture(executor: executor, ledgerURL: url)
+            defer { fixture.manager.stop(); fixture.browser.close() }
+            let prompt = makeEnvelope(id: "research-\(terminal)", kind: .prompt, body: "Find concert tickets tomorrow.")
+            fixture.manager.authorizePeer(senderID: prompt.senderID)
+            XCTAssertTrue(fixture.manager.handle(prompt, channel: fixture.channel))
+            await waitUntil { executor.owners.count == 1 && fixture.manager.activity == .paused }
+            let owner = try XCTUnwrap(executor.owners.first), original = owner.input
+            do { _ = try await owner.interpretGoal(); XCTFail("Host intervention must pause the retained owner") }
+            catch { XCTAssertEqual(error as? ComputerUseBrowserResearchTask.Failure, .paused) }
+            let controls = try XCTUnwrap(fixture.browser.taskControls)
+            fixture.browser.requestTaskControl(.resume, displayed: controls)
+            await waitUntil { executor.owners.count == 2 && fixture.manager.activity == .paused }
+            XCTAssertEqual(executor.owners.count, 2)
+            XCTAssertTrue(executor.owners.last === owner)
+            XCTAssertEqual(owner.input, original)
+            XCTAssertEqual(executor.planner.inputs, [original], "Explicit handback retains the interpretation and original clock")
+            if terminal == "disconnect" { fixture.manager.stop() }
+            else { fixture.browser.requestTaskControl(.stop, displayed: try XCTUnwrap(fixture.browser.taskControls)) }
+            XCTAssertEqual(fixture.manager.activity, .idle)
+            do { _ = try await owner.interpretGoal(); XCTFail("Stop and disconnect must retire the owner, not merely close the action gate") }
+            catch { XCTAssertEqual(error as? ComputerUseBrowserResearchTask.Failure, .retired) }
+            XCTAssertNil(fixture.browser.taskID, "The prepared lifecycle fixture performs no browser navigation")
+        }
+    }
+
+    func test_managerTerminalResearchRepliesAndCancellationRetirePreparedOwner() async throws {
+        for outcome in ["completed", "unable", "clarification", "cancelled", "error"] {
+            let url = temporaryLedgerURL()
+            defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+            let executor = ResearchOwnerLifecycleExecutor()
+            switch outcome {
+            case "completed": executor.terminalResult = .completed("Injected lifecycle fixture completion")
+            case "unable": executor.terminalResult = .unableToComplete("Injected lifecycle fixture failure")
+            case "clarification": executor.terminalResult = .clarificationRequired("Legacy text-task terminal question")
+            case "cancelled": executor.failure = CancellationError()
+            default: executor.failure = ComputerUseBrowserResearchTask.Failure.goalChanged
+            }
+            let fixture = try browserControlFixture(executor: executor, ledgerURL: url)
+            defer { fixture.manager.stop(); fixture.browser.close() }
+            let prompt = makeEnvelope(id: "research-terminal-\(outcome)", kind: .prompt, body: "Find concert tickets tomorrow.")
+            fixture.manager.authorizePeer(senderID: prompt.senderID)
+            XCTAssertTrue(fixture.manager.handle(prompt, channel: fixture.channel))
+            await waitUntil { executor.owners.count == 1 && fixture.manager.activity == .idle }
+            let owner = try XCTUnwrap(executor.owners.first)
+            do { _ = try await owner.interpretGoal(); XCTFail("A host terminal cannot leave an independently reusable research owner") }
+            catch { XCTAssertEqual(error as? ComputerUseBrowserResearchTask.Failure, .retired) }
+            XCTAssertEqual(executor.planner.inputs, [owner.input])
+            XCTAssertNil(fixture.browser.taskID)
+        }
+    }
+
     func test_localBrowserControlsPauseResumeAndStopOnlyTheirDisplayedRun() async throws {
         let url = temporaryLedgerURL()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
@@ -9197,6 +9253,33 @@ private final class BrowserPageApprovalTestExecutor: ComputerUseExecuting, Compu
     }
 
     func cancelVisualApprovalContinuation(_ continuation: ComputerUseVisualApprovalContinuation) { cancelled.append(continuation) }
+}
+
+@MainActor
+private final class ResearchOwnerLifecycleExecutor: ComputerUseExecuting {
+    let isReady = true
+    let runtimeName = "Prepared research-owner lifecycle fixture"
+    let planner = BrowserResearchGoalFixture()
+    private(set) var owners: [ComputerUseBrowserResearchTask] = []
+    var terminalResult: ComputerUseExecutionResult?
+    var failure: Error?
+
+    func execute(prompt: String, tools: ComputerUseHostTools,
+                 progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
+        XCTFail("The host must retain the original task identity")
+        return .unableToComplete("Missing original task identity")
+    }
+
+    func execute(taskID: String, prompt: String, trustedUserPrompt: String, tools: ComputerUseHostTools,
+                 progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
+        let owner = try tools.prepareOwnedBrowserResearch(taskID: taskID, prompt: trustedUserPrompt,
+            goalPlanner: planner, resultPlanner: BrowserResearchResultFixture(),
+            referenceDate: Date(timeIntervalSince1970: owners.isEmpty ? 1_800_000_000 : 1_900_000_000), timeZoneIdentifier: "UTC")
+        owners.append(owner)
+        _ = try await owner.interpretGoal()
+        if let failure { throw failure }
+        return terminalResult ?? .userInterventionRequired("Continue when ready.")
+    }
 }
 
 @MainActor

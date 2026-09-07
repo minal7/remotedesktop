@@ -1210,6 +1210,28 @@ final class ComputerUseHostTools {
         browserNavigationTask = nil
     }
 
+    /// Explicit preparation entry for the research driver. This does not
+    /// route an arbitrary request, open a page or start either planner.
+    func prepareOwnedBrowserResearch(taskID: String, prompt: String,
+        goalPlanner: any ComputerUseBrowserGoalPlanning, resultPlanner: any ComputerUseBrowserResultPlanning,
+        referenceDate: Date = Date(), timeZoneIdentifier: String = TimeZone.current.identifier) throws -> ComputerUseBrowserResearchTask {
+        try Task.checkCancellation()
+        guard mayAct() else { throw ToolError.paused }
+        if browserNavigationTask == nil {
+            guard !HostRuntimeContext.isRunningUnitTests else { throw ComputerUseBrowserResearchTask.Failure.browserRequired }
+            browserNavigationTask = .init(browser: ComputerUseOwnedBrowser(mayAct: mayAct),
+                journalDirectory: ComputerUseBrowserNavigationTask.journalDirectory)
+            publishOwnedBrowserTaskControls()
+        }
+        guard let browserNavigationTask else { throw ComputerUseBrowserError.closed }
+        return try browserNavigationTask.prepareResearchTask(taskID: taskID, prompt: prompt, goalPlanner: goalPlanner,
+            resultPlanner: resultPlanner, mayAct: mayAct, referenceDate: referenceDate, timeZoneIdentifier: timeZoneIdentifier)
+    }
+
+    func pauseOwnedBrowserResearch(taskID: String) { browserNavigationTask?.pauseResearchTask(taskID: taskID) }
+    func resumeOwnedBrowserResearch(taskID: String) async throws { try await browserNavigationTask?.resumeResearchTask(taskID: taskID) }
+    func retireOwnedBrowserResearch(taskID: String) { browserNavigationTask?.retireResearchTask(taskID: taskID) }
+
     /// Read-only evidence for browser capabilities. It does not open a window,
     /// claim that a search finished, or feed raw destinations into a model.
     func observeOwnedBrowserPage(taskID: String) async throws -> ComputerUseBrowserPageEvidence? {
@@ -4961,6 +4983,7 @@ final class HostComputerUseManager: ObservableObject {
         // observe Task cancellation promptly and may still unwind through a
         // final tool call.
         actionGate.endAutomation(allowsActions: false)
+        tools.pauseOwnedBrowserResearch(taskID: context.envelope.id)
         let invalidatedApproval = pendingApproval
         pausedExecution = context
         currentExecution = nil
@@ -5055,6 +5078,7 @@ final class HostComputerUseManager: ObservableObject {
         // closed until a later, separately claimed Prompt explicitly begins;
         // never let cancellation-ignoring work inject during unwind.
         actionGate.endAutomation(allowsActions: false)
+        tools.retireOwnedBrowserResearch(taskID: context.envelope.id)
         let invalidatedApproval = pendingApproval
         postedApprovedVisualTaskID = nil
         cancelActiveVisualApprovalContinuation()
@@ -6171,9 +6195,12 @@ final class HostComputerUseManager: ObservableObject {
                     // to reconstruct or repeat this consequential task.
                     result = Self.resultForApprovedAction(action, trustedUserPrompt: context.trustedUserPrompt)
                 } else {
-                    if isResuming, let requirement = context.browserHandbackRequirement {
+                    if isResuming {
                         do {
-                            try await tools.reacquireOwnedBrowserAfterUserControl(requirement)
+                            if let requirement = context.browserHandbackRequirement {
+                                try await tools.reacquireOwnedBrowserAfterUserControl(requirement)
+                            }
+                            try await tools.resumeOwnedBrowserResearch(taskID: context.envelope.id)
                         } catch {
                             let guidance: String
                             switch error as? ComputerUseBrowserError {
@@ -6833,6 +6860,10 @@ final class HostComputerUseManager: ObservableObject {
         channel: any HostComputerUseChannel,
         clarification: ComputerUseClarificationReference? = nil
     ) {
+        // A durable terminal ends this research owner even if saving the
+        // terminal fails. Resumable browser questions must use their retained
+        // question/answer lifecycle, not this legacy text-task terminal path.
+        tools.retireOwnedBrowserResearch(taskID: envelope.id)
         do {
             let terminal = try taskLedger.complete(
                 taskID: envelope.id,
