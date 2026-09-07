@@ -1,0 +1,230 @@
+import Foundation
+import XCTest
+@testable import RemoteDesktopHost
+
+final class ComputerUseBrowserScalarRequirementsTests: XCTestCase {
+    private typealias Scalar = ComputerUseBrowserScalarRequirements
+
+    func testScalarLedgerRetainsEveryRequirementAndUnresolvedDisposition() throws {
+        let rows = [row("Find flights ", role: "outcome", field: "category"),
+            row("from San Francisco ", field: "origin"), row("to Los Angeles ", field: "destination"),
+            row("on 2026-09-20 ", field: "date"), row("under USD 500 total including fees. ", field: "price"),
+            row("Do not book. ", role: "prohibition"), row("Compare again.", role: "order")]
+        let ledger = Scalar(proposal: try proposal(rows))
+        XCTAssertEqual(ledger.entries.map(\.requirementID), ledger.proposal.requirements.map(\.id))
+        XCTAssertEqual(ledger.entries.count, rows.count)
+        XCTAssertEqual(ledger.unresolvedRequirementIDs, [0, 1, 2, 5, 6].map { ledger.entries[$0].requirementID })
+        _ = try condition(ledger, at: 3); _ = try condition(ledger, at: 4)
+        XCTAssertEqual(ledger.proposal.requirements.compactMap { ledger.proposal.source(of: $0) }.joined(), ledger.proposal.input.prompt)
+        for text in [String(describing: ledger), String(reflecting: ledger), String(reflecting: try condition(ledger, at: 4))] {
+            XCTAssertFalse(text.contains("San Francisco")); XCTAssertFalse(text.contains("500"))
+        }
+        for disposition in ["unsupported", "clarification"] {
+            let unresolved = Scalar(proposal: try proposal(rows, disposition: disposition,
+                question: disposition == "clarification" ? "Which dates do you want?" : ""))
+            XCTAssertEqual(unresolved.unresolvedRequirementIDs, unresolved.entries.map(\.requirementID))
+            for entry in unresolved.entries { XCTAssertEqual(entry.resolution, .unresolved(.unresolvedDisposition)) }
+        }
+    }
+
+    func testQuantityComparisonsKeepTicketAndResultUnitsDistinct() throws {
+        let cases: [(String, Scalar.Comparison, [Scalar.Evaluation])] = [
+            ("three tickets", .equal, [.notSatisfied, .satisfied, .notSatisfied]),
+            ("at least 3 tickets", .atLeast, [.notSatisfied, .satisfied, .satisfied]),
+            ("at most 3 tickets", .atMost, [.satisfied, .satisfied, .notSatisfied]),
+            ("more than 3 tickets", .above, [.notSatisfied, .notSatisfied, .satisfied]),
+            ("fewer than 3 tickets", .below, [.satisfied, .notSatisfied, .notSatisfied])]
+        for (source, comparison, expected) in cases {
+            let bound = try compile(source, field: "quantity")
+            XCTAssertEqual(bound.predicate, .quantity(comparison, 3, .tickets))
+            XCTAssertEqual([2, 3, 4].map { bound.evaluate(.quantity($0, .tickets)) }, expected)
+            XCTAssertEqual(bound.evaluate(.quantity(3, .results)), .unverifiable)
+            XCTAssertEqual(bound.evaluate(.quantity(-1, .tickets)), .unverifiable)
+            XCTAssertEqual(bound.evaluate(.day(try civil("2026-09-20"))), .unverifiable)
+        }
+        for unit in [Scalar.QuantityUnit.results, .options, .flights, .concerts, .movies] {
+            let bound = try compile("and exactly 10 \(unit.rawValue).", field: "quantity")
+            XCTAssertEqual(bound.predicate, .quantity(.equal, 10, unit))
+        }
+        XCTAssertEqual(try compile("0 results", field: "quantity").evaluate(.quantity(0, .results)), .satisfied)
+        XCTAssertEqual(try compile("999 results", field: "quantity").evaluate(.quantity(999, .results)), .satisfied)
+    }
+
+    func testPriceComparisonUsesExactDecimalAndStrictOrInclusiveBounds() throws {
+        let cases: [(String, Scalar.Comparison, [Scalar.Evaluation])] = [
+            ("under", .below, [.satisfied, .notSatisfied, .notSatisfied]),
+            ("at most", .atMost, [.satisfied, .satisfied, .notSatisfied]),
+            ("over", .above, [.notSatisfied, .notSatisfied, .satisfied]),
+            ("at least", .atLeast, [.notSatisfied, .satisfied, .satisfied]),
+            ("exactly", .equal, [.notSatisfied, .satisfied, .notSatisfied])]
+        for (source, comparison, expected) in cases {
+            let bound = try compile("\(source) USD 1,234.50 per ticket including fees", field: "price")
+            XCTAssertEqual(bound.predicate, .price(comparison, try amount(123_450), .perTicket, .included))
+            let actual = try [123_449, 123_450, 123_451].map {
+                bound.evaluate(.price(try amount($0), .perTicket, .included, isExact: true))
+            }
+            XCTAssertEqual(actual, expected)
+        }
+        for (source, hundredths) in [("USD 0", Int64(0)), ("USD 0.1", 10), ("USD 0.29", 29), ("USD 999,999,999.99", 99_999_999_999)] {
+            let bound = try compile("exactly " + source, field: "price")
+            XCTAssertEqual(bound.predicate, .price(.equal, try amount(hundredths), .unspecified, .unspecified))
+        }
+        XCTAssertNil(Scalar.Amount(hundredths: -1, currency: .usd))
+        XCTAssertNil(Scalar.Amount(hundredths: 100_000_000_000, currency: .usd))
+    }
+
+    func testPriceEvaluationCannotInventCurrencyBasisFeesOrExactness() throws {
+        let bound = try compile("under $500 total including fees", field: "price")
+        let dollars = try amount(49_999, currency: .dollarSymbol)
+        XCTAssertEqual(bound.evaluate(.price(dollars, .total, .included, isExact: true)), .satisfied)
+        XCTAssertEqual(bound.evaluate(.price(try amount(49_999), .total, .included, isExact: true)), .unverifiable,
+            "A dollar symbol does not establish USD")
+        XCTAssertEqual(bound.evaluate(.price(dollars, .perPerson, .included, isExact: true)), .unverifiable)
+        XCTAssertEqual(bound.evaluate(.price(dollars, .unspecified, .included, isExact: true)), .unverifiable)
+        XCTAssertEqual(bound.evaluate(.price(dollars, .total, .excluded, isExact: true)), .unverifiable)
+        XCTAssertEqual(bound.evaluate(.price(dollars, .total, .unspecified, isExact: true)), .unverifiable)
+        XCTAssertEqual(bound.evaluate(.price(dollars, .total, .included, isExact: false)), .unverifiable,
+            "A starting-at or estimated amount is not an exact offer price")
+        for currency in [Scalar.Currency.usd, .eur, .gbp, .cad, .aud, .jpy, .dollarSymbol, .euroSymbol, .poundSymbol, .yenSymbol] {
+            let condition = try compile("exactly \(currency.rawValue) 15 per person excluding fees", field: "price")
+            XCTAssertEqual(condition.predicate, .price(.equal, try amount(1_500, currency: currency), .perPerson, .excluded))
+        }
+        let unspecified = try compile("under USD 500", field: "price")
+        XCTAssertEqual(unspecified.predicate, .price(.below, try amount(50_000), .unspecified, .unspecified))
+        // This only compares the scalar explicitly requested. Separate offer
+        // scope, provenance and completeness gates remain necessary.
+        XCTAssertEqual(unspecified.evaluate(.price(try amount(49_999), .perTicket, .unspecified, isExact: true)), .satisfied)
+    }
+
+    func testRelativeDaysUseOriginalClockAndCalendarAcrossDaylightSaving() throws {
+        let clock = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-03-08T07:30:00Z"))
+        let rows = [row("Find movie tickets ", role: "outcome"), row("today ", field: "date"), row("and tomorrow.", field: "date")]
+        let input = try proposal(rows, referenceDate: clock, timeZone: "America/Los_Angeles")
+        let ledger = Scalar(proposal: input)
+        let today = try condition(ledger, at: 1), tomorrow = try condition(ledger, at: 2)
+        XCTAssertEqual(today.evaluate(.day(try civil("2026-03-07"))), .satisfied)
+        XCTAssertEqual(tomorrow.evaluate(.day(try civil("2026-03-08"))), .satisfied)
+        XCTAssertEqual(tomorrow.evaluate(.day(try civil("2026-03-09"))), .notSatisfied,
+            "Adding 86,400 seconds to the reference instant crosses to March 9 locally")
+        let resumed = Scalar(proposal: input)
+        XCTAssertEqual(resumed.entries, ledger.entries, "Recompilation has no new wall-clock input")
+        let utc = Scalar(proposal: try proposal(rows, referenceDate: clock, timeZone: "UTC"))
+        XCTAssertEqual(try condition(utc, at: 1).evaluate(.day(try civil("2026-03-08"))), .satisfied)
+        XCTAssertNotEqual(try condition(utc, at: 1).id, today.id)
+    }
+
+    func testCivilDatesRejectInvalidDaysAndPreserveRangeEndpoints() throws {
+        for (year, month, day) in [(2026, 2, 29), (1900, 2, 29), (2026, 4, 31), (2026, 0, 1), (2026, 13, 1), (0, 1, 1), (10_000, 1, 1)] {
+            XCTAssertNil(Scalar.CivilDay(year: year, month: month, day: day))
+        }
+        XCTAssertNotNil(Scalar.CivilDay(year: 2000, month: 2, day: 29))
+        XCTAssertEqual(try civil("0001-01-01").iso8601, "0001-01-01")
+        let cases: [(String, [Scalar.Evaluation])] = [
+            ("on 2028-02-29", [.notSatisfied, .satisfied, .notSatisfied]),
+            ("before 2028-02-29", [.satisfied, .notSatisfied, .notSatisfied]),
+            ("on or before 2028-02-29", [.satisfied, .satisfied, .notSatisfied]),
+            ("after 2028-02-29", [.notSatisfied, .notSatisfied, .satisfied]),
+            ("on or after 2028-02-29", [.notSatisfied, .satisfied, .satisfied])]
+        for (source, expected) in cases {
+            let bound = try compile(source, field: "date")
+            XCTAssertEqual(try ["2028-02-28", "2028-02-29", "2028-03-01"].map { bound.evaluate(.day(try civil($0))) }, expected)
+        }
+        let range = try compile("from 2028-02-29 through 2028-03-01", field: "date", relation: "between")
+        XCTAssertEqual(range.evaluate(.day(try civil("2028-02-29"))), .satisfied)
+        XCTAssertEqual(range.evaluate(.day(try civil("2028-03-01"))), .satisfied)
+        XCTAssertEqual(range.evaluate(.day(try civil("2028-03-02"))), .notSatisfied)
+        for source in ["on 2026-02-29", "from 2028-03-01 through 2028-02-29"] {
+            XCTAssertEqual(try resolution(source, field: "date"), .unresolved(.invalidValue))
+        }
+    }
+
+    func testSourceComparatorOverridesMissingHintsAndRejectsContradictoryInterpretation() throws {
+        let source = "under USD 500"
+        let bound = try compile(source, field: "price", values: ["USD", "500"])
+        XCTAssertEqual(bound.predicate, .price(.below, try amount(50_000), .unspecified, .unspecified))
+        XCTAssertEqual(try compile(source, field: "price").predicate, bound.predicate,
+            "Value hints are not argument authority")
+        XCTAssertEqual(try compile(source, field: "price", relation: "below").predicate, bound.predicate)
+        for relation in ["atMost", "above", "equal", "exclude"] {
+            XCTAssertEqual(try resolution(source, field: "price", relation: relation), .unresolved(.contradictoryProposal))
+        }
+        XCTAssertEqual(try resolution("before 2026-09-20", field: "date", relation: "later"), .unresolved(.contradictoryProposal))
+        XCTAssertEqual(try resolution("three tickets", field: "quantity", relation: "atLeast"), .unresolved(.contradictoryProposal))
+        XCTAssertEqual(try resolution(source, field: "date"), .unresolved(.unrecognizedSource), "A model-selected field cannot substitute for parsing source")
+        let rows = [row("Find tickets ", role: "outcome"), row(source, role: "prohibition", field: "price", relation: "below")]
+        XCTAssertEqual(Scalar(proposal: try proposal(rows)).entries[1].resolution, .unresolved(.notScalar))
+        let splitNegation = Scalar(proposal: try proposal([row("Find tickets ", role: "outcome"),
+            row("not "), row(source, field: "price")]))
+        XCTAssertEqual(splitNegation.entries[1].resolution, .unresolved(.notScalar))
+        XCTAssertEqual(try condition(splitNegation, at: 2).predicate, bound.predicate,
+            "A locally bound fragment does not resolve the separate negation; whole-goal logic remains uncompiled")
+    }
+
+    func testUnsupportedNegationAlternativesSuffixesAndValuesRemainUnresolved() throws {
+        let cases: [(String, String)] = [
+            ("not under USD 500", "price"), ("under USD 500 or above USD 700", "price"),
+            ("under USD 500 and buy them", "price"), ("under USD 500 unless sold out", "price"),
+            ("around USD 500", "price"), ("under USD -5", "price"), ("under USD 1.001", "price"),
+            ("under USD 1,23", "price"), ("under USD 5%", "price"), ("under CHF 500", "price"),
+            ("under USD 1e3", "price"), ("under USD 1.000,00", "price"), ("under USD 1000000000", "price"),
+            ("three", "quantity"), ("three tickets or four results", "quantity"), ("1000 tickets", "quantity"),
+            ("-1 results", "quantity"), ("1.5 tickets", "quantity"), ("Find three flights", "quantity"),
+            ("tomorrow at 7 pm", "date"), ("on 2026-09-20 or 2026-09-21", "date"), ("not tomorrow", "date")]
+        for (source, field) in cases {
+            let result = try resolution(source, field: field)
+            guard case .unresolved = result else { XCTFail("Unsupported source was bound: \(source)"); continue }
+        }
+        for source in ["next Friday", "on Monday", "between 2026-09-20 and 2026-09-22"] {
+            XCTAssertEqual(try resolution(source, field: "date"), .unresolved(.ambiguousDate))
+        }
+        XCTAssertEqual(try resolution("including fees", field: "fees"), .unresolved(.notScalar),
+            "A separate fees clause still needs semantic association with the relevant price")
+    }
+
+    func testConditionIdentityBindsOriginalTaskClockAndSourceOccurrence() throws {
+        let rows = [row("Find tickets ", role: "outcome"), row("under USD 500 ", field: "price"), row("under USD 500 ", field: "price")]
+        let ledger = Scalar(proposal: try proposal(rows))
+        let first = try condition(ledger, at: 1), repeated = try condition(ledger, at: 2)
+        XCTAssertEqual(first.predicate, repeated.predicate)
+        XCTAssertNotEqual(first.id, repeated.id); XCTAssertNotEqual(first.requirementID, repeated.requirementID)
+        for proposal in [try proposal(rows, taskID: "another-task"),
+            try proposal(rows, referenceDate: Date(timeIntervalSince1970: 1_800_000_001))] {
+            let other = try condition(Scalar(proposal: proposal), at: 1)
+            XCTAssertNotEqual(other.id, first.id); XCTAssertEqual(other.predicate, first.predicate)
+        }
+        XCTAssertEqual(try condition(Scalar(proposal: ledger.proposal), at: 1), first)
+    }
+
+    private func proposal(_ rows: [[String: Any]], taskID: String = "scalar-research-task",
+                          referenceDate: Date = Date(timeIntervalSince1970: 1_800_000_000), timeZone: String = "America/Los_Angeles",
+                          disposition: String = "research", question: String = "") throws -> ComputerUseBrowserGoalProposal {
+        let prompt = try rows.map { try XCTUnwrap($0["source"] as? String) }.joined()
+        let input = try ComputerUseBrowserGoalInput(taskID: taskID, prompt: prompt, referenceDate: referenceDate, timeZoneIdentifier: timeZone)
+        let data = try JSONSerialization.data(withJSONObject: ["disposition":disposition, "requirements":rows, "question":question], options: [.sortedKeys])
+        return try .decode(content: String(decoding: data, as: UTF8.self), input: input)
+    }
+    private func row(_ source: String, role: String = "condition", field: String = "other", relation: String = "unspecified", values: [String] = []) -> [String: Any] {
+        ["source":source, "role":role, "field":field, "relation":relation, "values":values]
+    }
+    private func resolution(_ source: String, field: String, relation: String = "unspecified", values: [String] = []) throws -> Scalar.Resolution {
+        Scalar(proposal: try proposal([row("Find tickets. ", role: "outcome"), row(source, field: field, relation: relation, values: values)])).entries[1].resolution
+    }
+    private func compile(_ source: String, field: String, relation: String = "unspecified", values: [String] = []) throws -> Scalar.Condition {
+        let value = try resolution(source, field: field, relation: relation, values: values)
+        guard case .bound(let condition) = value else { throw FixtureError.unresolved }
+        return condition
+    }
+    private func condition(_ ledger: Scalar, at index: Int) throws -> Scalar.Condition {
+        guard case .bound(let condition) = ledger.entries[index].resolution else { throw FixtureError.unresolved }
+        return condition
+    }
+    private func amount(_ hundredths: Int64, currency: Scalar.Currency = .usd) throws -> Scalar.Amount {
+        try XCTUnwrap(.init(hundredths: hundredths, currency: currency))
+    }
+    private func civil(_ iso: String) throws -> Scalar.CivilDay {
+        let values = iso.split(separator: "-").compactMap { Int($0) }
+        guard values.count == 3 else { throw FixtureError.invalidDate }
+        return try XCTUnwrap(.init(year: values[0], month: values[1], day: values[2]))
+    }
+    private enum FixtureError: Error { case unresolved, invalidDate }
+}
