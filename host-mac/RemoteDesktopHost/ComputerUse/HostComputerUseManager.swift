@@ -1184,7 +1184,8 @@ final class ComputerUseHostTools {
 
     func executeOwnedBrowserTaskIfSupported(taskID: String, prompt: String,
         progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult? {
-        guard ComputerUseBrowserNavigationRequest.urls(in: prompt) != nil else { return nil }
+        let workflow = try ComputerUseBrowserWorkflowRequest.compile(prompt)
+        guard workflow != nil || ComputerUseBrowserNavigationRequest.urls(in: prompt) != nil else { return nil }
         if browserNavigationTask == nil {
             // App-hosted tests opt into an isolated loopback fixture explicitly;
             // unrelated routing tests must not open websites on the user's Mac.
@@ -1196,6 +1197,11 @@ final class ComputerUseHostTools {
         }
         try Task.checkCancellation()
         guard mayAct() else { throw ToolError.paused }
+        if let workflow {
+            guard let browserNavigationTask else { throw ComputerUseBrowserError.closed }
+            return try await browserNavigationTask.executeWorkflow(taskID: taskID, request: workflow,
+                injector: injector, progress: progress)
+        }
         return try await browserNavigationTask?.execute(taskID: taskID, prompt: prompt, progress: progress)
     }
 

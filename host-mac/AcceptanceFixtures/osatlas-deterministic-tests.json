@@ -203,7 +203,9 @@
     "RemoteDesktopHostTests/ComputerUseTests/test_managerCannotResumeLoginAfterThePausedBrowserIsStoppedOrClosed",
     "RemoteDesktopHostTests/ComputerUseTests/test_managerAuthenticationWithoutABrowserCannotSilentlyResume",
     "RemoteDesktopHostTests/ComputerUseTests/test_managerNativeResumeDoesNotAcquireAnUnrelatedBrowser",
-    "RemoteDesktopHostTests/ComputerUseTests/test_managerConsumesSuccessfulHandbackBeforeCapturingTheNextSession"
+    "RemoteDesktopHostTests/ComputerUseTests/test_managerConsumesSuccessfulHandbackBeforeCapturingTheNextSession",
+    "RemoteDesktopHostTests/ComputerUseTests/test_managerBrowserWorkflowRetainsWholeRequestThroughLoginFormQueryAndLink",
+    "RemoteDesktopHostTests/ComputerUseTests/test_managerBrowserWorkflowDoesNotExecuteAPrefixOfAnUnsupportedResearchGoal"
   ],
   "expectedTests": [
     "RemoteDesktopHostTests/AppleFoundationMCPPlannerTests/testCountedInputExpandsBeforeEffectAndTerminalQueries",
@@ -419,6 +421,11 @@
     "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testActiveObservationWaitCannotCrossCancellationTakeoverOrSameTaskOwnershipRestart",
     "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testActivePageObservationWaitsForSuccessAndTimeoutDoesNotReloadThePage",
     "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testBoundNavigationRequiresTheExactCurrentDocumentBeforeLoading",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testBrowserWorkflowCannotReplayUncertainObservedNavigation",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testBrowserWorkflowCompilerPreservesQuotedConnectorsAndRejectsUncoveredGoals",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testBrowserWorkflowGivesRepeatedNavigationsDistinctEffectsAndReplaysNoStages",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testBrowserWorkflowKeepsVerifiedFormRequirementsAfterManualChanges",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testBrowserWorkflowRejectsGoalSessionAndStorageChangesBeforeNewEffects",
     "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testCancelledNavigationAndLateResponseCannotAcquireAReceipt",
     "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testClosingSignInPopupDoesNotAssertAuthenticationSucceeded",
     "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testDeadlineAndOwnershipLossStopPendingLoadWithoutSuccess",
@@ -541,6 +548,8 @@
     "RemoteDesktopHostTests/ComputerUseTests/test_localTakeoverPersistenceFailureCannotResumeFromEitherSurface",
     "RemoteDesktopHostTests/ComputerUseTests/test_malformedPromptDigestCannotTurnExistingLedgerIntoUnclaimedWork",
     "RemoteDesktopHostTests/ComputerUseTests/test_managerAuthenticationWithoutABrowserCannotSilentlyResume",
+    "RemoteDesktopHostTests/ComputerUseTests/test_managerBrowserWorkflowDoesNotExecuteAPrefixOfAnUnsupportedResearchGoal",
+    "RemoteDesktopHostTests/ComputerUseTests/test_managerBrowserWorkflowRetainsWholeRequestThroughLoginFormQueryAndLink",
     "RemoteDesktopHostTests/ComputerUseTests/test_managerCannotResumeLoginAfterThePausedBrowserIsStoppedOrClosed",
     "RemoteDesktopHostTests/ComputerUseTests/test_managerChangedPromptCannotReplacePausedContextOrTerminalizeActiveTask",
     "RemoteDesktopHostTests/ComputerUseTests/test_managerChangedPromptCannotReplayTerminalClarificationOrApprovedActionEvidence",

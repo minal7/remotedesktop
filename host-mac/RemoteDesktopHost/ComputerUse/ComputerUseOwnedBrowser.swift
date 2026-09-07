@@ -148,6 +148,11 @@ struct ComputerUseBrowserHandbackRequirement: Equatable, Sendable, CustomStringC
 
     var description: String { "BrowserHandbackRequirement" }
     var debugDescription: String { description }
+
+    var sessionBindingDigest: String {
+        ComputerUseTaskContract.digest(["browser-session-v1", taskID, contextID ?? "",
+            sessionID?.uuidString ?? "", ownershipEpoch?.uuidString ?? ""])
+    }
 }
 
 struct ComputerUseBrowserNavigationReceipt: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
@@ -413,12 +418,34 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             requiresPresentation: required || hasRequiredPresentation || hasOpenSignInWindow)
     }
 
-    private func validateHandback(_ requirement: ComputerUseBrowserHandbackRequirement, taskID: String) throws {
+    private func validateSessionIdentity(_ requirement: ComputerUseBrowserHandbackRequirement, taskID: String) throws {
         guard requirement.taskID == taskID, requirement.contextID == contextID,
               requirement.sessionID == browserSessionID, requirement.ownershipEpoch == ownershipEpoch,
               browser != nil, self.taskID == taskID else { throw ComputerUseBrowserError.handbackContextLost }
+    }
+
+    private func validateHandback(_ requirement: ComputerUseBrowserHandbackRequirement, taskID: String) throws {
+        try validateSessionIdentity(requirement, taskID: taskID)
         guard !hasOpenSignInWindow else { throw ComputerUseBrowserError.signInWindowOpen }
         if requirement.requiresPresentation, !hasRequiredPresentation { throw ComputerUseBrowserError.windowNotActive }
+    }
+
+    /// Allocate session identity before a workflow journal is bound. This
+    /// performs no navigation or input; each child capability owns its effect.
+    func prepareWorkflowSession(taskID: String) throws -> ComputerUseBrowserHandbackRequirement {
+        try Task.checkCancellation()
+        try claim(taskID: taskID)
+        _ = makeBrowser()
+        guard let requirement = handbackRequirement(taskID: taskID, required: true) else {
+            throw ComputerUseBrowserError.handbackContextLost
+        }
+        return requirement
+    }
+
+    func validateWorkflowSession(_ requirement: ComputerUseBrowserHandbackRequirement) throws {
+        try Task.checkCancellation()
+        try validateSessionIdentity(requirement, taskID: requirement.taskID)
+        guard hasOwnership(taskID: requirement.taskID) else { throw ComputerUseBrowserError.ownershipLost }
     }
 
     func reacquireAfterUserControl(taskID: String, requirement: ComputerUseBrowserHandbackRequirement) async throws {

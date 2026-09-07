@@ -897,6 +897,106 @@ final class ComputerUseTests: XCTestCase {
         return (manager, try XCTUnwrap(browser), channel, ledger)
     }
 
+    func test_managerBrowserWorkflowRetainsWholeRequestThroughLoginFormQueryAndLink() async throws {
+        let server = try OwnedBrowserHTTPFixture(routes: [
+            "/form": .init(body: """
+                <input id='password' type='password' value='private-fixture-password'>
+                <form method='get' action='/results'><label>Destination<input id='q' name='q' value='old'></label><button>Search</button></form>
+                <script>
+                document.getElementById('q').addEventListener('input', e => fetch('/edited?value=' + encodeURIComponent(e.target.value), { keepalive: true }));
+                fetch('/release-login').then(() => {
+                    document.getElementById('password').remove(); sessionStorage.fixtureAccount = 'retained';
+                    history.replaceState({}, '', '/account'); fetch('/logged-in');
+                });
+                </script>
+                """),
+            "/release-login": .init(held: true),
+            "/results?q=Paris": .init(body: """
+                <p>Paris results</p><a id='event'>Event details</a><script>
+                document.getElementById('event').href = sessionStorage.fixtureAccount === 'retained' ? '/event?session=retained' : '/event?session=lost';
+                </script>
+                """),
+            "/event?session=retained": .init(body: "<p>Event details visible</p>"),
+        ])
+        let base = try await server.start()
+        defer { server.stop() }
+        let url = temporaryLedgerURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        var fallbackEntries = 0
+        let executor = ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in
+            fallbackEntries += 1
+            XCTFail("A selected workflow cannot fall through to an unrelated whole-form or desktop planner")
+            return .unableToComplete("Unexpected fallback")
+        })
+        let fixture = try browserControlFixture(executor: executor, ledgerURL: url)
+        defer { fixture.manager.stop(); fixture.browser.close() }
+        let prompt = makeEnvelope(id: "workflow-login", kind: .prompt,
+            body: "Open \(base.appendingPathComponent("form").absoluteString) then set \"Destination\" to \"Paris\" then open the form query using \"Search\" then open the link \"Event details\"")
+        fixture.manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(fixture.manager.handle(prompt, channel: fixture.channel))
+        await waitUntil(timeoutIterations: 1_000) { fixture.manager.activity == .paused && server.count("/release-login") == 1 }
+        XCTAssertEqual(fallbackEntries, 0)
+        XCTAssertEqual(server.count("/form"), 1)
+        XCTAssertEqual(server.count("/edited?value=Paris"), 0)
+        let store = try ComputerUseTaskJournalStore(directory: url.deletingLastPathComponent().appendingPathComponent("browser/Workflows"))
+        let paused = try XCTUnwrap(store.load(taskID: prompt.id))
+        XCTAssertEqual(paused.statuses, [.verified, .attempted, .planned, .planned])
+        XCTAssertEqual(paused.promptDigest, ComputerUseTextTaskContract.digest(prompt.body))
+        let encoded = String(decoding: try JSONEncoder().encode(paused), as: UTF8.self)
+        for privateValue in ["Paris", "Destination", "private-fixture-password", base.absoluteString] { XCTAssertFalse(encoded.contains(privateValue)) }
+        server.releaseHeldResponses()
+        await waitUntil(timeoutIterations: 1_000) { server.count("/logged-in") == 1 && fixture.browser.hasPageAwaitingHandback }
+        XCTAssertTrue(fixture.manager.handle(try makeControlEnvelope(kind: .resume,
+            taskID: prompt.id, revision: 1, hostEpoch: 1), channel: fixture.channel))
+        await waitUntil(timeoutIterations: 1_000) { fixture.manager.activity == .idle && server.count("/event?session=retained") == 1 }
+        XCTAssertEqual(fallbackEntries, 0)
+        XCTAssertEqual(fixture.browser.taskID, prompt.id)
+        XCTAssertEqual(server.count("/form"), 1, "Resume must skip the already confirmed initial page opening")
+        XCTAssertEqual(server.count("/edited?value=Paris"), 1)
+        XCTAssertEqual(server.count("/results?q=Paris"), 1)
+        XCTAssertEqual(server.count("/event?session=retained"), 1)
+        XCTAssertEqual(server.count("/event?session=lost"), 0)
+        let completed = try XCTUnwrap(store.load(taskID: prompt.id))
+        XCTAssertEqual(completed.statuses, Array(repeating: .verified, count: 4))
+        XCTAssertEqual(completed.stepIDs, paused.stepIDs)
+        XCTAssertEqual(completed.promptDigest, paused.promptDigest)
+        XCTAssertEqual(completed.contractDigest, paused.contractDigest)
+        XCTAssertTrue(fixture.manager.handle(prompt, channel: fixture.channel))
+        await Task.yield()
+        XCTAssertEqual(server.count("/form"), 1)
+        XCTAssertEqual(server.count("/edited?value=Paris"), 1)
+        let messages = await fixture.channel.sentMessages()
+        XCTAssertFalse(messages.contains { $0.body.contains("private-fixture-password") })
+        XCTAssertTrue(messages.contains { message in
+            guard message.kind == .assistant, let update = try? ComputerUseTaskUpdate.decodeBody(message.body) else { return false }
+            return update.taskID == prompt.id && update.outcome == .taskCompleted
+        })
+    }
+
+    func test_managerBrowserWorkflowDoesNotExecuteAPrefixOfAnUnsupportedResearchGoal() async throws {
+        let server = try OwnedBrowserHTTPFixture(routes: ["/form": .init(body: "<label>Destination<input></label>")])
+        let base = try await server.start()
+        defer { server.stop() }
+        let url = temporaryLedgerURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        var received: [String] = []
+        let executor = ComputerUseCapabilityExecutor(nativeExecution: { _, prompt, _ in
+            received.append(prompt)
+            return .unableToComplete("The full research request needs further planning.")
+        })
+        let fixture = try browserControlFixture(executor: executor, ledgerURL: url)
+        defer { fixture.manager.stop(); fixture.browser.close() }
+        let prompt = makeEnvelope(id: "uncovered-browser-goal", kind: .prompt,
+            body: "Open \(base.appendingPathComponent("form").absoluteString) then set \"Destination\" to \"Paris\" then find three flights under $500 including fees")
+        fixture.manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(fixture.manager.handle(prompt, channel: fixture.channel))
+        await waitUntil { fixture.manager.activity == .idle && received.count == 1 }
+        XCTAssertEqual(received, [prompt.body], "The fallback receives the complete original request, including every constraint")
+        XCTAssertEqual(server.count("/form"), 0)
+        XCTAssertNil(fixture.browser.taskID)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.deletingLastPathComponent().appendingPathComponent("browser/Workflows").path))
+    }
+
     func test_managerLoginHandbackWaitsForPageAndPreservesTaskAndBrowserSession() async throws {
         let server = try OwnedBrowserHTTPFixture(routes: [
             "/login": .init(body: """

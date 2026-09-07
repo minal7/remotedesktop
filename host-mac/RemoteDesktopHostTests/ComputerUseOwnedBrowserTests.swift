@@ -6,6 +6,161 @@ import XCTest
 
 @MainActor
 final class ComputerUseOwnedBrowserTests: XCTestCase {
+    func testBrowserWorkflowCompilerPreservesQuotedConnectorsAndRejectsUncoveredGoals() throws {
+        let prompt = "Open https://example.invalid/form then set \"Message\" to \"Now then later, and then 😀\" then append \"!\" to the same field then open the form query using \"Search\""
+        let request = try XCTUnwrap(ComputerUseBrowserWorkflowRequest.compile(prompt))
+        XCTAssertEqual(request.prompt, prompt)
+        XCTAssertEqual(request.stages.count, 3)
+        XCTAssertEqual(request.stages.map(\.kindID), ["navigation", "edits", "form-query"])
+        XCTAssertTrue(request.stages[1].source.contains("\"Now then later, and then 😀\""))
+        XCTAssertTrue(request.stages[1].source.hasSuffix("append \"!\" to the same field"))
+        for tail in [" then find three tickets under $100", " then buy the cheapest ticket", " then click \"Pay\"",
+                     " then set \"Other\" to \"unfinished", " then leave all unavailable results out"] {
+            XCTAssertNil(try ComputerUseBrowserWorkflowRequest.compile(prompt + tail), "Uncovered requirements cannot be dropped after a recognized prefix")
+        }
+        XCTAssertNil(try ComputerUseBrowserWorkflowRequest.compile("Open https://example.invalid/one then open https://example.invalid/two"), "Keep the existing complete navigation capability")
+        XCTAssertNil(try ComputerUseBrowserWorkflowRequest.compile("Set \"A\" to \"one\" then set \"B\" to \"two\""), "Keep the existing complete form capability")
+    }
+
+    func testBrowserWorkflowGivesRepeatedNavigationsDistinctEffectsAndReplaysNoStages() async throws {
+        let server = try OwnedBrowserHTTPFixture(routes: ["/form": .init(body: """
+            <label>Destination<input id='destination' value='old'></label><script>
+            document.getElementById('destination').addEventListener('input', e => fetch('/edited?value=' + encodeURIComponent(e.target.value), { keepalive: true }));
+            </script>
+            """)])
+        let base = try await server.start()
+        defer { server.stop() }
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+        defer { browser.close() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let prompt = "Open \(base.appendingPathComponent("form").absoluteString) then set \"Destination\" to \"Paris\" then open \(base.appendingPathComponent("form").absoluteString) then set \"Destination\" to \"Paris\" then open \(base.appendingPathComponent("form").absoluteString)"
+        let request = try XCTUnwrap(ComputerUseBrowserWorkflowRequest.compile(prompt))
+        let navigation = ComputerUseBrowserNavigationTask(browser: browser, journalDirectory: directory)
+        let first = try await navigation.executeWorkflow(taskID: "repeated-workflow", request: request, injector: InputInjector(), progress: { _ in })
+        guard case .completed = first else { return XCTFail("Every requested occurrence must execute") }
+        try await waitUntil { server.count("/edited?value=Paris") == 2 }
+        XCTAssertEqual(server.count("/form"), 3)
+        let store = try ComputerUseTaskJournalStore(directory: directory.appendingPathComponent("Workflows"))
+        let saved = try XCTUnwrap(store.load(taskID: "repeated-workflow"))
+        XCTAssertEqual(saved.statuses, Array(repeating: .verified, count: 5))
+        XCTAssertEqual(Set(saved.stepIDs).count, 5)
+        XCTAssertEqual(saved.promptDigest, ComputerUseTextTaskContract.digest(prompt))
+        for runner in [navigation, ComputerUseBrowserNavigationTask(browser: browser, journalDirectory: directory)] {
+            let replay = try await runner.executeWorkflow(taskID: "repeated-workflow", request: request, injector: InputInjector(), progress: { _ in })
+            guard case .completed = replay else { return XCTFail("Verified stages must be recoverable without re-execution") }
+        }
+        XCTAssertEqual(server.count("/form"), 3)
+        XCTAssertEqual(server.count("/edited?value=Paris"), 2)
+        XCTAssertEqual(try store.load(taskID: "repeated-workflow"), saved)
+    }
+
+    func testBrowserWorkflowKeepsVerifiedFormRequirementsAfterManualChanges() async throws {
+        let server = try OwnedBrowserHTTPFixture(routes: ["/form": .init(body: """
+            <form method='get' action='/results'><label>Destination<input name='q' id='q' value='old'></label><button>Search</button></form>
+            <script>
+            document.getElementById('q').addEventListener('input', e => fetch('/edited?value=' + encodeURIComponent(e.target.value), { keepalive: true }));
+            fetch('/change').then(() => { document.getElementById('q').value = 'Tokyo'; fetch('/changed'); });
+            </script>
+            """), "/change": .init(held: true)])
+        let base = try await server.start()
+        defer { server.stop() }
+        var allowed = true
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { allowed })
+        defer { browser.close() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let prompt = "Open \(base.appendingPathComponent("form").absoluteString) then set \"Destination\" to \"Paris\" then open the form query using \"Search\""
+        let request = try XCTUnwrap(ComputerUseBrowserWorkflowRequest.compile(prompt))
+        let navigation = ComputerUseBrowserNavigationTask(browser: browser, journalDirectory: directory)
+        var requirement: ComputerUseBrowserHandbackRequirement?
+        let paused = try await navigation.executeWorkflow(taskID: "changed-workflow", request: request, injector: InputInjector(), progress: { message in
+            if message == "Browser step 3 of 3…" {
+                requirement = browser.handbackRequirement(taskID: "changed-workflow", required: true)
+                allowed = false
+            }
+        })
+        guard case .userInterventionRequired = paused else { return XCTFail("Takeover must retain the unfinished query") }
+        try await waitUntil { server.count("/change") == 1 && server.count("/edited?value=Paris") == 1 }
+        server.releaseHeldResponses()
+        try await waitUntil { server.count("/changed") == 1 }
+        allowed = true
+        try await browser.reacquireAfterUserControl(taskID: "changed-workflow", requirement: XCTUnwrap(requirement))
+        let resumed = try await navigation.executeWorkflow(taskID: "changed-workflow", request: request, injector: InputInjector(), progress: { _ in })
+        guard case .userInterventionRequired = resumed else { return XCTFail("Current values cannot replace the verified intended form values") }
+        XCTAssertEqual(server.count("/form"), 1)
+        XCTAssertEqual(server.count("/edited?value=Paris"), 1)
+        XCTAssertFalse(server.requestedPaths.contains { $0.hasPrefix("/results") })
+        let saved = try XCTUnwrap(ComputerUseTaskJournalStore(directory: directory.appendingPathComponent("Workflows")).load(taskID: "changed-workflow"))
+        XCTAssertEqual(saved.statuses, [.verified, .verified, .attempted])
+    }
+
+    func testBrowserWorkflowCannotReplayUncertainObservedNavigation() async throws {
+        let server = try OwnedBrowserHTTPFixture(routes: [
+            "/start": .init(body: "<a href='/held'>Results</a>"), "/held": .init(held: true)])
+        let base = try await server.start()
+        defer { server.stop() }
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+        defer { browser.close() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let request = try XCTUnwrap(ComputerUseBrowserWorkflowRequest.compile("Open \(base.appendingPathComponent("start").absoluteString) then open the link \"Results\""))
+        let navigation = ComputerUseBrowserNavigationTask(browser: browser, journalDirectory: directory)
+        let running = Task { try await navigation.executeWorkflow(taskID: "uncertain-workflow", request: request, injector: InputInjector(), progress: { _ in }) }
+        try await waitUntil { server.count("/held") == 1 }
+        running.cancel()
+        do { _ = try await running.value; XCTFail("Cancellation cannot report completion") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        let retry = try await navigation.executeWorkflow(taskID: "uncertain-workflow", request: request, injector: InputInjector(), progress: { _ in })
+        guard case .userInterventionRequired = retry else { return XCTFail("An uncertain child effect requires reconciliation") }
+        XCTAssertEqual(server.count("/start"), 1)
+        XCTAssertEqual(server.count("/held"), 1)
+        let saved = try XCTUnwrap(ComputerUseTaskJournalStore(directory: directory.appendingPathComponent("Workflows")).load(taskID: "uncertain-workflow"))
+        XCTAssertEqual(saved.statuses, [.verified, .attempted])
+    }
+
+    func testBrowserWorkflowRejectsGoalSessionAndStorageChangesBeforeNewEffects() async throws {
+        let server = try OwnedBrowserHTTPFixture(routes: [
+            "/start": .init(body: "<a href='/details'>Details</a><a href='/other'>Other</a>"),
+            "/details": .init(body: "<p>Details</p>")])
+        let base = try await server.start()
+        defer { server.stop() }
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+        let other = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+        defer { browser.close(); other.close() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let prompt = "Open \(base.appendingPathComponent("start").absoluteString) then open the link \"Details\""
+        let request = try XCTUnwrap(ComputerUseBrowserWorkflowRequest.compile(prompt))
+        let navigation = ComputerUseBrowserNavigationTask(browser: browser, journalDirectory: directory)
+        let result = try await navigation.executeWorkflow(taskID: "bound-workflow", request: request, injector: InputInjector(), progress: { _ in })
+        guard case .completed = result else { return XCTFail("Initial workflow must finish") }
+        let changed = try XCTUnwrap(ComputerUseBrowserWorkflowRequest.compile(prompt.replacingOccurrences(of: "\"Details\"", with: "\"Other\"")))
+        do {
+            _ = try await navigation.executeWorkflow(taskID: "bound-workflow", request: changed, injector: InputInjector(), progress: { _ in })
+            XCTFail("The same root task cannot replace its remaining requirements")
+        } catch { XCTAssertEqual(error as? ComputerUseTaskExecutionError, .journalMismatch) }
+        for replacement in [other, browser] {
+            if replacement === browser { browser.close() }
+            let runner = ComputerUseBrowserNavigationTask(browser: replacement, journalDirectory: directory)
+            do {
+                _ = try await runner.executeWorkflow(taskID: "bound-workflow", request: request, injector: InputInjector(), progress: { _ in })
+                XCTFail("A lost or replaced browser cannot recreate prior workflow facts")
+            } catch { XCTAssertEqual(error as? ComputerUseTaskExecutionError, .journalMismatch) }
+        }
+        let blocked = directory.appendingPathComponent("blocked")
+        try FileManager.default.createDirectory(at: blocked, withIntermediateDirectories: true)
+        try Data("not a journal directory".utf8).write(to: blocked.appendingPathComponent("Workflows"))
+        let blockedRunner = ComputerUseBrowserNavigationTask(browser: browser, journalDirectory: blocked)
+        do {
+            _ = try await blockedRunner.executeWorkflow(taskID: "blocked-workflow", request: request, injector: InputInjector(), progress: { _ in })
+            XCTFail("Storage must be available before the first child receives execution")
+        } catch { XCTAssertFalse(error is CancellationError) }
+        XCTAssertEqual(server.count("/start"), 1)
+        XCTAssertEqual(server.count("/details"), 1)
+        XCTAssertEqual(server.count("/other"), 0)
+    }
+
     func testPageControlsExposeSearchMetadataWithoutEnteredOrSubmissionValues() async throws {
         let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: """
             <form id='trip' action='/search?private-form=original' method='get'>

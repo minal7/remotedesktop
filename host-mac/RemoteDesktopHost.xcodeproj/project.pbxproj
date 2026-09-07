@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		33FE59F3521FE7C5C19EED6E /* ComputerUseBrowserWorkflowTask.swift in Sources */ = {isa = PBXBuildFile; fileRef = BAE3687E5B43F6EE45215942 /* ComputerUseBrowserWorkflowTask.swift */; };
 		011F517DDAFBE8E5487AC981 /* AppLogo.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4BCF8A7A47830BB9DBB25CE9 /* AppLogo.swift */; };
 		04286FABBD9989313AA94B48 /* ComputerUseObservationWorkerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 39FE1E3654B6C097036EB8BC /* ComputerUseObservationWorkerTests.swift */; };
 		93E2B951632545F28A2DDA5C /* ComputerUsePlanningWorkerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8FFDF754D06447679A32043F /* ComputerUsePlanningWorkerTests.swift */; };
@@ -192,6 +193,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		BAE3687E5B43F6EE45215942 /* ComputerUseBrowserWorkflowTask.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseBrowserWorkflowTask.swift; sourceTree = "<group>"; };
 		01D4A4CBD5E28C53D7C11C24 /* AppleFoundationMCPPlanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleFoundationMCPPlanner.swift; sourceTree = "<group>"; };
 		037B0683983EF3DD797F9355 /* ScreenCaptureSizingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenCaptureSizingTests.swift; sourceTree = "<group>"; };
 		04D87AD6A58100E0FEF6A6D9 /* ComputerUseSourceBoundTextModelAcceptanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseSourceBoundTextModelAcceptanceTests.swift; sourceTree = "<group>"; };
@@ -497,6 +499,7 @@
 				B7196F80FEC0A28B03B3D49A /* ComputerUseArtifactManifest.swift */,
 				F2B773EF76537ED2F15FB0A0 /* ComputerUseBrowserDOM.swift */,
 				8BB5BF4DDC8661BF90D3A538 /* ComputerUseBrowserNavigationTask.swift */,
+				BAE3687E5B43F6EE45215942 /* ComputerUseBrowserWorkflowTask.swift */,
 				D462BD3E942537670E346BD3 /* ComputerUseCapabilityExecutor.swift */,
 				E985DBBFDBA3E8C04A0C63D2 /* ComputerUseClarificationPolicy.swift */,
 				1C2370C873EC38D6D50D88A8 /* ComputerUseFieldCopyPlan.swift */,
@@ -841,6 +844,7 @@
 				D184F2F3A70A20D0AE2C6A95 /* ComputerUseArtifactManifest.swift in Sources */,
 				145E4D8EB7756F17D37A0CBA /* ComputerUseBrowserDOM.swift in Sources */,
 				4C2907C9599BA45F37F3BFC3 /* ComputerUseBrowserNavigationTask.swift in Sources */,
+				33FE59F3521FE7C5C19EED6E /* ComputerUseBrowserWorkflowTask.swift in Sources */,
 				7F38EEA49C234B1F45290B35 /* ComputerUseCapabilityExecutor.swift in Sources */,
 				8AD76727F65B619CA61816CC /* ComputerUseClarificationPolicy.swift in Sources */,
 				AECF5889DA3E96E8DD2E3574 /* ComputerUseFieldCopyPlan.swift in Sources */,

@@ -43,6 +43,7 @@ enum ComputerUseBrowserNavigationRequest {
 final class ComputerUseBrowserNavigationTask {
     private let browser: ComputerUseOwnedBrowser
     private let journalDirectory: URL
+    private let effectNamespace: String?
     /// Controlled fixtures can suspend after the durable attempt and before
     /// dispatch. Production supplies no callback; document validation always
     /// remains inside the browser's actual navigation boundary.
@@ -50,18 +51,26 @@ final class ComputerUseBrowserNavigationTask {
     private let observedNavigationStore: (URL) throws -> ComputerUseTaskJournalStore
     private var execution: ComputerUseTaskExecution?
     private var retainedURLs: [URL] = []
+    private var workflow: ComputerUseBrowserWorkflowTask?
 
-    init(browser: ComputerUseOwnedBrowser, journalDirectory: URL,
+    init(browser: ComputerUseOwnedBrowser, journalDirectory: URL, effectNamespace: String? = nil,
          beforeNavigationDispatch: (@MainActor (Int) async throws -> Void)? = nil,
          observedNavigationStore: @escaping (URL) throws -> ComputerUseTaskJournalStore = { try .init(directory: $0) }) {
         self.browser = browser
         self.journalDirectory = journalDirectory
+        self.effectNamespace = effectNamespace
         self.beforeNavigationDispatch = beforeNavigationDispatch
         self.observedNavigationStore = observedNavigationStore
     }
 
     func execute(taskID: String, prompt: String, progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult? {
         guard let urls = ComputerUseBrowserNavigationRequest.urls(in: prompt) else { return nil }
+        if let effectNamespace {
+            guard effectNamespace.utf8.count == 64,
+                  effectNamespace.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else {
+                throw ComputerUseTaskExecutionError.invalidContract
+            }
+        }
         let promptDigest = ComputerUseTextTaskContract.digest(prompt)
         if let execution, execution.contract.taskID == taskID {
             guard execution.contract.promptDigest == promptDigest else { throw ComputerUseTaskExecutionError.journalMismatch }
@@ -72,7 +81,8 @@ final class ComputerUseBrowserNavigationTask {
                 kind: "task-ownership", expectedDigest: authority)]
             var steps: [ComputerUseTaskContract.Step] = []
             for (index, url) in urls.enumerated() {
-                let id = ComputerUseTaskContract.digest([taskID, String(index), url.absoluteString])
+                let identity = [taskID, String(index), url.absoluteString]
+                let id = ComputerUseTaskContract.digest(effectNamespace.map { ["browser-workflow-child-v1", $0] + identity } ?? identity)
                 predicates.append(.init(id: "navigation-\(index)", entityID: "browser", kind: "navigation-receipt",
                     expectedDigest: ComputerUseTaskContract.digest([url.absoluteString])))
                 predicates.append(.init(id: "current-\(index)", entityID: "browser", kind: "current-document",
@@ -137,6 +147,32 @@ final class ComputerUseBrowserNavigationTask {
             return .userInterventionRequired("The AI browser page changed before the next navigation. Check it before starting a new request.")
         } catch ComputerUseBrowserError.pageChanged {
             return .userInterventionRequired("The AI browser page changed before the next navigation. Check it before starting a new request.")
+        }
+    }
+
+    func executeWorkflow(taskID: String, request: ComputerUseBrowserWorkflowRequest, injector: InputInjector,
+                         progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
+        if let workflow, workflow.taskID == taskID {
+            guard workflow.request.prompt.utf8.elementsEqual(request.prompt.utf8) else {
+                throw ComputerUseTaskExecutionError.journalMismatch
+            }
+        } else {
+            workflow = ComputerUseBrowserWorkflowTask(taskID: taskID, request: request, browser: browser,
+                directory: journalDirectory.appendingPathComponent("Workflows", isDirectory: true), injector: injector)
+        }
+        guard let workflow else { throw ComputerUseTaskExecutionError.invalidContract }
+        do { return try await workflow.run(progress: progress) }
+        catch ComputerUseBrowserError.ownershipLost {
+            return .userInterventionRequired("Control changed during the browser task. Finish the manual step, then choose Resume to continue the original request.")
+        }
+        catch ComputerUseBrowserError.windowNotActive {
+            return .userInterventionRequired(ComputerUseBrowserError.windowNotActive.localizedDescription)
+        } catch ComputerUseBrowserError.pageChanged, ComputerUseBrowserError.formQueryUnavailable,
+                ComputerUseBrowserError.observedNavigationUncertain, ComputerUseTaskExecutionError.uncertainEffect,
+                ComputerUseTaskExecutionError.preconditionFailed, ComputerUseTaskExecutionError.incompleteOutcome,
+                ComputerUseTextTaskError.staleTarget, ComputerUseTextTaskError.uncertainEffect,
+                ComputerUseTextTaskError.incompleteOutcome {
+            return .userInterventionRequired("The browser state or an earlier action could not be verified. The original request is still pending; check the page before continuing.")
         }
     }
 
