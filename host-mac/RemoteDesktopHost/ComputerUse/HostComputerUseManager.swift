@@ -6472,7 +6472,7 @@ final class HostComputerUseManager: ObservableObject {
                         fingerprint: prepared.fingerprint, response: confirmation.response,
                         completionPromptDigest: confirmation.completionPromptDigest)
                     guard let recorded = try taskLedger.approvedAction(taskID: context.envelope.id,
-                        senderID: context.envelope.senderID, sessionID: context.envelope.sessionID) else {
+                        senderID: context.envelope.senderID, sessionID: context.envelope.sessionID, fingerprint: prepared.fingerprint) else {
                         throw MCPClientError.serverMismatch("The approved action confirmation could not be retained.")
                     }
                     result = Self.resultForApprovedAction(recorded, trustedUserPrompt: context.trustedUserPrompt)

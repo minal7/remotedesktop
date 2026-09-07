@@ -1579,6 +1579,221 @@ final class ComputerUseTests: XCTestCase {
         return MCPPreparedApproval(call: call, fingerprint: MCPApprovalFingerprint(call: call), display: call.approvalDisplay)
     }
 
+    private func approvedPlanFixture(taskID: String = "ordered", promptBody: String = "Create the same draft twice.",
+                                     count: Int = 2, generation: UInt64 = 7)
+        throws -> (contract: ComputerUseTaskContract, plan: ComputerUseTaskLedger.ApprovedActionPlan, prepared: [MCPPreparedApproval]) {
+        let prototype = try receiptApproval(taskID: taskID, generation: generation).call
+        let predicates = [ComputerUseTaskContract.Predicate(id: "owned", entityID: "mail", kind: "ownership",
+            expectedDigest: ComputerUseTaskContract.digest(["owned"]))]
+            + (0..<count).map { .init(id: "confirmed-\($0)", entityID: "mail", kind: "approved-result", expectedDigest: prototype.argumentsDigest) }
+        let steps = (0..<count).map { index in ComputerUseTaskContract.Step(id: "step-\(index)",
+            dependencies: index == 0 ? [] : ["step-\(index - 1)"],
+            operation: .init(capabilityID: "mcp.approved", entityID: "mail", payloadDigest: prototype.argumentsDigest, payloadVersion: 1),
+            preconditions: ["owned"] + (index == 0 ? [] : ["confirmed-\(index - 1)"]), postconditions: ["confirmed-\(index)"]) }
+        let contract = try ComputerUseTaskContract(taskID: taskID,
+            promptDigest: ComputerUseTaskContract.digest([ComputerUsePromptRequest.decodeCompatibleBody(promptBody).prompt]),
+            entities: [.init(id: "mail", authorityDigest: ComputerUseTaskLedger.ApprovedActionPlan.authorityDigest(for: prototype))],
+            predicates: predicates, steps: steps, invariants: ["owned"], outcomes: (0..<count).map { "confirmed-\($0)" })
+        let calls = try steps.map { step in try MCPToolCall(taskID: taskID, serverID: prototype.serverID,
+            processGeneration: generation, toolName: prototype.toolName, arguments: prototype.arguments,
+            schemaDigest: prototype.schemaDigest, risk: prototype.risk, approval: prototype.approvalDisplay,
+            stepEffectID: contract.effectIdentity(for: step)) }
+        let plan = try ComputerUseTaskLedger.ApprovedActionPlan(contract: contract, promptBody: promptBody, calls: calls)
+        return (contract, plan, calls.map { .init(call: $0, fingerprint: MCPApprovalFingerprint(call: $0), display: $0.approvalDisplay) })
+    }
+
+    func test_approvedPlanDistinguishesRepeatedEffectsAndRequiresAConfirmedPrefix() throws {
+        let url = temporaryLedgerURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let ledger = ComputerUseTaskLedger(fileURL: url), fixture = try approvedPlanFixture()
+        _ = try ledger.claim(taskID: "ordered", senderID: "sender", sessionID: "session", promptBody: "Create the same draft twice.")
+        func claim(_ index: Int) throws -> ComputerUseTaskLedger.ApprovedActionClaim {
+            try ledger.claimApprovedAction(taskID: "ordered", senderID: "sender", sessionID: "session", prepared: fixture.prepared[index], plan: fixture.plan)
+        }
+        XCTAssertNotEqual(fixture.prepared[0].call.canonicalDigest, fixture.prepared[1].call.canonicalDigest)
+        XCTAssertEqual(fixture.prepared[0].call.arguments, fixture.prepared[1].call.arguments)
+        XCTAssertThrowsError(try claim(1))
+        XCTAssertTrue(try ledger.approvedActionHistory(taskID: "ordered", senderID: "sender", sessionID: "session").isEmpty)
+        XCTAssertEqual(try claim(0), .new)
+        XCTAssertThrowsError(try claim(1))
+        try ledger.recordApprovedActionResult(taskID: "ordered", senderID: "sender", sessionID: "session",
+            fingerprint: fixture.prepared[0].fingerprint, response: "First draft confirmed")
+        XCTAssertEqual(try claim(1), .new)
+        let first = try XCTUnwrap(ledger.approvedAction(taskID: "ordered", senderID: "sender", sessionID: "session", fingerprint: fixture.prepared[0].fingerprint))
+        XCTAssertEqual(first.response, "First draft confirmed")
+        XCTAssertNil(try ledger.approvedAction(taskID: "ordered", senderID: "sender", sessionID: "session")?.response)
+        // A delayed duplicate of step one cannot replace the latest step.
+        try ledger.recordApprovedActionResult(taskID: "ordered", senderID: "sender", sessionID: "session",
+            fingerprint: fixture.prepared[0].fingerprint, response: "First draft confirmed")
+        XCTAssertNil(try ledger.approvedAction(taskID: "ordered", senderID: "sender", sessionID: "session")?.response)
+        XCTAssertThrowsError(try ledger.recordApprovedActionResult(taskID: "ordered", senderID: "sender", sessionID: "session",
+            fingerprint: fixture.prepared[1].fingerprint, response: "Second draft confirmed",
+            completionPromptDigest: MCPDigest.sha256(of: .string("Create the same draft twice."))))
+        try ledger.recordApprovedActionResult(taskID: "ordered", senderID: "sender", sessionID: "session",
+            fingerprint: fixture.prepared[1].fingerprint, response: "Second draft confirmed")
+        let history = try ledger.approvedActionHistory(taskID: "ordered", senderID: "sender", sessionID: "session")
+        XCTAssertEqual(history.map(\.response), ["First draft confirmed", "Second draft confirmed"])
+        XCTAssertTrue(history.allSatisfy { $0.confirmedAt != nil && $0.completionPromptDigest == nil })
+        XCTAssertNil(ledger.terminalOutcome(taskID: "ordered"), "Action confirmations are not the contract's whole-goal verifier")
+        let restored = ComputerUseTaskLedger(fileURL: url), newGeneration = try approvedPlanFixture(generation: 8)
+        XCTAssertEqual(newGeneration.plan, fixture.plan)
+        XCTAssertEqual(try restored.approvedActionHistory(taskID: "ordered", senderID: "sender", sessionID: "session"), history)
+        for index in 0..<2 {
+            XCTAssertEqual(try restored.claimApprovedAction(taskID: "ordered", senderID: "sender", sessionID: "session",
+                prepared: newGeneration.prepared[index], plan: newGeneration.plan), .existing(history[index]))
+        }
+        XCTAssertThrowsError(try restored.recordApprovedActionResult(taskID: "ordered", senderID: "sender", sessionID: "session",
+            fingerprint: newGeneration.prepared[0].fingerprint, response: "A new process cannot confirm an old claim"))
+    }
+
+    func test_approvedPlanRejectsContractPromptStepAndLegacyScopeChanges() throws {
+        let url = temporaryLedgerURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let ledger = ComputerUseTaskLedger(fileURL: url), fixture = try approvedPlanFixture()
+        _ = try ledger.claim(taskID: "ordered", senderID: "sender", sessionID: "session", promptBody: "Create the same draft twice.")
+        XCTAssertThrowsError(try ledger.claimApprovedAction(taskID: "ordered", senderID: "sender", sessionID: "session", prepared: fixture.prepared[0]))
+        _ = try ledger.claimApprovedAction(taskID: "ordered", senderID: "sender", sessionID: "session", prepared: fixture.prepared[0], plan: fixture.plan)
+        for changed in [try approvedPlanFixture(count: 3), try approvedPlanFixture(promptBody: "Create the same draft twice. ")] {
+            XCTAssertThrowsError(try ledger.claimApprovedAction(taskID: "ordered", senderID: "sender", sessionID: "session",
+                prepared: changed.prepared[0], plan: changed.plan))
+        }
+        XCTAssertThrowsError(try ledger.claimApprovedAction(taskID: "ordered", senderID: "other", sessionID: "session",
+            prepared: fixture.prepared[0], plan: fixture.plan))
+        XCTAssertThrowsError(try ComputerUseTaskLedger.ApprovedActionPlan(contract: fixture.contract,
+            promptBody: "Another task", calls: fixture.prepared.map(\.call)))
+        XCTAssertThrowsError(try ComputerUseTaskLedger.ApprovedActionPlan(contract: fixture.contract,
+            promptBody: "Create the same draft twice.", calls: fixture.prepared.reversed().map(\.call)))
+        let original = fixture.prepared[0].call
+        for changedPayload in [false, true] {
+            var arguments = original.arguments
+            if changedPayload { arguments["subject"] = .string("Another subject") }
+            let changed = try MCPToolCall(taskID: original.taskID, serverID: original.serverID,
+                processGeneration: original.processGeneration, toolName: original.toolName, arguments: arguments,
+                schemaDigest: changedPayload ? original.schemaDigest : String(repeating: "f", count: 64),
+                risk: original.risk, approval: original.approvalDisplay, stepEffectID: original.stepEffectID)
+            XCTAssertThrowsError(try ComputerUseTaskLedger.ApprovedActionPlan(contract: fixture.contract,
+                promptBody: "Create the same draft twice.", calls: [changed, fixture.prepared[1].call]))
+        }
+        let unscoped = try receiptApproval(taskID: "ordered")
+        XCTAssertThrowsError(try ComputerUseTaskLedger.ApprovedActionPlan(contract: fixture.contract,
+            promptBody: "Create the same draft twice.", calls: [unscoped.call, unscoped.call]))
+        let legacy = try approvedPlanFixture(taskID: "legacy")
+        _ = try ledger.claim(taskID: "legacy", senderID: "sender", sessionID: "session", promptBody: "Create the same draft twice.")
+        _ = try ledger.claimApprovedAction(taskID: "legacy", senderID: "sender", sessionID: "session", prepared: receiptApproval(taskID: "legacy"))
+        XCTAssertThrowsError(try ledger.claimApprovedAction(taskID: "legacy", senderID: "sender", sessionID: "session", prepared: legacy.prepared[0], plan: legacy.plan))
+        XCTAssertEqual(try ledger.approvedActionHistory(taskID: "ordered", senderID: "sender", sessionID: "session").count, 1)
+    }
+
+    func test_approvedPlanPauseStopAndLateConfirmationPreserveTheWholeHistory() throws {
+        let url = temporaryLedgerURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let body = "Create the same draft three times."
+        let ledger = ComputerUseTaskLedger(fileURL: url), fixture = try approvedPlanFixture(promptBody: body, count: 3)
+        _ = try ledger.claim(taskID: "ordered", senderID: "sender", sessionID: "session", promptBody: body)
+        _ = try ledger.claimApprovedAction(taskID: "ordered", senderID: "sender", sessionID: "session", prepared: fixture.prepared[0], plan: fixture.plan)
+        try ledger.recordApprovedActionResult(taskID: "ordered", senderID: "sender", sessionID: "session",
+            fingerprint: fixture.prepared[0].fingerprint, response: "First")
+        _ = try ledger.applyControl(.pause, taskID: "ordered", revision: 1, senderID: "sender", sessionID: "session")
+        XCTAssertThrowsError(try ledger.claimApprovedAction(taskID: "ordered", senderID: "sender", sessionID: "session", prepared: fixture.prepared[1], plan: fixture.plan))
+        _ = try ledger.applyControl(.resume, taskID: "ordered", revision: 2, senderID: "sender", sessionID: "session")
+        XCTAssertEqual(try ledger.claimApprovedAction(taskID: "ordered", senderID: "sender", sessionID: "session", prepared: fixture.prepared[1], plan: fixture.plan), .new)
+        _ = try ledger.applyControl(.cancel, taskID: "ordered", revision: 3, senderID: "sender", sessionID: "session")
+        try ledger.recordApprovedActionResult(taskID: "ordered", senderID: "sender", sessionID: "session",
+            fingerprint: fixture.prepared[1].fingerprint, response: "Second, confirmed after Stop")
+        XCTAssertThrowsError(try ledger.claimApprovedAction(taskID: "ordered", senderID: "sender", sessionID: "session", prepared: fixture.prepared[2], plan: fixture.plan))
+        let restored = ComputerUseTaskLedger(fileURL: url)
+        XCTAssertEqual(restored.terminalOutcome(taskID: "ordered"), .unableToComplete)
+        XCTAssertEqual(restored.appliedControlRevision(taskID: "ordered"), 3)
+        XCTAssertEqual(try restored.approvedActionHistory(taskID: "ordered", senderID: "sender", sessionID: "session").map(\.response), ["First", "Second, confirmed after Stop"])
+    }
+
+    func test_approvedPlanStorageFailureCannotPublishTheNextClaimOrItsResult() throws {
+        for confirming in [false, true] {
+            let url = temporaryLedgerURL(), folder = url.deletingLastPathComponent()
+            let parked = folder.appendingPathExtension("parked")
+            defer { try? FileManager.default.removeItem(at: folder); try? FileManager.default.removeItem(at: parked) }
+            let ledger = ComputerUseTaskLedger(fileURL: url), fixture = try approvedPlanFixture()
+            _ = try ledger.claim(taskID: "ordered", senderID: "sender", sessionID: "session", promptBody: "Create the same draft twice.")
+            _ = try ledger.claimApprovedAction(taskID: "ordered", senderID: "sender", sessionID: "session", prepared: fixture.prepared[0], plan: fixture.plan)
+            try ledger.recordApprovedActionResult(taskID: "ordered", senderID: "sender", sessionID: "session",
+                fingerprint: fixture.prepared[0].fingerprint, response: "First")
+            if confirming {
+                _ = try ledger.claimApprovedAction(taskID: "ordered", senderID: "sender", sessionID: "session", prepared: fixture.prepared[1], plan: fixture.plan)
+            }
+            try FileManager.default.moveItem(at: folder, to: parked)
+            try Data("Block ledger writes".utf8).write(to: folder)
+            if confirming {
+                XCTAssertThrowsError(try ledger.recordApprovedActionResult(taskID: "ordered", senderID: "sender", sessionID: "session",
+                    fingerprint: fixture.prepared[1].fingerprint, response: "Unstored second confirmation"))
+            } else {
+                XCTAssertThrowsError(try ledger.claimApprovedAction(taskID: "ordered", senderID: "sender", sessionID: "session", prepared: fixture.prepared[1], plan: fixture.plan))
+            }
+            XCTAssertThrowsError(try ledger.approvedActionHistory(taskID: "ordered", senderID: "sender", sessionID: "session"))
+            try FileManager.default.removeItem(at: folder)
+            try FileManager.default.moveItem(at: parked, to: folder)
+            let restored = ComputerUseTaskLedger(fileURL: url)
+            let history = try restored.approvedActionHistory(taskID: "ordered", senderID: "sender", sessionID: "session")
+            XCTAssertEqual(history.count, confirming ? 2 : 1)
+            XCTAssertEqual(history.first?.response, "First")
+            if confirming { XCTAssertNil(history.last?.response) }
+        }
+    }
+
+    func test_approvedPlanReloadRejectsBrokenHistoryAndRetainsLateConfirmation() throws {
+        let url = temporaryLedgerURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let ledger = ComputerUseTaskLedger(fileURL: url), fixture = try approvedPlanFixture()
+        _ = try ledger.claim(taskID: "ordered", senderID: "sender", sessionID: "session", promptBody: "Create the same draft twice.")
+        _ = try ledger.claimApprovedAction(taskID: "ordered", senderID: "sender", sessionID: "session", prepared: fixture.prepared[0], plan: fixture.plan)
+        try ledger.recordApprovedActionResult(taskID: "ordered", senderID: "sender", sessionID: "session",
+            fingerprint: fixture.prepared[0].fingerprint, response: "First")
+        _ = try ledger.claimApprovedAction(taskID: "ordered", senderID: "sender", sessionID: "session", prepared: fixture.prepared[1], plan: fixture.plan)
+        _ = try ledger.applyControl(.cancel, taskID: "ordered", revision: 1, senderID: "sender", sessionID: "session")
+        var records = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: [String: Any]])
+        records["ordered"]?["acceptedAt"] = 0
+        var actions = try XCTUnwrap(records["ordered"]?["approvedActionSteps"] as? [[String: Any]])
+        for index in actions.indices {
+            actions[index]["attemptedAt"] = 0
+            if index == 0 { actions[index]["confirmedAt"] = 0 }
+            else { actions[index].removeValue(forKey: "confirmedAt") }
+        }
+        records["ordered"]?["approvedActionSteps"] = actions
+        records["ordered"]?["approvedAction"] = try XCTUnwrap(actions.last)
+        try JSONSerialization.data(withJSONObject: records).write(to: url)
+        let restored = ComputerUseTaskLedger(fileURL: url)
+        _ = try restored.claim(taskID: "prune", senderID: "sender", sessionID: "session", promptBody: "Another request")
+        XCTAssertEqual(try restored.approvedActionHistory(taskID: "ordered", senderID: "sender", sessionID: "session").count, 2)
+        try restored.recordApprovedActionResult(taskID: "ordered", senderID: "sender", sessionID: "session",
+            fingerprint: fixture.prepared[1].fingerprint, response: "Café")
+        let confirmed = ComputerUseTaskLedger(fileURL: url)
+        XCTAssertEqual(try confirmed.approvedActionHistory(taskID: "ordered", senderID: "sender", sessionID: "session").last?.response, "Café",
+            "Pruning must retain a recent confirmation even when the original task and dispatch are old")
+        XCTAssertEqual(confirmed.terminalOutcome(taskID: "ordered"), .unableToComplete)
+        records = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: [String: Any]])
+        for corruption in ["reverse", "missing-plan", "skip-confirmation", "foreign-scope", "alias-bytes", "task-proof", "missing-time"] {
+            var damaged = records, record = try XCTUnwrap(records["ordered"])
+            var history = try XCTUnwrap(record["approvedActionSteps"] as? [[String: Any]])
+            switch corruption {
+            case "reverse": history.reverse()
+            case "missing-plan": record.removeValue(forKey: "approvedActionPlan")
+            case "skip-confirmation":
+                history[0].removeValue(forKey: "response"); history[0].removeValue(forKey: "responseDigest"); history[0].removeValue(forKey: "confirmedAt")
+            case "foreign-scope":
+                var plan = try XCTUnwrap(record["approvedActionPlan"] as? [String: Any])
+                plan["requestDigest"] = String(repeating: "f", count: 64); record["approvedActionPlan"] = plan
+            case "alias-bytes":
+                var alias = try XCTUnwrap(record["approvedAction"] as? [String: Any])
+                alias["response"] = "Cafe\u{301}"; record["approvedAction"] = alias
+            case "task-proof": history[0]["completionPromptDigest"] = String(repeating: "e", count: 64)
+            default: history[0].removeValue(forKey: "confirmedAt")
+            }
+            record["approvedActionSteps"] = history; damaged["ordered"] = record
+            try JSONSerialization.data(withJSONObject: damaged).write(to: url)
+            let invalid = ComputerUseTaskLedger(fileURL: url)
+            XCTAssertThrowsError(try invalid.approvedActionHistory(taskID: "ordered", senderID: "sender", sessionID: "session"), corruption)
+        }
+    }
+
     private func assertApprovedActionInterruption(_ mode: String) async throws {
         let url = temporaryLedgerURL()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }

@@ -142,7 +142,8 @@ struct MCPAllowedTool: Codable, Equatable, Sendable {
 
     func makeCall(
         taskID: String,
-        arguments: [String: MCPJSONValue]
+        arguments: [String: MCPJSONValue],
+        stepEffectID: String? = nil
     ) throws -> MCPToolCall {
         try MCPToolSafetyPolicy.validateArguments(
             toolName: toolName,
@@ -162,7 +163,8 @@ struct MCPAllowedTool: Codable, Equatable, Sendable {
             arguments: arguments,
             schemaDigest: schemaDigest,
             risk: assessment.risk,
-            approval: assessment.approval)
+            approval: assessment.approval,
+            stepEffectID: stepEffectID)
     }
 }
 
@@ -180,6 +182,9 @@ struct MCPToolCall: Codable, Equatable, Sendable {
     let canonicalArguments: String
     let argumentsDigest: String
     let canonicalDigest: String
+    /// Host task-contract effect identity, never a tool argument or model-
+    /// chosen retry nonce. Nil preserves the original single-action identity.
+    let stepEffectID: String?
     let schemaDigest: String
     let risk: MCPToolRisk
     let approvalSummary: String
@@ -194,7 +199,8 @@ struct MCPToolCall: Codable, Equatable, Sendable {
         arguments: [String: MCPJSONValue],
         schemaDigest: String,
         risk: MCPToolRisk,
-        approval: MCPApprovalDisplay
+        approval: MCPApprovalDisplay,
+        stepEffectID: String? = nil
     ) throws {
         let trimmedTaskID = taskID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedTaskID.isEmpty,
@@ -202,6 +208,12 @@ struct MCPToolCall: Codable, Equatable, Sendable {
               !toolName.isEmpty,
               !schemaDigest.isEmpty else {
             throw MCPClientError.invalidArguments("The MCP call identity is incomplete.")
+        }
+        if let stepEffectID {
+            guard risk == .approvalRequired, stepEffectID.utf8.count == 64,
+                  stepEffectID.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else {
+                throw MCPClientError.invalidArguments("The approved task-step identity is invalid.")
+            }
         }
 
         let canonicalData = try MCPDigest.canonicalData(
@@ -219,6 +231,12 @@ struct MCPToolCall: Codable, Equatable, Sendable {
             callMaterial.append(Data(component.utf8))
             callMaterial.append(0)
         }
+        if let stepEffectID {
+            callMaterial.append(Data("approved-task-step-v1".utf8))
+            callMaterial.append(0)
+            callMaterial.append(Data(stepEffectID.utf8))
+            callMaterial.append(0)
+        }
 
         self.taskID = trimmedTaskID
         self.serverID = serverID
@@ -228,6 +246,7 @@ struct MCPToolCall: Codable, Equatable, Sendable {
         self.canonicalArguments = canonicalArguments
         self.argumentsDigest = argumentsDigest
         self.canonicalDigest = MCPDigest.sha256(callMaterial)
+        self.stepEffectID = stepEffectID
         self.schemaDigest = schemaDigest
         self.risk = risk
         self.approvalSummary = approval.summary
@@ -320,7 +339,7 @@ struct MCPApprovedActionResult: Equatable, Sendable {
         let response = mail.sendNow
             ? "Mail accepted the approved email for sending."
             : "Email draft opened visibly in Mail for review."
-        let provesWholeTask = exactSingleMailRequest(trustedUserPrompt, matches: mail)
+        let provesWholeTask = call.stepEffectID == nil && exactSingleMailRequest(trustedUserPrompt, matches: mail)
         return .init(callDigest: call.canonicalDigest, response: response,
             completionPromptDigest: provesWholeTask ? try MCPDigest.sha256(of: .string(trustedUserPrompt)) : nil)
     }

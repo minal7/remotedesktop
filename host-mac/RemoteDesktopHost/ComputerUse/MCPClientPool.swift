@@ -281,7 +281,8 @@ actor MCPClientPool {
             against: tool.inputSchema)
         let reconstructed = try tool.makeCall(
             taskID: suppliedCall.taskID,
-            arguments: suppliedCall.arguments)
+            arguments: suppliedCall.arguments,
+            stepEffectID: suppliedCall.stepEffectID)
         guard reconstructed == suppliedCall else {
             throw MCPClientError.invalidArguments(
                 "The MCP call metadata does not match its exact arguments and current policy.")

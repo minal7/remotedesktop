@@ -2,6 +2,71 @@ import XCTest
 @testable import RemoteDesktopHost
 
 final class MCPFoundationTests: XCTestCase {
+    func testApprovedStepIdentityDistinguishesIntentionalRepetitionAndPreservesLegacyCalls() throws {
+        let tool = try allowedTool(name: "press_key", generation: 10)
+        let nextTool = try allowedTool(name: "press_key", generation: 11)
+        let firstID = ComputerUseTaskContract.digest(["first-step"]), secondID = ComputerUseTaskContract.digest(["second-step"])
+        let legacy = try tool.makeCall(taskID: "repeat", arguments: [:])
+        let first = try tool.makeCall(taskID: "repeat", arguments: [:], stepEffectID: firstID)
+        let second = try tool.makeCall(taskID: "repeat", arguments: [:], stepEffectID: secondID)
+        let resumed = try nextTool.makeCall(taskID: "repeat", arguments: [:], stepEffectID: firstID)
+        XCTAssertEqual(first.argumentsDigest, second.argumentsDigest)
+        XCTAssertEqual(first.canonicalDigest, resumed.canonicalDigest)
+        XCTAssertNotEqual(first.canonicalDigest, second.canonicalDigest)
+        XCTAssertNotEqual(first.canonicalDigest, legacy.canonicalDigest)
+        XCTAssertNotEqual(MCPApprovalFingerprint(call: first), MCPApprovalFingerprint(call: second))
+        XCTAssertNotEqual(MCPApprovalFingerprint(call: first), MCPApprovalFingerprint(call: resumed))
+        XCTAssertEqual(try JSONDecoder().decode(MCPToolCall.self, from: JSONEncoder().encode(first)), first)
+        let legacyData = try JSONEncoder().encode(legacy)
+        XCTAssertFalse(String(decoding: legacyData, as: UTF8.self).contains("stepEffectID"))
+        XCTAssertEqual(try JSONDecoder().decode(MCPToolCall.self, from: legacyData), legacy)
+        for invalid in ["", "step-one", String(repeating: "a", count: 63), String(repeating: "A", count: 64)] {
+            XCTAssertThrowsError(try tool.makeCall(taskID: "repeat", arguments: [:], stepEffectID: invalid))
+        }
+        XCTAssertThrowsError(try allowedTool(name: "focused_app").makeCall(taskID: "read", arguments: [:], stepEffectID: firstID))
+    }
+
+    func testPoolExecutesDistinctApprovedStepsOnceAndReconcilesEachAfterRestart() async throws {
+        let url = temporaryURL("scoped-mutations.json")
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let factory = FakeMCPSessionFactory(toolNames: ["press_key"])
+        let pool = MCPClientPool(binaryValidator: AcceptingMCPBinaryValidator(),
+            mutationLedger: MCPFileMutationCallLedger(fileURL: url),
+            sessionFactory: { factory.make(binary: $0, generation: $1) }, embeddedSessionFactory: { _ in nil })
+        _ = try await pool.start(binaryURL: fakeBinaryURL)
+        let tools = try await pool.allowedTools(), tool = try XCTUnwrap(tools.first)
+        let ids = [ComputerUseTaskContract.digest(["first"]), ComputerUseTaskContract.digest(["second"])]
+        let calls = try ids.map { try tool.makeCall(taskID: "two-approved-steps", arguments: [:], stepEffectID: $0) }
+        let first = try await pool.prepareApproval(calls[0]), second = try await pool.prepareApproval(calls[1])
+        do {
+            _ = try await pool.performApproved(calls[0], fingerprint: second.fingerprint)
+            XCTFail("Approval for one step cannot authorize another")
+        } catch { XCTAssertEqual(error as? MCPClientError, .approvalMismatch) }
+        _ = try await pool.performApproved(calls[0], fingerprint: first.fingerprint)
+        _ = try await pool.performApproved(calls[1], fingerprint: second.fingerprint)
+        let original = try XCTUnwrap(factory.createdSessions().last)
+        let originalExecutions = await original.executionCount()
+        XCTAssertEqual(originalExecutions, 2, "Identical requested effects in distinct steps must not share one mutation receipt")
+        await pool.cancelAll()
+        let restoredLedger = MCPFileMutationCallLedger(fileURL: url)
+        for call in calls {
+            guard case .completed = try await restoredLedger.claim(call) else {
+                return XCTFail("Each step needs its own durable result after ledger reconstruction")
+            }
+        }
+        _ = try await pool.start(binaryURL: fakeBinaryURL)
+        let refreshed = try await pool.allowedTools(), newTool = try XCTUnwrap(refreshed.first)
+        for id in ids {
+            let call = try newTool.makeCall(taskID: "two-approved-steps", arguments: [:], stepEffectID: id)
+            let prepared = try await pool.prepareApproval(call)
+            _ = try await pool.performApproved(call, fingerprint: prepared.fingerprint)
+        }
+        let latest = try XCTUnwrap(factory.createdSessions().last)
+        let replayExecutions = await latest.executionCount()
+        XCTAssertEqual(replayExecutions, 0, "A generation change must not replay either completed step")
+        await pool.cancelAll()
+    }
+
     @MainActor
     func testPoolValidationCannotOutliveStopCancellationOrNewerStart() async throws {
         try await assertStartupInvalidation(at: .validation)

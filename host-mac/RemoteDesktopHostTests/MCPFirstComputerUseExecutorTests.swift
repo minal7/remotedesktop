@@ -45,6 +45,12 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
                 "status": .string(send ? "accepted_for_sending" : "draft_opened")]), isError: false, wasTruncated: false)
             let confirmation = try MCPApprovedActionResult.verified(call: call, result: result, trustedUserPrompt: prompt)
             XCTAssertEqual(confirmation.completionPromptDigest, try MCPDigest.sha256(of: .string(prompt)))
+            let scopedCall = try tool.makeCall(taskID: call.taskID, arguments: arguments,
+                stepEffectID: ComputerUseTaskContract.digest(["approved-mail-step"]))
+            let scopedConfirmation = try MCPApprovedActionResult.verified(call: scopedCall, result: result, trustedUserPrompt: prompt)
+            XCTAssertEqual(scopedConfirmation.response, confirmation.response)
+            XCTAssertNil(scopedConfirmation.completionPromptDigest,
+                "A task-plan step needs the contract's whole-goal verifier even when this action matches a literal Mail command")
             for request in [prompt + ", then list my reminders", "First find Alex's number. " + prompt, "Do not " + prompt,
                             "Explain how to " + prompt, "Write the text: " + prompt, prompt.replacingOccurrences(of: "Café", with: "Cafe\u{301}"),
                             prompt.replacingOccurrences(of: "alex@example.invalid", with: "pat@example.invalid")] {
