@@ -213,34 +213,25 @@ final class ComputerUseBrowserWorkflowTask {
                 }
                 result = editResult
             case .link(let label), .formQuery(let label):
-                let target: ComputerUseBrowserNavigationTarget
-                if let retained = preparedDestinations[index] { target = retained }
-                else {
-                    let document = try await browser.acquireObservedDocument(taskID: taskID)
-                    let evidence = try await browser.observePage(document: document)
-                    switch stage.kind {
-                    case .link:
-                        let matches = evidence.page.links.filter { $0.label.caseInsensitiveCompare(label) == .orderedSame }
-                        guard matches.count == 1, let link = matches.first else {
-                            return .userInterventionRequired("I could not uniquely identify the requested link. Open the intended page, then choose Resume.")
+                let child = navigationChild(index, directory: childDirectory, stepID: stepIDs[index])
+                let candidate: ComputerUseBrowserNavigationTarget?
+                if let retained = preparedDestinations[index] {
+                    // A previous run may have stopped after preparing a link
+                    // but before any request (for example, inline login).
+                    // The child checks durable AND native attempts before it
+                    // allows fresh observation under the original stage ID.
+                    candidate = try await child.refreshUnsentObservedDestination(retained,
+                        promptDigest: request.promptDigest, operationID: stepIDs[index]) {
+                            try await self.prepareDestination(index: index, stage: stage, label: label)
                         }
-                        target = try await browser.prepareLinkNavigation(linkID: link.id, evidence: evidence)
-                    case .formQuery:
-                        let matches = evidence.page.controls.filter { $0.label.caseInsensitiveCompare(label) == .orderedSame && !$0.disabled }
-                        guard matches.count == 1, let control = matches.first else {
-                            return .userInterventionRequired("I could not uniquely identify the requested form query. Open the intended form, then choose Resume.")
-                        }
-                        if index > 0, case .edits = request.stages[index - 1].kind {
-                            guard let child = textChildren[index - 1] else { throw ComputerUseBrowserError.formQueryUnavailable }
-                            target = try await child.prepareFormQuery(taskID: taskID,
-                                promptDigest: ComputerUseTextTaskContract.digest(request.stages[index - 1].source),
-                                controlID: control.id, evidence: evidence)
-                        } else { target = try await browser.prepareFormQuery(controlID: control.id, evidence: evidence) }
-                    default: throw ComputerUseTaskExecutionError.invalidContract
-                    }
-                    preparedDestinations[index] = target
+                } else {
+                    candidate = try await prepareDestination(index: index, stage: stage, label: label)
                 }
-                _ = try await navigationChild(index, directory: childDirectory, stepID: stepIDs[index]).openObservedDestination(target,
+                guard let target = candidate else {
+                    return .userInterventionRequired("I could not uniquely identify the requested link or form query. Open the intended page, then choose Resume.")
+                }
+                preparedDestinations[index] = target
+                _ = try await child.openObservedDestination(target,
                     promptDigest: request.promptDigest, operationID: stepIDs[index], willBeginEffect: {})
                 result = .completed("Browser destination confirmed")
             }
@@ -256,6 +247,31 @@ final class ComputerUseBrowserWorkflowTask {
         _ = try await browser.observePage(document: document)
         try checkOwnership()
         return .completed("Completed the requested page openings and form edits. Website: \(ComputerUseBrowserSite.displayName(for: document.committedURL))")
+    }
+
+    private func prepareDestination(index: Int, stage: ComputerUseBrowserWorkflowRequest.Stage,
+        label: String) async throws -> ComputerUseBrowserNavigationTarget? {
+        let document = try await browser.acquireObservedDocument(taskID: taskID)
+        let evidence = try await browser.observePage(document: document)
+        switch stage.kind {
+        case .link:
+            let matches = evidence.page.links.filter { $0.label.caseInsensitiveCompare(label) == .orderedSame }
+            guard matches.count == 1, let link = matches.first else { return nil }
+            return try await browser.prepareLinkNavigation(linkID: link.id, evidence: evidence)
+        case .formQuery:
+            let matches = evidence.page.controls.filter { $0.label.caseInsensitiveCompare(label) == .orderedSame && !$0.disabled }
+            guard matches.count == 1, let control = matches.first else { return nil }
+            if index > 0, case .edits = request.stages[index - 1].kind {
+                // Re-observation cannot replace the original edit requirements
+                // with whatever values manual control left on the page.
+                guard let child = textChildren[index - 1] else { throw ComputerUseBrowserError.formQueryUnavailable }
+                return try await child.prepareFormQuery(taskID: taskID,
+                    promptDigest: ComputerUseTextTaskContract.digest(request.stages[index - 1].source),
+                    controlID: control.id, evidence: evidence)
+            }
+            return try await browser.prepareFormQuery(controlID: control.id, evidence: evidence)
+        default: throw ComputerUseTaskExecutionError.invalidContract
+        }
     }
 
     private func navigationChild(_ index: Int, directory: URL, stepID: String) -> ComputerUseBrowserNavigationTask {

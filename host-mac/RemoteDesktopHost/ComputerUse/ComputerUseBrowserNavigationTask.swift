@@ -218,15 +218,74 @@ final class ComputerUseBrowserNavigationTask {
         try await browser.prepareFormQuery(controlID: controlID, evidence: evidence)
     }
 
+    /// Called on a later run with the original stage's retained target. Only
+    /// a proven-unsent plan may select a fresh page reference. Hold the same
+    /// execution lease through preparation and replacement so an older runner
+    /// cannot dispatch while this binding changes. No navigation occurs here.
+    func refreshUnsentObservedDestination(_ target: ComputerUseBrowserNavigationTarget,
+        promptDigest: String, operationID: String,
+        prepare: () async throws -> ComputerUseBrowserNavigationTarget?) async throws -> ComputerUseBrowserNavigationTarget? {
+        let identity = try Self.observedIdentity(target, promptDigest: promptDigest, operationID: operationID)
+        guard browser.contextID == target.contextID,
+              let session = browser.handbackRequirement(taskID: target.taskID, required: true) else {
+            throw ComputerUseBrowserError.ownershipLost
+        }
+        try browser.validateWorkflowSession(session)
+        let store = try observedNavigationStore(journalDirectory.appendingPathComponent("Observed Destinations", isDirectory: true))
+        let persisted = try store.load(taskID: identity.taskID)
+        if let persisted { try Self.validateObservedIdentity(persisted, identity) }
+        let lease = try store.acquireExecution(taskID: identity.taskID, expected: persisted)
+        defer { lease.release() }
+        func checkOwnership() throws {
+            try Task.checkCancellation()
+            try lease.assertOwnership()
+            try browser.validateWorkflowSession(session)
+        }
+        try checkOwnership()
+        guard persisted == nil || persisted?.statuses == [.planned],
+              !browser.hasObservedNavigationAttempt(operationID: operationID) else { return target }
+        guard let fresh = try await prepare() else { return nil }
+        try checkOwnership()
+        guard fresh.taskID.utf8.elementsEqual(target.taskID.utf8), fresh.contextID == target.contextID else {
+            throw ComputerUseTaskExecutionError.journalMismatch
+        }
+        try await browser.validateObservedDestination(fresh)
+        try checkOwnership()
+        guard !browser.hasObservedNavigationAttempt(operationID: operationID) else { return target }
+        let replacement = try Self.observedIdentity(fresh, promptDigest: promptDigest, operationID: operationID)
+        if let persisted { try store.replaceUnattemptedBinding(replacement, replacing: persisted) }
+        else { try store.save(replacement, replacing: nil) }
+        // A failed durable write must not publish a replacement to the caller.
+        return fresh
+    }
+
+    private static func observedIdentity(_ target: ComputerUseBrowserNavigationTarget,
+        promptDigest: String, operationID: String) throws -> ComputerUseTaskJournal {
+        func validDigest(_ value: String) -> Bool {
+            value.utf8.count == 64 && value.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
+        }
+        guard validDigest(promptDigest), validDigest(operationID) else { throw ComputerUseTaskExecutionError.invalidContract }
+        // Excluding document/context/payload makes a changed target find the
+        // earlier record, rather than silently becoming a second operation.
+        return ComputerUseTaskJournal(
+            taskID: ComputerUseTaskContract.digest(["observed-browser-effect-record-v1", target.taskID, operationID]),
+            promptDigest: promptDigest,
+            contractDigest: ComputerUseTaskContract.digest(["observed-browser-effect-binding-v1", target.taskID, operationID, target.payloadDigest]),
+            stepIDs: [operationID], statuses: [.planned])
+    }
+
+    private static func validateObservedIdentity(_ saved: ComputerUseTaskJournal, _ identity: ComputerUseTaskJournal) throws {
+        guard saved.taskID == identity.taskID, saved.promptDigest == identity.promptDigest,
+              saved.contractDigest == identity.contractDigest, saved.stepIDs == identity.stepIDs,
+              saved.statuses.count == 1 else { throw ComputerUseTaskExecutionError.journalMismatch }
+    }
+
     /// Persist one host-selected effect independently of the whole task's
     /// remaining goals. The caller must supply the original prompt digest and
     /// a stable task-step operation ID; a page reference supplies neither.
     /// This journal records only identities/status, never URLs or form values.
     func openObservedDestination(_ target: ComputerUseBrowserNavigationTarget, promptDigest: String, operationID: String,
                                  willBeginEffect: () -> Void) async throws -> ComputerUseBrowserNavigationReceipt {
-        func validDigest(_ value: String) -> Bool {
-            value.utf8.count == 64 && value.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
-        }
         func checkOwnership() throws {
             try Task.checkCancellation()
             guard browser.contextID == target.contextID, browser.hasOwnership(taskID: target.taskID) else {
@@ -234,21 +293,11 @@ final class ComputerUseBrowserNavigationTask {
             }
         }
         try checkOwnership()
-        guard validDigest(promptDigest), validDigest(operationID) else { throw ComputerUseTaskExecutionError.invalidContract }
-        // The lookup key excludes document/context/payload: replacement
-        // browsers and newly prepared targets must find the earlier record
-        // and reject changed identity instead of treating it as a new effect.
-        let journalID = ComputerUseTaskContract.digest(["observed-browser-effect-record-v1", target.taskID, operationID])
-        let identity = ComputerUseTaskJournal(taskID: journalID, promptDigest: promptDigest,
-            contractDigest: ComputerUseTaskContract.digest(["observed-browser-effect-binding-v1", target.taskID, operationID, target.payloadDigest]),
-            stepIDs: [operationID], statuses: [.planned])
+        let identity = try Self.observedIdentity(target, promptDigest: promptDigest, operationID: operationID)
+        let journalID = identity.taskID
         let store = try observedNavigationStore(journalDirectory.appendingPathComponent("Observed Destinations", isDirectory: true))
         var persisted = try store.load(taskID: journalID)
-        if let persisted {
-            guard persisted.taskID == identity.taskID, persisted.promptDigest == identity.promptDigest,
-                  persisted.contractDigest == identity.contractDigest, persisted.stepIDs == identity.stepIDs,
-                  persisted.statuses.count == 1 else { throw ComputerUseTaskExecutionError.journalMismatch }
-        }
+        if let persisted { try Self.validateObservedIdentity(persisted, identity) }
         let lease = try store.acquireExecution(taskID: journalID, expected: persisted)
         defer { lease.release() }
         func save(_ status: ComputerUseTaskStepStatus) throws {

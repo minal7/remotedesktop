@@ -3,6 +3,219 @@ import XCTest
 
 @MainActor
 final class ComputerUseBrowserDOMTests: XCTestCase {
+    func testUnsentDestinationRefreshReobservesLinkAndQueryWithoutChangingTaskOrOperation() async throws {
+        for useForm in [false, true] {
+            for savePlan in [false, true] {
+                let fixture = try await DOMFixture(body: """
+                    <a href='/old'>Results</a><form method='get' action='/destination'>
+                    <input type='hidden' name='state' value='old'><button>Search</button></form>
+                    <script>fetch('/signal').then(() => {
+                        document.querySelector('a').href = '/destination?state=fresh';
+                        document.querySelector('input').value = 'fresh'; fetch('/changed');
+                    });</script>
+                    """, heldSignal: true)
+                defer { fixture.close() }
+                let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+                defer { try? FileManager.default.removeItem(at: directory) }
+                func prepare() async throws -> ComputerUseBrowserNavigationTarget {
+                    let page = try await fixture.browser.observePage(document: fixture.document)
+                    if useForm {
+                        return try await fixture.browser.prepareFormQuery(controlID: try XCTUnwrap(page.page.controls.first { $0.label == "Search" }).id, evidence: page)
+                    }
+                    return try await fixture.browser.prepareLinkNavigation(linkID: page.page.links[0].id, evidence: page)
+                }
+                let old = try await prepare()
+                let prompt = ComputerUseTextTaskContract.digest("Original whole request"), operation = ComputerUseTaskContract.digest(["same stage"])
+                let navigation = ComputerUseBrowserNavigationTask(browser: fixture.browser, journalDirectory: directory)
+                try await fixture.wait { fixture.server.count("/signal") == 1 }
+                fixture.server.releaseHeldResponses()
+                try await fixture.wait { fixture.server.count("/changed") == 1 }
+                if savePlan {
+                    do { _ = try await navigation.openObservedDestination(old, promptDigest: prompt, operationID: operation,
+                        willBeginEffect: { XCTFail("Changed page must stop before dispatch") }); XCTFail("Old destination is stale") }
+                    catch { XCTAssertFalse(error is CancellationError) }
+                    XCTAssertEqual(try observedNavigationJournal(in: directory).statuses, [.planned])
+                }
+                XCTAssertFalse(fixture.browser.hasObservedNavigationAttempt(operationID: operation))
+                let candidate = try await navigation.refreshUnsentObservedDestination(old, promptDigest: prompt, operationID: operation) { try await prepare() }
+                let fresh = try XCTUnwrap(candidate)
+                XCTAssertNotEqual(fresh.payloadDigest, old.payloadDigest)
+                let saved = try observedNavigationJournal(in: directory)
+                XCTAssertEqual(saved.promptDigest, prompt); XCTAssertEqual(saved.stepIDs, [operation]); XCTAssertEqual(saved.statuses, [.planned])
+                XCTAssertEqual(saved.contractDigest, ComputerUseTaskContract.digest(["observed-browser-effect-binding-v1", "fixture", operation, fresh.payloadDigest]))
+                XCTAssertFalse(fixture.server.requestedPaths.contains { $0.hasPrefix("/destination") })
+                do { _ = try await navigation.openObservedDestination(old, promptDigest: prompt, operationID: operation,
+                    willBeginEffect: { XCTFail("An old caller cannot dispatch after rebind") }); XCTFail("Old payload must mismatch") }
+                catch { XCTAssertEqual(error as? ComputerUseTaskExecutionError, .journalMismatch) }
+                _ = try await navigation.openObservedDestination(fresh, promptDigest: prompt, operationID: operation, willBeginEffect: {})
+                XCTAssertEqual(fixture.server.count("/destination?state=fresh"), 1)
+                XCTAssertEqual(fixture.server.count("/old"), 0)
+                XCTAssertEqual(try observedNavigationJournal(in: directory).statuses, [.verified])
+            }
+        }
+    }
+
+    func testDestinationRefreshCannotResetDurableOrNativeAttemptsEvenWithoutReceipts() async throws {
+        for mode in ["native-only", "attempted", "uncertain", "verified"] {
+            let fixture = try await DOMFixture(body: "<a href='/destination'>Results</a>")
+            defer { fixture.close() }
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let evidence = try await fixture.browser.observePage(document: fixture.document)
+            let target = try await fixture.browser.prepareLinkNavigation(linkID: evidence.page.links[0].id, evidence: evidence)
+            let prompt = ComputerUseTextTaskContract.digest("Original goal"), operation = ComputerUseTaskContract.digest(["fixed operation"])
+            let store = try ComputerUseTaskJournalStore(directory: directory.appendingPathComponent("Observed Destinations"))
+            let identity = ComputerUseTaskJournal(taskID: ComputerUseTaskContract.digest(["observed-browser-effect-record-v1", "fixture", operation]),
+                promptDigest: prompt, contractDigest: ComputerUseTaskContract.digest(["observed-browser-effect-binding-v1", "fixture", operation, target.payloadDigest]),
+                stepIDs: [operation], statuses: [.planned])
+            try store.save(identity, replacing: nil)
+            if mode == "native-only" {
+                do { _ = try await fixture.browser.openObservedDestination(target, operationID: operation,
+                    willBeginEffect: { throw ComputerUseTaskJournalStore.StoreError.unavailable }); XCTFail("The native attempt must stop before load") }
+                catch { XCTAssertEqual(error as? ComputerUseTaskJournalStore.StoreError, .unavailable) }
+                XCTAssertTrue(fixture.browser.hasObservedNavigationAttempt(operationID: operation))
+            } else {
+                var attempted = identity; attempted.statuses = [.attempted]
+                try store.save(attempted, replacing: identity)
+                if mode != "attempted" {
+                    var advanced = identity; advanced.statuses = [mode == "verified" ? .verified : .uncertain]
+                    try store.save(advanced, replacing: attempted)
+                }
+            }
+            let original = try observedNavigationJournal(in: directory)
+            let navigation = ComputerUseBrowserNavigationTask(browser: fixture.browser, journalDirectory: directory)
+            let retained = try await navigation.refreshUnsentObservedDestination(target, promptDigest: prompt, operationID: operation) {
+                XCTFail("Neither an attempted journal nor a native attempt may select another target")
+                return nil
+            }
+            XCTAssertEqual(retained, target)
+            XCTAssertEqual(try observedNavigationJournal(in: directory), original)
+            do { _ = try await navigation.openObservedDestination(target, promptDigest: prompt, operationID: operation,
+                willBeginEffect: { XCTFail("No independent receipt exists") }); XCTFail("Must reconcile without replay") }
+            catch { XCTAssertEqual(error as? ComputerUseBrowserError, .observedNavigationUncertain) }
+            XCTAssertEqual(fixture.server.count("/destination"), 0)
+        }
+    }
+
+    func testDestinationRefreshHoldsLeaseThroughPreparationAndRejectsChangedGoal() async throws {
+        let fixture = try await DOMFixture(body: "<a href='/destination'>Results</a>")
+        defer { fixture.close() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let page = try await fixture.browser.observePage(document: fixture.document)
+        let target = try await fixture.browser.prepareLinkNavigation(linkID: page.page.links[0].id, evidence: page)
+        let prompt = ComputerUseTextTaskContract.digest("Original goal"), operation = ComputerUseTaskContract.digest(["fixed operation"])
+        let first = ComputerUseBrowserNavigationTask(browser: fixture.browser, journalDirectory: directory)
+        let second = ComputerUseBrowserNavigationTask(browser: fixture.browser, journalDirectory: directory)
+        var entered = false, released = false
+        let running = Task {
+            try await first.refreshUnsentObservedDestination(target, promptDigest: prompt, operationID: operation) {
+                entered = true
+                try await fixture.wait { released }
+                let fresh = try await fixture.browser.observePage(document: fixture.document)
+                return try await fixture.browser.prepareLinkNavigation(linkID: fresh.page.links[0].id, evidence: fresh)
+            }
+        }
+        defer { released = true; running.cancel() }
+        try await fixture.wait { entered }
+        do { _ = try await second.refreshUnsentObservedDestination(target, promptDigest: prompt, operationID: operation) {
+            XCTFail("A competing refresh must not observe"); return target
+        }; XCTFail("Preparation owns the execution lease") }
+        catch { XCTAssertEqual(error as? ComputerUseTaskJournalStore.StoreError, .busy) }
+        do { _ = try await second.openObservedDestination(target, promptDigest: prompt, operationID: operation,
+            willBeginEffect: { XCTFail("Old target cannot dispatch during rebind") }); XCTFail("Old executor must wait for the lease") }
+        catch { XCTAssertEqual(error as? ComputerUseTaskJournalStore.StoreError, .busy) }
+        released = true
+        let candidate = try await running.value
+        let fresh = try XCTUnwrap(candidate)
+        let original = try observedNavigationJournal(in: directory)
+        do { _ = try await second.refreshUnsentObservedDestination(fresh, promptDigest: ComputerUseTextTaskContract.digest("Changed goal"), operationID: operation) {
+            XCTFail("Changed goal cannot prepare"); return fresh
+        }; XCTFail("The original goal is fixed") }
+        catch { XCTAssertEqual(error as? ComputerUseTaskExecutionError, .journalMismatch) }
+        XCTAssertEqual(try observedNavigationJournal(in: directory), original)
+        XCTAssertEqual(fixture.server.count("/destination"), 0)
+    }
+
+    func testDestinationRefreshFailureDoesNotPublishNewBindingOrAuthorizeARequest() async throws {
+        let fixture = try await DOMFixture(body: "<a href='/destination'>Results</a>")
+        defer { fixture.close() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let page = try await fixture.browser.observePage(document: fixture.document)
+        let old = try await fixture.browser.prepareLinkNavigation(linkID: page.page.links[0].id, evidence: page)
+        let prompt = ComputerUseTextTaskContract.digest("Original goal"), operation = ComputerUseTaskContract.digest(["fixed operation"])
+        let normal = ComputerUseBrowserNavigationTask(browser: fixture.browser, journalDirectory: directory)
+        _ = try await normal.refreshUnsentObservedDestination(old, promptDigest: prompt, operationID: operation) { old }
+        let original = try observedNavigationJournal(in: directory)
+        let failing = ComputerUseBrowserNavigationTask(browser: fixture.browser, journalDirectory: directory, observedNavigationStore: { location in
+            try ComputerUseTaskJournalStore(directory: location, afterReplacement: { throw ComputerUseTaskJournalStore.StoreError.unavailable })
+        })
+        var published = old
+        do {
+            let candidate = try await failing.refreshUnsentObservedDestination(old, promptDigest: prompt, operationID: operation) {
+                let fresh = try await fixture.browser.observePage(document: fixture.document)
+                return try await fixture.browser.prepareLinkNavigation(linkID: fresh.page.links[0].id, evidence: fresh)
+            }
+            published = try XCTUnwrap(candidate)
+            XCTFail("An uncertain durable replacement cannot publish a new target")
+        } catch { XCTAssertEqual(error as? ComputerUseTaskJournalStore.StoreError, .unavailable) }
+        XCTAssertEqual(published, old)
+        let visible = try observedNavigationJournal(in: directory)
+        XCTAssertEqual(visible.promptDigest, original.promptDigest); XCTAssertEqual(visible.stepIDs, original.stepIDs)
+        XCTAssertEqual(visible.statuses, [.planned]); XCTAssertNotEqual(visible.contractDigest, original.contractDigest)
+        do { _ = try await normal.openObservedDestination(published, promptDigest: prompt, operationID: operation,
+            willBeginEffect: { XCTFail("Stale cache must not dispatch after failed persistence") }); XCTFail("Old payload cannot overwrite the visible new binding") }
+        catch { XCTAssertEqual(error as? ComputerUseTaskExecutionError, .journalMismatch) }
+        XCTAssertFalse(fixture.browser.hasObservedNavigationAttempt(operationID: operation))
+        XCTAssertEqual(fixture.server.count("/destination"), 0)
+    }
+
+    func testDestinationRefreshRejectsMissingForeignStaleAndUnownedEvidenceWithoutRebinding() async throws {
+        for mode in ["missing", "foreign", "stale", "unowned"] {
+            var allowed = true
+            let fixture = try await DOMFixture(body: """
+                <a href='/destination'>Results</a><script>fetch('/signal').then(() => {
+                    document.querySelector('a').href = '/other'; fetch('/changed');
+                });</script>
+                """, heldSignal: true, mayAct: { allowed })
+            defer { fixture.close() }
+            let other = try await DOMFixture(body: "<a href='/destination'>Results</a>")
+            defer { other.close() }
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let page = try await fixture.browser.observePage(document: fixture.document)
+            let old = try await fixture.browser.prepareLinkNavigation(linkID: page.page.links[0].id, evidence: page)
+            let prompt = ComputerUseTextTaskContract.digest("Original goal"), operation = ComputerUseTaskContract.digest(["fixed stage"])
+            let navigation = ComputerUseBrowserNavigationTask(browser: fixture.browser, journalDirectory: directory)
+            _ = try await navigation.refreshUnsentObservedDestination(old, promptDigest: prompt, operationID: operation) { old }
+            let saved = try observedNavigationJournal(in: directory)
+            do {
+                let result = try await navigation.refreshUnsentObservedDestination(old, promptDigest: prompt, operationID: operation) {
+                    if mode == "missing" { return nil }
+                    let source = mode == "foreign" ? other : fixture
+                    let fresh = try await source.browser.observePage(document: source.document)
+                    let target = try await source.browser.prepareLinkNavigation(linkID: fresh.page.links[0].id, evidence: fresh)
+                    if mode == "stale" {
+                        try await fixture.wait { fixture.server.count("/signal") == 1 }
+                        fixture.server.releaseHeldResponses()
+                        try await fixture.wait { fixture.server.count("/changed") == 1 }
+                    } else if mode == "unowned" { allowed = false }
+                    return target
+                }
+                XCTAssertEqual(mode, "missing", "Invalid fresh evidence cannot replace an unsent binding")
+                XCTAssertNil(result)
+            } catch {
+                XCTAssertNotEqual(mode, "missing")
+                if mode == "foreign" { XCTAssertEqual(error as? ComputerUseTaskExecutionError, .journalMismatch) }
+                if mode == "unowned" { XCTAssertEqual(error as? ComputerUseBrowserError, .ownershipLost) }
+            }
+            XCTAssertEqual(try observedNavigationJournal(in: directory), saved)
+            XCTAssertFalse(fixture.browser.hasObservedNavigationAttempt(operationID: operation))
+            XCTAssertEqual(fixture.server.count("/destination"), 0); XCTAssertEqual(other.server.count("/destination"), 0)
+        }
+    }
+
     func testJournaledObservedNavigationPersistsBeforeLoadAndReplaysHistoricalReceipts() async throws {
         for useForm in [false, true] {
             let fixture = try await DOMFixture(body: """

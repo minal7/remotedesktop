@@ -574,7 +574,8 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             && (lhs.port ?? (lhs.scheme?.lowercased() == "https" ? 443 : 80)) == (rhs.port ?? (rhs.scheme?.lowercased() == "https" ? 443 : 80))
     }
 
-    private func validateObservedDestination(_ target: ComputerUseBrowserNavigationTarget) async throws {
+    /// Read-only validation, also used before durably rebinding an unsent plan.
+    func validateObservedDestination(_ target: ComputerUseBrowserNavigationTarget) async throws {
         guard hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
         let evidence = target.evidence
         var arguments: [String: Any] = ["documentID": evidence.documentID, "snapshotID": evidence.page.id]
@@ -594,6 +595,12 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             if case .formQuery = target.source { throw ComputerUseBrowserError.formQueryUnavailable }
             throw ComputerUseBrowserError.linkNavigationUnavailable
         }
+    }
+
+    /// Absence of a receipt is not absence of an attempt. Keep failures before
+    /// native load conservative too: the durable callback may have failed.
+    func hasObservedNavigationAttempt(operationID: String) -> Bool {
+        observedNavigationAttempts[operationID] != nil
     }
 
     /// Open the previously bound HTTP(S) destination with the native browser

@@ -4,6 +4,91 @@ import XCTest
 @testable import RemoteDesktopHost
 
 final class ComputerUseTextStepStoreTests: XCTestCase {
+    func testExplicitUnattemptedRebindingPreservesGoalAndStepsAndRejectsEveryAdvancedState() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try ComputerUseTextStepStore(directory: directory)
+        let original = journal([.planned, .planned])
+        let fresh = ComputerUseTaskJournal(taskID: original.taskID, promptDigest: original.promptDigest,
+            contractDigest: ComputerUseTextTaskContract.digest("fresh binding"), stepIDs: original.stepIDs, statuses: original.statuses)
+        try store.save(original, replacing: nil)
+        XCTAssertThrowsError(try store.save(fresh, replacing: original), "Ordinary saves retain immutable binding")
+        let wrongGoal = ComputerUseTaskJournal(taskID: original.taskID, promptDigest: ComputerUseTextTaskContract.digest("other goal"),
+            contractDigest: fresh.contractDigest, stepIDs: original.stepIDs, statuses: original.statuses)
+        let wrongStep = ComputerUseTaskJournal(taskID: original.taskID, promptDigest: original.promptDigest,
+            contractDigest: fresh.contractDigest, stepIDs: ["é", "step-2"], statuses: original.statuses)
+        let wrongTask = ComputerUseTaskJournal(taskID: "other task", promptDigest: original.promptDigest,
+            contractDigest: fresh.contractDigest, stepIDs: original.stepIDs, statuses: original.statuses)
+        for candidate in [wrongGoal, wrongStep, wrongTask] {
+            XCTAssertThrowsError(try store.replaceUnattemptedBinding(candidate, replacing: original)) {
+                XCTAssertEqual($0 as? ComputerUseTextStepStore.StoreError, .invalidTransition)
+            }
+        }
+        let advancedStates: [[ComputerUseTaskStepStatus]] = [[.attempted, .planned], [.uncertain, .planned], [.verified, .planned], [.verified, .verified]]
+        for statuses in advancedStates {
+            var advanced = fresh
+            advanced.statuses = statuses
+            XCTAssertThrowsError(try store.replaceUnattemptedBinding(advanced, replacing: original))
+            XCTAssertThrowsError(try store.replaceUnattemptedBinding(fresh, replacing: advanced))
+        }
+        XCTAssertEqual(try store.load(taskID: "task"), original)
+        try store.replaceUnattemptedBinding(fresh, replacing: original)
+        XCTAssertEqual(try store.load(taskID: "task"), fresh)
+        var attempted = original
+        attempted.statuses[0] = .attempted
+        XCTAssertThrowsError(try store.save(attempted, replacing: original)) {
+            XCTAssertEqual($0 as? ComputerUseTextStepStore.StoreError, .staleJournal)
+        }
+        attempted = fresh; attempted.statuses[0] = .attempted
+        try store.save(attempted, replacing: fresh)
+        XCTAssertThrowsError(try store.replaceUnattemptedBinding(original, replacing: attempted))
+        XCTAssertEqual(try store.load(taskID: "task"), attempted)
+    }
+
+    func testUnattemptedRebindingUsesExecutionExclusionAndExactExpectedBinding() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let first = try ComputerUseTextStepStore(directory: directory), second = try ComputerUseTextStepStore(directory: directory)
+        let original = journal([.planned, .planned])
+        let fresh = ComputerUseTaskJournal(taskID: original.taskID, promptDigest: original.promptDigest,
+            contractDigest: ComputerUseTextTaskContract.digest("fresh"), stepIDs: original.stepIDs, statuses: original.statuses)
+        try first.save(original, replacing: nil)
+        let lease = try first.acquireExecution(taskID: "task", expected: original)
+        defer { lease.release() }
+        XCTAssertThrowsError(try second.replaceUnattemptedBinding(fresh, replacing: original)) {
+            XCTAssertEqual($0 as? ComputerUseTextStepStore.StoreError, .busy)
+        }
+        try first.replaceUnattemptedBinding(fresh, replacing: original)
+        XCTAssertEqual(try second.load(taskID: "task"), fresh)
+        lease.release()
+        XCTAssertThrowsError(try second.replaceUnattemptedBinding(fresh, replacing: original)) {
+            XCTAssertEqual($0 as? ComputerUseTextStepStore.StoreError, .staleJournal)
+        }
+        XCTAssertThrowsError(try second.acquireExecution(taskID: "task", expected: original))
+    }
+
+    func testUnattemptedRebindingFailureAfterRenamePoisonsWriterWithoutAdvancingAnEffect() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var fail = false
+        let writer = try ComputerUseTextStepStore(directory: directory, afterReplacement: {
+            if fail { throw ComputerUseTextStepStore.StoreError.unavailable }
+        })
+        let original = journal([.planned, .planned])
+        let fresh = ComputerUseTaskJournal(taskID: original.taskID, promptDigest: original.promptDigest,
+            contractDigest: ComputerUseTextTaskContract.digest("fresh"), stepIDs: original.stepIDs, statuses: original.statuses)
+        try writer.save(original, replacing: nil)
+        fail = true
+        XCTAssertThrowsError(try writer.replaceUnattemptedBinding(fresh, replacing: original))
+        fail = false
+        XCTAssertThrowsError(try writer.load(taskID: "task"))
+        XCTAssertThrowsError(try writer.replaceUnattemptedBinding(fresh, replacing: original))
+        let reopened = try ComputerUseTextStepStore(directory: directory)
+        XCTAssertEqual(try reopened.load(taskID: "task"), fresh)
+        XCTAssertThrowsError(try reopened.replaceUnattemptedBinding(fresh, replacing: original))
+        XCTAssertFalse(try FileManager.default.contentsOfDirectory(atPath: directory.path).contains { $0.hasPrefix(".pending-") })
+    }
+
     func testExecutionLeaseExcludesDuplicateRunWhileAllowingJournalReadAndDifferentTask() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

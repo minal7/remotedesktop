@@ -6,6 +6,99 @@ import XCTest
 
 @MainActor
 final class ComputerUseOwnedBrowserTests: XCTestCase {
+    func testBrowserWorkflowRefreshesUnsentDestinationAfterLoginAndKeepsVerifiedQueryValues() async throws {
+        for mode in ["link", "query", "changed-query"] {
+            let loginChange = mode == "link"
+                ? "history.replaceState(null, '', '/account'); document.querySelector('a').href = '/results?session=retained';"
+                : (mode == "changed-query" ? "document.getElementById('q').value = 'Tokyo';" : "")
+            let server = try OwnedBrowserHTTPFixture(routes: ["/form": .init(body: """
+                <a href='/old'>Results</a><div id='login'></div>
+                <form method='get' action='/results'><label>Destination<input name='q' id='q' value='old'></label><button>Search</button></form>
+                <script>
+                document.getElementById('q').addEventListener('input', e => fetch('/edited?value=' + encodeURIComponent(e.target.value), { keepalive: true }));
+                fetch('/show-login').then(() => {
+                    document.getElementById('login').innerHTML = '<label>Password<input type=password></label>';
+                    fetch('/login-shown'); return fetch('/finish-login');
+                }).then(() => {
+                    document.getElementById('login').remove(); \(loginChange) fetch('/logged-in');
+                });
+                </script>
+                """), "/show-login": .init(held: true), "/finish-login": .init(held: true)])
+            let base = try await server.start()
+            defer { server.stop() }
+            let root = "unsent-login-workflow"
+            var allowed = true, linkValidations = 0, pausedOnce = false
+            var requirement: ComputerUseBrowserHandbackRequirement?
+            weak var observedBrowser: ComputerUseOwnedBrowser?
+            let browser = ComputerUseOwnedBrowser(presentsWindow: false, domScriptDidDispatch: { command in
+                if command == .validatePageLink { linkValidations += 1 }
+                let opening = mode == "link" ? command == .validatePageLink && linkValidations == 2 : command == .validateFormQuery
+                if opening && !pausedOnce {
+                    pausedOnce = true
+                    requirement = observedBrowser?.handbackRequirement(taskID: root, required: true)
+                    allowed = false
+                }
+            }, mayAct: { allowed })
+            observedBrowser = browser
+            defer { browser.close() }
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let ending = mode == "link" ? "open the link \"Results\"" : "set \"Destination\" to \"Paris\" then open the form query using \"Search\""
+            let prompt = "Open \(base.appendingPathComponent("form").absoluteString) then \(ending)"
+            let request = try XCTUnwrap(ComputerUseBrowserWorkflowRequest.compile(prompt))
+            let navigation = ComputerUseBrowserNavigationTask(browser: browser, journalDirectory: directory)
+            let paused = try await navigation.executeWorkflow(taskID: root, request: request, injector: InputInjector(), progress: { _ in })
+            guard case .userInterventionRequired = paused else { return XCTFail("Takeover must stop the prepared destination before a request") }
+            let parentStore = try ComputerUseTaskJournalStore(directory: directory.appendingPathComponent("Workflows"))
+            let parent = try XCTUnwrap(parentStore.load(taskID: root)), operation = try XCTUnwrap(parent.stepIDs.last)
+            XCTAssertEqual(parent.statuses, mode == "link" ? [.verified, .attempted] : [.verified, .verified, .attempted])
+            let childStore = try ComputerUseTaskJournalStore(directory: directory.appendingPathComponent("Workflows/Stages")
+                .appendingPathComponent(operation).appendingPathComponent("Observed Destinations"))
+            let journalID = ComputerUseTaskContract.digest(["observed-browser-effect-record-v1", root, operation])
+            let unsent = try XCTUnwrap(childStore.load(taskID: journalID))
+            XCTAssertEqual(unsent.statuses, [.planned]); XCTAssertEqual(unsent.promptDigest, ComputerUseTextTaskContract.digest(prompt))
+            XCTAssertFalse(browser.hasObservedNavigationAttempt(operationID: operation))
+            try await waitUntil { server.count("/show-login") == 1 }
+            server.releaseHeldResponses()
+            try await waitUntil { server.count("/login-shown") == 1 && server.count("/finish-login") == 1 }
+            allowed = true
+            let handback = try XCTUnwrap(requirement)
+            try await browser.reacquireAfterUserControl(taskID: root, requirement: handback)
+            do { _ = try await navigation.executeWorkflow(taskID: root, request: request, injector: InputInjector(), progress: { _ in })
+                XCTFail("An active login challenge still requires the user") }
+            catch { XCTAssertEqual(error as? ComputerUseBrowserError, .authenticationRequired) }
+            XCTAssertEqual(try childStore.load(taskID: journalID), unsent)
+            allowed = false
+            server.releaseHeldResponses()
+            try await waitUntil { server.count("/logged-in") == 1 }
+            allowed = true
+            try await browser.reacquireAfterUserControl(taskID: root, requirement: handback)
+            let resumed = try await navigation.executeWorkflow(taskID: root, request: request, injector: InputInjector(), progress: { _ in })
+            if mode == "changed-query" {
+                guard case .userInterventionRequired = resumed else { return XCTFail("Rebinding must retain the original verified Paris requirement") }
+                XCTAssertEqual(try childStore.load(taskID: journalID), unsent)
+                XCTAssertEqual(try parentStore.load(taskID: root), parent)
+                XCTAssertFalse(server.requestedPaths.contains { $0.hasPrefix("/results") })
+            } else {
+                guard case .completed = resumed else { return XCTFail("The unsent stage must continue after explicit handback") }
+                let completed = try XCTUnwrap(childStore.load(taskID: journalID))
+                XCTAssertEqual(completed.statuses, [.verified]); XCTAssertNotEqual(completed.contractDigest, unsent.contractDigest)
+                XCTAssertEqual(completed.promptDigest, unsent.promptDigest); XCTAssertEqual(completed.stepIDs, unsent.stepIDs)
+                let finished = try XCTUnwrap(parentStore.load(taskID: root))
+                XCTAssertEqual(finished.stepIDs, parent.stepIDs); XCTAssertEqual(finished.contractDigest, parent.contractDigest)
+                XCTAssertEqual(finished.statuses, parent.stepIDs.map { _ in .verified })
+                XCTAssertEqual(server.count(mode == "link" ? "/results?session=retained" : "/results?q=Paris"), 1)
+                _ = try await navigation.executeWorkflow(taskID: root, request: request, injector: InputInjector(), progress: { _ in })
+                XCTAssertEqual(server.requestedPaths.filter { $0.hasPrefix("/results") }.count, 1)
+            }
+            if mode != "link" {
+                try await waitUntil { server.count("/edited?value=Paris") == 1 }
+                XCTAssertEqual(server.count("/edited?value=Paris"), 1)
+            }
+            XCTAssertEqual(server.count("/form"), 1); XCTAssertEqual(server.count("/old"), 0)
+        }
+    }
+
     func testBrowserWorkflowCompilerPreservesQuotedConnectorsAndRejectsUncoveredGoals() throws {
         let prompt = "Open https://example.invalid/form then set \"Message\" to \"Now then later, and then 😀\" then append \"!\" to the same field then open the form query using \"Search\""
         let request = try XCTUnwrap(ComputerUseBrowserWorkflowRequest.compile(prompt))

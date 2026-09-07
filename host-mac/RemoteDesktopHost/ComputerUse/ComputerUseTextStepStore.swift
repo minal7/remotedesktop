@@ -176,6 +176,28 @@ final class ComputerUseTaskJournalStore {
         }
     }
 
+    /// An explicit re-plan before any step was attempted. The caller must
+    /// also establish that its native adapter has no attempt. Task, original
+    /// request and operation IDs remain fixed; ordinary save never rebinds.
+    func replaceUnattemptedBinding(_ journal: ComputerUseTaskJournal, replacing expected: ComputerUseTaskJournal) throws {
+        guard Self.isValid(journal), Self.isValid(expected) else { throw StoreError.invalidFile }
+        guard journal.taskID.utf8.elementsEqual(expected.taskID.utf8), journal.promptDigest == expected.promptDigest,
+              journal.stepIDs.count == expected.stepIDs.count,
+              zip(journal.stepIDs, expected.stepIDs).allSatisfy({ $0.0.utf8.elementsEqual($0.1.utf8) }),
+              journal.statuses.allSatisfy({ $0 == .planned }), expected.statuses.allSatisfy({ $0 == .planned }) else {
+            throw StoreError.invalidTransition
+        }
+        let data = try JSONEncoder().encode(journal)
+        guard data.count <= 65_536 else { throw StoreError.invalidFile }
+        try withJournalLock(taskID: journal.taskID, exclusive: true) {
+            let current = try readJournal(taskID: journal.taskID)
+            guard Self.matches(current, expected) else { throw StoreError.staleJournal }
+            if Self.matches(current, journal) { return }
+            do { try replace(data, taskID: journal.taskID) }
+            catch { writeFailed = true; throw error }
+        }
+    }
+
     private func replace(_ data: Data, taskID: String) throws {
         let temporary = ".pending-" + UUID().uuidString
         let name = ComputerUseTextTaskContract.digest(taskID) + ".json"
