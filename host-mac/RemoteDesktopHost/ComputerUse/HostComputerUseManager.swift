@@ -1219,6 +1219,15 @@ final class ComputerUseHostTools {
         try await browserNavigationTask.validatePageEvidence(evidence)
     }
 
+    func scrollOwnedBrowserViewport(_ direction: OSAtlasScrollDirection, evidence: ComputerUseBrowserPageEvidence,
+                                    operationID: String, willBeginEffect: () -> Void) async throws -> ComputerUseBrowserViewportScrollReceipt {
+        try Task.checkCancellation()
+        guard mayAct() else { throw ToolError.paused }
+        guard let browserNavigationTask else { throw ComputerUseBrowserError.closed }
+        return try await browserNavigationTask.scrollViewport(direction, evidence: evidence,
+            operationID: operationID, willBeginEffect: willBeginEffect)
+    }
+
     func reacquireOwnedBrowserAfterUserControl(taskID: String) async throws {
         try await browserNavigationTask?.reacquireAfterUserControl(taskID: taskID)
     }

@@ -167,6 +167,11 @@ final class ComputerUseBrowserNavigationTask {
         try await browser.validatePageEvidence(evidence)
     }
 
+    func scrollViewport(_ direction: OSAtlasScrollDirection, evidence: ComputerUseBrowserPageEvidence,
+                        operationID: String, willBeginEffect: () -> Void) async throws -> ComputerUseBrowserViewportScrollReceipt {
+        try await browser.scrollViewport(direction, evidence: evidence, operationID: operationID, willBeginEffect: willBeginEffect)
+    }
+
     static var journalDirectory: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Remote Desktop Host/Computer Use Tasks/Browser Steps", isDirectory: true)

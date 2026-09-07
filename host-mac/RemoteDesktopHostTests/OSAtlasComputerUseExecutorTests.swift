@@ -2860,6 +2860,101 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
         }
     }
 
+    func testOwnedBrowserScrollUsesViewportAndCannotCompleteFromNoMovementOrWrongScope() async throws {
+        for (index, prompt) in ["Scroll down", "Scroll up", "Scroll down in the results list"].enumerated() {
+            let server = try OwnedBrowserHTTPFixture(routes: [
+                "/page": .init(body: "<!doctype html><style>body {height:4000px}</style><p>Page content</p>")])
+            let base = try await server.start()
+            defer { server.stop() }
+            let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+            defer { browser.close() }
+            try browser.claim(taskID: "browser-viewport")
+            let document = try await browser.navigate(taskID: "browser-viewport", operationID: "open", to: base.appendingPathComponent("page"))
+            let before = try await browser.observePage(document: document)
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let navigation = ComputerUseBrowserNavigationTask(browser: browser, journalDirectory: directory)
+            let fixture = makeCorrectionRuntime(completionResponses: [], port: UInt16(43_810 + index))
+            let requests = SemanticRoutingRequestLog()
+            let direction: OSAtlasScrollDirection = index == 1 ? .up : .down
+            let executor = OSAtlasComputerUseExecutor.makeForTesting(inputs: fixture.inputs, runtime: fixture.runtime,
+                semanticRouter: StubSemanticActionRouter { request in
+                    await requests.record(request)
+                    return .init(directive: .scroll, scrollDirection: direction)
+                }, allowsExplicitActionCompatibility: false, maxSteps: 1)
+            do {
+                let result = try await executor.execute(taskID: "browser-viewport", prompt: prompt, trustedUserPrompt: prompt,
+                    tools: correctionTestTools(browserNavigationTask: navigation,
+                        actionPerformer: { _ in XCTFail("Owned viewport scrolling must never inject global input") }), progress: { _ in })
+                if index == 1 {
+                    if case .userInterventionRequired = result {} else { XCTFail("No movement must pause, not complete") }
+                } else if index == 2 {
+                    if case .unableToComplete = result {} else { XCTFail("A nested list is not the page viewport") }
+                } else { XCTFail("One verified scroll must not fabricate whole-task completion") }
+            } catch {
+                if index == 0, case OSAtlasComputerUseExecutor.RuntimeError.stepLimit = error {} else {
+                    await fixture.runtime.shutdown()
+                    throw error
+                }
+            }
+            await fixture.runtime.shutdown()
+            let after = try await browser.observePage(document: document)
+            if index == 0 { XCTAssertGreaterThan(try XCTUnwrap(after.page.viewport?.y), try XCTUnwrap(before.page.viewport?.y)) }
+            else { XCTAssertEqual(after.page.viewport, before.page.viewport) }
+            let recorded = await requests.values()
+            XCTAssertEqual(recorded.count, 1)
+            XCTAssertEqual(recorded.first?.task, prompt)
+            XCTAssertNotNil(recorded.first?.browserPageContext)
+            XCTAssertEqual(browser.receipt(taskID: "browser-viewport", operationID: "open"), document)
+            XCTAssertEqual(server.count("/page"), 1)
+        }
+    }
+
+    func testInterruptedOwnedViewportScrollRetainsUncertaintyBeforeReplanning() async throws {
+        var mayAct = true, dispatches = 0
+        let server = try OwnedBrowserHTTPFixture(routes: [
+            "/page": .init(body: "<!doctype html><style>body {height:4000px}</style><p>Page content</p>")])
+        let base = try await server.start()
+        defer { server.stop() }
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, domScriptDidDispatch: { command in
+            if command == .scrollViewport { dispatches += 1; mayAct = false }
+        }, mayAct: { mayAct })
+        defer { browser.close() }
+        try browser.claim(taskID: "interrupted-viewport")
+        let document = try await browser.navigate(taskID: "interrupted-viewport", operationID: "open", to: base.appendingPathComponent("page"))
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let navigation = ComputerUseBrowserNavigationTask(browser: browser, journalDirectory: directory)
+        let fixture = makeCorrectionRuntime(completionResponses: [], port: 43_815)
+        let requests = SemanticRoutingRequestLog()
+        let executor = OSAtlasComputerUseExecutor.makeForTesting(inputs: fixture.inputs, runtime: fixture.runtime,
+            semanticRouter: StubSemanticActionRouter { request in
+                await requests.record(request)
+                return .init(directive: .scroll, scrollDirection: .down)
+            }, allowsExplicitActionCompatibility: false, maxSteps: 2)
+        let tools = correctionTestTools(browserNavigationTask: navigation,
+            actionPerformer: { _ in XCTFail("An interrupted DOM action cannot fall back to wheel input") })
+        let prompt = "Scroll down"
+        do {
+            do {
+                _ = try await executor.execute(taskID: "interrupted-viewport", prompt: prompt, trustedUserPrompt: prompt, tools: tools, progress: { _ in })
+                XCTFail("Takeover must invalidate the returned receipt")
+            } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .viewportScrollUncertain) }
+            XCTAssertEqual(dispatches, 1)
+            mayAct = true
+            try await browser.waitForDOMCompletion(document: document)
+            let resumed = try await executor.execute(taskID: "interrupted-viewport", prompt: prompt, trustedUserPrompt: prompt, tools: tools, progress: { _ in })
+            guard case .clarificationRequired = resumed else {
+                await fixture.runtime.shutdown()
+                return XCTFail("The original task must reconcile its attempted effect before replanning")
+            }
+        } catch { await fixture.runtime.shutdown(); throw error }
+        await fixture.runtime.shutdown()
+        XCTAssertEqual(dispatches, 1)
+        let recorded = await requests.values()
+        XCTAssertEqual(recorded.count, 1)
+    }
+
     func testOwnedBrowserInvisibleDestinationChangeRestartsPlanningBeforeTyping() async throws {
         let server = try OwnedBrowserHTTPFixture(routes: ["/results": .init(body: """
             <label>Search<input></label><a id='result' href='/event?opaque=first'>Event</a>

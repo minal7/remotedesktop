@@ -3,6 +3,194 @@ import XCTest
 
 @MainActor
 final class ComputerUseBrowserDOMTests: XCTestCase {
+    func testViewportScrollAuthorityAndReceiptRejectWrongTargetsAndUnprovenMovement() {
+        for task in ["Scroll down", "Please scroll the page down.", "Could you scroll down in this page?",
+                     "Scroll down until the Privacy section is visible."] {
+            XCTAssertTrue(ComputerUseBrowserViewportScrollRequest.authorizes(.down, in: task), task)
+            XCTAssertFalse(ComputerUseBrowserViewportScrollRequest.authorizes(.up, in: task), task)
+        }
+        for task in ["Find flights", "Scroll down in the results list", "Scroll the field down",
+                     "Click the list, then scroll down", "Do not scroll down", "Explain how to scroll down",
+                     "Type \"Scroll down\"", "Scroll down and then submit", "Scroll down. Don't scroll.",
+                     "Scroll down until the price is visible; buy it"] {
+            XCTAssertFalse(ComputerUseBrowserViewportScrollRequest.authorizes(.down, in: task), task)
+        }
+        let before = ComputerUseBrowserViewport(x: 0, y: 0, width: 960, height: 640, contentWidth: 4_000, contentHeight: 4_000)
+        func receipt(x: Double = 0, y: Double = 100, height: Double = 640) -> ComputerUseBrowserViewportScrollReceipt {
+            .init(operationID: "operation", direction: "DOWN", before: before,
+                after: .init(x: x, y: y, width: 960, height: height, contentWidth: 4_000, contentHeight: 4_000))
+        }
+        XCTAssertTrue(receipt().validates(operationID: "operation", direction: .down, before: before))
+        XCTAssertTrue(receipt(y: 0).validates(operationID: "operation", direction: .down, before: before))
+        XCTAssertFalse(receipt(y: 0).moved)
+        for invalid in [receipt(x: 10), receipt(y: -10), receipt(y: 800), receipt(y: .nan),
+                        receipt(y: .infinity), receipt(height: 641)] {
+            XCTAssertFalse(invalid.validates(operationID: "operation", direction: .down, before: before))
+        }
+        XCTAssertFalse(receipt().validates(operationID: "another-operation", direction: .down, before: before))
+        XCTAssertFalse(receipt().validates(operationID: "operation", direction: .up, before: before))
+    }
+
+    func testViewportScrollMovesDocumentWithoutWheelOrFocusedControlEvents() async throws {
+        let fixture = try await DOMFixture(body: """
+            <style>html { scroll-behavior:smooth } body { margin:0; width:4000px; height:4000px }
+            #list { width:150px; height:80px; overflow:auto }</style>
+            <label>Quantity<input id="quantity" type="number" value="7"></label>
+            <label>Cabin<select><option>Economy</option><option>Business</option></select></label>
+            <div id="list"><div style="height:1000px">Nested results</div></div>
+            <p>Page content</p><script>
+            const quantity = document.getElementById('quantity'), list = document.getElementById('list');
+            quantity.focus({preventScroll:true});
+            for (const type of ['wheel','input','change']) document.addEventListener(type, () => fetch('/unexpected'), true);
+            list.addEventListener('scroll', () => fetch('/unexpected'));
+            window.addEventListener('scroll', () => {
+              fetch(quantity.value === '7' && list.scrollTop === 0 && document.activeElement === quantity
+                && document.querySelector('select').selectedIndex === 0 ? '/viewport-only' : '/unexpected');
+            });
+            </script>
+            """)
+        defer { fixture.close() }
+        let initial = try await fixture.browser.observePage(document: fixture.document)
+        var previous = initial
+        for (index, direction) in [OSAtlasScrollDirection.down, .right, .up, .left].enumerated() {
+            let operationID = ComputerUseTaskContract.digest(["scroll", String(index)])
+            let receipt = try await fixture.browser.scrollViewport(direction, evidence: previous, operationID: operationID)
+            XCTAssertTrue(receipt.moved)
+            XCTAssertTrue(receipt.validates(operationID: operationID, direction: direction, before: try XCTUnwrap(previous.page.viewport)))
+            do { try await fixture.browser.validatePageEvidence(previous); XCTFail("Scrolling consumes the old page observation") }
+            catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+            previous = try await fixture.browser.observePage(document: fixture.document)
+            XCTAssertEqual(previous.page.viewport, receipt.after)
+            XCTAssertEqual(previous.page.texts, initial.page.texts, "Viewport changes must invalidate evidence even when DOM text is unchanged")
+            XCTAssertNil(fixture.browser.receipt(taskID: "fixture", operationID: operationID), "A viewport operation is not navigation")
+        }
+        XCTAssertEqual(previous.page.viewport?.x, initial.page.viewport?.x)
+        XCTAssertEqual(previous.page.viewport?.y, initial.page.viewport?.y)
+        try await fixture.wait { fixture.server.count("/viewport-only") > 0 }
+        XCTAssertEqual(fixture.server.count("/unexpected"), 0)
+        let fields = try await fixture.target.fields()
+        XCTAssertEqual(fields.first(where: { $0.label == "Quantity" })?.snapshot.value, "7")
+    }
+
+    func testViewportScrollRejectsStaleOffsetsGeometryAndSnapshotBeforeMovement() async throws {
+        for mutation in ["window.scroll({top:64, behavior:'instant'});", "document.body.style.height='4500px';", ""] {
+            let fixture = try await DOMFixture(body: """
+                <style>body { margin:0; height:4000px }</style><p>Same visible fact</p>
+                <script>fetch('/signal').then(() => { \(mutation) fetch('/changed'); });</script>
+                """, heldSignal: true)
+            defer { fixture.close() }
+            let old = try await fixture.browser.observePage(document: fixture.document)
+            try await fixture.wait { fixture.server.count("/signal") == 1 }
+            fixture.server.releaseHeldResponses()
+            try await fixture.wait { fixture.server.count("/changed") == 1 }
+            // For the last variant only the newer observation nonce changed.
+            let current = try await fixture.browser.observePage(document: fixture.document)
+            XCTAssertEqual(current.page.texts, old.page.texts)
+            do {
+                _ = try await fixture.browser.scrollViewport(.down, evidence: old,
+                    operationID: ComputerUseTaskContract.digest(["stale", mutation]))
+                XCTFail("A stale snapshot cannot move the page")
+            } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .viewportScrollUncertain) }
+            let after = try await fixture.browser.observePage(document: fixture.document)
+            XCTAssertEqual(after.page.viewport, current.page.viewport)
+        }
+    }
+
+    func testViewportNoMovementIsNotSuccessAndOperationEvidenceSurvivesFormDiscovery() async throws {
+        let fixture = try await DOMFixture(body: "<style>body {height:4000px}</style><label>Search<input></label>")
+        defer { fixture.close() }
+        let initial = try await fixture.browser.observePage(document: fixture.document)
+        let operationID = ComputerUseTaskContract.digest(["no-movement"])
+        let receipt = try await fixture.browser.scrollViewport(.up, evidence: initial, operationID: operationID)
+        XCTAssertFalse(receipt.moved)
+        _ = try await fixture.target.fields()
+        let historical = try await fixture.browser.callDOM(.viewportScrollReceipt,
+            arguments: ["documentID": initial.documentID, "operationID": operationID], document: fixture.document)
+        XCTAssertEqual(historical.status, "viewport-scroll-confirmed")
+        XCTAssertEqual(historical.scroll, receipt)
+        let current = try await fixture.browser.observePage(document: fixture.document)
+        do {
+            _ = try await fixture.browser.scrollViewport(.down, evidence: current, operationID: operationID)
+            XCTFail("A new snapshot/direction must not reuse an earlier operation")
+        } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .viewportScrollUncertain) }
+        let after = try await fixture.browser.observePage(document: fixture.document)
+        XCTAssertEqual(after.page.viewport, initial.page.viewport)
+    }
+
+    func testViewportScrollInterruptionCannotPublishAReceiptOrRepeatTheOperation() async throws {
+        for interruption in ["pause", "stop", "close", "cancel"] {
+            var mayAct = true, dispatches = 0, attempts = 0
+            var browser: ComputerUseOwnedBrowser?
+            var task: Task<ComputerUseBrowserViewportScrollReceipt, Error>?
+            let fixture = try await DOMFixture(body: "<style>body {height:4000px}</style><p>Page</p>",
+                domScriptDidDispatch: { command in
+                    guard command == .scrollViewport else { return }
+                    dispatches += 1
+                    guard dispatches == 1 else { return }
+                    switch interruption {
+                    case "pause": mayAct = false
+                    case "stop": browser?.stop()
+                    case "close": browser?.close()
+                    default: task?.cancel()
+                    }
+                }, mayAct: { mayAct })
+            defer { fixture.close() }
+            browser = fixture.browser
+            let initial = try await fixture.browser.observePage(document: fixture.document)
+            let operationID = ComputerUseTaskContract.digest(["interrupted", interruption])
+            task = Task {
+                try await fixture.browser.scrollViewport(.down, evidence: initial, operationID: operationID,
+                    willBeginEffect: { attempts += 1 })
+            }
+            do { _ = try await task?.value; XCTFail("An interrupted callback must not publish movement") }
+            catch {
+                if interruption == "cancel" { XCTAssertTrue(error is CancellationError) }
+                else { XCTAssertEqual(error as? ComputerUseBrowserError, .viewportScrollUncertain) }
+            }
+            XCTAssertEqual(attempts, 1)
+            mayAct = true
+            if interruption == "pause" || interruption == "cancel" {
+                try await fixture.browser.waitForDOMCompletion(document: fixture.document)
+                let current = try await fixture.browser.observePage(document: fixture.document)
+                do {
+                    _ = try await fixture.browser.scrollViewport(.down, evidence: current, operationID: operationID)
+                    XCTFail("The dispatched operation cannot be replayed")
+                } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .viewportScrollUncertain) }
+                let after = try await fixture.browser.observePage(document: fixture.document)
+                XCTAssertEqual(after.page.viewport, current.page.viewport)
+            } else {
+                do {
+                    _ = try await fixture.browser.scrollViewport(.down, evidence: initial, operationID: operationID)
+                    XCTFail("An old owner cannot dispatch again")
+                } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+                XCTAssertEqual(dispatches, 1)
+            }
+        }
+    }
+
+    func testViewportScrollHandsBackAtNewAuthenticationWithoutMovingThePage() async throws {
+        let fixture = try await DOMFixture(body: """
+            <style>body {height:4000px}</style><p>Page</p><script>
+            fetch('/signal').then(() => {
+              document.body.insertAdjacentHTML('beforeend','<label>Password<input type=password></label>');
+              fetch('/shown');
+            });
+            window.addEventListener('scroll', () => fetch('/unexpected'));
+            </script>
+            """, heldSignal: true)
+        defer { fixture.close() }
+        let initial = try await fixture.browser.observePage(document: fixture.document)
+        try await fixture.wait { fixture.server.count("/signal") == 1 }
+        fixture.server.releaseHeldResponses()
+        try await fixture.wait { fixture.server.count("/shown") == 1 }
+        do {
+            _ = try await fixture.browser.scrollViewport(.down, evidence: initial,
+                operationID: ComputerUseTaskContract.digest(["authentication"]))
+            XCTFail("Authentication must hand control back")
+        } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .authenticationRequired) }
+        XCTAssertEqual(fixture.server.count("/unexpected"), 0)
+    }
+
     func testControlSnapshotRejectsMalformedMetadataAndCombinedOverflow() throws {
         let form: [String: Any] = ["id": "f1", "method": "get", "action": "https://example.com/search", "target": "", "encoding": "application/x-www-form-urlencoded", "noValidate": false]
         let control: [String: Any] = ["id": "c1", "containerID": "g1", "label": "Departure", "kind": "date", "name": "departure",

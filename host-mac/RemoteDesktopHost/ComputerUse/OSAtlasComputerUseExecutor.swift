@@ -2636,6 +2636,13 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
                 return terminalResult
             }
 
+            // Compatibility scroll routes also use the owned viewport when
+            // present. Once this browser supplies evidence, a failed DOM
+            // operation must never fall through to global wheel injection.
+            if case .scroll = action, browserPageEvidence == nil {
+                browserPageEvidence = try await tools.observeOwnedBrowserPage(taskID: taskID)
+            }
+
             switch action {
             case .wait:
                 progress("Step \(step): waiting for the Mac…")
@@ -2692,6 +2699,34 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
                         crossedApprovalBoundary: false,
                         preEffectVisibleLineKeys: preEffectVisibleLineKeys)
                 }
+                try await Task.sleep(for: actionDelay)
+            case .scroll(let direction) where browserPageEvidence != nil:
+                guard let evidence = browserPageEvidence else { preconditionFailure("Missing owned browser evidence") }
+                guard ComputerUseBrowserViewportScrollRequest.authorizes(direction, in: trustedUserPrompt) else {
+                    return .unableToComplete("I couldn't carry out this scroll request. Try one page direction, such as “Scroll the page down,” or move the needed section yourself.")
+                }
+                guard try await browserEvidenceIsCurrent(evidence),
+                      try revalidatedPlanningState(expected: planningCapture.fingerprint, binding: .strictVisual) != nil else {
+                    try recordPlanningStateRetry()
+                    continue
+                }
+                progress("Step \(step): moving the AI browser page \(direction.rawValue.lowercased())…")
+                let operationID = ComputerUseTaskContract.digest([
+                    taskID, "browser.viewport.scroll.v1", String(performedActionCount),
+                    evidence.documentID, evidence.page.id, direction.rawValue])
+                let receipt = try await tools.scrollOwnedBrowserViewport(direction, evidence: evidence,
+                    operationID: operationID, willBeginEffect: { effectNeedsReconciliation = true })
+                recordPerformedEffect()
+                effectNeedsReconciliation = false
+                guard receipt.moved else {
+                    // An unchanged offset may be an edge, CSS scroll snap or
+                    // a non-scrolling layout. It proves neither exhaustiveness
+                    // nor that the task's requested target was found.
+                    return .userInterventionRequired("The AI browser page did not move. Check the page or move to the needed section, then let AI continue.")
+                }
+                history.append(action.historyEntry)
+                // Do not make this viewport receipt a generic semantic-effect
+                // success receipt. Any answer still needs fresh task evidence.
                 try await Task.sleep(for: actionDelay)
             case .click, .doubleClick, .rightClick, .drag,
                     .typeText, .scroll, .enter, .hotkey:

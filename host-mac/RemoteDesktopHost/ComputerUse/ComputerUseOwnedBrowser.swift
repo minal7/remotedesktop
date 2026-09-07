@@ -96,7 +96,7 @@ struct ComputerUseBrowserPageEvidence: Equatable, Sendable, CustomStringConverti
 }
 
 enum ComputerUseBrowserError: Error, LocalizedError, Equatable {
-    case invalidURL, busy, ownershipLost, pageChanged, navigationFailed, deadlineExceeded, closed, unsupportedDocument, pageEvidenceUnavailable, documentUnresponsive, windowNotActive, authenticationRequired, signInWindowOpen
+    case invalidURL, busy, ownershipLost, pageChanged, navigationFailed, deadlineExceeded, closed, unsupportedDocument, pageEvidenceUnavailable, documentUnresponsive, windowNotActive, authenticationRequired, signInWindowOpen, viewportScrollUnavailable, viewportScrollUncertain
     var errorDescription: String? {
         switch self {
         case .invalidURL: return "The browser needs an HTTP or HTTPS URL without embedded credentials."
@@ -112,6 +112,8 @@ enum ComputerUseBrowserError: Error, LocalizedError, Equatable {
         case .windowNotActive: return "The AI browser is open, but another Mac window still has focus. Select the AI browser, then continue."
         case .authenticationRequired: return "Sign in or complete verification yourself in the AI browser, then choose Let AI continue. AI will check the page again before continuing your request."
         case .signInWindowOpen: return "Finish or close the sign-in window, then choose Let AI continue in the AI browser."
+        case .viewportScrollUnavailable: return "This page does not expose a supported document viewport for scrolling."
+        case .viewportScrollUncertain: return "I couldn't verify how the AI browser page moved. Check the page before continuing."
         }
     }
 }
@@ -416,6 +418,44 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
               result.fields == nil, result.page == nil else { throw ComputerUseBrowserError.pageChanged }
     }
 
+    func scrollViewport(_ direction: OSAtlasScrollDirection, evidence: ComputerUseBrowserPageEvidence,
+                        operationID: String, willBeginEffect: () -> Void = {}) async throws -> ComputerUseBrowserViewportScrollReceipt {
+        try Task.checkCancellation()
+        guard hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
+        guard validate(evidence.document) else { throw ComputerUseBrowserError.pageChanged }
+        guard let before = evidence.page.viewport, before.isWellFormed,
+              operationID.utf8.count == 64,
+              operationID.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else {
+            throw ComputerUseBrowserError.viewportScrollUnavailable
+        }
+        // The caller retains an uncertain effect before WebKit can execute.
+        // A lost/cancelled callback cannot authorize a wheel fallback or replay.
+        willBeginEffect()
+        do {
+            let result = try await callDOM(.scrollViewport, arguments: [
+                "documentID": evidence.documentID, "snapshotID": evidence.page.id,
+                "operationID": operationID, "direction": direction.rawValue],
+                validateContext: { self.hasRequiredPresentation && self.validate(evidence.document) })
+            guard result.status == "viewport-scroll-dispatched", result.documentID == evidence.documentID,
+                  result.fields == nil, result.page == nil, let receipt = result.scroll,
+                  receipt.validates(operationID: operationID, direction: direction, before: before) else {
+                throw ComputerUseBrowserError.viewportScrollUncertain
+            }
+            // Re-read on a separate invocation, after page scroll handlers had
+            // an opportunity to run. This is not a general page-settled proof.
+            let confirmation = try await callDOM(.viewportScrollReceipt,
+                arguments: ["documentID": evidence.documentID, "operationID": operationID],
+                validateContext: { self.hasRequiredPresentation && self.validate(evidence.document) })
+            guard confirmation.status == "viewport-scroll-confirmed", confirmation.documentID == evidence.documentID,
+                  confirmation.fields == nil, confirmation.page == nil, confirmation.scroll == receipt else {
+                throw ComputerUseBrowserError.viewportScrollUncertain
+            }
+            return receipt
+        } catch is CancellationError { throw CancellationError() }
+        catch ComputerUseBrowserError.authenticationRequired { throw ComputerUseBrowserError.authenticationRequired }
+        catch { throw ComputerUseBrowserError.viewportScrollUncertain }
+    }
+
     private func readPageIdentity(validateContext: () -> Bool) async throws -> String {
         let reply = try await callDOM(.pageIdentity, arguments: [:], validateContext: validateContext)
         guard reply.status == "page-identity", reply.fields == nil else { throw ComputerUseBrowserError.pageChanged }
@@ -464,12 +504,15 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         }
         guard validateContext() else { throw ComputerUseBrowserError.pageChanged }
         let result = try JSONDecoder().decode(ComputerUseBrowserDOMReply.self, from: Data(source.utf8))
+        guard result.scroll == nil || command == .scrollViewport || command == .viewportScrollReceipt else {
+            throw ComputerUseBrowserError.unsupportedDocument
+        }
         guard result.documentID.utf8.count == 32,
               result.documentID.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else {
             throw ComputerUseBrowserError.pageChanged
         }
         if result.status == "authentication-required" {
-            guard result.fields == nil, result.page == nil else { throw ComputerUseBrowserError.unsupportedDocument }
+            guard result.fields == nil, result.page == nil, result.scroll == nil else { throw ComputerUseBrowserError.unsupportedDocument }
             throw ComputerUseBrowserError.authenticationRequired
         }
         return result

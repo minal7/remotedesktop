@@ -3,6 +3,70 @@ import WebKit
 
 enum ComputerUseBrowserDOMCommand: String {
     case fields, read, edit, receipt, reobserve, preflight, pageIdentity, pageSnapshot, validatePageSnapshot
+    case scrollViewport, viewportScrollReceipt
+}
+
+/// Until the whole browsing task compiler binds container roles, admit only
+/// complete direction requests whose scroll target is the page (or implicit
+/// page). A named list, field, frame or an earlier focus step is not authority
+/// to substitute the document viewport.
+enum ComputerUseBrowserViewportScrollRequest {
+    static func authorizes(_ direction: OSAtlasScrollDirection, in task: String) -> Bool {
+        let pattern = #"(?i)^\s*(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?scroll\s+(?:(?:(?:the|this|current)\s+)?(?:browser\s+)?(?:page|webpage)\s+)?(up|down|left|right)(?:\s+(?:on|in)\s+(?:(?:the|this|current)\s+)?(?:browser\s+)?(?:page|webpage))?(?:\s+until\s+[^\n.;!?]+\s+(?:is|are|becomes|become)\s+visible)?\s*[.!?]?\s*$"#
+        guard task.utf8.count <= 8_192,
+              let expression = try? NSRegularExpression(pattern: pattern),
+              let match = expression.firstMatch(in: task, range: NSRange(task.startIndex..., in: task)),
+              let range = Range(match.range(at: 1), in: task) else { return false }
+        return task[range].uppercased() == direction.rawValue
+    }
+}
+
+/// Layout viewport geometry, never a focused field or a nested scroll target.
+struct ComputerUseBrowserViewport: Decodable, Equatable, Sendable {
+    let x: Double
+    let y: Double
+    let width: Double
+    let height: Double
+    let contentWidth: Double
+    let contentHeight: Double
+
+    var isWellFormed: Bool {
+        [x, y, width, height, contentWidth, contentHeight].allSatisfy { $0.isFinite && abs($0) <= 10_000_000 }
+            && width > 0 && height > 0 && contentWidth >= 0 && contentHeight >= 0
+    }
+
+    func distance(for direction: OSAtlasScrollDirection) -> Double {
+        min(768, max(1, floor((direction == .up || direction == .down ? height : width) * 0.75)))
+    }
+}
+
+/// Evidence of one viewport operation; it proves no search or navigation outcome.
+struct ComputerUseBrowserViewportScrollReceipt: Decodable, Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    let operationID: String
+    let direction: String
+    let before: ComputerUseBrowserViewport
+    let after: ComputerUseBrowserViewport
+
+    var moved: Bool { before.x != after.x || before.y != after.y }
+    var description: String { "BrowserViewportScroll(moved: \(moved))" }
+    var debugDescription: String { description }
+
+    func validates(operationID: String, direction: OSAtlasScrollDirection, before expected: ComputerUseBrowserViewport) -> Bool {
+        guard self.operationID == operationID, self.direction == direction.rawValue,
+              before == expected, before.isWellFormed, after.isWellFormed,
+              before.width == after.width, before.height == after.height,
+              before.contentWidth == after.contentWidth, before.contentHeight == after.contentHeight else { return false }
+        let delta: Double
+        switch direction {
+        case .up, .down:
+            guard before.x == after.x else { return false }
+            delta = (after.y - before.y) * (direction == .up ? -1 : 1)
+        case .left, .right:
+            guard before.y == after.y else { return false }
+            delta = (after.x - before.x) * (direction == .left ? -1 : 1)
+        }
+        return delta >= 0 && delta <= before.distance(for: direction) + 1
+    }
 }
 
 /// Page evidence, not an action receipt or proof that the user's goal is met.
@@ -75,14 +139,17 @@ struct ComputerUseBrowserPageSnapshot: Decodable, Equatable, Sendable, CustomStr
     let truncated: Bool
     let omittedEmbeddedContent: Bool
     let omittedControls: Bool
+    let viewport: ComputerUseBrowserViewport?
 
     init(id: String, texts: [Text], links: [Link], controls: [Control] = [],
-         truncated: Bool, omittedEmbeddedContent: Bool, omittedControls: Bool = false) {
+         truncated: Bool, omittedEmbeddedContent: Bool, omittedControls: Bool = false,
+         viewport: ComputerUseBrowserViewport? = nil) {
         self.id = id; self.texts = texts; self.links = links; self.controls = controls
         self.truncated = truncated; self.omittedEmbeddedContent = omittedEmbeddedContent; self.omittedControls = omittedControls
+        self.viewport = viewport
     }
 
-    private enum CodingKeys: String, CodingKey { case id, texts, links, controls, truncated, omittedEmbeddedContent, omittedControls }
+    private enum CodingKeys: String, CodingKey { case id, texts, links, controls, truncated, omittedEmbeddedContent, omittedControls, viewport }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         let controls: [Control]
@@ -94,7 +161,7 @@ struct ComputerUseBrowserPageSnapshot: Decodable, Equatable, Sendable, CustomStr
         self.init(id: try values.decode(String.self, forKey: .id), texts: try values.decode([Text].self, forKey: .texts),
             links: try values.decode([Link].self, forKey: .links), controls: controls,
             truncated: try values.decode(Bool.self, forKey: .truncated), omittedEmbeddedContent: try values.decode(Bool.self, forKey: .omittedEmbeddedContent),
-            omittedControls: omittedControls)
+            omittedControls: omittedControls, viewport: try values.decodeIfPresent(ComputerUseBrowserViewport.self, forKey: .viewport))
     }
 
     var description: String {
@@ -128,6 +195,7 @@ struct ComputerUseBrowserPageSnapshot: Decodable, Equatable, Sendable, CustomStr
                 && value.dropFirst(prefix.count).utf8.allSatisfy { (48...57).contains($0) }
         }
         guard id.utf8.count == 32,
+              viewport?.isWellFormed ?? true,
               id.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }),
               texts.count <= 256, links.count <= 128, controls.count <= 64,
               Set(texts.map(\.id)).count == texts.count, Set(links.map(\.id)).count == links.count,
@@ -290,6 +358,7 @@ struct ComputerUseBrowserDOMReply: Decodable {
     let documentID: String
     let fields: [Field]?
     let page: ComputerUseBrowserPageSnapshot?
+    let scroll: ComputerUseBrowserViewportScrollReceipt?
 }
 
 /// Fixed host code in a separate WebKit script world. Page text, model output
@@ -306,6 +375,8 @@ enum ComputerUseBrowserDOM {
       const pageID = nonce();
       let documentID = nonce(), root = null, nextID = 0;
       const bindings = new Map(), operations = new Map();
+      // Independent of form discovery, which retires text-operation bindings.
+      const viewportOperations = new Map();
       let lastPageSnapshot = null;
       const pageControlIDs = new WeakMap(), pageFormIDs = new WeakMap(), pageOptionIDs = new WeakMap();
       let nextPageControlID = 0, nextPageFormID = 0, nextPageOptionID = 0;
@@ -349,7 +420,7 @@ enum ComputerUseBrowserDOM {
       function synchronize() {
         retire(observer.takeRecords());
         if (root !== doc.documentElement) {
-          if (root) { documentID = nonce(); bindings.clear(); operations.clear(); lastPageSnapshot = null; }
+          if (root) { documentID = nonce(); bindings.clear(); operations.clear(); viewportOperations.clear(); lastPageSnapshot = null; }
           root = doc.documentElement;
         }
       }
@@ -587,6 +658,16 @@ enum ComputerUseBrowserDOM {
         if (retained && found.length !== retained.size) return reply('stale');
         return reply('ok', found);
       }
+      function readViewport() {
+        const scroller = doc.scrollingElement, visual = window.visualViewport;
+        // Pinch zoom has a separate visual viewport; this capability does not
+        // guess how to distribute scrolling between the two viewports.
+        if (!scroller || !visual || visual.scale !== 1 || visual.offsetLeft !== 0 || visual.offsetTop !== 0) return null;
+        const value = {x: window.scrollX, y: window.scrollY, width: window.innerWidth, height: window.innerHeight,
+          contentWidth: scroller.scrollWidth, contentHeight: scroller.scrollHeight};
+        return Object.values(value).every(n => Number.isFinite(n) && Math.abs(n) <= 10000000)
+          && value.width > 0 && value.height > 0 && value.contentWidth >= 0 && value.contentHeight >= 0 ? value : null;
+      }
       function pageContent() {
         // Read rendered text nodes, never form values, innerHTML, scripts or
         // frame documents. Omitted surfaces and bounds remain explicit; this
@@ -627,7 +708,7 @@ enum ComputerUseBrowserDOM {
             return NodeFilter.FILTER_ACCEPT;
           }
         };
-        if (filter.acceptNode(root) === NodeFilter.FILTER_REJECT) return {texts, links, controls, truncated, omittedEmbeddedContent, omittedControls};
+        if (filter.acceptNode(root) === NodeFilter.FILTER_REJECT) return {texts, links, controls, truncated, omittedEmbeddedContent, omittedControls, viewport: readViewport()};
         // display:contents has no own rectangle but its descendants can render.
         const walkers = [doc.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, filter)];
         while (walkers.length) {
@@ -777,7 +858,7 @@ enum ComputerUseBrowserDOM {
           if (bytes + size > 65536) { truncated = true; omittedControls = true; continue; }
           bytes += size; controls.push(control);
         }
-        return {texts, links, controls, truncated, omittedEmbeddedContent, omittedControls};
+        return {texts, links, controls, truncated, omittedEmbeddedContent, omittedControls, viewport: readViewport()};
       }
       function run(command, args) {
         // Read only the identity of this loaded Document, before inspecting
@@ -789,20 +870,53 @@ enum ComputerUseBrowserDOM {
         }
         synchronize();
         if (!root || doc !== document) return reply('stale');
-        if (command === 'pageSnapshot' || command === 'validatePageSnapshot') {
+        if (command === 'viewportScrollReceipt') {
+          if (args.documentID !== documentID) return reply('stale');
+          const status = authenticationStatus();
+          if (status) return reply(status);
+          const operation = viewportOperations.get(args.operationID);
+          if (!operation || !operation.receipt || operation.url !== doc.URL || operation.scroller !== doc.scrollingElement
+              || JSON.stringify(readViewport()) !== JSON.stringify(operation.receipt.after)) return reply('uncertain');
+          return {...reply('viewport-scroll-confirmed'), scroll: operation.receipt};
+        }
+        if (command === 'pageSnapshot' || command === 'validatePageSnapshot' || command === 'scrollViewport') {
           const status = authenticationStatus();
           if (status) { lastPageSnapshot = null; return reply(status); }
           if (doc.readyState !== 'complete') return reply('stale');
           const content = pageContent(), serialized = JSON.stringify(content);
-          if (command === 'validatePageSnapshot') {
+          if (command !== 'pageSnapshot') {
             // Re-read the projection, including rendering and resolved URLs.
             // Mutation records alone miss CSSOM/value-property changes.
             if (!lastPageSnapshot || args.documentID !== documentID || args.snapshotID !== lastPageSnapshot.id
-                || lastPageSnapshot.documentID !== documentID || serialized !== lastPageSnapshot.serialized) return reply('stale');
-            return reply('page-current');
+                || lastPageSnapshot.documentID !== documentID || lastPageSnapshot.url !== doc.URL
+                || lastPageSnapshot.scroller !== doc.scrollingElement || serialized !== lastPageSnapshot.serialized) return reply('stale');
+            if (command === 'validatePageSnapshot') return reply('page-current');
+            if (!/^[a-f0-9]{64}$/.test(args.operationID) || !['UP','DOWN','LEFT','RIGHT'].includes(args.direction)) return reply('unsupported');
+            if (viewportOperations.has(args.operationID)) return reply('duplicate');
+            if (viewportOperations.size >= 64) return reply('limit');
+            const before = content.viewport;
+            if (!before) return reply('unsupported');
+            const vertical = args.direction === 'UP' || args.direction === 'DOWN';
+            const distance = Math.min(768, Math.max(1, Math.floor((vertical ? before.height : before.width) * 0.75)));
+            const delta = distance * (args.direction === 'UP' || args.direction === 'LEFT' ? -1 : 1);
+            const operation = {url: doc.URL, scroller: doc.scrollingElement, receipt: null};
+            viewportOperations.set(args.operationID, operation);
+            lastPageSnapshot = null;
+            try {
+              // Fixed isolated-world API, no wheel/key event and no page-
+              // supplied target. 'instant' overrides CSS smooth scrolling.
+              window.scroll({left: before.x + (vertical ? 0 : delta), top: before.y + (vertical ? delta : 0), behavior: 'instant'});
+              synchronize();
+              const after = readViewport();
+              if (!after || args.documentID !== documentID || operation.url !== doc.URL || operation.scroller !== doc.scrollingElement) return reply('uncertain');
+              const status = authenticationStatus();
+              if (status) return reply(status);
+              operation.receipt = {operationID: args.operationID, direction: args.direction, before, after};
+              return {...reply('viewport-scroll-dispatched'), scroll: operation.receipt};
+            } catch (_) { return reply('uncertain'); }
           }
           const id = nonce();
-          lastPageSnapshot = {id, documentID, serialized};
+          lastPageSnapshot = {id, documentID, serialized, url: doc.URL, scroller: doc.scrollingElement};
           return {status: 'page-snapshot', documentID, page: {id, ...content}};
         }
         if (command !== 'fields' && args.documentID !== documentID) return reply('stale');
