@@ -92,6 +92,19 @@ struct ComputerUseRuntimeTextGoalPlanner: ComputerUseTextGoalPlanning {
     }
 }
 
+/// Browser goal interpretation shares the native text runtime owner. It has
+/// no independent model process or browser executor, and returns proposals.
+struct ComputerUseRuntimeBrowserGoalPlanner: ComputerUseBrowserGoalPlanning {
+    let inputs: ComputerUseNativeTextRuntimeInputs
+    var runtime: OSAtlasLlamaRuntime = .shared
+
+    func propose(_ input: ComputerUseBrowserGoalInput) async throws -> ComputerUseBrowserGoalProposal {
+        try Task.checkCancellation()
+        let endpoint = try await runtime.activateNativeText(inputs)
+        return try await runtime.proposeBrowserGoal(endpoint: endpoint, input: input)
+    }
+}
+
 struct OSAtlasLlamaEndpoint: Equatable, Sendable {
     let generation: UInt64
     /// Nil for the independent text planner; never label it as OS-Atlas.
@@ -1381,6 +1394,33 @@ actor OSAtlasLlamaRuntime {
             if active?.endpoint == endpoint {
                 try await stopActiveServerUnserialized()
             }
+            throw error
+        }
+    }
+
+    /// Keeps the native model lease through exact token counting, inference
+    /// and strict goal decoding. A goal proposal cannot authorize any effect.
+    func proposeBrowserGoal(endpoint: OSAtlasLlamaEndpoint, input: ComputerUseBrowserGoalInput) async throws -> ComputerUseBrowserGoalProposal {
+        let lease = try await acquireModelAccessLease()
+        defer { releaseModelAccessLease(lease) }
+        guard let server = active, server.endpoint == endpoint, server.inputs.nativeText != nil else {
+            throw OSAtlasLlamaRuntimeError.inactiveSession
+        }
+        do {
+            try validateResources(minimumReclaimableBytes: server.resourceProfile.minimumInferenceMemoryBytes)
+            let connection = try ComputerUseTextModelConnection(baseURL: endpoint.baseURL, bearerToken: endpoint.bearerToken,
+                modelAlias: ComputerUseNativeTextRuntimeInputs.modelAlias)
+            let planner = ComputerUseLocalBrowserGoalPlanner(connection: connection, transport: server.transport)
+            let proposal = try await withTaskCancellationHandler {
+                try await planner.propose(input)
+            } onCancel: {
+                Task { await self.cancel(endpoint: endpoint) }
+            }
+            try Task.checkCancellation()
+            guard active?.endpoint == endpoint else { throw OSAtlasLlamaRuntimeError.inactiveSession }
+            return proposal
+        } catch {
+            if active?.endpoint == endpoint { try await stopActiveServerUnserialized() }
             throw error
         }
     }
