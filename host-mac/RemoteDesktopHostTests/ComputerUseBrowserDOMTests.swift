@@ -3,6 +3,225 @@ import XCTest
 
 @MainActor
 final class ComputerUseBrowserDOMTests: XCTestCase {
+    func testVerifiedFormQueryContinuesRetainedExecutorWithExactChoicesAndNoReplanning() async throws {
+        var mayAct = true
+        let fixture = try await DOMFixture(body: """
+            <form method="get" action="/results">
+              <label>Query<input name="q" value="old"></label>
+              <label>Cabin<select name="cabin"><option value="E">Economy</option><option value="P">Premium</option></select></label>
+              <input type="hidden" name="server" value="private-state"><button>Search</button>
+            </form><label>Keep<input value="unchanged"></label>
+            <script>document.addEventListener('input', () => fetch('/input-event'));
+            for (const event of ['submit','formdata','invalid']) document.addEventListener(event, () => fetch('/unexpected-event'), true);</script>
+            """, mayAct: { mayAct })
+        defer { fixture.close() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let planner = DOMRepresentabilityFixturePlanner { fields in
+            .edits([.init(targetID: try requireDOM(fields.first { $0.label == "Query" }).snapshot.targetID, mode: .replaceAll, text: "Café & music"),
+                    .init(targetID: try requireDOM(fields.first { $0.label == "Cabin" }).snapshot.targetID, mode: .replaceAll, text: "Premium")],
+                unchangedTargetIDs: [try requireDOM(fields.first { $0.label == "Keep" }).snapshot.targetID])
+        }
+        let executor = ComputerUseNativeTextExecutor(injector: InputInjector(), mayAct: { mayAct }, journalDirectory: directory,
+            planner: planner, browserTargetProvider: { _ in fixture.target })
+        let prompt = "Controlled mixed form continuation", promptDigest = ComputerUseTextTaskContract.digest(prompt)
+        let firstPage = try await fixture.browser.observePage(document: fixture.document)
+        let firstButton = try XCTUnwrap(firstPage.page.controls.first { $0.label == "Search" })
+        do { _ = try await executor.prepareFormQuery(taskID: "fixture", promptDigest: promptDigest, controlID: firstButton.id, evidence: firstPage)
+            XCTFail("A query continuation requires a completed retained transaction") } catch { }
+        guard let result = try await executor.execute(taskID: "fixture", prompt: prompt, progress: { _ in }), case .completed = result else {
+            return XCTFail("The controlled edit transaction must finish")
+        }
+        _ = try await fixture.target.reobserveRetainedFields()
+        let evidence = try await fixture.browser.observePage(document: fixture.document)
+        let button = try XCTUnwrap(evidence.page.controls.first { $0.label == "Search" })
+        for (taskID, digest) in [("different-task", promptDigest), ("fixture", ComputerUseTextTaskContract.digest("another request"))] {
+            do { _ = try await executor.prepareFormQuery(taskID: taskID, promptDigest: digest, controlID: button.id, evidence: evidence)
+                XCTFail("Retained edit authority cannot be rebound to another request") } catch { }
+        }
+        mayAct = false
+        do { _ = try await executor.prepareFormQuery(taskID: "fixture", promptDigest: promptDigest, controlID: button.id, evidence: evidence)
+            XCTFail("User control must block continuation, even after all edits were verified") }
+        catch { XCTAssertEqual(error as? ComputerUseTextEditError, .interrupted) }
+        mayAct = true
+        let target = try await executor.prepareFormQuery(taskID: "fixture", promptDigest: promptDigest, controlID: button.id, evidence: evidence)
+        XCTAssertEqual(planner.calls, 1)
+        try await fixture.wait { fixture.server.count("/input-event") == 2 }
+        XCTAssertFalse(fixture.server.requestedPaths.contains { $0.hasPrefix("/results") })
+        let operationID = ComputerUseTaskContract.digest(["verified-query"])
+        let receipt = try await fixture.browser.openObservedDestination(target, operationID: operationID)
+        let query = try XCTUnwrap(URLComponents(url: receipt.document.requestedURL, resolvingAgainstBaseURL: false)?.queryItems)
+        XCTAssertEqual(query.map(\.name), ["q", "cabin", "server"])
+        XCTAssertEqual(query.map(\.value), ["Café & music", "P", "private-state"])
+        let replay = try await fixture.browser.openObservedDestination(target, operationID: operationID)
+        XCTAssertEqual(replay, receipt)
+        XCTAssertEqual(fixture.server.requestedPaths.filter { $0.hasPrefix("/results?") }.count, 1)
+        XCTAssertEqual(fixture.server.count("/input-event"), 2)
+        XCTAssertEqual(fixture.server.count("/unexpected-event"), 0)
+        XCTAssertFalse(String(reflecting: target).contains("private-state"))
+    }
+
+    func testVerifiedFormQueryRequiresFinishedJournalAndIndependentNativeInputReceipts() async throws {
+        let fixture = try await DOMFixture(body: """
+            <form method="get" action="/results"><label>Query<input name="q" value="Paris"></label><button>Search</button></form>
+            <script>document.addEventListener('input', () => fetch('/input-event'));</script>
+            """)
+        defer { fixture.close() }
+        let fields = try await fixture.target.fields(), field = try XCTUnwrap(fields.first)
+        let contract = try ComputerUseTextTaskContract(taskID: "fixture", prompt: "Controlled exact query repeated twice", fields: fields,
+            edits: Array(repeating: .init(targetID: field.snapshot.targetID, mode: .replaceAll, text: "Paris"), count: 2))
+        func recovered(_ status: ComputerUseTaskStepStatus) throws -> ComputerUseTextTask {
+            try fixture.textTask(contract: contract, recovered: .init(taskID: contract.taskID, promptDigest: contract.promptDigest,
+                contractDigest: contract.contractDigest, stepIDs: contract.steps.map(\.id), statuses: [status, status]))
+        }
+        for status in [ComputerUseTaskStepStatus.planned, .attempted, .uncertain] {
+            XCTAssertThrowsError(try recovered(status).verifiedContinuation()) {
+                XCTAssertEqual($0 as? ComputerUseTextTaskError, .incompleteOutcome)
+            }
+        }
+        let continuation = try recovered(.verified).verifiedContinuation()
+        XCTAssertEqual(continuation.finalValues, [field.snapshot.targetID: "Paris"])
+        XCTAssertFalse(String(reflecting: continuation).contains("Paris"))
+        let evidence = try await fixture.browser.observePage(document: fixture.document)
+        let button = try XCTUnwrap(evidence.page.controls.first { $0.label == "Search" })
+        do { _ = try await fixture.target.prepareFormQuery(controlID: button.id, evidence: evidence, after: continuation)
+            XCTFail("Persisted verified flags and matching values cannot manufacture document-owned input receipts") } catch { }
+        XCTAssertEqual(fixture.server.count("/input-event"), 0, "Obtaining requirements must never execute unfinished input")
+        var mayContinue = true
+        let task = try fixture.textTask(contract: contract, mayAct: { mayContinue })
+        do { try await task.run { complete, _ in if complete == 1 { mayContinue = false } }
+            XCTFail("Stop after the first identified input") }
+        catch { XCTAssertEqual(error as? ComputerUseTextEditError, .interrupted) }
+        XCTAssertEqual(task.journal.statuses, [.verified, .planned])
+        XCTAssertThrowsError(try task.verifiedContinuation())
+        do { _ = try await fixture.target.prepareFormQuery(controlID: button.id, evidence: evidence, after: continuation)
+            XCTFail("The first receipt cannot stand in for a second identical requested input") } catch { }
+        try await fixture.wait { fixture.server.count("/input-event") == 1 }
+        mayContinue = true
+        try await task.run()
+        let verified = try task.verifiedContinuation()
+        XCTAssertEqual(verified.digest, continuation.digest, "Identical requirements still need fresh independent receipt checks")
+        _ = try await fixture.target.prepareFormQuery(controlID: button.id, evidence: evidence, after: verified)
+        try await fixture.wait { fixture.server.count("/input-event") == 2 }
+        XCTAssertFalse(fixture.server.requestedPaths.contains { $0.hasPrefix("/results") })
+    }
+
+    func testVerifiedFormQueryRejectsChangedIntentBeforePreparationAndBeforeNavigation() async throws {
+        for prepareFirst in [false, true] {
+            for mutation in ["document.querySelector('#q').value = 'Lyon';", "document.querySelector('#keep').value = 'cafe\\u0301';"] {
+                let fixture = try await DOMFixture(body: """
+                    <form method="get" action="/results"><label>Query<input id="q" name="q" value="old"></label><button>Search</button></form>
+                    <label>Keep<input id="keep" value="café"></label>
+                    <script>fetch('/signal').then(() => { \(mutation) fetch('/changed'); });</script>
+                    """, heldSignal: true)
+                defer { fixture.close() }
+                let fields = try await fixture.target.fields()
+                let query = try XCTUnwrap(fields.first { $0.label == "Query" }), keep = try XCTUnwrap(fields.first { $0.label == "Keep" })
+                let contract = try ComputerUseTextTaskContract(taskID: "fixture", prompt: "Retain the exact complete form intent", fields: fields,
+                    edits: [.init(targetID: query.snapshot.targetID, mode: .replaceAll, text: "Paris")], unchangedTargetIDs: [keep.snapshot.targetID])
+                let task = try fixture.textTask(contract: contract)
+                try await task.run()
+                let continuation = try task.verifiedContinuation()
+                let evidence = try await fixture.browser.observePage(document: fixture.document)
+                let button = try XCTUnwrap(evidence.page.controls.first { $0.label == "Search" })
+                let prepared = prepareFirst ? try await fixture.target.prepareFormQuery(controlID: button.id, evidence: evidence, after: continuation) : nil
+                try await fixture.wait { fixture.server.count("/signal") == 1 }
+                fixture.server.releaseHeldResponses()
+                try await fixture.wait { fixture.server.count("/changed") == 1 }
+                var attempted = false
+                do {
+                    if let prepared {
+                        _ = try await fixture.browser.openObservedDestination(prepared, operationID: ComputerUseTaskContract.digest(["changed-intent", mutation]),
+                            willBeginEffect: { attempted = true })
+                    } else { _ = try await fixture.target.prepareFormQuery(controlID: button.id, evidence: evidence, after: continuation) }
+                    XCTFail("Check all original values, including a byte-different invariant outside the submitted form")
+                } catch { }
+                XCTAssertFalse(attempted)
+                XCTAssertFalse(fixture.server.requestedPaths.contains { $0.hasPrefix("/results") })
+                if !prepareFirst {
+                    _ = try await fixture.browser.prepareFormQuery(controlID: button.id, evidence: evidence)
+                    // The capture-only primitive accepts current state. Only
+                    // the retained task requirements reject changed intent.
+                }
+            }
+        }
+    }
+
+    func testVerifiedFormQueryRequiresEveryEditedFieldToProduceASubmittedEntry() async throws {
+        for body in [
+            "<form method='get' action='/results'><label>Query<input value='old'></label><button>Search</button></form>",
+            "<form><label>Query<input name='q' value='old'></label></form><form method='get' action='/results'><button>Search</button></form>"
+        ] {
+            let fixture = try await DOMFixture(body: body)
+            defer { fixture.close() }
+            let fields = try await fixture.target.fields(), field = try XCTUnwrap(fields.first)
+            let contract = try ComputerUseTextTaskContract(taskID: "fixture", prompt: "The edited query must actually be included", fields: fields,
+                edits: [.init(targetID: field.snapshot.targetID, mode: .replaceAll, text: "Paris")])
+            let task = try fixture.textTask(contract: contract)
+            try await task.run()
+            let evidence = try await fixture.browser.observePage(document: fixture.document)
+            let button = try XCTUnwrap(evidence.page.controls.first { $0.label == "Search" })
+            do { _ = try await fixture.target.prepareFormQuery(controlID: button.id, evidence: evidence, after: task.verifiedContinuation())
+                XCTFail("An omitted edited value cannot become a verified form query") } catch { }
+            _ = try await fixture.browser.prepareFormQuery(controlID: button.id, evidence: evidence)
+            XCTAssertFalse(fixture.server.requestedPaths.contains { $0.hasPrefix("/results") })
+        }
+    }
+
+    func testVerifiedFormQueryDoesNotSurviveReceiptLossOrFieldRediscovery() async throws {
+        for prepareFirst in [false, true] {
+            let fixture = try await DOMFixture(body: "<form method='get' action='/results'><label>Query<input name='q' value='old'></label><button>Search</button></form>")
+            defer { fixture.close() }
+            let fields = try await fixture.target.fields(), field = try XCTUnwrap(fields.first)
+            let contract = try ComputerUseTextTaskContract(taskID: "fixture", prompt: "Continue using the original field receipt", fields: fields,
+                edits: [.init(targetID: field.snapshot.targetID, mode: .replaceAll, text: "Paris")])
+            let task = try fixture.textTask(contract: contract)
+            try await task.run()
+            let continuation = try task.verifiedContinuation()
+            let evidence = try await fixture.browser.observePage(document: fixture.document)
+            let button = try XCTUnwrap(evidence.page.controls.first { $0.label == "Search" })
+            let prepared = prepareFirst ? try await fixture.target.prepareFormQuery(controlID: button.id, evidence: evidence, after: continuation) : nil
+            _ = try await fixture.browser.callDOM(.fields, arguments: [:], document: fixture.document)
+            var attempted = false
+            do {
+                if let prepared {
+                    _ = try await fixture.browser.openObservedDestination(prepared, operationID: ComputerUseTaskContract.digest(["lost-query-receipts"]),
+                        willBeginEffect: { attempted = true })
+                } else { _ = try await fixture.target.prepareFormQuery(controlID: button.id, evidence: evidence, after: continuation) }
+                XCTFail("Fresh labels and equal values cannot replace retained bindings or dispatch receipts")
+            } catch { }
+            XCTAssertFalse(attempted)
+            XCTAssertFalse(fixture.server.requestedPaths.contains { $0.hasPrefix("/results") })
+        }
+    }
+
+    func testVerifiedFormQueryCannotTransferToForeignBrowserOrAnswerTask() async throws {
+        let body = "<form method='get' action='/results'><label>Query<input name='q' value='old'></label><button>Search</button></form>"
+        let fixture = try await DOMFixture(body: body), other = try await DOMFixture(body: body)
+        defer { fixture.close(); other.close() }
+        let fields = try await fixture.target.fields(), field = try XCTUnwrap(fields.first)
+        let contract = try ComputerUseTextTaskContract(taskID: "fixture", prompt: "Keep the task and document scope", fields: fields,
+            edits: [.init(targetID: field.snapshot.targetID, mode: .replaceAll, text: "Paris")])
+        let task = try fixture.textTask(contract: contract)
+        try await task.run()
+        let continuation = try task.verifiedContinuation()
+        _ = try await other.target.fields()
+        let otherEvidence = try await other.browser.observePage(document: other.document)
+        let otherButton = try XCTUnwrap(otherEvidence.page.controls.first { $0.label == "Search" })
+        do { _ = try await fixture.target.prepareFormQuery(controlID: otherButton.id, evidence: otherEvidence, after: continuation)
+            XCTFail("A retained document cannot be replaced by an identical foreign page") } catch { }
+        do { _ = try await other.target.prepareFormQuery(controlID: otherButton.id, evidence: otherEvidence, after: continuation)
+            XCTFail("A foreign adapter cannot translate this task's field identities") } catch { }
+        let next = try fixture.target.transferForClarification(taskID: "answer-task")
+        let nextDocument = try fixture.browser.acquireCurrentDocument(taskID: "answer-task")
+        let nextEvidence = try await fixture.browser.observePage(document: nextDocument)
+        let nextButton = try XCTUnwrap(nextEvidence.page.controls.first { $0.label == "Search" })
+        do { _ = try await next.prepareFormQuery(controlID: nextButton.id, evidence: nextEvidence, after: continuation)
+            XCTFail("Preserved DOM receipts do not transfer completed-task authority to an answer task") } catch { }
+        XCTAssertFalse(fixture.server.requestedPaths.contains { $0.hasPrefix("/results") })
+        XCTAssertFalse(other.server.requestedPaths.contains { $0.hasPrefix("/results") })
+    }
+
     func testFormQueryBindsNativeEntryOrderSubmitterOverridesAndPrivateStateWithoutEvents() async throws {
         let fixture = try await DOMFixture(body: """
             <form id="search" action="/wrong?discard=1" method="post" target="_blank" accept-charset="UTF-8">
@@ -2736,6 +2955,13 @@ private final class DOMFixture {
         } catch { browser.close(); server.stop(); throw error }
     }
     func close() { browser.close(); server.stop() }
+    func textTask(contract: ComputerUseTextTaskContract, recovered: ComputerUseTextStepJournal? = nil,
+                  mayAct: @escaping () -> Bool = { true }) throws -> ComputerUseTextTask {
+        try ComputerUseTextTask(contract: contract, recovered: recovered, read: { try await self.target.read(targetID: $0) },
+            apply: { _, _ in XCTFail("Use document-owned identified input") },
+            applyWithIdentity: { try await self.target.apply($0) },
+            didDispatchInput: { try await self.target.didDispatchInput(operationID: $0) }, persist: { _ in }, mayAct: mayAct)
+    }
     var editedValues: [String] {
         server.requestedPaths.filter { $0.hasPrefix("/edited?") }.compactMap {
             URLComponents(string: "http://localhost" + $0)?.queryItems?.first(where: { $0.name == "value" })?.value

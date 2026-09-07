@@ -101,11 +101,12 @@ struct ComputerUseBrowserPageEvidence: Equatable, Sendable, CustomStringConverti
 struct ComputerUseBrowserNavigationTarget: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     fileprivate enum Source: Equatable, Sendable {
         case link(String)
-        case formQuery(controlID: String, queryID: String)
+        case formQuery(controlID: String, queryID: String, requirementsDigest: String?)
         var identity: [String] {
             switch self {
             case .link(let id): return ["link", id]
-            case .formQuery(let controlID, let queryID): return ["form-query", controlID, queryID]
+            case .formQuery(let controlID, let queryID, let requirementsDigest):
+                return ["form-query", controlID, queryID] + (requirementsDigest.map { ["verified-edits", $0] } ?? [])
             }
         }
     }
@@ -477,11 +478,18 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         return target
     }
 
-    func prepareFormQuery(controlID: String, evidence: ComputerUseBrowserPageEvidence) async throws -> ComputerUseBrowserNavigationTarget {
+    func prepareFormQuery(controlID: String, evidence: ComputerUseBrowserPageEvidence,
+                          requirements: ComputerUseBrowserFormQueryRequirements? = nil) async throws -> ComputerUseBrowserNavigationTarget {
         guard evidence.page.isWellFormed, evidence.page.controls.contains(where: { $0.id == controlID && $0.kind == "submit" && !$0.disabled }),
               hasRequiredPresentation else { throw ComputerUseBrowserError.formQueryUnavailable }
-        let result = try await callDOM(.prepareFormQuery, arguments: ["documentID": evidence.documentID,
-            "snapshotID": evidence.page.id, "controlID": controlID], document: evidence.document)
+        var arguments: [String: Any] = ["documentID": evidence.documentID, "snapshotID": evidence.page.id, "controlID": controlID]
+        if let requirements {
+            guard requirements.document == evidence.document, requirements.documentID == evidence.documentID else {
+                throw ComputerUseBrowserError.pageChanged
+            }
+            arguments["requirements"] = requirements.domArguments
+        }
+        let result = try await callDOM(.prepareFormQuery, arguments: arguments, document: evidence.document)
         guard hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
         if result.status == "form-invalid" { throw ComputerUseBrowserError.formQueryInvalid }
         guard result.status == "form-query-prepared", result.documentID == evidence.documentID, result.fields == nil,
@@ -490,7 +498,8 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
               Self.sameOrigin(destination, evidence.document.committedURL) else {
             throw ComputerUseBrowserError.formQueryUnavailable
         }
-        return .init(evidence: evidence, source: .formQuery(controlID: controlID, queryID: query.id), destination: destination)
+        return .init(evidence: evidence, source: .formQuery(controlID: controlID, queryID: query.id,
+            requirementsDigest: requirements?.digest), destination: destination)
     }
 
     private static func sameOrigin(_ lhs: URL, _ rhs: URL) -> Bool {
@@ -505,8 +514,9 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         let command: ComputerUseBrowserDOMCommand, expectedStatus: String
         switch target.source {
         case .link(let id): arguments["linkID"] = id; command = .validatePageLink; expectedStatus = "link-current"
-        case .formQuery(let controlID, let queryID):
+        case .formQuery(let controlID, let queryID, let requirementsDigest):
             arguments["controlID"] = controlID; arguments["queryID"] = queryID
+            if let requirementsDigest { arguments["requirementsDigest"] = requirementsDigest }
             command = .validateFormQuery; expectedStatus = "form-query-current"
         }
         let result = try await callDOM(command, arguments: arguments, document: evidence.document)

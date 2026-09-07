@@ -925,7 +925,7 @@ enum ComputerUseBrowserDOM {
         if (collection.length > 128) return {status:'unsupported'};
         const members = Array.from(collection);
         if (!members.includes(submitter)) return {status:'unsupported'};
-        const entries = [], states = [];
+        const entries = [], states = [], submittedMembers = new Set();
         let bytes = 0;
         const newline = value => value.replace(/\r\n|\r|\n/g, '\r\n');
         const add = (name, value) => {
@@ -960,9 +960,11 @@ enum ComputerUseBrowserDOM {
           states.push([kind, name, disabled, value, !!element.checked, selected]);
           if (element.closest('datalist') || !name || (['submit','button','reset'].includes(kind) && element !== submitter)
               || (['checkbox','radio'].includes(kind) && !element.checked)) continue;
+          const countBefore = entries.length;
           if (selected) {
             for (const option of selected) if (option[1] && !option[2] && !add(name, option[0])) return {status:'unsupported'};
           } else if (!add(name, kind === 'hidden' && name.replace(/[A-Z]/g, c => c.toLowerCase()) === '_charset_' ? 'UTF-8' : value)) return {status:'unsupported'};
+          if (entries.length > countBefore) submittedMembers.add(element);
         }
         const signature = JSON.stringify([metadata, target, charset, states]);
         if (encoder.encode(signature).length > 65536) return {status:'unsupported'};
@@ -970,7 +972,30 @@ enum ComputerUseBrowserDOM {
         // Read native state without events and encode the bounded entry list.
         destination.search = '?' + new URLSearchParams(entries).toString();
         if (encoder.encode(destination.href).length > 8192) return {status:'unsupported'};
-        return {status:'form-query', destination:destination.href, signature, members, form};
+        return {status:'form-query', destination:destination.href, signature, members, submittedMembers, form};
+      }
+      function formRequirementsCurrent(requirements) {
+        if (!requirements || typeof requirements.digest !== 'string' || !/^[a-f0-9]{64}$/.test(requirements.digest)
+            || !Array.isArray(requirements.fields) || requirements.fields.length < 1 || requirements.fields.length > 16
+            || !Array.isArray(requirements.inputOperationIDs) || requirements.inputOperationIDs.length < 1 || requirements.inputOperationIDs.length > 8
+            || new Set(requirements.inputOperationIDs).size !== requirements.inputOperationIDs.length) return false;
+        let bytes = 0, edited = 0;
+        const ids = new Set();
+        // Validate the entire bounded shape before reading any field values.
+        for (const field of requirements.fields) {
+          if (!field || typeof field.id !== 'string' || field.id.length > 65 || !/^e[0-9]+$/.test(field.id)
+              || ids.has(field.id) || typeof field.value !== 'string' || field.value.length > 8192
+              || typeof field.mustSubmit !== 'boolean') return false;
+          const size = encoder.encode(field.value).length;
+          if (size > 8192 || (bytes += size) > 65536) return false;
+          ids.add(field.id); if (field.mustSubmit) edited++;
+        }
+        if (!edited || requirements.inputOperationIDs.some(id => typeof id !== 'string' || !/^[a-f0-9]{64}$/.test(id)
+            || operations.get(id) !== 'dispatched')) return false;
+        return requirements.fields.every(field => {
+          const binding = bindings.get(field.id);
+          return binding && snapshot(binding)?.value === field.value;
+        });
       }
       function run(command, args) {
         // Read only the identity of this loaded Document, before inspecting
@@ -1018,19 +1043,27 @@ enum ComputerUseBrowserDOM {
               return reply(binding?.canOpen ? 'link-current' : 'unsupported');
             }
             if (command === 'prepareFormQuery' || command === 'validateFormQuery') {
+              const previous = command === 'validateFormQuery' ? formQueries.get(args.queryID) : null;
+              if (command === 'validateFormQuery' && (!previous || previous.snapshotID !== args.snapshotID
+                  || previous.controlID !== args.controlID || (previous.requirements?.digest ?? null) !== (args.requirementsDigest ?? null))) return reply('stale');
+              // Revalidation uses the stored requirements, never a replacement
+              // supplied by a caller. This also checks invariants outside the
+              // submitted form and receipts lost through field rediscovery.
+              const requirements = previous ? previous.requirements : args.requirements;
+              if (requirements !== undefined && !formRequirementsCurrent(requirements)) return reply('stale');
               const current = readFormQuery(controls.get(args.controlID));
               if (current.status !== 'form-query') return reply(current.status);
+              if (requirements?.fields.some(field => field.mustSubmit
+                  && !current.submittedMembers.has(bindings.get(field.id)?.element))) return reply('stale');
               if (command === 'validateFormQuery') {
-                const previous = formQueries.get(args.queryID);
-                if (!previous || previous.snapshotID !== args.snapshotID || previous.controlID !== args.controlID
-                    || previous.form !== current.form || previous.signature !== current.signature
+                if (previous.form !== current.form || previous.signature !== current.signature
                     || previous.destination !== current.destination || previous.members.length !== current.members.length
                     || previous.members.some((member, index) => member !== current.members[index])) return reply('stale');
                 return reply('form-query-current');
               }
               if (formQueries.size >= 8) return reply('limit');
               const id = nonce();
-              formQueries.set(id, {...current, snapshotID:args.snapshotID, controlID:args.controlID});
+              formQueries.set(id, {...current, requirements, snapshotID:args.snapshotID, controlID:args.controlID});
               return {...reply('form-query-prepared'), formQuery:{id, controlID:args.controlID, destination:current.destination}};
             }
             if (!/^[a-f0-9]{64}$/.test(args.operationID) || !['UP','DOWN','LEFT','RIGHT'].includes(args.direction)) return reply('unsupported');
@@ -1164,6 +1197,47 @@ enum ComputerUseBrowserDOM {
     """#
 }
 
+/// Private adapter requirements bound to one retained document and text task.
+/// Values and receipt identities are never part of the planner projection.
+struct ComputerUseBrowserFormQueryRequirements: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    let document: ComputerUseBrowserDocument
+    let documentID: String
+    let digest: String
+    private let continuation: ComputerUseTextTaskContinuation
+    private let targets: [String: String]
+
+    fileprivate init(document: ComputerUseBrowserDocument, documentID: String,
+                     continuation: ComputerUseTextTaskContinuation, targets: [String: String]) throws {
+        guard continuation.taskID == document.taskID, (1...16).contains(continuation.finalValues.count),
+              !continuation.editedTargetIDs.isEmpty,
+              continuation.editedTargetIDs.isSubset(of: Set(continuation.finalValues.keys)),
+              Set(continuation.finalValues.keys).isSubset(of: Set(targets.keys)),
+              Set(targets.values).count == targets.count,
+              continuation.finalValues.values.allSatisfy({ $0.utf8.count <= 8192 }),
+              continuation.finalValues.values.reduce(0, { $0 + $1.utf8.count }) <= 65536,
+              (1...8).contains(continuation.inputOperationIDs.count),
+              Set(continuation.inputOperationIDs).count == continuation.inputOperationIDs.count else {
+            throw ComputerUseBrowserError.formQueryUnavailable
+        }
+        self.document = document; self.documentID = documentID
+        self.continuation = continuation; self.targets = targets
+        digest = ComputerUseTaskContract.digest(["browser-form-continuation-v1", document.contextID,
+            document.taskID, String(document.generation), documentID, continuation.digest]
+            + continuation.finalValues.keys.sorted().flatMap { [$0, targets[$0]!] })
+    }
+
+    var domArguments: [String: Any] {
+        ["digest": digest, "inputOperationIDs": continuation.inputOperationIDs,
+         "fields": continuation.finalValues.keys.sorted().map { id -> [String: Any] in
+             ["id": targets[id]!, "value": continuation.finalValues[id]!,
+              "mustSubmit": continuation.editedTargetIDs.contains(id)]
+         }]
+    }
+
+    var description: String { "BrowserFormContinuationRequirements" }
+    var debugDescription: String { description }
+}
+
 /// A text adapter sealed to one owned page and one set of retained DOM objects.
 /// Only labels go to the existing local planner; exact values remain host-side.
 @MainActor
@@ -1183,6 +1257,21 @@ final class ComputerUseBrowserTextTarget {
     func fields() async throws -> [ComputerUseTextField] {
         guard let fields = try await fieldsIfSupported() else { throw ComputerUseBrowserError.unsupportedDocument }
         return fields
+    }
+
+    /// Reuse the original retained field objects and operation receipts. Fresh
+    /// discovery would clear those receipts and cannot reconnect this task.
+    func prepareFormQuery(controlID: String, evidence: ComputerUseBrowserPageEvidence,
+                          after continuation: ComputerUseTextTaskContinuation) async throws -> ComputerUseBrowserNavigationTarget {
+        try validate()
+        guard evidence.document == document, let documentID, evidence.documentID == documentID else {
+            throw ComputerUseBrowserError.pageChanged
+        }
+        let requirements = try ComputerUseBrowserFormQueryRequirements(document: document, documentID: documentID,
+            continuation: continuation, targets: targets)
+        let result = try await browser.prepareFormQuery(controlID: controlID, evidence: evidence, requirements: requirements)
+        try validate()
+        return result
     }
 
     /// Only an explicit, complete no-effect discovery decline permits another

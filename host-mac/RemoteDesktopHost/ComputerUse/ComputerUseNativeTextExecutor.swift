@@ -121,6 +121,7 @@ final class ComputerUseNativeTextExecutor {
     private let now: () -> Date
     private let clarificationLifetime: TimeInterval
     private var retainedTask: ComputerUseTextTask?
+    private var retainedBrowserTarget: ComputerUseBrowserTextTarget?
     private var retainedTaskOriginID: String?
     private var pendingClarification: PendingClarification?
     private var preparedClarification: PreparedClarification?
@@ -177,6 +178,7 @@ final class ComputerUseNativeTextExecutor {
             return .clarificationRequired(pending.info.question)
         }
         retainedTask = nil
+        retainedBrowserTarget = nil
         retainedTaskOriginID = nil
         invalidateClarification()
         let browserTarget = try await browserTargetProvider?(taskID)
@@ -262,6 +264,7 @@ final class ComputerUseNativeTextExecutor {
             // exact answer task may resume the observation or planning stage.
             invalidateClarification()
             retainedTask = nil
+            retainedBrowserTarget = nil
             retainedTaskOriginID = nil
             let next = try pending.form.transfer(taskID: taskID)
             let nonce = UUID()
@@ -408,9 +411,31 @@ final class ComputerUseNativeTextExecutor {
                 try store.acquireExecution(taskID: taskID, expected: persistedJournal)
             }, mayAct: mayAct)
         retainedTask = task
+        retainedBrowserTarget = browserTarget
         retainedTaskOriginID = originatingTaskID
         invalidateClarification(taskID: taskID)
         return try await run(task, verifiedStep: verifiedStep, progress: progress)
+    }
+
+    /// Continue the exact retained form transaction without replanning or
+    /// rediscovery. This only prepares a query; a whole-browser task must
+    /// separately authorize navigation and verify its remaining outcomes.
+    func prepareFormQuery(taskID: String, promptDigest: String, controlID: String,
+                          evidence: ComputerUseBrowserPageEvidence) async throws -> ComputerUseBrowserNavigationTarget {
+        try Task.checkCancellation()
+        guard mayAct() else { throw ComputerUseTextEditError.interrupted }
+        guard !isExecuting else { throw Failure.alreadyExecuting }
+        guard let retainedTask, retainedTask.contract.taskID == taskID,
+              retainedTask.contract.promptDigest == promptDigest, let retainedBrowserTarget else {
+            throw ComputerUseBrowserError.formQueryUnavailable
+        }
+        let continuation = try retainedTask.verifiedContinuation()
+        isExecuting = true
+        defer { isExecuting = false }
+        let result = try await retainedBrowserTarget.prepareFormQuery(controlID: controlID, evidence: evidence, after: continuation)
+        try Task.checkCancellation()
+        guard mayAct() else { throw ComputerUseTextEditError.interrupted }
+        return result
     }
 
     private func decline(taskID: String) throws -> ComputerUseExecutionResult? {

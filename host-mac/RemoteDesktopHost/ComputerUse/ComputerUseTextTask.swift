@@ -200,6 +200,32 @@ enum ComputerUseTextTaskError: Error, Equatable {
 
 typealias ComputerUseTextStepJournal = ComputerUseTaskJournal
 
+/// Requirements retained from a completed edit transaction, not proof that
+/// the page still satisfies them. A continuation must freshly check both the
+/// exact final values and the original adapter-owned dispatch receipts.
+struct ComputerUseTextTaskContinuation: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    let taskID: String
+    let promptDigest: String
+    let contractDigest: String
+    let finalValues: [String: String]
+    let editedTargetIDs: Set<String>
+    let inputOperationIDs: [String]
+    let digest: String
+
+    fileprivate init(contract: ComputerUseTextTaskContract, inputOperationIDs: [String]) {
+        taskID = contract.taskID; promptDigest = contract.promptDigest; contractDigest = contract.contractDigest
+        let finalValues = contract.finalValues, editedTargetIDs = Set(contract.steps.map(\.targetID))
+        self.finalValues = finalValues; self.editedTargetIDs = editedTargetIDs
+        self.inputOperationIDs = inputOperationIDs
+        digest = ComputerUseTaskContract.digest(["verified-text-continuation-v1", taskID, promptDigest, contractDigest,
+            String(inputOperationIDs.count)] + inputOperationIDs + [String(finalValues.count)]
+            + finalValues.keys.sorted().flatMap { [$0, finalValues[$0]!, editedTargetIDs.contains($0) ? "edited" : "unchanged"] })
+    }
+
+    var description: String { "VerifiedTextContinuationRequirements" }
+    var debugDescription: String { description }
+}
+
 /// Text capability compiler/adapter for the shared transaction engine. The
 /// private journal format is unchanged, but the versioned step identities
 /// reject older contracts that did not bind dispatch evidence and retained
@@ -382,6 +408,18 @@ final class ComputerUseTextTask {
             case .alreadyExecuting: throw error
             }
         }
+    }
+
+    /// Never runs or retries unfinished edits to obtain continuation authority.
+    /// Recovered verified flags alone cannot prove a live browser receipt.
+    func verifiedContinuation() throws -> ComputerUseTextTaskContinuation {
+        guard execution.journal.statuses.count == contract.steps.count,
+              execution.journal.statuses.allSatisfy({ $0 == .verified }) else {
+            throw ComputerUseTextTaskError.incompleteOutcome
+        }
+        return .init(contract: contract, inputOperationIDs: execution.contract.steps.map {
+            execution.contract.effectIdentity(for: $0)
+        })
     }
 
     private static func textJournal(_ journal: ComputerUseTaskJournal,
