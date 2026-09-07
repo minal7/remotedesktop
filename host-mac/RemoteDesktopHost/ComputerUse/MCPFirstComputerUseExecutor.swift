@@ -34,7 +34,7 @@ protocol MCPApprovalContinuing: AnyObject {
         _ prepared: MCPPreparedApproval,
         tools: ComputerUseHostTools,
         progress: @escaping (String) -> Void
-    ) async throws -> ComputerUseExecutionResult
+    ) async throws -> MCPApprovedActionResult
 
     /// Invalidates the current run synchronously. The helper shutdown itself
     /// is asynchronous, but is bound to the captured process generation so a
@@ -543,10 +543,9 @@ final class MCPFirstComputerUseExecutor:
         } catch let error as ExecutorError {
             guard error == .tooManySteps else { throw error }
 
-            // The only non-terminal structured operations are read-only or
-            // reversible. Approval-required calls stop before execution and
-            // return terminally after approval, so a duplicate/exhausted plan
-            // cannot represent a partially performed consequential action.
+            // This planning invocation has performed no approved effect.
+            // Approval-required calls stop before dispatch and use a separate
+            // confirmation path, so this fallback cannot replay an approval.
             // Preserve deterministic Mail isolation, then hand a routing stall
             // to the local visual executor instead of surfacing a false task
             // failure to the phone.
@@ -579,11 +578,11 @@ final class MCPFirstComputerUseExecutor:
         _ prepared: MCPPreparedApproval,
         tools: ComputerUseHostTools,
         progress: @escaping (String) -> Void
-    ) async throws -> ComputerUseExecutionResult {
+    ) async throws -> MCPApprovedActionResult {
         try beginExecution()
         defer { activeExecutionEpoch = nil }
         try Task.checkCancellation()
-        guard var state = pendingApprovalState,
+        guard let state = pendingApprovalState,
               pendingApprovalDigest == prepared.call.canonicalDigest,
               prepared.call.taskID == state.taskID else {
             throw ExecutorError.approvalStateChanged
@@ -602,22 +601,11 @@ final class MCPFirstComputerUseExecutor:
                 throw ExecutorError.structuredToolFailed(
                     Self.boundedFailure(result.text))
             }
-            state.executedCallDigests.insert(prepared.call.canonicalDigest)
-            state.results.append(StepResult(
-                toolName: prepared.call.toolName,
-                risk: prepared.call.risk,
-                arguments: prepared.call.arguments,
-                readProvenance: nil,
-                text: Self.boundedResult(result.text),
-                structuredContent: result.structuredContent,
-                wasTruncated: result.wasTruncated))
-
-            // Approval-required tools are intentionally terminal operations:
-            // returning their verified local result avoids ever asking a model
-            // whether it should repeat a send/create action.
-            return .completed(Self.completionMessage(
-                for: prepared.call,
-                result: result))
+            // Return only a typed action fact. The host records it before
+            // deciding whether the original task has a whole-goal proof.
+            // Planner prose and arbitrary tool text cannot manufacture one.
+            return try MCPApprovedActionResult.verified(call: prepared.call,
+                result: result, trustedUserPrompt: state.trustedUserPrompt)
         }
     }
 
@@ -712,11 +700,11 @@ final class MCPFirstComputerUseExecutor:
         }
     }
 
-    private func withGenerationCancellation(
+    private func withGenerationCancellation<Result>(
         generation: UInt64,
         preserveCompletedResultOnCancellation: Bool = false,
-        operation: () async throws -> ComputerUseExecutionResult
-    ) async throws -> ComputerUseExecutionResult {
+        operation: () async throws -> Result
+    ) async throws -> Result {
         let join = cancellationJoin(for: generation)
         do {
             let result = try await withTaskCancellationHandler {
@@ -1565,7 +1553,7 @@ final class MCPFirstComputerUseExecutor:
         CLARIFICATION_REQUIRED: <one short question when required information is missing>
         TASK_COMPLETE: <short result, only after a local read-only result proves it>
         VISUAL_FALLBACK_REQUIRED
-        Never use TASK_COMPLETE to claim an email/message was sent, an event/reminder was created, a Shortcut ran, an order/purchase/payment happened, a form was submitted, or another consequential mutation occurred. Those actions complete only from their approved tool result.
+        Never use TASK_COMPLETE to claim an email/message was sent, an event/reminder was created, a Shortcut ran, an order/purchase/payment happened, a form was submitted, or another consequential mutation occurred. Only the host can confirm an approved action. Its confirmation does not prove that every part of the user's request is complete.
         """
         if let requirements = state.contactReadRequirements,
            let data = try? JSONEncoder().encode(requirements.queries),
@@ -2925,20 +2913,4 @@ final class MCPFirstComputerUseExecutor:
         }
     }
 
-    private static func completionMessage(
-        for call: MCPToolCall,
-        result: MCPToolResult
-    ) -> String {
-        let reported = boundedResult(result.text)
-        if !reported.isEmpty { return reported }
-        switch call.toolName {
-        case RemoteDesktopMailMCP.toolName:
-            return "The email action completed on your Mac."
-        case "imessage_send": return "The message was sent from your Mac."
-        case "calendar_create_event": return "The calendar event was created on your Mac."
-        case "reminders_create": return "The reminder was created on your Mac."
-        case "run_shortcut": return "The shortcut finished on your Mac."
-        default: return "The approved action completed on your Mac."
-        }
-    }
 }

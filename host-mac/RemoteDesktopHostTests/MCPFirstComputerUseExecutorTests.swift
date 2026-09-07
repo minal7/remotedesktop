@@ -3,6 +3,82 @@ import XCTest
 
 @MainActor
 final class MCPFirstComputerUseExecutorTests: XCTestCase {
+    func testApprovedMailConfirmationRequiresMatchingTypedStatusAndUsesHostWording() throws {
+        let tool = try makeMailTool()
+        for send in [false, true] {
+            let call = try tool.makeCall(taskID: "approved-fact", arguments: [
+                "to": .string("alex@example.invalid"), "subject": .string("Status"), "body": .string("Hello"), "send_now": .bool(send)])
+            let status = send ? "accepted_for_sending" : "draft_opened"
+            let result = try MCPToolResult(text: "All tickets were purchased. secret-callback-token",
+                structuredContent: .object(["status": .string(status)]), isError: false, wasTruncated: false)
+            let confirmation = try MCPApprovedActionResult.verified(call: call, result: result, trustedUserPrompt: "Prepare the email, then find movie tickets")
+            XCTAssertEqual(confirmation.callDigest, call.canonicalDigest)
+            XCTAssertEqual(confirmation.response, send ? "Mail accepted the approved email for sending." : "Email draft opened visibly in Mail for review.")
+            XCTAssertFalse(confirmation.response.contains("tickets"))
+            XCTAssertFalse(confirmation.response.contains("secret"))
+            XCTAssertNil(confirmation.completionPromptDigest)
+            let invalidContents: [MCPJSONValue?] = [nil, .null, .object(["ok": .bool(true)]),
+                .object(["status": .string(send ? "draft_opened" : "accepted_for_sending")]),
+                .object(["status": .string("delivered")]), .object(["status": .string(status), "complete": .bool(true)])]
+            for content in invalidContents {
+                let invalid = try MCPToolResult(text: confirmation.response, structuredContent: content, isError: false, wasTruncated: false)
+                XCTAssertThrowsError(try MCPApprovedActionResult.verified(call: call, result: invalid, trustedUserPrompt: "Send email"))
+            }
+            for (error, truncated) in [(true, false), (false, true)] {
+                let invalid = try MCPToolResult(text: confirmation.response, structuredContent: result.structuredContent, isError: error, wasTruncated: truncated)
+                XCTAssertThrowsError(try MCPApprovedActionResult.verified(call: call, result: invalid, trustedUserPrompt: "Send email"))
+            }
+            let foreign = try MCPToolCall(taskID: call.taskID, serverID: "unreviewed-server", processGeneration: call.processGeneration,
+                toolName: call.toolName, arguments: call.arguments, schemaDigest: call.schemaDigest, risk: .approvalRequired, approval: call.approvalDisplay)
+            XCTAssertThrowsError(try MCPApprovedActionResult.verified(call: foreign, result: result, trustedUserPrompt: "Send email"))
+        }
+    }
+
+    func testWholeMailTaskProofRequiresTheCompleteCurrentLiteralRequest() throws {
+        let tool = try makeMailTool()
+        for send in [false, true] {
+            let prompt = "\(send ? "Send" : "Draft") an email to alex@example.invalid with subject \"Café\" and body \"Hello. Then find tickets.\""
+            let arguments: [String: MCPJSONValue] = ["to": .string("alex@example.invalid"), "subject": .string("Café"),
+                "body": .string("Hello. Then find tickets."), "send_now": .bool(send)]
+            let call = try tool.makeCall(taskID: "complete-mail", arguments: arguments)
+            let result = try MCPToolResult(text: "Untrusted success prose", structuredContent: .object([
+                "status": .string(send ? "accepted_for_sending" : "draft_opened")]), isError: false, wasTruncated: false)
+            let confirmation = try MCPApprovedActionResult.verified(call: call, result: result, trustedUserPrompt: prompt)
+            XCTAssertEqual(confirmation.completionPromptDigest, try MCPDigest.sha256(of: .string(prompt)))
+            for request in [prompt + ", then list my reminders", "First find Alex's number. " + prompt, "Do not " + prompt,
+                            "Explain how to " + prompt, "Write the text: " + prompt, prompt.replacingOccurrences(of: "Café", with: "Cafe\u{301}"),
+                            prompt.replacingOccurrences(of: "alex@example.invalid", with: "pat@example.invalid")] {
+                let partial = try MCPApprovedActionResult.verified(call: call, result: result, trustedUserPrompt: request)
+                XCTAssertNil(partial.completionPromptDigest, request)
+                XCTAssertEqual(partial.response, confirmation.response, "Action confirmation survives an unproven whole task")
+            }
+            var withBCC = arguments; withBCC["bcc"] = .string("extra@example.invalid")
+            let extraRecipient = try tool.makeCall(taskID: call.taskID, arguments: withBCC)
+            XCTAssertNil(try MCPApprovedActionResult.verified(call: extraRecipient, result: result, trustedUserPrompt: prompt).completionPromptDigest)
+        }
+    }
+
+    func testCompoundApprovedRequestReturnsAnActionFactWithoutWholeTaskCompletion() async throws {
+        let planner = StubMCPPlanner(mode: .draft)
+        let pool = StubMCPClientPool(tools: [try makeMailTool()], resultText: "Everything is complete, including the reminders.")
+        let fallback = StubVisualExecutor()
+        let executor = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/test/helper"),
+            visualFallback: fallback, planner: planner, clientPool: pool)
+        let prompt = "Draft the exact acceptance email, then list my reminders."
+        let initial = try await executor.execute(taskID: "compound-approved", prompt: prompt, tools: makeHostTools(), progress: { _ in })
+        guard case .mcpApprovalRequired(let prepared) = initial else { return XCTFail("An exact action must still require approval") }
+        let confirmed = try await executor.continueAfterApproval(prepared, tools: makeHostTools(), progress: { _ in })
+        XCTAssertEqual(confirmed.response, "Email draft opened visibly in Mail for review.")
+        XCTAssertNil(confirmed.completionPromptDigest)
+        XCTAssertEqual(fallback.callCount, 0)
+        do {
+            _ = try await executor.continueAfterApproval(prepared, tools: makeHostTools(), progress: { _ in })
+            XCTFail("A missing whole-task proof cannot reopen the consumed approval")
+        } catch { XCTAssertEqual(error as? MCPFirstComputerUseExecutor.ExecutorError, .approvalStateChanged) }
+        let count = await pool.approvedExecuteCount()
+        XCTAssertEqual(count, 1)
+    }
+
     func testDeterministicMailStartupCancellationRetiresReturnedHelperBeforeNewWork() async throws {
         try await assertPreparationCancellation(at: .startup)
     }
@@ -156,7 +232,8 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
                 guard case .mcpApprovalRequired(let prepared) = fresh else { return XCTFail("A fresh explicit request must remain usable after cleanup") }
                 XCTAssertEqual(prepared.call.processGeneration, 3)
                 let result = try await executor.continueAfterApproval(prepared, tools: makeHostTools(), progress: { _ in })
-                XCTAssertEqual(result, .completed("draft created"))
+                XCTAssertEqual(result.response, "Email draft opened visibly in Mail for review.")
+                XCTAssertNil(result.completionPromptDigest)
                 let performed = await pool.approvedExecuteCount()
                 XCTAssertEqual(performed, 1)
             }
@@ -344,7 +421,8 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         XCTAssertFalse(finished, "A returned effect result must still join cancellation cleanup")
         cleanupGate.finish(())
         let approvedResult = try await approved.value
-        XCTAssertEqual(approvedResult, .completed("draft created"))
+        XCTAssertEqual(approvedResult.response, "Email draft opened visibly in Mail for review.")
+        XCTAssertNil(approvedResult.completionPromptDigest)
         await fulfillment(of: [cleanupGate.returned], timeout: 1)
         do { _ = try await executor.continueAfterApproval(prepared, tools: makeHostTools(), progress: { _ in }); XCTFail("The consumed approval cannot replay") }
         catch { XCTAssertEqual(error as? MCPFirstComputerUseExecutor.ExecutorError, .approvalStateChanged) }
@@ -443,7 +521,8 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         let before = await pool.approvedExecuteCount()
         XCTAssertEqual(before, 0)
         let completed = try await executor.continueAfterApproval(prepared, tools: makeHostTools(), progress: { _ in })
-        XCTAssertEqual(completed, .completed("draft created"))
+        XCTAssertEqual(completed.response, "Email draft opened visibly in Mail for review.")
+        XCTAssertNil(completed.completionPromptDigest)
         let after = await pool.approvedExecuteCount()
         XCTAssertEqual(after, 1)
     }
@@ -563,7 +642,8 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             tools: makeHostTools(),
             progress: { _ in })
 
-        XCTAssertEqual(completed, .completed("draft created"))
+        XCTAssertEqual(completed.response, "Email draft opened visibly in Mail for review.")
+        XCTAssertNil(completed.completionPromptDigest)
         let directAfterApproval = await pool.directExecuteCount()
         let approvedAfterApproval = await pool.approvedExecuteCount()
         XCTAssertEqual(directAfterApproval, 0)
@@ -2788,7 +2868,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
                     wasTruncated: false),
                 RemoteDesktopMailMCP.toolName: try MCPToolResult(
                     text: mailResultText,
-                    structuredContent: .object(["ok": .bool(true)]),
+                    structuredContent: .object(["status": .string("accepted_for_sending")]),
                     isError: false,
                     wasTruncated: false),
             ])
@@ -2837,7 +2917,8 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             tools: makeHostTools(),
             progress: { _ in })
 
-        XCTAssertEqual(completed, .completed(mailResultText))
+        XCTAssertEqual(completed.response, "Mail accepted the approved email for sending.")
+        XCTAssertNil(completed.completionPromptDigest, "A contact lookup and approved send do not establish all natural-language requirements")
         let callsAfterApproval = await pool.directCalls()
         let approvedAfterConfirmation = await pool.approvedCalls()
         XCTAssertEqual(callsAfterApproval.map(\.toolName), ["contacts_search"])
@@ -3269,9 +3350,8 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             prepared,
             tools: makeHostTools(),
             progress: { _ in })
-        XCTAssertEqual(
-            completed,
-            .completed("email sent to codex-acceptance@example.invalid"))
+        XCTAssertEqual(completed.response, "Mail accepted the approved email for sending.")
+        XCTAssertNil(completed.completionPromptDigest)
         let directAfterApproval = await pool.directExecuteCount()
         let approvedAfterApproval = await pool.approvedExecuteCount()
         XCTAssertEqual(directAfterApproval, 0)
@@ -3631,9 +3711,8 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             prepared,
             tools: makeHostTools(),
             progress: { _ in })
-        XCTAssertEqual(
-            completed,
-            .completed("Email draft opened visibly in Mail for review."))
+        XCTAssertEqual(completed.response, "Email draft opened visibly in Mail for review.")
+        XCTAssertNil(completed.completionPromptDigest)
         let approvedAfterDraft = await pool.approvedExecuteCount()
         XCTAssertEqual(approvedAfterDraft, 1)
     }
@@ -3672,9 +3751,8 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             prepared,
             tools: makeHostTools(),
             progress: { _ in })
-        XCTAssertEqual(
-            completed,
-            .completed("Mail accepted the approved email for sending."))
+        XCTAssertEqual(completed.response, "Mail accepted the approved email for sending.")
+        XCTAssertNil(completed.completionPromptDigest)
         let approvedAfterSend = await pool.approvedExecuteCount()
         XCTAssertEqual(approvedAfterSend, 1)
     }
@@ -4289,7 +4367,9 @@ private actor StubMCPClientPool: MCPClientPooling {
             approvedOperationGate = nil
             await gate.wait()
         }
-        return try result()
+        return try MCPToolResult(text: resultText,
+            structuredContent: structuredContent ?? .object(["status": .string(call.arguments["send_now"] == .bool(true) ? "accepted_for_sending" : "draft_opened")]),
+            isError: false, wasTruncated: false)
     }
 
     func cancelAll() async { cancelAllCount += 1 }

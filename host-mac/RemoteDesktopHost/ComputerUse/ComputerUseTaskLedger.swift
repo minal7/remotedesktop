@@ -61,6 +61,9 @@ final class ComputerUseTaskLedger {
         let attemptedAt: Date
         var response: String?
         var responseDigest: String? = nil
+        /// Present only when the host separately proved the complete original
+        /// request. Legacy records and action-only confirmations leave it nil.
+        var completionPromptDigest: String? = nil
     }
 
     enum ApprovedActionClaim: Equatable {
@@ -181,6 +184,12 @@ final class ComputerUseTaskLedger {
             }
             if let approvedAction, (approvedAction.response == nil) != (approvedAction.responseDigest == nil) {
                 throw LedgerError.unavailable
+            }
+            if let proof = approvedAction?.completionPromptDigest {
+                guard approvedAction?.response != nil, proof.utf8.count == 64,
+                      proof.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else {
+                    throw LedgerError.unavailable
+                }
             }
         }
     }
@@ -481,8 +490,8 @@ final class ComputerUseTaskLedger {
               prepared.fingerprint == MCPApprovalFingerprint(call: prepared.call) else {
             throw LedgerError.invalidIdentity
         }
-        // One approved MCP action is terminal for this task. A second call,
-        // even with a new generation or fingerprint, cannot reopen dispatch.
+        // Until the task journal represents multiple approved steps, one
+        // claim seals this task's dispatch. It does not prove task completion.
         if let existing = record.approvedAction { return .existing(existing) }
         guard record.response == nil, record.effectiveControlState != .cancelled,
               record.effectiveControlState != .paused else { throw LedgerError.invalidControl }
@@ -492,20 +501,30 @@ final class ComputerUseTaskLedger {
     }
 
     func recordApprovedActionResult(taskID: String, senderID: String, sessionID: String,
-                                    fingerprint: MCPApprovalFingerprint, response: String) throws {
+                                    fingerprint: MCPApprovalFingerprint, response: String,
+                                    completionPromptDigest: String? = nil) throws {
         try ensureAvailable()
         guard var record = records[taskID], record.senderID == senderID, record.sessionID == sessionID,
               var action = record.approvedAction, action.fingerprint == fingerprint else {
             throw LedgerError.invalidIdentity
         }
+        if let proof = completionPromptDigest {
+            guard proof.utf8.count == 64,
+                  proof.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else {
+                throw LedgerError.invalidIdentity
+            }
+        }
         let bounded = String(response.prefix(4_000))
         let digest = try MCPDigest.sha256(of: .string(response))
         if action.response != nil {
-            guard action.responseDigest == digest else { throw LedgerError.invalidIdentity }
+            guard action.responseDigest == digest, action.completionPromptDigest == completionPromptDigest else {
+                throw LedgerError.invalidIdentity
+            }
             return
         }
         action.response = bounded
         action.responseDigest = digest
+        action.completionPromptDigest = completionPromptDigest
         record.approvedAction = action
         // Do not change a Cancel/Stop terminal or its control revision.
         try commit(record, for: taskID)

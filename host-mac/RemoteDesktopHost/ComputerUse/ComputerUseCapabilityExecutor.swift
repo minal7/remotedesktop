@@ -160,7 +160,7 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
     }
 
     func continueAfterApproval(_ prepared: MCPPreparedApproval, tools: ComputerUseHostTools,
-                              progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
+                              progress: @escaping (String) -> Void) async throws -> MCPApprovedActionResult {
         guard !isExecuting else { throw RoutingError.alreadyExecuting }
         isExecuting = true
         defer { isExecuting = false }
@@ -171,8 +171,6 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
         let result = try await continuing.continueAfterApproval(prepared, tools: tools, progress: progress)
         // A successful approved effect remains a fact after concurrent Stop.
         // The manager records it separately from task cancellation/state.
-        if case .completed = result { return result }
-        try Task.checkCancellation()
         return result
     }
 

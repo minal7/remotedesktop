@@ -5932,9 +5932,14 @@ final class HostComputerUseManager: ObservableObject {
                 } else {
                     if let action = try taskLedger.approvedAction(taskID: envelope.id,
                         senderID: envelope.senderID, sessionID: envelope.sessionID) {
-                        sendDurableTerminal(action.response ?? Self.unconfirmedApprovedActionResponse,
-                            outcome: action.response == nil ? .unableToComplete : .taskCompleted,
-                            replyingTo: envelope, channel: channel)
+                        let prompt = ComputerUsePromptRequest.decodeCompatibleBody(envelope.body).prompt
+                        switch Self.resultForApprovedAction(action, trustedUserPrompt: prompt) {
+                        case .completed(let response):
+                            sendDurableTerminal(response, outcome: .taskCompleted, replyingTo: envelope, channel: channel)
+                        case .unableToComplete(let response):
+                            sendDurableTerminal(response, outcome: .unableToComplete, replyingTo: envelope, channel: channel)
+                        default: preconditionFailure("Approved action reconciliation must return a bounded terminal disposition")
+                        }
                     } else {
                         let response = "That request was received before the host restarted, so it was not run again. Send it as a new request if it is still needed."
                         sendDurableTerminal(response, outcome: .unableToComplete,
@@ -6103,7 +6108,7 @@ final class HostComputerUseManager: ObservableObject {
                     // Resume joins the previous execution first. Reconcile a
                     // claimed approved effect instead of asking any executor
                     // to reconstruct or repeat this consequential task.
-                    result = Self.resultForApprovedAction(action)
+                    result = Self.resultForApprovedAction(action, trustedUserPrompt: context.trustedUserPrompt)
                 } else {
                     if isResuming {
                         do {
@@ -6441,11 +6446,11 @@ final class HostComputerUseManager: ObservableObject {
                 switch try taskLedger.claimApprovedAction(taskID: context.envelope.id,
                     senderID: context.envelope.senderID, sessionID: context.envelope.sessionID, prepared: prepared) {
                 case .existing(let action):
-                    result = Self.resultForApprovedAction(action)
+                    result = Self.resultForApprovedAction(action, trustedUserPrompt: context.trustedUserPrompt)
                 case .new:
                     sendApprovedActionEvidence(for: context, transportGeneration: evidenceTransportGeneration,
                         authorizationGeneration: evidenceAuthorizationGeneration)
-                    result = try await continuation.continueAfterApproval(
+                    let confirmation = try await continuation.continueAfterApproval(
                         prepared,
                         tools: tools,
                         progress: { [weak self] value in
@@ -6453,15 +6458,24 @@ final class HostComputerUseManager: ObservableObject {
                             self?.activity = .working(value)
                             self?.sendStatus(value, replyingTo: context.envelope, channel: context.channel)
                         })
-                    guard case .completed(let response) = result else {
-                        throw MCPClientError.serverMismatch("The approved operation did not return a terminal result.")
+                    let trustedPromptDigest = try MCPDigest.sha256(of: .string(context.trustedUserPrompt))
+                    guard confirmation.callDigest == prepared.call.canonicalDigest,
+                          confirmation.completionPromptDigest == nil
+                            || confirmation.completionPromptDigest == trustedPromptDigest else {
+                        throw MCPClientError.serverMismatch("The approved operation returned a confirmation for another task.")
                     }
                     // Record the exact old task's confirmed effect before
                     // checking its UI token. Stop's first terminal still wins;
                     // a stale completion may not clear or update a newer task.
                     try taskLedger.recordApprovedActionResult(taskID: context.envelope.id,
                         senderID: context.envelope.senderID, sessionID: context.envelope.sessionID,
-                        fingerprint: prepared.fingerprint, response: response)
+                        fingerprint: prepared.fingerprint, response: confirmation.response,
+                        completionPromptDigest: confirmation.completionPromptDigest)
+                    guard let recorded = try taskLedger.approvedAction(taskID: context.envelope.id,
+                        senderID: context.envelope.senderID, sessionID: context.envelope.sessionID) else {
+                        throw MCPClientError.serverMismatch("The approved action confirmation could not be retained.")
+                    }
+                    result = Self.resultForApprovedAction(recorded, trustedUserPrompt: context.trustedUserPrompt)
                     sendApprovedActionEvidence(for: context, transportGeneration: evidenceTransportGeneration,
                         authorizationGeneration: evidenceAuthorizationGeneration)
                 }
@@ -6488,8 +6502,13 @@ final class HostComputerUseManager: ObservableObject {
 
     private static let unconfirmedApprovedActionResponse = "The approved action may already have been performed. I couldn't confirm its result, so I will not repeat it. Check the Mac before starting another request for this action."
 
-    private static func resultForApprovedAction(_ action: ComputerUseTaskLedger.ApprovedActionRecord) -> ComputerUseExecutionResult {
-        if let response = action.response { return .completed(response) }
+    private static func resultForApprovedAction(_ action: ComputerUseTaskLedger.ApprovedActionRecord,
+                                               trustedUserPrompt: String) -> ComputerUseExecutionResult {
+        if let response = action.response {
+            if let proof = action.completionPromptDigest,
+               proof == (try? MCPDigest.sha256(of: .string(trustedUserPrompt))) { return .completed(response) }
+            return .unableToComplete("The full request remains unverified. I retained this action confirmation and will not repeat it:\n\n" + response)
+        }
         return .unableToComplete(unconfirmedApprovedActionResponse)
     }
 

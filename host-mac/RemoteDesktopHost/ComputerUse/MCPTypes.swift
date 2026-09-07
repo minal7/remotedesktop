@@ -297,6 +297,57 @@ enum MCPMutationClaim: Equatable, Sendable {
     case ambiguous
 }
 
+/// Confirmation of one exact approved operation. This is deliberately not a
+/// ComputerUseExecutionResult: an action receipt is not whole-task completion.
+struct MCPApprovedActionResult: Equatable, Sendable {
+    let callDigest: String
+    let response: String
+    let completionPromptDigest: String?
+
+    static func verified(call: MCPToolCall, result: MCPToolResult,
+                         trustedUserPrompt: String) throws -> MCPApprovedActionResult {
+        guard call.risk == .approvalRequired,
+              call.serverID == RemoteDesktopMailMCP.serverID,
+              call.toolName == RemoteDesktopMailMCP.toolName,
+              !result.isError, !result.wasTruncated,
+              case .object(let content)? = result.structuredContent,
+              Set(content.keys) == ["status"],
+              case .string(let status)? = content["status"],
+              let mail = try? RemoteDesktopMailRequest(arguments: call.arguments),
+              status == (mail.sendNow ? "accepted_for_sending" : "draft_opened") else {
+            throw MCPClientError.toolFailed("The approved action returned no matching, complete confirmation. It will not be repeated.")
+        }
+        let response = mail.sendNow
+            ? "Mail accepted the approved email for sending."
+            : "Email draft opened visibly in Mail for review."
+        let provesWholeTask = exactSingleMailRequest(trustedUserPrompt, matches: mail)
+        return .init(callDigest: call.canonicalDigest, response: response,
+            completionPromptDigest: provesWholeTask ? try MCPDigest.sha256(of: .string(trustedUserPrompt)) : nil)
+    }
+
+    /// A complete literal command supplies a bounded whole-task proof. Other
+    /// natural-language/compound requests retain action-only evidence until a
+    /// task compiler verifies every requested outcome. Approval of the call
+    /// alone cannot erase their remaining requirements.
+    private static func exactSingleMailRequest(_ prompt: String, matches mail: RemoteDesktopMailRequest) -> Bool {
+        guard prompt.utf8.count <= 16_384, mail.cc.isEmpty, mail.bcc.isEmpty else { return false }
+        let pattern = #"(?is)^\s*(?:please\s+)?(send|draft)\s+(?:an?\s+)?email\s+to\s+([^\s,;<>"]+@[^\s,;<>"]+)\s+with\s+subject\s+"([^"]*)"\s+and\s+body\s+"([^"]*)"\s*[.!]?\s*$"#
+        guard let expression = try? NSRegularExpression(pattern: pattern),
+              let match = expression.firstMatch(in: prompt, range: NSRange(prompt.startIndex..., in: prompt)) else { return false }
+        let values = (1...4).compactMap { index -> String? in
+            guard let range = Range(match.range(at: index), in: prompt) else { return nil }
+            return String(prompt[range])
+        }
+        guard values.count == 4 else { return false }
+        let action = values[0].lowercased()
+        guard action == "send" || action == "draft" else { return false }
+        return (action == "send") == mail.sendNow
+            && values[1].utf8.elementsEqual(mail.to.utf8)
+            && values[2].utf8.elementsEqual(mail.subject.utf8)
+            && values[3].utf8.elementsEqual(mail.body.utf8)
+    }
+}
+
 /// Persistent implementations must record `.new` before the external call,
 /// then atomically store completion. A process death between those points is
 /// permanently ambiguous and must never be converted back to `.new`.

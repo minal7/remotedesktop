@@ -1376,6 +1376,112 @@ final class ComputerUseTests: XCTestCase {
             prepared: receiptApproval(taskID: "approved", generation: 8)), .existing(receipt))
     }
 
+    func test_approvedActionCompletionProofIsOptionalImmutableAndValidatedOnReload() throws {
+        for includesProof in [false, true] {
+            let url = temporaryLedgerURL()
+            defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+            let ledger = ComputerUseTaskLedger(fileURL: url)
+            let proof = try MCPDigest.sha256(of: .string("The entire trusted request"))
+            _ = try ledger.claim(taskID: "proof", senderID: "sender", sessionID: "session", promptBody: "The entire trusted request")
+            let prepared = try receiptApproval(taskID: "proof")
+            _ = try ledger.claimApprovedAction(taskID: "proof", senderID: "sender", sessionID: "session", prepared: prepared)
+            _ = try ledger.applyControl(.cancel, taskID: "proof", revision: 1, senderID: "sender", sessionID: "session")
+            XCTAssertThrowsError(try ledger.recordApprovedActionResult(taskID: "proof", senderID: "sender", sessionID: "session",
+                fingerprint: prepared.fingerprint, response: "Action confirmed", completionPromptDigest: "invalid"))
+            XCTAssertNil(try ledger.approvedAction(taskID: "proof", senderID: "sender", sessionID: "session")?.response)
+            try ledger.recordApprovedActionResult(taskID: "proof", senderID: "sender", sessionID: "session",
+                fingerprint: prepared.fingerprint, response: "Action confirmed", completionPromptDigest: includesProof ? proof : nil)
+            let restored = ComputerUseTaskLedger(fileURL: url)
+            XCTAssertEqual(restored.terminalOutcome(taskID: "proof"), .unableToComplete)
+            XCTAssertEqual(restored.appliedControlRevision(taskID: "proof"), 1)
+            XCTAssertEqual(try restored.approvedAction(taskID: "proof", senderID: "sender", sessionID: "session")?.completionPromptDigest,
+                includesProof ? proof : nil)
+            XCTAssertThrowsError(try restored.recordApprovedActionResult(taskID: "proof", senderID: "sender", sessionID: "session",
+                fingerprint: prepared.fingerprint, response: "Action confirmed", completionPromptDigest: includesProof ? nil : proof))
+            var records = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: [String: Any]])
+            var action = try XCTUnwrap(records["proof"]?["approvedAction"] as? [String: Any])
+            action["completionPromptDigest"] = "not-a-proof"
+            records["proof"]?["approvedAction"] = action
+            try JSONSerialization.data(withJSONObject: records).write(to: url)
+            let corrupted = ComputerUseTaskLedger(fileURL: url)
+            XCTAssertThrowsError(try corrupted.approvedAction(taskID: "proof", senderID: "sender", sessionID: "session"))
+        }
+    }
+
+    func test_confirmedActionRestartReplayRequiresMatchingWholeTaskProof() async throws {
+        for scope in ["legacy-action-only", "whole-task", "wrong-task"] {
+            let url = temporaryLedgerURL()
+            defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+            let ledger = ComputerUseTaskLedger(fileURL: url)
+            let text = "Draft an email to receipt@example.invalid with subject \"Receipt fixture\" and body \"Fixture body\""
+            let envelope = makeEnvelope(id: "restart-proof", kind: .prompt,
+                body: try ComputerUsePromptRequest(prompt: text, supportsApprovedActionEvidence: true).encodedBody())
+            _ = try ledger.claim(taskID: envelope.id, senderID: envelope.senderID, sessionID: envelope.sessionID, promptBody: envelope.body)
+            let prepared = try receiptApproval(taskID: envelope.id)
+            _ = try ledger.claimApprovedAction(taskID: envelope.id, senderID: envelope.senderID, sessionID: envelope.sessionID, prepared: prepared)
+            let proof = scope == "legacy-action-only" ? nil : try MCPDigest.sha256(of: .string(scope == "whole-task" ? text : "Another request"))
+            try ledger.recordApprovedActionResult(taskID: envelope.id, senderID: envelope.senderID, sessionID: envelope.sessionID,
+                fingerprint: prepared.fingerprint, response: "Draft confirmed", completionPromptDigest: proof)
+            let restored = ComputerUseTaskLedger(fileURL: url)
+            let executor = ImmediateComputerUseExecutor(results: []), channel = FakeHostComputerUseChannel()
+            let manager = HostComputerUseManager(injector: InputInjector(), executor: executor, taskLedger: restored,
+                allowsExternalServices: false, channelFactory: { _ in channel })
+            defer { manager.stop() }
+            manager.authorizePeer(senderID: envelope.senderID)
+            XCTAssertTrue(manager.handle(envelope, channel: channel))
+            await waitUntil { await channel.sentMessages().contains { $0.kind == .assistant } }
+            let messages = await channel.sentMessages()
+            let update = try ComputerUseTaskUpdate.decodeBody(XCTUnwrap(messages.first { $0.kind == .assistant }).body)
+            XCTAssertEqual(update.outcome, scope == "whole-task" ? .taskCompleted : .unableToComplete)
+            XCTAssertTrue(update.text.contains("Draft confirmed"))
+            XCTAssertEqual(update.approvedActionEvidence?.state, .confirmed)
+            XCTAssertEqual(executor.callCount, 0)
+            XCTAssertEqual(try restored.approvedAction(taskID: envelope.id, senderID: envelope.senderID, sessionID: envelope.sessionID)?.completionPromptDigest, proof)
+        }
+    }
+
+    func test_freshApprovedConfirmationBindsActionAndWholeTaskScopeBeforeRecording() async throws {
+        for scope in ["action-only", "whole-task", "wrong-task", "wrong-call"] {
+            let url = temporaryLedgerURL()
+            defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+            let ledger = ComputerUseTaskLedger(fileURL: url)
+            let literal = "Draft an email to receipt@example.invalid with subject \"Receipt fixture\" and body \"Fixture body\""
+            let text = scope == "action-only" ? literal + ", then find movie tickets" : literal
+            let prompt = makeEnvelope(id: "fresh-proof", kind: .prompt, body: try ComputerUsePromptRequest(
+                prompt: text, supportsApprovedActionEvidence: true).encodedBody())
+            let prepared = try receiptApproval(taskID: prompt.id)
+            let confirmed = try MCPApprovedActionResult.verified(call: prepared.call,
+                result: MCPToolResult(text: "Untrusted success", structuredContent: .object(["status": .string("draft_opened")]),
+                    isError: false, wasTruncated: false), trustedUserPrompt: text)
+            let supplied = MCPApprovedActionResult(callDigest: scope == "wrong-call" ? String(repeating: "f", count: 64) : confirmed.callDigest,
+                response: confirmed.response, completionPromptDigest: scope == "wrong-task"
+                    ? try MCPDigest.sha256(of: .string("Another task")) : confirmed.completionPromptDigest)
+            let executor = ApprovalHoldingMCPComputerUseExecutor(prepared: prepared, approvalResult: supplied)
+            let channel = FakeHostComputerUseChannel()
+            let manager = HostComputerUseManager(injector: InputInjector(), executor: executor, taskLedger: ledger,
+                allowsExternalServices: false, channelFactory: { _ in channel })
+            defer { manager.stop() }
+            manager.authorizePeer(senderID: prompt.senderID)
+            XCTAssertTrue(manager.handle(prompt, channel: channel))
+            await waitUntil { await channel.sentMessages().contains { $0.kind == .approvalRequest } }
+            let before = await channel.sentMessages()
+            let request = try ComputerUseApprovalRequest.decodeBody(XCTUnwrap(before.first { $0.kind == .approvalRequest }).body)
+            XCTAssertTrue(manager.handle(makeEnvelope(kind: .approvalResponse,
+                body: try ComputerUseApprovalResponse(requestID: request.requestID, approved: true).encodedBody()), channel: channel))
+            await waitUntil { manager.activity == .idle }
+            let messages = await channel.sentMessages()
+            let update = try ComputerUseTaskUpdate.decodeBody(XCTUnwrap(messages.first { $0.kind == .assistant }).body)
+            XCTAssertEqual(update.outcome, scope == "whole-task" ? .taskCompleted : .unableToComplete)
+            let action = try XCTUnwrap(ledger.approvedAction(taskID: prompt.id, senderID: prompt.senderID, sessionID: prompt.sessionID))
+            let valid = scope == "whole-task" || scope == "action-only"
+            XCTAssertEqual(action.response, valid ? confirmed.response : nil)
+            XCTAssertEqual(action.completionPromptDigest, scope == "whole-task" ? confirmed.completionPromptDigest : nil)
+            XCTAssertEqual(executor.approvedActionSideEffectCount, 1)
+            XCTAssertTrue(manager.handle(prompt, channel: channel))
+            XCTAssertEqual(executor.executeCount, 1)
+        }
+    }
+
     func test_approvedActionRecordRejectsForeignOrUnclaimedResultsAndConflictingConfirmation() throws {
         let url = temporaryLedgerURL()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
@@ -1553,8 +1659,9 @@ final class ComputerUseTests: XCTestCase {
             }
         }
         if mode == "pause-confirmed" || mode == "legacy-confirmed" {
-            XCTAssertEqual(terminals.first?.outcome, .taskCompleted)
-            XCTAssertEqual(terminals.first?.text, record.response)
+            XCTAssertEqual(terminals.first?.outcome, .unableToComplete)
+            XCTAssertTrue(terminals.first?.text.contains(record.response ?? "") == true)
+            XCTAssertNil(record.completionPromptDigest)
         } else {
             XCTAssertEqual(terminals.first?.outcome, .unableToComplete)
             if mode == "cancel-new-task" { XCTAssertEqual(terminals.first?.text, ComputerUseTaskLedger.stoppedResponse) }
@@ -8933,16 +9040,18 @@ private final class ApprovalHoldingMCPComputerUseExecutor:
     private let prepared: MCPPreparedApproval
     private let resultGate: ComputerUsePlanningTestGate<Bool>?
     private let resultAfterFirstExecution: ComputerUseExecutionResult?
+    private let approvalResult: MCPApprovedActionResult?
     private(set) var executeCount = 0
     private(set) var continueAfterApprovalCount = 0
     private(set) var cancelMCPWorkCount = 0
     private(set) var approvedActionSideEffectCount = 0
 
     init(prepared: MCPPreparedApproval, resultGate: ComputerUsePlanningTestGate<Bool>? = nil,
-         resultAfterFirstExecution: ComputerUseExecutionResult? = nil) {
+         resultAfterFirstExecution: ComputerUseExecutionResult? = nil, approvalResult: MCPApprovedActionResult? = nil) {
         self.prepared = prepared
         self.resultGate = resultGate
         self.resultAfterFirstExecution = resultAfterFirstExecution
+        self.approvalResult = approvalResult
     }
 
     func execute(
@@ -8959,14 +9068,15 @@ private final class ApprovalHoldingMCPComputerUseExecutor:
         _ prepared: MCPPreparedApproval,
         tools: ComputerUseHostTools,
         progress: @escaping (String) -> Void
-    ) async throws -> ComputerUseExecutionResult {
+    ) async throws -> MCPApprovedActionResult {
         continueAfterApprovalCount += 1
         approvedActionSideEffectCount += 1
+        if let approvalResult { return approvalResult }
         if let resultGate {
             guard await resultGate.wait() else { throw CancellationError() }
-            return .completed("Confirmed approved fixture action")
+            return .init(callDigest: prepared.call.canonicalDigest, response: "Confirmed approved fixture action", completionPromptDigest: nil)
         }
-        return .completed("Unexpected approved MCP action")
+        return .init(callDigest: prepared.call.canonicalDigest, response: "Unexpected approved MCP action", completionPromptDigest: nil)
     }
 
     func cancelMCPWork() {

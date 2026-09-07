@@ -209,7 +209,7 @@ private final class RoutingDesktopFixture: ComputerUseExecuting, MCPApprovalCont
     var cancellations = 0
     func cancelMCPWork() { cancellations += 1 }
     func continueAfterApproval(_ prepared: MCPPreparedApproval, tools: ComputerUseHostTools,
-                              progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
+                              progress: @escaping (String) -> Void) async throws -> MCPApprovedActionResult {
         throw ComputerUseCapabilityExecutor.RoutingError.missingContinuation
     }
     var taskIDs: [String] = []
