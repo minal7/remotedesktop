@@ -400,9 +400,6 @@ final class SemanticCandidateSelectionV5Tests: XCTestCase {
         let rawHistory = [
             "TYPE [private fixture token]",
             "CLICK [[300,400]]",
-            "SCROLL [UP]",
-            "SCROLL [DOWN]",
-            "SCROLL [LEFT]",
             "SCROLL [RIGHT]",
             "OPEN_APP [Finder]",
             "HOTKEY [COMMAND+S]",
@@ -437,14 +434,14 @@ final class SemanticCandidateSelectionV5Tests: XCTestCase {
         let recordedSelectorRequests = await selectorRecorder
             .recordedRequests()
         let expectedProposalRequest = baseRequest.replacingHistory(
-            OSAtlasComputerUseExecutor.semanticRoutingHistory(rawHistory))
+            OSAtlasComputerUseExecutor.semanticRoutingHistory(rawHistory), historyIsComplete: true)
         let expectedSelectorRequest = baseRequest.replacingHistory(
-            OSAtlasComputerUseExecutor.semanticRoutingHistoryV5(rawHistory))
+            OSAtlasComputerUseExecutor.semanticRoutingHistoryV5(rawHistory), historyIsComplete: true)
 
         XCTAssertEqual(selected, sampleRoutes[0])
         XCTAssertEqual(recordedProposalRequests, [expectedProposalRequest])
         XCTAssertEqual(recordedSelectorRequests, [expectedSelectorRequest])
-        XCTAssertNotEqual(
+        XCTAssertEqual(
             expectedSelectorRequest.history,
             OSAtlasComputerUseExecutor.semanticRoutingHistoryV5(
                 expectedProposalRequest.history))
@@ -455,6 +452,29 @@ final class SemanticCandidateSelectionV5Tests: XCTestCase {
         } catch let error as AppleFoundationVisualActionRouterError {
             XCTAssertEqual(error, .invalidRequest)
         }
+    }
+
+    @MainActor
+    func testIncompletePairedHistoryIsRejectedBeforeEitherModelIsInvoked() async throws {
+        let raw = ["TYPE [private value]", "CLICK [[1,2]]", "SCROLL [UP]", "SCROLL [DOWN]", "SCROLL [LEFT]",
+            "SCROLL [RIGHT]", "OPEN_APP [Finder]", "HOTKEY [COMMAND+S]", "ENTER"]
+        let proposerRecorder = SemanticCandidateRouterRecorder()
+        let selectorRecorder = SemanticCandidateSelectorRecorder()
+        let router = CandidateSelectingSemanticActionRouter(
+            proposer: AppleFoundationSemanticActionCandidateProposer(
+                router: SemanticCandidateRouterStub(reportedAvailability: .available, route: sampleRoutes[0], recorder: proposerRecorder),
+                caseIDProvider: { "runtime.incomplete-history" }),
+            selector: EffectFreeSemanticActionCandidateSelector { request, candidates in
+                try await selectorRecorder.selectFirst(request: request, candidates: candidates)
+            })
+        let paired = OSAtlasComputerUseExecutor.semanticCandidateRoutingRequests(for: routingRequest(), rawHistory: raw)
+        XCTAssertTrue(paired.proposalRequest.historyIsComplete)
+        XCTAssertFalse(paired.selectorRequest.historyIsComplete)
+        do { _ = try await router.route(paired); XCTFail("A shortened selector history cannot authorize a next step") }
+        catch { XCTAssertEqual(error as? AppleFoundationVisualActionRouterError, .invalidRequest) }
+        let proposals = await proposerRecorder.recordedRequests(), selections = await selectorRecorder.recordedRequests()
+        XCTAssertTrue(proposals.isEmpty); XCTAssertTrue(selections.isEmpty)
+        XCTAssertThrowsError(try SemanticCandidateSelectionV5.validateRequest(paired.selectorRequest))
     }
 
     func testAppleFoundationCandidateProposerDelegatesWithoutEffects()

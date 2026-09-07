@@ -3826,8 +3826,7 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
 
         let routed = OSAtlasComputerUseExecutor.semanticRoutingHistory(history)
         XCTAssertEqual(
-            routed.count,
-            OSAtlasSemanticRoutingRequest.maximumHistoryEntries)
+            routed.count, history.count)
         XCTAssertTrue(routed.contains("TYPE"))
         XCTAssertTrue(routed.contains("CLICK"))
         XCTAssertTrue(routed.contains("SCROLL [DOWN]"))
@@ -3851,12 +3850,11 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
 
         let routed = OSAtlasComputerUseExecutor.semanticRoutingHistory(history)
         XCTAssertEqual(
-            routed.count,
-            OSAtlasSemanticRoutingRequest.maximumHistoryEntries)
+            routed.count, history.count)
         XCTAssertEqual(Array(routed.suffix(2)), [
             "SCROLL [UP]", "SCROLL [DOWN]",
         ])
-        XCTAssertEqual(routed.filter { $0 == "SCROLL [DOWN]" }.count, 1)
+        XCTAssertEqual(routed.filter { $0 == "SCROLL [DOWN]" }.count, 2)
         XCTAssertTrue(routed.contains("TYPE"))
         XCTAssertTrue(routed.contains("CLICK"))
         XCTAssertFalse(routed.contains(where: {
@@ -3947,7 +3945,7 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
             "OPEN_APP [Finder]", "HOTKEY [COMMAND+S]", "ENTER",
         ])
         XCTAssertEqual(routed.count,
-                       OSAtlasSemanticRoutingRequest.maximumHistoryEntries)
+                       SemanticCandidateSelectionV5.maximumHistoryEntries)
         XCTAssertFalse(routed.contains("TYPE"))
         XCTAssertFalse(routed.contains("CLICK"))
         XCTAssertEqual(Array(routed.prefix(3)), [
@@ -3988,16 +3986,18 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
 
         XCTAssertEqual(paired.proposalRequest.history, expectedV4)
         XCTAssertEqual(paired.selectorRequest.history, expectedV5)
+        XCTAssertTrue(paired.proposalRequest.historyIsComplete)
+        XCTAssertFalse(paired.selectorRequest.historyIsComplete)
         XCTAssertEqual(
             paired.proposalRequest.replacingHistory([]),
             baseRequest.replacingHistory([]))
         XCTAssertEqual(
             paired.selectorRequest.replacingHistory([]),
             baseRequest.replacingHistory([]))
-        XCTAssertNotEqual(
+        XCTAssertEqual(
             paired.selectorRequest.history,
             OSAtlasComputerUseExecutor.semanticRoutingHistoryV5(expectedV4),
-            "V5 must read the raw executor ledger, never V4-compacted history")
+            "The complete production projection no longer evicts the newer actions before V5 normalization")
         XCTAssertEqual(Array(paired.selectorRequest.history.suffix(3)), [
             "OPEN_APP [Finder]", "HOTKEY [COMMAND+S]", "ENTER",
         ])

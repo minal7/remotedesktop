@@ -3838,8 +3838,8 @@ final class AppleFoundationMCPPlannerTests: XCTestCase {
         }
         XCTAssertEqual(resolve("alpha", history: "TYPE"), .rejected)
         XCTAssertEqual(
-            resolve("alpha", history: "TYPE", complete: false), done,
-            "A unique privacy-compacted router hint remains usable only outside the complete host ledger")
+            resolve("alpha", history: "TYPE", complete: false), .rejected,
+            "An incomplete history cannot infer the next step from one privacy marker")
 
         let prefix = String(repeating: "a", count: 1_000)
         let first = prefix + "FIRST"

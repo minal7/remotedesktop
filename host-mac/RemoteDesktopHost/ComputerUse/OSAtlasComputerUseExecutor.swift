@@ -7046,55 +7046,15 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
         }
     }
 
-    /// Keeps one-shot deterministic actions visible to the router for the
-    /// entire bounded task, even after they fall outside the ordinary recent
-    /// history suffix. TYPE is reduced to a privacy-safe token; CLICK retains
-    /// no coordinates. Together with four scroll directions this needs at
-    /// most the existing six-entry routing budget.
+    /// Keep every recorded action in its original order. TYPE payloads and
+    /// CLICK coordinates remain private, but repetitions are distinct facts.
+    /// Overflow is rejected by request validation, never hidden by compaction.
     static func semanticRoutingHistory(_ history: [String]) -> [String] {
-        let limit = OSAtlasSemanticRoutingRequest.maximumHistoryEntries
-        func promptSafeEntry(_ entry: String) -> String {
+        history.map { entry in
             ComputerUsePromptSanitizer.inline(
                 routingHistoryMarker(for: entry) ?? entry,
-                maximumUTF8Bytes:
-                    OSAtlasSemanticRoutingRequest.maximumHistoryEntryBytes)
+                maximumUTF8Bytes: OSAtlasSemanticRoutingRequest.maximumHistoryEntryBytes)
         }
-        guard history.count > limit else {
-            return history.map(promptSafeEntry)
-        }
-
-        var persistent: [String: (index: Int, value: String)] = [:]
-        for (index, entry) in history.enumerated() {
-            guard let marker = routingHistoryMarker(for: entry) else {
-                continue
-            }
-            // Retain the latest occurrence of each canonical marker. This
-            // keeps the compacted history chronological when navigation
-            // changes direction more than once (for example DOWN, UP, DOWN),
-            // while TYPE values and CLICK coordinates remain redacted.
-            persistent[marker] = (index, marker)
-        }
-
-        var selected = Dictionary(
-            uniqueKeysWithValues: persistent.values.map {
-                ($0.index, $0.value)
-            })
-        var index = history.count - 1
-        while selected.count < limit, index >= 0 {
-            let entry = history[index]
-            if selected[index] == nil {
-                if let marker = routingHistoryMarker(for: entry),
-                   persistent[marker] != nil {
-                    // The latest canonical marker already represents this
-                    // deterministic action without its private payload.
-                } else {
-                    selected[index] = entry
-                }
-            }
-            index -= 1
-        }
-        return selected.keys.sorted().compactMap { selected[$0] }
-            .map(promptSafeEntry)
     }
 
     private static func routingHistoryMarker(for entry: String) -> String? {
@@ -7116,12 +7076,11 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
         return nil
     }
 
-    /// Dormant schema-5 boundary. The eventual V5 composition switch must
-    /// call this function on raw executor history, before the legacy V4
-    /// six-entry compactor above. Current production deliberately continues
-    /// to use `semanticRoutingHistory` until the sealed artifact is approved.
+    /// Dormant schema-5 artifact boundary. Its existing six-entry projection
+    /// remains separate from complete production history. The paired request
+    /// must declare lost entries so incomplete history cannot authorize input.
     static func semanticRoutingHistoryV5(_ history: [String]) -> [String] {
-        let limit = OSAtlasSemanticRoutingRequest.maximumHistoryEntries
+        let limit = SemanticCandidateSelectionV5.maximumHistoryEntries
         let canonical = history.enumerated().compactMap { index, entry in
             canonicalV5RoutingHistoryEntry(for: entry).map {
                 (index: index, value: $0)
@@ -7162,19 +7121,20 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
         return selected.keys.sorted().compactMap { selected[$0] }
     }
 
-    /// Builds the dormant schema-5 model boundary from one raw executor
-    /// ledger. Never feed the V4 compacted history into the V5 normalizer:
-    /// V4 deliberately preserves verbs that schema 5 rejects and can evict
-    /// newer workflow state before V5 has a chance to prioritize it.
+    /// Derive both views from the owned raw ledger and record whether either
+    /// lost entries. The dormant schema-5 vocabulary can omit observations or
+    /// older actions; that loss must be rejected before either model runs.
     static func semanticCandidateRoutingRequests(
         for request: OSAtlasSemanticRoutingRequest,
         rawHistory: [String]
     ) -> OSAtlasSemanticCandidateRoutingRequests {
-        OSAtlasSemanticCandidateRoutingRequests(
+        let proposalHistory = semanticRoutingHistory(rawHistory)
+        let selectorHistory = semanticRoutingHistoryV5(rawHistory)
+        return OSAtlasSemanticCandidateRoutingRequests(
             proposalRequest: request.replacingHistory(
-                semanticRoutingHistory(rawHistory)),
+                proposalHistory, historyIsComplete: true),
             selectorRequest: request.replacingHistory(
-                semanticRoutingHistoryV5(rawHistory)))
+                selectorHistory, historyIsComplete: selectorHistory.count == rawHistory.count))
     }
 
     private func boundedSemanticActionRoute(
@@ -7190,8 +7150,8 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
 
     /// The executor is the sole owner of the raw action ledger, so it is also
     /// the only boundary that may construct schema-5's paired histories. A
-    /// legacy router receives the exact V4 request it received before this
-    /// dormant adapter existed; a paired router cannot be invoked through its
+    /// regular router receives the complete production projection; a paired
+    /// router cannot be invoked through its
     /// unsafe single-request compatibility method.
     static func semanticActionRoute(
         using router: any OSAtlasSemanticActionRouting,
@@ -7220,7 +7180,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
                     rawHistory: rawHistory))
         }
         return try await router.route(request.replacingHistory(
-            semanticRoutingHistory(rawHistory)))
+            semanticRoutingHistory(rawHistory), historyIsComplete: true))
     }
 
     /// Every typed router may choose that the next operation is pointer-like,

@@ -185,7 +185,10 @@ struct OSAtlasSemanticRoutingRequest: Equatable, Sendable {
         SemanticVisibleEvidence.maximumTotalUnicodeScalars
     static let maximumVisibleTextBytes =
         SemanticVisibleEvidence.maximumTotalUTF8Bytes
-    static let maximumHistoryEntries = 6
+    /// Admit the complete bounded action sequence, including settling waits.
+    /// Token limits still apply; callers must not silently replace this with
+    /// a suffix or deduplicated set of action kinds to fit those limits.
+    static let maximumHistoryEntries = 128
     static let maximumHistoryEntryBytes = 512
     static let maximumOpenedApplicationEntries = 25
     static let maximumApplicationNameBytes = 256
@@ -200,6 +203,7 @@ struct OSAtlasSemanticRoutingRequest: Equatable, Sendable {
     let visibleText: String
     let browserPageContext: ComputerUseBrowserPlanningContext?
     let history: [String]
+    let historyIsComplete: Bool
     let availableDirectives: [OSAtlasExplicitActionDirective]
     let openedApplications: [String]
     let openedApplicationIdentities: [ComputerUseApplicationIdentity]
@@ -213,6 +217,7 @@ struct OSAtlasSemanticRoutingRequest: Equatable, Sendable {
         visibleText: String,
         browserPageContext: ComputerUseBrowserPlanningContext? = nil,
         history: [String],
+        historyIsComplete: Bool = true,
         availableDirectives: [OSAtlasExplicitActionDirective],
         openedApplications: [String] = [],
         openedApplicationIdentities: [ComputerUseApplicationIdentity] = []
@@ -237,6 +242,7 @@ struct OSAtlasSemanticRoutingRequest: Equatable, Sendable {
                 $0,
                 maximumUTF8Bytes: Self.maximumHistoryEntryBytes)
         }
+        self.historyIsComplete = historyIsComplete
         self.availableDirectives = availableDirectives
         self.openedApplications = openedApplications.map {
             ComputerUsePromptSanitizer.inline(
@@ -246,11 +252,9 @@ struct OSAtlasSemanticRoutingRequest: Equatable, Sendable {
         self.openedApplicationIdentities = openedApplicationIdentities
     }
 
-    /// Rebuilds the same typed routing request at an explicit history
-    /// boundary. The schema-5 composition uses this to give Apple's
-    /// proposer the frozen V4 verbs while independently giving Granite the
-    /// schema-5 history derived from the executor's raw action ledger.
-    func replacingHistory(_ history: [String]) -> Self {
+    /// Replacing history does not preserve an assumption of completeness.
+    /// Only the owner of the full raw ledger may explicitly attest coverage.
+    func replacingHistory(_ history: [String], historyIsComplete: Bool = false) -> Self {
         Self(
             task: task,
             conversation: conversation,
@@ -261,6 +265,7 @@ struct OSAtlasSemanticRoutingRequest: Equatable, Sendable {
             visibleText: visibleText,
             browserPageContext: browserPageContext,
             history: history,
+            historyIsComplete: historyIsComplete,
             availableDirectives: availableDirectives,
             openedApplications: openedApplications,
             openedApplicationIdentities: openedApplicationIdentities)
@@ -467,7 +472,7 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
                 <= OSAtlasSemanticRoutingRequest.maximumVisibleTextCharacters,
               request.visibleText.utf8.count
                 <= OSAtlasSemanticRoutingRequest.maximumVisibleTextBytes,
-              request.history.count
+              request.historyIsComplete, request.history.count
                 <= OSAtlasSemanticRoutingRequest.maximumHistoryEntries,
               request.history.allSatisfy({
                   $0.utf8.count
@@ -4435,8 +4440,7 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
               !history.isEmpty || !task.isEmpty else {
             return .rejected
         }
-        if !historyIsComplete,
-           history.count >= OSAtlasSemanticRoutingRequest.maximumHistoryEntries {
+        if !historyIsComplete {
             return .rejected
         }
 
@@ -4903,14 +4907,7 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
                         expectedHistoryEntry.utf8)
                     : completedAction.entry.caseInsensitiveCompare(
                         expectedHistoryEntry) == .orderedSame) {
-                let uniquelyCompactedTypedPayload =
-                    !historyIsComplete
-                    && completedAction.entry == "TYPE"
-                    && expectedHistoryEntry.hasPrefix("TYPE [")
-                    && actions.filter({ $0.directive == .type }).count == 1
-                guard uniquelyCompactedTypedPayload else {
-                    return .rejected
-                }
+                return .rejected
             }
             actionIndex += 1
         }
@@ -4944,9 +4941,7 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
                 for: request.task,
                 history: request.history,
                 availableDirectives: request.availableDirectives,
-                historyIsComplete:
-                    request.history.count
-                        < OSAtlasSemanticRoutingRequest.maximumHistoryEntries,
+                historyIsComplete: request.historyIsComplete,
                 frontmostApplication: request.frontmostApplication,
                 frontmostApplicationIdentityIsAuthoritative:
                     request.applicationIdentityIsAuthoritative

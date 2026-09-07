@@ -327,7 +327,7 @@ enum SemanticNativeToolWireContract {
                 <= OSAtlasSemanticRoutingRequest.maximumVisibleTextCharacters,
               request.visibleText.utf8.count
                 <= OSAtlasSemanticRoutingRequest.maximumVisibleTextBytes,
-              request.history.count
+              request.historyIsComplete, request.history.count
                 <= OSAtlasSemanticRoutingRequest.maximumHistoryEntries,
               request.history.allSatisfy({
                   $0.utf8.count

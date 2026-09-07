@@ -23,6 +23,7 @@ enum SemanticCandidateSelectionV5 {
     static let defaultCandidateSeed = 20_260_718
     static let minimumCandidateCount = 1
     static let maximumCandidateCount = 8
+    static let maximumHistoryEntries = 6
     static let maximumResponseBytes = 4 * 1_024 * 1_024
     /// Mirrors the reviewed 3,072-token V5 sequence cap while reserving the
     /// evaluator's required 256-token completion/headroom boundary.
@@ -452,6 +453,7 @@ enum SemanticCandidateSelectionV5 {
         guard !request.task.trimmingCharacters(
                 in: .whitespacesAndNewlines).isEmpty,
               request.task.count <= 8_000,
+              request.history.count <= maximumHistoryEntries,
               isCanonicalFrontmost(request.frontmostApplicationPromptValue),
               request.history.allSatisfy(isCanonicalHistoryMarker) else {
             throw SemanticCandidateSelectionV5Error.invalidRequest
@@ -1104,7 +1106,8 @@ struct CandidateSelectingSemanticActionRouter:
     ) async throws -> OSAtlasSemanticActionRoute {
         do {
             try Task.checkCancellation()
-            guard requests.proposalRequest.replacingHistory([])
+            guard requests.proposalRequest.historyIsComplete, requests.selectorRequest.historyIsComplete,
+                  requests.proposalRequest.replacingHistory([])
                     == requests.selectorRequest.replacingHistory([]) else {
                 throw AppleFoundationVisualActionRouterError.invalidRequest
             }
