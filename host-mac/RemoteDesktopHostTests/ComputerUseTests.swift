@@ -1511,6 +1511,7 @@ final class ComputerUseTests: XCTestCase {
         for request in [ComputerUsePromptRequest(prompt: "Open Calculator", supportsApprovedActionEvidence: true),
                         try .answering(reference, text: "  Exact answer  ", supportsApprovedActionEvidence: true)] {
             XCTAssertEqual(try ComputerUsePromptRequest.decodeBody(request.encodedBody()), request)
+            XCTAssertEqual(try ComputerUseExecutionPromptDecoder.decode(request.encodedBody()), request)
             XCTAssertTrue(request.supportsApprovedActionEvidence)
             XCTAssertFalse(request.modelPrompt.contains("supportsApprovedActionEvidence"))
         }
@@ -4356,7 +4357,7 @@ final class ComputerUseTests: XCTestCase {
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL), allowsExternalServices: false, channelFactory: { _ in channel })
         defer { manager.stop() }
         let original = "Put \"  e\u{301} 😀\n" + String(repeating: "x", count: 5_000) + "  \" in a field."
-        let prompt = makeEnvelope(id: "q1", kind: .prompt, body: try ComputerUsePromptRequest(prompt: original).encodedBody())
+        let prompt = makeEnvelope(id: "q1", kind: .prompt, body: try ComputerUsePromptRequest(prompt: original, supportsApprovedActionEvidence: true).encodedBody())
         manager.authorizePeer(senderID: prompt.senderID)
         XCTAssertTrue(manager.handle(prompt, channel: channel))
         let first = try await clarificationUpdate(taskID: "q1", channel: channel)
@@ -4365,11 +4366,11 @@ final class ComputerUseTests: XCTestCase {
         let replays = await channel.sentMessages().filter { $0.kind == .assistant }
         XCTAssertEqual(try ComputerUseTaskUpdate.decodeBody(replays[1].body).clarification, first.clarification)
         let answer = makeEnvelope(id: "a1", kind: .prompt,
-            body: try ComputerUsePromptRequest.answering(XCTUnwrap(first.clarification), text: "  Destination  ").encodedBody())
+            body: try ComputerUsePromptRequest.answering(XCTUnwrap(first.clarification), text: "  Destination  ", supportsApprovedActionEvidence: true).encodedBody())
         XCTAssertTrue(manager.handle(answer, channel: channel))
         let second = try await clarificationUpdate(taskID: "a1", channel: channel)
         let final = makeEnvelope(id: "a2", kind: .prompt,
-            body: try ComputerUsePromptRequest.answering(XCTUnwrap(second.clarification), text: "International").encodedBody())
+            body: try ComputerUsePromptRequest.answering(XCTUnwrap(second.clarification), text: "International", supportsApprovedActionEvidence: true).encodedBody())
         XCTAssertTrue(manager.handle(final, channel: channel))
         let completed = try await clarificationUpdate(taskID: "a2", channel: channel)
         XCTAssertEqual(completed.outcome, .taskCompleted); XCTAssertNil(completed.clarification)
@@ -4534,7 +4535,7 @@ final class ComputerUseTests: XCTestCase {
                 .init(
                     role: .assistant,
                     text: "Who should receive the email, and what should it say?"),
-            ])
+            ], supportsApprovedActionEvidence: true)
         let prompt = makeEnvelope(kind: .prompt, body: try request.encodedBody())
         manager.authorizePeer(senderID: prompt.senderID)
 
@@ -4546,6 +4547,7 @@ final class ComputerUseTests: XCTestCase {
         XCTAssertTrue(modelPrompt.contains("Assistant: Who should receive"))
         XCTAssertTrue(modelPrompt.contains("Current user request: To alex@example.com"))
         XCTAssertFalse(modelPrompt.hasPrefix("{"), "the model should receive labeled chat, not wire JSON")
+        XCTAssertFalse(modelPrompt.contains("supportsApprovedActionEvidence"))
         XCTAssertEqual(
             executor.trustedUserPrompts,
             ["To alex@example.com. Say the meeting is at 3."],
@@ -9127,7 +9129,7 @@ private final class HandoffSuspendingVisualApprovalExecutor:
 }
 
 @MainActor
-private final class ScopedClarificationTestExecutor: ComputerUseExecuting, ComputerUseTextClarificationContinuing {
+final class ScopedClarificationTestExecutor: ComputerUseExecuting, ComputerUseTextClarificationContinuing {
     var isReady = true
     let runtimeName = "Scoped clarification fixture"
     var pending: ComputerUseNativeTextExecutor.Clarification?

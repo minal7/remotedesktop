@@ -10,7 +10,7 @@ enum ComputerUseExecutionPromptDecoder {
         guard body.utf8.count <= 256 * 1_024 else { throw Failure.invalidStructuredPrompt }
         var parser = StrictSemanticJSONParser(prefix, maximumValueCount: 256)
         guard case .object(let object) = try parser.parse(),
-              Set(object.keys).isSubset(of: ["version", "prompt", "conversation", "clarification"]) else { throw Failure.invalidStructuredPrompt }
+              Set(object.keys).isSubset(of: ComputerUsePromptRequest.wireFieldNames) else { throw Failure.invalidStructuredPrompt }
         let request = try ComputerUsePromptRequest.decodeBody(prefix)
         guard request.version == ComputerUsePromptRequest.currentVersion,
               request.clarification == nil || request.conversation.isEmpty else { throw Failure.invalidStructuredPrompt }

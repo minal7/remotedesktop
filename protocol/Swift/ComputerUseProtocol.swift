@@ -804,6 +804,10 @@ public struct ComputerUseConversationTurn: Codable, Equatable, Sendable {
 /// small enough to process predictably.
 public struct ComputerUsePromptRequest: Codable, Equatable, Sendable {
     public static let currentVersion = 1
+    /// Strict host admission uses the same declared fields as the shipped
+    /// encoder/decoder, so adding optional transport metadata cannot make
+    /// every current client request fail an older handwritten allowlist.
+    public static let wireFieldNames = Set(CodingKeys.allCases.map(\.rawValue))
     public static let maximumConversationTurns = 12
     public static let maximumTurnLength = 4_000
     public static let maximumPromptLength = 8_000
@@ -877,7 +881,7 @@ public struct ComputerUsePromptRequest: Codable, Equatable, Sendable {
         return value
     }
 
-    private enum CodingKeys: String, CodingKey {
+    private enum CodingKeys: String, CodingKey, CaseIterable {
         case version
         case prompt
         case conversation

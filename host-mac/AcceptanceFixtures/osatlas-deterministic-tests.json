@@ -213,7 +213,9 @@
     "RemoteDesktopHostTests/ComputerUseBrowserResultPlannerTests",
     "RemoteDesktopHostTests/ComputerUseBrowserResearchTaskTests",
     "RemoteDesktopHostTests/ComputerUseTests/test_managerRetainsResearchOwnerThroughExplicitHandbackAndRetiresOnStopOrDisconnect",
-    "RemoteDesktopHostTests/ComputerUseTests/test_managerTerminalResearchRepliesAndCancellationRetirePreparedOwner"
+    "RemoteDesktopHostTests/ComputerUseTests/test_managerTerminalResearchRepliesAndCancellationRetirePreparedOwner",
+    "RemoteDesktopHostTests/ComputerUseClarificationCompositionTests/testCurrentClientCapabilityPassesHostAdmissionAcrossScopedAnswersAndDurableReplay",
+    "RemoteDesktopHostTests/ComputerUseTests/test_managerUsesClarificationConversationWhenAnswerIsComplete"
   ],
   "expectedTests": [
     "RemoteDesktopHostTests/AppleFoundationMCPPlannerTests/testCountedInputExpandsBeforeEffectAndTerminalQueries",
@@ -421,6 +423,7 @@
     "RemoteDesktopHostTests/ComputerUseCapabilityExecutorTests/testNativeErrorCannotReplayGoalThroughDesktopAndSameIDCannotChangeGoal",
     "RemoteDesktopHostTests/ComputerUseCapabilityExecutorTests/testNativeGoalUsesOnlyCurrentUserAuthorityAndDoesNotLoadDesktop",
     "RemoteDesktopHostTests/ComputerUseClarificationCompositionTests/testBrowserFactoryReceivesTheManagerActionGate",
+    "RemoteDesktopHostTests/ComputerUseClarificationCompositionTests/testCurrentClientCapabilityPassesHostAdmissionAcrossScopedAnswersAndDurableReplay",
     "RemoteDesktopHostTests/ComputerUseFieldCopyPlanTests/testCopyAndSuppliedPayloadsRemainDifferentTypesThroughOrderedCompilation",
     "RemoteDesktopHostTests/ComputerUseFieldCopyPlanTests/testCopySchemaAndExactBudgetNeverExposeExistingValuesOrRegenerateLiterals",
     "RemoteDesktopHostTests/ComputerUseFieldCopyPlanTests/testFallbackAcceptsOnlyAWholeCopyPlanOrADeclineAndHonorsCancellation",
@@ -630,6 +633,7 @@
     "RemoteDesktopHostTests/ComputerUseTests/test_managerRetainsResearchOwnerThroughExplicitHandbackAndRetiresOnStopOrDisconnect",
     "RemoteDesktopHostTests/ComputerUseTests/test_managerRetiresReferencesOnExpiryNewRequestRevocationAndTransportStop",
     "RemoteDesktopHostTests/ComputerUseTests/test_managerTerminalResearchRepliesAndCancellationRetirePreparedOwner",
+    "RemoteDesktopHostTests/ComputerUseTests/test_managerUsesClarificationConversationWhenAnswerIsComplete",
     "RemoteDesktopHostTests/ComputerUseTests/test_ownedBrowserAuthenticationPausesBeforeNativePlanningAndRechecksOnHandback",
     "RemoteDesktopHostTests/ComputerUseTests/test_ownedBrowserCallbackReplyAndDurableReplayContainOnlyWebsiteIdentity",
     "RemoteDesktopHostTests/ComputerUseTests/test_pendingNativeOpenBlocksNewAutomationUntilItsExactCallbackSettles",
@@ -647,6 +651,8 @@
     "RemoteDesktopHostTests/ComputerUseTextClarificationTests/testCancellationMatchesTheOriginatingRequestAndNewTaskCanClearAllRetention",
     "RemoteDesktopHostTests/ComputerUseTextClarificationTests/testCatalogKeepsTurnBoundariesAndQuestionsOutsidePayloadAuthority",
     "RemoteDesktopHostTests/ComputerUseTextClarificationTests/testDurableClarificationReplayPreservesFirstResultAndCancelRetiresReference",
+    "RemoteDesktopHostTests/ComputerUseTextClarificationTests/testExecutionDecoderAdmitsCurrentClientRequestsAndExactAnswersWithEvidenceCapability",
+    "RemoteDesktopHostTests/ComputerUseTextClarificationTests/testExecutionDecoderRejectsMalformedCapabilityAndUnknownAuthorityFields",
     "RemoteDesktopHostTests/ComputerUseTextClarificationTests/testExecutionDecoderRejectsStructuredCorruptionWithoutPlainTextFallback",
     "RemoteDesktopHostTests/ComputerUseTextClarificationTests/testExpiryRestartReplacementAndDocumentChangeCannotReviveOriginalGoal",
     "RemoteDesktopHostTests/ComputerUseTextClarificationTests/testInputBudgetRejectsOverflowBeforeConsumingAValidQuestion",
