@@ -118,7 +118,9 @@ final class ComputerUseBrowserGoalPlannerTests: XCTestCase {
         XCTAssertEqual(context["request"] as? String, input.prompt)
         XCTAssertEqual(context["timeZone"] as? String, input.timeZoneIdentifier)
         XCTAssertEqual((context["referenceUnixMilliseconds"] as? NSNumber)?.int64Value, input.referenceMilliseconds)
-        XCTAssertEqual(Set(context.keys), ["version", "request", "referenceUnixMilliseconds", "timeZone"])
+        XCTAssertEqual(context["version"] as? Int, 2)
+        XCTAssertEqual((context["clarifications"] as? [[String: Any]])?.count, 0)
+        XCTAssertEqual(Set(context.keys), ["version", "request", "clarifications", "referenceUnixMilliseconds", "timeZone"])
         XCTAssertFalse(String(decoding: try XCTUnwrap(request.httpBody), as: UTF8.self).contains(input.taskID))
         XCTAssertEqual(body["max_tokens"] as? Int, 1_024); XCTAssertEqual(body["cache_prompt"] as? Bool, false)
         let format = try XCTUnwrap(body["response_format"] as? [String: Any])
@@ -179,7 +181,7 @@ final class ComputerUseBrowserGoalPlannerTests: XCTestCase {
         try .init(taskID: taskID, prompt: prompt, referenceDate: referenceDate, timeZoneIdentifier: timeZone)
     }
     private func row(_ source: String, role: String = "condition", field: String = "other", relation: String = "unspecified", values: [String] = []) -> [String: Any] {
-        ["source":source, "role":role, "field":field, "relation":relation, "values":values]
+        ["turn":0, "source":source, "role":role, "field":field, "relation":relation, "values":values]
     }
     private func content(_ rows: [[String: Any]], disposition: String = "research", question: String = "") throws -> String {
         String(decoding: try JSONSerialization.data(withJSONObject: ["disposition":disposition, "requirements":rows, "question":question], options: [.sortedKeys]), as: UTF8.self)

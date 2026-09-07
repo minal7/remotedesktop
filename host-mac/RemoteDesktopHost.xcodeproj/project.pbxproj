@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		FC552127F0C32B6F93C059BC /* ComputerUseBrowserGoalPlanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 154E7F0EDA005E7A53ABC0F2 /* ComputerUseBrowserGoalPlanner.swift */; };
+		A1DCABA88102FB6418E36CCD /* ComputerUseBrowserGoalClarification.swift in Sources */ = {isa = PBXBuildFile; fileRef = EB1C0419CCB5579BBCB4F00D /* ComputerUseBrowserGoalClarification.swift */; };
 		FC76120F41E5C28FA8FB78DA /* ComputerUseBrowserScalarRequirements.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11CADCC28F54A2C52430C270 /* ComputerUseBrowserScalarRequirements.swift */; };
 		33FE59F3521FE7C5C19EED6E /* ComputerUseBrowserWorkflowTask.swift in Sources */ = {isa = PBXBuildFile; fileRef = BAE3687E5B43F6EE45215942 /* ComputerUseBrowserWorkflowTask.swift */; };
 		011F517DDAFBE8E5487AC981 /* AppLogo.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4BCF8A7A47830BB9DBB25CE9 /* AppLogo.swift */; };
@@ -38,6 +39,7 @@
 		242E2395DDBCEA3D6DE14F03 /* ComputerUseProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D5CCAA4089039A88CDF73D6 /* ComputerUseProtocol.swift */; };
 		246BFFB38F4B8DAE79220A1A /* SemanticCandidateSelectionV5Tests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4BBD6129693AC1122EF4022 /* SemanticCandidateSelectionV5Tests.swift */; };
 		4CE9E7EF6E81F064528BD9B4 /* ComputerUseBrowserGoalPlannerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09F7E4C1F30148D110DB98F2 /* ComputerUseBrowserGoalPlannerTests.swift */; };
+		2C2B683D133DFE2D38D3A30F /* ComputerUseBrowserGoalClarificationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D58422679F7C8253F935942 /* ComputerUseBrowserGoalClarificationTests.swift */; };
 		9088E0B6A7CCF906E89C888B /* ComputerUseBrowserScalarRequirementsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 830671FC9A2179F10E119B85 /* ComputerUseBrowserScalarRequirementsTests.swift */; };
 		284AA0F76549D75BD14D0B2D /* ComputerUseTextStepStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F271B7EB4A7FBF76E7DCD0BF /* ComputerUseTextStepStoreTests.swift */; };
 		2A73337CEE303568F6881543 /* OS-ATLAS-APACHE-2.0-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = 7D98C1008558E1DAD992F9B0 /* OS-ATLAS-APACHE-2.0-LICENSE.txt */; };
@@ -198,6 +200,7 @@
 
 /* Begin PBXFileReference section */
 		154E7F0EDA005E7A53ABC0F2 /* ComputerUseBrowserGoalPlanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseBrowserGoalPlanner.swift; sourceTree = "<group>"; };
+		EB1C0419CCB5579BBCB4F00D /* ComputerUseBrowserGoalClarification.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseBrowserGoalClarification.swift; sourceTree = "<group>"; };
 		11CADCC28F54A2C52430C270 /* ComputerUseBrowserScalarRequirements.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseBrowserScalarRequirements.swift; sourceTree = "<group>"; };
 		BAE3687E5B43F6EE45215942 /* ComputerUseBrowserWorkflowTask.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseBrowserWorkflowTask.swift; sourceTree = "<group>"; };
 		01D4A4CBD5E28C53D7C11C24 /* AppleFoundationMCPPlanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleFoundationMCPPlanner.swift; sourceTree = "<group>"; };
@@ -333,6 +336,7 @@
 		EF30648C9B8BB3F139DCD4CA /* MacControlMCPInstallerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacControlMCPInstallerTests.swift; sourceTree = "<group>"; };
 		F144A5766AF6CD0F4844FCE2 /* QWEN35-APACHE-2.0-LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "QWEN35-APACHE-2.0-LICENSE.txt"; sourceTree = "<group>"; };
 		09F7E4C1F30148D110DB98F2 /* ComputerUseBrowserGoalPlannerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseBrowserGoalPlannerTests.swift; sourceTree = "<group>"; };
+		7D58422679F7C8253F935942 /* ComputerUseBrowserGoalClarificationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseBrowserGoalClarificationTests.swift; sourceTree = "<group>"; };
 		830671FC9A2179F10E119B85 /* ComputerUseBrowserScalarRequirementsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseBrowserScalarRequirementsTests.swift; sourceTree = "<group>"; };
 		F271B7EB4A7FBF76E7DCD0BF /* ComputerUseTextStepStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseTextStepStoreTests.swift; sourceTree = "<group>"; };
 		F2B773EF76537ED2F15FB0A0 /* ComputerUseBrowserDOM.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseBrowserDOM.swift; sourceTree = "<group>"; };
@@ -476,6 +480,7 @@
 				AE72B41B2121EE13B4022CE5 /* ComputerUseTextEditorTests.swift */,
 				17F037AD9C0B16BCD93B582B /* ComputerUseTextGoalPlannerTests.swift */,
 				09F7E4C1F30148D110DB98F2 /* ComputerUseBrowserGoalPlannerTests.swift */,
+				7D58422679F7C8253F935942 /* ComputerUseBrowserGoalClarificationTests.swift */,
 				830671FC9A2179F10E119B85 /* ComputerUseBrowserScalarRequirementsTests.swift */,
 				F271B7EB4A7FBF76E7DCD0BF /* ComputerUseTextStepStoreTests.swift */,
 				4CAC6DA38D1E1900403297AA /* ComputerUseTextTaskTests.swift */,
@@ -510,6 +515,7 @@
 				F2B773EF76537ED2F15FB0A0 /* ComputerUseBrowserDOM.swift */,
 				8BB5BF4DDC8661BF90D3A538 /* ComputerUseBrowserNavigationTask.swift */,
 				154E7F0EDA005E7A53ABC0F2 /* ComputerUseBrowserGoalPlanner.swift */,
+				EB1C0419CCB5579BBCB4F00D /* ComputerUseBrowserGoalClarification.swift */,
 				11CADCC28F54A2C52430C270 /* ComputerUseBrowserScalarRequirements.swift */,
 				BAE3687E5B43F6EE45215942 /* ComputerUseBrowserWorkflowTask.swift */,
 				D462BD3E942537670E346BD3 /* ComputerUseCapabilityExecutor.swift */,
@@ -818,6 +824,7 @@
 				72E1D921B22574C34E127EBC /* ComputerUseTextEditorTests.swift in Sources */,
 				E541373D9B0B715CADDF54AF /* ComputerUseTextGoalPlannerTests.swift in Sources */,
 				4CE9E7EF6E81F064528BD9B4 /* ComputerUseBrowserGoalPlannerTests.swift in Sources */,
+				2C2B683D133DFE2D38D3A30F /* ComputerUseBrowserGoalClarificationTests.swift in Sources */,
 				9088E0B6A7CCF906E89C888B /* ComputerUseBrowserScalarRequirementsTests.swift in Sources */,
 				284AA0F76549D75BD14D0B2D /* ComputerUseTextStepStoreTests.swift in Sources */,
 				F43E68ABDC3B805186F3452B /* ComputerUseTextTaskTests.swift in Sources */,
@@ -859,6 +866,7 @@
 				145E4D8EB7756F17D37A0CBA /* ComputerUseBrowserDOM.swift in Sources */,
 				4C2907C9599BA45F37F3BFC3 /* ComputerUseBrowserNavigationTask.swift in Sources */,
 				FC552127F0C32B6F93C059BC /* ComputerUseBrowserGoalPlanner.swift in Sources */,
+				A1DCABA88102FB6418E36CCD /* ComputerUseBrowserGoalClarification.swift in Sources */,
 				FC76120F41E5C28FA8FB78DA /* ComputerUseBrowserScalarRequirements.swift in Sources */,
 				33FE59F3521FE7C5C19EED6E /* ComputerUseBrowserWorkflowTask.swift in Sources */,
 				7F38EEA49C234B1F45290B35 /* ComputerUseCapabilityExecutor.swift in Sources */,

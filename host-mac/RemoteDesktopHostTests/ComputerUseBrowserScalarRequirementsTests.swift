@@ -204,7 +204,7 @@ final class ComputerUseBrowserScalarRequirementsTests: XCTestCase {
         return try .decode(content: String(decoding: data, as: UTF8.self), input: input)
     }
     private func row(_ source: String, role: String = "condition", field: String = "other", relation: String = "unspecified", values: [String] = []) -> [String: Any] {
-        ["source":source, "role":role, "field":field, "relation":relation, "values":values]
+        ["turn":0, "source":source, "role":role, "field":field, "relation":relation, "values":values]
     }
     private func resolution(_ source: String, field: String, relation: String = "unspecified", values: [String] = []) throws -> Scalar.Resolution {
         Scalar(proposal: try proposal([row("Find tickets. ", role: "outcome"), row(source, field: field, relation: relation, values: values)])).entries[1].resolution
