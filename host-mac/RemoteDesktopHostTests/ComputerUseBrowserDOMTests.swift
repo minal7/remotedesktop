@@ -3,6 +3,146 @@ import XCTest
 
 @MainActor
 final class ComputerUseBrowserDOMTests: XCTestCase {
+    func testPageStructureAssociatesNestedCardTextLinksAndControlsWithoutCombiningOffers() async throws {
+        let fixture = try await DOMFixture(body: """
+            <main><article data-account='private-card-value' aria-label='private-wrapper-label'>
+            <h2>Concert Alpha</h2><div style='display:contents'><p>September 18</p><p>$35</p></div>
+            <a href='/alpha' aria-label='Alpha details' style='display:inline-block;width:1px;height:1px'></a><form><label>Quantity<input name='private-name' value='private-value'></label></form>
+            </article><article><h2>Concert Beta</h2><p>September 19</p><p>$35</p><a href='/beta'>Beta details</a></article></main>
+            """)
+        defer { fixture.close() }
+        let evidence = try await fixture.browser.observePage(document: fixture.document), page = evidence.page
+        XCTAssertTrue(page.isWellFormed); XCTAssertFalse(page.omittedStructure)
+        let containers = Dictionary(uniqueKeysWithValues: page.containers.map { ($0.id, $0) })
+        func article(for group: String?) throws -> String {
+            var current = group
+            while let id = current, let container = containers[id] {
+                if container.kind == "article" { return id }
+                current = container.parentID
+            }
+            throw ComputerUseBrowserError.pageEvidenceUnavailable
+        }
+        let alpha = try article(for: XCTUnwrap(page.texts.first { $0.text == "Concert Alpha" }).containerID)
+        let beta = try article(for: XCTUnwrap(page.texts.first { $0.text == "Concert Beta" }).containerID)
+        XCTAssertNotEqual(alpha, beta)
+        XCTAssertEqual(try article(for: XCTUnwrap(page.texts.first { $0.text == "September 18" }).containerID), alpha)
+        XCTAssertEqual(try article(for: XCTUnwrap(page.texts.first { $0.text == "September 19" }).containerID), beta)
+        let prices = page.texts.filter { $0.text == "$35" }
+        XCTAssertEqual(prices.count, 2)
+        XCTAssertEqual(try prices.map { try article(for: $0.containerID) }, [alpha, beta])
+        let alphaLink = try XCTUnwrap(page.links.first { $0.label == "Alpha details" })
+        XCTAssertTrue(alphaLink.textIDs.isEmpty, "An aria-labeled link still needs its structural parent")
+        XCTAssertEqual(try article(for: alphaLink.containerID), alpha)
+        XCTAssertEqual(try article(for: XCTUnwrap(page.links.first { $0.label == "Beta details" }).containerID), beta)
+        XCTAssertEqual(try article(for: XCTUnwrap(page.controls.first { $0.label == "Quantity" }).containerID), alpha)
+        let context = try ComputerUseBrowserPlanningContext(page: page).serialized()
+        for secret in ["private-card-value", "private-wrapper-label", "private-name", "private-value", "/alpha", "/beta"] {
+            XCTAssertFalse(context.contains(secret))
+        }
+        XCTAssertTrue(context.contains("\"element\":\"article\""))
+        try await fixture.browser.validatePageEvidence(evidence)
+        XCTAssertEqual(fixture.server.count("/alpha"), 0); XCTAssertEqual(fixture.server.count("/beta"), 0)
+    }
+
+    func testPageStructureTracksComposedSlotAncestorsAndBoundsIncompleteTrees() async throws {
+        let fixture = try await DOMFixture(body: """
+            <section id='host'><span slot='title'>Slotted movie</span></section><div id='deep'></div><div id='many'></div>
+            <script>
+            document.getElementById('host').attachShadow({mode:'open'}).innerHTML = '<article><h2><slot name="title"></slot></h2><p>7:30 PM</p><a href="/movie">Movie details</a></article>';
+            let node = document.getElementById('deep');
+            for (let i=0; i<35; i++) { const child = document.createElement('div'); node.append(child); node = child; }
+            node.innerHTML = '<label>Too deep<input value="private-deep-value"></label>';
+            for (let i=0; i<260; i++) { const p = document.createElement('p'); p.textContent = 'Row ' + i; document.getElementById('many').append(p); }
+            </script>
+            """)
+        defer { fixture.close() }
+        let evidence = try await fixture.browser.observePage(document: fixture.document), page = evidence.page
+        XCTAssertTrue(page.isWellFormed); XCTAssertTrue(page.omittedStructure); XCTAssertTrue(page.truncated)
+        XCTAssertTrue(page.omittedControls)
+        XCTAssertLessThanOrEqual(page.containers.count, 256)
+        let containers = Dictionary(uniqueKeysWithValues: page.containers.map { ($0.id, $0) })
+        func ancestors(_ group: String?) -> [String] {
+            var current = group, result: [String] = []
+            while let id = current, let container = containers[id] { result.append(id); current = container.parentID }
+            return result
+        }
+        let movie = try XCTUnwrap(page.texts.first { $0.text == "Slotted movie" })
+        let time = try XCTUnwrap(page.texts.first { $0.text == "7:30 PM" })
+        let article = try XCTUnwrap(ancestors(movie.containerID).first { containers[$0]?.kind == "article" })
+        XCTAssertTrue(ancestors(time.containerID).contains(article))
+        XCTAssertTrue(ancestors(try XCTUnwrap(page.links.first { $0.label == "Movie details" }).containerID).contains(article))
+        for text in page.texts { XCTAssertNotNil(containers[text.containerID]) }
+        for control in page.controls { XCTAssertNotNil(containers[control.containerID]) }
+        XCTAssertFalse(page.controls.contains { $0.label == "Too deep" })
+        let context = try ComputerUseBrowserPlanningContext(page: page).serialized(maximumRecords: 0)
+        XCTAssertTrue(context.contains("\"omitted_structure\":true"))
+        try await fixture.browser.validatePageEvidence(evidence)
+    }
+
+    func testPageStructureRejectsWrapperReplacementEvenWhenChildrenAndProjectionAreIdentical() async throws {
+        let fixture = try await DOMFixture(body: """
+            <article><h2>Concert Alpha</h2><p>$35</p><a href='/destination'>Details</a><input aria-label='Quantity'></article>
+            <script>fetch('/signal').then(() => {
+                const old = document.querySelector('article'), replacement = document.createElement('article');
+                replacement.replaceChildren(...old.childNodes); old.replaceWith(replacement); fetch('/changed');
+            });</script>
+            """, heldSignal: true)
+        defer { fixture.close() }
+        let evidence = try await fixture.browser.observePage(document: fixture.document)
+        let target = try await fixture.browser.prepareLinkNavigation(linkID: evidence.page.links[0].id, evidence: evidence)
+        try await fixture.wait { fixture.server.count("/signal") == 1 }
+        fixture.server.releaseHeldResponses()
+        try await fixture.wait { fixture.server.count("/changed") == 1 }
+        do { try await fixture.browser.validatePageEvidence(evidence); XCTFail("Equal structural labels cannot replace actual container objects") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+        do { _ = try await fixture.browser.openObservedDestination(target, operationID: ComputerUseTaskContract.digest(["old structure"]),
+            willBeginEffect: { XCTFail("Changed structure cannot dispatch through stale evidence") }); XCTFail("Fresh observation is required") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+        let fresh = try await fixture.browser.observePage(document: fixture.document)
+        XCTAssertEqual(fresh.page.texts, evidence.page.texts)
+        XCTAssertEqual(fresh.page.links, evidence.page.links)
+        XCTAssertEqual(fresh.page.controls, evidence.page.controls)
+        XCTAssertEqual(fresh.page.containers, evidence.page.containers)
+        try await fixture.browser.validatePageEvidence(fresh)
+        XCTAssertEqual(fixture.server.count("/destination"), 0)
+    }
+
+    func testBrowserStructureDecoderRejectsCyclesAliasesDanglingReferencesAndMissingMetadata() throws {
+        let base: [String: Any] = ["id": String(repeating: "a", count: 32), "texts": [["id":"t1", "containerID":"g1", "text":"Result"]],
+            "links": [["id":"l1", "label":"Details", "destination":"https://example.invalid/details", "textIDs":["t1"], "containerID":"g1"]],
+            "truncated": false, "omittedEmbeddedContent": false]
+        let root: [String: Any] = ["id":"g0", "parentID": NSNull(), "kind":"body"]
+        let child: [String: Any] = ["id":"g1", "parentID":"g0", "kind":"article"]
+        func decode(_ containers: [[String: Any]], omitted: Bool = false) throws -> ComputerUseBrowserPageSnapshot {
+            var object = base; object["containers"] = containers; object["omittedStructure"] = omitted
+            return try JSONDecoder().decode(ComputerUseBrowserPageSnapshot.self, from: JSONSerialization.data(withJSONObject: object))
+        }
+        XCTAssertTrue(try decode([root, child]).isWellFormed)
+        let invalid: [[[String: Any]]] = [[], [root], [child, root], [root, child, child],
+            [root, ["id":"g1", "parentID":"g1", "kind":"article"]],
+            [root, ["id":"g1", "parentID":"g9", "kind":"article"]],
+            [root, ["id":"g1", "parentID":NSNull(), "kind":"article"]],
+            [root, ["id":"g1", "parentID":"g0", "kind":"model instruction"]]]
+        for tree in invalid { XCTAssertFalse(try decode(tree).isWellFormed) }
+        XCTAssertFalse(try decode([root], omitted: true).isWellFormed, "Omission flags do not permit dangling references in a supplied tree")
+        var deep = [root]
+        for index in 1...32 { deep.append(["id":"g\(index)", "parentID":"g\(index - 1)", "kind":"div"]) }
+        XCTAssertFalse(try decode(deep).isWellFormed)
+        XCTAssertFalse(try decode([root] + (1...256).map { ["id":"g\($0)", "parentID":"g0", "kind":"div"] }).isWellFormed)
+        var danglingLink = base
+        danglingLink["containers"] = [root, child]; danglingLink["omittedStructure"] = false
+        danglingLink["links"] = [["id":"l1", "label":"Details", "destination":"https://example.invalid/details", "textIDs":["t1"], "containerID":"g9"]]
+        XCTAssertFalse(try JSONDecoder().decode(ComputerUseBrowserPageSnapshot.self,
+            from: JSONSerialization.data(withJSONObject: danglingLink)).isWellFormed)
+        for key in ["containers", "omittedStructure"] {
+            var partial = base
+            if key == "containers" { partial[key] = [root, child] } else { partial[key] = false }
+            XCTAssertThrowsError(try JSONDecoder().decode(ComputerUseBrowserPageSnapshot.self, from: JSONSerialization.data(withJSONObject: partial)))
+        }
+        let legacy = try JSONDecoder().decode(ComputerUseBrowserPageSnapshot.self, from: JSONSerialization.data(withJSONObject: base))
+        XCTAssertTrue(legacy.omittedStructure); XCTAssertTrue(legacy.containers.isEmpty); XCTAssertTrue(legacy.isWellFormed)
+    }
+
     func testUnsentDestinationRefreshReobservesLinkAndQueryWithoutChangingTaskOrOperation() async throws {
         for useForm in [false, true] {
             for savePlan in [false, true] {
@@ -1342,7 +1482,7 @@ final class ComputerUseBrowserDOMTests: XCTestCase {
         XCTAssertFalse(projection.contains("private-option-value"))
         XCTAssertFalse(projection.contains("example.com/search"))
         let projectedObject = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(projection.utf8)) as? [String: Any])
-        XCTAssertEqual(projectedObject["version"] as? Int, 2)
+        XCTAssertEqual(projectedObject["version"] as? Int, 3)
         var secondSelect = firstSelect; secondSelect["id"] = "c2"
         XCTAssertFalse(try decode([firstSelect, secondSelect]).isWellFormed, "Option identities cannot alias across controls")
         var oversizedOptions = firstSelect
