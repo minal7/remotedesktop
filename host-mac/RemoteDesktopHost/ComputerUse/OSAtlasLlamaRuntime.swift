@@ -105,6 +105,18 @@ struct ComputerUseRuntimeBrowserGoalPlanner: ComputerUseBrowserGoalPlanning {
     }
 }
 
+/// Candidate reading uses the same native model owner as goal interpretation.
+struct ComputerUseRuntimeBrowserResultPlanner: ComputerUseBrowserResultPlanning {
+    let inputs: ComputerUseNativeTextRuntimeInputs
+    var runtime: OSAtlasLlamaRuntime = .shared
+
+    func propose(goal: ComputerUseBrowserGoalInput, page: ComputerUseBrowserResultPageInput) async throws -> ComputerUseBrowserResultProposal {
+        try Task.checkCancellation()
+        let endpoint = try await runtime.activateNativeText(inputs)
+        return try await runtime.proposeBrowserResults(endpoint: endpoint, goal: goal, page: page)
+    }
+}
+
 struct OSAtlasLlamaEndpoint: Equatable, Sendable {
     let generation: UInt64
     /// Nil for the independent text planner; never label it as OS-Atlas.
@@ -1413,6 +1425,34 @@ actor OSAtlasLlamaRuntime {
             let planner = ComputerUseLocalBrowserGoalPlanner(connection: connection, transport: server.transport)
             let proposal = try await withTaskCancellationHandler {
                 try await planner.propose(input)
+            } onCancel: {
+                Task { await self.cancel(endpoint: endpoint) }
+            }
+            try Task.checkCancellation()
+            guard active?.endpoint == endpoint else { throw OSAtlasLlamaRuntimeError.inactiveSession }
+            return proposal
+        } catch {
+            if active?.endpoint == endpoint { try await stopActiveServerUnserialized() }
+            throw error
+        }
+    }
+
+    /// Candidate interpretation remains a no-effect read under the same lease,
+    /// resource admission and endpoint cancellation as other native proposals.
+    func proposeBrowserResults(endpoint: OSAtlasLlamaEndpoint, goal: ComputerUseBrowserGoalInput,
+                               page: ComputerUseBrowserResultPageInput) async throws -> ComputerUseBrowserResultProposal {
+        let lease = try await acquireModelAccessLease()
+        defer { releaseModelAccessLease(lease) }
+        guard let server = active, server.endpoint == endpoint, server.inputs.nativeText != nil else {
+            throw OSAtlasLlamaRuntimeError.inactiveSession
+        }
+        do {
+            try validateResources(minimumReclaimableBytes: server.resourceProfile.minimumInferenceMemoryBytes)
+            let connection = try ComputerUseTextModelConnection(baseURL: endpoint.baseURL, bearerToken: endpoint.bearerToken,
+                modelAlias: ComputerUseNativeTextRuntimeInputs.modelAlias)
+            let planner = ComputerUseLocalBrowserResultPlanner(connection: connection, transport: server.transport)
+            let proposal = try await withTaskCancellationHandler {
+                try await planner.propose(goal: goal, page: page)
             } onCancel: {
                 Task { await self.cancel(endpoint: endpoint) }
             }

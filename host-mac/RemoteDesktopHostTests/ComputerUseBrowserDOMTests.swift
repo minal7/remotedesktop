@@ -3,6 +3,120 @@ import XCTest
 
 @MainActor
 final class ComputerUseBrowserDOMTests: XCTestCase {
+    func testResultCandidatesRetainEverySourceFragmentAndKeepOfferAndGlobalContextSeparate() async throws {
+        let fixture = try await DOMFixture(body: """
+            <p>Global date: September 20</p><article><h2>Concert Alpha</h2><p>USD 35</p><p>Excluding fees</p>
+            <a href='/alpha?token=private-destination'>Alpha details</a></article>
+            <article><h2>Concert Beta</h2><p>USD 35</p><p>Sold out</p><a href='/beta'>Beta details</a></article>
+            <label>Search<input name='private-name' value='private-value'></label>
+            """)
+        defer { fixture.close() }
+        let evidence = try await fixture.browser.observePage(document: fixture.document), goal = try browserResultGoal()
+        let proposal = try browserResultProposal(evidence, goal: goal, titles: ["Concert Alpha", "Concert Beta"])
+        let batch = try await fixture.browser.prepareResultCandidates(proposal, goal: goal, evidence: evidence)
+        XCTAssertEqual(batch.candidates.count, 2); XCTAssertTrue(batch.omittedControls)
+        XCTAssertTrue(batch.candidates[0].texts.contains { $0.text == "Excluding fees" })
+        XCTAssertTrue(batch.candidates[1].texts.contains { $0.text == "Sold out" })
+        XCTAssertFalse(batch.candidates[0].texts.contains { $0.text == "Sold out" })
+        XCTAssertTrue(batch.candidates[0].unclassifiedTextIDs.contains(try XCTUnwrap(batch.candidates[0].texts.first { $0.text == "Excluding fees" }).id))
+        XCTAssertTrue(batch.surroundingTexts.contains { $0.text == "Global date: September 20" })
+        let textIDs = batch.candidates.flatMap { $0.texts.map(\.id) } + batch.surroundingTexts.map(\.id)
+        let linkIDs = batch.candidates.flatMap { $0.links.map(\.id) } + batch.surroundingLinks.map(\.id)
+        XCTAssertEqual(Set(textIDs), Set(evidence.page.texts.map(\.id))); XCTAssertEqual(textIDs.count, Set(textIDs).count)
+        XCTAssertEqual(Set(linkIDs), Set(evidence.page.links.map(\.id))); XCTAssertEqual(linkIDs.count, Set(linkIDs).count)
+        XCTAssertEqual(batch.containers, evidence.page.containers)
+        for description in [String(reflecting: batch), String(reflecting: batch.candidates[0]),
+            String(reflecting: batch.candidates[0].links[0]), String(reflecting: batch.candidates[0].texts[0])] {
+            XCTAssertFalse(description.contains("private-destination")); XCTAssertFalse(description.contains("Concert"))
+        }
+        try await fixture.browser.validateResultCandidates(batch, goal: goal)
+        let changed = try browserResultGoal(prompt: "Find different tickets.")
+        do { try await fixture.browser.validateResultCandidates(batch, goal: changed); XCTFail("Result bindings must follow the current goal revision") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserResultError, .goalChanged) }
+        do { _ = try await fixture.browser.prepareResultCandidates(proposal, goal: changed, evidence: evidence); XCTFail("An earlier interpretation cannot be rebound to a changed goal") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserResultError, .goalChanged) }
+        let fresh = try await fixture.browser.observePage(document: fixture.document)
+        do { _ = try await fixture.browser.prepareResultCandidates(proposal, goal: goal, evidence: fresh); XCTFail("Snapshot references cannot be moved into another observation") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserResultError, .invalidPage) }
+        XCTAssertFalse(fixture.server.requestedPaths.contains { $0.hasPrefix("/alpha") || $0.hasPrefix("/beta") })
+    }
+
+    func testResultCandidatesRejectReplacedNativeContainersBeforePreparationAndReporting() async throws {
+        let fixture = try await DOMFixture(body: """
+            <article><h2>Concert Alpha</h2><p>USD 35 including fees</p><a href='/alpha'>Alpha details</a></article>
+            <script>fetch('/signal').then(() => {
+                const old = document.querySelector('article'), replacement = document.createElement('article');
+                replacement.replaceChildren(...old.childNodes); old.replaceWith(replacement); fetch('/changed');
+            });</script>
+            """, heldSignal: true)
+        defer { fixture.close() }
+        let evidence = try await fixture.browser.observePage(document: fixture.document), goal = try browserResultGoal()
+        let proposal = try browserResultProposal(evidence, goal: goal)
+        let batch = try await fixture.browser.prepareResultCandidates(proposal, goal: goal, evidence: evidence)
+        try await fixture.wait { fixture.server.count("/signal") == 1 }
+        fixture.server.releaseHeldResponses()
+        try await fixture.wait { fixture.server.count("/changed") == 1 }
+        do { try await fixture.browser.validateResultCandidates(batch, goal: goal); XCTFail("Identical text does not replace native source objects") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+        do { _ = try await fixture.browser.prepareResultCandidates(proposal, goal: goal, evidence: evidence); XCTFail("Stale source cannot produce new bindings") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+        let fresh = try await fixture.browser.observePage(document: fixture.document)
+        let refreshed = try await fixture.browser.prepareResultCandidates(browserResultProposal(fresh, goal: goal), goal: goal, evidence: fresh)
+        XCTAssertEqual(refreshed.candidates[0].texts, batch.candidates[0].texts)
+        XCTAssertNotEqual(refreshed.candidates[0].id, batch.candidates[0].id)
+        XCTAssertEqual(fixture.server.count("/alpha"), 0)
+    }
+
+    func testResultCandidatePreparationRechecksAuthenticationControlAndCancellation() async throws {
+        for mode in ["pause", "cancel", "authentication"] {
+            var mayAct = true
+            var task: Task<ComputerUseBrowserResultCandidates, Error>?
+            let fixture = try await DOMFixture(body: """
+                <article><h2>Concert Alpha</h2><a href='/alpha'>Alpha details</a></article><div id='login'></div>
+                <script>fetch('/signal').then(() => {
+                    if ('\(mode)' === 'authentication') document.getElementById('login').innerHTML = '<label>Password<input type=password autocomplete=current-password></label>';
+                    fetch('/changed');
+                });</script>
+                """, heldSignal: true, domScriptDidDispatch: { command in
+                    guard command == .validatePageSnapshot else { return }
+                    if mode == "pause" { mayAct = false }
+                    if mode == "cancel" { task?.cancel() }
+                }, mayAct: { mayAct })
+            defer { task = nil; fixture.close() }
+            let evidence = try await fixture.browser.observePage(document: fixture.document), goal = try browserResultGoal()
+            let proposal = try browserResultProposal(evidence, goal: goal)
+            try await fixture.wait { fixture.server.count("/signal") == 1 }
+            fixture.server.releaseHeldResponses()
+            try await fixture.wait { fixture.server.count("/changed") == 1 }
+            task = Task { try await fixture.browser.prepareResultCandidates(proposal, goal: goal, evidence: evidence) }
+            do { _ = try await task?.value; XCTFail("Lost authority or authentication must prevent candidate publication") }
+            catch {
+                if mode == "cancel" { XCTAssertTrue(error is CancellationError) }
+                if mode == "authentication" { XCTAssertEqual(error as? ComputerUseBrowserError, .authenticationRequired) }
+            }
+            XCTAssertEqual(fixture.server.count("/alpha"), 0)
+        }
+    }
+
+    private func browserResultGoal(prompt: String = "Find concert tickets under USD 50. Do not buy.") throws -> ComputerUseBrowserGoalInput {
+        try .init(taskID: "fixture", prompt: prompt, referenceDate: Date(timeIntervalSince1970: 1_800_000_000), timeZoneIdentifier: "America/Los_Angeles")
+    }
+    private func browserResultProposal(_ evidence: ComputerUseBrowserPageEvidence, goal: ComputerUseBrowserGoalInput,
+                                       titles: [String] = ["Concert Alpha"]) throws -> ComputerUseBrowserResultProposal {
+        let page = evidence.page, containers = Dictionary(uniqueKeysWithValues: page.containers.map { ($0.id, $0) })
+        let candidates = try titles.map { title -> [String: Any] in
+            let text = try XCTUnwrap(page.texts.first { $0.text == title })
+            var group: String? = text.containerID
+            while let id = group, containers[id]?.kind != "article" { group = containers[id]?.parentID }
+            let container = try XCTUnwrap(group)
+            let label = title.replacingOccurrences(of: "Concert ", with: "") + " details"
+            let link = try XCTUnwrap(page.links.first { $0.label == label })
+            return ["container":container, "fields":[["kind":"title", "texts":[text.id]]], "links":[link.id]]
+        }
+        let data = try JSONSerialization.data(withJSONObject: ["candidates":candidates], options: [.sortedKeys])
+        return try .decode(content: String(decoding: data, as: UTF8.self), input: ComputerUseBrowserResultPageInput(page: page), goal: goal)
+    }
+
     func testPageStructureAssociatesNestedCardTextLinksAndControlsWithoutCombiningOffers() async throws {
         let fixture = try await DOMFixture(body: """
             <main><article data-account='private-card-value' aria-label='private-wrapper-label'>
