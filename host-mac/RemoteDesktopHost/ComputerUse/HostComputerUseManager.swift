@@ -1228,6 +1228,23 @@ final class ComputerUseHostTools {
             operationID: operationID, willBeginEffect: willBeginEffect)
     }
 
+    /// Host capability surface for a task compiler. Page IDs select observed
+    /// destinations; they do not authorize a goal or bypass its effect journal.
+    func prepareOwnedBrowserLinkNavigation(linkID: String, evidence: ComputerUseBrowserPageEvidence) async throws -> ComputerUseBrowserLinkNavigationTarget {
+        try Task.checkCancellation()
+        guard mayAct() else { throw ToolError.paused }
+        guard let browserNavigationTask else { throw ComputerUseBrowserError.closed }
+        return try await browserNavigationTask.prepareLinkNavigation(linkID: linkID, evidence: evidence)
+    }
+
+    func openOwnedBrowserLinkDestination(_ target: ComputerUseBrowserLinkNavigationTarget, operationID: String,
+                                        willBeginEffect: () -> Void) async throws -> ComputerUseBrowserLinkNavigationReceipt {
+        try Task.checkCancellation()
+        guard mayAct() else { throw ToolError.paused }
+        guard let browserNavigationTask else { throw ComputerUseBrowserError.closed }
+        return try await browserNavigationTask.openLinkDestination(target, operationID: operationID, willBeginEffect: willBeginEffect)
+    }
+
     func reacquireOwnedBrowserAfterUserControl(taskID: String) async throws {
         try await browserNavigationTask?.reacquireAfterUserControl(taskID: taskID)
     }

@@ -3,7 +3,7 @@ import WebKit
 
 enum ComputerUseBrowserDOMCommand: String {
     case fields, read, edit, receipt, reobserve, preflight, pageIdentity, pageSnapshot, validatePageSnapshot
-    case scrollViewport, viewportScrollReceipt
+    case scrollViewport, viewportScrollReceipt, validatePageLink
 }
 
 /// Until the whole browsing task compiler binds container roles, admit only
@@ -378,6 +378,7 @@ enum ComputerUseBrowserDOM {
       // Independent of form discovery, which retires text-operation bindings.
       const viewportOperations = new Map();
       let lastPageSnapshot = null;
+      const linkIdentityAttributes = new Set(['href', 'target', 'download', 'ping', 'rel', 'referrerpolicy', 'hreflang', 'type']);
       const pageControlIDs = new WeakMap(), pageFormIDs = new WeakMap(), pageOptionIDs = new WeakMap();
       let nextPageControlID = 0, nextPageFormID = 0, nextPageOptionID = 0;
       const protectedTypes = new Set(['password', 'hidden', 'file']);
@@ -399,8 +400,18 @@ enum ComputerUseBrowserDOM {
         return false;
       };
       function retire(records) {
-        if (records.length > 10000) { for (const binding of bindings.values()) binding.valid = false; return; }
+        if (records.length > 10000) { for (const binding of bindings.values()) binding.valid = false; lastPageSnapshot = null; return; }
         for (const record of records) {
+          if (lastPageSnapshot) {
+            for (const binding of lastPageSnapshot.links.values()) {
+              if ((record.type === 'childList' && Array.from(record.removedNodes).some(node => contains(node, binding.element)))
+                  || (record.type === 'attributes' && contains(record.target, binding.element))
+                  || (record.type === 'attributes' && record.target instanceof HTMLBaseElement)) {
+                lastPageSnapshot = null;
+                break;
+              }
+            }
+          }
           for (const binding of bindings.values()) {
             if (record.type === 'childList' && Array.from(record.removedNodes).some(node => node === binding.element || node.contains(binding.element) || contains(node, binding.element))) binding.valid = false;
             if (record.type === 'attributes' && identityAttributes.has(record.attributeName) && (record.target === binding.form || contains(record.target, binding.element))) binding.valid = false;
@@ -415,7 +426,7 @@ enum ComputerUseBrowserDOM {
       }
       const observer = new MutationObserver(retire);
       const observationOptions = {subtree: true, childList: true, attributes: true,
-        attributeFilter: [...identityAttributes, ...scalarConstraintAttributes, ...choiceAttributes], characterData: true};
+        attributeFilter: [...identityAttributes, ...scalarConstraintAttributes, ...choiceAttributes, ...linkIdentityAttributes], characterData: true};
       observer.observe(doc, observationOptions);
       function synchronize() {
         retire(observer.takeRecords());
@@ -668,7 +679,7 @@ enum ComputerUseBrowserDOM {
         return Object.values(value).every(n => Number.isFinite(n) && Math.abs(n) <= 10000000)
           && value.width > 0 && value.height > 0 && value.contentWidth >= 0 && value.contentHeight >= 0 ? value : null;
       }
-      function pageContent() {
+      function pageContent(linkBindings) {
         // Read rendered text nodes, never form values, innerHTML, scripts or
         // frame documents. Omitted surfaces and bounds remain explicit; this
         // is not a claim to have read every result on a website.
@@ -761,7 +772,18 @@ enum ComputerUseBrowserDOM {
             truncated = true; continue;
           }
           bytes += labelBytes + urlBytes;
-          links.push({id: 'l' + (links.length + 1), label, destination: url.href, textIDs: parts.map(entry => entry.id)});
+          const id = 'l' + (links.length + 1);
+          links.push({id, label, destination: url.href, textIDs: parts.map(entry => entry.id)});
+          const base = doc.querySelector('base[target]');
+          const target = anchor.getAttribute('target') ?? base?.getAttribute('target') ?? '';
+          const signature = JSON.stringify([doc.baseURI, target, ...Array.from(linkIdentityAttributes, name => anchor.getAttribute(name))]);
+          const source = new URL(doc.URL), destination = new URL(url.href);
+          source.hash = ''; destination.hash = '';
+          // This capability opens a document destination. Fragment routing,
+          // downloads, pings and other browsing contexts need other contracts.
+          const canOpen = !anchor.hasAttribute('download') && !(anchor.getAttribute('ping') || '').trim()
+            && ['', '_self'].includes(target.toLowerCase()) && source.href !== destination.href;
+          linkBindings.set(id, {element: anchor, base, signature, canOpen});
         }
         // Observe supported native control metadata in a separate bounded
         // pass: the text walker deliberately excludes inputs and options.
@@ -879,18 +901,28 @@ enum ComputerUseBrowserDOM {
               || JSON.stringify(readViewport()) !== JSON.stringify(operation.receipt.after)) return reply('uncertain');
           return {...reply('viewport-scroll-confirmed'), scroll: operation.receipt};
         }
-        if (command === 'pageSnapshot' || command === 'validatePageSnapshot' || command === 'scrollViewport') {
+        if (['pageSnapshot', 'validatePageSnapshot', 'scrollViewport', 'validatePageLink'].includes(command)) {
           const status = authenticationStatus();
           if (status) { lastPageSnapshot = null; return reply(status); }
           if (doc.readyState !== 'complete') return reply('stale');
-          const content = pageContent(), serialized = JSON.stringify(content);
+          const links = new Map(), content = pageContent(links), serialized = JSON.stringify(content);
           if (command !== 'pageSnapshot') {
             // Re-read the projection, including rendering and resolved URLs.
             // Mutation records alone miss CSSOM/value-property changes.
             if (!lastPageSnapshot || args.documentID !== documentID || args.snapshotID !== lastPageSnapshot.id
                 || lastPageSnapshot.documentID !== documentID || lastPageSnapshot.url !== doc.URL
-                || lastPageSnapshot.scroller !== doc.scrollingElement || serialized !== lastPageSnapshot.serialized) return reply('stale');
+                || lastPageSnapshot.scroller !== doc.scrollingElement || serialized !== lastPageSnapshot.serialized
+                || links.size !== lastPageSnapshot.links.size
+                || Array.from(links).some(([id, binding]) => {
+                  const previous = lastPageSnapshot.links.get(id);
+                  return !previous || previous.element !== binding.element || previous.base !== binding.base
+                    || previous.signature !== binding.signature;
+                })) return reply('stale');
             if (command === 'validatePageSnapshot') return reply('page-current');
+            if (command === 'validatePageLink') {
+              const binding = links.get(args.linkID);
+              return reply(binding?.canOpen ? 'link-current' : 'unsupported');
+            }
             if (!/^[a-f0-9]{64}$/.test(args.operationID) || !['UP','DOWN','LEFT','RIGHT'].includes(args.direction)) return reply('unsupported');
             if (viewportOperations.has(args.operationID)) return reply('duplicate');
             if (viewportOperations.size >= 64) return reply('limit');
@@ -916,7 +948,7 @@ enum ComputerUseBrowserDOM {
             } catch (_) { return reply('uncertain'); }
           }
           const id = nonce();
-          lastPageSnapshot = {id, documentID, serialized, url: doc.URL, scroller: doc.scrollingElement};
+          lastPageSnapshot = {id, documentID, serialized, url: doc.URL, scroller: doc.scrollingElement, links};
           return {status: 'page-snapshot', documentID, page: {id, ...content}};
         }
         if (command !== 'fields' && args.documentID !== documentID) return reply('stale');

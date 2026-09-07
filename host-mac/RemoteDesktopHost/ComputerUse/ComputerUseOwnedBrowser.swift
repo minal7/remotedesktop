@@ -95,8 +95,35 @@ struct ComputerUseBrowserPageEvidence: Equatable, Sendable, CustomStringConverti
     var debugDescription: String { description }
 }
 
+/// A host-observed document destination, not authority to click arbitrary
+/// page controls. A task compiler must separately authorize this operation.
+/// Exact URLs stay private to the adapter and never enter planner context.
+struct ComputerUseBrowserLinkNavigationTarget: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    fileprivate let evidence: ComputerUseBrowserPageEvidence
+    fileprivate let linkID: String
+    fileprivate let destination: URL
+    let payloadDigest: String
+
+    fileprivate init(evidence: ComputerUseBrowserPageEvidence, linkID: String, destination: URL) {
+        self.evidence = evidence; self.linkID = linkID; self.destination = destination
+        payloadDigest = ComputerUseTaskContract.digest(["browser-link-destination-v1", evidence.document.contextID,
+            evidence.document.taskID, String(evidence.document.generation), evidence.documentID, evidence.page.id,
+            linkID, destination.absoluteString])
+    }
+
+    var description: String { "BrowserLinkDestination(site: \(ComputerUseBrowserSite.displayName(for: destination)))" }
+    var debugDescription: String { description }
+}
+
+struct ComputerUseBrowserLinkNavigationReceipt: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    let payloadDigest: String
+    let document: ComputerUseBrowserDocument
+    var description: String { "BrowserLinkNavigation(\(document))" }
+    var debugDescription: String { description }
+}
+
 enum ComputerUseBrowserError: Error, LocalizedError, Equatable {
-    case invalidURL, busy, ownershipLost, pageChanged, navigationFailed, deadlineExceeded, closed, unsupportedDocument, pageEvidenceUnavailable, documentUnresponsive, windowNotActive, authenticationRequired, signInWindowOpen, viewportScrollUnavailable, viewportScrollUncertain
+    case invalidURL, busy, ownershipLost, pageChanged, navigationFailed, deadlineExceeded, closed, unsupportedDocument, pageEvidenceUnavailable, documentUnresponsive, windowNotActive, authenticationRequired, signInWindowOpen, viewportScrollUnavailable, viewportScrollUncertain, linkNavigationUnavailable, linkNavigationUncertain
     var errorDescription: String? {
         switch self {
         case .invalidURL: return "The browser needs an HTTP or HTTPS URL without embedded credentials."
@@ -114,6 +141,8 @@ enum ComputerUseBrowserError: Error, LocalizedError, Equatable {
         case .signInWindowOpen: return "Finish or close the sign-in window, then choose Let AI continue in the AI browser."
         case .viewportScrollUnavailable: return "This page does not expose a supported document viewport for scrolling."
         case .viewportScrollUncertain: return "I couldn't verify how the AI browser page moved. Check the page before continuing."
+        case .linkNavigationUnavailable: return "This page link cannot be opened as a document in the current AI browser."
+        case .linkNavigationUncertain: return "I couldn't verify the link navigation. Check the AI browser before continuing."
         }
     }
 }
@@ -135,6 +164,11 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     private var ownershipEpoch = UUID()
     private var document: ComputerUseBrowserDocument?
     private var receipts: [String: ComputerUseBrowserDocument] = [:]
+    private struct LinkNavigationAttempt {
+        let payloadDigest: String
+        var receipt: ComputerUseBrowserLinkNavigationReceipt?
+    }
+    private var linkNavigationAttempts: [String: LinkNavigationAttempt] = [:]
     private let mayAct: () -> Bool
     private let presentsWindow: Bool
     private let navigationTimeout: Duration
@@ -251,6 +285,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             observedUserPage = nil
             observedActivePage = nil
             receipts.removeAll()
+            linkNavigationAttempts.removeAll()
         }
     }
 
@@ -418,6 +453,70 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
               result.fields == nil, result.page == nil else { throw ComputerUseBrowserError.pageChanged }
     }
 
+    func prepareLinkNavigation(linkID: String, evidence: ComputerUseBrowserPageEvidence) async throws -> ComputerUseBrowserLinkNavigationTarget {
+        guard evidence.page.isWellFormed,
+              let link = evidence.page.links.first(where: { $0.id == linkID }),
+              let destination = URL(string: link.destination).flatMap(Self.validatedURL) else {
+            throw ComputerUseBrowserError.linkNavigationUnavailable
+        }
+        let target = ComputerUseBrowserLinkNavigationTarget(evidence: evidence, linkID: linkID, destination: destination)
+        try await validateLinkNavigation(target)
+        return target
+    }
+
+    private func validateLinkNavigation(_ target: ComputerUseBrowserLinkNavigationTarget) async throws {
+        guard hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
+        let evidence = target.evidence
+        let result = try await callDOM(.validatePageLink, arguments: ["documentID": evidence.documentID,
+            "snapshotID": evidence.page.id, "linkID": target.linkID], document: evidence.document)
+        guard hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
+        guard result.status == "link-current", result.documentID == evidence.documentID,
+              result.fields == nil, result.page == nil else { throw ComputerUseBrowserError.linkNavigationUnavailable }
+    }
+
+    /// Open the previously bound HTTP(S) destination with the native browser
+    /// loader. This intentionally has navigation semantics, not DOM click
+    /// semantics: it dispatches no link event handler or form submission.
+    /// A returned receipt proves one navigation, never the complete task.
+    func openLinkDestination(_ target: ComputerUseBrowserLinkNavigationTarget, operationID: String,
+                             willBeginEffect: () -> Void = {}) async throws -> ComputerUseBrowserLinkNavigationReceipt {
+        try Task.checkCancellation()
+        guard hasOwnership(taskID: target.evidence.document.taskID),
+              target.evidence.document.contextID == contextID else { throw ComputerUseBrowserError.ownershipLost }
+        guard operationID.utf8.count == 64,
+              operationID.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else {
+            throw ComputerUseBrowserError.linkNavigationUnavailable
+        }
+        if let attempted = linkNavigationAttempts[operationID] {
+            guard attempted.payloadDigest == target.payloadDigest, let receipt = attempted.receipt else {
+                throw ComputerUseBrowserError.linkNavigationUncertain
+            }
+            return receipt
+        }
+        guard linkNavigationAttempts.count < 64 else { throw ComputerUseBrowserError.linkNavigationUnavailable }
+        try await validateLinkNavigation(target)
+        do {
+            let document = try await navigate(taskID: target.evidence.document.taskID, operationID: operationID,
+                to: target.destination, from: target.evidence.document, willBeginEffect: {
+                    self.linkNavigationAttempts[operationID] = LinkNavigationAttempt(payloadDigest: target.payloadDigest)
+                    willBeginEffect()
+                })
+            let receipt = ComputerUseBrowserLinkNavigationReceipt(payloadDigest: target.payloadDigest, document: document)
+            linkNavigationAttempts[operationID]?.receipt = receipt
+            return receipt
+        } catch {
+            // didFinish may have proved the native load before cancellation
+            // interrupts subsequent document-identity observation. Keep that
+            // fact without changing the interrupted caller's result.
+            if linkNavigationAttempts[operationID]?.payloadDigest == target.payloadDigest,
+               let document = receipts[operationID], document.contextID == contextID,
+               document.taskID == target.evidence.document.taskID, document.requestedURL == target.destination {
+                linkNavigationAttempts[operationID]?.receipt = .init(payloadDigest: target.payloadDigest, document: document)
+            }
+            throw error
+        }
+    }
+
     func scrollViewport(_ direction: OSAtlasScrollDirection, evidence: ComputerUseBrowserPageEvidence,
                         operationID: String, willBeginEffect: () -> Void = {}) async throws -> ComputerUseBrowserViewportScrollReceipt {
         try Task.checkCancellation()
@@ -562,7 +661,8 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     }
 
     func navigate(taskID: String, operationID: String, to url: URL,
-                  from expectedDocument: ComputerUseBrowserDocument? = nil) async throws -> ComputerUseBrowserDocument {
+                  from expectedDocument: ComputerUseBrowserDocument? = nil,
+                  willBeginEffect: () -> Void = {}) async throws -> ComputerUseBrowserDocument {
         try Task.checkCancellation()
         guard hasOwnership(taskID: taskID) else { throw ComputerUseBrowserError.ownershipLost }
         guard pending == nil, pendingDOM == nil, observedNavigation == nil else { throw ComputerUseBrowserError.busy }
@@ -585,6 +685,9 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             guard validate(expectedDocument) else { throw ComputerUseBrowserError.pageChanged }
             guard hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
         }
+        willBeginEffect()
+        try Task.checkCancellation()
+        guard hasOwnership(taskID: taskID) else { throw ComputerUseBrowserError.ownershipLost }
         generation &+= 1
         document = nil
         loadedPageIdentity = nil

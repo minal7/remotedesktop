@@ -3,6 +3,249 @@ import XCTest
 
 @MainActor
 final class ComputerUseBrowserDOMTests: XCTestCase {
+    func testObservedLinkDestinationUsesExactReferenceAndRetainsNavigationWithoutReplay() async throws {
+        let fixture = try await DOMFixture(body: """
+            <a href="/destination?opaque=private-query#private-fragment" onclick="fetch('/clicked')">Results</a>
+            <a href="/different">Results</a>
+            """)
+        defer { fixture.close() }
+        let evidence = try await fixture.browser.observePage(document: fixture.document)
+        let first = try await fixture.browser.prepareLinkNavigation(linkID: evidence.page.links[0].id, evidence: evidence)
+        let second = try await fixture.browser.prepareLinkNavigation(linkID: evidence.page.links[1].id, evidence: evidence)
+        XCTAssertNotEqual(first.payloadDigest, second.payloadDigest, "Duplicate labels must retain their distinct observed destinations")
+        XCTAssertFalse(String(describing: first).contains("private-"))
+        XCTAssertFalse(String(reflecting: first).contains("private-"))
+        XCTAssertEqual(fixture.server.count("/destination?opaque=private-query"), 0)
+        let operationID = ComputerUseTaskContract.digest(["open-observed-link"])
+        var attempts = 0
+        let receipt = try await fixture.browser.openLinkDestination(first, operationID: operationID, willBeginEffect: { attempts += 1 })
+        XCTAssertEqual(attempts, 1)
+        XCTAssertEqual(receipt.payloadDigest, first.payloadDigest)
+        XCTAssertEqual(receipt.document.requestedURL.absoluteString, evidence.page.links[0].destination)
+        XCTAssertEqual(receipt.document.source, .automationNavigation)
+        XCTAssertTrue(fixture.browser.validate(receipt.document))
+        XCTAssertEqual(fixture.server.count("/destination?opaque=private-query"), 1)
+        XCTAssertEqual(fixture.server.count("/different"), 0)
+        XCTAssertEqual(fixture.server.count("/clicked"), 0, "Opening a destination is a native navigation, not synthetic link activation")
+        let nextPage = try await fixture.browser.observePage(document: receipt.document)
+        XCTAssertTrue(nextPage.page.texts.contains { $0.text == "Verified local page" })
+        let replayed = try await fixture.browser.openLinkDestination(first, operationID: operationID)
+        XCTAssertEqual(replayed, receipt)
+        XCTAssertEqual(fixture.server.count("/destination?opaque=private-query"), 1)
+        do {
+            _ = try await fixture.browser.openLinkDestination(second, operationID: operationID)
+            XCTFail("The same operation cannot be rebound to a different observed link")
+        } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .linkNavigationUncertain) }
+        XCTAssertFalse(String(reflecting: receipt).contains("private-"))
+    }
+
+    func testObservedLinkDestinationRejectsUnsupportedSemanticsAndForeignReferences() async throws {
+        let fixture = try await DOMFixture(body: """
+            <base target="_blank">
+            <a href="/destination" target="_self">Supported</a>
+            <a href="/destination" target="">Empty target override</a>
+            <a href="/destination" target="_self" download>Download</a>
+            <a href="/destination" target="_self" ping="/ping">Ping</a>
+            <a href="/destination">New context</a>
+            <a href="#section" target="_self">Fragment</a>
+            <a href="javascript:alert(1)">Script</a>
+            """)
+        defer { fixture.close() }
+        let evidence = try await fixture.browser.observePage(document: fixture.document)
+        XCTAssertFalse(evidence.page.links.contains { $0.label == "Script" })
+        for link in evidence.page.links where !["Supported", "Empty target override"].contains(link.label) {
+            do {
+                _ = try await fixture.browser.prepareLinkNavigation(linkID: link.id, evidence: evidence)
+                XCTFail("Unsupported link semantics must not become a document navigation: \(link.label)")
+            } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .linkNavigationUnavailable) }
+        }
+        let supported = try XCTUnwrap(evidence.page.links.first { $0.label == "Supported" })
+        let target = try await fixture.browser.prepareLinkNavigation(linkID: supported.id, evidence: evidence)
+        let empty = try XCTUnwrap(evidence.page.links.first { $0.label == "Empty target override" })
+        _ = try await fixture.browser.prepareLinkNavigation(linkID: empty.id, evidence: evidence)
+        do {
+            _ = try await fixture.browser.prepareLinkNavigation(linkID: "l999", evidence: evidence)
+            XCTFail("A fabricated link ID cannot select a destination")
+        } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .linkNavigationUnavailable) }
+        let foreign = try await DOMFixture(body: "<a href='/destination'>Supported</a>")
+        defer { foreign.close() }
+        do {
+            _ = try await foreign.browser.openLinkDestination(target, operationID: ComputerUseTaskContract.digest(["foreign"]))
+            XCTFail("Another context cannot use the target even with the same task ID")
+        } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .ownershipLost) }
+        XCTAssertEqual(fixture.server.count("/destination"), 0)
+        XCTAssertEqual(foreign.server.count("/destination"), 0)
+    }
+
+    func testObservedLinkDestinationRejectsReplacedRetargetedAndSupersededPageBindings() async throws {
+        let mutations = [
+            "link.replaceWith(link.cloneNode(true));",
+            "link.remove(); document.body.prepend(link);",
+            "link.href='/changed'; link.href='/destination';",
+            "link.target='_blank'; link.target='_self';",
+            "link.setAttribute('download','');",
+            "link.setAttribute('ping','/ping');",
+            "document.querySelector('base').target='_blank';",
+            "link.style.display='none'; link.style.display='';",
+            ""]
+        for mutation in mutations {
+            let fixture = try await DOMFixture(body: """
+                <base target="_self"><a id="link" target="_self" href="/destination">Results</a>
+                <script>fetch('/signal').then(() => { const link=document.getElementById('link'); \(mutation) fetch('/changed'); });</script>
+                """, heldSignal: true)
+            defer { fixture.close() }
+            let evidence = try await fixture.browser.observePage(document: fixture.document)
+            let target = try await fixture.browser.prepareLinkNavigation(linkID: evidence.page.links[0].id, evidence: evidence)
+            try await fixture.wait { fixture.server.count("/signal") == 1 }
+            fixture.server.releaseHeldResponses()
+            try await fixture.wait { fixture.server.count("/changed") == 1 }
+            if mutation.isEmpty { _ = try await fixture.browser.observePage(document: fixture.document) }
+            do {
+                try await fixture.browser.validatePageEvidence(evidence)
+                XCTFail("The old page binding must be retired: \(mutation)")
+            } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+            var attempted = false
+            do {
+                _ = try await fixture.browser.openLinkDestination(target, operationID: ComputerUseTaskContract.digest(["stale", mutation]),
+                    willBeginEffect: { attempted = true })
+                XCTFail("Stale link evidence cannot reach native navigation")
+            } catch { }
+            XCTAssertFalse(attempted)
+            XCTAssertEqual(fixture.server.count("/destination"), 0)
+        }
+    }
+
+    func testObservedLinkNavigationRechecksUserControlAfterDOMValidation() async throws {
+        for mode in ["pause", "stop", "close", "cancel"] {
+            var mayAct = true, validations = 0, attempts = 0
+            var browser: ComputerUseOwnedBrowser?
+            var task: Task<ComputerUseBrowserLinkNavigationReceipt, Error>?
+            let fixture = try await DOMFixture(body: "<a href='/destination'>Results</a>", domScriptDidDispatch: { command in
+                guard command == .validatePageLink else { return }
+                validations += 1
+                guard validations == 2 else { return }
+                switch mode {
+                case "pause": mayAct = false
+                case "stop": browser?.stop()
+                case "close": browser?.close()
+                default: task?.cancel()
+                }
+            }, mayAct: { mayAct })
+            defer { fixture.close() }
+            browser = fixture.browser
+            let evidence = try await fixture.browser.observePage(document: fixture.document)
+            let target = try await fixture.browser.prepareLinkNavigation(linkID: evidence.page.links[0].id, evidence: evidence)
+            task = Task {
+                try await fixture.browser.openLinkDestination(target, operationID: ComputerUseTaskContract.digest(["validation", mode]),
+                    willBeginEffect: { attempts += 1 })
+            }
+            do { _ = try await task?.value; XCTFail("Lost control must block before navigation") }
+            catch { if mode == "cancel" { XCTAssertTrue(error is CancellationError) } }
+            XCTAssertEqual(attempts, 0)
+            XCTAssertEqual(fixture.server.count("/destination"), 0)
+        }
+    }
+
+    func testObservedLinkNavigationRetainsAttemptWhenControlChangesAtDispatch() async throws {
+        var mayAct = true
+        let fixture = try await DOMFixture(body: "<a href='/destination'>Results</a>", mayAct: { mayAct })
+        defer { fixture.close() }
+        let evidence = try await fixture.browser.observePage(document: fixture.document)
+        let target = try await fixture.browser.prepareLinkNavigation(linkID: evidence.page.links[0].id, evidence: evidence)
+        let operationID = ComputerUseTaskContract.digest(["dispatch-takeover"])
+        var attempts = 0
+        do {
+            _ = try await fixture.browser.openLinkDestination(target, operationID: operationID,
+                willBeginEffect: { attempts += 1; mayAct = false })
+            XCTFail("Takeover at dispatch must stop navigation")
+        } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .ownershipLost) }
+        XCTAssertEqual(attempts, 1)
+        XCTAssertEqual(fixture.server.count("/destination"), 0)
+        mayAct = true
+        do {
+            _ = try await fixture.browser.openLinkDestination(target, operationID: operationID)
+            XCTFail("An attempted operation cannot be silently reissued")
+        } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .linkNavigationUncertain) }
+        XCTAssertEqual(fixture.server.count("/destination"), 0)
+    }
+
+    func testObservedLinkNavigationInterruptionCannotPublishSuccessOrRetryItsRequest() async throws {
+        for mode in ["pause", "stop", "close", "cancel"] {
+            var mayAct = true
+            let fixture = try await DOMFixture(body: "<a href='/signal'>Results</a>", heldSignal: true, mayAct: { mayAct })
+            defer { fixture.close() }
+            let evidence = try await fixture.browser.observePage(document: fixture.document)
+            let target = try await fixture.browser.prepareLinkNavigation(linkID: evidence.page.links[0].id, evidence: evidence)
+            let operationID = ComputerUseTaskContract.digest(["loading", mode])
+            let task = Task { try await fixture.browser.openLinkDestination(target, operationID: operationID) }
+            try await fixture.wait { fixture.server.count("/signal") == 1 }
+            switch mode {
+            case "pause": mayAct = false
+            case "stop": fixture.browser.stop()
+            case "close": fixture.browser.close()
+            default: task.cancel()
+            }
+            fixture.server.releaseHeldResponses()
+            do { _ = try await task.value; XCTFail("Interrupted navigation must not report success") }
+            catch { if mode == "cancel" { XCTAssertTrue(error is CancellationError) } }
+            mayAct = true
+            do {
+                let retained = try await fixture.browser.openLinkDestination(target, operationID: operationID)
+                XCTAssertEqual(mode, "cancel", "Only a successful load racing cancellation may retain its navigation fact")
+                XCTAssertEqual(retained.document, fixture.browser.receipt(taskID: "fixture", operationID: operationID))
+            } catch { }
+            XCTAssertEqual(fixture.server.count("/signal"), 1)
+            // A late successful callback may retain a historical navigation
+            // fact. It cannot make this interrupted invocation return success.
+        }
+    }
+
+    func testObservedLinkNavigationRetainsLateReceiptWhileCancellationStillWins() async throws {
+        var identities = 0
+        var task: Task<ComputerUseBrowserLinkNavigationReceipt, Error>?
+        let fixture = try await DOMFixture(body: "<a href='/destination'>Results</a>", domScriptDidDispatch: { command in
+            guard command == .pageIdentity else { return }
+            identities += 1
+            if identities == 2 { task?.cancel() }
+        })
+        defer { fixture.close() }
+        let evidence = try await fixture.browser.observePage(document: fixture.document)
+        let target = try await fixture.browser.prepareLinkNavigation(linkID: evidence.page.links[0].id, evidence: evidence)
+        let operationID = ComputerUseTaskContract.digest(["late-link-confirmation"])
+        task = Task { try await fixture.browser.openLinkDestination(target, operationID: operationID) }
+        do { _ = try await task?.value; XCTFail("Cancellation must still win for the interrupted caller") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        let native = try XCTUnwrap(fixture.browser.receipt(taskID: "fixture", operationID: operationID))
+        let retained = try await fixture.browser.openLinkDestination(target, operationID: operationID)
+        XCTAssertEqual(retained.document, native)
+        XCTAssertEqual(retained.payloadDigest, target.payloadDigest)
+        XCTAssertEqual(fixture.server.count("/destination"), 1)
+    }
+
+    func testObservedLinkNavigationHandsBackWhenAuthenticationAppearsBeforeDispatch() async throws {
+        let fixture = try await DOMFixture(body: """
+            <a href='/destination'>Results</a><div id='login'></div>
+            <script>fetch('/signal').then(() => {
+              document.getElementById('login').innerHTML='<label>Password<input type="password" autocomplete="current-password"></label>';
+              fetch('/changed');
+            });</script>
+            """, heldSignal: true)
+        defer { fixture.close() }
+        let evidence = try await fixture.browser.observePage(document: fixture.document)
+        let target = try await fixture.browser.prepareLinkNavigation(linkID: evidence.page.links[0].id, evidence: evidence)
+        try await fixture.wait { fixture.server.count("/signal") == 1 }
+        fixture.server.releaseHeldResponses()
+        try await fixture.wait { fixture.server.count("/changed") == 1 }
+        var attempted = false
+        do {
+            _ = try await fixture.browser.openLinkDestination(target, operationID: ComputerUseTaskContract.digest(["login-handoff"]),
+                willBeginEffect: { attempted = true })
+            XCTFail("A newly visible authentication barrier requires user control")
+        } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .authenticationRequired) }
+        XCTAssertFalse(attempted)
+        XCTAssertEqual(fixture.server.count("/destination"), 0)
+    }
+
     func testViewportScrollAuthorityAndReceiptRejectWrongTargetsAndUnprovenMovement() {
         for task in ["Scroll down", "Please scroll the page down.", "Could you scroll down in this page?",
                      "Scroll down until the Privacy section is visible."] {
