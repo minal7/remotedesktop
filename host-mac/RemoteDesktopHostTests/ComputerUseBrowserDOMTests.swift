@@ -3,6 +3,212 @@ import XCTest
 
 @MainActor
 final class ComputerUseBrowserDOMTests: XCTestCase {
+    func testFormQueryBindsNativeEntryOrderSubmitterOverridesAndPrivateStateWithoutEvents() async throws {
+        let fixture = try await DOMFixture(body: """
+            <form id="search" action="/wrong?discard=1" method="post" target="_blank" accept-charset="UTF-8">
+              <label>Query<input name="q" value="Café & music"></label>
+              <input name="action" value="clobbered"><input name="elements" value="also-bound">
+              <input type="hidden" name="_ChArSeT_" value="wrong"><input type="hidden" name="opaque" value="private-server-state">
+              <input name="skip" disabled value="disabled">
+              <fieldset disabled><legend><input name="legend" value="kept"></legend><input name="skip2" value="disabled"></fieldset>
+              <input type="checkbox" name="extra" value="yes" checked><input type="checkbox" name="extra" value="no">
+              <select name="kind" multiple><option value="a" selected>A</option><option value="b" selected>B</option><option value="c" disabled selected>C</option></select>
+              <textarea name="note">line1
+            line2</textarea>
+              <button type="submit" name="mode" value="search" formaction="/results?discard=1#results" formmethod="get" formtarget="_self" formenctype="multipart/form-data">Search</button>
+              <button type="submit" name="mode" value="other">Other</button>
+            </form><input form="search" name="external" value="outside">
+            <script>for (const name of ['submit','formdata','invalid','input','change']) document.addEventListener(name, () => fetch('/event-'+name), true);</script>
+            """)
+        defer { fixture.close() }
+        let evidence = try await fixture.browser.observePage(document: fixture.document)
+        let control = try XCTUnwrap(evidence.page.controls.first { $0.label == "Search" })
+        let target = try await fixture.browser.prepareFormQuery(controlID: control.id, evidence: evidence)
+        XCTAssertFalse(try ComputerUseBrowserPlanningContext(page: evidence.page).serialized().contains("private-server-state"))
+        XCTAssertFalse(String(reflecting: target).contains("private-server-state"))
+        XCTAssertFalse(fixture.server.requestedPaths.contains { $0.hasPrefix("/results") || $0.hasPrefix("/event-") })
+        let operationID = ComputerUseTaskContract.digest(["form-search"])
+        let receipt = try await fixture.browser.openObservedDestination(target, operationID: operationID)
+        let components = try XCTUnwrap(URLComponents(url: receipt.document.requestedURL, resolvingAgainstBaseURL: false))
+        let pairs = try XCTUnwrap(components.percentEncodedQuery).split(separator: "&").map { pair in
+            pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false).map {
+                String($0).replacingOccurrences(of: "+", with: " ").removingPercentEncoding ?? "invalid encoding"
+            }
+        }
+        XCTAssertEqual(components.path, "/results")
+        XCTAssertEqual(components.fragment, "results")
+        XCTAssertEqual(pairs, [["q", "Café & music"], ["action", "clobbered"], ["elements", "also-bound"],
+            ["_ChArSeT_", "UTF-8"], ["opaque", "private-server-state"], ["legend", "kept"], ["extra", "yes"],
+            ["kind", "a"], ["kind", "b"], ["note", "line1\r\nline2"], ["mode", "search"], ["external", "outside"]])
+        XCTAssertFalse(fixture.server.requestedPaths.contains { $0.hasPrefix("/event-") || $0.hasPrefix("/wrong") })
+        XCTAssertFalse(String(reflecting: receipt).contains("private-server-state"))
+        let replayed = try await fixture.browser.openObservedDestination(target, operationID: operationID)
+        XCTAssertEqual(replayed, receipt)
+        XCTAssertEqual(fixture.server.requestedPaths.filter { $0.hasPrefix("/results?") }.count, 1)
+    }
+
+    func testFormQueryRejectsChangedValuesSelectionMembershipAndSubmissionAuthority() async throws {
+        for mutation in ["q.value='London';", "token.value='changed-private';", "choice.selectedIndex=1;", "check.checked=false;",
+                         "q.replaceWith(q.cloneNode(true));", "q.remove(); document.getElementById('search').prepend(q);",
+                         "button.formAction='/other';", "q.name='other';", ""] {
+            let fixture = try await DOMFixture(body: """
+                <form id="search" action="/results" method="get"><label>Query<input id="q" name="q" value="Paris"></label>
+                  <input id="token" type="hidden" name="opaque" value="original-private">
+                  <select id="choice" name="choice"><option value="a">A</option><option value="b">B</option></select>
+                  <input id="check" type="checkbox" name="check" value="yes" checked><button id="button">Search</button>
+                </form><script>fetch('/signal').then(() => {
+                  const [q,token,choice,check,button]=['q','token','choice','check','button'].map(id => document.getElementById(id));
+                  \(mutation) fetch('/changed');
+                });</script>
+                """, heldSignal: true)
+            defer { fixture.close() }
+            let evidence = try await fixture.browser.observePage(document: fixture.document)
+            let button = try XCTUnwrap(evidence.page.controls.first { $0.label == "Search" })
+            let target = try await fixture.browser.prepareFormQuery(controlID: button.id, evidence: evidence)
+            try await fixture.wait { fixture.server.count("/signal") == 1 }
+            fixture.server.releaseHeldResponses()
+            try await fixture.wait { fixture.server.count("/changed") == 1 }
+            if mutation.isEmpty { _ = try await fixture.browser.observePage(document: fixture.document) }
+            var attempted = false
+            do {
+                _ = try await fixture.browser.openObservedDestination(target, operationID: ComputerUseTaskContract.digest(["changed-query", mutation]),
+                    willBeginEffect: { attempted = true })
+                XCTFail("A changed query must not navigate: \(mutation)")
+            } catch { }
+            XCTAssertFalse(attempted)
+            XCTAssertFalse(fixture.server.requestedPaths.contains { $0.hasPrefix("/results") || $0.hasPrefix("/other?") })
+        }
+    }
+
+    func testFormQueryDeclinesUnsupportedMethodsContextsControlsAndEncodingBeforeEffects() async throws {
+        let variants: [(String, String, String)] = [
+            ("method='post'", "", ""), ("method='get'", "formmethod='post'", ""),
+            ("method='get' action='https://example.invalid/results'", "", ""),
+            ("method='get' target='_blank'", "", ""), ("method='get' accept-charset='Shift_JIS'", "", ""),
+            ("method='get'", "", "<input type='file' name='file'>"),
+            ("method='get'", "", "<input type='password' name='secret' style='display:none'>"),
+            ("method='get'", "", "<input readonly autocomplete='one-time-code' name='code' value='private-code'>"),
+            ("method='get'", "", "<input readonly autocomplete='cc-number' name='card' value='private-card'>"),
+            ("method='get'", "", "<textarea wrap='hard' name='note'>Text</textarea>"),
+            ("method='get'", "", "<input name='direction' dirname='direction.dir' value='text'>")]
+        for (attributes, overrides, extra) in variants {
+            let fixture = try await DOMFixture(body: "<form \(attributes)><input name='q' value='Paris'>\(extra)<button \(overrides)>Search</button></form>")
+            defer { fixture.close() }
+            let evidence = try await fixture.browser.observePage(document: fixture.document)
+            let button = try XCTUnwrap(evidence.page.controls.first { $0.label == "Search" })
+            do {
+                _ = try await fixture.browser.prepareFormQuery(controlID: button.id, evidence: evidence)
+                XCTFail("Unsupported form semantics must not produce a query target")
+            } catch { XCTAssertTrue([ComputerUseBrowserError.formQueryUnavailable, .authenticationRequired].contains(error as? ComputerUseBrowserError ?? .busy)) }
+            XCTAssertEqual(fixture.server.requestedPaths.filter { $0 == "/form" }.count, 1)
+        }
+    }
+
+    func testFormQueryChecksValidityWithoutInvalidEventsAndBindsNoValidateOverride() async throws {
+        let fixture = try await DOMFixture(body: """
+            <form action='/results' method='get'><label>Query<input name='q' required></label><button id='button'>Search</button></form>
+            <script>document.addEventListener('invalid', () => fetch('/invalid'), true);
+              fetch('/signal').then(() => { document.getElementById('button').formNoValidate=true; fetch('/changed'); });</script>
+            """, heldSignal: true)
+        defer { fixture.close() }
+        let evidence = try await fixture.browser.observePage(document: fixture.document)
+        let button = try XCTUnwrap(evidence.page.controls.first { $0.label == "Search" })
+        do {
+            _ = try await fixture.browser.prepareFormQuery(controlID: button.id, evidence: evidence)
+            XCTFail("Invalid fields cannot silently become a query")
+        } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .formQueryInvalid) }
+        XCTAssertEqual(fixture.server.count("/invalid"), 0)
+        try await fixture.wait { fixture.server.count("/signal") == 1 }
+        fixture.server.releaseHeldResponses()
+        try await fixture.wait { fixture.server.count("/changed") == 1 }
+        let fresh = try await fixture.browser.observePage(document: fixture.document)
+        let target = try await fixture.browser.prepareFormQuery(controlID: button.id, evidence: fresh)
+        let receipt = try await fixture.browser.openObservedDestination(target, operationID: ComputerUseTaskContract.digest(["no-validate-query"]))
+        XCTAssertEqual(receipt.document.requestedURL.query, "q=")
+        XCTAssertEqual(fixture.server.count("/invalid"), 0)
+    }
+
+    func testFormQueryRechecksAuthenticationAndUserControlBeforeDispatch() async throws {
+        for mode in ["pause", "cancel", "authentication"] {
+            var mayAct = true
+            var task: Task<ComputerUseBrowserNavigationReceipt, Error>?
+            let fixture = try await DOMFixture(body: """
+                <form method='get' action='/results'><input name='q' value='Paris'><button>Search</button></form><div id='login'></div>
+                <script>fetch('/signal').then(() => {
+                  \(mode == "authentication" ? "document.getElementById('login').innerHTML='<label>Password<input type=password autocomplete=current-password></label>';" : "")
+                  fetch('/changed');
+                });</script>
+                """, heldSignal: true, domScriptDidDispatch: { command in
+                    guard command == .validateFormQuery else { return }
+                    if mode == "pause" { mayAct = false }
+                    if mode == "cancel" { task?.cancel() }
+                }, mayAct: { mayAct })
+            defer { fixture.close() }
+            let evidence = try await fixture.browser.observePage(document: fixture.document)
+            let button = try XCTUnwrap(evidence.page.controls.first { $0.label == "Search" })
+            let target = try await fixture.browser.prepareFormQuery(controlID: button.id, evidence: evidence)
+            try await fixture.wait { fixture.server.count("/signal") == 1 }
+            fixture.server.releaseHeldResponses()
+            try await fixture.wait { fixture.server.count("/changed") == 1 }
+            var attempted = false
+            task = Task {
+                try await fixture.browser.openObservedDestination(target, operationID: ComputerUseTaskContract.digest(["query-control", mode]),
+                    willBeginEffect: { attempted = true })
+            }
+            do { _ = try await task?.value; XCTFail("Authentication or lost control must block the query") }
+            catch {
+                if mode == "cancel" { XCTAssertTrue(error is CancellationError) }
+                if mode == "authentication" { XCTAssertEqual(error as? ComputerUseBrowserError, .authenticationRequired) }
+            }
+            XCTAssertFalse(attempted)
+            XCTAssertFalse(fixture.server.requestedPaths.contains { $0.hasPrefix("/results") })
+        }
+    }
+
+    func testFormQuerySharesNoReplayBoundaryWithOtherObservedDestinations() async throws {
+        let fixture = try await DOMFixture(body: """
+            <form action='/results' method='get'><input name='q' value='Paris'><button>Search</button></form>
+            <a href='/results?q=Paris'>Same destination</a>
+            """)
+        defer { fixture.close() }
+        let evidence = try await fixture.browser.observePage(document: fixture.document)
+        let button = try XCTUnwrap(evidence.page.controls.first { $0.label == "Search" })
+        let query = try await fixture.browser.prepareFormQuery(controlID: button.id, evidence: evidence)
+        let link = try await fixture.browser.prepareLinkNavigation(linkID: evidence.page.links[0].id, evidence: evidence)
+        XCTAssertNotEqual(query.payloadDigest, link.payloadDigest)
+        let operationID = ComputerUseTaskContract.digest(["one-navigation-occurrence"])
+        _ = try await fixture.browser.openObservedDestination(query, operationID: operationID)
+        do {
+            _ = try await fixture.browser.openObservedDestination(link, operationID: operationID)
+            XCTFail("Equal destinations do not make a link and a form query the same operation")
+        } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .observedNavigationUncertain) }
+        XCTAssertEqual(fixture.server.count("/results?q=Paris"), 1)
+    }
+
+    func testFormQueryPreservesEmptyQueryAndRejectsMalformedPrivateReplyBindings() async throws {
+        let fixture = try await DOMFixture(body: "<form method='get' action='/results?discard=1#empty'><button>Search</button></form>")
+        defer { fixture.close() }
+        let evidence = try await fixture.browser.observePage(document: fixture.document)
+        let button = try XCTUnwrap(evidence.page.controls.first { $0.label == "Search" })
+        let reply = try await fixture.browser.callDOM(.prepareFormQuery, arguments: ["documentID": evidence.documentID,
+            "snapshotID": evidence.page.id, "controlID": button.id], document: evidence.document)
+        let query = try XCTUnwrap(reply.formQuery)
+        XCTAssertTrue(query.isWellFormed)
+        let components = try XCTUnwrap(URLComponents(string: query.destination))
+        XCTAssertEqual(components.percentEncodedQuery, "")
+        XCTAssertEqual(components.fragment, "empty")
+        XCTAssertEqual(String(reflecting: query), "BrowserFormQuery")
+        for replacement in [["id": "short"], ["controlID": "l1"], ["controlID": "c-1"],
+                            ["destination": "https://user:secret@example.invalid/"], ["destination": "javascript:alert(1)"],
+                            ["destination": "https://example.invalid/?" + String(repeating: "x", count: 8_192)]] {
+            var values = ["id": query.id, "controlID": query.controlID, "destination": query.destination]
+            values.merge(replacement, uniquingKeysWith: { _, new in new })
+            let invalid = try JSONDecoder().decode(ComputerUseBrowserFormQuery.self, from: JSONSerialization.data(withJSONObject: values))
+            XCTAssertFalse(invalid.isWellFormed)
+        }
+        XCTAssertFalse(fixture.server.requestedPaths.contains { $0.hasPrefix("/results") })
+    }
+
     func testObservedLinkDestinationUsesExactReferenceAndRetainsNavigationWithoutReplay() async throws {
         let fixture = try await DOMFixture(body: """
             <a href="/destination?opaque=private-query#private-fragment" onclick="fetch('/clicked')">Results</a>
@@ -18,7 +224,7 @@ final class ComputerUseBrowserDOMTests: XCTestCase {
         XCTAssertEqual(fixture.server.count("/destination?opaque=private-query"), 0)
         let operationID = ComputerUseTaskContract.digest(["open-observed-link"])
         var attempts = 0
-        let receipt = try await fixture.browser.openLinkDestination(first, operationID: operationID, willBeginEffect: { attempts += 1 })
+        let receipt = try await fixture.browser.openObservedDestination(first, operationID: operationID, willBeginEffect: { attempts += 1 })
         XCTAssertEqual(attempts, 1)
         XCTAssertEqual(receipt.payloadDigest, first.payloadDigest)
         XCTAssertEqual(receipt.document.requestedURL.absoluteString, evidence.page.links[0].destination)
@@ -29,13 +235,13 @@ final class ComputerUseBrowserDOMTests: XCTestCase {
         XCTAssertEqual(fixture.server.count("/clicked"), 0, "Opening a destination is a native navigation, not synthetic link activation")
         let nextPage = try await fixture.browser.observePage(document: receipt.document)
         XCTAssertTrue(nextPage.page.texts.contains { $0.text == "Verified local page" })
-        let replayed = try await fixture.browser.openLinkDestination(first, operationID: operationID)
+        let replayed = try await fixture.browser.openObservedDestination(first, operationID: operationID)
         XCTAssertEqual(replayed, receipt)
         XCTAssertEqual(fixture.server.count("/destination?opaque=private-query"), 1)
         do {
-            _ = try await fixture.browser.openLinkDestination(second, operationID: operationID)
+            _ = try await fixture.browser.openObservedDestination(second, operationID: operationID)
             XCTFail("The same operation cannot be rebound to a different observed link")
-        } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .linkNavigationUncertain) }
+        } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .observedNavigationUncertain) }
         XCTAssertFalse(String(reflecting: receipt).contains("private-"))
     }
 
@@ -70,7 +276,7 @@ final class ComputerUseBrowserDOMTests: XCTestCase {
         let foreign = try await DOMFixture(body: "<a href='/destination'>Supported</a>")
         defer { foreign.close() }
         do {
-            _ = try await foreign.browser.openLinkDestination(target, operationID: ComputerUseTaskContract.digest(["foreign"]))
+            _ = try await foreign.browser.openObservedDestination(target, operationID: ComputerUseTaskContract.digest(["foreign"]))
             XCTFail("Another context cannot use the target even with the same task ID")
         } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .ownershipLost) }
         XCTAssertEqual(fixture.server.count("/destination"), 0)
@@ -106,7 +312,7 @@ final class ComputerUseBrowserDOMTests: XCTestCase {
             } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
             var attempted = false
             do {
-                _ = try await fixture.browser.openLinkDestination(target, operationID: ComputerUseTaskContract.digest(["stale", mutation]),
+                _ = try await fixture.browser.openObservedDestination(target, operationID: ComputerUseTaskContract.digest(["stale", mutation]),
                     willBeginEffect: { attempted = true })
                 XCTFail("Stale link evidence cannot reach native navigation")
             } catch { }
@@ -119,7 +325,7 @@ final class ComputerUseBrowserDOMTests: XCTestCase {
         for mode in ["pause", "stop", "close", "cancel"] {
             var mayAct = true, validations = 0, attempts = 0
             var browser: ComputerUseOwnedBrowser?
-            var task: Task<ComputerUseBrowserLinkNavigationReceipt, Error>?
+            var task: Task<ComputerUseBrowserNavigationReceipt, Error>?
             let fixture = try await DOMFixture(body: "<a href='/destination'>Results</a>", domScriptDidDispatch: { command in
                 guard command == .validatePageLink else { return }
                 validations += 1
@@ -136,7 +342,7 @@ final class ComputerUseBrowserDOMTests: XCTestCase {
             let evidence = try await fixture.browser.observePage(document: fixture.document)
             let target = try await fixture.browser.prepareLinkNavigation(linkID: evidence.page.links[0].id, evidence: evidence)
             task = Task {
-                try await fixture.browser.openLinkDestination(target, operationID: ComputerUseTaskContract.digest(["validation", mode]),
+                try await fixture.browser.openObservedDestination(target, operationID: ComputerUseTaskContract.digest(["validation", mode]),
                     willBeginEffect: { attempts += 1 })
             }
             do { _ = try await task?.value; XCTFail("Lost control must block before navigation") }
@@ -155,7 +361,7 @@ final class ComputerUseBrowserDOMTests: XCTestCase {
         let operationID = ComputerUseTaskContract.digest(["dispatch-takeover"])
         var attempts = 0
         do {
-            _ = try await fixture.browser.openLinkDestination(target, operationID: operationID,
+            _ = try await fixture.browser.openObservedDestination(target, operationID: operationID,
                 willBeginEffect: { attempts += 1; mayAct = false })
             XCTFail("Takeover at dispatch must stop navigation")
         } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .ownershipLost) }
@@ -163,9 +369,9 @@ final class ComputerUseBrowserDOMTests: XCTestCase {
         XCTAssertEqual(fixture.server.count("/destination"), 0)
         mayAct = true
         do {
-            _ = try await fixture.browser.openLinkDestination(target, operationID: operationID)
+            _ = try await fixture.browser.openObservedDestination(target, operationID: operationID)
             XCTFail("An attempted operation cannot be silently reissued")
-        } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .linkNavigationUncertain) }
+        } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .observedNavigationUncertain) }
         XCTAssertEqual(fixture.server.count("/destination"), 0)
     }
 
@@ -177,7 +383,7 @@ final class ComputerUseBrowserDOMTests: XCTestCase {
             let evidence = try await fixture.browser.observePage(document: fixture.document)
             let target = try await fixture.browser.prepareLinkNavigation(linkID: evidence.page.links[0].id, evidence: evidence)
             let operationID = ComputerUseTaskContract.digest(["loading", mode])
-            let task = Task { try await fixture.browser.openLinkDestination(target, operationID: operationID) }
+            let task = Task { try await fixture.browser.openObservedDestination(target, operationID: operationID) }
             try await fixture.wait { fixture.server.count("/signal") == 1 }
             switch mode {
             case "pause": mayAct = false
@@ -190,7 +396,7 @@ final class ComputerUseBrowserDOMTests: XCTestCase {
             catch { if mode == "cancel" { XCTAssertTrue(error is CancellationError) } }
             mayAct = true
             do {
-                let retained = try await fixture.browser.openLinkDestination(target, operationID: operationID)
+                let retained = try await fixture.browser.openObservedDestination(target, operationID: operationID)
                 XCTAssertEqual(mode, "cancel", "Only a successful load racing cancellation may retain its navigation fact")
                 XCTAssertEqual(retained.document, fixture.browser.receipt(taskID: "fixture", operationID: operationID))
             } catch { }
@@ -202,7 +408,7 @@ final class ComputerUseBrowserDOMTests: XCTestCase {
 
     func testObservedLinkNavigationRetainsLateReceiptWhileCancellationStillWins() async throws {
         var identities = 0
-        var task: Task<ComputerUseBrowserLinkNavigationReceipt, Error>?
+        var task: Task<ComputerUseBrowserNavigationReceipt, Error>?
         let fixture = try await DOMFixture(body: "<a href='/destination'>Results</a>", domScriptDidDispatch: { command in
             guard command == .pageIdentity else { return }
             identities += 1
@@ -212,11 +418,11 @@ final class ComputerUseBrowserDOMTests: XCTestCase {
         let evidence = try await fixture.browser.observePage(document: fixture.document)
         let target = try await fixture.browser.prepareLinkNavigation(linkID: evidence.page.links[0].id, evidence: evidence)
         let operationID = ComputerUseTaskContract.digest(["late-link-confirmation"])
-        task = Task { try await fixture.browser.openLinkDestination(target, operationID: operationID) }
+        task = Task { try await fixture.browser.openObservedDestination(target, operationID: operationID) }
         do { _ = try await task?.value; XCTFail("Cancellation must still win for the interrupted caller") }
         catch { XCTAssertTrue(error is CancellationError) }
         let native = try XCTUnwrap(fixture.browser.receipt(taskID: "fixture", operationID: operationID))
-        let retained = try await fixture.browser.openLinkDestination(target, operationID: operationID)
+        let retained = try await fixture.browser.openObservedDestination(target, operationID: operationID)
         XCTAssertEqual(retained.document, native)
         XCTAssertEqual(retained.payloadDigest, target.payloadDigest)
         XCTAssertEqual(fixture.server.count("/destination"), 1)
@@ -238,7 +444,7 @@ final class ComputerUseBrowserDOMTests: XCTestCase {
         try await fixture.wait { fixture.server.count("/changed") == 1 }
         var attempted = false
         do {
-            _ = try await fixture.browser.openLinkDestination(target, operationID: ComputerUseTaskContract.digest(["login-handoff"]),
+            _ = try await fixture.browser.openObservedDestination(target, operationID: ComputerUseTaskContract.digest(["login-handoff"]),
                 willBeginEffect: { attempted = true })
             XCTFail("A newly visible authentication barrier requires user control")
         } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .authenticationRequired) }

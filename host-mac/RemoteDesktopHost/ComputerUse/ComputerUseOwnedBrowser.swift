@@ -98,32 +98,42 @@ struct ComputerUseBrowserPageEvidence: Equatable, Sendable, CustomStringConverti
 /// A host-observed document destination, not authority to click arbitrary
 /// page controls. A task compiler must separately authorize this operation.
 /// Exact URLs stay private to the adapter and never enter planner context.
-struct ComputerUseBrowserLinkNavigationTarget: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+struct ComputerUseBrowserNavigationTarget: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    fileprivate enum Source: Equatable, Sendable {
+        case link(String)
+        case formQuery(controlID: String, queryID: String)
+        var identity: [String] {
+            switch self {
+            case .link(let id): return ["link", id]
+            case .formQuery(let controlID, let queryID): return ["form-query", controlID, queryID]
+            }
+        }
+    }
     fileprivate let evidence: ComputerUseBrowserPageEvidence
-    fileprivate let linkID: String
+    fileprivate let source: Source
     fileprivate let destination: URL
     let payloadDigest: String
 
-    fileprivate init(evidence: ComputerUseBrowserPageEvidence, linkID: String, destination: URL) {
-        self.evidence = evidence; self.linkID = linkID; self.destination = destination
-        payloadDigest = ComputerUseTaskContract.digest(["browser-link-destination-v1", evidence.document.contextID,
+    fileprivate init(evidence: ComputerUseBrowserPageEvidence, source: Source, destination: URL) {
+        self.evidence = evidence; self.source = source; self.destination = destination
+        payloadDigest = ComputerUseTaskContract.digest(["browser-observed-destination-v1", evidence.document.contextID,
             evidence.document.taskID, String(evidence.document.generation), evidence.documentID, evidence.page.id,
-            linkID, destination.absoluteString])
+            destination.absoluteString] + source.identity)
     }
 
-    var description: String { "BrowserLinkDestination(site: \(ComputerUseBrowserSite.displayName(for: destination)))" }
+    var description: String { "BrowserObservedDestination(site: \(ComputerUseBrowserSite.displayName(for: destination)))" }
     var debugDescription: String { description }
 }
 
-struct ComputerUseBrowserLinkNavigationReceipt: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+struct ComputerUseBrowserNavigationReceipt: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     let payloadDigest: String
     let document: ComputerUseBrowserDocument
-    var description: String { "BrowserLinkNavigation(\(document))" }
+    var description: String { "BrowserObservedNavigation(\(document))" }
     var debugDescription: String { description }
 }
 
 enum ComputerUseBrowserError: Error, LocalizedError, Equatable {
-    case invalidURL, busy, ownershipLost, pageChanged, navigationFailed, deadlineExceeded, closed, unsupportedDocument, pageEvidenceUnavailable, documentUnresponsive, windowNotActive, authenticationRequired, signInWindowOpen, viewportScrollUnavailable, viewportScrollUncertain, linkNavigationUnavailable, linkNavigationUncertain
+    case invalidURL, busy, ownershipLost, pageChanged, navigationFailed, deadlineExceeded, closed, unsupportedDocument, pageEvidenceUnavailable, documentUnresponsive, windowNotActive, authenticationRequired, signInWindowOpen, viewportScrollUnavailable, viewportScrollUncertain, linkNavigationUnavailable, observedNavigationUnavailable, observedNavigationUncertain, formQueryUnavailable, formQueryInvalid
     var errorDescription: String? {
         switch self {
         case .invalidURL: return "The browser needs an HTTP or HTTPS URL without embedded credentials."
@@ -142,7 +152,10 @@ enum ComputerUseBrowserError: Error, LocalizedError, Equatable {
         case .viewportScrollUnavailable: return "This page does not expose a supported document viewport for scrolling."
         case .viewportScrollUncertain: return "I couldn't verify how the AI browser page moved. Check the page before continuing."
         case .linkNavigationUnavailable: return "This page link cannot be opened as a document in the current AI browser."
-        case .linkNavigationUncertain: return "I couldn't verify the link navigation. Check the AI browser before continuing."
+        case .observedNavigationUnavailable: return "This browser destination cannot be opened with its current reference."
+        case .observedNavigationUncertain: return "I couldn't verify the navigation. Check the AI browser before continuing."
+        case .formQueryUnavailable: return "This form cannot be opened as a verified query in the AI browser."
+        case .formQueryInvalid: return "The form contains a value that does not meet its requirements. Check the form before continuing."
         }
     }
 }
@@ -164,11 +177,11 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     private var ownershipEpoch = UUID()
     private var document: ComputerUseBrowserDocument?
     private var receipts: [String: ComputerUseBrowserDocument] = [:]
-    private struct LinkNavigationAttempt {
+    private struct ObservedNavigationAttempt {
         let payloadDigest: String
-        var receipt: ComputerUseBrowserLinkNavigationReceipt?
+        var receipt: ComputerUseBrowserNavigationReceipt?
     }
-    private var linkNavigationAttempts: [String: LinkNavigationAttempt] = [:]
+    private var observedNavigationAttempts: [String: ObservedNavigationAttempt] = [:]
     private let mayAct: () -> Bool
     private let presentsWindow: Bool
     private let navigationTimeout: Duration
@@ -285,7 +298,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             observedUserPage = nil
             observedActivePage = nil
             receipts.removeAll()
-            linkNavigationAttempts.removeAll()
+            observedNavigationAttempts.removeAll()
         }
     }
 
@@ -453,65 +466,97 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
               result.fields == nil, result.page == nil else { throw ComputerUseBrowserError.pageChanged }
     }
 
-    func prepareLinkNavigation(linkID: String, evidence: ComputerUseBrowserPageEvidence) async throws -> ComputerUseBrowserLinkNavigationTarget {
+    func prepareLinkNavigation(linkID: String, evidence: ComputerUseBrowserPageEvidence) async throws -> ComputerUseBrowserNavigationTarget {
         guard evidence.page.isWellFormed,
               let link = evidence.page.links.first(where: { $0.id == linkID }),
               let destination = URL(string: link.destination).flatMap(Self.validatedURL) else {
             throw ComputerUseBrowserError.linkNavigationUnavailable
         }
-        let target = ComputerUseBrowserLinkNavigationTarget(evidence: evidence, linkID: linkID, destination: destination)
-        try await validateLinkNavigation(target)
+        let target = ComputerUseBrowserNavigationTarget(evidence: evidence, source: .link(linkID), destination: destination)
+        try await validateObservedDestination(target)
         return target
     }
 
-    private func validateLinkNavigation(_ target: ComputerUseBrowserLinkNavigationTarget) async throws {
+    func prepareFormQuery(controlID: String, evidence: ComputerUseBrowserPageEvidence) async throws -> ComputerUseBrowserNavigationTarget {
+        guard evidence.page.isWellFormed, evidence.page.controls.contains(where: { $0.id == controlID && $0.kind == "submit" && !$0.disabled }),
+              hasRequiredPresentation else { throw ComputerUseBrowserError.formQueryUnavailable }
+        let result = try await callDOM(.prepareFormQuery, arguments: ["documentID": evidence.documentID,
+            "snapshotID": evidence.page.id, "controlID": controlID], document: evidence.document)
+        guard hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
+        if result.status == "form-invalid" { throw ComputerUseBrowserError.formQueryInvalid }
+        guard result.status == "form-query-prepared", result.documentID == evidence.documentID, result.fields == nil,
+              result.page == nil, let query = result.formQuery, query.isWellFormed, query.controlID == controlID,
+              let destination = URL(string: query.destination).flatMap(Self.validatedURL),
+              Self.sameOrigin(destination, evidence.document.committedURL) else {
+            throw ComputerUseBrowserError.formQueryUnavailable
+        }
+        return .init(evidence: evidence, source: .formQuery(controlID: controlID, queryID: query.id), destination: destination)
+    }
+
+    private static func sameOrigin(_ lhs: URL, _ rhs: URL) -> Bool {
+        lhs.scheme?.lowercased() == rhs.scheme?.lowercased() && lhs.host?.lowercased() == rhs.host?.lowercased()
+            && (lhs.port ?? (lhs.scheme?.lowercased() == "https" ? 443 : 80)) == (rhs.port ?? (rhs.scheme?.lowercased() == "https" ? 443 : 80))
+    }
+
+    private func validateObservedDestination(_ target: ComputerUseBrowserNavigationTarget) async throws {
         guard hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
         let evidence = target.evidence
-        let result = try await callDOM(.validatePageLink, arguments: ["documentID": evidence.documentID,
-            "snapshotID": evidence.page.id, "linkID": target.linkID], document: evidence.document)
+        var arguments: [String: Any] = ["documentID": evidence.documentID, "snapshotID": evidence.page.id]
+        let command: ComputerUseBrowserDOMCommand, expectedStatus: String
+        switch target.source {
+        case .link(let id): arguments["linkID"] = id; command = .validatePageLink; expectedStatus = "link-current"
+        case .formQuery(let controlID, let queryID):
+            arguments["controlID"] = controlID; arguments["queryID"] = queryID
+            command = .validateFormQuery; expectedStatus = "form-query-current"
+        }
+        let result = try await callDOM(command, arguments: arguments, document: evidence.document)
         guard hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
-        guard result.status == "link-current", result.documentID == evidence.documentID,
-              result.fields == nil, result.page == nil else { throw ComputerUseBrowserError.linkNavigationUnavailable }
+        if result.status == "form-invalid" { throw ComputerUseBrowserError.formQueryInvalid }
+        guard result.status == expectedStatus, result.documentID == evidence.documentID,
+              result.fields == nil, result.page == nil else {
+            if case .formQuery = target.source { throw ComputerUseBrowserError.formQueryUnavailable }
+            throw ComputerUseBrowserError.linkNavigationUnavailable
+        }
     }
 
     /// Open the previously bound HTTP(S) destination with the native browser
     /// loader. This intentionally has navigation semantics, not DOM click
-    /// semantics: it dispatches no link event handler or form submission.
+    /// semantics: it dispatches no click, submit, formdata, or invalid event.
     /// A returned receipt proves one navigation, never the complete task.
-    func openLinkDestination(_ target: ComputerUseBrowserLinkNavigationTarget, operationID: String,
-                             willBeginEffect: () -> Void = {}) async throws -> ComputerUseBrowserLinkNavigationReceipt {
+    func openObservedDestination(_ target: ComputerUseBrowserNavigationTarget, operationID: String,
+                             willBeginEffect: () -> Void = {}) async throws -> ComputerUseBrowserNavigationReceipt {
         try Task.checkCancellation()
         guard hasOwnership(taskID: target.evidence.document.taskID),
               target.evidence.document.contextID == contextID else { throw ComputerUseBrowserError.ownershipLost }
         guard operationID.utf8.count == 64,
               operationID.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else {
-            throw ComputerUseBrowserError.linkNavigationUnavailable
+            throw ComputerUseBrowserError.observedNavigationUnavailable
         }
-        if let attempted = linkNavigationAttempts[operationID] {
+        if let attempted = observedNavigationAttempts[operationID] {
             guard attempted.payloadDigest == target.payloadDigest, let receipt = attempted.receipt else {
-                throw ComputerUseBrowserError.linkNavigationUncertain
+                throw ComputerUseBrowserError.observedNavigationUncertain
             }
             return receipt
         }
-        guard linkNavigationAttempts.count < 64 else { throw ComputerUseBrowserError.linkNavigationUnavailable }
-        try await validateLinkNavigation(target)
+        guard observedNavigationAttempts.count < 64 else { throw ComputerUseBrowserError.observedNavigationUnavailable }
+        try await validateObservedDestination(target)
         do {
             let document = try await navigate(taskID: target.evidence.document.taskID, operationID: operationID,
                 to: target.destination, from: target.evidence.document, willBeginEffect: {
-                    self.linkNavigationAttempts[operationID] = LinkNavigationAttempt(payloadDigest: target.payloadDigest)
+                    self.observedNavigationAttempts[operationID] = ObservedNavigationAttempt(payloadDigest: target.payloadDigest)
                     willBeginEffect()
                 })
-            let receipt = ComputerUseBrowserLinkNavigationReceipt(payloadDigest: target.payloadDigest, document: document)
-            linkNavigationAttempts[operationID]?.receipt = receipt
+            let receipt = ComputerUseBrowserNavigationReceipt(payloadDigest: target.payloadDigest, document: document)
+            observedNavigationAttempts[operationID]?.receipt = receipt
             return receipt
         } catch {
             // didFinish may have proved the native load before cancellation
             // interrupts subsequent document-identity observation. Keep that
             // fact without changing the interrupted caller's result.
-            if linkNavigationAttempts[operationID]?.payloadDigest == target.payloadDigest,
+            if observedNavigationAttempts[operationID]?.payloadDigest == target.payloadDigest,
                let document = receipts[operationID], document.contextID == contextID,
                document.taskID == target.evidence.document.taskID, document.requestedURL == target.destination {
-                linkNavigationAttempts[operationID]?.receipt = .init(payloadDigest: target.payloadDigest, document: document)
+                observedNavigationAttempts[operationID]?.receipt = .init(payloadDigest: target.payloadDigest, document: document)
             }
             throw error
         }
@@ -606,12 +651,13 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         guard result.scroll == nil || command == .scrollViewport || command == .viewportScrollReceipt else {
             throw ComputerUseBrowserError.unsupportedDocument
         }
+        guard result.formQuery == nil || command == .prepareFormQuery else { throw ComputerUseBrowserError.unsupportedDocument }
         guard result.documentID.utf8.count == 32,
               result.documentID.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else {
             throw ComputerUseBrowserError.pageChanged
         }
         if result.status == "authentication-required" {
-            guard result.fields == nil, result.page == nil, result.scroll == nil else { throw ComputerUseBrowserError.unsupportedDocument }
+            guard result.fields == nil, result.page == nil, result.scroll == nil, result.formQuery == nil else { throw ComputerUseBrowserError.unsupportedDocument }
             throw ComputerUseBrowserError.authenticationRequired
         }
         return result

@@ -1230,19 +1230,26 @@ final class ComputerUseHostTools {
 
     /// Host capability surface for a task compiler. Page IDs select observed
     /// destinations; they do not authorize a goal or bypass its effect journal.
-    func prepareOwnedBrowserLinkNavigation(linkID: String, evidence: ComputerUseBrowserPageEvidence) async throws -> ComputerUseBrowserLinkNavigationTarget {
+    func prepareOwnedBrowserLinkNavigation(linkID: String, evidence: ComputerUseBrowserPageEvidence) async throws -> ComputerUseBrowserNavigationTarget {
         try Task.checkCancellation()
         guard mayAct() else { throw ToolError.paused }
         guard let browserNavigationTask else { throw ComputerUseBrowserError.closed }
         return try await browserNavigationTask.prepareLinkNavigation(linkID: linkID, evidence: evidence)
     }
 
-    func openOwnedBrowserLinkDestination(_ target: ComputerUseBrowserLinkNavigationTarget, operationID: String,
-                                        willBeginEffect: () -> Void) async throws -> ComputerUseBrowserLinkNavigationReceipt {
+    func openOwnedBrowserDestination(_ target: ComputerUseBrowserNavigationTarget, operationID: String,
+                                        willBeginEffect: () -> Void) async throws -> ComputerUseBrowserNavigationReceipt {
         try Task.checkCancellation()
         guard mayAct() else { throw ToolError.paused }
         guard let browserNavigationTask else { throw ComputerUseBrowserError.closed }
-        return try await browserNavigationTask.openLinkDestination(target, operationID: operationID, willBeginEffect: willBeginEffect)
+        return try await browserNavigationTask.openObservedDestination(target, operationID: operationID, willBeginEffect: willBeginEffect)
+    }
+
+    func prepareOwnedBrowserFormQuery(controlID: String, evidence: ComputerUseBrowserPageEvidence) async throws -> ComputerUseBrowserNavigationTarget {
+        try Task.checkCancellation()
+        guard mayAct() else { throw ToolError.paused }
+        guard let browserNavigationTask else { throw ComputerUseBrowserError.closed }
+        return try await browserNavigationTask.prepareFormQuery(controlID: controlID, evidence: evidence)
     }
 
     func reacquireOwnedBrowserAfterUserControl(taskID: String) async throws {

@@ -4,6 +4,24 @@ import WebKit
 enum ComputerUseBrowserDOMCommand: String {
     case fields, read, edit, receipt, reobserve, preflight, pageIdentity, pageSnapshot, validatePageSnapshot
     case scrollViewport, viewportScrollReceipt, validatePageLink
+    case prepareFormQuery, validateFormQuery
+}
+
+/// Private adapter output. A GET query can contain server state or user input;
+/// never include this object in model context, chat, or diagnostic descriptions.
+struct ComputerUseBrowserFormQuery: Decodable, Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    let id: String
+    let controlID: String
+    let destination: String
+    var isWellFormed: Bool {
+        id.utf8.count == 32 && id.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) })
+            && controlID.first == "c" && (2...65).contains(controlID.utf8.count)
+            && controlID.dropFirst().utf8.allSatisfy({ (48...57).contains($0) })
+            && destination.utf8.count <= 8_192
+            && URL(string: destination).flatMap(ComputerUseOwnedBrowser.validatedURL) != nil
+    }
+    var description: String { "BrowserFormQuery" }
+    var debugDescription: String { description }
 }
 
 /// Until the whole browsing task compiler binds container roles, admit only
@@ -359,6 +377,7 @@ struct ComputerUseBrowserDOMReply: Decodable {
     let fields: [Field]?
     let page: ComputerUseBrowserPageSnapshot?
     let scroll: ComputerUseBrowserViewportScrollReceipt?
+    let formQuery: ComputerUseBrowserFormQuery?
 }
 
 /// Fixed host code in a separate WebKit script world. Page text, model output
@@ -377,6 +396,7 @@ enum ComputerUseBrowserDOM {
       const bindings = new Map(), operations = new Map();
       // Independent of form discovery, which retires text-operation bindings.
       const viewportOperations = new Map();
+      const formQueries = new Map();
       let lastPageSnapshot = null;
       const linkIdentityAttributes = new Set(['href', 'target', 'download', 'ping', 'rel', 'referrerpolicy', 'hreflang', 'type']);
       const pageControlIDs = new WeakMap(), pageFormIDs = new WeakMap(), pageOptionIDs = new WeakMap();
@@ -392,6 +412,9 @@ enum ComputerUseBrowserDOM {
       const choiceIndex = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'selectedIndex');
       const formGetters = Object.fromEntries(['action','method','target','enctype','noValidate'].map(key =>
         [key, Object.getOwnPropertyDescriptor(HTMLFormElement.prototype, key).get]));
+      const formElements = Object.getOwnPropertyDescriptor(HTMLFormElement.prototype, 'elements').get;
+      const formCharset = Object.getOwnPropertyDescriptor(HTMLFormElement.prototype, 'acceptCharset').get;
+      const queryAttributes = ['formaction','formmethod','formenctype','formtarget','formnovalidate','accept-charset','novalidate','checked','selected','wrap','dirname','required'];
       const probeDocument = doc.implementation.createHTMLDocument('');
       const reply = (status, fields) => ({status, documentID, ...(fields ? {fields} : {})});
       const parent = node => node.parentElement || (node.getRootNode() instanceof ShadowRoot ? node.getRootNode().host : null);
@@ -400,10 +423,14 @@ enum ComputerUseBrowserDOM {
         return false;
       };
       function retire(records) {
-        if (records.length > 10000) { for (const binding of bindings.values()) binding.valid = false; lastPageSnapshot = null; return; }
+        if (records.length > 10000) { for (const binding of bindings.values()) binding.valid = false; lastPageSnapshot = null; formQueries.clear(); return; }
         for (const record of records) {
+          for (const [id, query] of formQueries) {
+            if ((record.type === 'childList' && Array.from(record.removedNodes).some(node => query.members.some(member => contains(node, member)) || contains(node, query.form)))
+                || (record.type === 'attributes' && (contains(record.target, query.form) || query.members.some(member => contains(record.target, member))))) formQueries.delete(id);
+          }
           if (lastPageSnapshot) {
-            for (const binding of lastPageSnapshot.links.values()) {
+            for (const binding of [...lastPageSnapshot.links.values(), ...lastPageSnapshot.controls.values()]) {
               if ((record.type === 'childList' && Array.from(record.removedNodes).some(node => contains(node, binding.element)))
                   || (record.type === 'attributes' && contains(record.target, binding.element))
                   || (record.type === 'attributes' && record.target instanceof HTMLBaseElement)) {
@@ -426,12 +453,12 @@ enum ComputerUseBrowserDOM {
       }
       const observer = new MutationObserver(retire);
       const observationOptions = {subtree: true, childList: true, attributes: true,
-        attributeFilter: [...identityAttributes, ...scalarConstraintAttributes, ...choiceAttributes, ...linkIdentityAttributes], characterData: true};
+        attributeFilter: [...identityAttributes, ...scalarConstraintAttributes, ...choiceAttributes, ...linkIdentityAttributes, ...queryAttributes], characterData: true};
       observer.observe(doc, observationOptions);
       function synchronize() {
         retire(observer.takeRecords());
         if (root !== doc.documentElement) {
-          if (root) { documentID = nonce(); bindings.clear(); operations.clear(); viewportOperations.clear(); lastPageSnapshot = null; }
+          if (root) { documentID = nonce(); bindings.clear(); operations.clear(); viewportOperations.clear(); formQueries.clear(); lastPageSnapshot = null; }
           root = doc.documentElement;
         }
       }
@@ -679,7 +706,7 @@ enum ComputerUseBrowserDOM {
         return Object.values(value).every(n => Number.isFinite(n) && Math.abs(n) <= 10000000)
           && value.width > 0 && value.height > 0 && value.contentWidth >= 0 && value.contentHeight >= 0 ? value : null;
       }
-      function pageContent(linkBindings) {
+      function pageContent(linkBindings, controlBindings) {
         // Read rendered text nodes, never form values, innerHTML, scripts or
         // frame documents. Omitted surfaces and bounds remain explicit; this
         // is not a claim to have read every result on a website.
@@ -879,8 +906,71 @@ enum ComputerUseBrowserDOM {
           const size = encoder.encode(JSON.stringify(control)).length;
           if (bytes + size > 65536) { truncated = true; omittedControls = true; continue; }
           bytes += size; controls.push(control);
+          controlBindings.set(control.id, {element, form: element.form, metadata: control});
         }
         return {texts, links, controls, truncated, omittedEmbeddedContent, omittedControls, viewport: readViewport()};
+      }
+      function readFormQuery(binding) {
+        if (!binding || binding.metadata.kind !== 'submit' || binding.metadata.disabled || !binding.form) return {status:'unsupported'};
+        const form = binding.form, submitter = binding.element, metadata = binding.metadata.form;
+        if (!(form instanceof HTMLFormElement) || !form.isConnected || !metadata || metadata.method !== 'get') return {status:'unsupported'};
+        const target = submitter.hasAttribute('formtarget') ? submitter.getAttribute('formtarget')
+          : form.getAttribute('target') ?? doc.querySelector('base[target]')?.getAttribute('target') ?? '';
+        const charset = formCharset.call(form).trim();
+        if (!['','_self'].includes(target.toLowerCase()) || (charset ? charset.toLowerCase() !== 'utf-8' : doc.characterSet.toLowerCase() !== 'utf-8')) return {status:'unsupported'};
+        const destination = new URL(metadata.action), source = new URL(doc.URL);
+        if (!['http:','https:'].includes(destination.protocol) || destination.username || destination.password
+            || destination.origin !== source.origin) return {status:'unsupported'};
+        const collection = formElements.call(form);
+        if (collection.length > 128) return {status:'unsupported'};
+        const members = Array.from(collection);
+        if (!members.includes(submitter)) return {status:'unsupported'};
+        const entries = [], states = [];
+        let bytes = 0;
+        const newline = value => value.replace(/\r\n|\r|\n/g, '\r\n');
+        const add = (name, value) => {
+          if (name.length > 8192 || value.length > 8192) return false;
+          name = newline(name); value = newline(value);
+          bytes += encoder.encode(name).length + encoder.encode(value).length;
+          if (bytes > 65536 || entries.length >= 128) return false;
+          entries.push([name, value]); return true;
+        };
+        for (const element of members) {
+          if (element instanceof HTMLFieldSetElement || element instanceof HTMLOutputElement) { states.push(['non-submitting']); continue; }
+          if (!(element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement || element instanceof HTMLButtonElement)) return {status:'unsupported'};
+          const kind = element instanceof HTMLTextAreaElement ? 'textarea' : element instanceof HTMLSelectElement ? 'select' : element.type;
+          // Reject before reading any secret or file value. Hidden server
+          // fields are bound privately to the same-origin query only.
+          if (['password','file','image'].includes(kind) || element.hasAttribute('dirname')
+              || (kind === 'textarea' && element.wrap === 'hard')) return {status:'unsupported'};
+          const disabled = element.matches(':disabled'), name = element.name;
+          if (name.length > 8192 || element.id.length > 8192) return {status:'unsupported'};
+          if (disabled) { states.push([kind, name, true]); continue; }
+          const autocomplete = (element.getAttribute('autocomplete') || '').toLowerCase().split(/\s+/);
+          if (autocomplete.some(token => token === 'one-time-code' || token === 'username' || token.includes('password') || token.startsWith('cc-')))
+            return {status:'unsupported'};
+          if (kind !== 'hidden' && [name, element.id, labelFor(element).label].some(value =>
+              /\b(password|passcode|otp|verification[ _-]*code|security[ _-]*code|credit[ _-]*card|card[ _-]*number)\b/i.test(value))) return {status:'unsupported'};
+          if (!metadata.noValidate && element.willValidate && !element.validity.valid) return {status:'form-invalid'};
+          if (kind === 'select' && element.options.length > 128) return {status:'unsupported'};
+          const selected = kind === 'select' ? Array.from(element.options).map(option =>
+            [option.value, option.selected, option.disabled || (option.parentElement instanceof HTMLOptGroupElement && option.parentElement.disabled)]) : null;
+          const value = kind === 'select' ? '' : element.value;
+          if (name.length > 8192 || value.length > 8192 || (selected && selected.some(option => option[0].length > 8192))) return {status:'unsupported'};
+          states.push([kind, name, disabled, value, !!element.checked, selected]);
+          if (element.closest('datalist') || !name || (['submit','button','reset'].includes(kind) && element !== submitter)
+              || (['checkbox','radio'].includes(kind) && !element.checked)) continue;
+          if (selected) {
+            for (const option of selected) if (option[1] && !option[2] && !add(name, option[0])) return {status:'unsupported'};
+          } else if (!add(name, kind === 'hidden' && name.replace(/[A-Z]/g, c => c.toLowerCase()) === '_charset_' ? 'UTF-8' : value)) return {status:'unsupported'};
+        }
+        const signature = JSON.stringify([metadata, target, charset, states]);
+        if (encoder.encode(signature).length > 65536) return {status:'unsupported'};
+        // Constructing FormData would itself dispatch a page formdata event.
+        // Read native state without events and encode the bounded entry list.
+        destination.search = '?' + new URLSearchParams(entries).toString();
+        if (encoder.encode(destination.href).length > 8192) return {status:'unsupported'};
+        return {status:'form-query', destination:destination.href, signature, members, form};
       }
       function run(command, args) {
         // Read only the identity of this loaded Document, before inspecting
@@ -901,18 +991,22 @@ enum ComputerUseBrowserDOM {
               || JSON.stringify(readViewport()) !== JSON.stringify(operation.receipt.after)) return reply('uncertain');
           return {...reply('viewport-scroll-confirmed'), scroll: operation.receipt};
         }
-        if (['pageSnapshot', 'validatePageSnapshot', 'scrollViewport', 'validatePageLink'].includes(command)) {
+        if (['pageSnapshot', 'validatePageSnapshot', 'scrollViewport', 'validatePageLink', 'prepareFormQuery', 'validateFormQuery'].includes(command)) {
           const status = authenticationStatus();
           if (status) { lastPageSnapshot = null; return reply(status); }
           if (doc.readyState !== 'complete') return reply('stale');
-          const links = new Map(), content = pageContent(links), serialized = JSON.stringify(content);
+          const links = new Map(), controls = new Map(), content = pageContent(links, controls), serialized = JSON.stringify(content);
           if (command !== 'pageSnapshot') {
             // Re-read the projection, including rendering and resolved URLs.
             // Mutation records alone miss CSSOM/value-property changes.
             if (!lastPageSnapshot || args.documentID !== documentID || args.snapshotID !== lastPageSnapshot.id
                 || lastPageSnapshot.documentID !== documentID || lastPageSnapshot.url !== doc.URL
                 || lastPageSnapshot.scroller !== doc.scrollingElement || serialized !== lastPageSnapshot.serialized
-                || links.size !== lastPageSnapshot.links.size
+                || controls.size !== lastPageSnapshot.controls.size
+                || Array.from(controls).some(([id, binding]) => {
+                  const previous = lastPageSnapshot.controls.get(id);
+                  return !previous || previous.element !== binding.element || previous.form !== binding.form;
+                }) || links.size !== lastPageSnapshot.links.size
                 || Array.from(links).some(([id, binding]) => {
                   const previous = lastPageSnapshot.links.get(id);
                   return !previous || previous.element !== binding.element || previous.base !== binding.base
@@ -922,6 +1016,22 @@ enum ComputerUseBrowserDOM {
             if (command === 'validatePageLink') {
               const binding = links.get(args.linkID);
               return reply(binding?.canOpen ? 'link-current' : 'unsupported');
+            }
+            if (command === 'prepareFormQuery' || command === 'validateFormQuery') {
+              const current = readFormQuery(controls.get(args.controlID));
+              if (current.status !== 'form-query') return reply(current.status);
+              if (command === 'validateFormQuery') {
+                const previous = formQueries.get(args.queryID);
+                if (!previous || previous.snapshotID !== args.snapshotID || previous.controlID !== args.controlID
+                    || previous.form !== current.form || previous.signature !== current.signature
+                    || previous.destination !== current.destination || previous.members.length !== current.members.length
+                    || previous.members.some((member, index) => member !== current.members[index])) return reply('stale');
+                return reply('form-query-current');
+              }
+              if (formQueries.size >= 8) return reply('limit');
+              const id = nonce();
+              formQueries.set(id, {...current, snapshotID:args.snapshotID, controlID:args.controlID});
+              return {...reply('form-query-prepared'), formQuery:{id, controlID:args.controlID, destination:current.destination}};
             }
             if (!/^[a-f0-9]{64}$/.test(args.operationID) || !['UP','DOWN','LEFT','RIGHT'].includes(args.direction)) return reply('unsupported');
             if (viewportOperations.has(args.operationID)) return reply('duplicate');
@@ -948,7 +1058,8 @@ enum ComputerUseBrowserDOM {
             } catch (_) { return reply('uncertain'); }
           }
           const id = nonce();
-          lastPageSnapshot = {id, documentID, serialized, url: doc.URL, scroller: doc.scrollingElement, links};
+          formQueries.clear();
+          lastPageSnapshot = {id, documentID, serialized, url: doc.URL, scroller: doc.scrollingElement, links, controls};
           return {status: 'page-snapshot', documentID, page: {id, ...content}};
         }
         if (command !== 'fields' && args.documentID !== documentID) return reply('stale');

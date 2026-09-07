@@ -167,13 +167,17 @@ final class ComputerUseBrowserNavigationTask {
         try await browser.validatePageEvidence(evidence)
     }
 
-    func prepareLinkNavigation(linkID: String, evidence: ComputerUseBrowserPageEvidence) async throws -> ComputerUseBrowserLinkNavigationTarget {
+    func prepareLinkNavigation(linkID: String, evidence: ComputerUseBrowserPageEvidence) async throws -> ComputerUseBrowserNavigationTarget {
         try await browser.prepareLinkNavigation(linkID: linkID, evidence: evidence)
     }
 
-    func openLinkDestination(_ target: ComputerUseBrowserLinkNavigationTarget, operationID: String,
-                             willBeginEffect: () -> Void) async throws -> ComputerUseBrowserLinkNavigationReceipt {
-        try await browser.openLinkDestination(target, operationID: operationID, willBeginEffect: willBeginEffect)
+    func prepareFormQuery(controlID: String, evidence: ComputerUseBrowserPageEvidence) async throws -> ComputerUseBrowserNavigationTarget {
+        try await browser.prepareFormQuery(controlID: controlID, evidence: evidence)
+    }
+
+    func openObservedDestination(_ target: ComputerUseBrowserNavigationTarget, operationID: String,
+                             willBeginEffect: () -> Void) async throws -> ComputerUseBrowserNavigationReceipt {
+        try await browser.openObservedDestination(target, operationID: operationID, willBeginEffect: willBeginEffect)
     }
 
     func scrollViewport(_ direction: OSAtlasScrollDirection, evidence: ComputerUseBrowserPageEvidence,
