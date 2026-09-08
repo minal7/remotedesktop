@@ -240,9 +240,10 @@ final class ComputerUseTaskExecution {
                 guard try await satisfies(invariant) else { throw ComputerUseTaskExecutionError.incompleteOutcome(invariant) }
             }
             if journal.statuses[index] != .planned {
-                // A capability may complete a provably unstarted native tail
-                // of this exact attempted operation under the existing lease.
-                // This never invokes perform again or substitutes an ID.
+                // A capability may start an original native operation or its
+                // remaining tail only after proving that part never began,
+                // under this lease and with its original preconditions. This
+                // never invokes perform again, resets history or changes IDs.
                 if let finishPendingEffect {
                     try await finishPendingEffect(step, contract.effectIdentity(for: step))
                     try checkOwnership()

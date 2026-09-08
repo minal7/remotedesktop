@@ -4817,6 +4817,158 @@ final class ComputerUseBrowserFormBindingTests: XCTestCase {
 }
 
 @MainActor
+final class ComputerUseBrowserUnsentInputTests: XCTestCase {
+    func testAbsentOriginalOperationsSupportExactModesCopiesChoicesAndScalarsOnlyOnce() async throws {
+        for mode in ["replace", "append", "insert", "copy", "choice", "date", "number"] {
+            let fixture = try await make(kind: mode)
+            defer { fixture.close() }
+            let fields = try await fixture.target.fields(), query = try field("Query", fields)
+            let operation: ComputerUseTextGoalOperation
+            switch mode {
+            case "copy": operation = .copyField(sourceTargetID: try field("Source", fields).snapshot.targetID, targetID: query.snapshot.targetID, mode: .replaceAll)
+            default:
+                let value = mode == "choice" ? "Premium" : mode == "date" ? "2026-11-21" : mode == "number" ? "2" : "Paris"
+                operation = .enterText(.init(targetID: query.snapshot.targetID, mode: mode == "append" ? .append : mode == "insert" ? .insert : .replaceAll, text: value))
+            }
+            let contract = try ComputerUseTextTaskContract(taskID: "fixture", prompt: "Controlled original input",
+                fields: fields, operations: [operation], unchangedTargetIDs: [try field("Keep", fields).snapshot.targetID])
+            let step = try XCTUnwrap(contract.steps.first), id = ComputerUseTaskContract.digest(["unsent", mode])
+            let first = try await fixture.target.continueUnsentInput(step, operationID: id)
+            XCTAssertTrue(first)
+            let current = try await fixture.target.read(targetID: step.targetID)
+            XCTAssertEqual(current?.value, step.after)
+            let receipt = try await fixture.target.didDispatchInput(operationID: id)
+            XCTAssertTrue(receipt)
+            let repeated = try await fixture.target.continueUnsentInput(step, operationID: id)
+            XCTAssertFalse(repeated)
+            try await fixture.wait { fixture.server.count("/input") == 1 }
+            if ["choice", "date", "number"].contains(mode) { try await fixture.wait { fixture.server.count("/change") == 1 } }
+            XCTAssertEqual(fixture.server.count("/input"), 1)
+        }
+    }
+
+    func testChangedOriginalObjectsValuesSelectionSourcesAndPreservationBlockBeforeInput() async throws {
+        let mutations = [
+            "value": "q.value = 'different';",
+            "object": "q.replaceWith(q.cloneNode(true));",
+            "label": "q.parentElement.firstChild.textContent = 'Different';",
+            "selection": "const caret = q.selectionStart === 0 ? 1 : 0; q.setSelectionRange(caret, caret);",
+            "source": "document.getElementById('source').value = 'Rome';",
+            "preservation": "document.getElementById('keep').value = 'changed';",
+            "option": "q.options[1].disabled = true;",
+        ]
+        for (mutation, script) in mutations.sorted(by: { $0.key < $1.key }) {
+            let fixture = try await make(kind: mutation == "option" ? "choice" : "text", mutation: script)
+            defer { fixture.close() }
+            let fields = try await fixture.target.fields(), query = try field("Query", fields)
+            let operation: ComputerUseTextGoalOperation = mutation == "source"
+                ? .copyField(sourceTargetID: try field("Source", fields).snapshot.targetID, targetID: query.snapshot.targetID, mode: .replaceAll)
+                : .enterText(.init(targetID: query.snapshot.targetID, mode: mutation == "selection" ? .insert : .replaceAll,
+                    text: mutation == "option" ? "Premium" : "Paris"))
+            let contract = try ComputerUseTextTaskContract(taskID: "fixture", prompt: "Controlled original input",
+                fields: fields, operations: [operation], unchangedTargetIDs: [try field("Keep", fields).snapshot.targetID])
+            try await mutate(fixture)
+            let id = ComputerUseTaskContract.digest(["drift", mutation])
+            do { _ = try await fixture.target.continueUnsentInput(try XCTUnwrap(contract.steps.first),
+                operationID: id); XCTFail("Original precondition changed: " + mutation) }
+            catch { XCTAssertTrue(error as? ComputerUseTextTaskError == .staleTarget
+                || error as? ComputerUseTextTaskError == .incompleteOutcome, mutation) }
+            let provedAbsent = try await fixture.target.retireUnsentInputs(operationIDs: [id])
+            XCTAssertTrue(provedAbsent, "The failed original precondition must precede the native attempt marker")
+            XCTAssertEqual(fixture.server.count("/input"), 0); XCTAssertEqual(fixture.server.count("/change"), 0)
+        }
+    }
+
+    func testRetirementAndLostLedgerCannotTurnAbsenceIntoNewAuthority() async throws {
+        for mode in ["retirement", "rediscovery", "root"] {
+            let fixture = try await make(mutation: mode == "root" ? "document.documentElement.replaceWith(document.documentElement.cloneNode(true));" : "")
+            defer { fixture.close() }
+            let fields = try await fixture.target.fields(), query = try field("Query", fields)
+            let contract = try ComputerUseTextTaskContract(taskID: "fixture", prompt: "Controlled original input", fields: fields,
+                edits: [.init(targetID: query.snapshot.targetID, mode: .replaceAll, text: "Paris")])
+            let step = try XCTUnwrap(contract.steps.first), id = ComputerUseTaskContract.digest(["lost-ledger", mode])
+            if mode == "retirement" {
+                let retired = try await fixture.target.retireUnsentInputs(operationIDs: [id])
+                XCTAssertTrue(retired)
+                let continued = try await fixture.target.continueUnsentInput(step, operationID: id)
+                XCTAssertFalse(continued)
+            } else {
+                if mode == "rediscovery" {
+                    _ = try await ComputerUseBrowserTextTarget(browser: fixture.browser, document: fixture.document, requiresFrontmost: false).fields()
+                } else { try await mutate(fixture) }
+                do { _ = try await fixture.target.continueUnsentInput(step, operationID: id); XCTFail("An empty new ledger is not original absence") }
+                catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+            }
+            XCTAssertEqual(fixture.server.count("/input"), 0)
+        }
+    }
+
+    func testCompletedAndUncertainNativeAttemptsCannotRepeatWhenTheOriginalValueReturns() async throws {
+        for mode in ["text", "number"] {
+            let fixture = try await make(kind: mode, inputHandler: "q.value = '\(mode == "number" ? "1" : "old")';")
+            defer { fixture.close() }
+            let fields = try await fixture.target.fields(), query = try field("Query", fields)
+            let edit = ComputerUseTextPlanEdit(targetID: query.snapshot.targetID, mode: .replaceAll, text: mode == "number" ? "2" : "Paris")
+            let contract = try ComputerUseTextTaskContract(taskID: "fixture", prompt: "Controlled original input", fields: fields, edits: [edit])
+            let id = ComputerUseTaskContract.digest(["native-attempt", mode])
+            do { try await fixture.target.apply(edit, expected: query.snapshot, operationID: id)
+                XCTAssertEqual(mode, "text") }
+            catch { XCTAssertEqual(mode, "number"); XCTAssertEqual(error as? ComputerUseTextEditError, .deliveryUncertain) }
+            let current = try await fixture.target.read(targetID: query.snapshot.targetID)
+            XCTAssertEqual(current?.value, query.snapshot.value)
+            let continued = try await fixture.target.continueUnsentInput(try XCTUnwrap(contract.steps.first), operationID: id)
+            XCTAssertFalse(continued, "A native attempt remains present even after its effect was undone")
+            try await fixture.wait { fixture.server.count("/input") == 1 }
+            XCTAssertEqual(fixture.server.count("/input"), 1); XCTAssertEqual(fixture.server.count("/change"), 0)
+        }
+    }
+
+    func testOriginalRepeatedStepsKeepDistinctInputIdentitiesAndRequiredEarlierValues() async throws {
+        let fixture = try await make()
+        defer { fixture.close() }
+        let fields = try await fixture.target.fields(), query = try field("Query", fields)
+        let edit = ComputerUseTextPlanEdit(targetID: query.snapshot.targetID, mode: .append, text: " Paris")
+        let contract = try ComputerUseTextTaskContract(taskID: "fixture", prompt: "Append Paris twice", fields: fields, edits: [edit, edit],
+            unchangedTargetIDs: [try field("Keep", fields).snapshot.targetID])
+        let ids = ["first", "second"].map { ComputerUseTaskContract.digest(["repeated-original-input", $0]) }
+        do { _ = try await fixture.target.continueUnsentInput(contract.steps[1], operationID: ids[1]); XCTFail("The preceding value is missing") }
+        catch { XCTAssertEqual(error as? ComputerUseTextTaskError, .staleTarget) }
+        for index in 0..<2 {
+            let sent = try await fixture.target.continueUnsentInput(contract.steps[index], operationID: ids[index])
+            XCTAssertTrue(sent)
+            let repeated = try await fixture.target.continueUnsentInput(contract.steps[index], operationID: ids[index])
+            XCTAssertFalse(repeated)
+        }
+        let current = try await fixture.target.read(targetID: query.snapshot.targetID)
+        XCTAssertEqual(current?.value, "old Paris Paris")
+        try await fixture.wait { fixture.server.count("/input") == 2 }
+    }
+
+    private func field(_ label: String, _ fields: [ComputerUseTextField]) throws -> ComputerUseTextField {
+        try XCTUnwrap(fields.first { $0.label == label })
+    }
+    private func mutate(_ fixture: DOMFixture) async throws {
+        try await fixture.wait { fixture.server.count("/signal") == 1 }
+        fixture.server.releaseHeldResponses()
+        try await fixture.wait { fixture.server.count("/changed") == 1 }
+    }
+    private func make(kind: String = "text", mutation: String = "", inputHandler: String = "") async throws -> DOMFixture {
+        let control = kind == "choice"
+            ? "<select id='q'><option value='E'>Economy</option><option value='P'>Premium</option></select>"
+            : "<input id='q' type='\(kind == "date" ? "date" : kind == "number" ? "number" : "text")' value='\(kind == "date" ? "2026-01-01" : kind == "number" ? "1" : "old")'>"
+        return try await DOMFixture(body: """
+            <label>Query\(control)</label><label>Source<input id='source' value='Paris'></label><label>Keep<input id='keep' value='keep'></label>
+            <script>
+            const q = document.getElementById('q');
+            q.addEventListener('input', () => { fetch('/input'); \(inputHandler) });
+            q.addEventListener('change', () => fetch('/change'));
+            fetch('/signal').then(() => { \(mutation) fetch('/changed'); });
+            </script>
+            """, heldSignal: true)
+    }
+}
+
+@MainActor
 private final class DOMFixture {
     let server: OwnedBrowserHTTPFixture
     let browser: ComputerUseOwnedBrowser

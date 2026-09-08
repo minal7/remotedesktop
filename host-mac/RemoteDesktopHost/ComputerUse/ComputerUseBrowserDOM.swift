@@ -3,7 +3,7 @@ import WebKit
 
 enum ComputerUseBrowserDOMCommand: String {
     case fields, read, edit, receipt, reobserve, preflight, pageIdentity, pageSnapshot, validatePageSnapshot
-    case scrollViewport, viewportScrollReceipt, validatePageLink, finishPendingChange
+    case scrollViewport, viewportScrollReceipt, validatePageLink, finishPendingChange, continueUnsentInput
     case prepareFormQuery, validateFormQuery, bindPageFields, formFields, extendFormFields, inspectFormRequirements, retireUnsentInputs
 }
 
@@ -1378,7 +1378,15 @@ enum ComputerUseBrowserDOM {
           if (typeof args.operationID !== 'string' || args.operationID.length !== 64) return reply('unsupported');
           return reply(operations.get(args.operationID) === 'dispatched' ? 'dispatched' : 'unproven');
         }
-        if (['fields', 'read', 'edit', 'reobserve', 'preflight'].includes(command)) {
+        if (command === 'continueUnsentInput') {
+          if (args.inputLedgerID !== inputLedgerID || doc.readyState !== 'complete') return reply('stale');
+          if (typeof args.operationID !== 'string' || !/^[a-f0-9]{64}$/.test(args.operationID)) return reply('unsupported');
+          // Absence is meaningful only in this original, non-evicting ledger.
+          // No await separates this proof from the usual preconditions and
+          // attempted marker below. Even a failed native attempt is not absent.
+          if (operations.has(args.operationID) || retiredInputs.has(args.operationID)) return reply('unproven');
+        }
+        if (['fields', 'read', 'edit', 'continueUnsentInput', 'reobserve', 'preflight'].includes(command)) {
           const status = authenticationStatus();
           if (status) return reply(status);
         }
@@ -1402,7 +1410,8 @@ enum ComputerUseBrowserDOM {
         const binding = bindings.get(args.id), current = binding && snapshot(binding);
         if (!current) return reply('stale');
         if (command === 'read') return reply('ok', [current]);
-        if (command !== 'edit' || typeof args.operationID !== 'string' || args.operationID.length !== 64 || typeof args.payload !== 'string') return reply('unsupported');
+        if (!['edit', 'continueUnsentInput'].includes(command) || typeof args.operationID !== 'string'
+            || !/^[a-f0-9]{64}$/.test(args.operationID) || typeof args.payload !== 'string') return reply('unsupported');
         if (operations.has(args.operationID) || retiredInputs.has(args.operationID)) return reply('duplicate');
         if (operations.size >= 64 || encoder.encode(args.payload).length > 65536) return reply('limit');
         if (current.value !== args.before || (args.mode === 'insert' &&
@@ -1924,6 +1933,31 @@ final class ComputerUseBrowserTextTarget {
     /// use the dispatch overload to retain every per-step requirement.
     func apply(_ edit: ComputerUseTextPlanEdit, expected: ComputerUseTextSnapshot, operationID: String,
                copySource: ComputerUseTextSnapshot? = nil, requiredValues: [String: String] = [:]) async throws {
+        _ = try await sendInput(edit, expected: expected, operationID: operationID,
+            copySource: copySource, requiredValues: requiredValues, continuingUnsent: false)
+    }
+
+    /// The caller confirms the original durable attempt under execution
+    /// exclusion. This can start only a provably absent native operation in
+    /// the retained ledger, using its original compiled preconditions/payload.
+    /// It cannot retry a native attempt, change a plan or adopt another field.
+    func continueUnsentInput(_ step: ComputerUseTextTaskContract.Step, operationID: String) async throws -> Bool {
+        guard step.mode != .insert || step.insertionSelection != nil else { throw ComputerUseTextTaskError.invalidPlan }
+        let expected = ComputerUseTextSnapshot(targetID: step.targetID, value: step.before,
+            selection: step.insertionSelection ?? NSRange(location: step.isChoiceSelection ? NSNotFound : 0, length: 0),
+            isEditable: true, isSecure: false)
+        // Outside insert mode, selection is not a precondition. The native
+        // dispatcher uses the current control kind/range when applying input.
+        return try await joiningCompletion {
+            try await sendInput(.init(targetID: step.targetID, mode: step.mode, text: step.payload),
+                expected: expected, operationID: operationID, copySource: step.copySource,
+                requiredValues: step.requiredValues, continuingUnsent: true, compiledAfter: step.after)
+        }
+    }
+
+    private func sendInput(_ edit: ComputerUseTextPlanEdit, expected: ComputerUseTextSnapshot, operationID: String,
+                           copySource: ComputerUseTextSnapshot?, requiredValues: [String: String],
+                           continuingUnsent: Bool, compiledAfter: String? = nil) async throws -> Bool {
         try validate()
         guard edit.targetID == expected.targetID, let documentID, let id = targets[edit.targetID],
               edit.text.utf8.count <= ComputerUseTextEditor.maximumPayloadBytes else { throw ComputerUseTextTaskError.staleTarget }
@@ -1935,6 +1969,7 @@ final class ComputerUseBrowserTextTarget {
         }
         guard let textRange = Range(range, in: expected.value) else { throw ComputerUseTextEditError.invalidSelection }
         let after = expected.value.replacingCharacters(in: textRange, with: edit.text)
+        guard compiledAfter.map({ after.utf8.elementsEqual($0.utf8) }) ?? true else { throw ComputerUseTextTaskError.invalidPlan }
         guard after.utf8.count <= ComputerUseTextEditor.maximumObservedValueBytes else { throw ComputerUseTextEditError.payloadTooLarge }
         guard requiredValues.count <= 16 else { throw ComputerUseTextTaskError.invalidPlan }
         let requirements: [[String: String]] = try requiredValues.keys.sorted().map { targetID in
@@ -1959,14 +1994,23 @@ final class ComputerUseBrowserTextTarget {
             arguments["copySourceID"] = sourceID
             arguments["copySourceValue"] = copySource.value
         }
-        let reply = try await browser.callDOM(.edit, arguments: arguments, document: document)
+        if continuingUnsent {
+            guard let inputLedgerID else { throw ComputerUseBrowserError.pageChanged }
+            arguments["inputLedgerID"] = inputLedgerID
+        }
+        let reply = try await browser.callDOM(continuingUnsent ? .continueUnsentInput : .edit, arguments: arguments, document: document)
         try validate()
+        if continuingUnsent {
+            guard reply.documentID == documentID, reply.inputLedgerID == inputLedgerID else { throw ComputerUseBrowserError.pageChanged }
+            if reply.status == "unproven" { return false }
+        }
         if reply.status == "stale" { throw ComputerUseTextTaskError.staleTarget }
         guard reply.documentID == documentID else { throw ComputerUseTextEditError.deliveryUncertain }
         if reply.status == "constraint-changed" { throw ComputerUseTextTaskError.incompleteOutcome }
         if reply.status == "unrepresentable" { throw ComputerUseTextEditError.valueNotRepresentable }
         guard reply.status == "attempted" else { throw ComputerUseTextEditError.deliveryUncertain }
         // A separate read by the transaction engine proves the resulting value.
+        return true
     }
 
     private func validate() throws {

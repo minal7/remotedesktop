@@ -429,9 +429,12 @@ final class ComputerUseNativeTextExecutor {
                 { operationID in try await target.joiningCompletion { try await target.didDispatchInput(operationID: operationID) } }
             },
             finishPendingInput: browserTarget.map { target in
-                { operationID in
+                { step, operationID in
                     try session.confirmPendingAttempt()
-                    _ = try await target.finishPendingChange(operationID: operationID)
+                    let finished = try await target.finishPendingChange(operationID: operationID)
+                    if !finished {
+                        _ = try await target.continueUnsentInput(step, operationID: operationID)
+                    }
                 }
             },
             persist: { journal in

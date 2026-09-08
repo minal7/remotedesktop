@@ -1,0 +1,46 @@
+# Continuing saved attempts whose browser input never started
+
+Source checkpoint after `30542ae`. The [working repair list](../../../TODO.md) remains open. This checkpoint adds source behavior and regression specifications; it does not establish runtime, model or real-site readiness.
+
+## First-principles failure
+
+The host must save an attempt before asking a browser to change a field. That ordering prevents an input from disappearing from history after a crash. It also creates a legitimate interval in which the host journal says attempted but the browser has never received the input: a failed directory commit, cancellation during a final read, or interruption before dispatch can stop there.
+
+The previous current-form runner could reopen storage, retain its original plan and inspect the exact native receipt. If the receipt was absent, however, it remained uncertain forever. That was necessary when absence could mean lost evidence. It was unnecessarily limiting when the original browser ledger still existed and could prove that the operation had never started.
+
+An unchanged value is insufficient proof: an input handler may have undone the value, or a user may have restored it. A new empty ledger is also insufficient: discovery or document replacement can erase the evidence. Resetting the journal to planned would conceal the original attempt, and generating a new plan or operation ID would not answer whether the original input began.
+
+The usable proof is narrower: the exact original operation ID is absent from the exact original, non-evicting native input ledger, has not been retired, and its original preconditions still hold immediately before the setter. The absence check, preconditions and native attempted marker must share one synchronous execution. This permits starting that original input once while preserving the host's attempted history.
+
+## Source changes
+
+1. [The isolated DOM dispatcher](../../../host-mac/RemoteDesktopHost/ComputerUse/ComputerUseBrowserDOM.swift) now accepts an internal `continueUnsentInput` command. It checks the original document and input-ledger identities, document readiness, the exact operation-ID format, and absence from both the operation map and retired-input set. It then uses the same synchronous field binding, before-value, insert-selection, copy-source, preservation, earlier-value, representation and payload checks as ordinary input. There is no asynchronous gap before the native attempted marker and setter.
+2. Any native operation entry blocks this path, whether dispatched, partially attempted or awaiting its change event. A retired operation also remains unusable. Field rediscovery and document-root replacement renew the ledger, so their empty maps cannot prove original absence. The dispatcher still records the native attempt before the setter and notifications; cancellation or page-handler failure cannot reopen it.
+3. [The browser text adapter](../../../host-mac/RemoteDesktopHost/ComputerUse/ComputerUseBrowserDOM.swift) builds the input from the original compiled text step, including payload, before/after values, insert selection, copy source and all required values. It checks the derived outcome against the compiled outcome. Selection remains a precondition only for insert mode. Ordinary and resumed input share argument construction and response validation. Failed/cancelled native calls join completion before returning to the leased runner.
+4. [The text-task recovery callback](../../../host-mac/RemoteDesktopHost/ComputerUse/ComputerUseTextTask.swift) now receives the original compiled step as well as its existing effect ID. The shared runner does not invoke its ordinary `perform` callback again, reset statuses or invent another ID.
+5. [The current-form executor](../../../host-mac/RemoteDesktopHost/ComputerUse/ComputerUseNativeTextExecutor.swift) confirms its exact saved attempt under the fresh execution lease, first tries the existing proven pending-change completion, and then permits original-input continuation only if that path did not finish. A native operation already present in the ledger cannot enter the new path. Independent native receipt and current-outcome checks still decide verification and completion.
+6. The research-form adapter's callback signature is updated, but its recovery policy is unchanged. It retains its separate no-input/prefix retirement and replanning capability. The new unchanged-plan behavior is composed through the current-form executor; native AX still lacks independent no-dispatch evidence and remains conservative.
+
+## Prepared coverage
+
+Eight new methods are registered in source, and one existing cancellation method is revised:
+
+- Five methods in the new `ComputerUseBrowserUnsentInputTests` class, inside [the existing DOM test source](../../../host-mac/RemoteDesktopHostTests/ComputerUseBrowserDOMTests.swift), cover replace/append/insert/copy/choice/date/number inputs; changed field objects, labels, before-values, selection, sources, preserved values and options; retired/lost ledgers; completed and partially attempted native input whose value returns to its original state; and distinct original repeated steps. Negative precondition cases also require the original native ledger to prove no attempted input before revoking that fixture ID.
+- Three [current-form methods](../../../host-mac/RemoteDesktopHostTests/ComputerUseBrowserPendingChangeTests.swift) cover a failed attempt commit followed by a failed verification commit, unchanged original task/contract/operation identities, no replanning or rediscovery, login during resumed input followed by the exact pending change, goal mismatch refusal, user-control gating, and cancellation with execution exclusion through native completion.
+- The prior cancellation-at-read case now specifies that the original browser input can start after original-ledger absence is proved. Actual native attempts, lost ledgers and the native AX fixture still retain no-replay requirements.
+
+The fixtures independently count input/change events and check their order where relevant. These are controlled adapter/planner specifications, not actual-model interpretation, account-login or provider qualification. The direct DOM tests exercise the adapter boundary without manufacturing a host recovery claim; production continuation is reachable through the retained task's confirmed journal attempt.
+
+## Source checks
+
+Seven Swift files passed syntax parsing only. Production DOM JavaScript and eleven fixture-script variants passed JavaScript syntax checks only. The existing test file is already in the Xcode target; the project property list and source registrations were checked. The default inventory selects **1090** methods and the [focused inventory](browser-unsent-input-inventory.json) selects **407**, with exact identifiers matching source. Documentation links and whitespace were checked.
+
+No typecheck, build, assertion/test execution, model inference, app launch, browser/computer-use execution or installed-app replacement occurred. No held-out set was inspected or run. This checkpoint created source and documentation only, without disposable runtime output. Performance optimization, 8 GB resource qualification and authorized RTX 3080 model work remain deferred; SSH to the designated desktop is still unverified.
+
+## Remaining work toward complete browsing tasks
+
+1. **Verified research answers.** The whole browser driver still needs to assemble a complete answer from verified travel/concert/movie candidates and the full original goal. Finish offer association, dates, location, quantity, availability, totals/fees, comparisons and public source links. A successful form transaction or search navigation is not a completed ticket-finding task.
+2. **Changed requirements and controls.** This continuation is valid only for the unchanged original plan and preconditions. Changed or replaced required objects, intentionally revised criteria, obsolete preservation, and delivered work whose outcome later changes need explicit remaining-goal reconciliation. Retain prior delivery history while justifying any new correction from the complete goal. Do not treat a new ID as sufficient permission.
+3. **Other native phases and restart.** A native attempt without a provably missing tail remains unresolved. Complete phase-specific evidence/reconciliation and independent native AX receipts. Reconstruct durable parent/native/browser task state across process or session loss; a journal or equal visible value alone cannot restore it.
+4. **Provider and login continuity.** Audit target-provider lifetime before it returns a target, document transitions, login redirects and remaining-goal retention through explicit user takeover/handback. Finish custom date/location/party controls and JavaScript/POST form semantics where supported. Qualify the actual host and phone control flow.
+5. **Qualification and model selection.** After development readiness and explicit authorization, compile and run the controlled suites, then qualify the actual local model and bounded provider scenarios. Separate application failures from model interpretation failures before changing or adapting models. Preserve unused held-out sets, the lightweight inference requirement and the 8 GB Mac target.

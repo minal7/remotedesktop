@@ -6,6 +6,115 @@ import XCTest
 final class ComputerUseBrowserPendingChangeTests: XCTestCase {
     private let prompt = "Find concerts in Paris. Leave Reference unchanged. Do not buy."
 
+    func testCurrentFormStartsProvenUnsentInputUnderTheOriginalIDsAcrossTwoFailedWrites() async throws {
+        let fixture = try await make(login: false)
+        defer { fixture.close() }
+        let setup = unsentExecutor(fixture, failingWrites: [1, 2]), taskID = ResearchDriverFixture.root
+        do { _ = try await setup.executor.execute(taskID: taskID, prompt: prompt, progress: { _ in }); XCTFail("Attempt write failed before input") }
+        catch { XCTAssertEqual(error as? ComputerUseTaskJournalStore.StoreError, .unavailable) }
+        let before = try XCTUnwrap(ComputerUseTaskJournalStore(directory: setup.directory).load(taskID: taskID))
+        XCTAssertEqual(before.statuses, [.attempted, .planned])
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit || $0 == .continueUnsentInput }.count, 0)
+        do { _ = try await setup.executor.execute(taskID: taskID, prompt: prompt, progress: { _ in }); XCTFail("Verification write failed after the one input") }
+        catch { XCTAssertEqual(error as? ComputerUseTaskJournalStore.StoreError, .unavailable) }
+        let intermediate = try XCTUnwrap(ComputerUseTaskJournalStore(directory: setup.directory).load(taskID: taskID))
+        XCTAssertEqual(intermediate.statuses, [.verified, .planned]); XCTAssertEqual(intermediate.stepIDs, before.stepIDs)
+        for _ in 0..<2 {
+            let result = try await setup.executor.execute(taskID: taskID, prompt: prompt, progress: { _ in })
+            guard case .completed? = result else { return XCTFail("Original task must finish without rediscovery") }
+        }
+        try await wait { fixture.server.count("/category-input") == 1 && fixture.server.count("/category-change") == 1
+            && fixture.server.count("/city-input") == 1 && fixture.server.count("/input-order?value=category-input%2Ccategory-change%2Ccity-input") == 1 }
+        let after = try XCTUnwrap(ComputerUseTaskJournalStore(directory: setup.directory).load(taskID: taskID))
+        XCTAssertEqual(after.stepIDs, before.stepIDs); XCTAssertEqual(after.contractDigest, before.contractDigest)
+        XCTAssertEqual(after.statuses, [.verified, .verified]); XCTAssertNil(after.retirementDigest)
+        XCTAssertEqual(setup.planner.calls, 1); XCTAssertEqual(setup.state.stores, 4)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .fields }.count, 1)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .continueUnsentInput }.count, 1)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 1)
+    }
+
+    func testLoginDuringProvenUnsentInputRetainsItsMissingChangeAndExactGoal() async throws {
+        let fixture = try await make()
+        defer { fixture.close() }
+        let setup = unsentExecutor(fixture, failingWrites: [1]), taskID = ResearchDriverFixture.root
+        do { _ = try await setup.executor.execute(taskID: taskID, prompt: prompt, progress: { _ in }); XCTFail("Attempt storage failed") }
+        catch { XCTAssertEqual(error as? ComputerUseTaskJournalStore.StoreError, .unavailable) }
+        let before = try XCTUnwrap(ComputerUseTaskJournalStore(directory: setup.directory).load(taskID: taskID))
+        do { _ = try await setup.executor.execute(taskID: taskID, prompt: prompt + " Changed goal", progress: { _ in }); XCTFail("Resume must retain the complete goal") }
+        catch { XCTAssertEqual(error as? ComputerUseTextTaskError, .journalMismatch) }
+        do { _ = try await setup.executor.execute(taskID: taskID, prompt: prompt, progress: { _ in }); XCTFail("Input reveals authentication") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .authenticationRequired) }
+        try await wait { fixture.server.count("/signal") == 1 && fixture.server.count("/category-input") == 1 }
+        fixture.state.allowed = false
+        do { _ = try await setup.executor.execute(taskID: taskID, prompt: prompt, progress: { _ in }); XCTFail("User control remains exclusive") }
+        catch { XCTAssertEqual(error as? ComputerUseTextEditError, .interrupted) }
+        try await clearLogin(fixture)
+        fixture.state.allowed = true
+        _ = try await setup.executor.execute(taskID: taskID, prompt: prompt, progress: { _ in })
+        try await wait { fixture.server.count("/category-change") == 1 && fixture.server.count("/city-input") == 1 }
+        let after = try XCTUnwrap(ComputerUseTaskJournalStore(directory: setup.directory).load(taskID: taskID))
+        XCTAssertEqual(after.stepIDs, before.stepIDs); XCTAssertEqual(after.statuses, [.verified, .verified])
+        XCTAssertEqual(fixture.server.count("/category-input"), 1); XCTAssertEqual(fixture.server.count("/category-change"), 1)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .continueUnsentInput }.count, 1)
+        XCTAssertEqual(setup.planner.calls, 1)
+    }
+
+    func testCancellationDuringProvenUnsentDispatchJoinsItsCallbackBeforeReleasingTheLease() async throws {
+        let fixture = try await make(login: false)
+        defer { fixture.close() }
+        let setup = unsentExecutor(fixture, failingWrites: [1]), taskID = ResearchDriverFixture.root
+        do { _ = try await setup.executor.execute(taskID: taskID, prompt: prompt, progress: { _ in }); XCTFail("Attempt storage failed") }
+        catch { XCTAssertEqual(error as? ComputerUseTaskJournalStore.StoreError, .unavailable) }
+        var running: Task<ComputerUseExecutionResult?, Error>?, excluded = false
+        fixture.state.onCommand = { command in
+            guard command == .continueUnsentInput else { return }
+            fixture.state.onCommand = nil
+            do {
+                let other = try ComputerUseTaskJournalStore(directory: setup.directory)
+                let saved = try other.load(taskID: taskID), lease = try other.acquireExecution(taskID: taskID, expected: saved)
+                lease.release(); XCTFail("Native continuation must retain exact execution exclusion")
+            } catch { excluded = error as? ComputerUseTaskJournalStore.StoreError == .busy }
+            running?.cancel()
+        }
+        running = Task { try await setup.executor.execute(taskID: taskID, prompt: self.prompt, progress: { _ in }) }
+        do { _ = try await running?.value; XCTFail("Cancellation cannot publish completion") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        running = nil
+        XCTAssertTrue(excluded)
+        _ = try fixture.browser.acquireCurrentDocument(taskID: taskID)
+        let other = try ComputerUseTaskJournalStore(directory: setup.directory)
+        let saved = try other.load(taskID: taskID), lease = try other.acquireExecution(taskID: taskID, expected: saved)
+        lease.release()
+        _ = try await setup.executor.execute(taskID: taskID, prompt: prompt, progress: { _ in })
+        try await wait { fixture.server.count("/category-input") == 1 && fixture.server.count("/category-change") == 1 && fixture.server.count("/city-input") == 1 }
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .continueUnsentInput }.count, 1)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 1)
+        XCTAssertEqual(setup.planner.calls, 1)
+    }
+
+    private func unsentExecutor(_ fixture: ResearchDriverFixture, failingWrites: Set<Int>)
+        -> (executor: ComputerUseNativeTextExecutor, planner: PendingChangeTextPlanner, state: UnsentWriteState, directory: URL) {
+        let directory = fixture.directory.appendingPathComponent("Unsent Native Input"), state = UnsentWriteState()
+        let planner = PendingChangeTextPlanner()
+        let executor = ComputerUseNativeTextExecutor(injector: InputInjector(), mayAct: { fixture.state.allowed }, journalDirectory: directory,
+            planner: planner, browserTargetProvider: { taskID in
+                ComputerUseBrowserTextTarget(browser: fixture.browser,
+                    document: try fixture.browser.acquireCurrentDocument(taskID: taskID), requiresFrontmost: false)
+            }, makeJournalStore: { directory in
+                state.stores += 1
+                return try ComputerUseTaskJournalStore(directory: directory, afterReplacement: {
+                    try MainActor.assumeIsolated {
+                        state.writes += 1
+                        if failingWrites.contains(state.writes) { throw ComputerUseTaskJournalStore.StoreError.unavailable }
+                    }
+                })
+            })
+        return (executor, planner, state, directory)
+    }
+
+    private final class UnsentWriteState { var writes = 0, stores = 0 }
+
     func testCurrentFormReopensFailedTailVerificationAndPreparesQueryOnlyFromReconciledHistory() async throws {
         let fixture = try await make()
         defer { fixture.close() }
@@ -110,21 +219,12 @@ final class ComputerUseBrowserPendingChangeTests: XCTestCase {
             _ = try fixture.browser.acquireCurrentDocument(taskID: taskID)
             let other = try ComputerUseTaskJournalStore(directory: directory), saved = try other.load(taskID: taskID)
             let lease = try other.acquireExecution(taskID: taskID, expected: saved); lease.release()
-            if boundary == "read" {
-                // This read follows the durable attempt but precedes input.
-                // The general current-form runner cannot retire that attempt
-                // from native absence yet, so Resume must withhold replay.
-                do { _ = try await executor.execute(taskID: taskID, prompt: prompt, progress: { _ in }); XCTFail("No receipt for this attempt") }
-                catch { XCTAssertEqual(error as? ComputerUseTextTaskError, .uncertainEffect) }
-                XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 0)
-                XCTAssertEqual(planner.calls, 1)
-                continue
-            }
             _ = try await executor.execute(taskID: taskID, prompt: prompt, progress: { _ in })
             try await wait { fixture.server.count("/category-input") == 1 && fixture.server.count("/city-input") == 1
                 && fixture.server.count("/category-change") == 1 }
             XCTAssertEqual(fixture.server.count("/category-change"), 1)
-            XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 2)
+            XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, boundary == "read" ? 1 : 2)
+            XCTAssertEqual(fixture.state.commands.filter { $0 == .continueUnsentInput }.count, boundary == "read" ? 1 : 0)
             XCTAssertEqual(planner.calls, boundary == "preflight" ? 2 : 1)
         }
     }

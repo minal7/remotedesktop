@@ -183,7 +183,7 @@ final class ComputerUseBrowserResearchFormStage {
                 let value = try await target.didDispatchInput(operationID: operationID)
                 try check()
                 return value
-            }, finishPendingInput: { [self] operationID in
+            }, finishPendingInput: { [self] _, operationID in
                 try check(); try lease.assertOwnership()
                 guard let persisted else { throw ComputerUseTextTaskError.journalMismatch }
                 try store.confirmPendingAttempt(persisted)
