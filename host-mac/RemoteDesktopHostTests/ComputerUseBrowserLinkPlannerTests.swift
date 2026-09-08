@@ -159,7 +159,7 @@ final class ComputerUseBrowserLinkPlannerTests: XCTestCase {
         let executor = ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in nil }, browserResearch: fixture.driver)
         let result = try await executor.execute(taskID: ResearchDriverFixture.root, modelPrompt: "Unrelated assistant history",
             currentUserPrompt: ResearchDriverFixture.prompt, conversation: [], tools: fixture.tools, progress: { _ in })
-        guard case .userInterventionRequired = result else { return XCTFail("A selected page is not a verified research answer") }
+        guard case .browserResearchProgress = result else { return XCTFail("A selected page is not a verified research answer") }
         XCTAssertEqual(fixture.server.count("/search?q=concerts"), 1); XCTAssertEqual(fixture.server.count("/beta"), 1)
         XCTAssertEqual(fixture.server.count("/details"), 0)
         XCTAssertTrue(fixture.policy.goals.isEmpty, "The model adapter, not the earlier fixed-choice policy, supplies this proposal")

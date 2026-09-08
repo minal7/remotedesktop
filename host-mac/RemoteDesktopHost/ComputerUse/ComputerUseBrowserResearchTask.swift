@@ -1013,14 +1013,15 @@ final class ComputerUseBrowserResearchTask {
         // Authentication observation may inspect a manually reached page,
         // but its contents cannot enter result inference outside task scope.
         guard sourcePolicy == nil || sourcePolicyInstalled else { throw Failure.navigationUnavailable }
+        guard let interpretation, interpretation.proposal.input == goal else { throw Failure.interpretationRequired }
         try retainedEvidence.requireCapacity()
         let evidence = try await observeOwnedPage(goal: goal, enforceSources: true)
         let page = try ComputerUseBrowserResultPageInput(page: evidence.page)
-        let proposal = try await resultPlanner.propose(goal: goal, page: page)
+        let proposal = try await resultPlanner.propose(interpretation: interpretation.proposal, page: page)
         try checkCurrent(goal)
         let answerPolicy = researchSources?.answerPolicy
         guard answerPolicy == nil || answerPolicy?.goalRevision == goal.digest else { throw Failure.goalChanged }
-        guard let interpretation, interpretation.proposal.input == goal else { throw Failure.interpretationRequired }
+        guard self.interpretation?.proposal == interpretation.proposal else { throw Failure.interpretationRequired }
         let bound = try await browser.prepareResultCandidates(proposal, goal: goal, evidence: evidence,
             answerPolicy: answerPolicy, interpretation: interpretation.proposal)
         try checkCurrent(goal)

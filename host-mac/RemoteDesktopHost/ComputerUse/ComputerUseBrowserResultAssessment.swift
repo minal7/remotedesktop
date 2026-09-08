@@ -10,6 +10,7 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
         case missingQuote, ambiguousQuotes, unparsedQuote
         case quotedValueMatches, quotedValueConflicts, incompatibleLiteral
         case reviewMixedOffers, reviewUnresolved, reviewPageContext, reviewQualifiedPrice
+        case reviewRequirementSupported, reviewRequirementConflict, reviewRequirementUnresolved
         case sourceOriginPermitted, sourceOriginExcluded, sourceUnconfigured, incompletePage
     }
     struct Requirement: Equatable, Sendable {
@@ -52,6 +53,7 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
 
     init(interpretation: ComputerUseBrowserGoalProposal, reading: ComputerUseBrowserResultCandidates) throws {
         guard interpretation.input.digest == reading.goalRevision else { throw ComputerUseBrowserResultError.goalChanged }
+        try reading.review?.validateInterpretation(interpretation)
         goalRevision = interpretation.input.digest; interpretationDigest = interpretation.digest
         readingIdentity = reading.requirementAssessmentIdentity
         requirements = interpretation.requirements.map {
@@ -70,7 +72,7 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
                 return Quote(fieldIndex: fieldIndex, kind: field.kind, textIDs: field.textIDs, source: source, literal: Self.parse(source, kind: field.kind))
             }
             let incomplete = pageIncomplete || !candidate.unprojectedTextIDs.isEmpty || !candidate.unprojectedLinkIDs.isEmpty
-            let evaluations = interpretation.requirements.map { requirement -> Evaluation in
+            let evaluations = interpretation.requirements.enumerated().map { requirementIndex, requirement -> Evaluation in
                 func result(_ status: Status, quotes: [Int] = []) -> Evaluation {
                     .init(requirementID: requirement.id, status: status, quoteIndices: quotes)
                 }
@@ -84,8 +86,16 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
                     case .permitted: return result(.sourceOriginPermitted)
                     }
                 }
+                let semantic = review?.requirements?[requirementIndex]
+                let canReview = ComputerUseBrowserResultReviewInput.permitsCandidateJudgment(requirement)
+                let semanticFailure: Status? = !canReview || semantic == nil || semantic?.judgment == .supports ? nil
+                    : (semantic?.judgment == .conflicts ? .reviewRequirementConflict : .reviewRequirementUnresolved)
                 guard case .bound(let condition)? = conditions[requirement.id] else {
-                    return result([.price, .date, .quantity].contains(requirement.field) ? .uncompiledRequirement : .needsSemanticVerification)
+                    if [.price, .date, .quantity].contains(requirement.field) { return result(.uncompiledRequirement) }
+                    if let semanticFailure { return result(semanticFailure) }
+                    // This is the reviewer's cited interpretation, not native
+                    // verification of geography, availability or goal success.
+                    return result(canReview && semantic?.judgment == .supports ? .reviewRequirementSupported : .needsSemanticVerification)
                 }
                 // The number of discovered cards is not the number of unique,
                 // qualifying offers, nor evidence of inventory for a party.
@@ -111,6 +121,7 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
                         if fields.contains(where: { $0.price != .exact }) { return result(.reviewUnresolved, quotes: indices) }
                     }
                 }
+                if let semanticFailure { return result(semanticFailure, quotes: indices) }
                 guard indices.count == 1 else { return result(.ambiguousQuotes, quotes: indices) }
                 guard let literal = quotes[indices[0]].literal else { return result(.unparsedQuote, quotes: indices) }
                 switch condition.compareLiteral(literal) {

@@ -204,14 +204,14 @@ final class ComputerUseBrowserResultReviewTests: XCTestCase {
                 searchPlanner: fixture.search, actionPlanner: BrowserResearchActionFixture(), formPlanner: BrowserResearchFormFixture(), planning: ComputerUseModelBrowserResearchPlanning(providers: [fixture.policy.provider], linkPlanner: links),
                 now: { ResearchDriverFixture.date }, timeZoneIdentifier: { "America/Los_Angeles" })
             let result = try await driver.executeBrowserResearch(taskID: ResearchDriverFixture.root, prompt: ResearchDriverFixture.prompt, tools: fixture.tools, progress: { _ in })
-            guard case .userInterventionRequired = result else { return XCTFail("Even an exact label is not a completed research answer") }
+            guard case .browserResearchProgress = result else { return XCTFail("Even an exact label is not a completed research answer") }
             let input = try XCTUnwrap(links.inputs.first), context = try F.object(Data(input.contextJSON.utf8))
             let goal = try XCTUnwrap(context["goal"] as? [String: Any]), reviews = try XCTUnwrap(context["field_review"] as? [[String: Any]])
             XCTAssertEqual(goal["request"] as? String, ResearchDriverFixture.prompt)
             XCTAssertEqual(reviews[0]["association"] as? String, association)
             let assessment = try XCTUnwrap(context["requirement_assessment"] as? [String: Any])
             let candidates = try XCTUnwrap(assessment["candidates"] as? [[String: Any]])
-            XCTAssertEqual(candidates[0]["requirements"] as? [String], ["needsSemanticVerification", expected.rawValue, "needsSemanticVerification"])
+            XCTAssertEqual(candidates[0]["requirements"] as? [String], ["reviewRequirementUnresolved", expected.rawValue, "needsSemanticVerification"])
             XCTAssertEqual(fixture.server.count("/search?q=concerts"), 1); XCTAssertEqual(fixture.server.count("/details"), 0)
             let owner = try fixture.owner(), batch = try await owner.readCandidates(), review = try XCTUnwrap(batch.review)
             try await fixture.browser.validateResultReview(review, reading: batch, goal: owner.input)
@@ -309,6 +309,162 @@ final class ComputerUseBrowserResultReviewTests: XCTestCase {
     }
 }
 
+@MainActor
+final class ComputerUseBrowserRequirementReviewTests: XCTestCase {
+    private typealias F = ResultReviewFixture
+    private typealias Review = ComputerUseBrowserResultReview
+
+    private func input(snapshot: ComputerUseBrowserPageSnapshot? = nil) async throws
+        -> (ComputerUseBrowserGoalProposal, ComputerUseBrowserResultPageInput, ComputerUseBrowserResultProposal, ComputerUseBrowserResultReviewInput) {
+        let goal = try F.goal(), interpretation = try await ResultReviewGoal().propose(goal)
+        let (page, proposal, _) = try F.input(goal: goal, snapshot: snapshot)
+        return (interpretation, page, proposal, try .init(goal: goal, page: page, proposal: proposal, interpretation: interpretation))
+    }
+    private func content(_ judgments: [(String, [String])], association: String = "singleOffer") throws -> String {
+        let fieldScope = association == "singleOffer" ? "offer" : "unknown"
+        return try F.json(["candidates":[["association":association,
+            "fields":[F.field(fieldScope, "notPrice"), F.field(fieldScope, association == "singleOffer" ? "exact" : "unknown")],
+            "requirements":judgments.enumerated().map { ["requirement":$0.offset, "judgment":$0.element.0, "texts":$0.element.1] as [String: Any] }]]])
+    }
+
+    func testRequirementReviewRetainsExactGoalFragmentsAndProducesOnlyCitedJudgments() async throws {
+        let (interpretation, _, proposal, input) = try await self.input()
+        let context = try F.object(Data(input.contextJSON.utf8)), requirements = try XCTUnwrap(context["requirements"] as? [[String: Any]])
+        XCTAssertEqual(requirements.count, 3)
+        for (index, requirement) in interpretation.requirements.enumerated() {
+            XCTAssertEqual(requirements[index]["index"] as? Int, index)
+            XCTAssertEqual(requirements[index]["source"] as? String, interpretation.source(of: requirement))
+            XCTAssertEqual(requirements[index]["sourceByteOffset"] as? Int, requirement.sourceByteOffset)
+            XCTAssertEqual(requirements[index]["role"] as? String, requirement.role.rawValue)
+        }
+        XCTAssertEqual(requirements.map { $0["candidate_judgment_allowed"] as? Bool }, [true, true, false])
+        XCTAssertFalse(input.contextJSON.contains(interpretation.input.taskID))
+        XCTAssertFalse(input.contextJSON.contains("callback-secret"))
+        let review = try Review.decode(content: content([("supports", ["t1"]), ("conflicts", ["t2", "t4"]), ("unknown", [])]), input: input)
+        XCTAssertEqual(review.candidates[0].requirements?.map(\.judgment), [.supports, .conflicts, .unknown])
+        XCTAssertEqual(review.candidates[0].requirements?[1].textIDs, ["t2", "t4"])
+        let bound = try proposal.reviewed(review, goal: interpretation.input, interpretation: interpretation)
+        XCTAssertEqual(bound.review, review)
+        XCTAssertThrowsError(try proposal.reviewed(review, goal: interpretation.input), "Losing the interpreted requirement scope cannot reuse a review")
+        XCTAssertFalse(String(reflecting: review).contains("t4"))
+    }
+
+    func testRequirementReviewRejectsMissingReorderedInventedAndUnjustifiedJudgments() async throws {
+        let (_, _, _, input) = try await self.input()
+        let valid = try content([("supports", ["t1"]), ("supports", ["t2"]), ("unknown", [])])
+        let variants = [try F.content(), try content([("supports", ["t1"])]),
+            valid.replacingOccurrences(of: "\"requirement\":1", with: "\"requirement\":0"),
+            valid.replacingOccurrences(of: "\"requirement\":1", with: "\"requirement\":1.5"),
+            valid.replacingOccurrences(of: "\"judgment\":\"supports\"", with: "\"judgment\":\"verified\""),
+            try content([("supports", []), ("supports", ["t2"]), ("unknown", [])]),
+            try content([("supports", ["t4"]), ("supports", ["t2"]), ("unknown", [])]),
+            try content([("supports", ["t1"]), ("conflicts", []), ("unknown", [])]),
+            try content([("supports", ["t1"]), ("supports", ["t1", "t4"]), ("unknown", [])]),
+            try content([("supports", ["t1"]), ("supports", ["invented"]), ("unknown", [])]),
+            try content([("supports", ["t1"]), ("supports", ["l1"]), ("unknown", [])]),
+            try content([("supports", ["t1", "t1"]), ("supports", ["t2"]), ("unknown", [])]),
+            try content([("supports", ["t1"]), ("supports", ["t2"]), ("supports", ["t1"])]),
+            try content([("supports", ["t1"]), ("unknown", []), ("unknown", [])], association: "mixedOffers")]
+        for value in variants { XCTAssertThrowsError(try Review.decode(content: value, input: input), value) }
+        let (_, _, _, incomplete) = try await self.input(snapshot: F.page(truncated: true))
+        XCTAssertThrowsError(try Review.decode(content: valid, input: incomplete))
+    }
+
+    func testRequirementCitationsCannotBorrowAnotherCandidateOrCutASelectedField() async throws {
+        let goal = try F.goal(), interpretation = try await ResultReviewGoal().propose(goal)
+        let snapshot = ComputerUseBrowserPageSnapshot(id: String(repeating: "a", count: 32), texts: [
+            .init(id: "t1", containerID: "g1", text: "Concert Alpha"),
+            .init(id: "t2", containerID: "g1", text: "USD 40"), .init(id: "t3", containerID: "g1", text: "Plus fees"),
+            .init(id: "t4", containerID: "g2", text: "Concert Beta"), .init(id: "t5", containerID: "g2", text: "USD 30"),
+            .init(id: "t6", containerID: "g2", text: "Unclassified Beta qualification")], links: [],
+            truncated: false, omittedEmbeddedContent: false,
+            containers: [.init(id: "g0", parentID: nil, kind: "body"), .init(id: "g1", parentID: "g0", kind: "article"),
+                .init(id: "g2", parentID: "g0", kind: "article")], omittedStructure: false)
+        let page = try ComputerUseBrowserResultPageInput(page: snapshot)
+        let proposal = try ComputerUseBrowserResultProposal.decode(content: F.json(["candidates":[
+            ["container":"g1", "fields":[["kind":"title", "texts":["t1"]], ["kind":"price", "texts":["t2", "t3"]]], "links":[]],
+            ["container":"g2", "fields":[["kind":"title", "texts":["t4"]], ["kind":"price", "texts":["t5"]]], "links":[]]]]), input: page, goal: goal)
+        let input = try ComputerUseBrowserResultReviewInput(goal: goal, page: page, proposal: proposal, interpretation: interpretation)
+        for references in [["t2"], ["t2", "t3", "t5"], ["t2", "t3", "t6"], ["t2", "t3"]] {
+            var first = try F.object(Data(content([("supports", ["t1"]), ("supports", references), ("unknown", [])]).utf8))
+            let other = try F.object(Data(content([("supports", ["t4"]), ("supports", ["t5"]), ("unknown", [])]).utf8))
+            first["candidates"] = try XCTUnwrap(first["candidates"] as? [[String: Any]]) + XCTUnwrap(other["candidates"] as? [[String: Any]])
+            let encoded = try F.json(first)
+            if references == ["t2", "t3"] { XCTAssertNoThrow(try Review.decode(content: encoded, input: input)) }
+            else { XCTAssertThrowsError(try Review.decode(content: encoded, input: input)) }
+        }
+    }
+
+    func testChangedInterpretationOrCitationCannotReuseReviewIdentity() async throws {
+        let (interpretation, _, proposal, input) = try await self.input()
+        let review = try Review.decode(content: content([("supports", ["t1"]), ("supports", ["t2"]), ("unknown", [])]), input: input)
+        let changed = try Review.decode(content: content([("unknown", []), ("supports", ["t2"]), ("unknown", [])]), input: input)
+        XCTAssertNotEqual(review.digest, changed.digest)
+        let rows: [[String: Any]] = interpretation.requirements.map { requirement in
+            ["turn":requirement.sourceTurnIndex, "source":interpretation.source(of: requirement)!,
+             "role":requirement.role.rawValue, "field":requirement.field == .price ? "other" : requirement.field.rawValue,
+             "relation":requirement.relation.rawValue, "values":requirement.values]
+        }
+        let other = try ComputerUseBrowserGoalProposal.decode(content: F.json(["disposition":"research", "requirements":rows,
+            "question":["topic":"none", "requirements":[]]]), input: interpretation.input)
+        XCTAssertThrowsError(try proposal.reviewed(review, goal: interpretation.input, interpretation: other))
+        XCTAssertThrowsError(try review.validateInterpretation(other))
+    }
+
+    func testV2CompositeUsesOneExistingReviewCallAndRetainsTheCompleteMatrix() async throws {
+        let (interpretation, page, proposal, input) = try await self.input()
+        let response = try F.envelope(content([("supports", ["t1"]), ("supports", ["t2"]), ("unknown", [])]))
+        let transport = ResultReviewTransport(response: response)
+        let composite = ComputerUseReviewedBrowserResultPlanner(reader: FixedReviewReading(value: proposal), reviewer: try F.local(transport))
+        let result = try await composite.propose(interpretation: interpretation, page: page)
+        XCTAssertEqual(result.review?.candidates[0].requirements?.count, 3)
+        let calls = await transport.calls, requests = await transport.requests
+        XCTAssertEqual(calls.counts, 1); XCTAssertEqual(calls.completions, 1)
+        let body = try F.object(XCTUnwrap(requests.first?.httpBody)), format = try XCTUnwrap(body["response_format"] as? [String: Any])
+        let schema = try XCTUnwrap(format["json_schema"] as? [String: Any])
+        XCTAssertEqual(schema["name"] as? String, "browser_result_review_v2")
+        let messages = try XCTUnwrap(body["messages"] as? [[String: String]])
+        XCTAssertEqual(messages[1]["content"], input.contextJSON)
+        let reused = ComputerUseReviewedBrowserResultPlanner(reader: FixedReviewReading(value: result), reviewer: try F.local(transport))
+        _ = try await reused.propose(interpretation: interpretation, page: page)
+        let after = await transport.calls
+        XCTAssertEqual(after.completions, 1, "An exactly bound review needs no additional model call")
+        let stale = ComputerUseReviewedBrowserResultPlanner(reader: FixedReviewReading(value: result), reviewer: try F.local(transport))
+        do { _ = try await stale.propose(goal: interpretation.input, page: page); XCTFail("A v2 review cannot lose its requirement binding") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserResultReviewError, .inputChanged) }
+    }
+
+    func testNativeResearchAssessmentKeepsContradictionsAndUnknownsAheadOfMatchingNumbers() async throws {
+        let cases: [(String, String, ComputerUseBrowserResultAssessment.Status)] = [("supports", "50", .quotedValueMatches),
+            ("supports", "30", .quotedValueConflicts), ("conflicts", "50", .reviewRequirementConflict), ("unknown", "50", .reviewRequirementUnresolved)]
+        for (judgment, limit, expected) in cases {
+            let fixture = try await ResearchDriverFixture.make(candidateBodyHTML: "<p>USD 40</p>")
+            defer { fixture.close() }
+            let reviewer = ResultReviewReply(); reviewer.requirementPriceJudgment = judgment
+            reviewer.requirementCategoryJudgment = "supports"
+            let links = ResultReviewLinks(), reader = ComputerUseReviewedBrowserResultPlanner(reader: NativeReviewReading(), reviewer: reviewer)
+            let driver = ComputerUseBrowserResearchDriver(goalPlanner: ResultReviewGoal(priceLimit: limit), resultPlanner: reader, searchPlanner: fixture.search,
+                actionPlanner: fixture.actions, formPlanner: fixture.forms,
+                planning: ComputerUseModelBrowserResearchPlanning(providers: [fixture.policy.provider], linkPlanner: links),
+                now: { ResearchDriverFixture.date }, timeZoneIdentifier: { "America/Los_Angeles" })
+            let result = try await driver.executeBrowserResearch(taskID: ResearchDriverFixture.root, prompt: "Find concerts under USD \(limit). Do not buy.",
+                tools: fixture.tools, progress: { _ in })
+            guard case .browserResearchProgress = result else { return XCTFail("Cited judgments remain incomplete research") }
+            let owner = try fixture.owner(), batch = try await owner.revalidateCandidates()
+            XCTAssertEqual(batch.requirementAssessment?.candidates[0].requirements[0].status, .reviewRequirementSupported)
+            XCTAssertEqual(batch.requirementAssessment?.candidates[0].requirements[1].status, expected)
+            XCTAssertEqual(reviewer.inputs.first?.interpretation?.input, owner.input)
+            let archive = try owner.researchEvidence(for: owner.input), recalled = try archive.recall(0, goal: owner.input)
+            let observation = try XCTUnwrap(recalled["observation"] as? [String: Any])
+            let reviews = try XCTUnwrap(observation["field_review"] as? [[String: Any]])
+            let requirements = try XCTUnwrap(reviews[0]["requirements"] as? [[String: Any]])
+            XCTAssertEqual(requirements[1]["judgment"] as? String, judgment)
+            XCTAssertTrue(try XCTUnwrap(requirements[1]["texts"] as? [String]).allSatisfy { $0.hasPrefix("r0/") })
+            XCTAssertEqual(fixture.server.count("/details"), 0)
+        }
+    }
+}
+
 private enum ResultReviewFixture {
     static func goal(taskID: String = "private-review-root", prompt: String = "Find concerts under USD 50. Do not buy.") throws -> ComputerUseBrowserGoalInput {
         try .init(taskID: taskID, prompt: prompt, referenceDate: Date(timeIntervalSince1970: 1_800_000_000), timeZoneIdentifier: "America/Los_Angeles")
@@ -377,6 +533,8 @@ private final class ResultReviewReply: ComputerUseBrowserResultReviewPlanning {
     var inputs: [ComputerUseBrowserResultReviewInput] = []
     var replacement: ComputerUseBrowserResultReview?
     var association = "singleOffer", price = "exact", scope = "offer", titleScope = "offer"
+    var requirementPriceJudgment: String?
+    var requirementCategoryJudgment: String?
     var beforeReply: (@MainActor () async -> Void)?
     func propose(_ input: ComputerUseBrowserResultReviewInput) async throws -> ComputerUseBrowserResultReview {
         inputs.append(input)
@@ -385,7 +543,20 @@ private final class ResultReviewReply: ComputerUseBrowserResultReviewPlanning {
         let context = try ResultReviewFixture.object(Data(input.contextJSON.utf8)), page = try XCTUnwrap(context["page"] as? [String: Any])
         let records = try XCTUnwrap(page["records"] as? [[String: Any]])
         let qualifiers: [String] = price == "qualified" ? [try XCTUnwrap(records.first { $0["text"] as? String == "From" }?["id"] as? String)] : []
-        return try .decode(content: ResultReviewFixture.content(association: association, price: price, scope: scope, titleScope: titleScope, qualifiers: qualifiers), input: input)
+        let content = try ResultReviewFixture.content(association: association, price: price, scope: scope, titleScope: titleScope, qualifiers: qualifiers)
+        guard let interpretation = input.interpretation else { return try .decode(content: content, input: input) }
+        var body = try ResultReviewFixture.object(Data(content.utf8))
+        var candidates = try XCTUnwrap(body["candidates"] as? [[String: Any]])
+        candidates[0]["requirements"] = interpretation.requirements.enumerated().map { index, requirement -> [String: Any] in
+            if requirement.field == .category, let requirementCategoryJudgment {
+                return ["requirement":index, "judgment":requirementCategoryJudgment, "texts":input.fieldTextIDs(candidate: 0, field: 0)]
+            }
+            let priceMatch = requirement.field == .price && association == "singleOffer" && scope == "offer" && price == "exact"
+            return ["requirement":index, "judgment":priceMatch ? (requirementPriceJudgment ?? "supports") : "unknown",
+                "texts":priceMatch ? input.fieldTextIDs(candidate: 0, field: 1) : []]
+        }
+        body["candidates"] = candidates
+        return try .decode(content: ResultReviewFixture.json(body), input: input)
     }
 }
 
@@ -406,10 +577,11 @@ private struct NativeReviewReading: ComputerUseBrowserResultPlanning {
 }
 
 private struct ResultReviewGoal: ComputerUseBrowserGoalPlanning {
+    var priceLimit = "50"
     func propose(_ input: ComputerUseBrowserGoalInput) async throws -> ComputerUseBrowserGoalProposal {
         let rows: [[String: Any]] = [
             ["turn":0, "source":"Find concerts ", "role":"outcome", "field":"category", "relation":"unspecified", "values":[]],
-            ["turn":0, "source":"under USD 50. ", "role":"condition", "field":"price", "relation":"below", "values":[]],
+            ["turn":0, "source":"under USD \(priceLimit). ", "role":"condition", "field":"price", "relation":"below", "values":[]],
             ["turn":0, "source":"Do not buy.", "role":"prohibition", "field":"other", "relation":"unspecified", "values":[]]]
         return try .decode(content: ResultReviewFixture.json(["disposition":"research", "requirements":rows, "question":["topic":"none", "requirements":[]]]), input: input)
     }

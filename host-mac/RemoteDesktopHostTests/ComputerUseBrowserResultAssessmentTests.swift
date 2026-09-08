@@ -241,7 +241,11 @@ final class ComputerUseBrowserResultAssessmentTests: XCTestCase {
                 planning: ComputerUseModelBrowserResearchPlanning(providers: [fixture.policy.provider], linkPlanner: links),
                 now: { ResearchDriverFixture.date }, timeZoneIdentifier: { "America/Los_Angeles" })
             let result = try await driver.executeBrowserResearch(taskID: input.taskID, prompt: input.prompt, tools: fixture.tools, progress: { _ in })
-            guard case .userInterventionRequired = result else { throw ComputerUseBrowserResearchDriver.Failure.invalidProposal }
+            if empty {
+                guard case .userInterventionRequired = result else { throw ComputerUseBrowserResearchDriver.Failure.invalidProposal }
+            } else {
+                guard case .browserResearchProgress = result else { throw ComputerUseBrowserResearchDriver.Failure.invalidProposal }
+            }
             let owner = try fixture.owner(), batch = try await owner.readCandidates()
             return .init(fixture: fixture, owner: owner, interpretation: interpretation, batch: batch, links: links, goals: goals)
         } catch { fixture.close(); throw error }

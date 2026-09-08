@@ -263,7 +263,11 @@ private struct EvidenceReviewFixture: ComputerUseBrowserResultReviewPlanning {
         let context = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(input.contextJSON.utf8)) as? [String: Any])
         let page = try XCTUnwrap(context["page"] as? [String: Any]), records = try XCTUnwrap(page["records"] as? [[String: Any]])
         let id = try XCTUnwrap(records.first { $0["text"] as? String == "From t1 l1 g1" }?["id"] as? String)
-        let data = try JSONSerialization.data(withJSONObject: ["candidates":[["association":"singleOffer", "fields":[["scope":"offer", "price":"notPrice", "qualifiers":[id]]]]]])
+        var candidate: [String: Any] = ["association":"singleOffer", "fields":[["scope":"offer", "price":"notPrice", "qualifiers":[id]]]]
+        if input.interpretation != nil {
+            candidate["requirements"] = (0..<input.requirementCount).map { ["requirement":$0, "judgment":"unknown", "texts":[]] as [String: Any] }
+        }
+        let data = try JSONSerialization.data(withJSONObject: ["candidates":[candidate]])
         return try .decode(content: String(decoding: data, as: UTF8.self), input: input)
     }
 }

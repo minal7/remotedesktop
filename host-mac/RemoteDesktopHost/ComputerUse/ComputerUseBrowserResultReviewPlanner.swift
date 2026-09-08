@@ -10,16 +10,23 @@ struct ComputerUseReviewedBrowserResultPlanner: ComputerUseBrowserResultPlanning
     let reader: any ComputerUseBrowserResultPlanning
     let reviewer: any ComputerUseBrowserResultReviewPlanning
     func propose(goal: ComputerUseBrowserGoalInput, page: ComputerUseBrowserResultPageInput) async throws -> ComputerUseBrowserResultProposal {
+        try await propose(goal: goal, page: page, interpretation: nil)
+    }
+    func propose(interpretation: ComputerUseBrowserGoalProposal, page: ComputerUseBrowserResultPageInput) async throws -> ComputerUseBrowserResultProposal {
+        try await propose(goal: interpretation.input, page: page, interpretation: interpretation)
+    }
+    private func propose(goal: ComputerUseBrowserGoalInput, page: ComputerUseBrowserResultPageInput,
+                         interpretation: ComputerUseBrowserGoalProposal?) async throws -> ComputerUseBrowserResultProposal {
         try Task.checkCancellation()
         let proposal = try await reader.propose(goal: goal, page: page)
         try Task.checkCancellation()
-        let input = try ComputerUseBrowserResultReviewInput(goal: goal, page: page, proposal: proposal)
+        let input = try ComputerUseBrowserResultReviewInput(goal: goal, page: page, proposal: proposal, interpretation: interpretation)
         if let review = proposal.review { try review.validate(for: input); return proposal }
         let review: ComputerUseBrowserResultReview
         if input.candidateCount == 0 { review = try .decode(content: #"{"candidates":[]}"#, input: input) }
         else { review = try await reviewer.propose(input) }
         try Task.checkCancellation()
-        return try proposal.reviewed(review, goal: goal)
+        return try proposal.reviewed(review, goal: goal, interpretation: interpretation)
     }
 }
 
@@ -49,15 +56,26 @@ struct ComputerUseLocalBrowserResultReviewPlanner: ComputerUseBrowserResultRevie
                 "qualifiers":["type":"array", "maxItems":min(8, input.textIDs.count),
                     "items":input.textIDs.isEmpty ? ["type":"string"] : enumeration(input.textIDs)]],
             "required":["scope", "price", "qualifiers"]]
-        let candidate: [String: Any] = ["type":"object", "additionalProperties":false,
-            "properties":["association":enumeration(input.permitsOfferAssertions ? ComputerUseBrowserResultReview.Association.allCases.map(\.rawValue) : ["mixedOffers", "unknown"]),
-                "fields":["type":"array", "minItems":1, "maxItems":16, "items":field]], "required":["association", "fields"]]
+        var properties: [String: Any] = ["association":enumeration(input.permitsOfferAssertions ? ComputerUseBrowserResultReview.Association.allCases.map(\.rawValue) : ["mixedOffers", "unknown"]),
+            "fields":["type":"array", "minItems":1, "maxItems":16, "items":field]]
+        var required = ["association", "fields"]
+        if input.interpretation != nil {
+            let requirement: [String: Any] = ["type":"object", "additionalProperties":false,
+                "properties":["requirement":["type":"integer", "minimum":0, "maximum":input.requirementCount - 1],
+                    "judgment":enumeration(input.permitsOfferAssertions ? ComputerUseBrowserResultReview.Judgment.allCases.map(\.rawValue) : ["conflicts", "unknown"]),
+                    "texts":["type":"array", "maxItems":min(8, input.textIDs.count),
+                        "items":input.textIDs.isEmpty ? ["type":"string"] : enumeration(input.textIDs)]],
+                "required":["requirement", "judgment", "texts"]]
+            properties["requirements"] = ["type":"array", "minItems":input.requirementCount, "maxItems":input.requirementCount, "items":requirement]
+            required.append("requirements")
+        }
+        let candidate: [String: Any] = ["type":"object", "additionalProperties":false, "properties":properties, "required":required]
         let schema: [String: Any] = ["type":"object", "additionalProperties":false,
             "properties":["candidates":["type":"array", "minItems":input.candidateCount, "maxItems":input.candidateCount, "items":candidate]], "required":["candidates"]]
         let body: [String: Any] = ["model":connection.modelAlias,
             "messages":[["role":"system", "content":Self.instructions], ["role":"user", "content":input.contextJSON]],
             "temperature":0, "top_p":1, "top_k":0, "max_tokens":ComputerUseLocalBrowserGoalPlanner.outputTokens, "cache_prompt":false,
-            "response_format":["type":"json_schema", "json_schema":["name":"browser_result_review_v1", "strict":true, "schema":schema]]]
+            "response_format":["type":"json_schema", "json_schema":["name":input.interpretation == nil ? "browser_result_review_v1" : "browser_result_review_v2", "strict":true, "schema":schema]]]
         var request = URLRequest(url: connection.baseURL.appendingPathComponent("v1/chat/completions"))
         request.httpMethod = "POST"; request.timeoutInterval = 30
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -72,6 +90,8 @@ struct ComputerUseLocalBrowserResultReviewPlanner: ComputerUseBrowserResultRevie
     For each field, scope offer means its complete selected records apply to that offer, page means they are surrounding/global context rather than that offer's fact, and unknown means association is unresolved. Look for competing offers, variants, inherited filters, qualifiers, exclusions, sold-out notes and contradictions throughout the projection, including text the initial proposal left unclassified.
     For price fields, exact means a single stated price for that offer with no unresolved qualification of the amount; qualified means a starting, ranged, approximate, conditional or otherwise qualified price; unknown means pricing meaning is unresolved. Exact requires offer scope and singleOffer association. Never infer exactness from a copied number. For every non-price field use notPrice. Preserve observed conditions with up to eight distinct qualifier text IDs per field; reference only projected text records, including relevant surrounding records. A qualified price requires at least one qualifier reference, which may be a selected field's own complete record. Do not select one clause while ignoring contradictory text.
     offer_assertions_allowed=false means text or structure is incomplete: never use singleOffer, scope offer or exact pricing. This flag does not account for omitted controls or their current values. Missing/omitted records and controls cannot prove absence, availability, uniqueness or complete task fulfillment. If a field depends on an unobserved selected option or filter, leave its association or pricing unknown. A page's relative dates have their own unresolved publication/time-zone context, not the user's original clock.
+    When the input contains requirements, return one requirements entry per original requirement for EVERY candidate, in the exact input order, with requirement equal to its input index. These are proposed interpretations of the verbatim user source fragments, not verified task predicates. Read the complete request and scoped answers to check their intended meaning; a mistaken field/role label is not permission to change the request. judgment supports means the complete cited records affirm that this one offer meets the requirement; conflicts means they explicitly contradict it; unknown means the reading cannot decide. Use unknown for ambiguous wording, wrong goal labels, conditional/partial support, omitted controls or unresolved answer scope. A different city, date, destination, price basis or unavailable inventory must not inherit support from a matching title or low number.
+    Cite up to eight distinct observed text IDs in texts for each judgment, retaining qualifications and contradictions, including relevant surrounding records. Supports and conflicts require citations; unknown may cite missing-context clues or use an empty array. A supports judgment requires singleOffer association and at least one whole offer-scoped field of the relevant kind among its citations (category may cite title, fees may cite price); if citing any record of a selected field, cite that field's complete selected records. Supports is forbidden on incomplete projections. Do not use another candidate's fields as evidence for this candidate. If candidate_judgment_allowed=false, use unknown: a candidate cannot establish task prohibitions, permitted navigation/source policy, distinct result counts, ranking or completion. With no requirements input, omit this output member entirely.
     This review cannot establish source-origin eligibility, verify a link destination, count distinct qualifying results, rank the full result set, perform login/booking/payment or declare completion. The host checks native identity, source policy and literal comparisons separately. Return no confidence score, explanation, report text, normalized amount/date or new instructions.
     """
 }

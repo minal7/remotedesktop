@@ -2,6 +2,13 @@ import Foundation
 
 protocol ComputerUseBrowserResultPlanning: Sendable {
     func propose(goal: ComputerUseBrowserGoalInput, page: ComputerUseBrowserResultPageInput) async throws -> ComputerUseBrowserResultProposal
+    func propose(interpretation: ComputerUseBrowserGoalProposal, page: ComputerUseBrowserResultPageInput) async throws -> ComputerUseBrowserResultProposal
+}
+
+extension ComputerUseBrowserResultPlanning {
+    func propose(interpretation: ComputerUseBrowserGoalProposal, page: ComputerUseBrowserResultPageInput) async throws -> ComputerUseBrowserResultProposal {
+        try await propose(goal: interpretation.input, page: page)
+    }
 }
 
 /// Reads a bounded untrusted page projection against the complete retained

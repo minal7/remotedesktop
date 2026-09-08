@@ -37,6 +37,10 @@ struct ComputerUseBrowserResultPageInput: Equatable, Sendable, CustomStringConve
         }
         textIDs = texts; linkIDs = links; containerIDs = containers; projectionOmittedRecords = omitted
     }
+    func projectedTextIDs(in container: String) -> Set<String> {
+        let tree = ComputerUseBrowserResultProposal.Tree(page)
+        return Set(page.texts.filter { textIDs.contains($0.id) && tree.contains($0.containerID, in: container) }.map(\.id))
+    }
     var description: String { "BrowserResultPageInput(texts: \(textIDs.count), links: \(linkIDs.count))" }
     var debugDescription: String { description }
 }
@@ -69,8 +73,9 @@ struct ComputerUseBrowserResultProposal: Equatable, Sendable, CustomStringConver
         guard input == page, goalRevision == goal.digest else { throw ComputerUseBrowserResultReviewError.inputChanged }
     }
 
-    func reviewed(_ review: ComputerUseBrowserResultReview, goal: ComputerUseBrowserGoalInput) throws -> Self {
-        let reviewInput = try ComputerUseBrowserResultReviewInput(goal: goal, page: input, proposal: self)
+    func reviewed(_ review: ComputerUseBrowserResultReview, goal: ComputerUseBrowserGoalInput,
+                  interpretation: ComputerUseBrowserGoalProposal? = nil) throws -> Self {
+        let reviewInput = try ComputerUseBrowserResultReviewInput(goal: goal, page: input, proposal: self, interpretation: interpretation)
         try review.validate(for: reviewInput)
         guard self.review == nil || self.review == review else { throw ComputerUseBrowserResultReviewError.inputChanged }
         return .init(input: input, goal: goal, selections: selections, review: review)
@@ -442,7 +447,9 @@ extension ComputerUseOwnedBrowser {
         }
         guard proposal.input.page == evidence.page else { throw ComputerUseBrowserResultError.invalidPage }
         if let review = proposal.review {
-            try review.validate(for: ComputerUseBrowserResultReviewInput(goal: goal, page: proposal.input, proposal: proposal))
+            guard !review.hasRequirementMapping || interpretation != nil else { throw ComputerUseBrowserResultReviewError.inputChanged }
+            try review.validate(for: ComputerUseBrowserResultReviewInput(goal: goal, page: proposal.input, proposal: proposal,
+                interpretation: review.hasRequirementMapping ? interpretation : nil))
         }
         try await validatePageEvidence(evidence)
         try Task.checkCancellation()
