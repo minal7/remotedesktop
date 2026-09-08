@@ -6,6 +6,141 @@ import XCTest
 
 @MainActor
 final class ComputerUseOwnedBrowserTests: XCTestCase {
+    func testUnnavigatedSessionHandbackRetainsIdentityWithoutPageOrReceipt() async throws {
+        var allowed = true, commands: [ComputerUseBrowserDOMCommand] = []
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false,
+            domScriptDidDispatch: { commands.append($0) }, mayAct: { allowed })
+        defer { browser.close() }
+        let missing = try XCTUnwrap(browser.handbackRequirement(taskID: "root", required: true))
+        let session = try browser.prepareWorkflowSession(taskID: "root")
+        XCTAssertTrue(try browser.isUnnavigatedSession(session))
+        XCTAssertThrowsError(try browser.isUnnavigatedSession(missing))
+        allowed = false
+        XCTAssertThrowsError(try browser.isUnnavigatedSession(session)) {
+            XCTAssertEqual($0 as? ComputerUseBrowserError, .ownershipLost)
+        }
+        do { try await browser.reacquireAfterUserControl(taskID: "root", requirement: session); XCTFail("Handback needs the action gate") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .ownershipLost) }
+        allowed = true
+        for _ in 0..<2 {
+            try await browser.reacquireAfterUserControl(taskID: "root", requirement: session)
+            XCTAssertEqual(browser.handbackRequirement(taskID: "root", required: true), session)
+            XCTAssertTrue(try browser.isUnnavigatedSession(session))
+            XCTAssertNil(browser.currentDocument(taskID: "root"))
+            XCTAssertNil(browser.receipt(taskID: "root", operationID: "first"))
+        }
+        do { _ = try await browser.acquireObservedDocument(taskID: "root"); XCTFail("Empty handback is not page evidence") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+        XCTAssertTrue(commands.isEmpty, "Handback must not read an invented document")
+    }
+
+    func testUnnavigatedSessionCannotSurviveOwnershipOrBrowserReplacement() async throws {
+        for ending in ["stop", "close", "other-owner"] {
+            let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+            defer { browser.close() }
+            let missing = try XCTUnwrap(browser.handbackRequirement(taskID: "root", required: true))
+            let old = try browser.prepareWorkflowSession(taskID: "root")
+            if ending == "stop" { browser.stop() }
+            else if ending == "close" { browser.close() }
+            else { try browser.claim(taskID: "other") }
+            let fresh = try browser.prepareWorkflowSession(taskID: "root")
+            XCTAssertNotEqual(fresh, old)
+            for stale in [old, missing] {
+                XCTAssertThrowsError(try browser.isUnnavigatedSession(stale)) {
+                    XCTAssertEqual($0 as? ComputerUseBrowserError, .handbackContextLost)
+                }
+                do { try await browser.reacquireAfterUserControl(taskID: "root", requirement: stale); XCTFail("Blankness cannot replace session identity") }
+                catch { XCTAssertEqual(error as? ComputerUseBrowserError, .handbackContextLost) }
+            }
+            XCTAssertTrue(try browser.isUnnavigatedSession(fresh))
+            try await browser.reacquireAfterUserControl(taskID: "root", requirement: fresh)
+            XCTAssertNil(browser.currentDocument(taskID: "root"))
+        }
+    }
+
+    func testFailedAndCancelledFirstLoadsNeverBecomeUnnavigatedSessions() async throws {
+        for cancelled in [false, true] {
+            let server = try OwnedBrowserHTTPFixture(routes: ["/first": .init(status: cancelled ? 200 : 503, held: cancelled)])
+            let base = try await server.start()
+            defer { server.stop() }
+            let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+            defer { browser.close() }
+            let session = try browser.prepareWorkflowSession(taskID: "root")
+            XCTAssertTrue(try browser.isUnnavigatedSession(session))
+            let load = Task { try await browser.navigate(taskID: "root", operationID: "first", to: base.appendingPathComponent("first")) }
+            try await waitUntil { server.count("/first") == 1 }
+            if cancelled { load.cancel() }
+            do { _ = try await load.value; XCTFail("An interrupted or failed page must not succeed") }
+            catch {
+                if cancelled { XCTAssertTrue(error is CancellationError) }
+                else { XCTAssertEqual(error as? ComputerUseBrowserError, .navigationFailed) }
+            }
+            try await waitUntil { !browser.isLoadingPage }
+            XCTAssertFalse(try browser.isUnnavigatedSession(session))
+            XCTAssertNil(browser.currentDocument(taskID: "root"))
+            XCTAssertNil(browser.receipt(taskID: "root", operationID: "first"))
+            do { try await browser.reacquireAfterUserControl(taskID: "root", requirement: session); XCTFail("A failed load is not a first-page handback") }
+            catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+            XCTAssertEqual(server.count("/first"), 1, "Handback cannot retry navigation")
+        }
+    }
+
+    func testUnnavigatedHandbackDoesNotReauthorizeJournaledNavigationAttempt() async throws {
+        let server = try OwnedBrowserHTTPFixture()
+        let base = try await server.start()
+        defer { server.stop() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var allowed = true, dispatches = 0
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { allowed })
+        let session = try browser.prepareWorkflowSession(taskID: "root")
+        let navigation = ComputerUseBrowserNavigationTask(browser: browser, journalDirectory: directory,
+            beforeNavigationDispatch: { _ in dispatches += 1; allowed = false })
+        defer { navigation.close() }
+        let prompt = "Open \(base.appendingPathComponent("first").absoluteString)"
+        do { _ = try await navigation.execute(taskID: "root", prompt: prompt, progress: { _ in }); XCTFail("The gate closes after the durable attempt") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .ownershipLost) }
+        let store = try ComputerUseTaskJournalStore(directory: directory)
+        let attempted = try XCTUnwrap(store.load(taskID: "root"))
+        XCTAssertEqual(attempted.statuses, [.uncertain])
+        allowed = true
+        XCTAssertTrue(try browser.isUnnavigatedSession(session), "No native request started, but the journal still owns the uncertain attempt")
+        try await browser.reacquireAfterUserControl(taskID: "root", requirement: session)
+        for _ in 0..<2 {
+            let result = try await navigation.execute(taskID: "root", prompt: prompt, progress: { _ in })
+            guard case .userInterventionRequired = result else { return XCTFail("An uncertain action must reconcile, not redispatch") }
+        }
+        let retained = try XCTUnwrap(store.load(taskID: "root"))
+        XCTAssertEqual(retained.stepIDs, attempted.stepIDs)
+        XCTAssertEqual(retained.statuses, [.uncertain])
+        XCTAssertEqual(dispatches, 1); XCTAssertEqual(server.requestCount, 0)
+        XCTAssertTrue(try browser.isUnnavigatedSession(session))
+        XCTAssertNil(browser.currentDocument(taskID: "root"))
+    }
+
+    func testUsedSessionDoesNotBecomeUnnavigatedWhenClaimClearsEvidence() async throws {
+        let server = try OwnedBrowserHTTPFixture()
+        let base = try await server.start()
+        defer { server.stop() }
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+        defer { browser.close() }
+        let original = try browser.prepareWorkflowSession(taskID: "root")
+        _ = try await browser.navigate(taskID: "root", operationID: "first", to: base.appendingPathComponent("first"))
+        browser.stop()
+        let reclaimed = try browser.prepareWorkflowSession(taskID: "root")
+        XCTAssertNotEqual(reclaimed, original)
+        XCTAssertNil(browser.currentDocument(taskID: "root"))
+        XCTAssertNil(browser.receipt(taskID: "root", operationID: "first"))
+        XCTAssertFalse(try browser.isUnnavigatedSession(reclaimed), "Cleared task evidence cannot erase native session history")
+        do { try await browser.reacquireAfterUserControl(taskID: "root", requirement: reclaimed); XCTFail("Claim cannot adopt a used page as blank") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+        browser.close()
+        let replacement = try browser.prepareWorkflowSession(taskID: "root")
+        XCTAssertTrue(try browser.isUnnavigatedSession(replacement))
+        XCTAssertThrowsError(try browser.isUnnavigatedSession(reclaimed))
+        XCTAssertEqual(server.count("/first"), 1)
+    }
+
     func testBrowserWorkflowRefreshesUnsentDestinationAfterLoginAndKeepsVerifiedQueryValues() async throws {
         for mode in ["link", "query", "changed-query"] {
             let loginChange = mode == "link"

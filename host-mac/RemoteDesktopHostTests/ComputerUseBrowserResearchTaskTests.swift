@@ -4,6 +4,84 @@ import XCTest
 
 @MainActor
 final class ComputerUseBrowserResearchTaskTests: XCTestCase {
+    func testResearchCanPlanAndResumeUnusedSessionWithoutInventingPageEvidence() async throws {
+        var allowed = true, domCalls = 0
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false,
+            domScriptDidDispatch: { _ in domCalls += 1 }, mayAct: { allowed })
+        defer { browser.close() }
+        let original = try goal(), planner = BrowserResearchGoalFixture(), reader = BrowserResearchResultFixture()
+        let search = BrowserResearchEmptySearchFixture()
+        let session = try browser.prepareWorkflowSession(taskID: original.taskID)
+        let owner = ComputerUseBrowserResearchTask(input: original, browser: browser,
+            goalPlanner: planner, resultPlanner: reader, mayAct: { allowed })
+        _ = try await owner.interpretGoal()
+        owner.pause(); allowed = false
+        do { try await owner.resumeAfterUserControl(); XCTFail("Closed control cannot resume an unused session") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .ownershipLost) }
+        allowed = true
+        try await owner.resumeAfterUserControl()
+        let query = try await owner.planInitialSearch(using: search)
+        XCTAssertNil(query.query)
+        XCTAssertEqual(query.goalDigest, original.digest)
+        XCTAssertEqual(search.inputs, [original])
+        do { _ = try await owner.readCandidates(); XCTFail("Query planning cannot supply a page") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+        XCTAssertTrue(reader.inputs.isEmpty)
+        let interpretation = try await owner.interpretGoal()
+        let question = try owner.issueQuestion(topic: .location,
+            requirementIDs: interpretation.proposal.requirements.map(\.id), controllerID: "controller", controllerSessionID: "session")
+        let answer = "  Paris e\u{301} 😀\n  "
+        _ = try owner.answerQuestion(questionID: question.id, answerTaskID: "answer", answer: answer,
+            controllerID: "controller", controllerSessionID: "session")
+        owner.pause()
+        try await owner.resumeAfterUserControl()
+        _ = try await owner.interpretGoal()
+        _ = try await owner.planInitialSearch(using: search)
+        XCTAssertEqual(owner.input.userTurns, [original.prompt, answer])
+        XCTAssertEqual(owner.input.rootDigest, original.rootDigest)
+        XCTAssertEqual(owner.input.referenceMilliseconds, original.referenceMilliseconds)
+        XCTAssertEqual(owner.input.timeZoneIdentifier, original.timeZoneIdentifier)
+        XCTAssertEqual(owner.executionTaskID, "answer")
+        XCTAssertEqual(search.inputs, [original, owner.input])
+        XCTAssertEqual(planner.inputs, [original, owner.input])
+        XCTAssertEqual(browser.handbackRequirement(taskID: original.taskID, required: true), session)
+        XCTAssertTrue(try browser.isUnnavigatedSession(session))
+        XCTAssertNil(browser.currentDocument(taskID: original.taskID))
+        XCTAssertEqual(domCalls, 0)
+        browser.close()
+        do { _ = try await owner.planInitialSearch(using: search); XCTFail("A lost captured session must fail before inference") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .handbackContextLost) }
+        XCTAssertEqual(search.inputs.count, 2)
+    }
+
+    func testResearchPauseDuringUnnavigatedHandbackCannotBeOverwritten() async throws {
+        weak var retainedOwner: ComputerUseBrowserResearchTask?
+        var pauseOnGateCheck = false, domCalls = 0
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false,
+            domScriptDidDispatch: { _ in domCalls += 1 }, mayAct: {
+                if pauseOnGateCheck { pauseOnGateCheck = false; retainedOwner?.pause() }
+                return true
+            })
+        defer { browser.close() }
+        let original = try goal(), planner = BrowserResearchGoalFixture()
+        let session = try browser.prepareWorkflowSession(taskID: original.taskID)
+        let owner = makeOwner(original, browser: browser, planner: planner)
+        retainedOwner = owner
+        _ = try await owner.interpretGoal()
+        owner.pause(); pauseOnGateCheck = true
+        do { try await owner.resumeAfterUserControl(); XCTFail("A newer Pause cancels the handback child") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertFalse(owner.isOperating)
+        do { _ = try await owner.interpretGoal(); XCTFail("Late completion cannot clear the new Pause") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserResearchTask.Failure, .paused) }
+        try await owner.resumeAfterUserControl()
+        _ = try await owner.interpretGoal()
+        XCTAssertEqual(planner.inputs, [original])
+        XCTAssertTrue(try browser.isUnnavigatedSession(session))
+        XCTAssertNil(browser.currentDocument(taskID: original.taskID))
+        XCTAssertEqual(domCalls, 0)
+    }
+
     func testQuestionRequestRequiresCurrentInterpretationAndCannotEscapePauseOrRetirement() async throws {
         let planner = BrowserResearchGoalFixture(), browser = ComputerUseOwnedBrowser(presentsWindow: false)
         defer { browser.close() }
@@ -208,6 +286,15 @@ final class ComputerUseBrowserResearchTaskTests: XCTestCase {
     }
     private func makeOwner(_ input: ComputerUseBrowserGoalInput, browser: ComputerUseOwnedBrowser, planner: BrowserResearchGoalFixture) -> ComputerUseBrowserResearchTask {
         .init(input: input, browser: browser, goalPlanner: planner, resultPlanner: BrowserResearchResultFixture(), mayAct: { true })
+    }
+}
+
+@MainActor
+private final class BrowserResearchEmptySearchFixture: ComputerUseBrowserSearchPlanning {
+    private(set) var inputs: [ComputerUseBrowserGoalInput] = []
+    func propose(_ interpretation: ComputerUseBrowserGoalProposal) async throws -> ComputerUseBrowserSearchQuery {
+        inputs.append(interpretation.input)
+        return try .decode(content: #"{"terms":[]}"#, interpretation: interpretation)
     }
 }
 

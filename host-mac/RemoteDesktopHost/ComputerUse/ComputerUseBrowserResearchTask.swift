@@ -64,7 +64,7 @@ final class ComputerUseBrowserResearchTask {
         let result = try await operate { [self] in
             // When this task already owns a page, discover login/control loss
             // before asking the model. No browser is created or claimed here.
-            if browser.taskID == taskID { _ = try await observeOwnedPage(goal: captured) }
+            try await checkPageBeforePlanning(goal: captured)
             let proposal = try await goalPlanner.propose(captured)
             try checkCurrent(captured)
             guard proposal.input.digest == captured.digest else { throw Failure.goalChanged }
@@ -97,7 +97,7 @@ final class ComputerUseBrowserResearchTask {
               interpretation.proposal.disposition == .research else { throw Failure.interpretationRequired }
         let captured = input
         return try await operate { [self] in
-            if browser.taskID == taskID { _ = try await observeOwnedPage(goal: captured) }
+            try await checkPageBeforePlanning(goal: captured)
             let query = try await planner.propose(interpretation.proposal)
             try checkCurrent(captured)
             guard query.goalDigest == captured.digest, query.interpretationDigest == interpretation.proposal.digest else {
@@ -258,10 +258,12 @@ final class ComputerUseBrowserResearchTask {
             if let expected {
                 try await browser.reacquireAfterUserControl(taskID: taskID, requirement: expected)
                 try Task.checkCancellation()
-                let document = try await browser.acquireObservedDocument(taskID: taskID)
-                try Task.checkCancellation()
-                _ = try await browser.observePage(document: document)
-                try Task.checkCancellation()
+                if try !browser.isUnnavigatedSession(expected) {
+                    let document = try await browser.acquireObservedDocument(taskID: taskID)
+                    try Task.checkCancellation()
+                    _ = try await browser.observePage(document: document)
+                    try Task.checkCancellation()
+                }
                 try browser.validateWorkflowSession(expected)
                 return expected
             }
@@ -304,6 +306,14 @@ final class ComputerUseBrowserResearchTask {
         let evidence = try await browser.observePage(document: document)
         try checkCurrent(goal)
         return evidence
+    }
+
+    private func checkPageBeforePlanning(goal: ComputerUseBrowserGoalInput) async throws {
+        try checkCurrent(goal)
+        guard browser.taskID == taskID else { return }
+        try captureSession()
+        if let session, try browser.isUnnavigatedSession(session) { return }
+        _ = try await observeOwnedPage(goal: goal)
     }
 
     private func readCurrentCandidates(goal: ComputerUseBrowserGoalInput) async throws -> ComputerUseBrowserResultCandidates {

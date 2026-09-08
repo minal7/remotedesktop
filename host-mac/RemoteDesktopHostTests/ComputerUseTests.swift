@@ -859,6 +859,44 @@ final class ComputerUseTests: XCTestCase {
         XCTAssertTrue(executor.continued.isEmpty)
     }
 
+    func test_managerResearchResumesBeforeFirstPageWithoutReadmissionOrLosingGoal() async throws {
+        let url = temporaryLedgerURL(), executor = BrowserQuestionLifecycleExecutor()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        var domCalls = 0, preparations = 0
+        let fixture = try browserControlFixture(executor: executor.capabilityExecutor(), ledgerURL: url,
+            domScriptDidDispatch: { _ in domCalls += 1 })
+        defer { executor.preparePage = nil; fixture.manager.stop(); fixture.browser.close() }
+        var session: ComputerUseBrowserHandbackRequirement?
+        executor.preparePage = { root in
+            preparations += 1
+            session = try fixture.browser.prepareWorkflowSession(taskID: root)
+            let controls = try XCTUnwrap(fixture.browser.taskControls)
+            fixture.browser.requestTaskControl(.pause, displayed: controls)
+        }
+        let prompt = makeEnvelope(id: "unused-browser-root", kind: .prompt, body: "Find concert tickets tomorrow. Do not buy anything.")
+        fixture.manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(fixture.manager.handle(prompt, channel: fixture.channel))
+        await waitUntil { fixture.manager.activity == .paused && executor.owner?.isOperating == false }
+        let owner = try XCTUnwrap(executor.owner), original = owner.input
+        XCTAssertTrue(executor.planner.inputs.isEmpty)
+        let paused = try XCTUnwrap(fixture.browser.taskControls)
+        XCTAssertEqual(paused.taskID, prompt.id)
+        fixture.browser.requestTaskControl(.resume, displayed: paused)
+        let question = try await clarificationUpdate(taskID: prompt.id, channel: fixture.channel)
+        XCTAssertEqual(question.clarification?.taskID, prompt.id)
+        XCTAssertEqual(question.text, ComputerUseBrowserClarificationTopic.location.question)
+        XCTAssertEqual(preparations, 1, "Explicit Resume continues the retained driver without repeating admission")
+        XCTAssertEqual(executor.ordinaryPrompts, [original.prompt])
+        XCTAssertEqual(executor.continued.map(\.taskID), [prompt.id])
+        XCTAssertEqual(executor.continued.map(\.goal), [original])
+        XCTAssertEqual(executor.planner.inputs, [original])
+        XCTAssertEqual(owner.input, original)
+        XCTAssertEqual(owner.executionTaskID, prompt.id)
+        XCTAssertEqual(fixture.browser.handbackRequirement(taskID: prompt.id, required: true), session)
+        XCTAssertNil(fixture.browser.currentDocument(taskID: prompt.id))
+        XCTAssertEqual(domCalls, 0)
+    }
+
     func test_managerBrowserAnswerLoginHandbackKeepsRootSessionAndDoesNotRepeatNavigation() async throws {
         let server = try OwnedBrowserHTTPFixture(routes: [
             "/form": .init(body: """

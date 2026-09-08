@@ -207,6 +207,9 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     private var generation: UInt64 = 0
     private var ownershipEpoch = UUID()
     private var browserSessionID = UUID()
+    /// Monotonic for one WKWebView lifetime. A failed/cancelled load or a URL
+    /// returning to nil cannot turn a used session into an untouched one.
+    private var sessionHasNavigationActivity = false
     private var document: ComputerUseBrowserDocument?
     private var receipts: [String: ComputerUseBrowserDocument] = [:]
     private struct ObservedNavigationAttempt {
@@ -448,8 +451,45 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         guard hasOwnership(taskID: requirement.taskID) else { throw ComputerUseBrowserError.ownershipLost }
     }
 
+    private var hasUnnavigatedContents: Bool {
+        guard let browser else { return false }
+        return !sessionHasNavigationActivity && browser.url == nil && !browser.isLoading
+            && pending == nil && pendingDOM == nil && observedNavigation == nil
+            && document == nil && loadedPageIdentity == nil && receipts.isEmpty
+            && observedUserPage == nil && observedActivePage == nil && !hasOpenSignInWindow
+    }
+
+    /// Native evidence of an allocated session with no navigation activity.
+    /// This is not a page observation, receipt or permission to reset a journal.
+    func isUnnavigatedSession(_ requirement: ComputerUseBrowserHandbackRequirement) throws -> Bool {
+        try validateWorkflowSession(requirement)
+        return hasUnnavigatedContents
+    }
+
     func reacquireAfterUserControl(taskID: String, requirement: ComputerUseBrowserHandbackRequirement) async throws {
         try Task.checkCancellation()
+        try validateSessionIdentity(requirement, taskID: taskID)
+        if hasUnnavigatedContents, let browser {
+            guard mayAct() else { throw ComputerUseBrowserError.ownershipLost }
+            try Task.checkCancellation()
+            try validateSessionIdentity(requirement, taskID: taskID)
+            // First-page preparation can allocate a session before presenting
+            // its window. Explicit Resume may present that same blank browser.
+            presentIfNeeded(browser)
+            let focusDeadline = ContinuousClock.now + .seconds(2)
+            while requirement.requiresPresentation && !hasRequiredPresentation && ContinuousClock.now < focusDeadline {
+                try Task.checkCancellation()
+                try validateWorkflowSession(requirement)
+                guard hasUnnavigatedContents else { throw ComputerUseBrowserError.pageChanged }
+                try await Task.sleep(for: .milliseconds(25))
+            }
+            try Task.checkCancellation()
+            try validateWorkflowSession(requirement)
+            try validateHandback(requirement, taskID: taskID)
+            guard hasOwnership(taskID: taskID), hasUnnavigatedContents else { throw ComputerUseBrowserError.pageChanged }
+            detail = "Control returned — ready to open the first page"
+            return
+        }
         try validateHandback(requirement, taskID: taskID)
         guard mayAct() else { throw ComputerUseBrowserError.ownershipLost }
         guard pending == nil, pendingDOM == nil, observedNavigation == nil,
@@ -837,6 +877,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             guard validate(expectedDocument) else { throw ComputerUseBrowserError.pageChanged }
             guard hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
         }
+        sessionHasNavigationActivity = true
         generation &+= 1
         document = nil
         loadedPageIdentity = nil
@@ -947,6 +988,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     private func makeBrowser() -> WKWebView {
         if let browser { return browser }
         browserSessionID = UUID()
+        sessionHasNavigationActivity = false
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .nonPersistent()
         // Provider flows may open their window after an asynchronous response.
@@ -981,6 +1023,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
 
     private func locationChanged(in view: WKWebView, to url: URL?, ordered: Bool) {
         guard browser === view, view.url == url else { return }
+        if url != nil || !ordered { sessionHasNavigationActivity = true }
         displayedSite = ComputerUseBrowserSite.displayName(for: url)
         let changed = document.map { $0.committedURL != url } ?? false
         let observedChanged = (observedUserPage.map { $0.url != url } ?? false)
@@ -1165,6 +1208,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             decisionHandler(["http", "https", "about", "data", "blob"].contains(scheme) ? .allow : .cancel)
             return
         }
+        sessionHasNavigationActivity = true
         guard let url = navigationAction.request.url, Self.validatedURL(url) != nil else {
             decisionHandler(.cancel)
             if let pending { failPending(id: pending.id, error: .invalidURL) }
@@ -1210,6 +1254,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         guard webView === browser else { return }
+        sessionHasNavigationActivity = true
         guard let pending else {
             generation &+= 1
             document = nil
