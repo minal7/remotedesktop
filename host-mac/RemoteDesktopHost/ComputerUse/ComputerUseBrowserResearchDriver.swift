@@ -141,6 +141,9 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
         } catch is ComputerUseBrowserResearchEvidenceError {
             try validate(run, tools: tools)
             return .userInterventionRequired("The browser could not retain another reading for this research task. Earlier findings and the original request remain pending.")
+        } catch ComputerUseBrowserActionPlanError.deadlineExceeded {
+            try validate(run, tools: tools)
+            return .userInterventionRequired("Choosing the next research step ran out of time. Earlier findings and the original task remain pending. Review the page, then choose Resume to continue.")
         } catch is ComputerUseBrowserActionPlanError, is ComputerUseBrowserResearchFormError {
             try validate(run, tools: tools)
             return .userInterventionRequired("The browser could not prepare the next form or reading action from the complete request. Earlier work and the original task remain pending.")
@@ -259,6 +262,7 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                 let action = try await owner.planNextAction(using: actionPlanner)
                 try check()
                 switch action.step {
+                case .recall: throw Failure.invalidProposal // Resolved inside the owner, never an executable action.
                 case .editForm:
                     guard owner.confirmedFormHistory.count < 32 else {
                         return .userInterventionRequired("The browser reached this task's form-action limit. The original request remains pending.")

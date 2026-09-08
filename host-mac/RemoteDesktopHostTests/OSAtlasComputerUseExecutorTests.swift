@@ -10635,6 +10635,43 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
             resourceInspector: FixedResourceInspector.sufficient)
     }
 
+    @MainActor
+    func testRuntimeBrowserActionRecallUsesSharedWorkerWithoutFormChoices() async throws {
+        let fixture = try await ResearchDriverFixture.make(candidateBodyHTML: "<p>Unresolved fees</p>")
+        defer { fixture.close() }
+        _ = try await fixture.start()
+        let owner = try fixture.owner(), base = try await owner.planNextAction(using: fixture.actions).input
+        let events = RuntimeEventLog(), launcher = FakeLlamaLauncher(events: events)
+        let responses = try [#"{"reading":0}"#, #"{"unavailable":true}"#].map { content in
+            try JSONSerialization.data(withJSONObject: ["model":ComputerUseNativeTextRuntimeInputs.modelAlias,
+                "choices":[["finish_reason":"stop", "message":["role":"assistant", "content":content]]]])
+        }
+        let transport = FakeTransportMaker(events: events, completionDataResponses: responses)
+        let runtime = textRuntime(launcher, transports: transport)
+        let planner = ComputerUseRuntimeBrowserActionPlanner(inputs: nativeTextInputs, runtime: runtime)
+        do {
+            let empty = try ComputerUseBrowserActionInput(interpretation: base.interpretation, evidence: base.evidence,
+                navigationHistory: [], formHistory: [], latestForm: nil, changedFormTargetIDs: [])
+            let skipped = try await planner.propose(empty), unused = await launcher.configurations()
+            XCTAssertEqual(skipped.step, .readResults); XCTAssertTrue(unused.isEmpty)
+            let action = try await owner.planNextAction(using: planner)
+            XCTAssertFalse(action.input.needsFormDecision); XCTAssertTrue(action.input.needsPlanningDecision)
+            XCTAssertEqual(action.step, .unavailable); XCTAssertEqual(action.input.recalledReadingIndices, [0])
+            let configurations = await launcher.configurations()
+            XCTAssertEqual(configurations.count, 1)
+            let completions = transport.recordedCompletionRequests()
+            XCTAssertEqual(completions.count, 2); XCTAssertEqual(transport.recordedTokenCountRequests(), completions)
+            let request = try XCTUnwrap(completions.last), data = try XCTUnwrap(request.httpBody)
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            let messages = try XCTUnwrap(body["messages"] as? [[String: String]])
+            XCTAssertEqual(messages.last?["content"], action.input.contextJSON)
+            XCTAssertTrue(action.input.contextJSON.contains("Unresolved fees"))
+            XCTAssertEqual(fixture.server.count("/search?q=concerts"), 1)
+            XCTAssertEqual(fixture.server.count("/details"), 0)
+            await runtime.shutdown()
+        } catch { await runtime.shutdown(); throw error }
+    }
+
     func testNativeTextLaunchUsesPrivateCredentialAndMeasuredSingleModelBudget() throws {
         let token = "private-runtime-test-token"
         let file = try OSAtlasLlamaPrivateFile.authentication(token: token)

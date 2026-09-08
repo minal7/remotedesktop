@@ -155,13 +155,13 @@ struct ComputerUseRuntimeBrowserFormPlanner: ComputerUseBrowserFormPlanning {
     }
 }
 
-/// Form-versus-reading decisions use the same local model owner.
+/// Form, reading and historical-recall decisions use the same model owner.
 struct ComputerUseRuntimeBrowserActionPlanner: ComputerUseBrowserActionPlanning {
     let inputs: ComputerUseNativeTextRuntimeInputs
     var runtime: OSAtlasLlamaRuntime = .shared
     func propose(_ input: ComputerUseBrowserActionInput) async throws -> ComputerUseBrowserActionProposal {
         try Task.checkCancellation()
-        if !input.needsFormDecision { return try .decode(content: #"{"read_results":true}"#, input: input) }
+        if !input.needsPlanningDecision { return try .decode(content: #"{"read_results":true}"#, input: input) }
         let endpoint = try await runtime.activateNativeText(inputs)
         return try await runtime.proposeBrowserAction(endpoint: endpoint, input: input)
     }

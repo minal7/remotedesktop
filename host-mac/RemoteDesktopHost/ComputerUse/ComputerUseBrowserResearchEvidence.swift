@@ -66,6 +66,20 @@ struct ComputerUseBrowserResearchEvidence: Sendable, CustomStringConvertible, Cu
              "candidate_count":entry.reading.candidates.count, "reviewed":entry.reading.review != nil]
         }
     }
+    /// Capability selection happens before a fresh candidate reading exists.
+    /// Permit historical recall only inside the archive's original session;
+    /// a new page is still the sole authority for current controls/actions.
+    func actionCatalog(goal: ComputerUseBrowserGoalInput, page: ComputerUseBrowserPageEvidence) throws -> [[String: Any]] {
+        try validate(goal: goal)
+        guard page.document.taskID == goal.taskID,
+              sessionIdentity == nil || sessionIdentity == page.document.contextID else {
+            throw ComputerUseBrowserResearchEvidenceError.inputChanged
+        }
+        return entries.enumerated().map { index, entry in
+            ["reading":index, "current_goal_revision":entry.goal == goal,
+             "candidate_count":entry.reading.candidates.count, "reviewed":entry.reading.review != nil]
+        }
+    }
     func recall(_ index: Int, goal: ComputerUseBrowserGoalInput) throws -> [String: Any] {
         try validate(goal: goal)
         guard entries.indices.contains(index) else { throw ComputerUseBrowserResearchEvidenceError.unavailable }

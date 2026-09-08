@@ -297,7 +297,7 @@ final class ComputerUseBrowserResearchTask {
 
     /// Select an interaction capability before interpreting a page as offers.
     /// Observation and planning preserve retained native field receipts.
-    func planNextAction(using planner: any ComputerUseBrowserActionPlanning) async throws -> ComputerUseBrowserActionProposal {
+    func planNextAction(using planner: any ComputerUseBrowserActionPlanning, budget: Duration = .seconds(30)) async throws -> ComputerUseBrowserActionProposal {
         try requireIdle()
         guard !hasPendingForm else { throw Failure.formPending }
         guard !hasPendingNavigation else { throw Failure.navigationPending }
@@ -306,28 +306,70 @@ final class ComputerUseBrowserResearchTask {
               interpretation.proposal.disposition == .research else { throw Failure.interpretationRequired }
         guard sourcePolicy == nil || (sourcePolicyInstalled && sourcePolicy?.goalRevision == input.digest) else { throw Failure.navigationUnavailable }
         let captured = input
+        let deadline = ContinuousClock.now.advanced(by: min(.seconds(30), max(.zero, budget)))
         latestCandidates = nil; latestForm = nil; latestAction = nil
         let action = try await operate { [self] in
-            let page = try await observeOwnedPage(goal: captured, enforceSources: true)
+            try await withThrowingTaskGroup(of: ComputerUseBrowserActionProposal.self) { group in
+                group.addTask { @MainActor [self] in
+                    try await selectAction(using: planner, interpretation: interpretation.proposal, deadline: deadline)
+                }
+                group.addTask {
+                    try await Task.sleep(until: deadline, clock: .continuous)
+                    try Task.checkCancellation()
+                    throw ComputerUseBrowserActionPlanError.deadlineExceeded
+                }
+                defer { group.cancelAll() }
+                guard let proposal = try await group.next() else { throw ComputerUseBrowserActionPlanError.invalidProposal }
+                try checkCurrent(captured)
+                guard ContinuousClock.now < deadline else { throw ComputerUseBrowserActionPlanError.deadlineExceeded }
+                return proposal
+            }
+        }
+        latestAction = action
+        return action
+    }
+
+    private func selectAction(using planner: any ComputerUseBrowserActionPlanning,
+                              interpretation: ComputerUseBrowserGoalProposal,
+                              deadline: ContinuousClock.Instant) async throws -> ComputerUseBrowserActionProposal {
+        let captured = interpretation.input
+        func check() throws {
+            try checkCurrent(captured)
+            guard self.interpretation?.proposal == interpretation else { throw Failure.interpretationRequired }
+            guard ContinuousClock.now < deadline else { throw ComputerUseBrowserActionPlanError.deadlineExceeded }
+        }
+        try check()
+        let page = try await observeOwnedPage(goal: captured, enforceSources: true)
+        do {
             var changed: Set<String> = []
             if let stage = formStage, let receipt = stage.nativeReceipt, confirmedFormHistory.last == receipt,
                captured.continues(stage.input.interpretation.input), stage.input.evidence.page.document == page.document,
                stage.input.evidence.page.documentID == page.documentID {
                 changed = try await stage.inspectChangedCriteria(page: page, checkCurrent: { try self.checkCurrent(captured) })
             }
-            try checkCurrent(captured)
-            let context = try ComputerUseBrowserActionInput(interpretation: interpretation.proposal, evidence: page,
-                navigationHistory: confirmedNavigationHistory, formHistory: confirmedFormHistory, latestForm: formStage,
-                changedFormTargetIDs: changed)
-            let proposal = try await planner.propose(context)
-            try checkCurrent(captured)
-            try proposal.validate(for: context)
-            try await browser.validatePageEvidence(page)
-            try checkCurrent(captured); try browser.validateSourceDocument(page.document)
-            return proposal
+            try check()
+            let archive = try researchEvidence(for: captured)
+            var recalled: [Int] = []
+            while true {
+                try check()
+                guard retainedEvidence.digest == archive.digest else { throw ComputerUseBrowserResearchEvidenceError.inputChanged }
+                let context = try ComputerUseBrowserActionInput(interpretation: interpretation, evidence: page,
+                    navigationHistory: confirmedNavigationHistory, formHistory: confirmedFormHistory, latestForm: formStage,
+                    changedFormTargetIDs: changed, researchEvidence: archive, recalledReadings: recalled)
+                let proposal = try await planner.propose(context)
+                try check()
+                try proposal.validate(for: context)
+                // Recall never refreshes or replaces native authority. A
+                // changed page invalidates even a no-effect recall decision.
+                try await browser.validatePageEvidence(page)
+                try check(); try browser.validateSourceDocument(page.document)
+                if case .recall(let index) = proposal.step { recalled.append(index); continue }
+                return proposal
+            }
+        } catch {
+            await browser.joinDOMCompletion(document: page.document)
+            throw error
         }
-        latestAction = action
-        return action
     }
 
     private func validateAction(_ action: ComputerUseBrowserActionProposal) throws {
@@ -945,12 +987,17 @@ final class ComputerUseBrowserResearchTask {
     private func observeOwnedPage(goal: ComputerUseBrowserGoalInput, enforceSources: Bool = false) async throws -> ComputerUseBrowserPageEvidence {
         try checkCurrent(goal); try captureSession()
         let document = try await browser.acquireObservedDocument(taskID: taskID)
-        try checkCurrent(goal)
-        if enforceSources { try browser.validateSourceDocument(document) }
-        let evidence = try await browser.observePage(document: document)
-        try checkCurrent(goal)
-        if enforceSources { try browser.validateSourceDocument(document) }
-        return evidence
+        do {
+            try checkCurrent(goal)
+            if enforceSources { try browser.validateSourceDocument(document) }
+            let evidence = try await browser.observePage(document: document)
+            try checkCurrent(goal)
+            if enforceSources { try browser.validateSourceDocument(document) }
+            return evidence
+        } catch {
+            await browser.joinDOMCompletion(document: document)
+            throw error
+        }
     }
 
     private func checkPageBeforePlanning(goal: ComputerUseBrowserGoalInput) async throws {

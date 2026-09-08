@@ -14,7 +14,7 @@ final class ComputerUseBrowserActionPlannerTests: XCTestCase {
         XCTAssertEqual((goal["referenceUnixMilliseconds"] as? NSNumber)?.int64Value, owner.input.referenceMilliseconds)
         XCTAssertEqual(goal["timeZone"] as? String, owner.input.timeZoneIdentifier)
         XCTAssertEqual((context["requirements"] as? [[String: Any]])?.first?["source"] as? String, owner.input.prompt)
-        XCTAssertEqual(context["version"] as? Int, 5)
+        XCTAssertEqual(context["version"] as? Int, 6)
         XCTAssertEqual(context["preservable_controls"] as? [String], input.preservableControlIDs)
         XCTAssertEqual(context["editable_forms"] as? [String], input.formIDs); XCTAssertEqual(input.formIDs.count, 1)
         XCTAssertTrue(input.queryControlIDs.isEmpty); XCTAssertNil(input.queryReceipt)
@@ -181,7 +181,11 @@ final class ComputerUseBrowserActionPlannerTests: XCTestCase {
             let fixture = try await ResearchDriverFixture.make(searchForm: hasForm)
             defer { fixture.close() }
             _ = try await fixture.start()
-            let input = try await fixture.owner().planNextAction(using: fixture.actions).input
+            let observed = try await fixture.owner().planNextAction(using: fixture.actions).input
+            // Exercise the no-history shortcut explicitly. A page without
+            // forms can still require a decision about retained readings.
+            let input = try ComputerUseBrowserActionInput(interpretation: observed.interpretation, evidence: observed.evidence,
+                navigationHistory: [], formHistory: [], latestForm: nil, changedFormTargetIDs: [])
             for count in [-1, 0, 3_008, 3_009] {
                 let transport = ActionPlannerTransport(count: count), planner = try local(transport)
                 do { _ = try await planner.propose(input); XCTAssertTrue(!hasForm || count == 3_008) }
@@ -197,7 +201,7 @@ final class ComputerUseBrowserActionPlannerTests: XCTestCase {
                     XCTAssertEqual(body["max_tokens"] as? Int, 1_024); XCTAssertEqual(body["cache_prompt"] as? Bool, false); XCTAssertNil(body["tools"])
                     let format = try XCTUnwrap(body["response_format"] as? [String: Any])
                     let schema = try XCTUnwrap(format["json_schema"] as? [String: Any])
-                    XCTAssertEqual(schema["name"] as? String, "browser_research_action_v5")
+                    XCTAssertEqual(schema["name"] as? String, "browser_research_action_v6")
                     let root = try XCTUnwrap(schema["schema"] as? [String: Any])
                     let alternatives = try XCTUnwrap(root["oneOf"] as? [[String: Any]])
                     let form = try XCTUnwrap(alternatives.first { ($0["required"] as? [String])?.contains("form") == true })
