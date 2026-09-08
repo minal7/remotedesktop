@@ -306,8 +306,16 @@ final class ComputerUseBrowserResearchTask {
         latestCandidates = nil; latestForm = nil; latestAction = nil
         let action = try await operate { [self] in
             let page = try await observeOwnedPage(goal: captured, enforceSources: true)
+            var changed: Set<String> = []
+            if let stage = formStage, let receipt = stage.nativeReceipt, confirmedFormHistory.last == receipt,
+               captured.continues(stage.input.interpretation.input), stage.input.evidence.page.document == page.document,
+               stage.input.evidence.page.documentID == page.documentID {
+                changed = try await stage.inspectChangedCriteria(page: page, checkCurrent: { try self.checkCurrent(captured) })
+            }
+            try checkCurrent(captured)
             let context = try ComputerUseBrowserActionInput(interpretation: interpretation.proposal, evidence: page,
-                navigationHistory: confirmedNavigationHistory, formHistory: confirmedFormHistory, latestForm: formStage)
+                navigationHistory: confirmedNavigationHistory, formHistory: confirmedFormHistory, latestForm: formStage,
+                changedFormTargetIDs: changed)
             let proposal = try await planner.propose(context)
             try checkCurrent(captured)
             try proposal.validate(for: context)

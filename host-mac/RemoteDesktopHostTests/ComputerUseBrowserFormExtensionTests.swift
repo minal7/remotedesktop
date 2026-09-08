@@ -120,9 +120,8 @@ final class ComputerUseBrowserFormExtensionTests: XCTestCase {
         }
     }
 
-    func testChangedEarlierCriteriaAndReplacedRequiredObjectsCannotBecomeFreshAuthority() async throws {
-        for mutation in ["document.getElementById('category').selectedIndex = 0;",
-                         "const field = document.getElementById('category'); field.replaceWith(field.cloneNode(true));",
+    func testReplacedRequiredObjectsAndChangedExplicitPreservationCannotBecomeFreshAuthority() async throws {
+        for mutation in ["const field = document.getElementById('category'); field.replaceWith(field.cloneNode(true));",
                          "document.getElementById('reference').value = 'changed';"] {
             let fixture = try await prepared(body: body + """
                 <script>fetch('/signal').then(() => { \(mutation) fetch('/changed'); });</script>

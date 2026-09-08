@@ -82,6 +82,10 @@ struct ComputerUseBrowserFormProposal: Equatable, Sendable, CustomStringConverti
                 } else { throw invalid }
                 edits.append(.init(field: alias, payload: payload))
             }
+            // A changed historical criterion cannot become an unchanged
+            // invariant at its newly observed value. Repair every such field
+            // with a new goal-backed operation before this stage can run.
+            guard Set(input.requiredRepairFieldAliases).isSubset(of: usedFields) else { throw invalid }
             var preserved = input.requiredPreservation
             for row in preservationRows {
                 guard case .object(let value) = row, Set(value.keys) == ["field", "requirement"],

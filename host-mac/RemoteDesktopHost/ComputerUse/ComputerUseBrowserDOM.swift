@@ -4,7 +4,7 @@ import WebKit
 enum ComputerUseBrowserDOMCommand: String {
     case fields, read, edit, receipt, reobserve, preflight, pageIdentity, pageSnapshot, validatePageSnapshot
     case scrollViewport, viewportScrollReceipt, validatePageLink
-    case prepareFormQuery, validateFormQuery, bindPageFields, formFields, extendFormFields
+    case prepareFormQuery, validateFormQuery, bindPageFields, formFields, extendFormFields, inspectFormRequirements
 }
 
 /// Private adapter output. A GET query can contain server state or user input;
@@ -455,6 +455,7 @@ struct ComputerUseBrowserDOMReply: Decodable {
     let scroll: ComputerUseBrowserViewportScrollReceipt?
     let formQuery: ComputerUseBrowserFormQuery?
     let formBindings: [FormBinding]?
+    let changedFieldIDs: [String]?
 }
 
 /// Fixed host code in a separate WebKit script world. Page text, model output
@@ -798,8 +799,8 @@ enum ComputerUseBrowserDOM {
         return Object.values(value).every(n => Number.isFinite(n) && Math.abs(n) <= 10000000)
           && value.width > 0 && value.height > 0 && value.contentWidth >= 0 && value.contentHeight >= 0 ? value : null;
       }
-      function extendFields(scope, requirements) {
-        if (!fieldScope || fieldScope.form !== scope.form || !formRequirementsCurrent(requirements)) return reply('stale');
+      function extendFields(scope, requirements, repairableIDs) {
+        if (!fieldScope || fieldScope.form !== scope.form || !formRequirementsCurrent(requirements, repairableIDs)) return reply('stale');
         const requiredIDs = new Set(requirements.fields.map(field => field.id));
         // Earlier explicit preservation may be outside the submitted form.
         // Keep its actual object even when the new proposal omits the control.
@@ -1132,7 +1133,7 @@ enum ComputerUseBrowserDOM {
         if (encoder.encode(destination.href).length > 8192) return {status:'unsupported'};
         return {status:'form-query', destination:destination.href, signature, members, submittedMembers, form};
       }
-      function formRequirementsCurrent(requirements) {
+      function formRequirementsCurrent(requirements, repairableIDs = [], changes = null) {
         if (!requirements || typeof requirements.digest !== 'string' || !/^[a-f0-9]{64}$/.test(requirements.digest)
             || !Array.isArray(requirements.fields) || requirements.fields.length < 1 || requirements.fields.length > 16
             || !Array.isArray(requirements.inputOperationIDs) || requirements.inputOperationIDs.length < 1 || requirements.inputOperationIDs.length > 64
@@ -1150,9 +1151,19 @@ enum ComputerUseBrowserDOM {
         }
         if (!edited || requirements.inputOperationIDs.some(id => typeof id !== 'string' || !/^[a-f0-9]{64}$/.test(id)
             || operations.get(id) !== 'dispatched')) return false;
+        // Only host-selected earlier edits can be re-observed for repair.
+        // Query preparation never supplies this exception. Explicitly
+        // preserved fields are excluded by the retained host continuation.
+        if (!Array.isArray(repairableIDs) || repairableIDs.length > 16
+            || new Set(repairableIDs).size !== repairableIDs.length
+            || repairableIDs.some(id => typeof id !== 'string' || !requirements.fields.some(field => field.id === id && field.mustSubmit))) return false;
         return requirements.fields.every(field => {
-          const binding = bindings.get(field.id);
-          return binding && snapshot(binding)?.value === field.value;
+          const binding = bindings.get(field.id), current = binding && snapshot(binding);
+          if (!current) return false;
+          if (current.value === field.value) return true;
+          if (!repairableIDs.includes(field.id)) return false;
+          if (changes) changes.push(field.id);
+          return true;
         });
       }
       function run(command, args) {
@@ -1174,7 +1185,7 @@ enum ComputerUseBrowserDOM {
               || JSON.stringify(readViewport()) !== JSON.stringify(operation.receipt.after)) return reply('uncertain');
           return {...reply('viewport-scroll-confirmed'), scroll: operation.receipt};
         }
-        if (['pageSnapshot', 'validatePageSnapshot', 'scrollViewport', 'validatePageLink', 'prepareFormQuery', 'validateFormQuery', 'bindPageFields', 'formFields', 'extendFormFields'].includes(command)) {
+        if (['pageSnapshot', 'validatePageSnapshot', 'scrollViewport', 'validatePageLink', 'prepareFormQuery', 'validateFormQuery', 'bindPageFields', 'formFields', 'extendFormFields', 'inspectFormRequirements'].includes(command)) {
           const status = authenticationStatus();
           if (status) { lastPageSnapshot = null; return reply(status); }
           if (doc.readyState !== 'complete') return reply('stale');
@@ -1202,6 +1213,12 @@ enum ComputerUseBrowserDOM {
                     || previous.signature !== binding.signature;
                 })) return reply('stale');
             if (command === 'validatePageSnapshot') return reply('page-current');
+            if (command === 'inspectFormRequirements') {
+              const changes = [];
+              if (!formRequirementsCurrent(args.requirements, args.repairableFieldIDs, changes)) return reply('stale');
+              // Export only bounded changed IDs, never private field values.
+              return {...reply('form-requirements-inspected'), changedFieldIDs:changes};
+            }
             if (command === 'formFields' || command === 'extendFormFields') {
               if (typeof args.formID !== 'string' || !Array.isArray(args.preservedControlIDs)
                   || args.preservedControlIDs.length > 16 || args.preservedControlIDs.some(id => typeof id !== 'string')
@@ -1215,7 +1232,7 @@ enum ComputerUseBrowserDOM {
                 if (!control || !editable(control.element) || control.form !== control.element.form) return reply('unsupported');
                 additional.push(control.element);
               }
-              if (command === 'extendFormFields') return extendFields({form, additional}, args.requirements);
+              if (command === 'extendFormFields') return extendFields({form, additional}, args.requirements, args.repairableFieldIDs);
               return fields(undefined, {form, additional});
             }
             if (command === 'bindPageFields') {
@@ -1510,9 +1527,40 @@ final class ComputerUseBrowserTextTarget {
         return fields
     }
 
+    /// Read required fields against their original native identities and input
+    /// receipts. Changed, unpreserved edit values become mandatory repair work;
+    /// equal values never reconstruct receipts or authorize replacement objects.
+    func inspectChangedCriteria(page evidence: ComputerUseBrowserPageEvidence,
+                                after continuation: ComputerUseBrowserResearchFormContinuation) async throws -> Set<String> {
+        try validate()
+        guard let documentID, evidence.document == document, evidence.documentID == documentID else { throw ComputerUseBrowserError.pageChanged }
+        let requirements = try ComputerUseBrowserFormQueryRequirements(document: document, documentID: documentID,
+            continuation: continuation, targets: targets)
+        let reply = try await browser.callDOM(.inspectFormRequirements, arguments: ["documentID":documentID,
+            "snapshotID":evidence.page.id, "requirements":requirements.domArguments,
+            "repairableFieldIDs":try repairableNativeIDs(after: continuation)], document: document)
+        try validate()
+        guard reply.status == "form-requirements-inspected", reply.documentID == documentID,
+              reply.fields == nil, let ids = reply.changedFieldIDs, ids.count <= 16, Set(ids).count == ids.count else {
+            throw ComputerUseBrowserError.pageChanged
+        }
+        let nativeToTarget = Dictionary(uniqueKeysWithValues: targets.map { ($0.value, $0.key) })
+        guard ids.allSatisfy({ nativeToTarget[$0] != nil }) else { throw ComputerUseBrowserError.pageChanged }
+        let changed = Set(ids.compactMap { nativeToTarget[$0] })
+        guard changed.isSubset(of: continuation.repairableTargetIDs) else { throw ComputerUseBrowserError.pageChanged }
+        return changed
+    }
+
+    private func repairableNativeIDs(after continuation: ComputerUseBrowserResearchFormContinuation) throws -> [String] {
+        try continuation.repairableTargetIDs.sorted().map {
+            guard let id = targets[$0] else { throw ComputerUseBrowserError.pageChanged }
+            return id
+        }
+    }
+
     /// Carry required native objects and all earlier input receipts through a
-    /// complete, read-only catalogue extension. Do not adopt replacement IDs
-    /// for any previously required field, even if its value happens to match.
+    /// complete, read-only catalogue extension. Changed edit values must later
+    /// be explicitly repaired; preservation and required object identity hold.
     func extendFields(in formID: String, page evidence: ComputerUseBrowserPageEvidence, preserving controlIDs: [String],
                       after continuation: ComputerUseBrowserResearchFormContinuation) async throws -> [ComputerUseTextField] {
         try validate()
@@ -1523,7 +1571,8 @@ final class ComputerUseBrowserTextTarget {
             continuation: continuation, targets: targets)
         let reply = try await browser.callDOM(.extendFormFields, arguments: ["documentID":documentID,
             "snapshotID":evidence.page.id, "formID":formID, "preservedControlIDs":controlIDs,
-            "requirements":requirements.domArguments], document: document)
+            "requirements":requirements.domArguments,
+            "repairableFieldIDs":try repairableNativeIDs(after: continuation)], document: document)
         try validate()
         guard reply.documentID == documentID else { throw ComputerUseBrowserError.pageChanged }
         let previous = targets

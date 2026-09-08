@@ -15,7 +15,9 @@ struct ComputerUseBrowserResearchFormContinuation: Equatable, Sendable, CustomSt
     let editedTargetIDs: Set<String>
     let inputOperationIDs: [String]
     let preservedControls: [ComputerUseBrowserFormPreservationSource]
+    let preservedTargetIDs: Set<String>
     let editedSources: [String: [ComputerUseBrowserFormSource]]
+    var repairableTargetIDs: Set<String> { editedTargetIDs.subtracting(preservedTargetIDs) }
     let digest: String
 
     @MainActor fileprivate init(stage: ComputerUseBrowserResearchFormStage, current: ComputerUseTextTaskContinuation) throws {
@@ -45,6 +47,7 @@ struct ComputerUseBrowserResearchFormContinuation: Equatable, Sendable, CustomSt
         preservedControls = try stage.proposal.preserved.map {
             .init(controlID: try input.field(for: $0.field).control.id, source: $0.source)
         }
+        preservedTargetIDs = Set(try stage.proposal.preserved.map { try input.field(for: $0.field).editable.snapshot.targetID })
         var sources = previous?.editedSources ?? [:]
         for edit in stage.proposal.edits {
             let targetID = try input.field(for: edit.field).editable.snapshot.targetID
@@ -66,7 +69,7 @@ struct ComputerUseBrowserResearchFormContinuation: Equatable, Sendable, CustomSt
             sources[targetID] = unique
         }
         editedSources = sources
-        digest = ComputerUseTaskContract.digest(["browser-research-form-continuation-v2", taskID, rootDigest, goalRevision,
+        digest = ComputerUseTaskContract.digest(["browser-research-form-continuation-v3", taskID, rootDigest, goalRevision,
             document.contextID, String(document.generation), documentID, formID ?? "", previous?.digest ?? "", current.digest]
             + stageIDs + inputOperationIDs)
     }
@@ -185,6 +188,29 @@ final class ComputerUseBrowserResearchFormStage {
             let receipt = ComputerUseBrowserResearchFormReceipt(stage: self)
             completed = receipt
             return receipt
+        } catch {
+            await browser.joinDOMCompletion(document: input.evidence.page.document)
+            throw error
+        }
+    }
+
+    /// Inspect historical criteria before offering a query. Changed values
+    /// are repair work, not new success; original objects/receipts and explicit
+    /// preservation still have to hold. No binding or journal is replaced.
+    func inspectChangedCriteria(page: ComputerUseBrowserPageEvidence,
+                                checkCurrent: @escaping @MainActor () throws -> Void) async throws -> Set<String> {
+        guard !isExecuting else { throw Failure.busy }
+        guard !isRetired else { throw Failure.retired }
+        guard completed != nil, let continuation else { throw Failure.notVerified }
+        isExecuting = true
+        defer { isExecuting = false }
+        do {
+            try Task.checkCancellation(); try checkCurrent()
+            let changed = try await target.inspectChangedCriteria(page: page, after: continuation)
+            try Task.checkCancellation(); try checkCurrent()
+            guard !isRetired else { throw Failure.retired }
+            try browser.validateSourceDocument(page.document)
+            return changed
         } catch {
             await browser.joinDOMCompletion(document: input.evidence.page.document)
             throw error
