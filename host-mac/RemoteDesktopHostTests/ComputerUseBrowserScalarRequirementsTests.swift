@@ -20,8 +20,7 @@ final class ComputerUseBrowserScalarRequirementsTests: XCTestCase {
             XCTAssertFalse(text.contains("San Francisco")); XCTAssertFalse(text.contains("500"))
         }
         for disposition in ["unsupported", "clarification"] {
-            let unresolved = Scalar(proposal: try proposal(rows, disposition: disposition,
-                question: disposition == "clarification" ? "Which dates do you want?" : ""))
+            let unresolved = Scalar(proposal: try proposal(rows, disposition: disposition))
             XCTAssertEqual(unresolved.unresolvedRequirementIDs, unresolved.entries.map(\.requirementID))
             for entry in unresolved.entries { XCTAssertEqual(entry.resolution, .unresolved(.unresolvedDisposition)) }
         }
@@ -197,9 +196,11 @@ final class ComputerUseBrowserScalarRequirementsTests: XCTestCase {
 
     private func proposal(_ rows: [[String: Any]], taskID: String = "scalar-research-task",
                           referenceDate: Date = Date(timeIntervalSince1970: 1_800_000_000), timeZone: String = "America/Los_Angeles",
-                          disposition: String = "research", question: String = "") throws -> ComputerUseBrowserGoalProposal {
+                          disposition: String = "research") throws -> ComputerUseBrowserGoalProposal {
         let prompt = try rows.map { try XCTUnwrap($0["source"] as? String) }.joined()
         let input = try ComputerUseBrowserGoalInput(taskID: taskID, prompt: prompt, referenceDate: referenceDate, timeZoneIdentifier: timeZone)
+        let question: [String: Any] = ["topic":disposition == "clarification" ? "date" : "none",
+            "requirements":disposition == "clarification" ? [0] : []]
         let data = try JSONSerialization.data(withJSONObject: ["disposition":disposition, "requirements":rows, "question":question], options: [.sortedKeys])
         return try .decode(content: String(decoding: data, as: UTF8.self), input: input)
     }

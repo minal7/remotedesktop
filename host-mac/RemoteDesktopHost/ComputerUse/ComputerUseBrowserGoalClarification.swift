@@ -17,18 +17,21 @@ enum ComputerUseBrowserClarificationTopic: String, CaseIterable, Sendable {
         case .fees: return "Should the price limit include fees?"
         }
     }
-    fileprivate func accepts(_ requirement: ComputerUseBrowserGoalProposal.Requirement) -> Bool {
+    func accepts(_ requirement: ComputerUseBrowserGoalProposal.Requirement) -> Bool {
         if requirement.role == .outcome { return true } // A missing detail may have no separate source clause.
         guard requirement.role == .condition || requirement.role == .clarification else { return false }
+        return scopeFields.contains(requirement.field)
+    }
+    var scopeFields: [ComputerUseBrowserGoalProposal.Field] {
         switch self {
-        case .origin: return requirement.field == .origin
-        case .destination: return requirement.field == .destination
-        case .location: return requirement.field == .location
-        case .date: return requirement.field == .date
-        case .time: return requirement.field == .time
-        case .quantity: return requirement.field == .quantity
-        case .currency, .priceBasis: return requirement.field == .price
-        case .fees: return requirement.field == .fees || requirement.field == .price
+        case .origin: return [.origin]
+        case .destination: return [.destination]
+        case .location: return [.location]
+        case .date: return [.date]
+        case .time: return [.time]
+        case .quantity: return [.quantity]
+        case .currency, .priceBasis: return [.price]
+        case .fees: return [.fees, .price]
         }
     }
 }
@@ -115,9 +118,9 @@ final class ComputerUseBrowserGoalClarification {
     private let now: () -> Date
     init(input: ComputerUseBrowserGoalInput, now: @escaping () -> Date = Date.init) { self.input = input; self.now = now }
 
-    /// A typed host topic selects a question; the model's question string is
-    /// never displayed. Scope validation is structural, not proof that this is
-    /// the right semantic clarification for the user's complete goal.
+    /// A typed host topic selects fixed question text. Scope validation is
+    /// structural, not proof that this is the right semantic clarification
+    /// for the user's complete goal.
     func issue(proposal: ComputerUseBrowserGoalProposal, topic: ComputerUseBrowserClarificationTopic,
                requirementIDs: [String], context: Context) throws -> Question {
         guard !isRetired else { throw Failure.retired }

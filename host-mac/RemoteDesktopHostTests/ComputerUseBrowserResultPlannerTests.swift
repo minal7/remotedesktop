@@ -89,7 +89,8 @@ final class ComputerUseBrowserResultPlannerTests: XCTestCase {
     func testResultRequestRetainsWholeClarifiedGoalAndSeparatesUntrustedPage() throws {
         let initial = try goal(), state = ComputerUseBrowserGoalClarification(input: initial)
         let requirement: [String: Any] = ["turn":0, "source":initial.prompt, "role":"outcome", "field":"category", "relation":"unspecified", "values":[]]
-        let goalData = try JSONSerialization.data(withJSONObject: ["disposition":"clarification", "question":"Where?", "requirements":[requirement]])
+        let goalData = try JSONSerialization.data(withJSONObject: ["disposition":"clarification",
+            "question":["topic":"location", "requirements":[0]], "requirements":[requirement]])
         let interpretation = try ComputerUseBrowserGoalProposal.decode(content: String(decoding: goalData, as: UTF8.self), input: initial)
         let owner = try ComputerUseBrowserGoalClarification.Context(controllerID: "private-controller", controllerSessionID: "private-session", browserSessionDigest: nil)
         let question = try state.issue(proposal: interpretation, topic: .location, requirementIDs: [interpretation.requirements[0].id], context: owner)

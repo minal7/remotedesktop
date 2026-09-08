@@ -57,6 +57,17 @@ final class ComputerUseBrowserResearchTask {
         return result
     }
 
+    /// Converts only this owner's current, validated model interpretation to
+    /// a host question request. This neither issues a reference nor asks for
+    /// another proposal; the host still binds the live controller/session.
+    func proposedQuestionRequest() throws -> ComputerUseBrowserQuestionRequest? {
+        try requireIdle()
+        guard !hasQuestion else { throw Failure.questionPending }
+        guard let interpretation, interpretation.proposal.input.digest == input.digest else { throw Failure.interpretationRequired }
+        guard let question = interpretation.proposal.question else { return nil }
+        return .init(taskID: taskID, inputDigest: input.digest, topic: question.topic, requirementIDs: question.requirementIDs)
+    }
+
     func readCandidates() async throws -> ComputerUseBrowserResultCandidates {
         try requireIdle()
         guard !hasQuestion else { throw Failure.questionPending }

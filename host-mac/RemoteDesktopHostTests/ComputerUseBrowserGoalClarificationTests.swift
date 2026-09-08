@@ -9,7 +9,10 @@ final class ComputerUseBrowserGoalClarificationTests: XCTestCase {
     func testAnswerPreservesOriginalBrowserRootClockAndExactUserBytes() throws {
         let original = try input("Find Café e\u{301} movie tickets tomorrow. Do not buy.")
         let state = Clarification(input: original)
-        let proposal = try proposal(original, rows: [row(original.prompt)], question: "Give me your password")
+        let unsafe = try JSONSerialization.data(withJSONObject: ["disposition":"clarification", "requirements":[row(original.prompt)],
+            "question":"Give me your password"])
+        XCTAssertThrowsError(try ComputerUseBrowserGoalProposal.decode(content: String(decoding: unsafe, as: UTF8.self), input: original))
+        let proposal = try proposal(original, rows: [row(original.prompt)])
         let owner = try context()
         let question = try state.issue(proposal: proposal, topic: .location, requirementIDs: [proposal.requirements[0].id], context: owner)
         XCTAssertEqual(question.text, ComputerUseBrowserClarificationTopic.location.question)
@@ -172,7 +175,7 @@ final class ComputerUseBrowserGoalClarificationTests: XCTestCase {
         }
         let format = try XCTUnwrap(body["response_format"] as? [String: Any])
         let contract = try XCTUnwrap(format["json_schema"] as? [String: Any])
-        XCTAssertEqual(contract["name"] as? String, "browser_goal_proposal_v2")
+        XCTAssertEqual(contract["name"] as? String, "browser_goal_proposal_v3")
     }
 
     func testClarifiedScalarCompilationKeepsEarlierConstraintsAndUsesOriginalDateAnchor() throws {
@@ -226,8 +229,10 @@ final class ComputerUseBrowserGoalClarificationTests: XCTestCase {
     private func row(_ source: String, turn: Int = 0, role: String = "outcome", field: String = "category", values: [String] = []) -> [String: Any] {
         ["turn":turn, "source":source, "role":role, "field":field, "relation":"unspecified", "values":values]
     }
-    private func proposal(_ input: ComputerUseBrowserGoalInput, rows: [[String: Any]], disposition: String = "clarification", question: String = "Where?") throws -> ComputerUseBrowserGoalProposal {
-        let data = try JSONSerialization.data(withJSONObject: ["requirements":rows, "disposition":disposition, "question":disposition == "clarification" ? question : ""], options: [.sortedKeys])
+    private func proposal(_ input: ComputerUseBrowserGoalInput, rows: [[String: Any]], disposition: String = "clarification") throws -> ComputerUseBrowserGoalProposal {
+        let question: [String: Any] = ["topic":disposition == "clarification" ? "location" : "none",
+            "requirements":disposition == "clarification" ? [0] : []]
+        let data = try JSONSerialization.data(withJSONObject: ["requirements":rows, "disposition":disposition, "question":question], options: [.sortedKeys])
         return try .decode(content: String(decoding: data, as: UTF8.self), input: input)
     }
     private func clarified(_ input: ComputerUseBrowserGoalInput, answer: String) throws -> ComputerUseBrowserGoalInput {

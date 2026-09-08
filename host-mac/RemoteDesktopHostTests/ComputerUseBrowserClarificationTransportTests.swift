@@ -162,10 +162,10 @@ final class BrowserQuestionLifecycleExecutor: ComputerUseExecuting, ComputerUseB
         return try await next(research)
     }
     private func next(_ research: ComputerUseBrowserResearchTask) async throws -> ComputerUseExecutionResult {
-        let interpretation = try await research.interpretGoal()
+        planner.questionTopic = research.input.userTurns.count < 3 ? (research.input.userTurns.count == 1 ? .location : .date) : nil
+        _ = try await research.interpretGoal()
         guard research.input.userTurns.count < 3 else { return .unableToComplete("Fixture received the complete retained goal; no website research was performed.") }
         try beforeQuestion?()
-        return .browserClarificationRequired(.init(taskID: research.taskID, inputDigest: research.input.digest,
-            topic: research.input.userTurns.count == 1 ? .location : .date, requirementIDs: [interpretation.proposal.requirements[0].id]))
+        return .browserClarificationRequired(try XCTUnwrap(research.proposedQuestionRequest()))
     }
 }

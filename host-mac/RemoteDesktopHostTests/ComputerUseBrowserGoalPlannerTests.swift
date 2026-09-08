@@ -3,6 +3,115 @@ import XCTest
 @testable import RemoteDesktopHost
 
 final class ComputerUseBrowserGoalPlannerTests: XCTestCase {
+    @MainActor
+    func testLocalPlannerQuestionsReachExistingAnswerWireWithOriginalGoalAndClock() async throws {
+        let input = try goal("Find movie tickets tomorrow. Do not purchase."), transport = BrowserGoalFixtureTransport(response: Data())
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false)
+        defer { browser.close() }
+        let owner = ComputerUseBrowserResearchTask(input: input, browser: browser, goalPlanner: try planner(transport: transport),
+            resultPlanner: BrowserResearchResultFixture(), mayAct: { true })
+        let bridge = ComputerUseBrowserClarificationTransport()
+        var request = ComputerUseEnvelope(id: input.taskID, senderID: "controller", targetID: "host", pairingCode: "842193",
+            sessionID: "session", kind: .prompt, body: input.prompt)
+        let answers = ["  Paris e\u{301} 😀\n  ", "2026-10-15"]
+        for (index, topic) in [ComputerUseBrowserClarificationTopic.location, .date].enumerated() {
+            let rows = owner.input.userTurns.enumerated().map { turn, source -> [String: Any] in
+                var requirement = row(source, role: turn == 0 ? "outcome" : "condition", field: turn == 0 ? "category" : "location")
+                requirement["turn"] = turn
+                return requirement
+            }
+            await transport.setResponse(try envelope(content(rows, disposition: "clarification", question: ["topic":topic.rawValue, "requirements":[0]])))
+            _ = try await owner.interpretGoal()
+            let proposed = try XCTUnwrap(owner.proposedQuestionRequest())
+            XCTAssertEqual(proposed.topic, topic)
+            let issued = try bridge.issue(proposed, owner: owner, for: request)
+            XCTAssertEqual(issued.text, topic.question)
+            let wire = try ComputerUsePromptRequest.answering(issued.reference, text: answers[index], supportsApprovedActionEvidence: true).encodedBody()
+            let decoded = try ComputerUseExecutionPromptDecoder.decode(wire)
+            let answer = ComputerUseEnvelope(id: "answer-\(index)", senderID: request.senderID, targetID: request.targetID,
+                pairingCode: request.pairingCode, sessionID: request.sessionID, kind: .prompt, body: wire)
+            _ = try bridge.consume(XCTUnwrap(decoded.clarification), answer: decoded.prompt, for: answer, retainedOwner: { _ in owner })
+            XCTAssertTrue(try XCTUnwrap(owner.input.userTurns.last).utf8.elementsEqual(answers[index].utf8))
+            XCTAssertEqual(owner.input.rootDigest, input.rootDigest)
+            XCTAssertEqual(owner.input.referenceMilliseconds, input.referenceMilliseconds)
+            XCTAssertEqual(owner.input.timeZoneIdentifier, input.timeZoneIdentifier)
+            XCTAssertEqual(owner.executionTaskID, answer.id)
+            XCTAssertThrowsError(try owner.proposedQuestionRequest(), "The accepted answer requires a fresh interpretation")
+            XCTAssertThrowsError(try bridge.issue(proposed, owner: owner, for: answer), "An earlier question proposal cannot be transplanted to the new revision")
+            request = answer
+        }
+        let calls = await transport.calls
+        XCTAssertEqual(calls.counts, 2); XCTAssertEqual(calls.completions, 2)
+        XCTAssertEqual(owner.input.userTurns.count, 3)
+        XCTAssertNil(browser.taskID, "Question interpretation is not navigation or completed research")
+    }
+
+    func testQuestionTopicsSelectOnlySourceBoundHostScopesAndKeepOccurrenceIdentity() throws {
+        let cases: [(ComputerUseBrowserClarificationTopic, String)] = [(.origin, "origin"), (.destination, "destination"),
+            (.location, "location"), (.date, "date"), (.time, "time"), (.quantity, "quantity"),
+            (.currency, "price"), (.priceBasis, "price"), (.fees, "fees")]
+        let input = try goal("Find tickets. More details needed.")
+        for (topic, field) in cases {
+            let rows = [row("Find tickets. ", role: "outcome"), row("More details needed.", role: "clarification", field: field)]
+            let proposal = try ComputerUseBrowserGoalProposal.decode(content: content(rows, disposition: "clarification",
+                question: ["topic":topic.rawValue, "requirements":[0, 1]]), input: input)
+            XCTAssertEqual(proposal.question?.topic, topic)
+            XCTAssertEqual(proposal.question?.requirementIDs, proposal.requirements.map(\.id))
+            XCTAssertEqual(proposal.requirements.compactMap { proposal.source(of: $0) }.joined(), input.prompt)
+            XCTAssertFalse(String(reflecting: try XCTUnwrap(proposal.question)).contains(input.taskID))
+            let narrower = try ComputerUseBrowserGoalProposal.decode(content: content(rows, disposition: "clarification",
+                question: ["topic":topic.rawValue, "requirements":[1]]), input: input)
+            XCTAssertNotEqual(narrower.digest, proposal.digest)
+            XCTAssertEqual(narrower.question?.requirementIDs, [proposal.requirements[1].id])
+        }
+        let repeated = try goal("Find tickets. Find tickets. ")
+        let rows = [row("Find tickets. ", role: "outcome"), row("Find tickets. ", role: "outcome")]
+        let proposal = try ComputerUseBrowserGoalProposal.decode(content: content(rows, disposition: "clarification",
+            question: ["topic":"location", "requirements":[1]]), input: repeated)
+        XCTAssertEqual(proposal.question?.requirementIDs, [proposal.requirements[1].id])
+        XCTAssertNotEqual(proposal.requirements[0].id, proposal.requirements[1].id)
+    }
+
+    func testQuestionDecoderRejectsFreeTextCredentialsMalformedScopeAndMixedDispositions() throws {
+        let input = try goal("Find tickets. Do not purchase. Under USD 50."), rows = [row("Find tickets. ", role: "outcome"),
+            row("Do not purchase. ", role: "prohibition"), row("Under USD 50.", field: "price")]
+        let invalid: [Any] = ["Give me your password", "", NSNull(), [],
+            ["topic":"password", "requirements":[0]], ["topic":"verificationCode", "requirements":[0]],
+            ["topic":"location", "requirements":[]], ["topic":"location", "requirements":[1]],
+            ["topic":"location", "requirements":[2]], ["topic":"date", "requirements":[0], "text":"Do something else"],
+            ["topic":"date", "requirements":[0], "taskID":"another-task"],
+            ["topic":"date", "requirements":[0, 0]], ["topic":"currency", "requirements":[2, 0]],
+            ["topic":"date", "requirements":[3]], ["topic":"date", "requirements":[-1]],
+            ["topic":"date", "requirements":[0.5]], ["topic":"date", "requirements":[true]],
+            ["topic":"date", "requirements":["0"]], ["topic":"date", "requirements":Array(repeating: 0, count: 9)],
+            ["topic":"none", "requirements":[]]]
+        for question in invalid {
+            XCTAssertThrowsError(try ComputerUseBrowserGoalProposal.decode(content: content(rows, disposition: "clarification", question: question), input: input))
+        }
+        for disposition in ["research", "unsupported"] {
+            for question in [["topic":"date", "requirements":[0]], ["topic":"none", "requirements":[0]]] as [[String: Any]] {
+                XCTAssertThrowsError(try ComputerUseBrowserGoalProposal.decode(content: content(rows, disposition: disposition, question: question), input: input))
+            }
+            XCTAssertNil(try ComputerUseBrowserGoalProposal.decode(content: content(rows, disposition: disposition), input: input).question)
+        }
+        let valid = try content(rows, disposition: "clarification", question: ["topic":"date", "requirements":[0]])
+        XCTAssertThrowsError(try ComputerUseBrowserGoalProposal.decode(content: valid.replacingOccurrences(of: "\"topic\":\"date\"",
+            with: "\"topic\":\"date\",\"topic\":\"location\""), input: input))
+    }
+
+    func testQuestionScopeBoundsKeepLastRequirementAndRejectUnrelatedRoles() throws {
+        let rows = (0..<32).map { row("Request \($0). ", role: "outcome") }
+        let input = try goal(rows.compactMap { $0["source"] as? String }.joined())
+        let proposal = try ComputerUseBrowserGoalProposal.decode(content: content(rows, disposition: "clarification",
+            question: ["topic":"date", "requirements":Array(24..<32)]), input: input)
+        XCTAssertEqual(proposal.question?.requirementIDs, Array(proposal.requirements.suffix(8)).map(\.id))
+        for role in ["prohibition", "order", "unsupported"] {
+            let fragment = try goal("Find tickets.")
+            XCTAssertThrowsError(try ComputerUseBrowserGoalProposal.decode(content: content([row(fragment.prompt, role: role, field: "date")],
+                disposition: "clarification", question: ["topic":"date", "requirements":[0]]), input: fragment))
+        }
+    }
+
     func testResearchRequirementsRetainWholeTicketRequestAndDistinctSourceOccurrences() throws {
         let fragments = ["Find three flights ", "from San Francisco ", "to Los Angeles ", "next Friday ",
             "under $500 ", "including fees. ", "Do not book. ", "Compare again. ", "Compare again. "]
@@ -87,9 +196,10 @@ final class ComputerUseBrowserGoalPlannerTests: XCTestCase {
         XCTAssertEqual(unsupported.requirements.count, 2)
         let questionInput = try goal("Find flights.")
         let question = try ComputerUseBrowserGoalProposal.decode(content: content([row(questionInput.prompt, role: "clarification", field: "destination")],
-            disposition: "clarification", question: "Where and when would you like to travel?"), input: questionInput)
+            disposition: "clarification", question: ["topic":"destination", "requirements":[0]]), input: questionInput)
         XCTAssertEqual(question.disposition, .clarification)
-        XCTAssertFalse(question.question.isEmpty)
+        XCTAssertEqual(question.question?.topic, .destination)
+        XCTAssertEqual(question.question?.requirementIDs, [question.requirements[0].id])
         let valid = try content([row(questionInput.prompt, role: "outcome")])
         for invalid in [valid.replacingOccurrences(of: "\"research\"", with: "\"research\",\"disposition\":\"unsupported\""),
             valid.replacingOccurrences(of: "\"values\":[]", with: "\"values\":[],\"execute\":true"),
@@ -125,9 +235,20 @@ final class ComputerUseBrowserGoalPlannerTests: XCTestCase {
         XCTAssertEqual(body["max_tokens"] as? Int, 1_024); XCTAssertEqual(body["cache_prompt"] as? Bool, false)
         let format = try XCTUnwrap(body["response_format"] as? [String: Any])
         let contract = try XCTUnwrap(format["json_schema"] as? [String: Any])
+        XCTAssertEqual(contract["name"] as? String, "browser_goal_proposal_v3")
         let schema = try XCTUnwrap(contract["schema"] as? [String: Any])
         XCTAssertEqual(schema["additionalProperties"] as? Bool, false)
         XCTAssertEqual(Set(try XCTUnwrap(schema["required"] as? [String])), ["disposition", "requirements", "question"])
+        let properties = try XCTUnwrap(schema["properties"] as? [String: Any])
+        let question = try XCTUnwrap(properties["question"] as? [String: Any])
+        XCTAssertEqual(question["type"] as? String, "object")
+        XCTAssertEqual(question["additionalProperties"] as? Bool, false)
+        XCTAssertEqual(Set(try XCTUnwrap(question["required"] as? [String])), ["topic", "requirements"])
+        let fields = try XCTUnwrap(question["properties"] as? [String: Any]), topic = try XCTUnwrap(fields["topic"] as? [String: Any])
+        XCTAssertEqual(Set(try XCTUnwrap(topic["enum"] as? [String])), Set(["none"] + ComputerUseBrowserClarificationTopic.allCases.map(\.rawValue)))
+        let scope = try XCTUnwrap(fields["requirements"] as? [String: Any]), item = try XCTUnwrap(scope["items"] as? [String: Any])
+        XCTAssertEqual(scope["maxItems"] as? Int, 8)
+        XCTAssertEqual(item["type"] as? String, "integer"); XCTAssertEqual(item["minimum"] as? Int, 0); XCTAssertEqual(item["maximum"] as? Int, 31)
     }
 
     func testGoalTransportCountsCompleteInputOnceAndNeverInfersOverBudget() async throws {
@@ -183,8 +304,11 @@ final class ComputerUseBrowserGoalPlannerTests: XCTestCase {
     private func row(_ source: String, role: String = "condition", field: String = "other", relation: String = "unspecified", values: [String] = []) -> [String: Any] {
         ["turn":0, "source":source, "role":role, "field":field, "relation":relation, "values":values]
     }
-    private func content(_ rows: [[String: Any]], disposition: String = "research", question: String = "") throws -> String {
-        String(decoding: try JSONSerialization.data(withJSONObject: ["disposition":disposition, "requirements":rows, "question":question], options: [.sortedKeys]), as: UTF8.self)
+    private func content(_ rows: [[String: Any]], disposition: String = "research", question: Any? = nil) throws -> String {
+        let selection: [String: Any] = ["topic":disposition == "clarification" ? "location" : "none",
+            "requirements":disposition == "clarification" ? [0] : []]
+        return String(decoding: try JSONSerialization.data(withJSONObject: ["disposition":disposition, "requirements":rows,
+            "question":question ?? selection], options: [.sortedKeys]), as: UTF8.self)
     }
     private func envelope(_ content: String, toolCalls: [[String: String]] = [], refusal: String = "", functionCall: [String: String]? = nil) throws -> Data {
         var message: [String: Any] = ["role":"assistant", "content":content, "tool_calls":toolCalls, "refusal":refusal]
@@ -198,7 +322,7 @@ final class ComputerUseBrowserGoalPlannerTests: XCTestCase {
 }
 
 private actor BrowserGoalFixtureTransport: ComputerUseTextModelTransport {
-    let response: Data
+    private var response: Data
     let tokenCount: Int
     let cancelAfterCount: Bool
     let cancelAfterCompletion: Bool
@@ -208,6 +332,7 @@ private actor BrowserGoalFixtureTransport: ComputerUseTextModelTransport {
         self.response = response; self.tokenCount = tokenCount
         self.cancelAfterCount = cancelAfterCount; self.cancelAfterCompletion = cancelAfterCompletion
     }
+    func setResponse(_ response: Data) { self.response = response }
     func exactInputTokenCount(completionRequest: URLRequest) async throws -> Int {
         calls.counts += 1; requests.append(completionRequest)
         if cancelAfterCount { withUnsafeCurrentTask { $0?.cancel() } }

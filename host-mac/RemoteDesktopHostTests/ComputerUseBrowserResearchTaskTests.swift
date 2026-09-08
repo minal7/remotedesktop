@@ -4,6 +4,43 @@ import XCTest
 
 @MainActor
 final class ComputerUseBrowserResearchTaskTests: XCTestCase {
+    func testQuestionRequestRequiresCurrentInterpretationAndCannotEscapePauseOrRetirement() async throws {
+        let planner = BrowserResearchGoalFixture(), browser = ComputerUseOwnedBrowser(presentsWindow: false)
+        defer { browser.close() }
+        let owner = makeOwner(try goal(), browser: browser, planner: planner)
+        XCTAssertThrowsError(try owner.proposedQuestionRequest()) {
+            XCTAssertEqual($0 as? ComputerUseBrowserResearchTask.Failure, .interpretationRequired)
+        }
+        planner.questionTopic = .location
+        _ = try await owner.interpretGoal()
+        let proposal = try XCTUnwrap(owner.proposedQuestionRequest())
+        XCTAssertEqual(proposal.taskID, owner.taskID); XCTAssertEqual(proposal.inputDigest, owner.input.digest)
+        XCTAssertEqual(proposal.topic, .location)
+        XCTAssertEqual(try owner.proposedQuestionRequest(), proposal)
+        XCTAssertEqual(planner.inputs.count, 1, "Converting a current interpretation does not invoke the model again")
+        let question = try owner.issueQuestion(topic: proposal.topic, requirementIDs: proposal.requirementIDs,
+            controllerID: "controller", controllerSessionID: "session")
+        XCTAssertThrowsError(try owner.proposedQuestionRequest()) {
+            XCTAssertEqual($0 as? ComputerUseBrowserResearchTask.Failure, .questionPending)
+        }
+        _ = try owner.answerQuestion(questionID: question.id, answerTaskID: "answer", answer: "Paris",
+            controllerID: "controller", controllerSessionID: "session")
+        planner.questionTopic = nil
+        _ = try await owner.interpretGoal()
+        XCTAssertNil(try owner.proposedQuestionRequest(), "Research disposition cannot manufacture a question")
+        owner.pause()
+        XCTAssertThrowsError(try owner.proposedQuestionRequest()) {
+            XCTAssertEqual($0 as? ComputerUseBrowserResearchTask.Failure, .paused)
+        }
+        try await owner.resumeAfterUserControl()
+        XCTAssertNil(try owner.proposedQuestionRequest())
+        owner.retire()
+        XCTAssertThrowsError(try owner.proposedQuestionRequest()) {
+            XCTAssertEqual($0 as? ComputerUseBrowserResearchTask.Failure, .retired)
+        }
+        XCTAssertNil(browser.taskID)
+    }
+
     func testResearchOwnerRetainsInterpretationAndRejectsForeignProposal() async throws {
         let planner = BrowserResearchGoalFixture(), browser = ComputerUseOwnedBrowser(presentsWindow: false)
         defer { browser.close() }
@@ -198,6 +235,7 @@ final class BrowserResearchGoalFixture: ComputerUseBrowserGoalPlanning {
     private(set) var inputs: [ComputerUseBrowserGoalInput] = []
     var replacement: ComputerUseBrowserGoalInput?
     var beforeReply: (@MainActor () async -> Void)?
+    var questionTopic: ComputerUseBrowserClarificationTopic?
     func propose(_ input: ComputerUseBrowserGoalInput) async throws -> ComputerUseBrowserGoalProposal {
         inputs.append(input)
         if let beforeReply { await beforeReply() } // Deliberately ignores cancellation until the fixture is released.
@@ -206,7 +244,9 @@ final class BrowserResearchGoalFixture: ComputerUseBrowserGoalPlanning {
             ["turn":index, "source":source, "role":index == 0 ? "outcome" : "condition",
                 "field":index == 0 ? "category" : "other", "relation":"unspecified", "values":[]]
         }
-        let data = try JSONSerialization.data(withJSONObject: ["disposition":"research", "question":"", "requirements":rows])
+        let question: [String: Any] = ["topic":questionTopic?.rawValue ?? "none", "requirements":questionTopic == nil ? [] : [0]]
+        let data = try JSONSerialization.data(withJSONObject: ["disposition":questionTopic == nil ? "research" : "clarification",
+            "question":question, "requirements":rows])
         return try .decode(content: String(decoding: data, as: UTF8.self), input: goal)
     }
 }
