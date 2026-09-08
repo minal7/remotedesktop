@@ -40,7 +40,13 @@ struct ComputerUseBrowserSourceRequirements: Sendable {
         goal = proposal.input; interpretationDigest = proposal.digest
         isResearch = proposal.disposition == .research
         var navigation = Scope(), answers = Scope(), unresolved: [Unresolved] = []
+        let parameterAnswers = Set(ComputerUseBrowserScalarRequirements(proposal: proposal).entries.compactMap { entry -> String? in
+            if case .clarification = entry.resolution { return entry.requirementID }; return nil
+        })
         for requirement in proposal.requirements {
+            // A whole literal answer to a sealed price-parameter question
+            // has host-known meaning even if its model field label is wrong.
+            if parameterAnswers.contains(requirement.id) { continue }
             guard [.source, .navigationSource, .answerSource].contains(requirement.field) else { continue }
             func reject(_ reason: UnresolvedReason) { unresolved.append(.init(requirementID: requirement.id, reason: reason)) }
             guard proposal.disposition == .research else { reject(.unresolvedDisposition); continue }

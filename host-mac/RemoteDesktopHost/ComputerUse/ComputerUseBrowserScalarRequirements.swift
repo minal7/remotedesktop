@@ -8,8 +8,30 @@ import Foundation
 struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     enum UnresolvedReason: String, Sendable {
         case unresolvedDisposition, notScalar, unrecognizedSource, invalidValue, contradictoryProposal, ambiguousDate
+        case ambiguousClarification, clarificationScope, contradictoryClarification
     }
-    enum Resolution: Equatable, Sendable { case bound(Condition), unresolved(UnresolvedReason) }
+    enum Resolution: Equatable, Sendable { case bound(Condition), clarification(ClarificationBinding), unresolved(UnresolvedReason) }
+    struct ClarificationBinding: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+        enum Parameter: Equatable, Sendable {
+            case currency(Currency), priceBasis(PriceBasis), fees(Fees)
+            fileprivate var identity: [String] {
+                switch self { case .currency(let value): return ["currency", value.rawValue]
+                case .priceBasis(let value): return ["priceBasis", value.rawValue]
+                case .fees(let value): return ["fees", value.rawValue] }
+            }
+        }
+        let id: String
+        let answerTurn: Int
+        let parameter: Parameter
+        let targetRequirementIDs: [String]
+        fileprivate init(input: ComputerUseBrowserGoalInput, turn: Int, parameter: Parameter, targets: [String]) {
+            answerTurn = turn; self.parameter = parameter; targetRequirementIDs = targets
+            id = ComputerUseTaskContract.digest(["browser-price-clarification-v1", input.digest,
+                input.clarifications[turn - 1].digest, String(turn)] + parameter.identity + targets)
+        }
+        var description: String { "BrowserPriceClarification(turn: \(answerTurn), targets: \(targetRequirementIDs.count))" }
+        var debugDescription: String { description }
+    }
     struct Entry: Equatable, Sendable {
         let requirementID: String
         let resolution: Resolution
@@ -173,7 +195,7 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
 
     init(proposal: ComputerUseBrowserGoalProposal) {
         self.proposal = proposal
-        entries = proposal.requirements.map { requirement in
+        let baseEntries = proposal.requirements.map { requirement in
             guard proposal.disposition == .research else {
                 return Entry(requirementID: requirement.id, resolution: .unresolved(.unresolvedDisposition))
             }
@@ -199,6 +221,140 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
             case .failure(let failure): return Entry(requirementID: requirement.id, resolution: .unresolved(failure.reason))
             }
         }
+        entries = Self.applyingPriceClarifications(proposal, to: baseEntries)
+    }
+
+    /// Resolve only whole, explicit parameter answers from authenticated
+    /// clarification turns. The original amount and comparator stay fixed.
+    /// Every answer retains a ledger entry tied to the exact target clauses.
+    private static func applyingPriceClarifications(_ proposal: ComputerUseBrowserGoalProposal, to original: [Entry]) -> [Entry] {
+        guard proposal.disposition == .research else { return original }
+        var entries = original
+        let priceIndices = original.indices.filter { index in
+            if case .bound(let condition) = original[index].resolution, case .price = condition.predicate { return true }
+            return false
+        }
+        var previousTargets: [Int: [Int]] = [:]
+        for (index, answer) in proposal.input.clarifications.enumerated() {
+            guard [.currency, .priceBasis, .fees].contains(answer.topic) else { continue }
+            let turn = index + 1
+            let answerIndices = proposal.requirements.indices.filter { proposal.requirements[$0].sourceTurnIndex == turn }
+            var targets: Set<Int> = [], possibleTargets: Set<Int> = [], invalidScope = false
+            for scope in answer.scope {
+                guard scope.turn < turn else { invalidScope = true; continue }
+                let matching = priceIndices.filter { Self.contains(scope, requirement: proposal.requirements[$0], proposal: proposal) }
+                possibleTargets.formUnion(matching)
+                if matching.count == 1 { targets.insert(matching[0]) }
+                else if matching.isEmpty, scope.turn > 0, let previous = previousTargets[scope.turn],
+                        let expected = Self.parameter(proposal.input.userTurns[scope.turn], topic: proposal.input.clarifications[scope.turn - 1].topic),
+                        Self.parameter(scope.source, topic: proposal.input.clarifications[scope.turn - 1].topic) == expected {
+                    // A follow-up can refer to a previously resolved answer,
+                    // including a source span expressing that same parameter.
+                    // The complete earlier answer must already be bound.
+                    targets.formUnion(previous); possibleTargets.formUnion(previous)
+                } else { invalidScope = true }
+            }
+            func unresolved(_ reason: UnresolvedReason) {
+                for row in possibleTargets.union(targets).union(answerIndices) {
+                    entries[row] = .init(requirementID: original[row].requirementID, resolution: .unresolved(reason))
+                }
+            }
+            guard !invalidScope, !targets.isEmpty else { unresolved(.clarificationScope); continue }
+            guard let parameter = Self.parameter(answer.answer, topic: answer.topic) else { unresolved(.ambiguousClarification); continue }
+            let ordered = targets.sorted()
+            var replacements: [(Int, Condition)] = []
+            for target in ordered {
+                guard case .bound(let condition) = entries[target].resolution,
+                      let predicate = Self.applying(parameter, to: condition.predicate) else { continue }
+                replacements.append((target, .init(inputDigest: proposal.input.digest,
+                    requirementID: condition.requirementID, predicate: predicate)))
+            }
+            // A multi-clause answer applies atomically: a conflict in one
+            // clause cannot silently change the others or overwrite an
+            // unresolved earlier answer with its original default values.
+            guard replacements.count == ordered.count else { unresolved(.contradictoryClarification); continue }
+            for (target, condition) in replacements {
+                entries[target] = .init(requirementID: condition.requirementID, resolution: .bound(condition))
+            }
+            let binding = ClarificationBinding(input: proposal.input, turn: turn, parameter: parameter,
+                targets: ordered.map { original[$0].requirementID })
+            for row in answerIndices { entries[row] = .init(requirementID: original[row].requirementID, resolution: .clarification(binding)) }
+            previousTargets[turn] = ordered
+        }
+        let current = Dictionary(uniqueKeysWithValues: entries.map { ($0.requirementID, $0.resolution) })
+        for index in entries.indices {
+            guard case .clarification(let binding) = entries[index].resolution else { continue }
+            if !binding.targetRequirementIDs.allSatisfy({ if case .bound? = current[$0] { return true }; return false }) {
+                entries[index] = .init(requirementID: entries[index].requirementID, resolution: .unresolved(.contradictoryClarification))
+            }
+        }
+        return entries
+    }
+
+    private static func contains(_ scope: ComputerUseBrowserGoalClarificationTurn.Scope,
+                                 requirement: ComputerUseBrowserGoalProposal.Requirement,
+                                 proposal: ComputerUseBrowserGoalProposal) -> Bool {
+        guard requirement.sourceTurnIndex == scope.turn, let source = proposal.source(of: requirement) else { return false }
+        // A new partition may move boundary whitespace, "and" or sentence
+        // punctuation. Use the already supported price-clause normalization,
+        // preserving every comparator/value/qualifier byte and its occurrence.
+        let clause = conditionSource(source)
+        guard !clause.isEmpty, let range = source.range(of: clause, options: .literal) else { return false }
+        let start = requirement.sourceByteOffset + source[..<range.lowerBound].utf8.count
+        guard start >= scope.sourceByteOffset else { return false }
+        let selected = Data(clause.utf8)
+        let bytes = Data(scope.source.utf8), offset = start - scope.sourceByteOffset
+        guard !selected.isEmpty, offset <= bytes.count, selected.count <= bytes.count - offset else { return false }
+        return bytes.subdata(in: offset..<(offset + selected.count)) == selected
+    }
+
+    private static func parameter(_ answer: String, topic: ComputerUseBrowserClarificationTopic) -> ClarificationBinding.Parameter? {
+        var text = answer.split(whereSeparator: \.isWhitespace).joined(separator: " ").lowercased()
+        if text.last == "." { text.removeLast() }
+        if text.hasPrefix("please ") { text = String(text.dropFirst(7)) }
+        for suffix in [", please", " please"] where text.hasSuffix(suffix) { text = String(text.dropLast(suffix.count)); break }
+        switch topic {
+        case .currency:
+            for prefix in ["i mean ", "use ", "the currency is "] where text.hasPrefix(prefix) { text = String(text.dropFirst(prefix.count)); break }
+            let names: [String: Currency] = ["usd":.usd, "us dollars":.usd, "u.s. dollars":.usd, "american dollars":.usd,
+                "cad":.cad, "canadian dollars":.cad, "aud":.aud, "australian dollars":.aud,
+                "eur":.eur, "euros":.eur, "gbp":.gbp, "british pounds":.gbp, "jpy":.jpy, "japanese yen":.jpy]
+            return names[text].map { .currency($0) }
+        case .priceBasis:
+            for prefix in ["the budget is ", "it is ", "it's "] where text.hasPrefix(prefix) { text = String(text.dropFirst(prefix.count)); break }
+            switch text { case "total", "a total", "in total": return .priceBasis(.total)
+            case "per person", "per-person": return .priceBasis(.perPerson)
+            case "per ticket", "per-ticket": return .priceBasis(.perTicket)
+            default: return nil }
+        case .fees:
+            switch text { case "yes", "include fees", "including fees", "fees included", "including taxes and fees", "yes, include fees": return .fees(.included)
+            case "no", "exclude fees", "excluding fees", "fees excluded", "excluding taxes and fees", "no, exclude fees": return .fees(.excluded)
+            default: return nil }
+        default: return nil
+        }
+    }
+
+    private static func applying(_ parameter: ClarificationBinding.Parameter, to predicate: Predicate) -> Predicate? {
+        guard case .price(let comparison, let original, let originalBasis, let originalFees) = predicate else { return nil }
+        var currency = original.currency, basis = originalBasis, fees = originalFees
+        switch parameter {
+        case .currency(let value):
+            let compatible: Bool
+            switch currency {
+            case .dollarSymbol: compatible = [.usd, .cad, .aud].contains(value)
+            case .euroSymbol: compatible = value == .eur
+            case .poundSymbol: compatible = value == .gbp
+            case .yenSymbol: compatible = value == .jpy
+            default: compatible = value == currency
+            }
+            guard compatible else { return nil }; currency = value
+        case .priceBasis(let value):
+            guard basis == .unspecified || basis == value else { return nil }; basis = value
+        case .fees(let value):
+            guard fees == .unspecified || fees == value else { return nil }; fees = value
+        }
+        guard let amount = Amount(hundredths: original.hundredths, currency: currency) else { return nil }
+        return .price(comparison, amount, basis, fees)
     }
 
     private struct BindingFailure: Error { let reason: UnresolvedReason }

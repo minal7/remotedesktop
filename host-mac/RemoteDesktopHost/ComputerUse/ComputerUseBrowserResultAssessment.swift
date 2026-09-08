@@ -6,7 +6,7 @@ import Foundation
 struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     typealias Scalars = ComputerUseBrowserScalarRequirements
     enum Status: String, Sendable {
-        case needsSemanticVerification, needsResultSet, uncompiledRequirement
+        case needsSemanticVerification, needsResultSet, uncompiledRequirement, clarificationApplied
         case missingQuote, ambiguousQuotes, unparsedQuote
         case quotedValueMatches, quotedValueConflicts, incompatibleLiteral
         case sourceOriginPermitted, sourceOriginExcluded, sourceUnconfigured, incompletePage
@@ -72,6 +72,7 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
                     .init(requirementID: requirement.id, status: status, quoteIndices: quotes)
                 }
                 guard interpretation.disposition == .research else { return result(.uncompiledRequirement) }
+                if case .clarification? = conditions[requirement.id] { return result(.clarificationApplied) }
                 if unresolvedSources.contains(requirement.id) { return result(.uncompiledRequirement) }
                 if requirement.field == .answerSource {
                     switch reading.documentAnswerSourceStatus {

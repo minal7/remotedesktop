@@ -187,6 +187,39 @@ final class ComputerUseBrowserResultAssessmentTests: XCTestCase {
         XCTAssertEqual(assessment.candidates.first?.quotes.first?.source, "USD 40")
     }
 
+    func testPriceAnswersReachNativeCandidateAssessmentWithoutReplacingOrRepeatingTheResearchTask() async throws {
+        var rows = [row("Find concerts. "), row("Under $50.", field: "price", relation: "below")]
+        let result = try await reading(rows, fields: [.init(.price, ["USD 40 per ticket including fees"])])
+        defer { result.fixture.close() }
+        let original = result.owner.input
+        XCTAssertEqual(result.batch.requirementAssessment?.candidates[0].requirements[1].status, .incompatibleLiteral)
+        var current = result.interpretation
+        let answers: [(ComputerUseBrowserClarificationTopic, String)] = [(.currency, "USD"), (.priceBasis, "per ticket"), (.fees, "including fees")]
+        for (index, value) in answers.enumerated() {
+            let question = try result.owner.issueQuestion(topic: value.0, requirementIDs: [current.requirements[1].id],
+                controllerID: "phone", controllerSessionID: "session")
+            let input = try result.owner.answerQuestion(questionID: question.id, answerTaskID: "price-answer-\(index)", answer: value.1,
+                controllerID: "phone", controllerSessionID: "session")
+            // A mistaken source label on the literal USD answer must not
+            // create an unrelated website restriction or source question.
+            var answerRow = row(value.1, field: index == 0 ? "source" : "price")
+            answerRow["turn"] = index + 1; rows.append(answerRow)
+            current = try proposal(rows, input: input); result.goals.value = current
+            _ = try await result.owner.interpretGoal()
+            XCTAssertNil(try result.owner.proposedQuestionRequest())
+            let sources = try XCTUnwrap(ComputerUseBrowserSourceRequirements(proposal: current).selectSources(from: [result.fixture.policy.provider]))
+            try result.owner.configureResearchSources(sources)
+            let batch = try await result.owner.readCandidates(), assessment = try XCTUnwrap(batch.requirementAssessment)
+            XCTAssertEqual(assessment.candidates[0].requirements[1].status, .quotedValueMatches)
+            XCTAssertEqual(assessment.candidates[0].requirements.dropFirst(2).map(\.status), Array(repeating: .clarificationApplied, count: index + 1))
+            XCTAssertEqual(input.rootDigest, original.rootDigest); XCTAssertEqual(input.referenceMilliseconds, original.referenceMilliseconds)
+            XCTAssertEqual(input.userTurns, [original.prompt] + answers.prefix(index + 1).map { $0.1 })
+            try await result.fixture.browser.validateResultAssessment(assessment, reading: batch, interpretation: current)
+        }
+        XCTAssertEqual(result.fixture.server.count("/search?q=concerts"), 1)
+        XCTAssertEqual(result.fixture.server.count("/details"), 0)
+    }
+
     private struct Reading {
         let fixture: ResearchDriverFixture
         let owner: ComputerUseBrowserResearchTask
