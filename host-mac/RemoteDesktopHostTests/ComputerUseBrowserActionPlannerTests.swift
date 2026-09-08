@@ -14,7 +14,7 @@ final class ComputerUseBrowserActionPlannerTests: XCTestCase {
         XCTAssertEqual((goal["referenceUnixMilliseconds"] as? NSNumber)?.int64Value, owner.input.referenceMilliseconds)
         XCTAssertEqual(goal["timeZone"] as? String, owner.input.timeZoneIdentifier)
         XCTAssertEqual((context["requirements"] as? [[String: Any]])?.first?["source"] as? String, owner.input.prompt)
-        XCTAssertEqual(context["version"] as? Int, 6)
+        XCTAssertEqual(context["version"] as? Int, 7)
         XCTAssertEqual(context["preservable_controls"] as? [String], input.preservableControlIDs)
         XCTAssertEqual(context["editable_forms"] as? [String], input.formIDs); XCTAssertEqual(input.formIDs.count, 1)
         XCTAssertTrue(input.queryControlIDs.isEmpty); XCTAssertNil(input.queryReceipt)

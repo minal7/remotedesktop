@@ -201,6 +201,7 @@ struct ComputerUseBrowserResultCandidates: Sendable, CustomStringConvertible, Cu
     /// Host wall-clock time after native reading validation, not the user's
     /// fixed date context and not a promise that inventory remains current.
     let observedAtMilliseconds: Int64
+    let historyOptions: [ComputerUseBrowserHistoryOption]
     let candidates: [Candidate]
     let review: ComputerUseBrowserResultReview?
     let documentAnswerSourceStatus: DocumentAnswerSourceStatus
@@ -275,9 +276,10 @@ struct ComputerUseBrowserResultCandidates: Sendable, CustomStringConvertible, Cu
 
     fileprivate init(proposal: ComputerUseBrowserResultProposal, goal: ComputerUseBrowserGoalInput,
                      evidence: ComputerUseBrowserPageEvidence, answerPolicy: ComputerUseBrowserAnswerSourcePolicy?,
-                     interpretation: ComputerUseBrowserGoalProposal?) {
+                     interpretation: ComputerUseBrowserGoalProposal?, historyOptions: [ComputerUseBrowserHistoryOption]) {
         self.evidence = evidence; goalRevision = goal.digest; rootTaskID = goal.taskID
         observedAtMilliseconds = Int64(Date().timeIntervalSince1970 * 1_000)
+        self.historyOptions = historyOptions
         answerSourcePolicy = answerPolicy
         goalInterpretation = interpretation; review = proposal.review
         documentAnswerSourceStatus = answerPolicy.map { $0.permitsEvidenceFrom(evidence.document.committedURL) ? .permitted : .excluded } ?? .unconfigured
@@ -323,6 +325,8 @@ struct ComputerUseBrowserLinkSelectionInput: Equatable, Sendable, CustomStringCo
     private let choices: [Choice]
     private let bindingDigest: String
     private let answerEligibility: ComputerUseBrowserResearchAnswer.Eligibility?
+    let historyOptions: [ComputerUseBrowserHistoryOption]
+    var historyVisitIndices: [Int] { historyOptions.map(\.visit) }
     let allowsAnswer: Bool
     var answerCandidateIndices: [Int] { answerEligibility?.candidateIndices ?? [] }
     var answerCounts: [Int] { answerEligibility?.selectionCounts ?? [] }
@@ -332,7 +336,7 @@ struct ComputerUseBrowserLinkSelectionInput: Equatable, Sendable, CustomStringCo
     var candidateCount: Int { choices.count }
     var selectableLinkIDs: [String] { Array(Set(choices.flatMap(\.links))).sorted() }
     var hasSelectableLinks: Bool { choices.contains { !$0.links.isEmpty } }
-    var hasPlanningChoices: Bool { hasSelectableLinks || !recallableReadingIndices.isEmpty || !answerCounts.isEmpty }
+    var hasPlanningChoices: Bool { hasSelectableLinks || !recallableReadingIndices.isEmpty || !answerCounts.isEmpty || !historyOptions.isEmpty }
 
     init(goal: ComputerUseBrowserGoalInput, candidates: ComputerUseBrowserResultCandidates,
          history: [ComputerUseBrowserResearchVisit], evidence: ComputerUseBrowserResearchEvidence? = nil,
@@ -351,6 +355,12 @@ struct ComputerUseBrowserLinkSelectionInput: Equatable, Sendable, CustomStringCo
             ? available.filter { !recalledReadings.contains($0) } : []
         choices = candidates.candidates.map { .init(candidateID: $0.id, links: $0.selectedLinkIDs) }
         self.allowsAnswer = allowsAnswer
+        historyOptions = allowsAnswer ? candidates.historyOptions : []
+        guard Set(historyOptions.map(\.visit)).count == historyOptions.count,
+              historyOptions.allSatisfy({ history.indices.contains($0.visit)
+                && history[$0.visit].operationID == $0.operationID && $0.target.isBound(to: candidates.evidence) }) else {
+            throw ComputerUseBrowserLinkPlanError.inputChanged
+        }
         answerEligibility = allowsAnswer ? try candidates.answerEligibility(goal: goal, evidence: evidence, recalledReadings: recalledReadings) : nil
         let visits: [[String: Any]] = history.enumerated().map {
             ["step":$0.offset, "kind":$0.element.kind.rawValue, "current_goal_revision":$0.element.goalRevision == goal.digest]
@@ -363,7 +373,7 @@ struct ComputerUseBrowserLinkSelectionInput: Equatable, Sendable, CustomStringCo
             guard let evidence else { throw ComputerUseBrowserLinkPlanError.inputChanged }
             return try evidence.recall(index, goal: goal)
         }
-        var context: [String: Any] = ["version":allowsAnswer ? 7 : 5, "goal":goal.plannerContext,
+        var context: [String: Any] = ["version":allowsAnswer ? 8 : 5, "goal":goal.plannerContext,
             "page":try JSONSerialization.jsonObject(with: Data(candidates.readingInput.contextJSON.utf8)),
             "candidates":candidates.candidatePlannerContext, "navigation_history":visits,
             "reading_catalog":readingCatalog,
@@ -377,6 +387,10 @@ struct ComputerUseBrowserLinkSelectionInput: Equatable, Sendable, CustomStringCo
             context["answer_counts"] = answerEligibility?.selectionCounts ?? []
             context["answer_options"] = answerEligibility?.plannerOptions ?? []
             context["observed_at_milliseconds"] = candidates.observedAtMilliseconds
+            context["history_destinations"] = historyOptions.map { option in
+                ["visit":option.visit, "mode":option.mode.rawValue,
+                 "readings":evidence?.readingIndices(forSource: option.target.destinationIdentity) ?? []] as [String: Any]
+            }
         }
         contextJSON = String(decoding: try JSONSerialization.data(withJSONObject: context, options: [.sortedKeys]), as: UTF8.self)
         let nativeEvidence = candidates.evidence
@@ -399,6 +413,10 @@ struct ComputerUseBrowserLinkSelectionInput: Equatable, Sendable, CustomStringCo
     func resolveAnswer(indices: [Int]) throws -> ComputerUseBrowserResearchAnswer.Selection {
         guard allowsAnswer, let answerEligibility else { throw ComputerUseBrowserLinkPlanError.invalidProposal }
         return try answerEligibility.selection(indices)
+    }
+    func resolveHistory(visit: Int) throws -> ComputerUseBrowserHistoryOption {
+        guard let option = historyOptions.first(where: { $0.visit == visit }) else { throw ComputerUseBrowserLinkPlanError.invalidProposal }
+        return option
     }
     var description: String { "BrowserLinkSelectionInput(candidates: \(candidateCount))" }
     var debugDescription: String { description }
@@ -496,7 +514,8 @@ extension ComputerUseOwnedBrowser {
     func prepareResultCandidates(_ proposal: ComputerUseBrowserResultProposal, goal: ComputerUseBrowserGoalInput,
                                  evidence: ComputerUseBrowserPageEvidence,
                                  answerPolicy: ComputerUseBrowserAnswerSourcePolicy? = nil,
-                                 interpretation: ComputerUseBrowserGoalProposal? = nil) async throws -> ComputerUseBrowserResultCandidates {
+                                 interpretation: ComputerUseBrowserGoalProposal? = nil,
+                                 historyOptions: [ComputerUseBrowserHistoryOption] = []) async throws -> ComputerUseBrowserResultCandidates {
         try Task.checkCancellation()
         guard proposal.goalRevision == goal.digest, goal.taskID.utf8.elementsEqual(evidence.document.taskID.utf8),
               answerPolicy == nil || answerPolicy?.goalRevision == goal.digest,
@@ -504,6 +523,7 @@ extension ComputerUseOwnedBrowser {
             throw ComputerUseBrowserResultError.goalChanged
         }
         guard proposal.input.page == evidence.page else { throw ComputerUseBrowserResultError.invalidPage }
+        guard historyOptions.allSatisfy({ $0.target.isBound(to: evidence) }) else { throw ComputerUseBrowserResultError.invalidPage }
         if let review = proposal.review {
             guard !review.hasRequirementMapping || interpretation != nil else { throw ComputerUseBrowserResultReviewError.inputChanged }
             try review.validate(for: ComputerUseBrowserResultReviewInput(goal: goal, page: proposal.input, proposal: proposal,
@@ -511,7 +531,7 @@ extension ComputerUseOwnedBrowser {
         }
         try await validatePageEvidence(evidence)
         try Task.checkCancellation()
-        return .init(proposal: proposal, goal: goal, evidence: evidence, answerPolicy: answerPolicy, interpretation: interpretation)
+        return .init(proposal: proposal, goal: goal, evidence: evidence, answerPolicy: answerPolicy, interpretation: interpretation, historyOptions: historyOptions)
     }
 
     /// Reuse requires the same review, complete goal and current native page.

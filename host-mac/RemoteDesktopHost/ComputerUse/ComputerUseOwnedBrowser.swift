@@ -102,10 +102,13 @@ struct ComputerUseBrowserPageEvidence: Equatable, Sendable, CustomStringConverti
 struct ComputerUseBrowserNavigationTarget: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     fileprivate enum Source: Equatable, Sendable {
         case link(String)
+        case history(String), revisit(String)
         case formQuery(controlID: String, queryID: String, requirementsDigest: String?)
         var identity: [String] {
             switch self {
             case .link(let id): return ["link", id]
+            case .history(let id): return ["history", id]
+            case .revisit(let id): return ["revisit", id]
             case .formQuery(let controlID, let queryID, let requirementsDigest):
                 return ["form-query", controlID, queryID] + (requirementsDigest.map { ["verified-edits", $0] } ?? [])
             }
@@ -118,6 +121,8 @@ struct ComputerUseBrowserNavigationTarget: Equatable, Sendable, CustomStringConv
     let payloadDigest: String
     var taskID: String { evidence.document.taskID }
     var contextID: String { evidence.document.contextID }
+    var destinationIdentity: String { ComputerUseTaskContract.digest([destination.absoluteString]) }
+    func isBound(to page: ComputerUseBrowserPageEvidence) -> Bool { evidence == page }
 
     fileprivate init(evidence: ComputerUseBrowserPageEvidence, source: Source, destination: URL, sourcePolicyDigest: String? = nil) {
         self.evidence = evidence; self.source = source; self.destination = destination
@@ -129,6 +134,19 @@ struct ComputerUseBrowserNavigationTarget: Equatable, Sendable, CustomStringConv
 
     var description: String { "BrowserObservedDestination(site: \(ComputerUseBrowserSite.displayName(for: destination)))" }
     var debugDescription: String { description }
+}
+
+/// Model-visible visit indices map to native history objects or a confirmed
+/// GET destination. The target itself never enters the model's JSON.
+struct ComputerUseBrowserHistoryOption: Equatable, Sendable {
+    enum Mode: String, Sendable { case back, forward, revisit }
+    let visit: Int
+    let operationID: String
+    let mode: Mode
+    let target: ComputerUseBrowserNavigationTarget
+    fileprivate init(visit: Int, operationID: String, mode: Mode, target: ComputerUseBrowserNavigationTarget) {
+        self.visit = visit; self.operationID = operationID; self.mode = mode; self.target = target
+    }
 }
 
 /// A handoff binds the live browser session and ownership epoch, not the old
@@ -218,6 +236,13 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     private var document: ComputerUseBrowserDocument?
     private var sourcePolicy: ComputerUseBrowserSourcePolicy?
     private var receipts: [String: ComputerUseBrowserDocument] = [:]
+    private struct HistoryReceipt {
+        let item: WKBackForwardListItem
+        let url: URL
+        let document: ComputerUseBrowserDocument
+        var wasObserved = false
+    }
+    private var historyReceipts: [String: HistoryReceipt] = [:]
     private var navigationAttemptIDs: Set<String> = []
     private struct ObservedNavigationAttempt {
         let payloadDigest: String
@@ -277,6 +302,10 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         let continuation: CheckedContinuation<ComputerUseBrowserDocument, Error>
         var navigation: WKNavigation?
         var receivedSuccessfulResponse = false
+        var readOnlyRequests = true
+        var historyOperationID: String?
+        var instantBackApproved = false
+        var restoration: Task<Void, Never>?
         var timeout: Task<Void, Never>?
     }
 
@@ -343,6 +372,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             observedUserPage = nil
             observedActivePage = nil
             receipts.removeAll()
+            historyReceipts.removeAll()
             navigationAttemptIDs.removeAll()
             observedNavigationAttempts.removeAll()
         }
@@ -646,6 +676,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         guard hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
         guard result.status == "page-snapshot", result.fields == nil,
               let page = result.page, page.isWellFormed else { throw ComputerUseBrowserError.pageEvidenceUnavailable }
+        if historyReceipts[expected.operationID]?.document == expected { historyReceipts[expected.operationID]?.wasObserved = true }
         return ComputerUseBrowserPageEvidence(document: expected, documentID: result.documentID, page: page)
     }
 
@@ -704,6 +735,56 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             && (lhs.port ?? (lhs.scheme?.lowercased() == "https" ? 443 : 80)) == (rhs.port ?? (rhs.scheme?.lowercased() == "https" ? 443 : 80))
     }
 
+    func historyOptions(goal: ComputerUseBrowserGoalInput, visits: [ComputerUseBrowserResearchVisit],
+                        evidence: ComputerUseBrowserPageEvidence) throws -> [ComputerUseBrowserHistoryOption] {
+        try validateSourceDocument(evidence.document)
+        guard evidence.document.taskID == goal.taskID, visits.count <= 64,
+              visits.allSatisfy({ $0.rootDigest == goal.rootDigest }) else { throw ComputerUseBrowserError.observedNavigationUnavailable }
+        var options: [ComputerUseBrowserHistoryOption] = [], seen: Set<String> = []
+        for (index, visit) in visits.enumerated().reversed() {
+            guard let saved = historyReceipts[visit.operationID], saved.url != evidence.document.committedURL,
+                  seen.insert(saved.url.absoluteString).inserted,
+                  let option = try? historyOption(visit: index, operationID: visit.operationID, evidence: evidence) else { continue }
+            options.append(option)
+        }
+        return options.sorted { $0.visit < $1.visit }
+    }
+
+    func historyOption(visit: Int, operationID: String, evidence: ComputerUseBrowserPageEvidence) throws -> ComputerUseBrowserHistoryOption {
+        try validateSourceDocument(evidence.document)
+        guard let browser, let saved = historyReceipts[operationID], saved.wasObserved, receipts[operationID] == saved.document,
+              saved.document.taskID == evidence.document.taskID, saved.document.contextID == evidence.document.contextID,
+              saved.item.url == saved.url, Self.validatedURL(saved.url) != nil,
+              browser.backForwardList.currentItem !== saved.item else { throw ComputerUseBrowserError.observedNavigationUnavailable }
+        try validateSourceURL(saved.url)
+        let mode: ComputerUseBrowserHistoryOption.Mode
+        if browser.backForwardList.backList.contains(where: { $0 === saved.item }) { mode = .back }
+        else if browser.backForwardList.forwardList.contains(where: { $0 === saved.item }) { mode = .forward }
+        else { mode = .revisit }
+        return .init(visit: visit, operationID: operationID, mode: mode,
+            target: .init(evidence: evidence, source: mode == .revisit ? .revisit(operationID) : .history(operationID),
+                destination: saved.url, sourcePolicyDigest: sourcePolicy?.digest))
+    }
+
+    func validateHistoryRefresh(_ previous: ComputerUseBrowserNavigationTarget, replacement: ComputerUseBrowserNavigationTarget) throws {
+        guard previous.source == replacement.source, previous.destination == replacement.destination,
+              previous.contextID == replacement.contextID, previous.taskID == replacement.taskID,
+              previous.sourcePolicyDigest == replacement.sourcePolicyDigest else { throw ComputerUseBrowserError.pageChanged }
+        switch previous.source { case .history, .revisit: break; default: throw ComputerUseBrowserError.observedNavigationUnavailable }
+    }
+
+    private func historyItem(for target: ComputerUseBrowserNavigationTarget) throws -> WKBackForwardListItem? {
+        let operationID: String, usesHistory: Bool
+        switch target.source {
+        case .history(let id): operationID = id; usesHistory = true
+        case .revisit(let id): operationID = id; usesHistory = false
+        default: return nil
+        }
+        let fresh = try historyOption(visit: 0, operationID: operationID, evidence: target.evidence)
+        try validateHistoryRefresh(target, replacement: fresh.target)
+        return usesHistory ? historyReceipts[operationID]?.item : nil
+    }
+
     /// A proven-unsent research query may refresh its page nonce. Keep the
     /// exact private destination, submitter reference and verified edit contract;
     /// equal visible labels cannot authorize changed query parameters or action.
@@ -730,12 +811,23 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         let command: ComputerUseBrowserDOMCommand, expectedStatus: String
         switch target.source {
         case .link(let id): arguments["linkID"] = id; command = .validatePageLink; expectedStatus = "link-current"
+        case .history, .revisit:
+            _ = try historyItem(for: target)
+            command = .validatePageSnapshot; expectedStatus = "page-current"
         case .formQuery(let controlID, let queryID, let requirementsDigest):
             arguments["controlID"] = controlID; arguments["queryID"] = queryID
             if let requirementsDigest { arguments["requirementsDigest"] = requirementsDigest }
             command = .validateFormQuery; expectedStatus = "form-query-current"
         }
-        let result = try await callDOM(command, arguments: arguments, document: evidence.document)
+        let result: ComputerUseBrowserDOMReply
+        do { result = try await callDOM(command, arguments: arguments, document: evidence.document) }
+        catch {
+            // Cancellation/timeout can precede WebKit's completion callback.
+            // Retain the caller's operation until that callback has joined.
+            await joinDOMCompletion(document: evidence.document)
+            throw error
+        }
+        _ = try historyItem(for: target)
         guard target.sourcePolicyDigest == sourcePolicy?.digest else { throw ComputerUseBrowserError.pageChanged }
         try validateSourceURL(target.destination)
         guard hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
@@ -775,11 +867,13 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         guard observedNavigationAttempts.count < 64 else { throw ComputerUseBrowserError.observedNavigationUnavailable }
         try await validateObservedDestination(target)
         do {
-            let document = try await navigate(taskID: target.evidence.document.taskID, operationID: operationID,
+            let historyTarget: ComputerUseBrowserNavigationTarget?
+            switch target.source { case .history, .revisit: historyTarget = target; default: historyTarget = nil }
+            let document = try await performNavigation(taskID: target.evidence.document.taskID, operationID: operationID,
                 to: target.destination, from: target.evidence.document, willBeginEffect: {
                     self.observedNavigationAttempts[operationID] = ObservedNavigationAttempt(payloadDigest: target.payloadDigest)
                     try willBeginEffect()
-                })
+                }, historyTarget: historyTarget)
             let receipt = ComputerUseBrowserNavigationReceipt(payloadDigest: target.payloadDigest, document: document)
             observedNavigationAttempts[operationID]?.receipt = receipt
             return receipt
@@ -980,6 +1074,14 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
                   from expectedDocument: ComputerUseBrowserDocument? = nil,
                   requiringUnnavigatedSession expectedSession: ComputerUseBrowserHandbackRequirement? = nil,
                   willBeginEffect: () throws -> Void = {}) async throws -> ComputerUseBrowserDocument {
+        try await performNavigation(taskID: taskID, operationID: operationID, to: url, from: expectedDocument,
+            requiringUnnavigatedSession: expectedSession, willBeginEffect: willBeginEffect)
+    }
+
+    private func performNavigation(taskID: String, operationID: String, to url: URL,
+                  from expectedDocument: ComputerUseBrowserDocument? = nil,
+                  requiringUnnavigatedSession expectedSession: ComputerUseBrowserHandbackRequirement? = nil,
+                  willBeginEffect: () throws -> Void = {}, historyTarget: ComputerUseBrowserNavigationTarget? = nil) async throws -> ComputerUseBrowserDocument {
         try Task.checkCancellation()
         guard hasOwnership(taskID: taskID) else { throw ComputerUseBrowserError.ownershipLost }
         guard pending == nil, pendingDOM == nil, observedNavigation == nil else { throw ComputerUseBrowserError.busy }
@@ -991,9 +1093,16 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         }
         guard let url = Self.validatedURL(url) else { throw ComputerUseBrowserError.invalidURL }
         let capturedPolicy = sourcePolicy
+        let historyItem = try historyTarget.flatMap { try self.historyItem(for: $0) }
+        if let historyTarget, case .history = historyTarget.source, historyItem == nil {
+            throw ComputerUseBrowserError.observedNavigationUnavailable
+        }
         func checkSource() throws {
             guard sourcePolicy == capturedPolicy else { throw ComputerUseBrowserError.pageChanged }
             try validateSourceURL(url)
+            if let historyTarget {
+                guard try self.historyItem(for: historyTarget) === historyItem else { throw ComputerUseBrowserError.pageChanged }
+            }
         }
         try checkSource()
         if let expectedDocument, !validate(expectedDocument) { throw ComputerUseBrowserError.pageChanged }
@@ -1046,12 +1155,25 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
                 let result: ComputerUseBrowserDocument = try await withCheckedThrowingContinuation { continuation in
                     pending = PendingNavigation(id: id, taskID: taskID, generation: generation,
                         operationID: operationID, requestedURL: url, continuation: continuation)
+                    if let historyTarget, case .history(let sourceOperation) = historyTarget.source { pending?.historyOperationID = sourceOperation }
                     pending?.timeout = Task { [weak self, navigationTimeout] in
                         do { try await Task.sleep(for: navigationTimeout) } catch { return }
                         self?.failPending(id: id, error: .deadlineExceeded)
                     }
-                    pending?.navigation = browser.load(URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData))
+                    if let historyItem { pending?.navigation = browser.go(to: historyItem) }
+                    else { pending?.navigation = browser.load(URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData)) }
                     if pending?.navigation == nil { failPending(id: id, error: .navigationFailed) }
+                    if historyItem != nil, pending?.id == id {
+                        // Cached/Instant Back may omit normal response/load
+                        // callbacks. Confirm the exact retained native item,
+                        // URL and settled state, then acquire fresh DOM identity.
+                        pending?.restoration = Task { [weak self] in
+                            while !Task.isCancelled, let self, self.pending?.id == id {
+                                if self.finishHistoryRestoration(id: id) { return }
+                                do { try await Task.sleep(for: .milliseconds(25)) } catch { return }
+                            }
+                        }
+                    }
                 }
                 let focusDeadline = ContinuousClock.now + .seconds(2)
                 while !hasRequiredPresentation && ContinuousClock.now < focusDeadline {
@@ -1335,6 +1457,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         guard let pending, pending.id == id else { return }
         self.pending = nil
         pending.timeout?.cancel()
+        pending.restoration?.cancel()
         generation &+= 1
         document = nil
         loadedPageIdentity = nil
@@ -1357,6 +1480,12 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             return
         }
         guard webView === browser else { decisionHandler(.cancel); return }
+        if !["GET", "HEAD"].contains((navigationAction.request.httpMethod ?? "").uppercased()) {
+            pending?.readOnlyRequests = false
+            if let pending, pending.historyOperationID != nil {
+                decisionHandler(.cancel); failPending(id: pending.id, error: .navigationFailed); return
+            }
+        }
         // A popup cannot consume the main navigation's continuation. Admission
         // is rechecked when WebKit asks for the concrete child configuration.
         guard let frame = navigationAction.targetFrame else {
@@ -1446,6 +1575,10 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             if let pending { failPending(id: pending.id, error: .sourceNotAllowed) }
             return
         }
+        if willUseInstantBack, let operationID = pending?.historyOperationID,
+           let saved = historyReceipts[operationID], saved.item === backForwardListItem, saved.url == url {
+            pending?.instantBackApproved = true
+        }
         completionHandler(true)
     }
 
@@ -1490,7 +1623,8 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         }
         guard let pending, navigation === pending.navigation else { return }
         guard hasOwnership(taskID: pending.taskID), pending.generation == generation,
-              pending.receivedSuccessfulResponse, let url = webView.url, Self.validatedURL(url) != nil else {
+              pending.receivedSuccessfulResponse || isCurrentHistoryRestoration(pending),
+              let url = webView.url, Self.validatedURL(url) != nil else {
             failPending(id: pending.id, error: .ownershipLost)
             return
         }
@@ -1498,12 +1632,36 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             failPending(id: pending.id, error: .sourceNotAllowed)
             return
         }
+        finishPendingNavigation(pending, url: url)
+    }
+
+    private func isCurrentHistoryRestoration(_ pending: PendingNavigation) -> Bool {
+        guard pending.readOnlyRequests, let id = pending.historyOperationID, let saved = historyReceipts[id],
+              let browser, browser.backForwardList.currentItem === saved.item, saved.item.url == saved.url,
+              browser.url == saved.url, pending.requestedURL == saved.url, !browser.isLoading else { return false }
+        return true
+    }
+
+    private func finishHistoryRestoration(id: UUID) -> Bool {
+        guard let pending, pending.id == id, pending.navigation != nil, pending.instantBackApproved,
+              hasOwnership(taskID: pending.taskID), pending.generation == generation,
+              isCurrentHistoryRestoration(pending), let url = browser?.url, sourcePolicy?.permits(url) != false else { return false }
+        finishPendingNavigation(pending, url: url)
+        return true
+    }
+
+    private func finishPendingNavigation(_ pending: PendingNavigation, url: URL) {
+        guard self.pending?.id == pending.id else { return }
         let receipt = ComputerUseBrowserDocument(contextID: contextID, taskID: pending.taskID,
             generation: generation, operationID: pending.operationID, requestedURL: pending.requestedURL, committedURL: url)
         self.pending = nil
         pending.timeout?.cancel()
+        pending.restoration?.cancel()
         document = receipt
         receipts[pending.operationID] = receipt
+        if pending.readOnlyRequests, let item = browser?.backForwardList.currentItem, item.url == url {
+            historyReceipts[pending.operationID] = .init(item: item, url: url, document: receipt)
+        }
         displayedSite = ComputerUseBrowserSite.displayName(for: url)
         detail = "Page opened"
         pending.continuation.resume(returning: receipt)

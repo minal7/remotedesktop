@@ -18,6 +18,9 @@ struct ComputerUseBrowserResearchEvidence: Sendable, CustomStringConvertible, Cu
     private var entries: [Entry] = []
     private var firstAnswerReading = 0
     var count: Int { entries.count }
+    func readingIndices(forSource identity: String) -> [Int] {
+        entries.indices.filter { entries[$0].reading.historicalSourceIdentity == identity }
+    }
     init(goal: ComputerUseBrowserGoalInput, readingLimit: Int = Self.maximumReadings) {
         rootDigest = goal.rootDigest; self.readingLimit = min(Self.maximumReadings, max(1, readingLimit))
     }

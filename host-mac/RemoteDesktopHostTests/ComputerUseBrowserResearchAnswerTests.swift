@@ -35,7 +35,7 @@ final class ComputerUseBrowserResearchAnswerTests: XCTestCase {
         let body = try ResearchAnswerFixture.object(XCTUnwrap(calls.completions.last?.httpBody))
         let messages = try XCTUnwrap(body["messages"] as? [[String: String]])
         let context = try ResearchAnswerFixture.object(Data(XCTUnwrap(messages.last?["content"]).utf8))
-        XCTAssertEqual(context["version"] as? Int, 7)
+        XCTAssertEqual(context["version"] as? Int, 8)
         let recalled = try XCTUnwrap(context["recalled_readings"] as? [[String: Any]])
         XCTAssertEqual(recalled.count, 1); XCTAssertEqual(recalled[0]["reading"] as? Int, 1)
         XCTAssertFalse(try ResearchAnswerFixture.json(context).contains(fixture.source.base.absoluteString))
@@ -155,7 +155,7 @@ final class ComputerUseBrowserResearchAnswerTests: XCTestCase {
         for request in calls.completions {
             let body = try ResearchAnswerFixture.object(XCTUnwrap(request.httpBody))
             let format = try XCTUnwrap(body["response_format"] as? [String: Any])
-            XCTAssertEqual((format["json_schema"] as? [String: Any])?["name"] as? String, "browser_result_link_v4")
+            XCTAssertEqual((format["json_schema"] as? [String: Any])?["name"] as? String, "browser_result_link_v5")
             XCTAssertEqual(body["max_tokens"] as? Int, 1_024)
         }
         XCTAssertEqual(owner.input.prompt, fixture.source.request)
@@ -286,8 +286,9 @@ struct ResearchAnswerFixture {
     static func make(count: Int = 1, requested: Int? = nil, price: String = "USD 40", duplicate: Bool = false,
                      extra: (String, String, String)? = nil, omitDetailLinks: Bool = false,
                      inventory: Int? = nil, quantityPolicy: ComputerUseBrowserResultReview.QuantityMeaning? = nil,
-                     includeControls: Bool = false, multiPage: Bool = false, repeatedPage: Bool = false) async throws -> Self {
-        let transport = ResearchAnswerTransport(followCount: multiPage ? 2 : 1, recall: multiPage ? 1 : nil)
+                     includeControls: Bool = false, multiPage: Bool = false, repeatedPage: Bool = false,
+                     historyRoute: Bool = false) async throws -> Self {
+        let transport = ResearchAnswerTransport(followCount: multiPage ? 2 : 1, recall: multiPage ? 1 : nil, historyRoute: historyRoute)
         let local = try ComputerUseLocalBrowserLinkPlanner(connection: .init(baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:54321")),
             bearerToken: "fixture-token", modelAlias: "fixture-model"), transport: transport)
         let planner = ResearchAnswerRecordingPlanner(local: local)
@@ -306,9 +307,14 @@ struct ResearchAnswerFixture {
             + "<p>Available for this concert</p>" } ?? ""
         let second = repeatedPage ? "<article><h2>Concert Alpha</h2><a href='/more'>Alpha details</a><p>USD 40</p></article>"
             : "<article><h2>Concert Beta</h2><a href='/more'>Beta details</a><p>USD 45</p></article>"
+        let alpha = "<article><h2>Concert Alpha</h2><a href='/details'>Alpha details</a><p>USD 40</p></article>"
+        let beta = "<article><h2>Concert Beta</h2><a href='/beta'>Beta details</a><p>USD 45</p></article>"
         let source = try await ResearchDriverFixture.make(linkPlanner: planner, resultPlanner: reviewed,
             additionalCardHTML: additional, candidateBodyHTML: "<p>\(price)</p>" + inventoryHTML, request: request,
-            offersBodyHTML: multiPage ? second + "<p>Beta conditions apply</p>" : nil)
+            offersBodyHTML: multiPage ? second + "<p>Beta conditions apply</p>" : nil,
+            searchBodyHTML: historyRoute ? alpha + beta : nil,
+            detailsBodyHTML: historyRoute ? alpha + "<p>Alpha conditions apply</p>" : nil,
+            betaBodyHTML: historyRoute ? beta + "<p>Beta conditions apply</p>" : nil)
         source.goal.select = { _ in try json(["disposition":"research", "requirements":rows, "question":["topic":"none", "requirements":[]]]) }
         return .init(source: source, planner: planner, transport: transport)
     }
@@ -388,7 +394,8 @@ private struct ResearchAnswerReviewer: ComputerUseBrowserResultReviewPlanning {
 private actor ResearchAnswerTransport: ComputerUseTextModelTransport {
     let followCount: Int
     let recall: Int?
-    init(followCount: Int, recall: Int?) { self.followCount = followCount; self.recall = recall }
+    let historyRoute: Bool
+    init(followCount: Int, recall: Int?, historyRoute: Bool) { self.followCount = followCount; self.recall = recall; self.historyRoute = historyRoute }
     private(set) var calls: (counts: [URLRequest], completions: [URLRequest]) = ([], [])
     func exactInputTokenCount(completionRequest: URLRequest) async throws -> Int { calls.counts.append(completionRequest); return 100 }
     func complete(request: URLRequest) async throws -> Data {
@@ -397,7 +404,11 @@ private actor ResearchAnswerTransport: ComputerUseTextModelTransport {
         let context = try ResearchAnswerFixture.object(Data(XCTUnwrap(messages.last?["content"]).utf8))
         let candidates = try XCTUnwrap(context["candidates"] as? [[String: Any]])
         let reply: [String: Any]
-        if let count = (context["answer_counts"] as? [Int])?.max(), let indices = context["answer_candidate_indices"] as? [Int] {
+        if historyRoute && calls.completions.count == 2 { reply = ["revisit":0] }
+        else if historyRoute && calls.completions.count == 3 {
+            reply = ["candidate":1, "link":try XCTUnwrap((candidates[1]["links"] as? [String])?.first)]
+        } else if historyRoute && calls.completions.count == 4 { reply = ["reading":1] }
+        else if let count = (context["answer_counts"] as? [Int])?.max(), let indices = context["answer_candidate_indices"] as? [Int] {
             reply = ["answer":Array(indices.prefix(count))]
         } else if calls.completions.count <= followCount, let link = (candidates.first?["links"] as? [String])?.first {
             reply = ["candidate":0, "link":link]

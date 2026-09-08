@@ -264,7 +264,8 @@
     "RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testRuntimeBrowserActionRecallUsesSharedWorkerWithoutFormChoices",
     "RemoteDesktopHostTests/ComputerUseBrowserQuantityReviewTests",
     "RemoteDesktopHostTests/ComputerUseBrowserResearchAnswerTests",
-    "RemoteDesktopHostTests/ComputerUseTests/test_managerResearchAnswerDeliversAndReplaysWholeSourceTextWithoutRepeatingWork"
+    "RemoteDesktopHostTests/ComputerUseTests/test_managerResearchAnswerDeliversAndReplaysWholeSourceTextWithoutRepeatingWork",
+    "RemoteDesktopHostTests/ComputerUseBrowserResearchHistoryTests"
   ],
   "expectedTests": [
     "RemoteDesktopHostTests/AppleFoundationMCPPlannerTests/testCountedInputExpandsBeforeEffectAndTerminalQueries",
@@ -696,6 +697,11 @@
     "RemoteDesktopHostTests/ComputerUseBrowserResearchEvidenceTests/testRecallContractRejectsUnlistedHybridRepeatedAndStaleRequests",
     "RemoteDesktopHostTests/ComputerUseBrowserResearchEvidenceTests/testRecallLoopIsBoundedAndRetainsAllPreviouslyRequestedReadings",
     "RemoteDesktopHostTests/ComputerUseBrowserResearchEvidenceTests/testRecallRunsWithoutCurrentLinksAndExactCountingKeepsEveryRecalledPage",
+    "RemoteDesktopHostTests/ComputerUseBrowserResearchHistoryTests/testActionAndResultContractsBindOfferedVisitsAndCountTheWholeRequest",
+    "RemoteDesktopHostTests/ComputerUseBrowserResearchHistoryTests/testAnUncertainHistoryAttemptCannotBeRetriedUnderANewOperation",
+    "RemoteDesktopHostTests/ComputerUseBrowserResearchHistoryTests/testDriverReadsOneOptionReturnsToSearchAndCombinesASecondDetailPage",
+    "RemoteDesktopHostTests/ComputerUseBrowserResearchHistoryTests/testNativeHistoryTraversesBackAndForwardAndExplicitlyRevisitsAnEvictedGET",
+    "RemoteDesktopHostTests/ComputerUseBrowserResearchHistoryTests/testPausedUnsentHistoryKeepsItsJournalAndResumesTheSameVisitOnce",
     "RemoteDesktopHostTests/ComputerUseBrowserResearchReportTests/testDriverReportsAllObservedCandidateTextAndRequirementsWithoutCompletingResearch",
     "RemoteDesktopHostTests/ComputerUseBrowserResearchReportTests/testExcludedAnswerSourceDoesNotProduceAReportEvenWhenNavigationIsAllowed",
     "RemoteDesktopHostTests/ComputerUseBrowserResearchReportTests/testProgressWireIsBoundedAndCannotBecomeTerminalOrUnorderedControlTraffic",

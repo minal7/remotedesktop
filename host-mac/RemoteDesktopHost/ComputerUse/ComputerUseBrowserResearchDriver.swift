@@ -132,6 +132,9 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
         } catch ComputerUseBrowserError.pageChanged, ComputerUseBrowserError.linkNavigationUnavailable {
             try validate(run, tools: tools)
             return .userInterventionRequired("The page changed before the next browser action. Check the page, then choose Resume to continue the original request.")
+        } catch ComputerUseBrowserError.observedNavigationUnavailable, ComputerUseBrowserResearchHistoryNavigation.Failure.invalidIntent {
+            try validate(run, tools: tools)
+            return .userInterventionRequired("The selected earlier visit is no longer available in this browser session. The original request remains pending; review the page before continuing.")
         } catch ComputerUseBrowserError.formQueryUnavailable, ComputerUseBrowserError.formQueryInvalid,
                 ComputerUseBrowserResearchFormError.inputChanged, ComputerUseTextTaskError.staleTarget,
                 ComputerUseTextTaskError.incompleteOutcome {
@@ -228,6 +231,12 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                 continue
             }
             if owner.hasPendingNavigation {
+                if owner.hasPendingHistoryNavigation {
+                    progress("Checking the pending return to an earlier page…")
+                    let receipt = try await owner.resumeHistoryNavigation()
+                    guard try record(.revisit, receipt.document) else { return reconciliationRequired }
+                    continue
+                }
                 progress("Checking the pending result link…")
                 let history = run.visits
                 let result = try await owner.replanPendingCandidateNavigation(select: { [planning] goal, candidates in
@@ -274,6 +283,11 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                 try check()
                 switch action.step {
                 case .recall: throw Failure.invalidProposal // Resolved inside the owner, never an executable action.
+                case .revisit:
+                    progress("Returning to an earlier page…")
+                    let receipt = try await owner.revisit(for: action)
+                    guard try record(.revisit, receipt.document) else { return reconciliationRequired }
+                    continue
                 case .editForm:
                     guard owner.confirmedFormHistory.count < 32 else {
                         return .userInterventionRequired("The browser reached this task's form-action limit. The original request remains pending.")
@@ -311,6 +325,10 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                 })
                 try check()
                 switch decision {
+                case .revisit(let option):
+                    let receipt = try await owner.revisitAfterReading(option)
+                    guard try record(.revisit, receipt.document) else { return reconciliationRequired }
+                    continue
                 case .answer(let selection):
                     let answer = try await owner.prepareAnswer(selection)
                     try check()

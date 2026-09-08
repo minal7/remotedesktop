@@ -15,7 +15,7 @@ struct ComputerUseBrowserResearchAdmissionPause: Error {
 /// Historical navigation only. A receipt is neither a verified offer nor an
 /// answer. No URL, account state or model-authored description is retained here.
 struct ComputerUseBrowserResearchVisit: Equatable, Sendable {
-    enum Kind: String, Sendable { case search, resultLink, formQuery }
+    enum Kind: String, Sendable { case search, resultLink, formQuery, revisit }
     let kind: Kind
     let operationID: String
     let goalRevision: String
@@ -38,7 +38,7 @@ final class ComputerUseBrowserResearchTask {
     }
     struct LinkChoice: Sendable { let candidateID: String; let linkID: String }
     enum Decision: Sendable {
-        case link(LinkChoice), answer(ComputerUseBrowserResearchAnswer.Selection), unresolved
+        case link(LinkChoice), answer(ComputerUseBrowserResearchAnswer.Selection), revisit(ComputerUseBrowserHistoryOption), unresolved
     }
     @MainActor
     private final class PreparedForm {
@@ -73,6 +73,8 @@ final class ComputerUseBrowserResearchTask {
     private var lastVerifiedFormStage: ComputerUseBrowserResearchFormStage?
     private var formStageSequence = 0
     private var formNavigation: ComputerUseBrowserResearchFormNavigation?
+    private var historyNavigation: ComputerUseBrowserResearchHistoryNavigation?
+    private var historySequence = 0
     private var retainedEvidence: ComputerUseBrowserResearchEvidence
     private var session: ComputerUseBrowserHandbackRequirement?
     private var handback: ComputerUseBrowserHandbackRequirement?
@@ -98,7 +100,11 @@ final class ComputerUseBrowserResearchTask {
     /// session identity and the original goal keep taskID as their root.
     var executionTaskID: String { input.clarifications.last?.answerTaskID ?? taskID }
     var isOperating: Bool { operationID != nil }
-    var hasPendingNavigation: Bool { initialSearch?.isPending == true || navigation?.pendingSelection != nil || hasPendingFormNavigation }
+    var hasPendingNavigation: Bool { initialSearch?.isPending == true || navigation?.pendingSelection != nil || hasPendingFormNavigation || hasPendingHistoryNavigation }
+    var hasPendingHistoryNavigation: Bool {
+        guard let historyNavigation else { return false }
+        return !confirmedNavigationHistory.contains { $0.operationID == historyNavigation.operationID && $0.kind == .revisit }
+    }
     var hasPendingFormNavigation: Bool {
         guard let formNavigation else { return false }
         return !confirmedNavigationHistory.contains { $0.operationID == formNavigation.operationID && $0.kind == .formQuery }
@@ -352,13 +358,14 @@ final class ComputerUseBrowserResearchTask {
             }
             try check()
             let archive = try researchEvidence(for: captured)
+            let historyOptions = try browser.historyOptions(goal: captured, visits: confirmedNavigationHistory, evidence: page)
             var recalled: [Int] = []
             while true {
                 try check()
                 guard retainedEvidence.digest == archive.digest else { throw ComputerUseBrowserResearchEvidenceError.inputChanged }
                 let context = try ComputerUseBrowserActionInput(interpretation: interpretation, evidence: page,
                     navigationHistory: confirmedNavigationHistory, formHistory: confirmedFormHistory, latestForm: formStage,
-                    changedFormTargetIDs: changed, researchEvidence: archive, recalledReadings: recalled)
+                    changedFormTargetIDs: changed, researchEvidence: archive, recalledReadings: recalled, historyOptions: historyOptions)
                 let proposal = try await planner.propose(context)
                 try check()
                 try proposal.validate(for: context)
@@ -389,6 +396,43 @@ final class ComputerUseBrowserResearchTask {
         guard case .openQuery(let controlID, let receipt) = action.step else { throw ComputerUseBrowserActionPlanError.invalidProposal }
         latestAction = nil
         return try await openFormQuery(after: receipt, controlID: controlID, evidence: action.input.evidence)
+    }
+
+    func revisit(for action: ComputerUseBrowserActionProposal) async throws -> ComputerUseBrowserNavigationReceipt {
+        try validateAction(action)
+        guard case .revisit(let index) = action.step,
+              let option = action.input.historyOptions.first(where: { $0.visit == index }) else { throw ComputerUseBrowserActionPlanError.invalidProposal }
+        return try await beginHistoryNavigation(option)
+    }
+
+    func revisitAfterReading(_ option: ComputerUseBrowserHistoryOption) async throws -> ComputerUseBrowserNavigationReceipt {
+        try requireIdle(); try checkCurrent(input)
+        guard !hasPendingForm, !hasPendingNavigation, !hasQuestion,
+              latestCandidates?.historyOptions.contains(option) == true else { throw Failure.navigationUnavailable }
+        return try await beginHistoryNavigation(option)
+    }
+
+    private func beginHistoryNavigation(_ option: ComputerUseBrowserHistoryOption) async throws -> ComputerUseBrowserNavigationReceipt {
+        guard let navigationDirectory else { throw Failure.navigationUnavailable }
+        let next = try ComputerUseBrowserResearchHistoryNavigation(option: option, goal: input, sequence: historySequence,
+            browser: browser, journalDirectory: navigationDirectory.appendingPathComponent("History"), makeStore: navigationStore)
+        latestAction = nil; latestCandidates = nil; latestForm = nil
+        historyNavigation?.retire(); historyNavigation = next; historySequence += 1
+        return try await resumeHistoryNavigation()
+    }
+
+    func resumeHistoryNavigation() async throws -> ComputerUseBrowserNavigationReceipt {
+        try requireIdle()
+        guard !hasPendingForm, initialSearch?.isPending != true, !hasPendingFormNavigation,
+              navigation?.pendingSelection == nil, !hasQuestion,
+              let stage = historyNavigation, stage.goal == input else { throw Failure.navigationPending }
+        let captured = input
+        return try await operate { [self] in
+            let receipt = try await stage.run(prepareCurrent: { try await self.observeOwnedPage(goal: captured, enforceSources: true) },
+                checkCurrent: { try self.checkCurrent(captured) })
+            try recordNavigation(.revisit, document: receipt.document, goal: captured)
+            return receipt
+        }
     }
 
     /// Prepare native field correspondence before semantic form planning.
@@ -804,7 +848,7 @@ final class ComputerUseBrowserResearchTask {
         let decision = try await planResearchDecision(budget: budget) { goal, candidates in
             try await select(goal, candidates).map { .link($0) } ?? .unresolved
         }
-        switch decision { case .link(let choice): return choice; case .unresolved: return nil; case .answer: throw ComputerUseBrowserLinkPlanError.invalidProposal }
+        switch decision { case .link(let choice): return choice; case .unresolved: return nil; case .answer, .revisit: throw ComputerUseBrowserLinkPlanError.invalidProposal }
     }
 
     func planResearchDecision(budget: Duration = .seconds(30), select: @escaping @MainActor @Sendable
@@ -839,7 +883,7 @@ final class ComputerUseBrowserResearchTask {
         let decision = try await selectCandidateDecision(goal: goal, candidates: candidates, budget: budget) { goal, candidates in
             try await select(goal, candidates).map { .link($0) } ?? .unresolved
         }
-        switch decision { case .link(let choice): return choice; case .unresolved: return nil; case .answer: throw ComputerUseBrowserLinkPlanError.invalidProposal }
+        switch decision { case .link(let choice): return choice; case .unresolved: return nil; case .answer, .revisit: throw ComputerUseBrowserLinkPlanError.invalidProposal }
     }
 
     private func selectCandidateDecision(goal: ComputerUseBrowserGoalInput, candidates: ComputerUseBrowserResultCandidates,
@@ -855,6 +899,10 @@ final class ComputerUseBrowserResearchTask {
                 try await browser.validateResultCandidates(candidates, goal: goal)
                 try checkCandidateLinkDecision(goal: goal, deadline: deadline)
                 switch choice {
+                case .revisit(let option):
+                    guard candidates.historyOptions.contains(option) else { throw ComputerUseBrowserLinkPlanError.inputChanged }
+                    try await browser.validateObservedDestination(option.target)
+                    try checkCandidateLinkDecision(goal: goal, deadline: deadline)
                 case .link(let choice):
                     guard let candidate = candidates.candidates.first(where: { $0.id == choice.candidateID }),
                           candidate.selectedLinkIDs.contains(choice.linkID) else { throw ComputerUseBrowserResultError.invalidProposal }
@@ -1038,6 +1086,7 @@ final class ComputerUseBrowserResearchTask {
         formStage?.retire(); formStage = nil; lastVerifiedFormStage?.retire(); lastVerifiedFormStage = nil
         confirmedFormHistory.removeAll(); retiredFormHistory.removeAll()
         formNavigation?.retire(); formNavigation = nil
+        historyNavigation?.retire(); historyNavigation = nil
         retainedEvidence = .init(goal: input)
         clarification.retire(); navigation?.retire(); initialSearch?.retire(); hasQuestion = false; cancelOperation?()
     }
@@ -1157,7 +1206,8 @@ final class ComputerUseBrowserResearchTask {
         guard answerPolicy == nil || answerPolicy?.goalRevision == goal.digest else { throw Failure.goalChanged }
         guard self.interpretation?.proposal == interpretation.proposal else { throw Failure.interpretationRequired }
         let bound = try await browser.prepareResultCandidates(proposal, goal: goal, evidence: evidence,
-            answerPolicy: answerPolicy, interpretation: interpretation.proposal)
+            answerPolicy: answerPolicy, interpretation: interpretation.proposal,
+            historyOptions: browser.historyOptions(goal: goal, visits: confirmedNavigationHistory, evidence: evidence))
         try checkCurrent(goal)
         try retainedEvidence.record(bound, goal: goal)
         return bound
