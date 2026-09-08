@@ -19,11 +19,14 @@ final class ComputerUseBrowserPopupStage {
     let target: ComputerUseBrowserPopupTarget
     let contract: ComputerUseTaskContract
     let operationID: String
+    let sequence: Int
     private let browser: ComputerUseOwnedBrowser
     private let store: ComputerUseTaskJournalStore
     private let state: State
     private let execution: ComputerUseTaskExecution
+    private let journalDirectory: URL
     private var isExecuting = false
+    private var retirementPending = false
     private(set) var retirementDigest: String?
     var completedReceipt: ComputerUseBrowserPopupReceipt? { state.receipt }
 
@@ -33,7 +36,7 @@ final class ComputerUseBrowserPopupStage {
          makeStore: (URL) throws -> ComputerUseTaskJournalStore = { try .init(directory: $0) }) throws {
         guard (0..<32).contains(sequence), target.binding.isWellFormed,
               target.binding.controlID == target.intent.controlID else { throw ComputerUseBrowserPopupError.invalidIntent }
-        self.target = target; self.browser = browser
+        self.target = target; self.browser = browser; self.sequence = sequence; self.journalDirectory = journalDirectory
         let goal = target.intent.interpretation.input, entity = "popup", stepID = "open"
         let stageID = ComputerUseTaskContract.digest(["browser-popup-stage-v1",goal.taskID,goal.rootDigest,String(sequence)])
         let authority = ComputerUseTaskContract.digest([target.intent.evidence.document.contextID,goal.taskID])
@@ -49,8 +52,15 @@ final class ComputerUseBrowserPopupStage {
         let operationID = contract.effectIdentity(for: contract.steps[0]); self.operationID = operationID
         let store = try makeStore(journalDirectory); self.store = store
         let state = State(); self.state = state; state.saved = try store.load(taskID: stageID)
+        if let saved = state.saved, saved.retirementDigest != nil {
+            let digest = ComputerUseTaskContract.digest(["browser-popup-unsent-retirement-v1",contract.contractDigest,operationID])
+            guard saved.taskID == stageID, saved.promptDigest == contract.promptDigest, saved.contractDigest == contract.contractDigest,
+                  saved.stepIDs == [stepID], saved.statuses.count == 1, !saved.statuses.contains(.verified),
+                  saved.retainedPrefixCount == nil, saved.retirementDigest == digest else { throw ComputerUseTaskExecutionError.journalMismatch }
+            retirementPending = true // Reconfirm the tombstone before publishing it.
+        }
         let budget = min(.seconds(2), max(.zero, confirmationBudget))
-        execution = try ComputerUseTaskExecution(contract: contract, recovered: state.saved,
+        execution = try ComputerUseTaskExecution(contract: contract, recovered: retirementPending ? nil : state.saved,
             observe: { predicate in
                 do {
                     try state.requireCurrent()
@@ -101,6 +111,7 @@ final class ComputerUseBrowserPopupStage {
             }, finishPendingEffect: { _, id in
                 do {
                     try state.requireCurrent()
+                    if let receipt = state.receipt, receipt.validates(target, operationID: id) { return }
                     // The same native command atomically rejects a second dispatch.
                     // If its ledger is empty, it revalidates the ORIGINAL page and
                     // binding before starting this original journaled operation.
@@ -132,6 +143,7 @@ final class ComputerUseBrowserPopupStage {
     func run(checkCurrent: @escaping @MainActor () throws -> Void) async throws -> ComputerUseBrowserPopupReceipt {
         guard !isExecuting else { throw ComputerUseBrowserPopupError.busy }
         guard retirementDigest == nil else { throw ComputerUseBrowserPopupError.retired }
+        guard !retirementPending else { throw ComputerUseBrowserPopupError.retirementPending }
         isExecuting = true; state.check = checkCurrent
         defer { isExecuting = false; state.check = nil }
         do {
@@ -170,7 +182,8 @@ final class ComputerUseBrowserPopupStage {
         func check() throws { try state.requireCurrent(); try lease.assertOwnership() }
         do {
             try check()
-            guard try await browser.retireUnsentPopup(target, operationID: operationID) else { return nil }
+            retirementPending = true
+            guard try await browser.retireUnsentPopup(target, operationID: operationID) else { retirementPending = false; return nil }
             try check()
             let retired = ComputerUseTaskJournal(taskID: contract.taskID, promptDigest: contract.promptDigest,
                 contractDigest: contract.contractDigest, stepIDs: contract.steps.map(\.id), statuses: saved?.statuses ?? [.planned],
@@ -186,4 +199,30 @@ final class ComputerUseBrowserPopupStage {
     }
 
     func retire() { state.retired = true }
+
+    /// Called only after the old run has joined. Carry an already observed
+    /// native fact, but let the new lease reconfirm disk before publication.
+    func reopened(makeStore: (URL) throws -> ComputerUseTaskJournalStore) throws -> ComputerUseBrowserPopupStage {
+        guard !isExecuting, !state.retired else { throw ComputerUseBrowserPopupError.busy }
+        let replacement = try ComputerUseBrowserPopupStage(target: target, sequence: sequence, browser: browser,
+            journalDirectory: journalDirectory, makeStore: makeStore)
+        replacement.state.receipt = state.receipt
+        return replacement
+    }
+}
+
+/// Historical opening/retirement under the original requirement. This is
+/// neither a current selection nor evidence that a research result is true.
+struct ComputerUseBrowserResearchPopupRecord: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    enum Outcome: String, Sendable { case opened, retiredUnsent }
+    let index: Int
+    let operationID: String
+    let intent: ComputerUseBrowserPopupIntent
+    let outcome: Outcome
+    let digest: String
+    @MainActor init(stage: ComputerUseBrowserPopupStage, outcome: Outcome, digest: String) {
+        index = stage.sequence; operationID = stage.operationID; intent = stage.target.intent; self.outcome = outcome; self.digest = digest
+    }
+    var description: String { "BrowserPopupRecord(\(index), \(outcome.rawValue))" }
+    var debugDescription: String { description }
 }

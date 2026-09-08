@@ -30,7 +30,7 @@ struct ComputerUseBrowserResearchVisit: Equatable, Sendable {
 /// compile arbitrary research actions or certify independent inventory truth.
 @MainActor
 final class ComputerUseBrowserResearchTask {
-    enum Failure: Error, Equatable { case busy, paused, retired, goalChanged, interpretationRequired, questionPending, browserRequired, navigationPending, navigationUnavailable, formPending, formUnavailable }
+    enum Failure: Error, Equatable { case busy, paused, retired, goalChanged, interpretationRequired, questionPending, browserRequired, navigationPending, navigationUnavailable, formPending, formUnavailable, popupPending, popupLimit }
     struct Interpretation: Sendable {
         let proposal: ComputerUseBrowserGoalProposal
         let scalars: ComputerUseBrowserScalarRequirements
@@ -75,6 +75,9 @@ final class ComputerUseBrowserResearchTask {
     private var formNavigation: ComputerUseBrowserResearchFormNavigation?
     private var historyNavigation: ComputerUseBrowserResearchHistoryNavigation?
     private var historySequence = 0
+    private var popupStage: ComputerUseBrowserPopupStage?
+    private var popupSequence = 0
+    private var popupNeedsReopen = false
     private var retainedEvidence: ComputerUseBrowserResearchEvidence
     private var session: ComputerUseBrowserHandbackRequirement?
     private var handback: ComputerUseBrowserHandbackRequirement?
@@ -88,6 +91,7 @@ final class ComputerUseBrowserResearchTask {
     private(set) var confirmedFormHistory: [ComputerUseBrowserResearchFormReceipt] = []
     private(set) var retiredFormHistory: [ComputerUseBrowserResearchFormStage.Retirement] = []
     private(set) var retiredHistoryNavigations: [ComputerUseBrowserResearchHistoryNavigation.Retirement] = []
+    private(set) var popupHistory: [ComputerUseBrowserResearchPopupRecord] = []
 
     var input: ComputerUseBrowserGoalInput { clarification.input }
     /// Available during the serialized selector operation as well as idle.
@@ -101,6 +105,7 @@ final class ComputerUseBrowserResearchTask {
     /// session identity and the original goal keep taskID as their root.
     var executionTaskID: String { input.clarifications.last?.answerTaskID ?? taskID }
     var isOperating: Bool { operationID != nil }
+    var hasPendingPopup: Bool { popupStage != nil }
     var hasPendingNavigation: Bool { initialSearch?.isPending == true || navigation?.pendingSelection != nil || hasPendingFormNavigation || hasPendingHistoryNavigation }
     var hasPendingHistoryNavigation: Bool {
         guard let historyNavigation else { return false }
@@ -126,7 +131,7 @@ final class ComputerUseBrowserResearchTask {
     /// around delegation. Individual owner operations still validate the actual
     /// browser session, page and effect evidence at their own boundaries.
     func validateDriverContinuation(_ expected: ComputerUseBrowserGoalInput) throws {
-        try requireIdle()
+        try requireIdle(allowPendingPopup: true)
         guard !hasQuestion else { throw Failure.questionPending }
         guard input == expected else { throw Failure.goalChanged }
     }
@@ -360,13 +365,18 @@ final class ComputerUseBrowserResearchTask {
             try check()
             let archive = try researchEvidence(for: captured)
             let historyOptions = try browser.historyOptions(goal: captured, visits: confirmedNavigationHistory, evidence: page)
+            let popupControls = popupSequence < 32 && navigationDirectory != nil && page.page.controls.contains(where: {
+                $0.compositeRole == "combobox" && !$0.disabled && ComputerUseBrowserControlRead.allows($0)
+            }) ? try await browser.popupControlIDs(in: page) : []
+            try check()
             var recalled: [Int] = []
             while true {
                 try check()
                 guard retainedEvidence.digest == archive.digest else { throw ComputerUseBrowserResearchEvidenceError.inputChanged }
                 let context = try ComputerUseBrowserActionInput(interpretation: interpretation, evidence: page,
                     navigationHistory: confirmedNavigationHistory, formHistory: confirmedFormHistory, latestForm: formStage,
-                    changedFormTargetIDs: changed, researchEvidence: archive, recalledReadings: recalled, historyOptions: historyOptions)
+                    changedFormTargetIDs: changed, researchEvidence: archive, recalledReadings: recalled, historyOptions: historyOptions,
+                    popupControlIDs: popupControls, popupHistory: popupHistory)
                 let proposal = try await planner.propose(context)
                 try check()
                 try proposal.validate(for: context)
@@ -397,6 +407,86 @@ final class ComputerUseBrowserResearchTask {
         guard case .openQuery(let controlID, let receipt) = action.step else { throw ComputerUseBrowserActionPlanError.invalidProposal }
         latestAction = nil
         return try await openFormQuery(after: receipt, controlID: controlID, evidence: action.input.evidence)
+    }
+
+    func openPopup(for action: ComputerUseBrowserActionProposal) async throws -> ComputerUseBrowserPopupReceipt {
+        try validateAction(action)
+        guard case .openPopup(let controlID, let requirement) = action.step,
+              action.input.popupControlIDs.contains(controlID), let navigationDirectory else { throw ComputerUseBrowserActionPlanError.invalidProposal }
+        guard popupSequence < 32 else { throw Failure.popupLimit }
+        let captured = input
+        let intent = try ComputerUseBrowserPopupIntent(interpretation: action.input.interpretation,
+            evidence: action.input.evidence, controlID: controlID, requirementIndex: requirement)
+        latestAction = nil; latestCandidates = nil; latestForm = nil
+        try await operate { [self] in
+            do {
+                let target = try await browser.preparePopup(intent)
+                try checkCurrent(captured)
+                let next = try ComputerUseBrowserPopupStage(target: target, sequence: popupSequence, browser: browser,
+                    journalDirectory: navigationDirectory.appendingPathComponent("Popups"), makeStore: navigationStore)
+                popupStage = next; popupSequence += 1; popupNeedsReopen = false
+            } catch {
+                await browser.joinDOMCompletion(document: intent.evidence.document)
+                throw error
+            }
+        }
+        return try await resumePopup()
+    }
+
+    func resumePopup() async throws -> ComputerUseBrowserPopupReceipt {
+        try requireIdle(allowPendingPopup: true)
+        guard !hasPendingForm, !hasPendingNavigation, !hasQuestion, popupStage != nil else { throw Failure.popupPending }
+        let captured = input
+        return try await operate(allowPendingPopup: true) { [self] in
+            let stage = try currentPopupStage()
+            guard stage.target.intent.interpretation.input == captured else { throw Failure.goalChanged }
+            do {
+                let receipt = try await stage.run(checkCurrent: { try self.checkCurrent(captured) })
+                let digest = ComputerUseTaskContract.digest(["browser-research-popup-opened-v1",stage.contract.contractDigest,
+                    receipt.operationID,receipt.bindingID,receipt.controlID,receipt.documentID])
+                try recordPopup(stage, outcome: .opened, digest: digest)
+                return receipt
+            } catch {
+                if error is ComputerUseTaskJournalStore.StoreError, popupStage === stage { popupNeedsReopen = true }
+                throw error
+            }
+        }
+    }
+
+    func retirePendingUnsentPopup() async throws -> ComputerUseBrowserResearchPopupRecord? {
+        try requireIdle(allowPendingPopup: true)
+        guard !hasPendingForm, !hasPendingNavigation, !hasQuestion else { throw Failure.popupPending }
+        guard popupStage != nil else { return nil }
+        let captured = input
+        return try await operate(allowPendingPopup: true) { [self] in
+            let stage = try currentPopupStage()
+            guard stage.target.intent.interpretation.input == captured else { throw Failure.goalChanged }
+            do {
+                guard let digest = try await stage.retireUnsent(checkCurrent: { try self.checkCurrent(captured) }) else { return nil }
+                try recordPopup(stage, outcome: .retiredUnsent, digest: digest)
+                return popupHistory.last
+            } catch {
+                if error is ComputerUseTaskJournalStore.StoreError, popupStage === stage { popupNeedsReopen = true }
+                throw error
+            }
+        }
+    }
+
+    private func currentPopupStage() throws -> ComputerUseBrowserPopupStage {
+        guard let stage = popupStage else { throw Failure.popupPending }
+        if !popupNeedsReopen { return stage }
+        let replacement = try stage.reopened(makeStore: navigationStore)
+        stage.retire(); popupStage = replacement; popupNeedsReopen = false
+        return replacement
+    }
+
+    private func recordPopup(_ stage: ComputerUseBrowserPopupStage, outcome: ComputerUseBrowserResearchPopupRecord.Outcome, digest: String) throws {
+        guard !isRetired else { return }
+        guard popupStage === stage, stage.sequence == popupHistory.count,
+              stage.target.intent.interpretation.input == input else { throw Failure.goalChanged }
+        popupHistory.append(.init(stage: stage, outcome: outcome, digest: digest))
+        popupStage = nil; popupNeedsReopen = false; stage.retire()
+        latestAction = nil; latestCandidates = nil; latestForm = nil
     }
 
     func revisit(for action: ComputerUseBrowserActionProposal) async throws -> ComputerUseBrowserNavigationReceipt {
@@ -1118,6 +1208,7 @@ final class ComputerUseBrowserResearchTask {
         formNavigation?.retire(); formNavigation = nil
         historyNavigation?.retire(); historyNavigation = nil
         retiredHistoryNavigations.removeAll()
+        popupStage?.retire(); popupStage = nil; popupNeedsReopen = false; popupHistory.removeAll()
         retainedEvidence = .init(goal: input)
         clarification.retire(); navigation?.retire(); initialSearch?.retire(); hasQuestion = false; cancelOperation?()
     }
@@ -1258,12 +1349,13 @@ final class ComputerUseBrowserResearchTask {
         return bound
     }
 
-    private func requireIdle() throws {
+    private func requireIdle(allowPendingPopup: Bool = false) throws {
         try Task.checkCancellation()
         guard !isRetired else { throw Failure.retired }
         guard !isPaused else { throw Failure.paused }
         guard mayAct() else { throw ComputerUseBrowserError.ownershipLost }
         guard operationID == nil else { throw Failure.busy }
+        guard allowPendingPopup || !hasPendingPopup else { throw Failure.popupPending }
     }
 
     private func checkCurrent(_ goal: ComputerUseBrowserGoalInput) throws {
@@ -1278,8 +1370,8 @@ final class ComputerUseBrowserResearchTask {
         }
     }
 
-    private func operate<Value: Sendable>(_ body: @escaping @MainActor @Sendable () async throws -> Value) async throws -> Value {
-        try requireIdle()
+    private func operate<Value: Sendable>(allowPendingPopup: Bool = false, _ body: @escaping @MainActor @Sendable () async throws -> Value) async throws -> Value {
+        try requireIdle(allowPendingPopup: allowPendingPopup)
         let id = UUID(), epoch = controlEpoch, captured = input
         operationID = id
         let child = Task { @MainActor in try await body() }

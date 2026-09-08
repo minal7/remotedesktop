@@ -5,7 +5,7 @@ enum ComputerUseBrowserDOMCommand: String {
     case fields, read, edit, receipt, reobserve, preflight, pageIdentity, pageSnapshot, validatePageSnapshot, observeResearchControls
     case scrollViewport, viewportScrollReceipt, validatePageLink, finishPendingChange, continueUnsentInput
     case prepareFormQuery, validateFormQuery, bindPageFields, formFields, extendFormFields, inspectFormRequirements, retireUnsentInputs
-    case preparePopup, validatePopup, openPopup, popupReceipt, retireUnsentPopup
+    case popupCandidates, preparePopup, validatePopup, openPopup, popupReceipt, retireUnsentPopup
 }
 
 /// Private adapter output. A GET query can contain server state or user input;
@@ -529,6 +529,7 @@ struct ComputerUseBrowserDOMReply: Decodable {
     let inputLedgerID: String?
     let popupBinding: ComputerUseBrowserPopupBinding?
     let popupReceipt: ComputerUseBrowserPopupReceipt?
+    let popupControls: [String]?
 }
 
 /// Fixed host code in a separate WebKit script world. Page text, model output
@@ -1440,7 +1441,7 @@ enum ComputerUseBrowserDOM {
               || JSON.stringify(readViewport()) !== JSON.stringify(operation.receipt.after)) return reply('uncertain');
           return {...reply('viewport-scroll-confirmed'), scroll: operation.receipt};
         }
-        if (['pageSnapshot', 'observeResearchControls', 'validatePageSnapshot', 'scrollViewport', 'validatePageLink', 'prepareFormQuery', 'validateFormQuery', 'bindPageFields', 'formFields', 'extendFormFields', 'inspectFormRequirements', 'preparePopup', 'validatePopup', 'openPopup'].includes(command)) {
+        if (['pageSnapshot', 'observeResearchControls', 'validatePageSnapshot', 'scrollViewport', 'validatePageLink', 'prepareFormQuery', 'validateFormQuery', 'bindPageFields', 'formFields', 'extendFormFields', 'inspectFormRequirements', 'popupCandidates', 'preparePopup', 'validatePopup', 'openPopup'].includes(command)) {
           const status = authenticationStatus();
           if (status) { lastPageSnapshot = null; return reply(status); }
           if (doc.readyState !== 'complete') return reply('stale');
@@ -1472,6 +1473,8 @@ enum ComputerUseBrowserDOM {
                     || previous.signature !== binding.signature;
                 })) return reply('stale');
             if (command === 'validatePageSnapshot') return reply('page-current');
+            if (command === 'popupCandidates') return {...reply('popup-candidates'),
+              popupControls:Array.from(controls).filter(([id,binding]) => popupOpening(binding.element,binding.metadata)).map(([id]) => id)};
             if (command === 'preparePopup') {
               const binding = controls.get(args.controlID), current = binding && popupOpening(binding.element,binding.metadata);
               if (!current) return reply('popup-unavailable');
@@ -1494,7 +1497,14 @@ enum ComputerUseBrowserDOM {
               const operation = {plan,dispatched:true,userInputSerial:popupUserInputSerial,deadline:performance.now() + 2000};
               plan.attemptID = args.operationID; popupOperations.set(args.operationID,operation);
               lastPageSnapshot = null; formQueries.clear();
-              try { popupClick.call(plan.element); return reply('popup-dispatched'); }
+              try {
+                popupClick.call(plan.element);
+                // Preserve a synchronous opening observation even when the
+                // Swift caller is cancelled before its separate receipt read.
+                // Delayed openings still require a query within the same window.
+                popupHistorical(args);
+                return reply('popup-dispatched');
+              }
               catch (_) { operation.failed = true; return reply('popup-uncertain'); }
             }
             if (command === 'inspectFormRequirements') {

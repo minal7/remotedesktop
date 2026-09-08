@@ -1,7 +1,7 @@
 import Foundation
 
 enum ComputerUseBrowserPopupError: Error, Equatable {
-    case invalidIntent, unavailable, uncertain, retired, busy
+    case invalidIntent, unavailable, uncertain, retired, retirementPending, busy
 }
 
 /// Proposed purpose under the whole original task; never a URL or click point.
@@ -61,6 +61,19 @@ struct ComputerUseBrowserPopupTarget: Equatable, Sendable, CustomStringConvertib
 }
 
 extension ComputerUseOwnedBrowser {
+    /// Eligibility metadata only; this allocates no plan and reads no values.
+    func popupControlIDs(in evidence: ComputerUseBrowserPageEvidence) async throws -> [String] {
+        try requirePopupContext(evidence.document)
+        let result = try await callDOM(.popupCandidates, arguments: ["documentID":evidence.documentID,
+            "snapshotID":evidence.page.id], document: evidence.document)
+        try requirePopupContext(evidence.document)
+        guard result.status == "popup-candidates", result.documentID == evidence.documentID,
+              let controls = result.popupControls, controls.count <= 64, Set(controls).count == controls.count,
+              controls.allSatisfy({ id in evidence.page.controls.contains { $0.id == id && $0.compositeRole == "combobox"
+                && !$0.disabled && ComputerUseBrowserControlRead.allows($0) } }) else { throw ComputerUseBrowserPopupError.unavailable }
+        return controls
+    }
+
     func preparePopup(_ intent: ComputerUseBrowserPopupIntent) async throws -> ComputerUseBrowserPopupTarget {
         try requirePopupContext(intent.evidence.document)
         let result = try await callDOM(.preparePopup, arguments: ["documentID":intent.evidence.documentID,

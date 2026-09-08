@@ -126,7 +126,8 @@
     "RemoteDesktopHostTests/ComputerUseBrowserReadonlyReadingTests",
     "RemoteDesktopHostTests/ComputerUseBrowserDeclaredStateTests",
     "RemoteDesktopHostTests/ComputerUseBrowserCompositeStateTests",
-    "RemoteDesktopHostTests/ComputerUseBrowserPopupTests"
+    "RemoteDesktopHostTests/ComputerUseBrowserPopupTests",
+    "RemoteDesktopHostTests/ComputerUseBrowserResearchPopupTests"
   ],
   "expectedTests": [
     "RemoteDesktopHostTests/ComputerUseBrowserActionPlannerTests/testActionContextRetainsTheWholeGoalAndObservedFormsWithoutPrivateValuesOrTargets",
@@ -487,6 +488,14 @@
     "RemoteDesktopHostTests/ComputerUseBrowserResearchHistoryTests/testPausedUnsentHistoryKeepsItsJournalAndResumesTheSameVisitOnce",
     "RemoteDesktopHostTests/ComputerUseBrowserResearchHistoryTests/testRetirementRejectsOldNativeAndReopenedJournalExecutionEvenIfTheTombstoneDisappears",
     "RemoteDesktopHostTests/ComputerUseBrowserResearchHistoryTests/testRetirementResolvesAnUnconfirmedPageRebindingWithoutLosingTheOriginalOperation",
+    "RemoteDesktopHostTests/ComputerUseBrowserResearchPopupTests/testDriverOpensOnceThenReadsFreshOptionsUnderTheCompleteOriginalGoal",
+    "RemoteDesktopHostTests/ComputerUseBrowserResearchPopupTests/testFailedAttemptReplacementReopensExactStoreBeforeAnyNativeDispatch",
+    "RemoteDesktopHostTests/ComputerUseBrowserResearchPopupTests/testFailedRetirementPublicationReopensTombstoneBeforeChoosingAFreshTarget",
+    "RemoteDesktopHostTests/ComputerUseBrowserResearchPopupTests/testLoginBeforePopupPreparationUsesHandbackAndExpiresTheOldProposal",
+    "RemoteDesktopHostTests/ComputerUseBrowserResearchPopupTests/testPauseBeforeDispatchBlocksNewWorkAndHandbackRetiresOnlyTheUnsentBinding",
+    "RemoteDesktopHostTests/ComputerUseBrowserResearchPopupTests/testPauseDuringNativeDispatchRetainsHistoricalOpeningWithoutASecondClick",
+    "RemoteDesktopHostTests/ComputerUseBrowserResearchPopupTests/testPlannerOffersOnlyCurrentNativePopupCandidatesAndBindsExactRequirement",
+    "RemoteDesktopHostTests/ComputerUseBrowserResearchPopupTests/testUnconfirmedNativeOpeningRemainsPendingAcrossDriverContinuations",
     "RemoteDesktopHostTests/ComputerUseBrowserResearchReportTests/testDriverReportsAllObservedCandidateTextAndRequirementsWithoutCompletingResearch",
     "RemoteDesktopHostTests/ComputerUseBrowserResearchReportTests/testExcludedAnswerSourceDoesNotProduceAReportEvenWhenNavigationIsAllowed",
     "RemoteDesktopHostTests/ComputerUseBrowserResearchReportTests/testProgressWireIsBoundedAndCannotBecomeTerminalOrUnorderedControlTraffic",

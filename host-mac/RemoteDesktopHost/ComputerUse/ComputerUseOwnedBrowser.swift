@@ -1028,8 +1028,9 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         guard result.formBindings == nil || command == .bindPageFields else { throw ComputerUseBrowserError.unsupportedDocument }
         guard result.changedFieldIDs == nil || command == .inspectFormRequirements else { throw ComputerUseBrowserError.unsupportedDocument }
         guard result.popupBinding == nil || command == .preparePopup,
-              result.popupReceipt == nil || command == .popupReceipt else { throw ComputerUseBrowserError.unsupportedDocument }
-        if [.preparePopup, .validatePopup, .openPopup, .popupReceipt, .retireUnsentPopup].contains(command) {
+              result.popupReceipt == nil || command == .popupReceipt,
+              result.popupControls == nil || command == .popupCandidates else { throw ComputerUseBrowserError.unsupportedDocument }
+        if [.popupCandidates, .preparePopup, .validatePopup, .openPopup, .popupReceipt, .retireUnsentPopup].contains(command) {
             guard result.fields == nil, result.page == nil, result.scroll == nil, result.formQuery == nil,
                   result.formBindings == nil, result.changedFieldIDs == nil else { throw ComputerUseBrowserError.unsupportedDocument }
         }
@@ -1039,7 +1040,8 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         }
         if result.status == "authentication-required" {
             guard result.fields == nil, result.page == nil, result.scroll == nil, result.formQuery == nil,
-                  result.formBindings == nil, result.changedFieldIDs == nil, result.popupBinding == nil, result.popupReceipt == nil else { throw ComputerUseBrowserError.unsupportedDocument }
+                  result.formBindings == nil, result.changedFieldIDs == nil, result.popupBinding == nil, result.popupReceipt == nil,
+                  result.popupControls == nil else { throw ComputerUseBrowserError.unsupportedDocument }
             throw ComputerUseBrowserError.authenticationRequired
         }
         return result
