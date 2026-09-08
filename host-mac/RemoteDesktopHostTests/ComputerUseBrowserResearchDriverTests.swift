@@ -524,10 +524,11 @@ struct ResearchDriverFixture {
                      additionalCardHTML: String = "", linkDestinationOverride: String? = nil,
                      candidateBodyHTML: String = "", searchForm: Bool = false,
                      actionPlanner: (any ComputerUseBrowserActionPlanning)? = nil,
-                     formPlanner: (any ComputerUseBrowserFormPlanning)? = nil, request: String = ResearchDriverFixture.prompt) async throws -> Self {
+                     formPlanner: (any ComputerUseBrowserFormPlanning)? = nil, request: String = ResearchDriverFixture.prompt,
+                     searchFormHTML: String? = nil, heldSignal: Bool = false) async throws -> Self {
         func card(_ path: String) -> String { "<article><h2>Concert Alpha</h2><a href='\(linkDestinationOverride ?? path)'>Alpha details</a>\(candidateBodyHTML)</article>" + additionalCardHTML }
-        let form = searchForm ? "<form action='/filtered'><label>Query<input name='q' value='old'></label><button>Search</button></form>" : ""
-        let server = try OwnedBrowserHTTPFixture(routes: ["/before": .init(body: card("/old")),
+        let form = searchFormHTML ?? (searchForm ? "<form action='/filtered'><label>Query<input name='q' value='old'></label><button>Search</button></form>" : "")
+        let server = try OwnedBrowserHTTPFixture(routes: ["/signal": .init(held: heldSignal), "/before": .init(body: card("/old")),
             "/search?q=concerts": .init(body: card("/details") + form), "/details": .init(body: card("/offers")),
             "/filtered?q=concerts": .init(body: card("/more")),
             "/offers": .init(body: card("/more")), "/account": .init(body: "<label>Password<input type=password></label>"),
@@ -680,12 +681,13 @@ final class BrowserResearchActionFixture: ComputerUseBrowserActionPlanning {
 }
 @MainActor
 final class BrowserResearchFormFixture: ComputerUseBrowserFormPlanning {
+    var select: ((ComputerUseBrowserResearchFormInput) throws -> String)?
     var content = #"{"unavailable":true}"#
     var beforeReply: (@MainActor () async throws -> Void)?
     private(set) var inputs: [ComputerUseBrowserResearchFormInput] = []
     func propose(_ input: ComputerUseBrowserResearchFormInput) async throws -> ComputerUseBrowserFormProposal {
         inputs.append(input)
         if let beforeReply { try await beforeReply() }
-        return try .decode(content: content, input: input)
+        return try .decode(content: select?(input) ?? content, input: input)
     }
 }

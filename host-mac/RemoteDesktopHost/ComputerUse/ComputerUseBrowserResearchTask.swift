@@ -370,12 +370,16 @@ final class ComputerUseBrowserResearchTask {
                 selectedFormID = nil
             }
             guard browser.hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
-            // New discovery clears native input receipts. Until retained
-            // field extension/aggregate continuations are implemented, an
-            // automatic dependent edit must preserve that earlier authority.
+            // Same-form dependent work reuses the original adapter and its
+            // receipts. It cannot fall back to discovery on extension failure.
             if action != nil, let formStage, formStage.nativeReceipt != nil,
                formStage.input.evidence.page.document == page.document {
-                throw ComputerUseBrowserActionPlanError.retainedFormRequiresExtension
+                guard let selectedFormID else { throw ComputerUseBrowserActionPlanError.retainedFormRequiresExtension }
+                let next = try await formStage.prepareNextFormInput(interpretation: interpretation.proposal, formID: selectedFormID,
+                    page: page, preserving: action?.preservedControls ?? [], checkCurrent: { try self.checkCurrent(captured) })
+                try checkCurrent(captured)
+                guard browser.hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
+                return PreparedForm(target: next.target, input: next.input)
             }
             let target = ComputerUseBrowserTextTarget(browser: browser, document: page.document,
                 requiresFrontmost: browser.isFrontmostWindow)

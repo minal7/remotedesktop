@@ -126,20 +126,27 @@ final class ComputerUseBrowserActionPlannerTests: XCTestCase {
     }
 
     func testVerifiedFormOffersQuerySelectionAndPreservesReceiptsWhenDependentDiscoveryIsUnavailable() async throws {
-        let fixture = try await ResearchDriverFixture.make(searchForm: true)
+        let fixture = try await ResearchDriverFixture.make(additionalCardHTML: "<form><label>Newsletter<input></label></form>", searchForm: true)
         defer { fixture.close() }
         _ = try await fixture.start()
         let owner = try fixture.owner()
-        fixture.actions.select = { try self.json(["form":XCTUnwrap($0.formIDs.first),"preserve":[]]) }
+        fixture.actions.select = { input in
+            let form = try XCTUnwrap(input.evidence.page.controls.first { $0.label == "Query" }?.form?.id)
+            return try self.json(["form":form,"preserve":[]])
+        }
         let action = try await owner.planNextAction(using: fixture.actions), input = try await owner.prepareFormInput(for: action)
         let plan = try ComputerUseBrowserFormProposal.decode(content: #"{"edits":[{"field":"field1","terms":[{"requirement":0,"text":"concerts"}]}],"preserve":[]}"#, input: input)
         let receipt = try await owner.executeForm(plan, input: input)
-        let fieldsBefore = fixture.state.commands.filter { ($0 == .fields || $0 == .formFields) }.count
+        let fieldsBefore = fixture.state.commands.filter { ($0 == .fields || $0 == .formFields || $0 == .extendFormFields) }.count
+        fixture.actions.select = { input in
+            let form = try XCTUnwrap(input.evidence.page.controls.first { $0.label == "Newsletter" }?.form?.id)
+            return try self.json(["form":form,"preserve":[]])
+        }
         let second = try await owner.planNextAction(using: fixture.actions)
         XCTAssertEqual(second.input.queryReceipt, receipt); XCTAssertEqual(second.input.queryControlIDs.count, 1)
         do { _ = try await owner.prepareFormInput(for: second); XCTFail("New discovery must not erase earlier input receipts") }
         catch { XCTAssertEqual(error as? ComputerUseBrowserActionPlanError, .retainedFormRequiresExtension) }
-        XCTAssertEqual(fixture.state.commands.filter { ($0 == .fields || $0 == .formFields) }.count, fieldsBefore)
+        XCTAssertEqual(fixture.state.commands.filter { ($0 == .fields || $0 == .formFields || $0 == .extendFormFields) }.count, fieldsBefore)
         fixture.actions.select = { try self.json(["query":XCTUnwrap($0.queryControlIDs.first)]) }
         let query = try await owner.planNextAction(using: fixture.actions)
         _ = try await owner.openFormQuery(for: query)

@@ -1,5 +1,73 @@
 import Foundation
 
+/// An ordered set of historical stages on the same retained native form.
+/// It describes what a query must still prove, not current satisfaction.
+struct ComputerUseBrowserResearchFormContinuation: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    let taskID: String
+    let rootDigest: String
+    let goalRevision: String
+    let document: ComputerUseBrowserDocument
+    let documentID: String
+    let formID: String?
+    let stageIDs: [String]
+    let finalValues: [String: String]
+    let editedTargetIDs: Set<String>
+    let inputOperationIDs: [String]
+    let preservedControls: [ComputerUseBrowserControlPreservation]
+    let editedRequirements: [String: [Int]]
+    let digest: String
+
+    @MainActor fileprivate init(stage: ComputerUseBrowserResearchFormStage, current: ComputerUseTextTaskContinuation) throws {
+        let input = stage.input, previous = input.previous
+        guard current.taskID == input.interpretation.input.taskID,
+              current.contractDigest == stage.contract.contractDigest,
+              previous == nil || (previous?.goalRevision == input.interpretation.input.digest
+                && previous?.document == input.evidence.page.document && previous?.documentID == input.evidence.page.documentID
+                && previous?.formID == input.selectedFormID) else { throw ComputerUseBrowserResearchFormStage.Failure.invalidStage }
+        taskID = current.taskID; rootDigest = input.interpretation.input.rootDigest; goalRevision = input.interpretation.input.digest
+        document = input.evidence.page.document; documentID = input.evidence.page.documentID; formID = input.selectedFormID
+        stageIDs = (previous?.stageIDs ?? []) + [stage.id]
+        inputOperationIDs = (previous?.inputOperationIDs ?? []) + current.inputOperationIDs
+        guard stageIDs.count <= 32, Set(stageIDs).count == stageIDs.count,
+              (1...64).contains(inputOperationIDs.count), Set(inputOperationIDs).count == inputOperationIDs.count else {
+            throw ComputerUseBrowserResearchFormStage.Failure.invalidStage
+        }
+        // The next contract explicitly carries earlier values for fields it
+        // does not edit; an intentional new edit supersedes that field only.
+        finalValues = current.finalValues
+        editedTargetIDs = (previous?.editedTargetIDs ?? []).union(current.editedTargetIDs)
+        guard editedTargetIDs.isSubset(of: Set(finalValues.keys)),
+              Set(previous?.finalValues.keys.map { $0 } ?? []).isSubset(of: Set(finalValues.keys)) else {
+            throw ComputerUseBrowserResearchFormStage.Failure.invalidStage
+        }
+        preservedControls = try stage.proposal.preserved.map {
+            .init(controlID: try input.field(for: $0.field).control.id, requirementIndex: $0.requirementIndex)
+        }
+        var requirements = previous?.editedRequirements ?? [:]
+        for edit in stage.proposal.edits {
+            let targetID = try input.field(for: edit.field).editable.snapshot.targetID
+            switch edit.payload {
+            case .text(let query):
+                requirements[targetID] = try query.terms.map { term in
+                    guard let index = input.interpretation.requirements.firstIndex(where: { $0.id == term.requirementID }) else {
+                        throw ComputerUseBrowserResearchFormStage.Failure.invalidStage
+                    }
+                    return index
+                }
+            case .normalized(let value): requirements[targetID] = [value.requirementIndex]
+            case .choice(_, let index): requirements[targetID] = [index]
+            }
+        }
+        editedRequirements = requirements
+        digest = ComputerUseTaskContract.digest(["browser-research-form-continuation-v1", taskID, rootDigest, goalRevision,
+            document.contextID, String(document.generation), documentID, formID ?? "", previous?.digest ?? "", current.digest]
+            + stageIDs + inputOperationIDs)
+    }
+
+    var description: String { "BrowserResearchFormContinuation(stages: \(stageIDs.count))" }
+    var debugDescription: String { description }
+}
+
 /// Historical proof of one verified edit stage, never a current-page assertion
 /// or a completed research answer. Construction stays with native execution.
 struct ComputerUseBrowserResearchFormReceipt: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
@@ -36,10 +104,11 @@ final class ComputerUseBrowserResearchFormStage {
     private let directory: URL
     private let makeStore: (URL) throws -> ComputerUseTaskJournalStore
     private var completed: ComputerUseBrowserResearchFormReceipt?
-    private var continuation: ComputerUseTextTaskContinuation?
+    private var continuation: ComputerUseBrowserResearchFormContinuation?
     private var isExecuting = false
     private var isRetired = false
     var nativeReceipt: ComputerUseBrowserResearchFormReceipt? { completed }
+    var nativeContinuation: ComputerUseBrowserResearchFormContinuation? { continuation }
 
     init(input: ComputerUseBrowserResearchFormInput, proposal: ComputerUseBrowserFormProposal,
          target: ComputerUseBrowserTextTarget, browser: ComputerUseOwnedBrowser, index: Int, journalDirectory: URL,
@@ -49,6 +118,7 @@ final class ComputerUseBrowserResearchFormStage {
         id = ComputerUseTaskContract.digest(["browser-research-form-stage-v1", input.interpretation.input.taskID,
             input.interpretation.input.rootDigest, String(index)])
         guard let contract = try proposal.textContract(for: input, stageID: id) else { throw Failure.invalidStage }
+        guard (input.previous?.inputOperationIDs.count ?? 0) + contract.steps.count <= 64 else { throw ComputerUseBrowserResearchFormError.stageLimit }
         self.contract = contract
         directory = journalDirectory.appendingPathComponent("Research Forms", isDirectory: true).appendingPathComponent(id, isDirectory: true)
         self.makeStore = makeStore
@@ -104,12 +174,48 @@ final class ComputerUseBrowserResearchFormStage {
             // reconciliation. Matching a value alone never permits replay.
             try await task.run()
             try check(); try lease.assertOwnership()
-            continuation = try task.verifiedContinuation()
+            continuation = try .init(stage: self, current: task.verifiedContinuation())
             let receipt = ComputerUseBrowserResearchFormReceipt(stage: self)
             completed = receipt
             return receipt
         } catch {
             await browser.joinDOMCompletion(document: input.evidence.page.document)
+            throw error
+        }
+    }
+
+    /// Extend a verified stage's native field catalogue without rediscovery.
+    /// Cancellation may leave a read-only extension committed in WebKit; a
+    /// retry reuses its objects and the original required receipts.
+    func prepareNextFormInput(interpretation: ComputerUseBrowserGoalProposal, formID: String,
+                              page: ComputerUseBrowserPageEvidence, preserving: [ComputerUseBrowserControlPreservation],
+                              checkCurrent: @escaping @MainActor () throws -> Void) async throws
+        -> (target: ComputerUseBrowserTextTarget, input: ComputerUseBrowserResearchFormInput) {
+        guard !isExecuting else { throw Failure.busy }
+        guard !isRetired else { throw Failure.retired }
+        guard completed != nil, let continuation else { throw Failure.notVerified }
+        guard interpretation == input.interpretation, formID == input.selectedFormID,
+              page.document == input.evidence.page.document, page.documentID == input.evidence.page.documentID else {
+            throw ComputerUseBrowserActionPlanError.retainedFormRequiresExtension
+        }
+        isExecuting = true
+        defer { isExecuting = false }
+        func check() throws {
+            try Task.checkCancellation(); try checkCurrent()
+            guard !isRetired else { throw Failure.retired }
+            try browser.validateSourceDocument(page.document)
+        }
+        do {
+            try check()
+            let fields = try await target.extendFields(in: formID, page: page, preserving: preserving.map(\.controlID), after: continuation)
+            try check()
+            let evidence = try await target.bindFields(fields, to: page)
+            try check()
+            let next = try ComputerUseBrowserResearchFormInput(interpretation: interpretation, evidence: evidence,
+                selectedFormID: formID, preservedControls: preserving, previous: continuation)
+            return (target, next)
+        } catch {
+            await browser.joinDOMCompletion(document: page.document)
             throw error
         }
     }

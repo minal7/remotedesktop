@@ -4,7 +4,7 @@ import WebKit
 enum ComputerUseBrowserDOMCommand: String {
     case fields, read, edit, receipt, reobserve, preflight, pageIdentity, pageSnapshot, validatePageSnapshot
     case scrollViewport, viewportScrollReceipt, validatePageLink
-    case prepareFormQuery, validateFormQuery, bindPageFields, formFields
+    case prepareFormQuery, validateFormQuery, bindPageFields, formFields, extendFormFields
 }
 
 /// Private adapter output. A GET query can contain server state or user input;
@@ -798,6 +798,46 @@ enum ComputerUseBrowserDOM {
         return Object.values(value).every(n => Number.isFinite(n) && Math.abs(n) <= 10000000)
           && value.width > 0 && value.height > 0 && value.contentWidth >= 0 && value.contentHeight >= 0 ? value : null;
       }
+      function extendFields(scope, requirements) {
+        if (!fieldScope || fieldScope.form !== scope.form || !formRequirementsCurrent(requirements)) return reply('stale');
+        const requiredIDs = new Set(requirements.fields.map(field => field.id));
+        // Earlier explicit preservation may be outside the submitted form.
+        // Keep its actual object even when the new proposal omits the control.
+        const additional = Array.from(new Set([...scope.additional,
+          ...requirements.fields.filter(field => !field.mustSubmit).map(field => bindings.get(field.id).element)]));
+        const members = formElements.call(scope.form);
+        if (members.length > 10000) return reply('limit');
+        const candidates = Array.from(new Set([...Array.from(members), ...additional]));
+        if (candidates.length > 10000) return reply('limit');
+        const byElement = new Map(Array.from(bindings.values()).map(binding => [binding.element, binding]));
+        const next = new Map(), found = [];
+        let totalBytes = 0, totalChoices = 0;
+        for (const element of candidates) {
+          if (!editable(element)) continue;
+          const {label, labels} = labelFor(element);
+          if (!label || encoder.encode(label).length > 256) return reply('unsupported');
+          const prior = byElement.get(element), priorField = prior && snapshot(prior);
+          // Unconstrained placeholder fields may change type/options or be
+          // replaced. Those receive new IDs; required objects never do.
+          if (prior && requiredIDs.has(prior.id) && !priorField) return reply('stale');
+          const binding = priorField ? prior : {id:'e' + (++nextID), element, form:element.form, label, labels, shape:shape(element), valid:true};
+          const field = priorField || snapshot(binding);
+          if (!field || found.length >= 16) return reply('limit');
+          totalBytes += encoder.encode(field.value).length; totalChoices += field.choices?.length || 0;
+          if (totalBytes > 1048576 || totalChoices > 128) return reply('limit');
+          next.set(binding.id, binding); found.push(field);
+        }
+        if (Array.from(requiredIDs).some(id => !next.has(id))) return reply('stale');
+        // Commit only a complete catalogue. Never clear input operations.
+        // Retrying after a lost callback reuses these same native IDs.
+        bindings.clear(); for (const [id, binding] of next) bindings.set(id, binding);
+        fieldScope = {form:scope.form, additional};
+        for (const binding of next.values()) {
+          const tree = binding.element.getRootNode();
+          if (tree instanceof ShadowRoot) observer.observe(tree, observationOptions);
+        }
+        return reply('ok', found);
+      }
       function pageContent(linkBindings, controlBindings, containerBindings) {
         // Read rendered text nodes, never form values, innerHTML, scripts or
         // frame documents. Omitted surfaces and bounds remain explicit; this
@@ -1095,7 +1135,7 @@ enum ComputerUseBrowserDOM {
       function formRequirementsCurrent(requirements) {
         if (!requirements || typeof requirements.digest !== 'string' || !/^[a-f0-9]{64}$/.test(requirements.digest)
             || !Array.isArray(requirements.fields) || requirements.fields.length < 1 || requirements.fields.length > 16
-            || !Array.isArray(requirements.inputOperationIDs) || requirements.inputOperationIDs.length < 1 || requirements.inputOperationIDs.length > 8
+            || !Array.isArray(requirements.inputOperationIDs) || requirements.inputOperationIDs.length < 1 || requirements.inputOperationIDs.length > 64
             || new Set(requirements.inputOperationIDs).size !== requirements.inputOperationIDs.length) return false;
         let bytes = 0, edited = 0;
         const ids = new Set();
@@ -1134,7 +1174,7 @@ enum ComputerUseBrowserDOM {
               || JSON.stringify(readViewport()) !== JSON.stringify(operation.receipt.after)) return reply('uncertain');
           return {...reply('viewport-scroll-confirmed'), scroll: operation.receipt};
         }
-        if (['pageSnapshot', 'validatePageSnapshot', 'scrollViewport', 'validatePageLink', 'prepareFormQuery', 'validateFormQuery', 'bindPageFields', 'formFields'].includes(command)) {
+        if (['pageSnapshot', 'validatePageSnapshot', 'scrollViewport', 'validatePageLink', 'prepareFormQuery', 'validateFormQuery', 'bindPageFields', 'formFields', 'extendFormFields'].includes(command)) {
           const status = authenticationStatus();
           if (status) { lastPageSnapshot = null; return reply(status); }
           if (doc.readyState !== 'complete') return reply('stale');
@@ -1162,7 +1202,7 @@ enum ComputerUseBrowserDOM {
                     || previous.signature !== binding.signature;
                 })) return reply('stale');
             if (command === 'validatePageSnapshot') return reply('page-current');
-            if (command === 'formFields') {
+            if (command === 'formFields' || command === 'extendFormFields') {
               if (typeof args.formID !== 'string' || !Array.isArray(args.preservedControlIDs)
                   || args.preservedControlIDs.length > 16 || args.preservedControlIDs.some(id => typeof id !== 'string')
                   || new Set(args.preservedControlIDs).size !== args.preservedControlIDs.length) return reply('unsupported');
@@ -1175,6 +1215,7 @@ enum ComputerUseBrowserDOM {
                 if (!control || !editable(control.element) || control.form !== control.element.form) return reply('unsupported');
                 additional.push(control.element);
               }
+              if (command === 'extendFormFields') return extendFields({form, additional}, args.requirements);
               return fields(undefined, {form, additional});
             }
             if (command === 'bindPageFields') {
@@ -1364,34 +1405,47 @@ struct ComputerUseBrowserFormQueryRequirements: Sendable, CustomStringConvertibl
     let document: ComputerUseBrowserDocument
     let documentID: String
     let digest: String
-    private let continuation: ComputerUseTextTaskContinuation
+    private let finalValues: [String: String]
+    private let editedTargetIDs: Set<String>
+    private let inputOperationIDs: [String]
     private let targets: [String: String]
 
     fileprivate init(document: ComputerUseBrowserDocument, documentID: String,
                      continuation: ComputerUseTextTaskContinuation, targets: [String: String]) throws {
-        guard continuation.taskID == document.taskID, (1...16).contains(continuation.finalValues.count),
-              !continuation.editedTargetIDs.isEmpty,
-              continuation.editedTargetIDs.isSubset(of: Set(continuation.finalValues.keys)),
-              Set(continuation.finalValues.keys).isSubset(of: Set(targets.keys)),
-              Set(targets.values).count == targets.count,
-              continuation.finalValues.values.allSatisfy({ $0.utf8.count <= 8192 }),
-              continuation.finalValues.values.reduce(0, { $0 + $1.utf8.count }) <= 65536,
-              (1...8).contains(continuation.inputOperationIDs.count),
-              Set(continuation.inputOperationIDs).count == continuation.inputOperationIDs.count else {
+        try self.init(document: document, documentID: documentID, taskID: continuation.taskID,
+            finalValues: continuation.finalValues, editedTargetIDs: continuation.editedTargetIDs,
+            inputOperationIDs: continuation.inputOperationIDs, continuationDigest: continuation.digest, targets: targets)
+    }
+
+    fileprivate init(document: ComputerUseBrowserDocument, documentID: String,
+                     continuation: ComputerUseBrowserResearchFormContinuation, targets: [String: String]) throws {
+        guard continuation.document == document, continuation.documentID == documentID else { throw ComputerUseBrowserError.pageChanged }
+        try self.init(document: document, documentID: documentID, taskID: continuation.taskID,
+            finalValues: continuation.finalValues, editedTargetIDs: continuation.editedTargetIDs,
+            inputOperationIDs: continuation.inputOperationIDs, continuationDigest: continuation.digest, targets: targets)
+    }
+
+    private init(document: ComputerUseBrowserDocument, documentID: String, taskID: String,
+                 finalValues: [String: String], editedTargetIDs: Set<String>, inputOperationIDs: [String],
+                 continuationDigest: String, targets: [String: String]) throws {
+        guard taskID == document.taskID, (1...16).contains(finalValues.count), !editedTargetIDs.isEmpty,
+              editedTargetIDs.isSubset(of: Set(finalValues.keys)), Set(finalValues.keys).isSubset(of: Set(targets.keys)),
+              Set(targets.values).count == targets.count, finalValues.values.allSatisfy({ $0.utf8.count <= 8192 }),
+              finalValues.values.reduce(0, { $0 + $1.utf8.count }) <= 65536,
+              (1...64).contains(inputOperationIDs.count), Set(inputOperationIDs).count == inputOperationIDs.count else {
             throw ComputerUseBrowserError.formQueryUnavailable
         }
-        self.document = document; self.documentID = documentID
-        self.continuation = continuation; self.targets = targets
+        self.document = document; self.documentID = documentID; self.targets = targets
+        self.finalValues = finalValues; self.editedTargetIDs = editedTargetIDs; self.inputOperationIDs = inputOperationIDs
         digest = ComputerUseTaskContract.digest(["browser-form-continuation-v1", document.contextID,
-            document.taskID, String(document.generation), documentID, continuation.digest]
-            + continuation.finalValues.keys.sorted().flatMap { [$0, targets[$0]!] })
+            document.taskID, String(document.generation), documentID, continuationDigest]
+            + finalValues.keys.sorted().flatMap { [$0, targets[$0]!] })
     }
 
     var domArguments: [String: Any] {
-        ["digest": digest, "inputOperationIDs": continuation.inputOperationIDs,
-         "fields": continuation.finalValues.keys.sorted().map { id -> [String: Any] in
-             ["id": targets[id]!, "value": continuation.finalValues[id]!,
-              "mustSubmit": continuation.editedTargetIDs.contains(id)]
+        ["digest": digest, "inputOperationIDs": inputOperationIDs,
+         "fields": finalValues.keys.sorted().map { id -> [String: Any] in
+             ["id": targets[id]!, "value": finalValues[id]!, "mustSubmit": editedTargetIDs.contains(id)]
          }]
     }
 
@@ -1454,6 +1508,32 @@ final class ComputerUseBrowserTextTarget {
         guard reply.documentID == evidence.documentID else { throw ComputerUseBrowserError.pageChanged }
         guard let fields = try adoptDiscoveredFields(reply) else { throw ComputerUseBrowserError.unsupportedDocument }
         return fields
+    }
+
+    /// Carry required native objects and all earlier input receipts through a
+    /// complete, read-only catalogue extension. Do not adopt replacement IDs
+    /// for any previously required field, even if its value happens to match.
+    func extendFields(in formID: String, page evidence: ComputerUseBrowserPageEvidence, preserving controlIDs: [String],
+                      after continuation: ComputerUseBrowserResearchFormContinuation) async throws -> [ComputerUseTextField] {
+        try validate()
+        guard let documentID, evidence.document == document, evidence.documentID == documentID,
+              continuation.formID == formID, controlIDs.count <= 16, Set(controlIDs).count == controlIDs.count,
+              Set(controlIDs).isSubset(of: Set(evidence.page.controls.map(\.id))) else { throw ComputerUseBrowserError.pageChanged }
+        let requirements = try ComputerUseBrowserFormQueryRequirements(document: document, documentID: documentID,
+            continuation: continuation, targets: targets)
+        let reply = try await browser.callDOM(.extendFormFields, arguments: ["documentID":documentID,
+            "snapshotID":evidence.page.id, "formID":formID, "preservedControlIDs":controlIDs,
+            "requirements":requirements.domArguments], document: document)
+        try validate()
+        guard reply.documentID == documentID else { throw ComputerUseBrowserError.pageChanged }
+        let previous = targets
+        guard let fields = try decodeDiscoveredFields(reply) else { throw ComputerUseBrowserError.unsupportedDocument }
+        let replacement = Dictionary(uniqueKeysWithValues: fields.map { ($0.field.snapshot.targetID, $0.nativeID) })
+        guard continuation.finalValues.keys.allSatisfy({ replacement[$0] == previous[$0] && replacement[$0] != nil }) else {
+            throw ComputerUseBrowserError.pageChanged
+        }
+        targets = replacement
+        return fields.map { $0.field }
     }
 
     /// Bind a previously discovered form to the exact observed page. This
@@ -1520,6 +1600,17 @@ final class ComputerUseBrowserTextTarget {
         return result
     }
 
+    func prepareFormQuery(controlID: String, evidence: ComputerUseBrowserPageEvidence,
+                          after continuation: ComputerUseBrowserResearchFormContinuation) async throws -> ComputerUseBrowserNavigationTarget {
+        try validate()
+        guard evidence.document == document, let documentID, evidence.documentID == documentID else { throw ComputerUseBrowserError.pageChanged }
+        let requirements = try ComputerUseBrowserFormQueryRequirements(document: document, documentID: documentID,
+            continuation: continuation, targets: targets)
+        let result = try await browser.prepareFormQuery(controlID: controlID, evidence: evidence, requirements: requirements)
+        try validate()
+        return result
+    }
+
     /// Only an explicit, complete no-effect discovery decline permits another
     /// capability to consider a fresh task. Transport/decoding failures, stale
     /// documents and invalid snapshots remain errors, even before an edit.
@@ -1533,6 +1624,14 @@ final class ComputerUseBrowserTextTarget {
     }
 
     private func adoptDiscoveredFields(_ reply: ComputerUseBrowserDOMReply) throws -> [ComputerUseTextField]? {
+        guard let fields = try decodeDiscoveredFields(reply) else { return nil }
+        guard targets.isEmpty else { throw ComputerUseBrowserError.pageChanged }
+        documentID = reply.documentID
+        targets = Dictionary(uniqueKeysWithValues: fields.map { ($0.field.snapshot.targetID, $0.nativeID) })
+        return fields.map { $0.field }
+    }
+
+    private func decodeDiscoveredFields(_ reply: ComputerUseBrowserDOMReply) throws -> [(nativeID: String, field: ComputerUseTextField)]? {
         if reply.status == "unsupported" || reply.status == "limit" {
             guard reply.fields == nil else { throw ComputerUseBrowserError.unsupportedDocument }
             return nil
@@ -1542,13 +1641,11 @@ final class ComputerUseBrowserTextTarget {
               fields.reduce(0, { $0 + ($1.choices?.count ?? 0) }) <= 128 else {
             throw ComputerUseBrowserError.unsupportedDocument
         }
-        documentID = reply.documentID
-        var result: [ComputerUseTextField] = []
+        var result: [(nativeID: String, field: ComputerUseTextField)] = [], seen: Set<String> = []
         for field in fields {
             let id = ComputerUseTaskContract.digest([document.contextID, document.taskID, String(document.generation), reply.documentID, field.id])
-            guard targets[id] == nil else { throw ComputerUseBrowserError.pageChanged }
-            targets[id] = field.id
-            result.append(.init(label: field.label, snapshot: try snapshot(field, targetID: id), choices: field.choices))
+            guard seen.insert(id).inserted else { throw ComputerUseBrowserError.pageChanged }
+            result.append((field.id, .init(label: field.label, snapshot: try snapshot(field, targetID: id), choices: field.choices)))
         }
         return result
     }
