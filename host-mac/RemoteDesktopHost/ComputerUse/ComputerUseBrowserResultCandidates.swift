@@ -59,8 +59,21 @@ struct ComputerUseBrowserResultProposal: Equatable, Sendable, CustomStringConver
     fileprivate let input: ComputerUseBrowserResultPageInput
     let goalRevision: String
     let selections: [Selection]
-    private init(input: ComputerUseBrowserResultPageInput, goal: ComputerUseBrowserGoalInput, selections: [Selection]) {
-        self.input = input; goalRevision = goal.digest; self.selections = selections
+    let review: ComputerUseBrowserResultReview?
+    private init(input: ComputerUseBrowserResultPageInput, goal: ComputerUseBrowserGoalInput, selections: [Selection],
+                 review: ComputerUseBrowserResultReview? = nil) {
+        self.input = input; goalRevision = goal.digest; self.selections = selections; self.review = review
+    }
+
+    func validateReviewInput(page: ComputerUseBrowserResultPageInput, goal: ComputerUseBrowserGoalInput) throws {
+        guard input == page, goalRevision == goal.digest else { throw ComputerUseBrowserResultReviewError.inputChanged }
+    }
+
+    func reviewed(_ review: ComputerUseBrowserResultReview, goal: ComputerUseBrowserGoalInput) throws -> Self {
+        let reviewInput = try ComputerUseBrowserResultReviewInput(goal: goal, page: input, proposal: self)
+        try review.validate(for: reviewInput)
+        guard self.review == nil || self.review == review else { throw ComputerUseBrowserResultReviewError.inputChanged }
+        return .init(input: input, goal: goal, selections: selections, review: review)
     }
 
     static func decode(content: String, input: ComputerUseBrowserResultPageInput, goal: ComputerUseBrowserGoalInput) throws -> Self {
@@ -181,6 +194,7 @@ struct ComputerUseBrowserResultCandidates: Sendable, CustomStringConvertible, Cu
     enum DocumentAnswerSourceStatus: String, Sendable { case unconfigured, permitted, excluded }
     let goalRevision: String
     let candidates: [Candidate]
+    let review: ComputerUseBrowserResultReview?
     let documentAnswerSourceStatus: DocumentAnswerSourceStatus
     fileprivate let answerSourcePolicy: ComputerUseBrowserAnswerSourcePolicy?
     fileprivate let goalInterpretation: ComputerUseBrowserGoalProposal?
@@ -198,7 +212,7 @@ struct ComputerUseBrowserResultCandidates: Sendable, CustomStringConvertible, Cu
 
     var requirementAssessmentIdentity: String {
         ComputerUseTaskContract.digest(["browser-reading-assessment-v1", goalRevision, evidence.document.contextID,
-            String(evidence.document.generation), evidence.documentID, evidence.page.id, answerSourcePolicy?.digest ?? ""] + candidates.map(\.id))
+            String(evidence.document.generation), evidence.documentID, evidence.page.id, answerSourcePolicy?.digest ?? "", review?.digest ?? ""] + candidates.map(\.id))
     }
     var requirementAssessment: ComputerUseBrowserResultAssessment? {
         guard let goalInterpretation else { return nil }
@@ -210,7 +224,7 @@ struct ComputerUseBrowserResultCandidates: Sendable, CustomStringConvertible, Cu
                      interpretation: ComputerUseBrowserGoalProposal?) {
         self.evidence = evidence; goalRevision = goal.digest; rootTaskID = goal.taskID
         answerSourcePolicy = answerPolicy
-        goalInterpretation = interpretation
+        goalInterpretation = interpretation; review = proposal.review
         documentAnswerSourceStatus = answerPolicy.map { $0.permitsEvidenceFrom(evidence.document.committedURL) ? .permitted : .excluded } ?? .unconfigured
         readingInput = proposal.input
         let page = evidence.page, tree = ComputerUseBrowserResultProposal.Tree(page)
@@ -232,6 +246,7 @@ struct ComputerUseBrowserResultCandidates: Sendable, CustomStringConvertible, Cu
                 + selection.fields.flatMap { [$0.kind.rawValue, String($0.textIDs.count)] + $0.textIDs }
                 + [String(selection.linkIDs.count)] + selection.linkIDs
                 + (answerPolicy.map { ["answer-source-policy", $0.digest] } ?? [])
+                + (proposal.review.map { ["semantic-review", $0.digest] } ?? [])
             return Candidate(id: ComputerUseTaskContract.digest(identity), containerID: selection.containerID, fields: selection.fields,
                 texts: texts.map(text), links: links.map(link), selectedLinkIDs: selection.linkIDs,
                 unclassifiedTextIDs: texts.filter { !assigned.contains($0.id) }.map(\.id),
@@ -277,10 +292,11 @@ struct ComputerUseBrowserLinkSelectionInput: Equatable, Sendable, CustomStringCo
             ["step":$0.offset, "kind":$0.element.kind.rawValue, "current_goal_revision":$0.element.goalRevision == goal.digest]
         }
         let assessment = candidates.requirementAssessment
-        let context: [String: Any] = ["version":3, "goal":goal.plannerContext,
+        let context: [String: Any] = ["version":4, "goal":goal.plannerContext,
             "page":try JSONSerialization.jsonObject(with: Data(candidates.readingInput.contextJSON.utf8)),
             "candidates":groups, "navigation_history":visits,
             "document_answer_source_status":candidates.documentAnswerSourceStatus.rawValue,
+            "field_review":candidates.review.map { $0.plannerContext as Any } ?? NSNull(),
             "requirement_assessment":assessment.map { $0.plannerContext as Any } ?? NSNull()]
         contextJSON = String(decoding: try JSONSerialization.data(withJSONObject: context, options: [.sortedKeys]), as: UTF8.self)
         let evidence = candidates.evidence
@@ -332,9 +348,22 @@ extension ComputerUseOwnedBrowser {
             throw ComputerUseBrowserResultError.goalChanged
         }
         guard proposal.input.page == evidence.page else { throw ComputerUseBrowserResultError.invalidPage }
+        if let review = proposal.review {
+            try review.validate(for: ComputerUseBrowserResultReviewInput(goal: goal, page: proposal.input, proposal: proposal))
+        }
         try await validatePageEvidence(evidence)
         try Task.checkCancellation()
         return .init(proposal: proposal, goal: goal, evidence: evidence, answerPolicy: answerPolicy, interpretation: interpretation)
+    }
+
+    /// Reuse requires the same review, complete goal and current native page.
+    /// A valid model review still cannot certify an offer or task completion.
+    func validateResultReview(_ review: ComputerUseBrowserResultReview, reading: ComputerUseBrowserResultCandidates,
+                              goal: ComputerUseBrowserGoalInput) async throws {
+        try Task.checkCancellation()
+        guard reading.review == review else { throw ComputerUseBrowserResultReviewError.inputChanged }
+        try await validateResultCandidates(reading, goal: goal)
+        try Task.checkCancellation()
     }
 
     /// Assessment is a reading fact. Current native evidence and the exact

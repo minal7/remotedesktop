@@ -9,6 +9,7 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
         case needsSemanticVerification, needsResultSet, uncompiledRequirement, clarificationApplied
         case missingQuote, ambiguousQuotes, unparsedQuote
         case quotedValueMatches, quotedValueConflicts, incompatibleLiteral
+        case reviewMixedOffers, reviewUnresolved, reviewPageContext, reviewQualifiedPrice
         case sourceOriginPermitted, sourceOriginExcluded, sourceUnconfigured, incompletePage
     }
     struct Requirement: Equatable, Sendable {
@@ -21,6 +22,7 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
         let relation: ComputerUseBrowserGoalProposal.Relation
     }
     struct Quote: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+        let fieldIndex: Int
         let kind: ComputerUseBrowserResultProposal.Kind
         let textIDs: [String]
         /// Complete selected source records, never a numeric substring.
@@ -61,10 +63,11 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
         let conditions = Dictionary(uniqueKeysWithValues: scalars.entries.map { ($0.requirementID, $0.resolution) })
         let pageIncomplete = reading.sourceTruncated || reading.omittedStructure || reading.omittedEmbeddedContent
             || reading.projectionOmittedRecords
-        candidates = reading.candidates.map { candidate in
-            let quotes = candidate.fields.filter { [.price, .date, .quantity].contains($0.kind) }.map { field -> Quote in
+        candidates = reading.candidates.enumerated().map { candidateIndex, candidate in
+            let review = reading.review?.candidates[candidateIndex]
+            let quotes = candidate.fields.enumerated().filter { [.price, .date, .quantity].contains($0.element.kind) }.map { fieldIndex, field -> Quote in
                 let source = field.textIDs.compactMap { id in candidate.texts.first { $0.id == id }?.text }.joined(separator: "\n")
-                return Quote(kind: field.kind, textIDs: field.textIDs, source: source, literal: Self.parse(source, kind: field.kind))
+                return Quote(fieldIndex: fieldIndex, kind: field.kind, textIDs: field.textIDs, source: source, literal: Self.parse(source, kind: field.kind))
             }
             let incomplete = pageIncomplete || !candidate.unprojectedTextIDs.isEmpty || !candidate.unprojectedLinkIDs.isEmpty
             let evaluations = interpretation.requirements.map { requirement -> Evaluation in
@@ -92,6 +95,20 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
                 let indices = quotes.indices.filter { quotes[$0].kind == kind }
                 guard !incomplete else { return result(.incompletePage, quotes: indices) }
                 guard !indices.isEmpty else { return result(.missingQuote) }
+                // Negative/uncertain semantic proposals prevent a numeric
+                // match from hiding a known association concern. Positive
+                // labels still establish only a quoted literal comparison.
+                if let review {
+                    guard review.association != .mixedOffers else { return result(.reviewMixedOffers, quotes: indices) }
+                    guard review.association == .singleOffer else { return result(.reviewUnresolved, quotes: indices) }
+                    let fields = indices.map { review.fields[quotes[$0].fieldIndex] }
+                    if fields.contains(where: { $0.scope == .page }) { return result(.reviewPageContext, quotes: indices) }
+                    if fields.contains(where: { $0.scope != .offer }) { return result(.reviewUnresolved, quotes: indices) }
+                    if kind == .price {
+                        if fields.contains(where: { $0.price == .qualified }) { return result(.reviewQualifiedPrice, quotes: indices) }
+                        if fields.contains(where: { $0.price != .exact }) { return result(.reviewUnresolved, quotes: indices) }
+                    }
+                }
                 guard indices.count == 1 else { return result(.ambiguousQuotes, quotes: indices) }
                 guard let literal = quotes[indices[0]].literal else { return result(.unparsedQuote, quotes: indices) }
                 switch condition.compareLiteral(literal) {
@@ -107,14 +124,14 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
     /// Planning gets indices and existing text references, never native URLs,
     /// goal/session hashes, candidate authority or invented normalized prose.
     var plannerContext: [String: Any] {
-        ["version":1,
+        ["version":2,
          "requirements":requirements.enumerated().map { index, value in
              ["index":index, "turn":value.turn, "sourceByteOffset":value.sourceByteOffset, "sourceByteCount":value.sourceByteCount,
               "role":value.role.rawValue, "field":value.field.rawValue, "relation":value.relation.rawValue] as [String: Any]
          },
          "candidates":candidates.enumerated().map { index, candidate in
              ["index":index, "quotes":candidate.quotes.map {
-                 ["kind":$0.kind.rawValue, "texts":$0.textIDs, "parsed":$0.literal != nil] as [String: Any]
+                 ["field":$0.fieldIndex, "kind":$0.kind.rawValue, "texts":$0.textIDs, "parsed":$0.literal != nil] as [String: Any]
              }, "requirements":candidate.requirements.map(\.status.rawValue)] as [String: Any]
          }]
     }

@@ -115,6 +115,9 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
         } catch ComputerUseBrowserError.sourceNotAllowed {
             try validate(run, tools: tools)
             return .userInterventionRequired(ComputerUseBrowserError.sourceNotAllowed.localizedDescription)
+        } catch is ComputerUseBrowserResultReviewError {
+            try validate(run, tools: tools)
+            return .userInterventionRequired("I could not determine how this page’s details belong to individual offers. The original request is still pending. Review the page, then choose Resume to continue.")
         }
     }
 

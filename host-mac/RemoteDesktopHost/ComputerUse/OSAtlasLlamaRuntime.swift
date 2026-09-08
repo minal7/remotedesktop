@@ -117,6 +117,19 @@ struct ComputerUseRuntimeBrowserResultPlanner: ComputerUseBrowserResultPlanning 
     }
 }
 
+/// Semantic field review shares the existing model owner, without another
+/// worker. Empty readings need no model activation.
+struct ComputerUseRuntimeBrowserResultReviewPlanner: ComputerUseBrowserResultReviewPlanning {
+    let inputs: ComputerUseNativeTextRuntimeInputs
+    var runtime: OSAtlasLlamaRuntime = .shared
+    func propose(_ input: ComputerUseBrowserResultReviewInput) async throws -> ComputerUseBrowserResultReview {
+        try Task.checkCancellation()
+        if input.candidateCount == 0 { return try .decode(content: #"{"candidates":[]}"#, input: input) }
+        let endpoint = try await runtime.activateNativeText(inputs)
+        return try await runtime.proposeBrowserResultReview(endpoint: endpoint, input: input)
+    }
+}
+
 /// Search-query proposals share the same verified native model and lease;
 /// they do not allocate an independent worker or issue a browser request.
 struct ComputerUseRuntimeBrowserSearchPlanner: ComputerUseBrowserSearchPlanning {
@@ -1479,6 +1492,34 @@ actor OSAtlasLlamaRuntime {
             let planner = ComputerUseLocalBrowserResultPlanner(connection: connection, transport: server.transport)
             let proposal = try await withTaskCancellationHandler {
                 try await planner.propose(goal: goal, page: page)
+            } onCancel: {
+                Task { await self.cancel(endpoint: endpoint) }
+            }
+            try Task.checkCancellation()
+            guard active?.endpoint == endpoint else { throw OSAtlasLlamaRuntimeError.inactiveSession }
+            return proposal
+        } catch {
+            if active?.endpoint == endpoint { try await stopActiveServerUnserialized() }
+            throw error
+        }
+    }
+
+    func proposeBrowserResultReview(endpoint: OSAtlasLlamaEndpoint,
+                                   input: ComputerUseBrowserResultReviewInput) async throws -> ComputerUseBrowserResultReview {
+        try Task.checkCancellation()
+        if input.candidateCount == 0 { return try .decode(content: #"{"candidates":[]}"#, input: input) }
+        let lease = try await acquireModelAccessLease()
+        defer { releaseModelAccessLease(lease) }
+        guard let server = active, server.endpoint == endpoint, server.inputs.nativeText != nil else {
+            throw OSAtlasLlamaRuntimeError.inactiveSession
+        }
+        do {
+            try validateResources(minimumReclaimableBytes: server.resourceProfile.minimumInferenceMemoryBytes)
+            let connection = try ComputerUseTextModelConnection(baseURL: endpoint.baseURL, bearerToken: endpoint.bearerToken,
+                modelAlias: ComputerUseNativeTextRuntimeInputs.modelAlias)
+            let planner = ComputerUseLocalBrowserResultReviewPlanner(connection: connection, transport: server.transport)
+            let proposal = try await withTaskCancellationHandler {
+                try await planner.propose(input)
             } onCancel: {
                 Task { await self.cancel(endpoint: endpoint) }
             }

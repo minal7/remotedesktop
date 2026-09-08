@@ -443,7 +443,9 @@ enum ComputerUseNativeTextExecutorLoader {
             journalDirectory: journalDirectory)
         let research = ComputerUseBrowserResearchDriver(
             goalPlanner: ComputerUseRuntimeBrowserGoalPlanner(inputs: inputs, runtime: runtime),
-            resultPlanner: ComputerUseRuntimeBrowserResultPlanner(inputs: inputs, runtime: runtime),
+            resultPlanner: ComputerUseReviewedBrowserResultPlanner(
+                reader: ComputerUseRuntimeBrowserResultPlanner(inputs: inputs, runtime: runtime),
+                reviewer: ComputerUseRuntimeBrowserResultReviewPlanner(inputs: inputs, runtime: runtime)),
             searchPlanner: ComputerUseRuntimeBrowserSearchPlanner(inputs: inputs, runtime: runtime),
             planning: ComputerUseModelBrowserResearchPlanning(providers: providers,
                 linkPlanner: ComputerUseRuntimeBrowserLinkPlanner(inputs: inputs, runtime: runtime)))
