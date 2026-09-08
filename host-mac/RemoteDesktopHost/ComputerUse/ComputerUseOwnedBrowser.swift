@@ -262,8 +262,10 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
 
     private struct PendingDOM {
         let id: UUID
+        let document: ComputerUseBrowserDocument?
         var continuation: CheckedContinuation<String, Error>?
         var timeout: Task<Void, Never>?
+        var completionWaiters: [CheckedContinuation<Void, Never>] = []
     }
 
     private struct PendingNavigation {
@@ -635,7 +637,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
 
     func callDOM(_ command: ComputerUseBrowserDOMCommand, arguments: [String: Any],
                  document expected: ComputerUseBrowserDocument) async throws -> ComputerUseBrowserDOMReply {
-        try await callDOM(command, arguments: arguments, validateContext: { self.validate(expected) })
+        try await callDOM(command, arguments: arguments, document: expected, validateContext: { self.validate(expected) })
     }
 
     func observePage(document expected: ComputerUseBrowserDocument) async throws -> ComputerUseBrowserPageEvidence {
@@ -836,6 +838,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     }
 
     private func callDOM(_ command: ComputerUseBrowserDOMCommand, arguments: [String: Any],
+                         document: ComputerUseBrowserDocument? = nil,
                          validateContext: () -> Bool) async throws -> ComputerUseBrowserDOMReply {
         try Task.checkCancellation()
         guard validateContext(), let browser else { throw ComputerUseBrowserError.pageChanged }
@@ -844,7 +847,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         let source = try await withTaskCancellationHandler {
             do {
                 let source: String = try await withCheckedThrowingContinuation { continuation in
-                    pendingDOM = PendingDOM(id: id, continuation: continuation)
+                    pendingDOM = PendingDOM(id: id, document: document, continuation: continuation)
                     pendingDOM?.timeout = Task { [weak self, domTimeout] in
                         do { try await Task.sleep(for: domTimeout) } catch { return }
                         self?.interruptDOM(id: id, error: ComputerUseBrowserError.documentUnresponsive)
@@ -854,6 +857,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
                         guard let self, let pending = pendingDOM, pending.id == id else { return }
                         pendingDOM = nil
                         pending.timeout?.cancel()
+                        for waiter in pending.completionWaiters { waiter.resume() }
                         switch result {
                         case .success(let value):
                             guard let source = value as? String, source.utf8.count <= 8 * 1_024 * 1_024 else {
@@ -892,6 +896,18 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             throw ComputerUseBrowserError.authenticationRequired
         }
         return result
+    }
+
+    /// Cleanup only: retain an executor's lease until already-dispatched work
+    /// on its document returns, or that browser is released. Cancellation and
+    /// login/control loss cannot turn a pending native call into an idle one.
+    /// An unresponsive page must be closed to release work that never returns.
+    func joinDOMCompletion(document expected: ComputerUseBrowserDocument) async {
+        guard let pending = pendingDOM, pending.document == expected else { return }
+        await withCheckedContinuation { continuation in
+            guard pendingDOM?.id == pending.id else { continuation.resume(); return }
+            pendingDOM?.completionWaiters.append(continuation)
+        }
     }
 
     /// A cancelled caller cannot retract a WebKit script. A continuation of
@@ -1078,6 +1094,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     private func releaseBrowser() {
         closeSignInWindow(restoreParent: false)
         if let pendingDOM { interruptDOM(id: pendingDOM.id, error: ComputerUseBrowserError.closed) }
+        let waiters = pendingDOM?.completionWaiters ?? []
         pendingDOM = nil
         observedNavigation = nil
         observedUserPage = nil
@@ -1087,6 +1104,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         browser?.navigationDelegate = nil
         browser?.uiDelegate = nil
         browser = nil
+        for waiter in waiters { waiter.resume() }
         displayedSite = ComputerUseBrowserSite.displayName(for: nil)
     }
 

@@ -309,6 +309,297 @@ final class ComputerUseBrowserFormPlannerTests: XCTestCase {
         }
     }
 
+    func testOwnerExecutesRetainedFormOnceAndPreparesQueryFromVerifiedNativeInput() async throws {
+        var edits = 0
+        let fixture = try await FormPlannerFixture(goal: proposal(), domScriptDidDispatch: { if $0 == .edit { edits += 1 } })
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { fixture.close(); try? FileManager.default.removeItem(at: directory) }
+        let owner = fixture.owner(journalDirectory: directory)
+        defer { owner.retire() }
+        _ = try await owner.interpretGoal()
+        let input = try await owner.prepareFormInput(), content = try plan([
+            ["field":"field1", "terms":[["requirement":1, "text":"Montréal e\u{301}"]]],
+            ["field":"field3", "normalized":"value4"], ["field":"field4", "normalized":"value5"]],
+            preserve: [["field":"field6", "requirement":7]])
+        let planner = FormProposalFixture(content: content), proposed = try await owner.planForm(input, using: planner)
+        let receipt = try await owner.executeForm(proposed, input: input)
+        let repeated = try await owner.executeForm(proposed, input: input), resumed = try await owner.resumeForm()
+        XCTAssertEqual(repeated, receipt); XCTAssertEqual(resumed, receipt)
+        XCTAssertEqual(edits, 3); XCTAssertEqual(planner.inputs.count, 1); XCTAssertFalse(owner.hasPendingForm)
+        XCTAssertEqual(owner.confirmedFormHistory, [receipt]); XCTAssertEqual(owner.input, input.interpretation.input)
+        let records = try stageJournals(directory)
+        XCTAssertEqual(records.count, 1); XCTAssertEqual(records[receipt.stageID]?.statuses, [.verified, .verified, .verified])
+        let page = try await owner.observeFormResultPage(after: receipt), button = try XCTUnwrap(page.page.controls.first { $0.kind == "submit" })
+        let query = try await owner.prepareFormQuery(after: receipt, controlID: button.id, evidence: page)
+        XCTAssertEqual(query.taskID, owner.taskID)
+        XCTAssertFalse(fixture.server.requestedPaths.contains { $0.hasPrefix("/results") })
+        let data = try stageJournalData(directory).map { String(decoding: $0, as: UTF8.self) }.joined()
+        for privateText in ["Montréal", "private-reference", input.interpretation.input.prompt, "Origin", "2026-03-08"] {
+            XCTAssertFalse(data.contains(privateText))
+        }
+    }
+
+    func testFormStageCancellationBeforeDispatchRetainsAttemptAndBlocksReplacementWork() async throws {
+        var owner: ComputerUseBrowserResearchTask?, edits = 0, writes = 0
+        let fixture = try await FormPlannerFixture(goal: proposal(), domScriptDidDispatch: { if $0 == .edit { edits += 1 } })
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { owner?.retire(); fixture.close(); try? FileManager.default.removeItem(at: directory) }
+        let current = fixture.owner(journalDirectory: directory, makeStore: { location in
+            try .init(directory: location, afterReplacement: { writes += 1; if writes == 1 { owner?.pause() } })
+        })
+        owner = current
+        _ = try await current.interpretGoal()
+        let input = try await current.prepareFormInput(), proposed = try ComputerUseBrowserFormProposal.decode(
+            content: plan([["field":"field3", "normalized":"value4"]]), input: input)
+        do { _ = try await current.executeForm(proposed, input: input); XCTFail("Pause after the durable attempt must stop before input") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertEqual(edits, 0); XCTAssertTrue(current.hasPendingForm)
+        XCTAssertEqual(try stageJournals(directory).values.first?.statuses, [.attempted])
+        try await current.resumeAfterUserControl()
+        let operations: [@MainActor () async throws -> Void] = [{ _ = try await current.prepareFormInput() }, { _ = try await current.readCandidates() }, { _ = try await current.interpretGoal() }]
+        for work in operations {
+            do { try await work(); XCTFail("An unresolved form stage cannot be replaced") }
+            catch { XCTAssertEqual(error as? ComputerUseBrowserResearchTask.Failure, .formPending) }
+        }
+        XCTAssertThrowsError(try current.issueQuestion(topic: .date, requirementIDs: [input.interpretation.requirements[3].id],
+            controllerID: "phone", controllerSessionID: "session")) {
+            XCTAssertEqual($0 as? ComputerUseBrowserResearchTask.Failure, .formPending)
+        }
+        do { _ = try await current.resumeForm(); XCTFail("No native receipt exists; the attempt cannot be replayed") }
+        catch { XCTAssertEqual(error as? ComputerUseTextTaskError, .uncertainEffect) }
+        XCTAssertEqual(edits, 0); XCTAssertEqual(try stageJournals(directory).values.first?.statuses, [.uncertain])
+    }
+
+    func testFormStagePauseJoinsDispatchedWebKitWorkBeforeReleasingExecutionLease() async throws {
+        var edits = 0
+        let body = FormPlannerFixture.body + """
+            <script>document.querySelector('input').addEventListener('input', () => {
+              const request = new XMLHttpRequest(); request.open('GET', '/held-input', false); request.send();
+            });</script>
+            """
+        let fixture = try await FormPlannerFixture(goal: proposal(), body: body, additionalRoutes: ["/held-input":.init(held: true)],
+            domScriptDidDispatch: { if $0 == .edit { edits += 1 } })
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { fixture.server.releaseHeldResponses(); fixture.close(); try? FileManager.default.removeItem(at: directory) }
+        let owner = fixture.owner(journalDirectory: directory)
+        defer { owner.retire() }
+        _ = try await owner.interpretGoal()
+        let input = try await owner.prepareFormInput(), proposed = try ComputerUseBrowserFormProposal.decode(
+            content: plan([["field":"field1", "terms":[["requirement":1, "text":"Montréal"]]]]), input: input)
+        let running = Task { try await owner.executeForm(proposed, input: input) }
+        try await fixture.wait { fixture.server.count("/held-input") == 1 }
+        owner.pause()
+        try await Task.sleep(for: .milliseconds(30))
+        XCTAssertTrue(owner.isOperating)
+        let stageID = try XCTUnwrap(stageJournals(directory).keys.first)
+        let store = try ComputerUseTaskJournalStore(directory: directory.appendingPathComponent("Research Forms").appendingPathComponent(stageID))
+        let journal = try store.load(taskID: owner.taskID)
+        XCTAssertThrowsError(try store.acquireExecution(taskID: owner.taskID, expected: journal)) {
+            XCTAssertEqual($0 as? ComputerUseTaskJournalStore.StoreError, .busy)
+        }
+        do { try await owner.resumeAfterUserControl(); XCTFail("An input call still owns the stage") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserResearchTask.Failure, .busy) }
+        fixture.server.releaseHeldResponses()
+        do { _ = try await running.value; XCTFail("The caller remains cancelled after native completion") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertFalse(owner.isOperating); XCTAssertEqual(edits, 1)
+        try await owner.resumeAfterUserControl()
+        let resumed = try await owner.resumeForm(), receipt = try XCTUnwrap(resumed)
+        XCTAssertEqual(receipt.editCount, 1); XCTAssertEqual(edits, 1); XCTAssertEqual(fixture.server.count("/held-input"), 1)
+        XCTAssertEqual(try stageJournals(directory)[receipt.stageID]?.statuses, [.verified])
+    }
+
+    func testFormStageReopensFailedStoreAndReconcilesVisibleVerifiedWriteWithoutReplay() async throws {
+        var writes = 0, edits = 0
+        let fixture = try await FormPlannerFixture(goal: proposal(), domScriptDidDispatch: { if $0 == .edit { edits += 1 } })
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { fixture.close(); try? FileManager.default.removeItem(at: directory) }
+        let owner = fixture.owner(journalDirectory: directory, makeStore: { location in
+            try .init(directory: location, afterReplacement: { writes += 1; if writes == 2 { throw ComputerUseTaskJournalStore.StoreError.unavailable } })
+        })
+        defer { owner.retire() }
+        _ = try await owner.interpretGoal()
+        let input = try await owner.prepareFormInput(), proposed = try ComputerUseBrowserFormProposal.decode(
+            content: plan([["field":"field3", "normalized":"value4"]]), input: input)
+        do { _ = try await owner.executeForm(proposed, input: input); XCTFail("A failed commit cannot publish success") }
+        catch { XCTAssertEqual(error as? ComputerUseTaskJournalStore.StoreError, .unavailable) }
+        XCTAssertEqual(edits, 1); XCTAssertTrue(owner.confirmedFormHistory.isEmpty); XCTAssertTrue(owner.hasPendingForm)
+        XCTAssertEqual(try stageJournals(directory).values.first?.statuses, [.verified])
+        let resumed = try await owner.resumeForm(), receipt = try XCTUnwrap(resumed)
+        XCTAssertEqual(owner.confirmedFormHistory, [receipt]); XCTAssertEqual(edits, 1)
+        XCTAssertFalse(owner.hasPendingForm)
+    }
+
+    func testFormStageFailedAttemptWriteCannotTreatMatchingManualValueAsItsOwnEffect() async throws {
+        var writes = 0, edits = 0
+        let body = FormPlannerFixture.body + """
+            <script>fetch('/signal').then(() => {
+              document.querySelector('input[type=date]').value = '2026-03-08'; fetch('/changed');
+            });</script>
+            """
+        let fixture = try await FormPlannerFixture(goal: proposal(), body: body, heldSignal: true,
+            domScriptDidDispatch: { if $0 == .edit { edits += 1 } })
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { fixture.close(); try? FileManager.default.removeItem(at: directory) }
+        let owner = fixture.owner(journalDirectory: directory, makeStore: { location in
+            try .init(directory: location, afterReplacement: { writes += 1; if writes == 1 { throw ComputerUseTaskJournalStore.StoreError.unavailable } })
+        })
+        defer { owner.retire() }
+        _ = try await owner.interpretGoal()
+        let input = try await owner.prepareFormInput(), proposed = try ComputerUseBrowserFormProposal.decode(
+            content: plan([["field":"field3", "normalized":"value4"]]), input: input)
+        do { _ = try await owner.executeForm(proposed, input: input); XCTFail("The failed attempt write must prevent input") } catch { }
+        XCTAssertEqual(edits, 0)
+        try await fixture.wait { fixture.server.count("/signal") == 1 }
+        fixture.server.releaseHeldResponses()
+        try await fixture.wait { fixture.server.count("/changed") == 1 }
+        do { _ = try await owner.resumeForm(); XCTFail("Manual value equality cannot supply the missing native receipt") }
+        catch { XCTAssertEqual(error as? ComputerUseTextTaskError, .uncertainEffect) }
+        XCTAssertEqual(edits, 0); XCTAssertTrue(owner.hasPendingForm)
+        XCTAssertEqual(try stageJournals(directory).values.first?.statuses, [.uncertain])
+    }
+
+    func testFormStageRefreshesUnsentObservationNonceWithoutReplanningTheContract() async throws {
+        var owner: ComputerUseBrowserResearchTask?, stores = 0, edits = 0
+        let fixture = try await FormPlannerFixture(goal: proposal(), domScriptDidDispatch: { if $0 == .edit { edits += 1 } })
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { owner?.retire(); fixture.close(); try? FileManager.default.removeItem(at: directory) }
+        let current = fixture.owner(journalDirectory: directory, makeStore: { location in
+            let store = try ComputerUseTaskJournalStore(directory: location)
+            stores += 1; if stores == 1 { owner?.pause() }
+            return store
+        })
+        owner = current
+        _ = try await current.interpretGoal()
+        let input = try await current.prepareFormInput(), proposed = try ComputerUseBrowserFormProposal.decode(
+            content: plan([["field":"field3", "normalized":"value4"]]), input: input)
+        do { _ = try await current.executeForm(proposed, input: input); XCTFail("Pause during admission must keep the stage unsent") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertEqual(edits, 0); XCTAssertTrue(try stageJournals(directory).isEmpty)
+        try await current.resumeAfterUserControl()
+        let resumed = try await current.resumeForm(), receipt = try XCTUnwrap(resumed)
+        XCTAssertEqual(edits, 1); XCTAssertEqual(stores, 2)
+        let original = try XCTUnwrap(proposed.textContract(for: input, stageID: receipt.stageID))
+        XCTAssertEqual(original.contractDigest, receipt.contractDigest)
+        XCTAssertEqual(current.input, input.interpretation.input)
+    }
+
+    func testNewFormStageKeepsOriginalGoalAndUsesAnotherJournalNamespace() async throws {
+        var edits = 0
+        let fixture = try await FormPlannerFixture(goal: proposal(), domScriptDidDispatch: { if $0 == .edit { edits += 1 } })
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { fixture.close(); try? FileManager.default.removeItem(at: directory) }
+        let owner = fixture.owner(journalDirectory: directory)
+        defer { owner.retire() }
+        _ = try await owner.interpretGoal()
+        let first = try await owner.prepareFormInput(), firstPlan = try ComputerUseBrowserFormProposal.decode(
+            content: plan([["field":"field1", "terms":[["requirement":1, "text":"Montréal"]]]]), input: first)
+        let firstReceipt = try await owner.executeForm(firstPlan, input: first)
+        let second = try await owner.prepareFormInput(), secondPlan = try ComputerUseBrowserFormProposal.decode(
+            content: plan([["field":"field2", "terms":[["requirement":2, "text":"Paris"]]]]), input: second)
+        let secondReceipt = try await owner.executeForm(secondPlan, input: second)
+        XCTAssertEqual(firstReceipt.index, 0); XCTAssertEqual(secondReceipt.index, 1)
+        XCTAssertNotEqual(firstReceipt.stageID, secondReceipt.stageID); XCTAssertNotEqual(firstReceipt.contractDigest, secondReceipt.contractDigest)
+        XCTAssertEqual(firstReceipt.taskID, secondReceipt.taskID); XCTAssertEqual(firstReceipt.goalRevision, secondReceipt.goalRevision)
+        XCTAssertEqual(owner.confirmedFormHistory, [firstReceipt, secondReceipt]); XCTAssertEqual(try stageJournals(directory).count, 2)
+        do { _ = try await owner.executeForm(firstPlan, input: first); XCTFail("An older form proposal cannot start a third stage") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserResearchTask.Failure, .formUnavailable) }
+        XCTAssertEqual(edits, 2)
+    }
+
+    func testReplacementOwnerCannotReconstructChangedNativeBindingsFromAnOldStageJournal() async throws {
+        let goal = try proposal(), directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let first = try await FormPlannerFixture(goal: goal), owner = first.owner(journalDirectory: directory)
+        defer { owner.retire(); first.close() }
+        _ = try await owner.interpretGoal()
+        let input = try await owner.prepareFormInput(), firstPlan = try ComputerUseBrowserFormProposal.decode(
+            content: plan([["field":"field3", "normalized":"value4"]]), input: input)
+        let original = try await owner.executeForm(firstPlan, input: input)
+        owner.retire(); first.close()
+        var edits = 0
+        let second = try await FormPlannerFixture(goal: goal, domScriptDidDispatch: { if $0 == .edit { edits += 1 } })
+        defer { second.close() }
+        let replacement = second.owner(journalDirectory: directory)
+        defer { replacement.retire() }
+        _ = try await replacement.interpretGoal()
+        let fresh = try await replacement.prepareFormInput(), proposed = try ComputerUseBrowserFormProposal.decode(
+            content: plan([["field":"field3", "normalized":"value4"]]), input: fresh)
+        do { _ = try await replacement.executeForm(proposed, input: fresh); XCTFail("A new browser must not replay an older form stage") }
+        catch { XCTAssertEqual(error as? ComputerUseTextTaskError, .journalMismatch) }
+        XCTAssertEqual(edits, 0); XCTAssertTrue(replacement.hasPendingForm)
+        XCTAssertEqual(try stageJournals(directory)[original.stageID]?.contractDigest, original.contractDigest)
+    }
+
+    func testRetireAndCloseReleasePendingNativeJoinWithoutPublishingAFormReceipt() async throws {
+        let body = FormPlannerFixture.body + """
+            <script>document.querySelector('input').addEventListener('input', () => {
+              const request = new XMLHttpRequest(); request.open('GET', '/held-input', false); request.send();
+            });</script>
+            """
+        let fixture = try await FormPlannerFixture(goal: proposal(), body: body, additionalRoutes: ["/held-input":.init(held: true)])
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { fixture.server.releaseHeldResponses(); fixture.close(); try? FileManager.default.removeItem(at: directory) }
+        let owner = fixture.owner(journalDirectory: directory)
+        _ = try await owner.interpretGoal()
+        let input = try await owner.prepareFormInput(), proposed = try ComputerUseBrowserFormProposal.decode(
+            content: plan([["field":"field1", "terms":[["requirement":1, "text":"Montréal"]]]]), input: input)
+        let running = Task { try await owner.executeForm(proposed, input: input) }
+        try await fixture.wait { fixture.server.count("/held-input") == 1 }
+        owner.retire()
+        try await Task.sleep(for: .milliseconds(30))
+        XCTAssertTrue(owner.isOperating)
+        fixture.browser.close()
+        do { _ = try await running.value; XCTFail("Closing the browser must only release cleanup, never publish a receipt") }
+        catch { XCTAssertTrue(error is CancellationError || error as? ComputerUseBrowserResearchFormStage.Failure == .retired) }
+        XCTAssertFalse(owner.isOperating); XCTAssertTrue(owner.confirmedFormHistory.isEmpty)
+        let stageID = try XCTUnwrap(stageJournals(directory).keys.first)
+        let store = try ComputerUseTaskJournalStore(directory: directory.appendingPathComponent("Research Forms").appendingPathComponent(stageID))
+        let record = try store.load(taskID: input.interpretation.input.taskID)
+        let lease = try store.acquireExecution(taskID: input.interpretation.input.taskID, expected: record)
+        lease.release()
+    }
+
+    func testFormStageRejectsChangedPageBeforeAnyDurableAttemptOrInput() async throws {
+        var edits = 0
+        let fixture = try await FormPlannerFixture(goal: proposal(), body: FormPlannerFixture.body + """
+            <script>fetch('/signal').then(() => { document.body.insertAdjacentHTML('beforeend', '<p>Changed search context</p>'); fetch('/changed'); });</script>
+            """, heldSignal: true, domScriptDidDispatch: { if $0 == .edit { edits += 1 } })
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { fixture.close(); try? FileManager.default.removeItem(at: directory) }
+        let owner = fixture.owner(journalDirectory: directory)
+        defer { owner.retire() }
+        _ = try await owner.interpretGoal()
+        let input = try await owner.prepareFormInput(), proposed = try ComputerUseBrowserFormProposal.decode(
+            content: plan([["field":"field3", "normalized":"value4"]]), input: input)
+        try await fixture.wait { fixture.server.count("/signal") == 1 }
+        fixture.server.releaseHeldResponses()
+        try await fixture.wait { fixture.server.count("/changed") == 1 }
+        do { _ = try await owner.executeForm(proposed, input: input); XCTFail("Fresh field IDs alone do not preserve a changed planning context") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserResearchFormError, .inputChanged) }
+        XCTAssertEqual(edits, 0); XCTAssertTrue(try stageJournals(directory).isEmpty)
+        XCTAssertTrue(owner.hasPendingForm)
+    }
+
+    private func stageJournalData(_ directory: URL) throws -> [Data] {
+        let forms = directory.appendingPathComponent("Research Forms")
+        guard FileManager.default.fileExists(atPath: forms.path) else { return [] }
+        return try FileManager.default.contentsOfDirectory(at: forms, includingPropertiesForKeys: nil).flatMap { stage in
+            try FileManager.default.contentsOfDirectory(at: stage, includingPropertiesForKeys: nil).filter { $0.pathExtension == "json" }.map { try Data(contentsOf: $0) }
+        }
+    }
+    private func stageJournals(_ directory: URL) throws -> [String: ComputerUseTaskJournal] {
+        let forms = directory.appendingPathComponent("Research Forms")
+        guard FileManager.default.fileExists(atPath: forms.path) else { return [:] }
+        var values: [String: ComputerUseTaskJournal] = [:]
+        for stage in try FileManager.default.contentsOfDirectory(at: forms, includingPropertiesForKeys: nil) {
+            for file in try FileManager.default.contentsOfDirectory(at: stage, includingPropertiesForKeys: nil) where file.pathExtension == "json" {
+                values[stage.lastPathComponent] = try JSONDecoder().decode(ComputerUseTaskJournal.self, from: Data(contentsOf: file))
+            }
+        }
+        return values
+    }
+
     private func local(_ transport: FormPlannerTransport) throws -> ComputerUseLocalBrowserFormPlanner {
         try .init(connection: .init(baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:54321")), bearerToken: "fixture-token-value",
             modelAlias: ComputerUseNativeTextRuntimeInputs.modelAlias), transport: transport)
@@ -338,11 +629,11 @@ final class ComputerUseBrowserFormPlannerTests: XCTestCase {
 private final class FormPlannerFixture {
     static let body = """
         <form action='/results'>
-          <label>Origin<input value='old-origin'></label><label>Destination<input value='old-destination'></label>
-          <label>Departure<input type='date'></label><label>People<input type='number' min='1' max='8'></label>
-          <label>Cabin<select><optgroup label='Basic'><option value='private-basic'>Economy</option></optgroup>
+          <label>Origin<input name='origin' value='old-origin'></label><label>Destination<input name='destination' value='old-destination'></label>
+          <label>Departure<input name='departure' type='date'></label><label>People<input name='people' type='number' min='1' max='8'></label>
+          <label>Cabin<select name='cabin'><optgroup label='Basic'><option value='private-basic'>Economy</option></optgroup>
             <optgroup label='Refundable'><option value='private-flexible'>Economy</option></optgroup><option hidden>Hidden</option></select></label>
-          <label>Reference<input value='private-reference'></label><button>Search</button>
+          <label>Reference<input name='reference' value='private-reference'></label><button>Search</button>
         </form>
         """
     let goal: ComputerUseBrowserGoalProposal
@@ -350,11 +641,16 @@ private final class FormPlannerFixture {
     let browser: ComputerUseOwnedBrowser
     let target: ComputerUseBrowserTextTarget
     let input: ComputerUseBrowserResearchFormInput
-    init(goal: ComputerUseBrowserGoalProposal, body: String? = nil, heldSignal: Bool = false) async throws {
+    init(goal: ComputerUseBrowserGoalProposal, body: String? = nil, heldSignal: Bool = false,
+         additionalRoutes: [String: OwnedBrowserHTTPFixture.Response] = [:],
+         domScriptDidDispatch: ((ComputerUseBrowserDOMCommand) -> Void)? = nil) async throws {
         self.goal = goal
-        server = try .init(routes: ["/form":.init(body: "<!doctype html><meta charset='utf-8'>" + (body ?? Self.body)), "/signal":.init(held: heldSignal)])
+        var routes = additionalRoutes
+        routes["/form"] = .init(body: "<!doctype html><meta charset='utf-8'>" + (body ?? Self.body))
+        routes["/signal"] = .init(held: heldSignal)
+        server = try .init(routes: routes)
         let base = try await server.start()
-        browser = .init(presentsWindow: false, mayAct: { true })
+        browser = .init(presentsWindow: false, domScriptDidDispatch: domScriptDidDispatch, mayAct: { true })
         do {
             try browser.claim(taskID: goal.input.taskID)
             let document = try await browser.navigate(taskID: goal.input.taskID, operationID: "form-open", to: base.appendingPathComponent("form"))
@@ -363,9 +659,9 @@ private final class FormPlannerFixture {
             input = try .init(interpretation: goal, evidence: await target.bindFields(fields, to: page))
         } catch { browser.close(); server.stop(); throw error }
     }
-    func owner() -> ComputerUseBrowserResearchTask {
+    func owner(journalDirectory: URL? = nil, makeStore: @escaping (URL) throws -> ComputerUseTaskJournalStore = { try .init(directory: $0) }) -> ComputerUseBrowserResearchTask {
         .init(input: goal.input, browser: browser, goalPlanner: FormGoalFixture(goal: goal),
-            resultPlanner: BrowserResearchResultFixture(), mayAct: { true })
+            resultPlanner: BrowserResearchResultFixture(), navigationJournalDirectory: journalDirectory, navigationStore: makeStore, mayAct: { true })
     }
     func close() { browser.close(); server.stop() }
     func wait(_ condition: () -> Bool) async throws {

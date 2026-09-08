@@ -110,8 +110,13 @@ struct ComputerUseBrowserFormProposal: Equatable, Sendable, CustomStringConverti
     /// journal. The parent must retain it before dispatch, never regenerate it
     /// to recover an attempted stage. Only user-scoped preservation becomes
     /// an invariant; ordinary unedited fields may react to the site's events.
-    func textContract(for current: ComputerUseBrowserResearchFormInput) throws -> ComputerUseTextTaskContract? {
+    func textContract(for current: ComputerUseBrowserResearchFormInput, stageID: String? = nil) throws -> ComputerUseTextTaskContract? {
         try validate(for: current)
+        if let stageID {
+            guard stageID.utf8.count == 64, stageID.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else {
+                throw ComputerUseBrowserResearchFormError.invalidInput
+            }
+        }
         guard !edits.isEmpty else { return nil }
         let operations: [ComputerUseTextGoalOperation] = try edits.map { edit in
             let field = try input.field(for: edit.field), targetID = field.editable.snapshot.targetID
@@ -125,7 +130,8 @@ struct ComputerUseBrowserFormProposal: Equatable, Sendable, CustomStringConverti
         }
         let fields = input.evidence.fields.map(\.editable)
         let unchanged = try preserved.map { try input.field(for: $0.field).editable.snapshot.targetID }
-        return try .init(taskID: input.interpretation.input.taskID, prompt: input.contextJSON, fields: fields, operations: operations,
+        let identity = stageID.map { ComputerUseTaskContract.digest(["browser-research-form-contract-v1", $0, input.contextJSON]) } ?? input.contextJSON
+        return try .init(taskID: input.interpretation.input.taskID, prompt: identity, fields: fields, operations: operations,
             unchangedTargetIDs: unchanged)
     }
 

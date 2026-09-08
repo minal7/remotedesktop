@@ -30,7 +30,7 @@ struct ComputerUseBrowserResearchVisit: Equatable, Sendable {
 /// compile the complete research action plan or terminal research answers.
 @MainActor
 final class ComputerUseBrowserResearchTask {
-    enum Failure: Error, Equatable { case busy, paused, retired, goalChanged, interpretationRequired, questionPending, browserRequired, navigationPending, navigationUnavailable }
+    enum Failure: Error, Equatable { case busy, paused, retired, goalChanged, interpretationRequired, questionPending, browserRequired, navigationPending, navigationUnavailable, formPending, formUnavailable }
     struct Interpretation: Sendable {
         let proposal: ComputerUseBrowserGoalProposal
         let scalars: ComputerUseBrowserScalarRequirements
@@ -65,6 +65,7 @@ final class ComputerUseBrowserResearchTask {
     private var interpretation: Interpretation?
     private var latestCandidates: ComputerUseBrowserResultCandidates?
     private var latestForm: PreparedForm?
+    private var formStage: ComputerUseBrowserResearchFormStage?
     private var retainedEvidence: ComputerUseBrowserResearchEvidence
     private var session: ComputerUseBrowserHandbackRequirement?
     private var handback: ComputerUseBrowserHandbackRequirement?
@@ -75,6 +76,7 @@ final class ComputerUseBrowserResearchTask {
     private var controlEpoch = UUID()
     private var hasQuestion = false
     private(set) var confirmedNavigationHistory: [ComputerUseBrowserResearchVisit] = []
+    private(set) var confirmedFormHistory: [ComputerUseBrowserResearchFormReceipt] = []
 
     var input: ComputerUseBrowserGoalInput { clarification.input }
     /// Available during the serialized selector operation as well as idle.
@@ -89,6 +91,10 @@ final class ComputerUseBrowserResearchTask {
     var executionTaskID: String { input.clarifications.last?.answerTaskID ?? taskID }
     var isOperating: Bool { operationID != nil }
     var hasPendingNavigation: Bool { initialSearch?.isPending == true || navigation?.pendingSelection != nil }
+    var hasPendingForm: Bool {
+        guard let formStage else { return false }
+        return !confirmedFormHistory.contains { $0.stageID == formStage.id }
+    }
     /// Confirmed means a historical navigation receipt, never a completed
     /// research answer. A driver can continue without proposing a second first
     /// search after handback or an accepted clarification answer.
@@ -114,6 +120,7 @@ final class ComputerUseBrowserResearchTask {
 
     private func configureSourcePolicy(_ policy: ComputerUseBrowserSourcePolicy, sources: ComputerUseBrowserResearchSources?) throws {
         try requireIdle()
+        guard !hasPendingForm else { throw Failure.formPending }
         guard !hasPendingNavigation, !hasQuestion, policy.taskID == taskID,
               policy.rootDigest == input.rootDigest, policy.goalRevision == input.digest else { throw Failure.goalChanged }
         if let sourcePolicy, sourcePolicy.goalRevision == policy.goalRevision, sourcePolicy != policy { throw Failure.goalChanged }
@@ -153,6 +160,7 @@ final class ComputerUseBrowserResearchTask {
 
     func interpretGoal() async throws -> Interpretation {
         try requireIdle()
+        guard !hasPendingForm else { throw Failure.formPending }
         guard !hasPendingNavigation else { throw Failure.navigationPending }
         guard !hasQuestion else { throw Failure.questionPending }
         if let interpretation, interpretation.proposal.input.digest == input.digest { return interpretation }
@@ -175,6 +183,7 @@ final class ComputerUseBrowserResearchTask {
     /// another proposal; the host still binds the live controller/session.
     func proposedQuestionRequest() throws -> ComputerUseBrowserQuestionRequest? {
         try requireIdle()
+        guard !hasPendingForm else { throw Failure.formPending }
         guard !hasPendingNavigation else { throw Failure.navigationPending }
         guard !hasQuestion else { throw Failure.questionPending }
         guard let interpretation, interpretation.proposal.input.digest == input.digest else { throw Failure.interpretationRequired }
@@ -193,6 +202,7 @@ final class ComputerUseBrowserResearchTask {
     /// navigation or a question. Dispatch requires its own retained action.
     func planInitialSearch(using planner: any ComputerUseBrowserSearchPlanning) async throws -> ComputerUseBrowserSearchQuery {
         try requireIdle()
+        guard !hasPendingForm else { throw Failure.formPending }
         guard !hasPendingNavigation else { throw Failure.navigationPending }
         guard !hasQuestion else { throw Failure.questionPending }
         guard let interpretation, interpretation.proposal.input.digest == input.digest,
@@ -214,6 +224,7 @@ final class ComputerUseBrowserResearchTask {
     func openInitialSearch(_ query: ComputerUseBrowserSearchQuery, provider: ComputerUseBrowserSearchProvider) async throws -> ComputerUseBrowserDocument {
         try requireIdle()
         guard !hasQuestion else { throw Failure.questionPending }
+        guard !hasPendingForm else { throw Failure.formPending }
         guard navigation?.pendingSelection == nil else { throw Failure.navigationPending }
         guard let directory = navigationDirectory else { throw Failure.navigationUnavailable }
         guard let interpretation, interpretation.proposal.input.digest == input.digest else { throw Failure.interpretationRequired }
@@ -247,6 +258,7 @@ final class ComputerUseBrowserResearchTask {
     func resumeInitialSearch() async throws -> ComputerUseBrowserDocument? {
         try requireIdle()
         guard !hasQuestion else { throw Failure.questionPending }
+        guard !hasPendingForm else { throw Failure.formPending }
         guard navigation?.pendingSelection == nil else { throw Failure.navigationPending }
         guard let initialSearch, initialSearch.isPending else { return nil }
         let captured = input
@@ -263,6 +275,7 @@ final class ComputerUseBrowserResearchTask {
     func refreshInitialSearchStartingPage() async throws -> ComputerUseBrowserInitialSearch.RefreshResult {
         try requireIdle()
         guard !hasQuestion else { throw Failure.questionPending }
+        guard !hasPendingForm else { throw Failure.formPending }
         guard navigation?.pendingSelection == nil else { throw Failure.navigationPending }
         guard let initialSearch, initialSearch.isPending else { return .noPendingStage }
         guard initialSearch.request.goal.digest == input.digest else { throw Failure.goalChanged }
@@ -277,6 +290,7 @@ final class ComputerUseBrowserResearchTask {
     /// This only observes; it neither runs a model nor edits/submits a form.
     func prepareFormInput() async throws -> ComputerUseBrowserResearchFormInput {
         try requireIdle()
+        guard !hasPendingForm else { throw Failure.formPending }
         guard !hasPendingNavigation else { throw Failure.navigationPending }
         guard !hasQuestion else { throw Failure.questionPending }
         guard let interpretation, interpretation.proposal.input == input,
@@ -303,6 +317,7 @@ final class ComputerUseBrowserResearchTask {
     /// check cannot leave a planning input eligible for later consumption.
     func revalidateFormInput(_ proposed: ComputerUseBrowserResearchFormInput) async throws {
         try requireIdle()
+        guard !hasPendingForm else { throw Failure.formPending }
         guard !hasPendingNavigation else { throw Failure.navigationPending }
         guard !hasQuestion else { throw Failure.questionPending }
         guard let retained = latestForm, retained.input == proposed,
@@ -320,6 +335,7 @@ final class ComputerUseBrowserResearchTask {
     /// the actual planner before releasing it; no edit is dispatched here.
     func planForm(_ proposed: ComputerUseBrowserResearchFormInput, using planner: any ComputerUseBrowserFormPlanning) async throws -> ComputerUseBrowserFormProposal {
         try requireIdle()
+        guard !hasPendingForm else { throw Failure.formPending }
         guard !hasPendingNavigation else { throw Failure.navigationPending }
         guard !hasQuestion else { throw Failure.questionPending }
         guard let retained = latestForm, retained.input == proposed,
@@ -354,8 +370,88 @@ final class ComputerUseBrowserResearchTask {
         try browser.validateSourceDocument(prepared.input.evidence.page.document)
     }
 
+    /// Accept one native edit stage. Repeating its original request resumes
+    /// that stage, including after Pause; it cannot create a replacement plan.
+    func executeForm(_ proposal: ComputerUseBrowserFormProposal, input expected: ComputerUseBrowserResearchFormInput) async throws -> ComputerUseBrowserResearchFormReceipt {
+        try requireIdle()
+        guard !hasPendingNavigation else { throw Failure.navigationPending }
+        guard !hasQuestion else { throw Failure.questionPending }
+        guard expected.interpretation.input == input, interpretation?.proposal == expected.interpretation else { throw Failure.goalChanged }
+        try proposal.validate(for: expected)
+        let stage: ComputerUseBrowserResearchFormStage
+        if let formStage, formStage.input == expected, formStage.proposal == proposal { stage = formStage }
+        else {
+            guard !hasPendingForm else { throw Failure.formPending }
+            guard let prepared = latestForm, prepared.input == expected, let directory = navigationDirectory else { throw Failure.formUnavailable }
+            stage = try .init(input: expected, proposal: proposal, target: prepared.target, browser: browser,
+                index: confirmedFormHistory.count, journalDirectory: directory, makeStore: navigationStore)
+            formStage = stage // Retain before any disk write, native await or effect.
+        }
+        latestForm = nil; latestCandidates = nil
+        return try await runForm(stage)
+    }
+
+    func resumeForm() async throws -> ComputerUseBrowserResearchFormReceipt? {
+        try requireIdle()
+        guard !hasPendingNavigation else { throw Failure.navigationPending }
+        guard !hasQuestion else { throw Failure.questionPending }
+        guard let formStage else { return nil }
+        guard formStage.input.interpretation.input == input else { throw Failure.goalChanged }
+        latestForm = nil; latestCandidates = nil
+        return try await runForm(formStage)
+    }
+
+    private func runForm(_ stage: ComputerUseBrowserResearchFormStage) async throws -> ComputerUseBrowserResearchFormReceipt {
+        let captured = input
+        return try await operate { [self] in
+            let receipt = try await stage.run(checkCurrent: { try self.checkCurrent(captured) })
+            if !isRetired {
+                if let previous = confirmedFormHistory.first(where: { $0.stageID == receipt.stageID }) {
+                    guard previous == receipt else { throw Failure.goalChanged }
+                } else {
+                    guard receipt.taskID == taskID, receipt.goalRevision == captured.digest,
+                          receipt.index == confirmedFormHistory.count else { throw Failure.goalChanged }
+                    confirmedFormHistory.append(receipt)
+                }
+            }
+            try checkCurrent(captured)
+            return receipt
+        }
+    }
+
+    /// Observe the result of the verified form stage before selecting a next
+    /// step. This does not rediscover fields or discard their input receipts.
+    func observeFormResultPage(after receipt: ComputerUseBrowserResearchFormReceipt) async throws -> ComputerUseBrowserPageEvidence {
+        try requireIdle()
+        try requireCompletedForm(receipt)
+        let captured = input
+        return try await operate { [self] in try await observeOwnedPage(goal: captured, enforceSources: true) }
+    }
+
+    /// Prepare only. The driver must separately retain and journal the selected
+    /// navigation; the query still validates exact values and native receipts.
+    func prepareFormQuery(after receipt: ComputerUseBrowserResearchFormReceipt, controlID: String,
+                          evidence: ComputerUseBrowserPageEvidence) async throws -> ComputerUseBrowserNavigationTarget {
+        try requireIdle()
+        try requireCompletedForm(receipt)
+        guard let formStage else { throw Failure.formUnavailable }
+        let captured = input
+        return try await operate { [self] in
+            try await formStage.prepareQuery(controlID: controlID, evidence: evidence, checkCurrent: { try self.checkCurrent(captured) })
+        }
+    }
+
+    private func requireCompletedForm(_ receipt: ComputerUseBrowserResearchFormReceipt) throws {
+        guard !hasPendingNavigation else { throw Failure.navigationPending }
+        guard !hasPendingForm else { throw Failure.formPending }
+        guard !hasQuestion else { throw Failure.questionPending }
+        guard let formStage, formStage.id == receipt.stageID, confirmedFormHistory.last == receipt,
+              formStage.input.interpretation.input == input else { throw Failure.formUnavailable }
+    }
+
     func readCandidates() async throws -> ComputerUseBrowserResultCandidates {
         try requireIdle()
+        guard !hasPendingForm else { throw Failure.formPending }
         guard !hasPendingNavigation else { throw Failure.navigationPending }
         guard !hasQuestion else { throw Failure.questionPending }
         guard let interpretation, interpretation.proposal.input.digest == input.digest,
@@ -373,6 +469,7 @@ final class ComputerUseBrowserResearchTask {
     /// semantics or a complete answer. Failed validation retires the cache.
     func revalidateCandidates() async throws -> ComputerUseBrowserResultCandidates {
         try requireIdle()
+        guard !hasPendingForm else { throw Failure.formPending }
         guard !hasPendingNavigation else { throw Failure.navigationPending }
         guard !hasQuestion else { throw Failure.questionPending }
         guard let retained = latestCandidates else { throw Failure.interpretationRequired }
@@ -390,6 +487,7 @@ final class ComputerUseBrowserResearchTask {
 
     func openCandidateLink(candidateID: String, linkID: String) async throws -> ComputerUseBrowserNavigationReceipt {
         try requireIdle()
+        guard !hasPendingForm else { throw Failure.formPending }
         guard initialSearch?.isPending != true else { throw Failure.navigationPending }
         guard !hasQuestion else { throw Failure.questionPending }
         guard let navigation else { throw Failure.navigationUnavailable }
@@ -411,6 +509,7 @@ final class ComputerUseBrowserResearchTask {
     func planCandidateNavigation(select: @escaping @MainActor @Sendable
         (ComputerUseBrowserGoalInput, ComputerUseBrowserResultCandidates) async throws -> LinkChoice?) async throws -> LinkChoice? {
         try requireIdle()
+        guard !hasPendingForm else { throw Failure.formPending }
         guard !hasPendingNavigation else { throw Failure.navigationPending }
         guard !hasQuestion else { throw Failure.questionPending }
         guard let interpretation, interpretation.proposal.input.digest == input.digest,
@@ -439,6 +538,7 @@ final class ComputerUseBrowserResearchTask {
     /// Its journal reconciles attempts; missing receipts never authorize replay.
     func resumeCandidateNavigation() async throws -> ComputerUseBrowserNavigationReceipt? {
         try requireIdle()
+        guard !hasPendingForm else { throw Failure.formPending }
         guard initialSearch?.isPending != true else { throw Failure.navigationPending }
         guard let navigation, let selection = navigation.pendingSelection else { return nil }
         guard !hasQuestion else { throw Failure.questionPending }
@@ -456,6 +556,7 @@ final class ComputerUseBrowserResearchTask {
     func replanPendingCandidateNavigation(select: @escaping @MainActor @Sendable
         (ComputerUseBrowserGoalInput, ComputerUseBrowserResultCandidates) async throws -> LinkChoice?) async throws -> ComputerUseBrowserResearchNavigation.ReplanResult {
         try requireIdle()
+        guard !hasPendingForm else { throw Failure.formPending }
         guard initialSearch?.isPending != true else { throw Failure.navigationPending }
         guard !hasQuestion else { throw Failure.questionPending }
         guard let navigation else { throw Failure.navigationUnavailable }
@@ -479,6 +580,7 @@ final class ComputerUseBrowserResearchTask {
     func issueQuestion(topic: ComputerUseBrowserClarificationTopic, requirementIDs: [String],
                        controllerID: String, controllerSessionID: String) throws -> ComputerUseBrowserGoalClarification.Question {
         try requireIdle()
+        guard !hasPendingForm else { throw Failure.formPending }
         guard !hasPendingNavigation else { throw Failure.navigationPending }
         guard let interpretation, interpretation.proposal.input.digest == input.digest else { throw Failure.interpretationRequired }
         let context = try questionContext(controllerID: controllerID, controllerSessionID: controllerSessionID)
@@ -490,6 +592,7 @@ final class ComputerUseBrowserResearchTask {
     func answerQuestion(questionID: String, answerTaskID: String, answer: String,
                         controllerID: String, controllerSessionID: String) throws -> ComputerUseBrowserGoalInput {
         try requireIdle()
+        guard !hasPendingForm else { throw Failure.formPending }
         guard !hasPendingNavigation else { throw Failure.navigationPending }
         let context = try questionContext(controllerID: controllerID, controllerSessionID: controllerSessionID)
         let updated: ComputerUseBrowserGoalInput
@@ -582,6 +685,7 @@ final class ComputerUseBrowserResearchTask {
     func retire() {
         isRetired = true; controlEpoch = UUID(); latestCandidates = nil; latestForm = nil; interpretation = nil
         confirmedNavigationHistory.removeAll()
+        formStage?.retire(); formStage = nil; confirmedFormHistory.removeAll()
         retainedEvidence = .init(goal: input)
         clarification.retire(); navigation?.retire(); initialSearch?.retire(); hasQuestion = false; cancelOperation?()
     }
