@@ -128,6 +128,14 @@ struct ComputerUseTaskJournal: Codable, Equatable, Sendable {
     let contractDigest: String
     let stepIDs: [String]
     var statuses: [ComputerUseTaskStepStatus]
+    /// A durable tombstone for a plan proven to have sent no input. This is
+    /// not an effect status or permission to revive the old contract.
+    let retirementDigest: String?
+    init(taskID: String, promptDigest: String, contractDigest: String, stepIDs: [String],
+         statuses: [ComputerUseTaskStepStatus], retirementDigest: String? = nil) {
+        self.taskID = taskID; self.promptDigest = promptDigest; self.contractDigest = contractDigest
+        self.stepIDs = stepIDs; self.statuses = statuses; self.retirementDigest = retirementDigest
+    }
 }
 
 enum ComputerUseTaskExecutionError: Error, Equatable {
@@ -170,7 +178,7 @@ final class ComputerUseTaskExecution {
             contractDigest: contract.contractDigest, stepIDs: contract.steps.map(\.id),
             statuses: contract.steps.map { _ in .planned })
         if let recovered {
-            guard recovered.taskID == initial.taskID, recovered.promptDigest == initial.promptDigest,
+            guard recovered.retirementDigest == nil, recovered.taskID == initial.taskID, recovered.promptDigest == initial.promptDigest,
                   recovered.contractDigest == initial.contractDigest, recovered.stepIDs == initial.stepIDs,
                   recovered.statuses.count == initial.statuses.count else {
                 throw ComputerUseTaskExecutionError.journalMismatch

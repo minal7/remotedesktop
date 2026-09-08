@@ -196,7 +196,11 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
             }
             if owner.hasPendingForm {
                 progress("Checking the pending form entries…")
-                guard try await owner.resumeForm() != nil else { throw Failure.invalidContinuation }
+                do {
+                    guard try await owner.resumeForm() != nil else { throw Failure.invalidContinuation }
+                } catch {
+                    guard try await retireStaleUnsentForm(owner, after: error) else { throw error }
+                }
                 try check()
                 continue // Choose the next capability using the retained verified stage.
             }
@@ -264,7 +268,10 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                     guard !proposal.isUnavailable else {
                         return .userInterventionRequired("I could not prepare justified entries for this form. The original request remains pending.")
                     }
-                    _ = try await owner.executeForm(proposal, input: input)
+                    do { _ = try await owner.executeForm(proposal, input: input) }
+                    catch {
+                        guard try await retireStaleUnsentForm(owner, after: error) else { throw error }
+                    }
                     try check()
                     continue
                 case .openQuery:
@@ -296,6 +303,13 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
 
     private var selectionRequired: ComputerUseExecutionResult {
         .userInterventionRequired("I could not select another result link that advances the complete request. More page interaction or result verification is needed; the original task is still pending.")
+    }
+    private func retireStaleUnsentForm(_ owner: ComputerUseBrowserResearchTask, after error: Error) async throws -> Bool {
+        guard error as? ComputerUseBrowserError == .pageChanged
+                || error as? ComputerUseBrowserResearchFormError == .inputChanged
+                || error as? ComputerUseTextTaskError == .staleTarget
+                || error as? ComputerUseBrowserResearchFormStage.Failure == .retirementPending else { return false }
+        return try await owner.retirePendingUnsentForm() != nil
     }
     private var reconciliationRequired: ComputerUseExecutionResult {
         .userInterventionRequired("An earlier browser action needs to be checked before continuing. The original request remains pending.")

@@ -103,7 +103,18 @@ struct ComputerUseBrowserResearchFormReceipt: Equatable, Sendable, CustomStringC
 /// journal alone and remains an explicit recovery limitation.
 @MainActor
 final class ComputerUseBrowserResearchFormStage {
-    enum Failure: Error, Equatable { case invalidStage, busy, retired, notVerified }
+    enum Failure: Error, Equatable { case invalidStage, busy, retired, notVerified, retirementPending }
+    struct Retirement: Equatable, Sendable {
+        let stageID: String
+        let index: Int
+        let goalRevision: String
+        let contractDigest: String
+        let digest: String
+        @MainActor fileprivate init(stage: ComputerUseBrowserResearchFormStage, digest: String) {
+            stageID = stage.id; index = stage.index; goalRevision = stage.input.interpretation.input.digest
+            contractDigest = stage.contract.contractDigest; self.digest = digest
+        }
+    }
     let input: ComputerUseBrowserResearchFormInput
     let proposal: ComputerUseBrowserFormProposal
     let id: String
@@ -117,16 +128,19 @@ final class ComputerUseBrowserResearchFormStage {
     private var continuation: ComputerUseBrowserResearchFormContinuation?
     private var isExecuting = false
     private var isRetired = false
+    private var retirementPending = false
+    private var retirement: Retirement?
+    private var observedAttempt = false
     var nativeReceipt: ComputerUseBrowserResearchFormReceipt? { completed }
     var nativeContinuation: ComputerUseBrowserResearchFormContinuation? { continuation }
 
     init(input: ComputerUseBrowserResearchFormInput, proposal: ComputerUseBrowserFormProposal,
-         target: ComputerUseBrowserTextTarget, browser: ComputerUseOwnedBrowser, index: Int, journalDirectory: URL,
+         target: ComputerUseBrowserTextTarget, browser: ComputerUseOwnedBrowser, index: Int, sequence: Int? = nil, journalDirectory: URL,
          makeStore: @escaping (URL) throws -> ComputerUseTaskJournalStore = { try .init(directory: $0) }) throws {
-        guard (0..<32).contains(index) else { throw Failure.invalidStage }
+        guard (0..<32).contains(index), (0..<64).contains(sequence ?? index) else { throw ComputerUseBrowserResearchFormError.stageLimit }
         self.input = input; self.proposal = proposal; self.target = target; self.browser = browser; self.index = index
-        id = ComputerUseTaskContract.digest(["browser-research-form-stage-v1", input.interpretation.input.taskID,
-            input.interpretation.input.rootDigest, String(index)])
+        id = ComputerUseTaskContract.digest(["browser-research-form-stage-v2", input.interpretation.input.taskID,
+            input.interpretation.input.rootDigest, String(index), String(sequence ?? index)])
         guard let contract = try proposal.textContract(for: input, stageID: id) else { throw Failure.invalidStage }
         guard (input.previous?.inputOperationIDs.count ?? 0) + contract.steps.count <= 64 else { throw ComputerUseBrowserResearchFormError.stageLimit }
         self.contract = contract
@@ -144,9 +158,11 @@ final class ComputerUseBrowserResearchFormStage {
             try checkCurrent()
         }
         try check()
+        guard !retirementPending else { throw Failure.retirementPending }
         if let completed { return completed } // Historical receipt; no replay or new page adoption.
         let store = try makeStore(directory)
         var persisted = try store.load(taskID: contract.taskID)
+        if persisted?.statuses.contains(where: { $0 != .planned }) == true { observedAttempt = true }
         let lease = try store.acquireExecution(taskID: contract.taskID, expected: persisted)
         defer { lease.release() }
         try check(); try lease.assertOwnership()
@@ -158,6 +174,7 @@ final class ComputerUseBrowserResearchFormStage {
                 return value
             }, apply: { _, _ in throw ComputerUseTextTaskError.invalidPlan },
             applyWithIdentity: { [self] dispatch in
+                observedAttempt = true
                 try check(); try browser.validateSourceDocument(input.evidence.page.document)
                 try await target.apply(dispatch)
                 try check(); try browser.validateSourceDocument(input.evidence.page.document)
@@ -187,6 +204,61 @@ final class ComputerUseBrowserResearchFormStage {
             continuation = try .init(stage: self, current: task.verifiedContinuation())
             let receipt = ComputerUseBrowserResearchFormReceipt(stage: self)
             completed = receipt
+            return receipt
+        } catch {
+            await browser.joinDOMCompletion(document: input.evidence.page.document)
+            throw error
+        }
+    }
+
+    /// Retire stale no-attempt work under the same disk lease used to execute
+    /// it. Native revocation precedes the durable tombstone. If either return
+    /// is lost, only this retirement can resume; the old plan cannot run.
+    func retireUnattempted(checkCurrent: @escaping @MainActor () throws -> Void) async throws -> Retirement? {
+        guard !isExecuting else { throw Failure.busy }
+        try Task.checkCancellation(); try checkCurrent()
+        if let retirement { return retirement }
+        guard !isRetired else { throw Failure.retired }
+        guard completed == nil, !observedAttempt else { return nil }
+        isExecuting = true
+        defer { isExecuting = false }
+        let plan = try ComputerUseTextTask(contract: contract, read: { _ in nil },
+            apply: { _, _ in throw Failure.invalidStage }, persist: { _ in throw Failure.invalidStage }, mayAct: { false })
+        let initial = plan.journal
+        let digest = ComputerUseTaskContract.digest(["browser-unsent-form-retirement-v1", id,
+            input.interpretation.input.rootDigest, input.interpretation.input.digest, contract.contractDigest])
+        let retired = ComputerUseTaskJournal(taskID: initial.taskID, promptDigest: initial.promptDigest,
+            contractDigest: initial.contractDigest, stepIDs: initial.stepIDs, statuses: initial.statuses, retirementDigest: digest)
+        let store = try makeStore(directory), persisted = try store.load(taskID: contract.taskID)
+        let lease = try store.acquireExecution(taskID: contract.taskID, expected: persisted)
+        defer { lease.release() }
+        if let persisted {
+            guard persisted.taskID == initial.taskID, persisted.promptDigest == initial.promptDigest,
+                  persisted.contractDigest == initial.contractDigest, persisted.stepIDs == initial.stepIDs,
+                  persisted.retirementDigest == nil || persisted.retirementDigest == digest else { throw ComputerUseTextTaskError.journalMismatch }
+            guard persisted.statuses.allSatisfy({ $0 == .planned }) else { observedAttempt = true; return nil }
+        }
+        func check() throws {
+            try Task.checkCancellation(); try checkCurrent(); try lease.assertOwnership()
+            guard !isRetired else { throw Failure.retired }
+        }
+        do {
+            try check()
+            retirementPending = true
+            // An exact saved tombstone already records the earlier native
+            // proof. Resolve its durability even if that ledger later reset;
+            // do not manufacture a new absence claim from the new ledger.
+            if persisted?.retirementDigest == nil {
+                guard try await target.retireUnsentInputs(operationIDs: plan.inputOperationIDs) else {
+                    retirementPending = false; observedAttempt = true; return nil
+                }
+            }
+            try check()
+            try store.retireUnattempted(retired, replacing: persisted)
+            let receipt = Retirement(stage: self, digest: digest)
+            retirement = receipt
+            // Publication is historical even if Pause closes the outer return.
+            try check()
             return receipt
         } catch {
             await browser.joinDOMCompletion(document: input.evidence.page.document)

@@ -249,7 +249,8 @@
     "RemoteDesktopHostTests/ComputerUseBrowserActionPlannerTests",
     "RemoteDesktopHostTests/ComputerUseBrowserFormExtensionTests",
     "RemoteDesktopHostTests/ComputerUseBrowserFormClarificationTests",
-    "RemoteDesktopHostTests/ComputerUseBrowserFormRepairTests"
+    "RemoteDesktopHostTests/ComputerUseBrowserFormRepairTests",
+    "RemoteDesktopHostTests/ComputerUseBrowserFormReplanTests"
   ],
   "expectedTests": [
     "RemoteDesktopHostTests/AppleFoundationMCPPlannerTests/testCountedInputExpandsBeforeEffectAndTerminalQueries",
@@ -516,6 +517,15 @@
     "RemoteDesktopHostTests/ComputerUseBrowserFormRepairTests/testPauseDuringRepairInspectionJoinsTheReadAndRequiresExplicitHandback",
     "RemoteDesktopHostTests/ComputerUseBrowserFormRepairTests/testRepairInspectionRequiresOriginalReceiptsEvenIfCurrentValuesMatch",
     "RemoteDesktopHostTests/ComputerUseBrowserFormRepairTests/testRepairUsesTheAcceptedAnswerInsteadOfBlindlyRestoringAnOldCity",
+    "RemoteDesktopHostTests/ComputerUseBrowserFormReplanTests/testAResetNativeLedgerCannotProveThatTheOldPlanWasUnsent",
+    "RemoteDesktopHostTests/ComputerUseBrowserFormReplanTests/testAnotherExecutionLeaseBlocksRetirementBeforeNativeRevocation",
+    "RemoteDesktopHostTests/ComputerUseBrowserFormReplanTests/testAttemptedAndVerifiedJournalsCannotBeRetiredEvenAfterAWriteFailure",
+    "RemoteDesktopHostTests/ComputerUseBrowserFormReplanTests/testDefaultDriverRetiresStaleUnsentTargetsAndReplansWithDistinctStageAuthority",
+    "RemoteDesktopHostTests/ComputerUseBrowserFormReplanTests/testFailedRetirementWriteRequiresFreshLeasedResolutionBeforeAnotherPlan",
+    "RemoteDesktopHostTests/ComputerUseBrowserFormReplanTests/testPauseDuringNativeRetirementJoinsBeforeHandbackAndDoesNotReviveOldInput",
+    "RemoteDesktopHostTests/ComputerUseBrowserFormReplanTests/testPostCommitPauseFinishesRetirementAdoptionWithoutDuplicateHistory",
+    "RemoteDesktopHostTests/ComputerUseBrowserFormReplanTests/testRetiredJournalCannotBeRevivedThroughSaveBindingReplacementOrTextRecovery",
+    "RemoteDesktopHostTests/ComputerUseBrowserFormReplanTests/testRetiringAnUnsentDependentStageKeepsEarlierCompletedInputAndPreservation",
     "RemoteDesktopHostTests/ComputerUseBrowserGoalClarificationTests/testAnswerPreservesOriginalBrowserRootClockAndExactUserBytes",
     "RemoteDesktopHostTests/ComputerUseBrowserGoalClarificationTests/testClarifiedInputStillRequiresCompleteTokenAdmissionBeforeInference",
     "RemoteDesktopHostTests/ComputerUseBrowserGoalClarificationTests/testClarifiedScalarCompilationKeepsEarlierConstraintsAndUsesOriginalDateAnchor",

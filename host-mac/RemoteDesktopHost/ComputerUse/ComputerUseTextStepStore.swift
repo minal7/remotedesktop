@@ -181,7 +181,8 @@ final class ComputerUseTaskJournalStore {
     /// request and operation IDs remain fixed; ordinary save never rebinds.
     func replaceUnattemptedBinding(_ journal: ComputerUseTaskJournal, replacing expected: ComputerUseTaskJournal) throws {
         guard Self.isValid(journal), Self.isValid(expected) else { throw StoreError.invalidFile }
-        guard journal.taskID.utf8.elementsEqual(expected.taskID.utf8), journal.promptDigest == expected.promptDigest,
+        guard journal.retirementDigest == nil, expected.retirementDigest == nil,
+              journal.taskID.utf8.elementsEqual(expected.taskID.utf8), journal.promptDigest == expected.promptDigest,
               journal.stepIDs.count == expected.stepIDs.count,
               zip(journal.stepIDs, expected.stepIDs).allSatisfy({ $0.0.utf8.elementsEqual($0.1.utf8) }),
               journal.statuses.allSatisfy({ $0 == .planned }), expected.statuses.allSatisfy({ $0 == .planned }) else {
@@ -194,6 +195,31 @@ final class ComputerUseTaskJournalStore {
             guard Self.matches(current, expected) else { throw StoreError.staleJournal }
             if Self.matches(current, journal) { return }
             do { try replace(data, taskID: journal.taskID) }
+            catch { writeFailed = true; throw error }
+        }
+    }
+
+    /// Retire only the exact all-planned journal under a held execution lease.
+    /// The capability must first prove and revoke its original native input
+    /// IDs. A failed write remains ambiguous until a fresh leased load.
+    func retireUnattempted(_ retired: ComputerUseTaskJournal, replacing expected: ComputerUseTaskJournal?) throws {
+        guard Self.isValid(retired), expected.map(Self.isValid) ?? true,
+              let digest = retired.retirementDigest, retired.statuses.allSatisfy({ $0 == .planned }),
+              expected.map({ Self.sameIdentity($0, retired) && $0.statuses == retired.statuses
+                  && ($0.retirementDigest == nil || $0.retirementDigest == digest) }) ?? true else { throw StoreError.invalidTransition }
+        let data = try JSONEncoder().encode(retired)
+        guard data.count <= 65_536 else { throw StoreError.invalidFile }
+        try withJournalLock(taskID: retired.taskID, exclusive: true) {
+            let name = ComputerUseTextTaskContract.digest(retired.taskID) + ".execution.lock"
+            guard let owner = executionOwners[name]?.value, owner.isActive else { throw StoreError.busy }
+            try owner.assertOwnership()
+            let current = try readJournal(taskID: retired.taskID)
+            guard Self.matches(current, expected) else { throw StoreError.staleJournal }
+            if Self.matches(current, retired) {
+                guard fsync(descriptor) == 0 else { throw StoreError.unavailable }
+                return
+            }
+            do { try replace(data, taskID: retired.taskID) }
             catch { writeFailed = true; throw error }
         }
     }
@@ -273,6 +299,9 @@ final class ComputerUseTaskJournalStore {
         guard validID(journal.taskID), validDigest(journal.promptDigest), validDigest(journal.contractDigest),
               (1...64).contains(journal.stepIDs.count), journal.stepIDs.allSatisfy(validID),
               Set(journal.stepIDs).count == journal.stepIDs.count, journal.statuses.count == journal.stepIDs.count else { return false }
+        if let digest = journal.retirementDigest {
+            guard validDigest(digest), journal.statuses.allSatisfy({ $0 == .planned }) else { return false }
+        }
         var sawUnverified = false
         for status in journal.statuses {
             if sawUnverified && status != .planned { return false }
@@ -290,12 +319,13 @@ final class ComputerUseTaskJournalStore {
     private static func matches(_ left: ComputerUseTaskJournal?, _ right: ComputerUseTaskJournal?) -> Bool {
         switch (left, right) {
         case (nil, nil): return true
-        case let (left?, right?): return sameIdentity(left, right) && left.statuses == right.statuses
+        case let (left?, right?): return sameIdentity(left, right) && left.statuses == right.statuses && left.retirementDigest == right.retirementDigest
         default: return false
         }
     }
 
     private static func isAllowedTransition(from previous: ComputerUseTaskJournal?, to next: ComputerUseTaskJournal) -> Bool {
+        guard previous?.retirementDigest == nil, next.retirementDigest == nil else { return false }
         guard let previous else {
             return next.statuses.allSatisfy { $0 == .planned }
                 || (next.statuses.first == .attempted && next.statuses.dropFirst().allSatisfy { $0 == .planned })

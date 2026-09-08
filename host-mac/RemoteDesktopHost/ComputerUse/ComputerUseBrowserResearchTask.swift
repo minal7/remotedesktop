@@ -67,6 +67,8 @@ final class ComputerUseBrowserResearchTask {
     private var latestForm: PreparedForm?
     private var latestAction: ComputerUseBrowserActionProposal?
     private var formStage: ComputerUseBrowserResearchFormStage?
+    private var lastVerifiedFormStage: ComputerUseBrowserResearchFormStage?
+    private var formStageSequence = 0
     private var formNavigation: ComputerUseBrowserResearchFormNavigation?
     private var retainedEvidence: ComputerUseBrowserResearchEvidence
     private var session: ComputerUseBrowserHandbackRequirement?
@@ -79,6 +81,7 @@ final class ComputerUseBrowserResearchTask {
     private var hasQuestion = false
     private(set) var confirmedNavigationHistory: [ComputerUseBrowserResearchVisit] = []
     private(set) var confirmedFormHistory: [ComputerUseBrowserResearchFormReceipt] = []
+    private(set) var retiredFormHistory: [ComputerUseBrowserResearchFormStage.Retirement] = []
 
     var input: ComputerUseBrowserGoalInput { clarification.input }
     /// Available during the serialized selector operation as well as idle.
@@ -477,7 +480,8 @@ final class ComputerUseBrowserResearchTask {
             guard !hasPendingForm else { throw Failure.formPending }
             guard let prepared = latestForm, prepared.input == expected, let directory = navigationDirectory else { throw Failure.formUnavailable }
             stage = try .init(input: expected, proposal: proposal, target: prepared.target, browser: browser,
-                index: confirmedFormHistory.count, journalDirectory: directory, makeStore: navigationStore)
+                index: confirmedFormHistory.count, sequence: formStageSequence, journalDirectory: directory, makeStore: navigationStore)
+            formStageSequence += 1
             formStage = stage // Retain before any disk write, native await or effect.
         }
         latestForm = nil; latestAction = nil; latestCandidates = nil
@@ -495,6 +499,28 @@ final class ComputerUseBrowserResearchTask {
         return try await runForm(formStage)
     }
 
+    /// Release a stale pending stage only after its original native IDs have
+    /// been revoked as unsent and its exact disk journal is tombstoned. Keep
+    /// the latest completed form's adapter and history for the new proposal.
+    func retirePendingUnsentForm() async throws -> ComputerUseBrowserResearchFormStage.Retirement? {
+        try requireIdle()
+        guard !hasPendingNavigation else { throw Failure.navigationPending }
+        guard !hasQuestion else { throw Failure.questionPending }
+        guard hasPendingForm, let stage = formStage else { return nil }
+        guard stage.input.interpretation.input == input else { throw Failure.goalChanged }
+        let captured = input
+        latestForm = nil; latestAction = nil; latestCandidates = nil
+        return try await operate { [self] in
+            guard let receipt = try await stage.retireUnattempted(checkCurrent: { try self.checkCurrent(captured) }) else { return nil }
+            try checkCurrent(captured)
+            guard formStage === stage else { throw Failure.formUnavailable }
+            if !retiredFormHistory.contains(receipt) { retiredFormHistory.append(receipt) }
+            formStage = lastVerifiedFormStage
+            stage.retire()
+            return receipt
+        }
+    }
+
     private func runForm(_ stage: ComputerUseBrowserResearchFormStage) async throws -> ComputerUseBrowserResearchFormReceipt {
         let captured = input
         return try await operate { [self] in
@@ -507,6 +533,7 @@ final class ComputerUseBrowserResearchTask {
                           receipt.index == confirmedFormHistory.count else { throw Failure.goalChanged }
                     confirmedFormHistory.append(receipt)
                 }
+                lastVerifiedFormStage = stage
             }
             try checkCurrent(captured)
             return receipt
@@ -825,7 +852,8 @@ final class ComputerUseBrowserResearchTask {
     func retire() {
         isRetired = true; controlEpoch = UUID(); latestCandidates = nil; latestForm = nil; latestAction = nil; interpretation = nil
         confirmedNavigationHistory.removeAll()
-        formStage?.retire(); formStage = nil; confirmedFormHistory.removeAll()
+        formStage?.retire(); formStage = nil; lastVerifiedFormStage?.retire(); lastVerifiedFormStage = nil
+        confirmedFormHistory.removeAll(); retiredFormHistory.removeAll()
         formNavigation?.retire(); formNavigation = nil
         retainedEvidence = .init(goal: input)
         clarification.retire(); navigation?.retire(); initialSearch?.retire(); hasQuestion = false; cancelOperation?()

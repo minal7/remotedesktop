@@ -4,7 +4,7 @@ import WebKit
 enum ComputerUseBrowserDOMCommand: String {
     case fields, read, edit, receipt, reobserve, preflight, pageIdentity, pageSnapshot, validatePageSnapshot
     case scrollViewport, viewportScrollReceipt, validatePageLink
-    case prepareFormQuery, validateFormQuery, bindPageFields, formFields, extendFormFields, inspectFormRequirements
+    case prepareFormQuery, validateFormQuery, bindPageFields, formFields, extendFormFields, inspectFormRequirements, retireUnsentInputs
 }
 
 /// Private adapter output. A GET query can contain server state or user input;
@@ -456,6 +456,7 @@ struct ComputerUseBrowserDOMReply: Decodable {
     let formQuery: ComputerUseBrowserFormQuery?
     let formBindings: [FormBinding]?
     let changedFieldIDs: [String]?
+    let inputLedgerID: String?
 }
 
 /// Fixed host code in a separate WebKit script world. Page text, model output
@@ -470,8 +471,9 @@ enum ComputerUseBrowserDOM {
       const encoder = new TextEncoder();
       const nonce = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), n => n.toString(16).padStart(2, '0')).join('');
       const pageID = nonce();
-      let documentID = nonce(), root = null, nextID = 0;
+      let documentID = nonce(), inputLedgerID = nonce(), root = null, nextID = 0;
       const bindings = new Map(), operations = new Map();
+      const retiredInputs = new Set();
       let fieldScope = null;
       // Independent of form discovery, which retires text-operation bindings.
       const viewportOperations = new Map();
@@ -495,7 +497,7 @@ enum ComputerUseBrowserDOM {
       const formCharset = Object.getOwnPropertyDescriptor(HTMLFormElement.prototype, 'acceptCharset').get;
       const queryAttributes = ['formaction','formmethod','formenctype','formtarget','formnovalidate','accept-charset','novalidate','checked','selected','wrap','dirname','required'];
       const probeDocument = doc.implementation.createHTMLDocument('');
-      const reply = (status, fields) => ({status, documentID, ...(fields ? {fields} : {})});
+      const reply = (status, fields) => ({status, documentID, inputLedgerID, ...(fields ? {fields} : {})});
       const parent = node => node.parentElement || (node.getRootNode() instanceof ShadowRoot ? node.getRootNode().host : null);
       const contains = (ancestor, node) => {
         for (let i = 0; node && i < 128; i++, node = parent(node)) if (node === ancestor) return true;
@@ -537,7 +539,7 @@ enum ComputerUseBrowserDOM {
       function synchronize() {
         retire(observer.takeRecords());
         if (root !== doc.documentElement) {
-          if (root) { documentID = nonce(); bindings.clear(); operations.clear(); fieldScope = null; viewportOperations.clear(); formQueries.clear(); lastPageSnapshot = null; }
+          if (root) { documentID = nonce(); inputLedgerID = nonce(); bindings.clear(); operations.clear(); retiredInputs.clear(); fieldScope = null; viewportOperations.clear(); formQueries.clear(); lastPageSnapshot = null; }
           root = doc.documentElement;
         }
       }
@@ -747,7 +749,7 @@ enum ComputerUseBrowserDOM {
             if (!binding || !binding.valid || retained.has(binding.element)) return reply('stale');
             retained.set(binding.element, binding);
           }
-        } else { bindings.clear(); operations.clear(); fieldScope = scope; }
+        } else { bindings.clear(); operations.clear(); retiredInputs.clear(); inputLedgerID = nonce(); fieldScope = scope; }
         // Retained observation must reuse the same native form and explicit
         // outside invariants. Never fall back to whole-document discovery.
         let scoped = [], scopedIndex = 0;
@@ -1176,6 +1178,20 @@ enum ComputerUseBrowserDOM {
         }
         synchronize();
         if (!root || doc !== document) return reply('stale');
+        if (command === 'retireUnsentInputs') {
+          if (args.documentID !== documentID || args.inputLedgerID !== inputLedgerID) return reply('stale');
+          const status = authenticationStatus();
+          if (status) return reply(status);
+          const ids = args.operationIDs;
+          if (!Array.isArray(ids) || ids.length < 1 || ids.length > 8 || new Set(ids).size !== ids.length
+              || ids.some(id => typeof id !== 'string' || !/^[a-f0-9]{64}$/.test(id))) return reply('unsupported');
+          if (ids.some(id => operations.has(id))) return reply('unproven');
+          if (retiredInputs.size + ids.filter(id => !retiredInputs.has(id)).length > 512) return reply('limit');
+          // Same ledger, no attempt, and no await: revoke all old operation
+          // IDs together. A later equal-value observation cannot revive them.
+          for (const id of ids) retiredInputs.add(id);
+          return reply('inputs-retired-unsent');
+        }
         if (command === 'viewportScrollReceipt') {
           if (args.documentID !== documentID) return reply('stale');
           const status = authenticationStatus();
@@ -1346,7 +1362,7 @@ enum ComputerUseBrowserDOM {
         if (!current) return reply('stale');
         if (command === 'read') return reply('ok', [current]);
         if (command !== 'edit' || typeof args.operationID !== 'string' || args.operationID.length !== 64 || typeof args.payload !== 'string') return reply('unsupported');
-        if (operations.has(args.operationID)) return reply('duplicate');
+        if (operations.has(args.operationID) || retiredInputs.has(args.operationID)) return reply('duplicate');
         if (operations.size >= 64 || encoder.encode(args.payload).length > 65536) return reply('limit');
         if (current.value !== args.before || (args.mode === 'insert' &&
             (current.selectionStart !== args.selectionStart || current.selectionEnd !== args.selectionEnd))) return reply('stale');
@@ -1497,6 +1513,7 @@ final class ComputerUseBrowserTextTarget {
     private let document: ComputerUseBrowserDocument
     private let requiresFrontmost: Bool
     private var documentID: String?
+    private var inputLedgerID: String?
     private var targets: [String: String] = [:]
     private let adapterID = UUID()
 
@@ -1675,7 +1692,10 @@ final class ComputerUseBrowserTextTarget {
     private func adoptDiscoveredFields(_ reply: ComputerUseBrowserDOMReply) throws -> [ComputerUseTextField]? {
         guard let fields = try decodeDiscoveredFields(reply) else { return nil }
         guard targets.isEmpty else { throw ComputerUseBrowserError.pageChanged }
+        guard let ledger = reply.inputLedgerID, ledger.utf8.count == 32,
+              ledger.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else { throw ComputerUseBrowserError.pageChanged }
         documentID = reply.documentID
+        inputLedgerID = ledger
         targets = Dictionary(uniqueKeysWithValues: fields.map { ($0.field.snapshot.targetID, $0.nativeID) })
         return fields.map { $0.field }
     }
@@ -1731,6 +1751,7 @@ final class ComputerUseBrowserTextTarget {
         let nextDocument = try browser.acquireCurrentDocument(taskID: taskID)
         let next = ComputerUseBrowserTextTarget(browser: browser, document: nextDocument, requiresFrontmost: requiresFrontmost)
         next.documentID = documentID
+        next.inputLedgerID = inputLedgerID
         next.targets = targets
         return next
     }
@@ -1772,6 +1793,22 @@ final class ComputerUseBrowserTextTarget {
         try validate()
         guard reply.documentID == documentID else { throw ComputerUseBrowserError.pageChanged }
         return reply.status == "dispatched"
+    }
+
+    /// Absence is proof only in the exact ledger retained at discovery. A
+    /// reset ledger cannot prove that old input was never sent. Revocation is
+    /// idempotent for the same unattempted IDs and prevents their later use.
+    func retireUnsentInputs(operationIDs: [String]) async throws -> Bool {
+        try validate()
+        guard let documentID, let inputLedgerID, (1...8).contains(operationIDs.count),
+              Set(operationIDs).count == operationIDs.count else { throw ComputerUseBrowserError.pageChanged }
+        let reply = try await browser.callDOM(.retireUnsentInputs, arguments: ["documentID":documentID,
+            "inputLedgerID":inputLedgerID, "operationIDs":operationIDs], document: document)
+        try validate()
+        guard reply.documentID == documentID, reply.inputLedgerID == inputLedgerID else { throw ComputerUseBrowserError.pageChanged }
+        if reply.status == "unproven" { return false }
+        guard reply.status == "inputs-retired-unsent" else { throw ComputerUseBrowserError.pageChanged }
+        return true
     }
 
     func validateRepresentability(of contract: ComputerUseTextTaskContract) async throws {

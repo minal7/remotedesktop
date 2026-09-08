@@ -248,6 +248,7 @@ final class ComputerUseTextTask {
     var journal: ComputerUseTextStepJournal {
         Self.textJournal(execution.journal, contract: contract)
     }
+    var inputOperationIDs: [String] { execution.contract.steps.map { execution.contract.effectIdentity(for: $0) } }
 
     private enum Check {
         case value(String)
@@ -331,7 +332,7 @@ final class ComputerUseTextTask {
         self.retainedPredicateIDs = retained
         var recoveredExecution: ComputerUseTaskJournal?
         if let recovered {
-            guard recovered.taskID == contract.taskID, recovered.promptDigest == contract.promptDigest,
+            guard recovered.retirementDigest == nil, recovered.taskID == contract.taskID, recovered.promptDigest == contract.promptDigest,
                   recovered.contractDigest == contract.contractDigest, recovered.stepIDs == contract.steps.map(\.id) else {
                 throw ComputerUseTextTaskError.journalMismatch
             }
@@ -427,14 +428,12 @@ final class ComputerUseTextTask {
               execution.journal.statuses.allSatisfy({ $0 == .verified }) else {
             throw ComputerUseTextTaskError.incompleteOutcome
         }
-        return .init(contract: contract, inputOperationIDs: execution.contract.steps.map {
-            execution.contract.effectIdentity(for: $0)
-        })
+        return .init(contract: contract, inputOperationIDs: inputOperationIDs)
     }
 
     private static func textJournal(_ journal: ComputerUseTaskJournal,
                                     contract: ComputerUseTextTaskContract) -> ComputerUseTextStepJournal {
         ComputerUseTextStepJournal(taskID: journal.taskID, promptDigest: journal.promptDigest,
-            contractDigest: contract.contractDigest, stepIDs: journal.stepIDs, statuses: journal.statuses)
+            contractDigest: contract.contractDigest, stepIDs: journal.stepIDs, statuses: journal.statuses, retirementDigest: journal.retirementDigest)
     }
 }
