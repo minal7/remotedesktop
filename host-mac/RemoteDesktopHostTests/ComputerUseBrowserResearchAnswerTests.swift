@@ -287,13 +287,16 @@ struct ResearchAnswerFixture {
                      extra: (String, String, String)? = nil, omitDetailLinks: Bool = false,
                      inventory: Int? = nil, quantityPolicy: ComputerUseBrowserResultReview.QuantityMeaning? = nil,
                      includeControls: Bool = false, multiPage: Bool = false, repeatedPage: Bool = false,
-                     historyRoute: Bool = false, controlHTML: String = "", resultDate: String? = nil, resultLocation: String? = nil) async throws -> Self {
+                     historyRoute: Bool = false, controlHTML: String = "", resultDate: String? = nil, resultLocation: String? = nil,
+                     surroundingHTML: String = "", controlRelationships: [ComputerUseBrowserControlRelevance.Relationship]? = nil,
+                     heldSignal: Bool = false) async throws -> Self {
         let transport = ResearchAnswerTransport(followCount: multiPage ? 2 : 1, recall: multiPage ? 1 : nil, historyRoute: historyRoute)
         let local = try ComputerUseLocalBrowserLinkPlanner(connection: .init(baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:54321")),
             bearerToken: "fixture-token", modelAlias: "fixture-model"), transport: transport)
         let planner = ResearchAnswerRecordingPlanner(local: local)
         let reader = ResearchAnswerReader(omitDetailLinks: omitDetailLinks)
-        let reviewed = ComputerUseReviewedBrowserResultPlanner(reader: reader, reviewer: ResearchAnswerReviewer(quantityPolicy: quantityPolicy))
+        let reviewed = ComputerUseReviewedBrowserResultPlanner(reader: reader,
+            reviewer: ResearchAnswerReviewer(quantityPolicy: quantityPolicy, controlRelationships: controlRelationships))
         var rows: [[String: Any]] = [row("Find concerts. ", "outcome", "category"), row("Under USD 50. ", "condition", "price")]
         if let requested { rows.append(row("\(requested) options. ", "condition", "quantity")) }
         if inventory != nil { rows.append(row("2 tickets. ", "condition", "quantity")) }
@@ -302,7 +305,7 @@ struct ResearchAnswerFixture {
         let request = rows.compactMap { $0["source"] as? String }.joined()
         let additional = (1..<count).map { index in
             "<article><h2>Concert \(duplicate ? "Alpha" : (index == 1 ? "Beta" : "Gamma"))</h2><a href='/offers'>\(duplicate ? "Alpha" : "Other") details</a><p>\(price)</p></article>"
-        }.joined() + "<p>Read the conditions</p>" + (includeControls ? "<label>Ticket notes<input value='Unscoped private text'></label>" : "")
+        }.joined() + "<p>Read the conditions</p>" + surroundingHTML + (includeControls ? "<label>Ticket notes<input value='Unscoped private text'></label>" : "")
         let inventoryHTML = inventory.map { "<p>\($0) tickets</p>" + (quantityPolicy == nil ? "" : "<p>2 tickets</p>")
             + "<p>Available for this concert</p>" } ?? ""
         let second = repeatedPage ? "<article><h2>Concert Alpha</h2><a href='/more'>Alpha details</a><p>USD 40</p></article>"
@@ -312,7 +315,7 @@ struct ResearchAnswerFixture {
         let source = try await ResearchDriverFixture.make(linkPlanner: planner, resultPlanner: reviewed,
             additionalCardHTML: additional, candidateBodyHTML: "<p>\(price)</p>" + inventoryHTML + controlHTML
                 + (resultDate.map { "<p>Date: \($0)</p>" } ?? "") + (resultLocation.map { "<p>Location: \($0)</p>" } ?? ""), request: request,
-            offersBodyHTML: multiPage ? second + "<p>Beta conditions apply</p>" : nil,
+            heldSignal: heldSignal, offersBodyHTML: multiPage ? second + "<p>Beta conditions apply</p>" : nil,
             searchBodyHTML: historyRoute ? alpha + beta : nil,
             detailsBodyHTML: historyRoute ? alpha + "<p>Alpha conditions apply</p>" : nil,
             betaBodyHTML: historyRoute ? beta + "<p>Beta conditions apply</p>" : nil)
@@ -383,9 +386,10 @@ private final class ResearchAnswerReader: ComputerUseBrowserResultPlanning {
 
 private struct ResearchAnswerReviewer: ComputerUseBrowserResultReviewPlanning {
     let quantityPolicy: ComputerUseBrowserResultReview.QuantityMeaning?
+    let controlRelationships: [ComputerUseBrowserControlRelevance.Relationship]?
     func propose(_ input: ComputerUseBrowserResultReviewInput) async throws -> ComputerUseBrowserResultReview {
         let candidates: [[String: Any]] = (0..<input.candidateCount).map { candidate in
-            ["association":"singleOffer", "fields":(0..<input.fieldCounts[candidate]).map { index in
+            var value: [String: Any] = ["association":"singleOffer", "fields":(0..<input.fieldCounts[candidate]).map { index in
                 let kind = input.fieldKind(candidate: candidate, field: index)
                 let fromControl = input.fieldUsesControlState(candidate: candidate, field: index)
                 let available = kind == .quantity && index == 2 && !fromControl
@@ -402,6 +406,12 @@ private struct ResearchAnswerReviewer: ComputerUseBrowserResultReviewPlanning {
                 return ["requirement":index, "judgment":field == nil ? "unknown" : "supports",
                     "texts":field.map { input.fieldTextIDs(candidate: candidate, field: $0) } ?? []] as [String: Any]
             }]
+            if !input.unobservedControlIDs.isEmpty, let controlRelationships, controlRelationships.indices.contains(candidate) {
+                value["controls"] = input.unobservedControlIDs.map {
+                    ["control":$0, "relationship":controlRelationships[candidate].rawValue, "evidence":[$0]] as [String: Any]
+                }
+            }
+            return value
         }
         return try .decode(content: ResearchAnswerFixture.json(["candidates":candidates]), input: input)
     }

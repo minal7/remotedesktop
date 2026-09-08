@@ -9,8 +9,10 @@ struct ComputerUseBrowserReviewPart: Equatable, Sendable {
     let candidate: Int
     let fields: [Int]
     let requirements: [Int]
-    private init(input: ComputerUseBrowserResultReviewInput, candidate: Int, fields: [Int], requirements: [Int]) {
+    let controls: [String]
+    private init(input: ComputerUseBrowserResultReviewInput, candidate: Int, fields: [Int], requirements: [Int], controls: [String] = []) {
         self.input = input; self.candidate = candidate; self.fields = fields; self.requirements = requirements
+        self.controls = controls
     }
 
     var responseSchema: [String: Any] {
@@ -28,12 +30,16 @@ struct ComputerUseBrowserReviewPart: Equatable, Sendable {
             "properties":["requirement":index(requirements),
                 "judgment":enumeration(input.permitsOfferAssertions ? ["supports", "conflicts", "unknown"] : ["conflicts", "unknown"]), "texts":references],
             "required":["requirement", "judgment", "texts"]]
-        return ["type":"object", "additionalProperties":false,
-            "properties":["candidate":index([candidate]),
+        var properties: [String: Any] = ["candidate":index([candidate]),
                 "association":enumeration(input.permitsOfferAssertions ? ["singleOffer", "mixedOffers", "unknown"] : ["mixedOffers", "unknown"]),
                 "fields":["type":"array", "minItems":fields.count, "maxItems":fields.count, "items":field],
-                "requirements":["type":"array", "minItems":requirements.count, "maxItems":requirements.count, "items":requirement]],
-            "required":["candidate", "association", "fields", "requirements"]]
+                "requirements":["type":"array", "minItems":requirements.count, "maxItems":requirements.count, "items":requirement]]
+        var required = ["candidate", "association", "fields", "requirements"]
+        if !input.unobservedControlIDs.isEmpty {
+            properties["controls"] = ComputerUseBrowserControlRelevance.schema(input: input, ids: controls)
+            required.append("controls")
+        }
+        return ["type":"object", "additionalProperties":false, "properties":properties, "required":required]
     }
 
     var contextJSON: String {
@@ -41,7 +47,9 @@ struct ComputerUseBrowserReviewPart: Equatable, Sendable {
             guard var context = try JSONSerialization.jsonObject(with: Data(input.contextJSON.utf8)) as? [String: Any] else {
                 throw ComputerUseBrowserResultReviewError.invalidInput
             }
-            context["requested_output"] = ["candidate":candidate, "fields":fields, "requirements":requirements]
+            var requested: [String: Any] = ["candidate":candidate, "fields":fields, "requirements":requirements]
+            if !input.unobservedControlIDs.isEmpty { requested["controls"] = controls }
+            context["requested_output"] = requested
             return String(decoding: try JSONSerialization.data(withJSONObject: context, options: [.sortedKeys]), as: UTF8.self)
         }
     }
@@ -60,6 +68,9 @@ struct ComputerUseBrowserReviewPart: Equatable, Sendable {
         let rows: [[String: Any]] = input.fieldCounts.map { count in
             var value: [String: Any] = ["association":"mixedOffers", "fields":Array(repeating: bounds.field, count: count)]
             if input.interpretation != nil { value["requirements"] = Array(repeating: bounds.requirement, count: input.requirementCount) }
+            if !input.unobservedControlIDs.isEmpty {
+                value["controls"] = ComputerUseBrowserControlRelevance.outputBounds(input: input, ids: input.unobservedControlIDs)
+            }
             return value
         }
         return try JSONSerialization.data(withJSONObject: ["candidates":rows]).count <= maximumOutputBytes
@@ -69,8 +80,9 @@ struct ComputerUseBrowserReviewPart: Equatable, Sendable {
             let bounds = Self.rowBounds(input)
             let rows: [[String: Any]] = fields.map { index in var row = bounds.field; row["field"] = index; return row }
             let judgments: [[String: Any]] = requirements.map { index in var row = bounds.requirement; row["requirement"] = index; return row }
-            return try JSONSerialization.data(withJSONObject: ["candidate":candidate, "association":"mixedOffers",
-                "fields":rows, "requirements":judgments]).count
+            var value: [String: Any] = ["candidate":candidate, "association":"mixedOffers", "fields":rows, "requirements":judgments]
+            if !input.unobservedControlIDs.isEmpty { value["controls"] = ComputerUseBrowserControlRelevance.outputBounds(input: input, ids: controls) }
+            return try JSONSerialization.data(withJSONObject: value).count
         }
     }
     static func plan(_ input: ComputerUseBrowserResultReviewInput) throws -> [Self] {
@@ -95,6 +107,19 @@ struct ComputerUseBrowserReviewPart: Equatable, Sendable {
                 }
                 parts.append(.init(input: input, candidate: candidate, fields: fields, requirements: requirements))
                 field += fields.count; requirement += requirements.count
+            }
+            var control = 0
+            while control < input.unobservedControlIDs.count {
+                var ids: [String] = []
+                while ids.count < 4, control + ids.count < input.unobservedControlIDs.count {
+                    let next = ids + [input.unobservedControlIDs[control + ids.count]]
+                    let part = Self(input: input, candidate: candidate, fields: [], requirements: [], controls: next)
+                    guard try part.maximumCanonicalOutputBytes <= maximumOutputBytes else { break }
+                    ids = next
+                }
+                guard !ids.isEmpty, parts.count < maximumParts else { throw ComputerUseBrowserResultReviewError.contextLimit }
+                parts.append(.init(input: input, candidate: candidate, fields: [], requirements: [], controls: ids))
+                control += ids.count
             }
         }
         return parts
@@ -132,14 +157,17 @@ struct ComputerUseBrowserReviewPartReply: Sendable {
     let association: String
     let fields: [Field]
     let requirements: [Requirement]
-    private init(part: ComputerUseBrowserReviewPart, body: Body) {
+    let controls: [ComputerUseBrowserControlRelevance]
+    private init(part: ComputerUseBrowserReviewPart, body: Body, controls: [ComputerUseBrowserControlRelevance]) {
         self.part = part; association = body.association; fields = body.fields; requirements = body.requirements
+        self.controls = controls
     }
     static func decode(_ content: String, part: ComputerUseBrowserReviewPart) throws -> Self {
         do {
             guard content.utf8.count <= 16 * 1_024 else { throw ComputerUseBrowserResultReviewError.invalidProposal }
             var parser = StrictSemanticJSONParser(content, maximumValueCount: 512)
-            guard case .object(let root) = try parser.parse(), Set(root.keys) == ["candidate", "association", "fields", "requirements"],
+            let keys: Set<String> = Set(["candidate", "association", "fields", "requirements"] + (part.input.unobservedControlIDs.isEmpty ? [] : ["controls"]))
+            guard case .object(let root) = try parser.parse(), Set(root.keys) == keys,
                   case .array(let fields)? = root["fields"], fields.count == part.fields.count,
                   case .array(let requirements)? = root["requirements"], requirements.count == part.requirements.count else {
                 throw ComputerUseBrowserResultReviewError.invalidProposal
@@ -173,7 +201,9 @@ struct ComputerUseBrowserReviewPartReply: Sendable {
                     && valid($0.texts) && $0.texts.allSatisfy { part.input.permitsReference($0, for: part.candidate) } }) else {
                 throw ComputerUseBrowserResultReviewError.invalidProposal
             }
-            return .init(part: part, body: body)
+            let controls = try ComputerUseBrowserControlRelevance.decode(root["controls"], input: part.input, candidate: part.candidate,
+                expected: part.controls, allowMissing: part.input.unobservedControlIDs.isEmpty)
+            return .init(part: part, body: body, controls: controls)
         } catch { throw ComputerUseBrowserResultReviewError.invalidProposal }
     }
 }
@@ -200,12 +230,15 @@ struct ComputerUseBrowserReviewAssembly: Sendable {
             let matching = replies.filter { $0.part.candidate == candidate }
             guard let first = matching.first else { throw ComputerUseBrowserResultReviewError.invalidProposal }
             let fields = matching.flatMap(\.fields), requirements = matching.flatMap(\.requirements)
+            let controls = matching.flatMap(\.controls)
             guard fields.map(\.field) == Array(0..<input.fieldCounts[candidate]),
-                  requirements.map(\.requirement) == Array(0..<input.requirementCount) else {
+                  requirements.map(\.requirement) == Array(0..<input.requirementCount),
+                  controls.map(\.controlID) == input.unobservedControlIDs else {
                 throw ComputerUseBrowserResultReviewError.invalidProposal
             }
             var value: [String: Any] = ["association":first.association, "fields":fields.map(\.value)]
             if input.interpretation != nil { value["requirements"] = requirements.map(\.value) }
+            if !input.unobservedControlIDs.isEmpty { value["controls"] = controls.map(\.context) }
             candidates.append(value)
         }
         return String(decoding: try JSONSerialization.data(withJSONObject: ["candidates":candidates], options: [.sortedKeys]), as: UTF8.self)

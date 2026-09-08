@@ -14,6 +14,8 @@ struct ComputerUseBrowserResultPageInput: Equatable, Sendable, CustomStringConve
     fileprivate let linkIDs: Set<String>
     fileprivate let containerIDs: Set<String>
     let controlIDs: Set<String>
+    let unobservedControlIDs: [String]
+    let controlMetadataComplete: Bool
     fileprivate let projectedControlIDs: Set<String>
     let projectionOmittedRecords: Bool
 
@@ -42,6 +44,9 @@ struct ComputerUseBrowserResultPageInput: Equatable, Sendable, CustomStringConve
         }
         textIDs = texts; linkIDs = links; containerIDs = containers; projectionOmittedRecords = omitted
         projectedControlIDs = controls
+        unobservedControlIDs = page.controlStates.filter { $0.kind == .unavailable && controls.contains($0.controlID) }.map(\.controlID)
+        controlMetadataComplete = !page.omittedControls && (page.controlStateObserved || page.controls.isEmpty)
+            && controls == Set(page.controls.map(\.id))
         controlIDs = Set(page.controls.filter { control in controls.contains(control.id)
             && page.controlStates.first(where: { $0.controlID == control.id })?.fieldSource(for: control) != nil }.map(\.id))
     }

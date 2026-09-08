@@ -14,6 +14,9 @@ struct ComputerUseBrowserResultReviewInput: Equatable, Sendable, CustomStringCon
     private let candidateTextIDs: [Set<String>]
     let permitsOfferAssertions: Bool
     let hasControlSources: Bool
+    let unobservedControlIDs: [String]
+    let controlMetadataComplete: Bool
+    let controlRelevanceEvidenceIDs: [String]
     var candidateCount: Int { selections.count }
     var fieldCounts: [Int] { selections.map { $0.fields.count } }
     var requirementCount: Int { interpretation?.requirements.count ?? 0 }
@@ -64,6 +67,8 @@ struct ComputerUseBrowserResultReviewInput: Equatable, Sendable, CustomStringCon
         try proposal.validateReviewInput(page: page, goal: goal)
         guard interpretation == nil || interpretation?.input == goal else { throw ComputerUseBrowserResultReviewError.inputChanged }
         self.interpretation = interpretation
+        unobservedControlIDs = page.unobservedControlIDs
+        controlMetadataComplete = page.controlMetadataComplete
         hasControlSources = !page.controlIDs.isEmpty
         self.goal = goal; self.page = page; selections = proposal.selections
         candidateTextIDs = selections.map { page.projectedSourceIDs(in: $0.containerID) }
@@ -71,6 +76,8 @@ struct ComputerUseBrowserResultReviewInput: Equatable, Sendable, CustomStringCon
               let records = projection["records"] as? [[String: Any]] else { throw ComputerUseBrowserResultReviewError.invalidInput }
         textIDs = records.filter { $0["kind"] as? String == "text" || ($0["id"] as? String).map { page.controlIDs.contains($0) } == true }
             .compactMap { $0["id"] as? String }.sorted()
+        controlRelevanceEvidenceIDs = records.filter { $0["kind"] as? String == "text" }
+            .compactMap { $0["id"] as? String }.sorted() + unobservedControlIDs
         permitsOfferAssertions = ["source_truncated", "omitted_embedded_content", "omitted_structure", "projection_omitted_records", "budget_omitted_records"]
             .allSatisfy { projection[$0] as? Bool == false }
         let candidates: [[String: Any]] = selections.enumerated().map { index, selection in
@@ -84,6 +91,12 @@ struct ComputerUseBrowserResultReviewInput: Equatable, Sendable, CustomStringCon
         var context: [String: Any] = ["version":hasControlSources ? 5 : (quantityReview ? 3 : (interpretation == nil ? 1 : 2)), "goal":goal.plannerContext, "page":projection,
             "candidates":candidates, "offer_assertions_allowed":permitsOfferAssertions]
         if quantityReview { context["quantity_meaning_required"] = true }
+        if !unobservedControlIDs.isEmpty {
+            context["version"] = 6
+            context["unobserved_controls"] = unobservedControlIDs
+            context["control_metadata_complete"] = controlMetadataComplete
+            context["control_relevance_evidence"] = controlRelevanceEvidenceIDs
+        }
         if let interpretation {
             context["requirements"] = try interpretation.requirements.enumerated().map { index, requirement -> [String: Any] in
                 guard let source = interpretation.source(of: requirement) else { throw ComputerUseBrowserResultReviewError.invalidInput }
@@ -124,6 +137,7 @@ struct ComputerUseBrowserResultReview: Equatable, Sendable, CustomStringConverti
         let association: Association
         let fields: [Field]
         let requirements: [Requirement]?
+        let controls: [ComputerUseBrowserControlRelevance]
     }
     private let input: ComputerUseBrowserResultReviewInput
     let candidates: [Candidate]
@@ -148,7 +162,8 @@ struct ComputerUseBrowserResultReview: Equatable, Sendable, CustomStringConverti
             var candidates: [Candidate] = [], referenceCount = 0, requirementReferenceCount = 0
             for (index, row) in rows.enumerated() {
                 let keys: Set<String> = input.interpretation == nil ? ["association", "fields"] : ["association", "fields", "requirements"]
-                guard case .object(let candidate) = row, Set(candidate.keys) == keys,
+                guard case .object(let candidate) = row,
+                      Set(candidate.keys) == keys || (!input.unobservedControlIDs.isEmpty && Set(candidate.keys) == keys.union(["controls"])),
                       case .string(let associationName)? = candidate["association"], let association = Association(rawValue: associationName),
                       input.permitsOfferAssertions || association != .singleOffer,
                       case .array(let fieldRows)? = candidate["fields"], fieldRows.count == input.fieldCounts[index] else { throw ComputerUseBrowserResultReviewError.invalidProposal }
@@ -240,7 +255,8 @@ struct ComputerUseBrowserResultReview: Equatable, Sendable, CustomStringConverti
                         return Requirement(judgment: judgment, textIDs: ids)
                     }
                 }
-                candidates.append(.init(association: association, fields: fields, requirements: requirements))
+                let controls = try ComputerUseBrowserControlRelevance.decode(candidate["controls"], input: input, candidate: index)
+                candidates.append(.init(association: association, fields: fields, requirements: requirements, controls: controls))
             }
             return .init(input: input, candidates: candidates)
         } catch { throw ComputerUseBrowserResultReviewError.invalidProposal }
@@ -253,17 +269,23 @@ struct ComputerUseBrowserResultReview: Equatable, Sendable, CustomStringConverti
             throw ComputerUseBrowserResultReviewError.inputChanged
         }
     }
+    func permitsAnswerWithUnobservedControls(for candidate: Int) -> Bool {
+        guard input.interpretation != nil, input.controlMetadataComplete, input.permitsOfferAssertions,
+              candidates.indices.contains(candidate), !input.unobservedControlIDs.isEmpty else { return false }
+        let controls = candidates[candidate].controls
+        return controls.map(\.controlID) == input.unobservedControlIDs && controls.allSatisfy { $0.relationship == .unrelated }
+    }
     /// Native candidate identity includes the entire review. The private
     /// input is separately compared exactly before attaching the review.
     var digest: String {
-        ComputerUseTaskContract.digest([input.hasControlSources ? "browser-result-review-v5" : (input.hasQuantityFields ? "browser-result-review-v3" : (hasRequirementMapping ? "browser-result-review-v2" : "browser-result-review-v1")), input.contextJSON, String(candidates.count)]
+        ComputerUseTaskContract.digest([!input.unobservedControlIDs.isEmpty ? "browser-result-review-v6" : (input.hasControlSources ? "browser-result-review-v5" : (input.hasQuantityFields ? "browser-result-review-v3" : (hasRequirementMapping ? "browser-result-review-v2" : "browser-result-review-v1"))), input.contextJSON, String(candidates.count)]
             + candidates.flatMap { candidate in
                 [candidate.association.rawValue, String(candidate.fields.count)] + candidate.fields.flatMap {
                     [$0.scope.rawValue, $0.price.rawValue, String($0.qualifierTextIDs.count)] + $0.qualifierTextIDs
                         + ($0.quantity.map { ["quantity", $0.rawValue] } ?? [])
                 } + (candidate.requirements.map { ["requirements", String($0.count)] + $0.flatMap {
                     [$0.judgment.rawValue, String($0.textIDs.count)] + $0.textIDs
-                } } ?? [])
+                } } ?? []) + candidate.controls.flatMap { [$0.controlID, $0.relationship.rawValue, String($0.evidenceIDs.count)] + $0.evidenceIDs }
             })
     }
     /// Indices follow the immutable reading's candidate and field order.
@@ -274,6 +296,7 @@ struct ComputerUseBrowserResultReview: Equatable, Sendable, CustomStringConverti
                 if let quantity = $0.quantity { field["quantity"] = quantity.rawValue }
                 return field
             }]
+            if !candidate.controls.isEmpty { context["controls"] = candidate.controls.map(\.context) }
             if let requirements = candidate.requirements {
                 context["requirements"] = requirements.enumerated().map {
                     ["requirement":$0.offset, "judgment":$0.element.judgment.rawValue, "texts":$0.element.textIDs] as [String: Any]

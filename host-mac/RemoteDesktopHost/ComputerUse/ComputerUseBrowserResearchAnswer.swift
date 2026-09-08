@@ -26,7 +26,7 @@ struct ComputerUseBrowserResearchAnswer: Equatable, Sendable, CustomStringConver
               interpretation: ComputerUseBrowserGoalProposal, source: String) {
             guard interpretation.input == goal, interpretation.disposition == .research,
                   reading.documentAnswerSourceStatus == .permitted,
-                  !reading.sourceTruncated, !reading.omittedStructure, !reading.omittedEmbeddedContent, !reading.omittedControls,
+                  !reading.sourceTruncated, !reading.omittedStructure, !reading.omittedEmbeddedContent,
                   !reading.projectionOmittedRecords,
                   let review = reading.review, review.hasRequirementMapping,
                   let assessment = reading.requirementAssessment,
@@ -46,7 +46,11 @@ struct ComputerUseBrowserResearchAnswer: Equatable, Sendable, CustomStringConver
             resultCounts = counts
             var passages: [Int: String] = [:], controls: [Int: String] = [:]
             for (index, candidate) in reading.candidates.enumerated() {
+                // Retain unread values as unknown. Only a complete, current
+                // per-candidate relevance review can release that dependency;
+                // missing metadata and relevant/uncertain values still block.
                 guard review.candidates[index].association == .singleOffer,
+                      !reading.omittedControls || review.permitsAnswerWithUnobservedControls(for: index),
                       candidate.unprojectedTextIDs.isEmpty, candidate.unprojectedLinkIDs.isEmpty,
                       candidate.unprojectedControlIDs.isEmpty else { continue }
                 let evaluations = assessment.candidates[index].requirements
