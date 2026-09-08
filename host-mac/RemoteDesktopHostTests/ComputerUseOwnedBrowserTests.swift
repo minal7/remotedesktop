@@ -142,8 +142,9 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
     }
 
     func testBrowserWorkflowRefreshesUnsentDestinationAfterLoginAndKeepsVerifiedQueryValues() async throws {
-        for mode in ["link", "query", "changed-query"] {
-            let loginChange = mode == "link"
+        for mode in ["link", "query", "changed-query", "failed-link-rebind", "failed-query-rebind"] {
+            let isLink = mode == "link" || mode == "failed-link-rebind"
+            let loginChange = isLink
                 ? "history.replaceState(null, '', '/account'); document.querySelector('a').href = '/results?session=retained';"
                 : (mode == "changed-query" ? "document.getElementById('q').value = 'Tokyo';" : "")
             let server = try OwnedBrowserHTTPFixture(routes: ["/form": .init(body: """
@@ -167,7 +168,7 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
             weak var observedBrowser: ComputerUseOwnedBrowser?
             let browser = ComputerUseOwnedBrowser(presentsWindow: false, domScriptDidDispatch: { command in
                 if command == .validatePageLink { linkValidations += 1 }
-                let opening = mode == "link" ? command == .validatePageLink && linkValidations == 2 : command == .validateFormQuery
+                let opening = isLink ? command == .validatePageLink && linkValidations == 2 : command == .validateFormQuery
                 if opening && !pausedOnce {
                     pausedOnce = true
                     requirement = observedBrowser?.handbackRequirement(taskID: root, required: true)
@@ -178,15 +179,19 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
             defer { browser.close() }
             let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
             defer { try? FileManager.default.removeItem(at: directory) }
-            let ending = mode == "link" ? "open the link \"Results\"" : "set \"Destination\" to \"Paris\" then open the form query using \"Search\""
+            let ending = isLink ? "open the link \"Results\"" : "set \"Destination\" to \"Paris\" then open the form query using \"Search\""
             let prompt = "Open \(base.appendingPathComponent("form").absoluteString) then \(ending)"
             let request = try XCTUnwrap(ComputerUseBrowserWorkflowRequest.compile(prompt))
-            let navigation = ComputerUseBrowserNavigationTask(browser: browser, journalDirectory: directory)
+            var failReplacement = false
+            let navigation = ComputerUseBrowserNavigationTask(browser: browser, journalDirectory: directory,
+                observedNavigationStore: { try .init(directory: $0, afterReplacement: {
+                    if failReplacement { failReplacement = false; throw ComputerUseTaskJournalStore.StoreError.unavailable }
+                }) })
             let paused = try await navigation.executeWorkflow(taskID: root, request: request, injector: InputInjector(), progress: { _ in })
             guard case .userInterventionRequired = paused else { return XCTFail("Takeover must stop the prepared destination before a request") }
             let parentStore = try ComputerUseTaskJournalStore(directory: directory.appendingPathComponent("Workflows"))
             let parent = try XCTUnwrap(parentStore.load(taskID: root)), operation = try XCTUnwrap(parent.stepIDs.last)
-            XCTAssertEqual(parent.statuses, mode == "link" ? [.verified, .attempted] : [.verified, .verified, .attempted])
+            XCTAssertEqual(parent.statuses, isLink ? [.verified, .attempted] : [.verified, .verified, .attempted])
             let childStore = try ComputerUseTaskJournalStore(directory: directory.appendingPathComponent("Workflows/Stages")
                 .appendingPathComponent(operation).appendingPathComponent("Observed Destinations"))
             let journalID = ComputerUseTaskContract.digest(["observed-browser-effect-record-v1", root, operation])
@@ -208,6 +213,16 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
             try await waitUntil { server.count("/logged-in") == 1 }
             allowed = true
             try await browser.reacquireAfterUserControl(taskID: root, requirement: handback)
+            if mode.hasPrefix("failed-") {
+                failReplacement = true
+                do { _ = try await navigation.executeWorkflow(taskID: root, request: request, injector: InputInjector(), progress: { _ in }); XCTFail("A failed replacement must remain pending") }
+                catch { XCTAssertEqual(error as? ComputerUseTaskJournalStore.StoreError, .unavailable) }
+                XCTAssertFalse(failReplacement)
+                let visible = try XCTUnwrap(childStore.load(taskID: journalID))
+                XCTAssertNotEqual(visible.contractDigest, unsent.contractDigest); XCTAssertEqual(visible.statuses, [.planned])
+                XCTAssertEqual(visible.stepIDs, unsent.stepIDs); XCTAssertEqual(try parentStore.load(taskID: root), parent)
+                XCTAssertFalse(server.requestedPaths.contains { $0.hasPrefix("/results") })
+            }
             let resumed = try await navigation.executeWorkflow(taskID: root, request: request, injector: InputInjector(), progress: { _ in })
             if mode == "changed-query" {
                 guard case .userInterventionRequired = resumed else { return XCTFail("Rebinding must retain the original verified Paris requirement") }
@@ -222,11 +237,11 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
                 let finished = try XCTUnwrap(parentStore.load(taskID: root))
                 XCTAssertEqual(finished.stepIDs, parent.stepIDs); XCTAssertEqual(finished.contractDigest, parent.contractDigest)
                 XCTAssertEqual(finished.statuses, parent.stepIDs.map { _ in .verified })
-                XCTAssertEqual(server.count(mode == "link" ? "/results?session=retained" : "/results?q=Paris"), 1)
+                XCTAssertEqual(server.count(isLink ? "/results?session=retained" : "/results?q=Paris"), 1)
                 _ = try await navigation.executeWorkflow(taskID: root, request: request, injector: InputInjector(), progress: { _ in })
                 XCTAssertEqual(server.requestedPaths.filter { $0.hasPrefix("/results") }.count, 1)
             }
-            if mode != "link" {
+            if !isLink {
                 try await waitUntil { server.count("/edited?value=Paris") == 1 }
                 XCTAssertEqual(server.count("/edited?value=Paris"), 1)
             }

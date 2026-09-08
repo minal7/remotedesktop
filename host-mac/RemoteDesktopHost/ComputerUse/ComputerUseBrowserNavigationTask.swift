@@ -161,7 +161,8 @@ final class ComputerUseBrowserNavigationTask: ComputerUseBrowserResearchAdmittin
             }
         } else {
             workflow = ComputerUseBrowserWorkflowTask(taskID: taskID, request: request, browser: browser,
-                directory: journalDirectory.appendingPathComponent("Workflows", isDirectory: true), injector: injector)
+                directory: journalDirectory.appendingPathComponent("Workflows", isDirectory: true), injector: injector,
+                observedNavigationStore: observedNavigationStore)
         }
         guard let workflow else { throw ComputerUseTaskExecutionError.invalidContract }
         do { return try await workflow.run(progress: progress) }
@@ -280,6 +281,38 @@ final class ComputerUseBrowserNavigationTask: ComputerUseBrowserResearchAdmittin
         case noSelection
     }
 
+    /// A failed replacement can leave either known binding visible. Resolve
+    /// only that metadata under a fresh lease: no reading, selection, write or
+    /// navigation occurs. The next open/replan acquires its own lease and
+    /// revalidates this identity, so an intervening writer cannot grant effect
+    /// authority through this result.
+    func resolveUnconfirmedObservedDestination(_ target: ComputerUseBrowserNavigationTarget,
+        replacement: ComputerUseBrowserNavigationTarget, promptDigest: String, operationID: String,
+        checkCurrent: () throws -> Void) throws -> ComputerUseBrowserNavigationTarget {
+        try Task.checkCancellation(); try checkCurrent()
+        guard target.taskID.utf8.elementsEqual(replacement.taskID.utf8), target.contextID == replacement.contextID,
+              browser.contextID == target.contextID,
+              let session = browser.handbackRequirement(taskID: target.taskID, required: true) else {
+            throw ComputerUseTaskExecutionError.journalMismatch
+        }
+        try browser.validateWorkflowSession(session)
+        let identity = try Self.observedIdentity(target, promptDigest: promptDigest, operationID: operationID)
+        let alternative = try Self.observedIdentity(replacement, promptDigest: promptDigest, operationID: operationID)
+        let store = try observedNavigationStore(journalDirectory.appendingPathComponent("Observed Destinations", isDirectory: true))
+        let persisted = try store.load(taskID: identity.taskID)
+        let resolved: ComputerUseBrowserNavigationTarget
+        if let persisted {
+            if Self.matchesObservedIdentity(persisted, identity) { resolved = target }
+            else if Self.matchesObservedIdentity(persisted, alternative) { resolved = replacement }
+            else { throw ComputerUseTaskExecutionError.journalMismatch }
+        } else { resolved = target }
+        let lease = try store.acquireExecution(taskID: identity.taskID, expected: persisted)
+        defer { lease.release() }
+        try Task.checkCancellation(); try checkCurrent()
+        try lease.assertOwnership(); try browser.validateWorkflowSession(session)
+        return resolved
+    }
+
     /// Distinguish a committed refresh from a retained attempted target, even
     /// when both have the same payload. Target equality is not replan authority.
     func replanUnsentObservedDestination(_ target: ComputerUseBrowserNavigationTarget,
@@ -334,10 +367,13 @@ final class ComputerUseBrowserNavigationTask: ComputerUseBrowserResearchAdmittin
             stepIDs: [operationID], statuses: [.planned])
     }
 
+    private static func matchesObservedIdentity(_ saved: ComputerUseTaskJournal, _ identity: ComputerUseTaskJournal) -> Bool {
+        saved.taskID == identity.taskID && saved.promptDigest == identity.promptDigest
+            && saved.contractDigest == identity.contractDigest && saved.stepIDs == identity.stepIDs && saved.statuses.count == 1
+    }
+
     private static func validateObservedIdentity(_ saved: ComputerUseTaskJournal, _ identity: ComputerUseTaskJournal) throws {
-        guard saved.taskID == identity.taskID, saved.promptDigest == identity.promptDigest,
-              saved.contractDigest == identity.contractDigest, saved.stepIDs == identity.stepIDs,
-              saved.statuses.count == 1 else { throw ComputerUseTaskExecutionError.journalMismatch }
+        guard matchesObservedIdentity(saved, identity) else { throw ComputerUseTaskExecutionError.journalMismatch }
     }
 
     /// Persist one host-selected effect independently of the whole task's
@@ -379,6 +415,7 @@ final class ComputerUseBrowserNavigationTask: ComputerUseBrowserResearchAdmittin
             try checkOwnership()
             return receipt
         }
+        guard !browser.hasNavigationAttempt(operationID: operationID) else { throw ComputerUseBrowserError.observedNavigationUncertain }
         if persisted == nil { try save(.planned) }
         do {
             let receipt = try await browser.openObservedDestination(target, operationID: operationID, willBeginEffect: {

@@ -110,16 +110,20 @@ final class ComputerUseBrowserWorkflowTask {
     private let browser: ComputerUseOwnedBrowser
     private let directory: URL
     private let injector: InputInjector
+    private let observedNavigationStore: (URL) throws -> ComputerUseTaskJournalStore
     private var session: ComputerUseBrowserHandbackRequirement?
     private var navigationChildren: [Int: ComputerUseBrowserNavigationTask] = [:]
     private var textChildren: [Int: ComputerUseNativeTextExecutor] = [:]
     private var preparedDestinations: [Int: ComputerUseBrowserNavigationTarget] = [:]
+    private var unconfirmedDestinations: [Int: ComputerUseBrowserNavigationTarget] = [:]
     private var isExecuting = false
 
     init(taskID: String, request: ComputerUseBrowserWorkflowRequest, browser: ComputerUseOwnedBrowser,
-         directory: URL, injector: InputInjector) {
+         directory: URL, injector: InputInjector,
+         observedNavigationStore: @escaping (URL) throws -> ComputerUseTaskJournalStore = { try .init(directory: $0) }) {
         self.taskID = taskID; self.request = request; self.browser = browser
         self.directory = directory; self.injector = injector
+        self.observedNavigationStore = observedNavigationStore
     }
 
     func run(progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
@@ -215,15 +219,31 @@ final class ComputerUseBrowserWorkflowTask {
             case .link(let label), .formQuery(let label):
                 let child = navigationChild(index, directory: childDirectory, stepID: stepIDs[index])
                 let candidate: ComputerUseBrowserNavigationTarget?
-                if let retained = preparedDestinations[index] {
+                if var retained = preparedDestinations[index] {
+                    if let replacement = unconfirmedDestinations[index] {
+                        retained = try child.resolveUnconfirmedObservedDestination(retained, replacement: replacement,
+                            promptDigest: request.promptDigest, operationID: stepIDs[index], checkCurrent: checkOwnership)
+                        preparedDestinations[index] = retained
+                        unconfirmedDestinations[index] = nil
+                    }
                     // A previous run may have stopped after preparing a link
                     // but before any request (for example, inline login).
                     // The child checks durable AND native attempts before it
                     // allows fresh observation under the original stage ID.
-                    candidate = try await child.refreshUnsentObservedDestination(retained,
-                        promptDigest: request.promptDigest, operationID: stepIDs[index]) {
-                            try await self.prepareDestination(index: index, stage: stage, label: label)
-                        }
+                    var proposed: ComputerUseBrowserNavigationTarget?
+                    do {
+                        candidate = try await child.refreshUnsentObservedDestination(retained,
+                            promptDigest: request.promptDigest, operationID: stepIDs[index]) {
+                                proposed = try await self.prepareDestination(index: index, stage: stage, label: label)
+                                return proposed
+                            }
+                    } catch {
+                        // This is an alternative to reconcile, not a new
+                        // prepared target or permission to repeat the action.
+                        unconfirmedDestinations[index] = proposed
+                        try checkOwnership()
+                        throw error
+                    }
                 } else {
                     candidate = try await prepareDestination(index: index, stage: stage, label: label)
                 }
@@ -231,6 +251,7 @@ final class ComputerUseBrowserWorkflowTask {
                     return .userInterventionRequired("I could not uniquely identify the requested link or form query. Open the intended page, then choose Resume.")
                 }
                 preparedDestinations[index] = target
+                unconfirmedDestinations[index] = nil
                 _ = try await child.openObservedDestination(target,
                     promptDigest: request.promptDigest, operationID: stepIDs[index], willBeginEffect: {})
                 result = .completed("Browser destination confirmed")
@@ -276,7 +297,8 @@ final class ComputerUseBrowserWorkflowTask {
 
     private func navigationChild(_ index: Int, directory: URL, stepID: String) -> ComputerUseBrowserNavigationTask {
         if let child = navigationChildren[index] { return child }
-        let child = ComputerUseBrowserNavigationTask(browser: browser, journalDirectory: directory, effectNamespace: stepID)
+        let child = ComputerUseBrowserNavigationTask(browser: browser, journalDirectory: directory, effectNamespace: stepID,
+            observedNavigationStore: observedNavigationStore)
         navigationChildren[index] = child
         return child
     }

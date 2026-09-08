@@ -22,6 +22,7 @@ final class ComputerUseBrowserResearchNavigation {
     private let browser: ComputerUseOwnedBrowser
     private let navigation: ComputerUseBrowserNavigationTask
     private var pending: Stage?
+    private var unconfirmedReplacement: Stage?
     private var completed: [Selection: Stage] = [:]
     private var isExecuting = false
     private var isRetired = false
@@ -54,7 +55,7 @@ final class ComputerUseBrowserResearchNavigation {
         let stage: Stage
         if let pending {
             guard pending.selection == selection else { throw Failure.pendingStage }
-            stage = pending
+            stage = try resolvePendingBinding(pending, checkCurrent: check)
         } else if let previous = completed[selection] {
             stage = previous
         } else {
@@ -72,12 +73,25 @@ final class ComputerUseBrowserResearchNavigation {
         let receipt = try await navigation.openObservedDestination(stage.target, promptDigest: rootDigest,
             operationID: stage.operationID, willBeginEffect: {})
         try check()
-        completed[selection] = stage
+        completed[stage.selection] = stage
         pending = nil
         return receipt
     }
 
-    func retire() { isRetired = true; pending = nil; completed.removeAll() }
+    func retire() { isRetired = true; pending = nil; unconfirmedReplacement = nil; completed.removeAll() }
+
+    private func resolvePendingBinding(_ previous: Stage, checkCurrent: () throws -> Void) throws -> Stage {
+        guard let replacement = unconfirmedReplacement else { return previous }
+        guard replacement.operationID == previous.operationID,
+              replacement.selection.goalRevision == previous.selection.goalRevision else { throw Failure.invalidSelection }
+        let target = try navigation.resolveUnconfirmedObservedDestination(previous.target, replacement: replacement.target,
+            promptDigest: rootDigest, operationID: previous.operationID, checkCurrent: checkCurrent)
+        let resolved = target == previous.target ? previous : replacement
+        // No suspension separates the leased resolution and this assignment.
+        // Subsequent effect/replan entry rechecks the saved identity itself.
+        pending = resolved; unconfirmedReplacement = nil
+        return resolved
+    }
 
     /// The durable/native no-attempt proof and execution lease surround the
     /// fresh reading, selection and binding replacement. This never navigates.
@@ -86,8 +100,8 @@ final class ComputerUseBrowserResearchNavigation {
                 checkCurrent: () throws -> Void) async throws -> ReplanResult {
         guard !isExecuting else { throw Failure.busy }
         guard !isRetired else { throw Failure.retired }
-        guard let previous = pending else { return .noPendingStage }
-        guard goal.taskID == taskID, goal.rootDigest == rootDigest, goal.digest == previous.selection.goalRevision else {
+        guard let retained = pending else { return .noPendingStage }
+        guard goal.taskID == taskID, goal.rootDigest == rootDigest, goal.digest == retained.selection.goalRevision else {
             throw Failure.invalidSelection
         }
         isExecuting = true
@@ -98,18 +112,29 @@ final class ComputerUseBrowserResearchNavigation {
             try checkCurrent()
         }
         try check()
+        let previous = try resolvePendingBinding(retained, checkCurrent: check)
         var prepared: Stage?
-        let result = try await navigation.replanUnsentObservedDestination(previous.target, promptDigest: rootDigest,
-            operationID: previous.operationID, prepare: {
-                guard let (selection, candidates) = try await prepare() else { return nil }
-                try check()
-                guard selection.goalRevision == goal.digest, completed[selection] == nil else { throw Failure.invalidSelection }
-                let target = try await browser.prepareResultLinkNavigation(candidates, candidateID: selection.candidateID,
-                    linkID: selection.linkID, goal: goal)
-                try check()
-                prepared = Stage(selection: selection, operationID: previous.operationID, target: target)
-                return target
-            })
+        let result: ComputerUseBrowserNavigationTask.ObservedReplanResult
+        do {
+            result = try await navigation.replanUnsentObservedDestination(previous.target, promptDigest: rootDigest,
+                operationID: previous.operationID, prepare: {
+                    guard let (selection, candidates) = try await prepare() else { return nil }
+                    try check()
+                    guard selection.goalRevision == goal.digest, completed[selection] == nil else { throw Failure.invalidSelection }
+                    let target = try await browser.prepareResultLinkNavigation(candidates, candidateID: selection.candidateID,
+                        linkID: selection.linkID, goal: goal)
+                    try check()
+                    prepared = Stage(selection: selection, operationID: previous.operationID, target: target)
+                    return target
+                })
+        } catch {
+            // Preparation has no effect authority. Keep at most the proposed
+            // alternative so a failed post-rename write can be reconciled on
+            // a later call, including after Pause. Stop cannot retain it.
+            if !isRetired, pending?.operationID == previous.operationID { unconfirmedReplacement = prepared }
+            try check()
+            throw error
+        }
         switch result {
         case .requiresReconciliation:
             try check()
@@ -122,7 +147,7 @@ final class ComputerUseBrowserResearchNavigation {
             // A completed durable replacement remains a fact after a late
             // Pause. Retain its matching target before surfacing cancellation;
             // otherwise Resume would use the old binding against the new file.
-            if !isRetired, pending?.operationID == previous.operationID { pending = prepared }
+            if !isRetired, pending?.operationID == previous.operationID { pending = prepared; unconfirmedReplacement = nil }
             try check()
             return .updated
         }

@@ -3,6 +3,218 @@ import XCTest
 
 @MainActor
 final class ComputerUseBrowserDOMTests: XCTestCase {
+    func testResearchNavigationRecoversFailedReplacementUsingOnlyTheVisibleKnownStage() async throws {
+        for storage in ["replacement", "original", "missing"] {
+            let prepared = try await changedPendingResearchLinkFixture()
+            defer { prepared.owner.retire(); prepared.fixture.close(); try? FileManager.default.removeItem(at: prepared.directory) }
+            let original = prepared.owner.input, before = try observedNavigationJournal(in: prepared.directory)
+            let chosen = try await failResearchLinkReplacement(prepared.owner, state: prepared.state)
+            let visible = try observedNavigationJournal(in: prepared.directory)
+            XCTAssertNotEqual(visible.contractDigest, before.contractDigest)
+            let readings = prepared.reader.inputs.count
+            if storage != "replacement" {
+                try replaceObservedFixtureRecord(in: prepared.directory, with: storage == "original" ? before : nil)
+                do { _ = try await prepared.owner.resumeCandidateNavigation(); XCTFail("The old binding cannot open the changed link") }
+                catch { XCTAssertEqual(error as? ComputerUseBrowserError, .linkNavigationUnavailable) }
+                XCTAssertEqual(prepared.reader.inputs.count, readings)
+                XCTAssertEqual(prepared.fixture.server.count("/fresh"), 0)
+                let result = try await replanResearchLink(prepared.owner)
+                XCTAssertEqual(result, .updated)
+            }
+            let receipt = try await prepared.owner.resumeCandidateNavigation()
+            XCTAssertEqual(receipt?.document.operationID, before.stepIDs[0])
+            XCTAssertEqual(prepared.reader.inputs.count, readings + (storage == "replacement" ? 0 : 1))
+            XCTAssertEqual(prepared.owner.input, original)
+            XCTAssertEqual(prepared.fixture.server.count("/alpha"), 0); XCTAssertEqual(prepared.fixture.server.count("/fresh"), 1)
+            let final = try observedNavigationJournal(in: prepared.directory)
+            XCTAssertEqual(final.taskID, before.taskID); XCTAssertEqual(final.promptDigest, before.promptDigest)
+            XCTAssertEqual(final.stepIDs, before.stepIDs); XCTAssertEqual(final.statuses, [.verified])
+            let repeated = try await prepared.owner.resumeCandidateNavigation()
+            XCTAssertNil(repeated); XCTAssertEqual(prepared.fixture.server.count("/fresh"), 1)
+            if storage == "replacement" {
+                let replay = try await prepared.owner.openCandidateLink(candidateID: chosen.candidateID, linkID: chosen.linkID)
+                XCTAssertEqual(replay, receipt, "Completion belongs to the recovered selection, not its superseded predecessor")
+                XCTAssertEqual(prepared.fixture.server.count("/fresh"), 1)
+            }
+        }
+    }
+
+    func testResearchNavigationCanReplanAgainAfterRepeatedAmbiguousReplacementWrites() async throws {
+        let prepared = try await changedPendingResearchLinkFixture()
+        defer { prepared.owner.retire(); prepared.fixture.close(); try? FileManager.default.removeItem(at: prepared.directory) }
+        let before = try observedNavigationJournal(in: prepared.directory)
+        for _ in 0..<2 {
+            try await failResearchLinkReplacement(prepared.owner, state: prepared.state)
+            XCTAssertTrue(prepared.owner.hasPendingNavigation)
+            XCTAssertEqual(try observedNavigationJournal(in: prepared.directory).stepIDs, before.stepIDs)
+        }
+        let visible = try observedNavigationJournal(in: prepared.directory)
+        let none = try await prepared.owner.replanPendingCandidateNavigation(select: { _, _ in nil })
+        XCTAssertEqual(none, .noSelection)
+        XCTAssertEqual(try observedNavigationJournal(in: prepared.directory), visible)
+        XCTAssertEqual(prepared.fixture.server.count("/fresh"), 0)
+        // The no-selection read created a newer snapshot. A new explicit
+        // selection must bind that snapshot before any request can start.
+        let selected = try await replanResearchLink(prepared.owner)
+        XCTAssertEqual(selected, .updated)
+        _ = try await prepared.owner.resumeCandidateNavigation()
+        XCTAssertEqual(prepared.fixture.server.count("/alpha"), 0); XCTAssertEqual(prepared.fixture.server.count("/fresh"), 1)
+        XCTAssertEqual(try observedNavigationJournal(in: prepared.directory).stepIDs, before.stepIDs)
+    }
+
+    func testResearchNavigationFailedReplacementCannotHideADurableAttempt() async throws {
+        for status in [ComputerUseTaskStepStatus.attempted, .uncertain, .verified] {
+            let prepared = try await changedPendingResearchLinkFixture()
+            defer { prepared.owner.retire(); prepared.fixture.close(); try? FileManager.default.removeItem(at: prepared.directory) }
+            try await failResearchLinkReplacement(prepared.owner, state: prepared.state)
+            let store = try ComputerUseTaskJournalStore(directory: prepared.directory.appendingPathComponent("Observed Destinations"))
+            let visible = try observedNavigationJournal(in: prepared.directory)
+            var attempted = visible; attempted.statuses = [.attempted]
+            try store.save(attempted, replacing: visible)
+            if status != .attempted { var final = attempted; final.statuses = [status]; try store.save(final, replacing: attempted) }
+            let readings = prepared.reader.inputs, commands = prepared.state.commands
+            let result = try await prepared.owner.replanPendingCandidateNavigation(select: { _, _ in
+                XCTFail("Binding recovery cannot turn an attempted stage into fresh selection"); return nil
+            })
+            XCTAssertEqual(result, .requiresReconciliation)
+            do { _ = try await prepared.owner.resumeCandidateNavigation(); XCTFail("Missing native receipt cannot authorize another request") }
+            catch { XCTAssertEqual(error as? ComputerUseBrowserError, .observedNavigationUncertain) }
+            XCTAssertEqual(prepared.reader.inputs, readings); XCTAssertEqual(prepared.state.commands, commands)
+            XCTAssertEqual(prepared.fixture.server.count("/alpha"), 0); XCTAssertEqual(prepared.fixture.server.count("/fresh"), 0)
+        }
+    }
+
+    func testResearchNavigationFailedReplacementRejectsUnknownBindingAndLostSession() async throws {
+        for change in ["binding", "stop", "close", "reclaim"] {
+            let prepared = try await changedPendingResearchLinkFixture()
+            defer { prepared.owner.retire(); prepared.fixture.close(); try? FileManager.default.removeItem(at: prepared.directory) }
+            try await failResearchLinkReplacement(prepared.owner, state: prepared.state)
+            if change == "binding" {
+                let visible = try observedNavigationJournal(in: prepared.directory)
+                try replaceObservedFixtureRecord(in: prepared.directory, with: .init(taskID: visible.taskID,
+                    promptDigest: visible.promptDigest, contractDigest: String(repeating: "a", count: 64),
+                    stepIDs: visible.stepIDs, statuses: [.planned]))
+            } else if change == "close" { prepared.fixture.browser.close() }
+            else {
+                prepared.fixture.browser.stop()
+                if change == "reclaim" { _ = try prepared.fixture.browser.prepareWorkflowSession(taskID: prepared.owner.taskID) }
+            }
+            let readings = prepared.reader.inputs, commands = prepared.state.commands
+            for replan in [false, true] {
+                do {
+                    if replan { _ = try await replanResearchLink(prepared.owner) }
+                    else { _ = try await prepared.owner.resumeCandidateNavigation() }
+                    XCTFail("Recovery must preserve the original binding and session boundary")
+                } catch {
+                    if change == "binding" { XCTAssertEqual(error as? ComputerUseTaskExecutionError, .journalMismatch) }
+                    else { XCTAssertEqual(error as? ComputerUseBrowserError, .handbackContextLost) }
+                }
+            }
+            XCTAssertEqual(prepared.reader.inputs, readings); XCTAssertEqual(prepared.state.commands, commands)
+            XCTAssertEqual(prepared.fixture.server.count("/fresh"), 0)
+        }
+    }
+
+    func testResearchNavigationFailedReplacementPreservesPauseWithoutRevivingRetirement() async throws {
+        for retires in [false, true] {
+            let prepared = try await changedPendingResearchLinkFixture()
+            defer { prepared.owner.retire(); prepared.fixture.close(); try? FileManager.default.removeItem(at: prepared.directory) }
+            let before = try observedNavigationJournal(in: prepared.directory)
+            prepared.state.failOnNextWrite = true
+            prepared.state.pauseOnNextWrite = !retires; prepared.state.retireOnNextWrite = retires
+            do { _ = try await replanResearchLink(prepared.owner); XCTFail("A failed write cannot override interruption") }
+            catch { XCTAssertTrue(error is CancellationError) }
+            XCTAssertFalse(prepared.state.failOnNextWrite)
+            let visible = try observedNavigationJournal(in: prepared.directory)
+            XCTAssertNotEqual(visible.contractDigest, before.contractDigest); XCTAssertEqual(visible.stepIDs, before.stepIDs)
+            XCTAssertEqual(prepared.owner.hasPendingNavigation, !retires)
+            do { _ = try await prepared.owner.resumeCandidateNavigation(); XCTFail("Continuation needs explicit handback and a live owner") }
+            catch { XCTAssertEqual(error as? ComputerUseBrowserResearchTask.Failure, retires ? .retired : .paused) }
+            if !retires {
+                try await prepared.owner.resumeAfterUserControl()
+                // Handback observes a fresh snapshot; recover the saved choice
+                // before selecting against that new observation under its lease.
+                let result = try await replanResearchLink(prepared.owner)
+                XCTAssertEqual(result, .updated)
+                _ = try await prepared.owner.resumeCandidateNavigation()
+            }
+            XCTAssertEqual(prepared.fixture.server.count("/alpha"), 0)
+            XCTAssertEqual(prepared.fixture.server.count("/fresh"), retires ? 0 : 1)
+        }
+    }
+
+    func testObservedBindingRecoveryHoldsAFreshLeaseAndRevalidatesBeforeDispatch() async throws {
+        var commands: [ComputerUseBrowserDOMCommand] = []
+        let fixture = try await DOMFixture(body: "<a href='/old'>Old</a><a href='/fresh'>Fresh</a>",
+            domScriptDidDispatch: { commands.append($0) })
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { fixture.close(); try? FileManager.default.removeItem(at: directory) }
+        let page = try await fixture.browser.observePage(document: fixture.document)
+        let old = try await fixture.browser.prepareLinkNavigation(linkID: page.page.links[0].id, evidence: page)
+        let fresh = try await fixture.browser.prepareLinkNavigation(linkID: page.page.links[1].id, evidence: page)
+        let prompt = ComputerUseTextTaskContract.digest("Original request"), operation = ComputerUseTaskContract.digest(["stage"])
+        let navigation = ComputerUseBrowserNavigationTask(browser: fixture.browser, journalDirectory: directory)
+        _ = try await navigation.replanUnsentObservedDestination(old, promptDigest: prompt, operationID: operation, prepare: { old })
+        let failing = ComputerUseBrowserNavigationTask(browser: fixture.browser, journalDirectory: directory,
+            observedNavigationStore: { try .init(directory: $0, afterReplacement: { throw ComputerUseTaskJournalStore.StoreError.unavailable }) })
+        do { _ = try await failing.replanUnsentObservedDestination(old, promptDigest: prompt, operationID: operation, prepare: { fresh }); XCTFail("Expected failed replacement") }
+        catch { XCTAssertEqual(error as? ComputerUseTaskJournalStore.StoreError, .unavailable) }
+        let saved = try observedNavigationJournal(in: directory), observed = commands
+        let store = try ComputerUseTaskJournalStore(directory: directory.appendingPathComponent("Observed Destinations"))
+        let occupied = try store.acquireExecution(taskID: saved.taskID, expected: saved)
+        XCTAssertThrowsError(try navigation.resolveUnconfirmedObservedDestination(old, replacement: fresh,
+            promptDigest: prompt, operationID: operation, checkCurrent: {})) {
+                XCTAssertEqual($0 as? ComputerUseTaskJournalStore.StoreError, .busy)
+            }
+        occupied.release()
+        var checks = 0
+        let resolved = try navigation.resolveUnconfirmedObservedDestination(old, replacement: fresh,
+            promptDigest: prompt, operationID: operation, checkCurrent: {
+                checks += 1
+                if checks == 2 {
+                    XCTAssertThrowsError(try store.acquireExecution(taskID: saved.taskID, expected: saved)) {
+                        XCTAssertEqual($0 as? ComputerUseTaskJournalStore.StoreError, .busy)
+                    }
+                }
+            })
+        XCTAssertEqual(checks, 2); XCTAssertEqual(resolved, fresh); XCTAssertEqual(commands, observed)
+        // An intervening valid writer is detected by the effect's own lease
+        // and identity check; metadata resolution is not a navigation permit.
+        let writer = try store.acquireExecution(taskID: saved.taskID, expected: saved)
+        let foreign = ComputerUseTaskJournal(taskID: saved.taskID, promptDigest: saved.promptDigest,
+            contractDigest: String(repeating: "b", count: 64), stepIDs: saved.stepIDs, statuses: [.planned])
+        try store.replaceUnattemptedBinding(foreign, replacing: saved); writer.release()
+        do { _ = try await navigation.openObservedDestination(resolved, promptDigest: prompt, operationID: operation, willBeginEffect: {}); XCTFail("Recheck the binding before dispatch") }
+        catch { XCTAssertEqual(error as? ComputerUseTaskExecutionError, .journalMismatch) }
+        XCTAssertEqual(commands, observed); XCTAssertEqual(fixture.server.count("/fresh"), 0)
+    }
+
+    func testObservedPlannedJournalCannotForgetARawNativeNavigationAttempt() async throws {
+        for failed in [false, true] {
+            var commands: [ComputerUseBrowserDOMCommand] = []
+            let fixture = try await DOMFixture(body: "<a href='/alpha'>Alpha</a>",
+                additionalRoutes: ["/alpha": .init(status: failed ? 503 : 200)], domScriptDidDispatch: { commands.append($0) })
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { fixture.close(); try? FileManager.default.removeItem(at: directory) }
+            let page = try await fixture.browser.observePage(document: fixture.document)
+            let target = try await fixture.browser.prepareLinkNavigation(linkID: page.page.links[0].id, evidence: page)
+            let prompt = ComputerUseTextTaskContract.digest("Original request"), operation = ComputerUseTaskContract.digest(["stage"])
+            let navigation = ComputerUseBrowserNavigationTask(browser: fixture.browser, journalDirectory: directory)
+            _ = try await navigation.replanUnsentObservedDestination(target, promptDigest: prompt, operationID: operation, prepare: { target })
+            let before = try observedNavigationJournal(in: directory)
+            do {
+                _ = try await fixture.browser.navigate(taskID: "fixture", operationID: operation,
+                    to: fixture.document.committedURL.deletingLastPathComponent().appendingPathComponent("alpha"))
+                XCTAssertFalse(failed)
+            } catch { XCTAssertTrue(failed); XCTAssertEqual(error as? ComputerUseBrowserError, .navigationFailed) }
+            let observed = commands
+            do { _ = try await navigation.openObservedDestination(target, promptDigest: prompt, operationID: operation, willBeginEffect: {}); XCTFail("Planned metadata cannot erase a native attempt") }
+            catch { XCTAssertEqual(error as? ComputerUseBrowserError, .observedNavigationUncertain) }
+            XCTAssertEqual(commands, observed); XCTAssertEqual(try observedNavigationJournal(in: directory), before)
+            XCTAssertEqual(fixture.server.count("/alpha"), 1)
+        }
+    }
+
     func testResearchNavigationReplansUnsentLinkAfterExplicitLoginHandbackUnderSameStage() async throws {
         let prepared = try await pendingResearchLinkFixture(body: """
             <article><h2>Concert Alpha</h2><a id='details' href='/before-login'>Alpha details</a></article><div id='login'></div>
@@ -78,6 +290,7 @@ final class ComputerUseBrowserDOMTests: XCTestCase {
                 catch { XCTAssertEqual(error as? ComputerUseBrowserError, .observedNavigationUncertain) }
                 XCTAssertEqual(prepared.fixture.server.count("/alpha"), 0)
             } else {
+                _ = try await replanResearchLink(prepared.owner)
                 _ = try await prepared.owner.resumeCandidateNavigation()
                 XCTAssertEqual(prepared.fixture.server.count("/alpha"), 1)
             }
@@ -108,6 +321,7 @@ final class ComputerUseBrowserDOMTests: XCTestCase {
         XCTAssertFalse(prepared.owner.isOperating); XCTAssertEqual(try observedNavigationJournal(in: prepared.directory), planned)
         prepared.reader.beforeReply = nil
         try await prepared.owner.resumeAfterUserControl()
+        _ = try await replanResearchLink(prepared.owner)
         _ = try await prepared.owner.resumeCandidateNavigation()
         XCTAssertEqual(prepared.fixture.server.count("/alpha"), 1)
     }
@@ -147,6 +361,7 @@ final class ComputerUseBrowserDOMTests: XCTestCase {
                 catch { XCTAssertEqual(error as? ComputerUseBrowserResearchTask.Failure, .retired) }
             } else {
                 try await prepared.owner.resumeAfterUserControl()
+                _ = try await replanResearchLink(prepared.owner)
                 _ = try await prepared.owner.resumeCandidateNavigation()
             }
             XCTAssertEqual(prepared.fixture.server.count("/alpha"), 0); XCTAssertEqual(prepared.fixture.server.count("/fresh"), retires ? 0 : 1)
@@ -190,6 +405,7 @@ final class ComputerUseBrowserDOMTests: XCTestCase {
         } catch { XCTAssertEqual(error as? ComputerUseBrowserResearchNavigation.Failure, .invalidSelection) }
         XCTAssertEqual(try journals(), before); XCTAssertTrue(owner.hasPendingNavigation)
         XCTAssertEqual(fixture.server.count("/form"), 2)
+        _ = try await replanResearchLink(owner)
         let resumed = try await owner.resumeCandidateNavigation(), secondReceipt = try XCTUnwrap(resumed)
         XCTAssertEqual(firstReceipt.document.operationID, ComputerUseTaskContract.digest(["browser-research-link-stage-v1", goal.taskID, goal.rootDigest, "0"]))
         XCTAssertEqual(secondReceipt.document.operationID, ComputerUseTaskContract.digest(["browser-research-link-stage-v1", goal.taskID, goal.rootDigest, "1"]))
@@ -570,6 +786,62 @@ final class ComputerUseBrowserDOMTests: XCTestCase {
         }
     }
 
+    private func replanResearchLink(_ owner: ComputerUseBrowserResearchTask) async throws -> ComputerUseBrowserResearchNavigation.ReplanResult {
+        try await owner.replanPendingCandidateNavigation(select: { _, candidates in
+            let candidate = try XCTUnwrap(candidates.candidates.first)
+            return .init(candidateID: candidate.id, linkID: try XCTUnwrap(candidate.selectedLinkIDs.first))
+        })
+    }
+
+    @discardableResult
+    private func failResearchLinkReplacement(_ owner: ComputerUseBrowserResearchTask, state: ResearchNavigationTestState) async throws -> ComputerUseBrowserResearchTask.LinkChoice {
+        state.failOnNextWrite = true
+        state.lastReplacementChoice = nil
+        do {
+            _ = try await owner.replanPendingCandidateNavigation(select: { _, candidates in
+                let candidate = try XCTUnwrap(candidates.candidates.first)
+                let choice = ComputerUseBrowserResearchTask.LinkChoice(candidateID: candidate.id, linkID: try XCTUnwrap(candidate.selectedLinkIDs.first))
+                state.lastReplacementChoice = choice
+                return choice
+            })
+            XCTFail("A failed binding write cannot publish a replacement")
+        }
+        catch { XCTAssertEqual(error as? ComputerUseTaskJournalStore.StoreError, .unavailable) }
+        XCTAssertFalse(state.failOnNextWrite)
+        return try XCTUnwrap(state.lastReplacementChoice)
+    }
+
+    private func replaceObservedFixtureRecord(in directory: URL, with value: ComputerUseTaskJournal?) throws {
+        // Fixture-only crash/storage outcomes; production cannot roll back a
+        // binding or erase an attempted operation.
+        let files = try FileManager.default.contentsOfDirectory(at: directory.appendingPathComponent("Observed Destinations"), includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "json" }
+        XCTAssertEqual(files.count, 1)
+        let file = try XCTUnwrap(files.first)
+        if let value {
+            try JSONEncoder().encode(value).write(to: file, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+        } else { try FileManager.default.removeItem(at: file) }
+    }
+
+    private func changedPendingResearchLinkFixture() async throws -> (fixture: DOMFixture, owner: ComputerUseBrowserResearchTask,
+        reader: BrowserResearchResultFixture, state: ResearchNavigationTestState, directory: URL) {
+        let prepared = try await pendingResearchLinkFixture(body: """
+            <article><h2>Concert Alpha</h2><a id='details' href='/alpha'>Alpha details</a></article>
+            <script>fetch('/signal').then(() => { document.getElementById('details').href = '/fresh'; fetch('/changed'); });</script>
+            """, heldSignal: true)
+        do {
+            try await prepared.fixture.wait { prepared.fixture.server.count("/signal") == 1 }
+            prepared.fixture.server.releaseHeldResponses()
+            try await prepared.fixture.wait { prepared.fixture.server.count("/changed") == 1 }
+            try await prepared.owner.resumeAfterUserControl()
+            return prepared
+        } catch {
+            prepared.owner.retire(); prepared.fixture.close(); try? FileManager.default.removeItem(at: prepared.directory)
+            throw error
+        }
+    }
+
     private func pendingResearchLinkFixture(
         body: String = "<article><h2>Concert Alpha</h2><a href='/alpha'>Alpha details</a></article>", heldSignal: Bool = false,
         additionalRoutes: [String: OwnedBrowserHTTPFixture.Response] = [:]
@@ -583,7 +855,7 @@ final class ComputerUseBrowserDOMTests: XCTestCase {
             reader.selectedLinkLabel = "Alpha details"
             let owner = ComputerUseBrowserResearchTask(input: goal, browser: fixture.browser, goalPlanner: BrowserResearchGoalFixture(),
                 resultPlanner: reader, navigationJournalDirectory: directory, navigationStore: { location in
-                    try .init(directory: location, afterReplacement: { MainActor.assumeIsolated { state.didReplace() } })
+                    try .init(directory: location, afterReplacement: { try MainActor.assumeIsolated { try state.didReplace() } })
                 }, mayAct: { true })
             state.owner = owner
             _ = try await owner.interpretGoal()
@@ -592,6 +864,7 @@ final class ComputerUseBrowserDOMTests: XCTestCase {
                 _ = try await owner.openCandidateLink(candidateID: candidate.id, linkID: XCTUnwrap(candidate.selectedLinkIDs.first))
                 _ = try XCTUnwrap(nil as ComputerUseBrowserNavigationReceipt?, "Expected a Pause before the native request")
             } catch is CancellationError { }
+            try await fixture.browser.waitForDOMCompletion(document: fixture.document)
             XCTAssertTrue(owner.hasPendingNavigation)
             XCTAssertEqual(try observedNavigationJournal(in: directory).statuses, [.planned])
             return (fixture, owner, reader, state, directory)
@@ -4148,14 +4421,19 @@ private final class ResearchNavigationTestState {
     var pauseBeforeDispatch = true
     var pauseOnNextWrite = false
     var retireOnNextWrite = false
+    var failOnNextWrite = false
+    var lastReplacementChoice: ComputerUseBrowserResearchTask.LinkChoice?
+    var commands: [ComputerUseBrowserDOMCommand] = []
     func didDispatch(_ command: ComputerUseBrowserDOMCommand) {
+        commands.append(command)
         if command == .validatePageLink, pauseBeforeDispatch, let owner, owner.hasPendingNavigation {
             pauseBeforeDispatch = false; owner.pause()
         }
     }
-    func didReplace() {
+    func didReplace() throws {
         if retireOnNextWrite { retireOnNextWrite = false; owner?.retire() }
         else if pauseOnNextWrite { pauseOnNextWrite = false; owner?.pause() }
+        if failOnNextWrite { failOnNextWrite = false; throw ComputerUseTaskJournalStore.StoreError.unavailable }
     }
 }
 
