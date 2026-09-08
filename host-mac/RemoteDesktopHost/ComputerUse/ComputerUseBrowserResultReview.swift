@@ -1,6 +1,6 @@
 import Foundation
 
-enum ComputerUseBrowserResultReviewError: Error, Equatable { case invalidInput, invalidProposal, inputChanged, contextLimit }
+enum ComputerUseBrowserResultReviewError: Error, Equatable { case invalidInput, invalidProposal, inputChanged, contextLimit, deadlineExceeded }
 
 /// Complete goal and exact reading proposal, with only the existing bounded
 /// page projection exposed to the model. Native destinations stay private.
@@ -113,9 +113,17 @@ struct ComputerUseBrowserResultReview: Equatable, Sendable, CustomStringConverti
     private init(input: ComputerUseBrowserResultReviewInput, candidates: [Candidate]) { self.input = input; self.candidates = candidates }
 
     static func decode(content: String, input: ComputerUseBrowserResultReviewInput) throws -> Self {
+        try decode(content: content, input: input, assembled: false)
+    }
+    static func assemble(_ assembly: ComputerUseBrowserReviewAssembly) throws -> Self {
+        try decode(content: assembly.completeContent(), input: assembly.input, assembled: true)
+    }
+    private static func decode(content: String, input: ComputerUseBrowserResultReviewInput, assembled: Bool) throws -> Self {
         do {
-            guard content.utf8.count <= 16 * 1_024 else { throw ComputerUseBrowserResultReviewError.invalidProposal }
-            var parser = StrictSemanticJSONParser(content, maximumValueCount: 2_048)
+            guard content.utf8.count <= (assembled ? 32 : 16) * 1_024 else { throw ComputerUseBrowserResultReviewError.invalidProposal }
+            var parser = StrictSemanticJSONParser(content, maximumValueCount: assembled ? 16_384 : 2_048)
+            let fieldReferenceLimit = assembled ? input.fieldCounts.reduce(0, +) * 8 : 128
+            let requirementReferenceLimit = assembled ? input.candidateCount * input.requirementCount * 8 : 128
             guard case .object(let root) = try parser.parse(), Set(root.keys) == ["candidates"],
                   case .array(let rows)? = root["candidates"], rows.count == input.candidateCount else { throw ComputerUseBrowserResultReviewError.invalidProposal }
             let observed = Set(input.textIDs)
@@ -142,7 +150,7 @@ struct ComputerUseBrowserResultReview: Equatable, Sendable, CustomStringConverti
                         guard case .string(let id) = reference, observed.contains(id), !qualifiers.contains(id) else { throw ComputerUseBrowserResultReviewError.invalidProposal }
                         qualifiers.append(id); referenceCount += 1
                     }
-                    guard referenceCount <= 128, price != .qualified || !qualifiers.isEmpty else { throw ComputerUseBrowserResultReviewError.invalidProposal }
+                    guard referenceCount <= fieldReferenceLimit, price != .qualified || !qualifiers.isEmpty else { throw ComputerUseBrowserResultReviewError.invalidProposal }
                     fields.append(.init(scope: scope, price: price, qualifierTextIDs: qualifiers))
                 }
                 var requirements: [Requirement]?
@@ -165,7 +173,7 @@ struct ComputerUseBrowserResultReview: Equatable, Sendable, CustomStringConverti
                             }
                             ids.append(id); requirementReferenceCount += 1
                         }
-                        guard requirementReferenceCount <= 128,
+                        guard requirementReferenceCount <= requirementReferenceLimit,
                               judgment == .unknown || (!ids.isEmpty && input.permitsCandidateJudgment(requirement: requirementIndex)),
                               judgment != .supports || (input.permitsOfferAssertions && association == .singleOffer) else {
                             throw ComputerUseBrowserResultReviewError.invalidProposal

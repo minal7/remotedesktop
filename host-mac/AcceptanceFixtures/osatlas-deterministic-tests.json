@@ -258,7 +258,8 @@
     "RemoteDesktopHostTests/ComputerUseBrowserUnsentInputTests",
     "RemoteDesktopHostTests/ComputerUseBrowserResearchReportTests",
     "RemoteDesktopHostTests/ComputerUseTests/test_managerResearchReportUsesResumableStatusAndReplaysWithoutAnotherReadOrSearch",
-    "RemoteDesktopHostTests/ComputerUseBrowserRequirementReviewTests"
+    "RemoteDesktopHostTests/ComputerUseBrowserRequirementReviewTests",
+    "RemoteDesktopHostTests/ComputerUseBrowserReviewPartsTests"
   ],
   "expectedTests": [
     "RemoteDesktopHostTests/AppleFoundationMCPPlannerTests/testCountedInputExpandsBeforeEffectAndTerminalQueries",
@@ -700,6 +701,15 @@
     "RemoteDesktopHostTests/ComputerUseBrowserResultReviewTests/testReviewIsBoundToExactGoalSnapshotContentsAndOriginalFieldRoles",
     "RemoteDesktopHostTests/ComputerUseBrowserResultReviewTests/testReviewKeepsTheCompleteClarifiedGoalAndSurroundingRecordsWithoutNativeAuthority",
     "RemoteDesktopHostTests/ComputerUseBrowserResultReviewTests/testTransportUsesTheExactBoundedRequestAndSkipsEmptyReadings",
+    "RemoteDesktopHostTests/ComputerUseBrowserReviewPartsTests/testAssemblyRejectsMissingDuplicateForeignAndConflictingParts",
+    "RemoteDesktopHostTests/ComputerUseBrowserReviewPartsTests/testCancellationInvalidPartAndLaterContextFailureCannotPublishAPrefixOrStartAnotherPart",
+    "RemoteDesktopHostTests/ComputerUseBrowserReviewPartsTests/testCompleteAssemblyStillRequiresTheOriginalWholeReviewValidation",
+    "RemoteDesktopHostTests/ComputerUseBrowserReviewPartsTests/testExcessiveReviewPlanStopsBeforeInferenceWithoutDroppingRequirements",
+    "RemoteDesktopHostTests/ComputerUseBrowserReviewPartsTests/testLocalPlannerCompletesBoundedPartsWithFullContextAndOneSharedDeadline",
+    "RemoteDesktopHostTests/ComputerUseBrowserReviewPartsTests/testPartDecoderRejectsChangedIndicesUnknownReferencesAndDuplicateJSONKeys",
+    "RemoteDesktopHostTests/ComputerUseBrowserReviewPartsTests/testPartsCoverEveryCandidateFieldAndRequirementWithinTheOutputBound",
+    "RemoteDesktopHostTests/ComputerUseBrowserReviewPartsTests/testReviewDeadlineCancelsAndJoinsAnInFlightCountOrCompletion",
+    "RemoteDesktopHostTests/ComputerUseBrowserReviewPartsTests/testReviewDeadlineReachesTheDriverAsAResumableOriginalTask",
     "RemoteDesktopHostTests/ComputerUseBrowserScalarRequirementsTests/testCivilDatesRejectInvalidDaysAndPreserveRangeEndpoints",
     "RemoteDesktopHostTests/ComputerUseBrowserScalarRequirementsTests/testConditionIdentityBindsOriginalTaskClockAndSourceOccurrence",
     "RemoteDesktopHostTests/ComputerUseBrowserScalarRequirementsTests/testPriceComparisonUsesExactDecimalAndStrictOrInclusiveBounds",
