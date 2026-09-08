@@ -193,7 +193,7 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                 guard let sources else {
                     return .userInterventionRequired("I need a search source that matches your request. The original task is still pending.")
                 }
-                try owner.configureSourcePolicy(sources.policy)
+                try owner.configureResearchSources(sources)
                 run.sources = sources
             }
             if owner.initialSearchState == .notPrepared {

@@ -178,8 +178,11 @@ struct ComputerUseBrowserResultCandidates: Sendable, CustomStringConvertible, Cu
         var description: String { "BrowserResultCandidate(fields: \(fields.count), texts: \(texts.count), links: \(links.count))" }
         var debugDescription: String { description }
     }
+    enum DocumentAnswerSourceStatus: String, Sendable { case unconfigured, permitted, excluded }
     let goalRevision: String
     let candidates: [Candidate]
+    let documentAnswerSourceStatus: DocumentAnswerSourceStatus
+    fileprivate let answerSourcePolicy: ComputerUseBrowserAnswerSourcePolicy?
     let containers: [ComputerUseBrowserPageSnapshot.Container]
     let surroundingTexts: [Text]
     let surroundingLinks: [Link]
@@ -192,8 +195,11 @@ struct ComputerUseBrowserResultCandidates: Sendable, CustomStringConvertible, Cu
     fileprivate let rootTaskID: String
     fileprivate let readingInput: ComputerUseBrowserResultPageInput
 
-    fileprivate init(proposal: ComputerUseBrowserResultProposal, goal: ComputerUseBrowserGoalInput, evidence: ComputerUseBrowserPageEvidence) {
+    fileprivate init(proposal: ComputerUseBrowserResultProposal, goal: ComputerUseBrowserGoalInput,
+                     evidence: ComputerUseBrowserPageEvidence, answerPolicy: ComputerUseBrowserAnswerSourcePolicy?) {
         self.evidence = evidence; goalRevision = goal.digest; rootTaskID = goal.taskID
+        answerSourcePolicy = answerPolicy
+        documentAnswerSourceStatus = answerPolicy.map { $0.permitsEvidenceFrom(evidence.document.committedURL) ? .permitted : .excluded } ?? .unconfigured
         readingInput = proposal.input
         let page = evidence.page, tree = ComputerUseBrowserResultProposal.Tree(page)
         containers = page.containers
@@ -213,6 +219,7 @@ struct ComputerUseBrowserResultCandidates: Sendable, CustomStringConvertible, Cu
                 String(evidence.document.generation), evidence.documentID, page.id, selection.containerID]
                 + selection.fields.flatMap { [$0.kind.rawValue, String($0.textIDs.count)] + $0.textIDs }
                 + [String(selection.linkIDs.count)] + selection.linkIDs
+                + (answerPolicy.map { ["answer-source-policy", $0.digest] } ?? [])
             return Candidate(id: ComputerUseTaskContract.digest(identity), containerID: selection.containerID, fields: selection.fields,
                 texts: texts.map(text), links: links.map(link), selectedLinkIDs: selection.linkIDs,
                 unclassifiedTextIDs: texts.filter { !assigned.contains($0.id) }.map(\.id),
@@ -257,14 +264,16 @@ struct ComputerUseBrowserLinkSelectionInput: Equatable, Sendable, CustomStringCo
         let visits: [[String: Any]] = history.enumerated().map {
             ["step":$0.offset, "kind":$0.element.kind.rawValue, "current_goal_revision":$0.element.goalRevision == goal.digest]
         }
-        let context: [String: Any] = ["version":1, "goal":goal.plannerContext,
+        let context: [String: Any] = ["version":2, "goal":goal.plannerContext,
             "page":try JSONSerialization.jsonObject(with: Data(candidates.readingInput.contextJSON.utf8)),
-            "candidates":groups, "navigation_history":visits]
+            "candidates":groups, "navigation_history":visits,
+            "document_answer_source_status":candidates.documentAnswerSourceStatus.rawValue]
         contextJSON = String(decoding: try JSONSerialization.data(withJSONObject: context, options: [.sortedKeys]), as: UTF8.self)
         let evidence = candidates.evidence
         bindingDigest = ComputerUseTaskContract.digest(["browser-link-selection-input-v1", goal.digest,
             evidence.document.contextID, String(evidence.document.generation), evidence.documentID, evidence.page.id, contextJSON]
             + choices.flatMap { [$0.candidateID, String($0.links.count)] + $0.links }
+            + (candidates.answerSourcePolicy.map { ["answer-source-policy", $0.digest] } ?? [])
             + history.flatMap { [$0.operationID, $0.goalRevision, $0.kind.rawValue] })
     }
 
@@ -298,15 +307,30 @@ extension ComputerUseOwnedBrowser {
     /// Preparation rereads the native page before returning source bindings.
     /// It neither follows links nor certifies semantic offer associations.
     func prepareResultCandidates(_ proposal: ComputerUseBrowserResultProposal, goal: ComputerUseBrowserGoalInput,
-                                 evidence: ComputerUseBrowserPageEvidence) async throws -> ComputerUseBrowserResultCandidates {
+                                 evidence: ComputerUseBrowserPageEvidence,
+                                 answerPolicy: ComputerUseBrowserAnswerSourcePolicy? = nil) async throws -> ComputerUseBrowserResultCandidates {
         try Task.checkCancellation()
-        guard proposal.goalRevision == goal.digest, goal.taskID.utf8.elementsEqual(evidence.document.taskID.utf8) else {
+        guard proposal.goalRevision == goal.digest, goal.taskID.utf8.elementsEqual(evidence.document.taskID.utf8),
+              answerPolicy == nil || answerPolicy?.goalRevision == goal.digest else {
             throw ComputerUseBrowserResultError.goalChanged
         }
         guard proposal.input.page == evidence.page else { throw ComputerUseBrowserResultError.invalidPage }
         try await validatePageEvidence(evidence)
         try Task.checkCancellation()
-        return .init(proposal: proposal, goal: goal, evidence: evidence)
+        return .init(proposal: proposal, goal: goal, evidence: evidence, answerPolicy: answerPolicy)
+    }
+
+    /// A necessary source check for future answer assembly, never sufficient
+    /// result verification. Search snippets and labels naming an allowed site
+    /// do not change the actual document origin that supplied their content.
+    func validateResultAnswerSource(_ batch: ComputerUseBrowserResultCandidates, goal: ComputerUseBrowserGoalInput,
+                                    policy: ComputerUseBrowserAnswerSourcePolicy) async throws {
+        try Task.checkCancellation()
+        guard policy.goalRevision == goal.digest, batch.answerSourcePolicy == policy,
+              batch.documentAnswerSourceStatus == .permitted else { throw ComputerUseBrowserError.sourceNotAllowed }
+        try await validateResultCandidates(batch, goal: goal)
+        try Task.checkCancellation()
+        guard policy.permitsEvidenceFrom(batch.evidence.document.committedURL) else { throw ComputerUseBrowserError.sourceNotAllowed }
     }
 
     /// Reporting later must revalidate against the actual current goal and

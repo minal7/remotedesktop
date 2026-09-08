@@ -175,7 +175,7 @@ final class ComputerUseBrowserGoalClarificationTests: XCTestCase {
         }
         let format = try XCTUnwrap(body["response_format"] as? [String: Any])
         let contract = try XCTUnwrap(format["json_schema"] as? [String: Any])
-        XCTAssertEqual(contract["name"] as? String, "browser_goal_proposal_v3")
+        XCTAssertEqual(contract["name"] as? String, "browser_goal_proposal_v4")
     }
 
     func testClarifiedScalarCompilationKeepsEarlierConstraintsAndUsesOriginalDateAnchor() throws {

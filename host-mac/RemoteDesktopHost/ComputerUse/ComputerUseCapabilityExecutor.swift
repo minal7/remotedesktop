@@ -430,16 +430,23 @@ enum ComputerUseNativeTextExecutorLoader {
                      bundle: Bundle = .main, runtime: OSAtlasLlamaRuntime = .shared,
                      journalDirectory: URL = ComputerUseTextStepStore.defaultDirectory,
                      progress: @escaping (String) -> Void) async throws -> ComputerUseCapabilityExecutor {
-        progress("Loading local form editing…")
+        progress("Loading local computer use…")
         let directory = try OSAtlasVisualExecutorLoader.bundledRuntimeDirectoryURL(in: bundle)
         let inputs = try OSAtlasRuntimeInputResolver(manifest: .nativeTextV2).resolveNativeText(
             receipt: receipt, runtimeDirectoryURL: directory, enclosingBundleURL: bundle.bundleURL)
+        let providers = try ComputerUseBrowserSourceRequirements.defaultProviders()
         let endpoint = try await runtime.activateNativeText(inputs)
         do { try Task.checkCancellation() }
         catch { await runtime.cancel(endpoint: endpoint); throw error }
         let native = tools.makeNativeTextExecutor(
             planner: ComputerUseRuntimeTextGoalPlanner(inputs: inputs, runtime: runtime),
             journalDirectory: journalDirectory)
-        return ComputerUseCapabilityExecutor(native: native)
+        let research = ComputerUseBrowserResearchDriver(
+            goalPlanner: ComputerUseRuntimeBrowserGoalPlanner(inputs: inputs, runtime: runtime),
+            resultPlanner: ComputerUseRuntimeBrowserResultPlanner(inputs: inputs, runtime: runtime),
+            searchPlanner: ComputerUseRuntimeBrowserSearchPlanner(inputs: inputs, runtime: runtime),
+            planning: ComputerUseModelBrowserResearchPlanning(providers: providers,
+                linkPlanner: ComputerUseRuntimeBrowserLinkPlanner(inputs: inputs, runtime: runtime)))
+        return ComputerUseCapabilityExecutor(native: native, browserResearch: research)
     }
 }

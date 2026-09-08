@@ -49,7 +49,7 @@ final class ComputerUseBrowserGoalPlannerTests: XCTestCase {
     func testQuestionTopicsSelectOnlySourceBoundHostScopesAndKeepOccurrenceIdentity() throws {
         let cases: [(ComputerUseBrowserClarificationTopic, String)] = [(.origin, "origin"), (.destination, "destination"),
             (.location, "location"), (.date, "date"), (.time, "time"), (.quantity, "quantity"),
-            (.currency, "price"), (.priceBasis, "price"), (.fees, "fees")]
+            (.currency, "price"), (.priceBasis, "price"), (.fees, "fees"), (.source, "source")]
         let input = try goal("Find tickets. More details needed.")
         for (topic, field) in cases {
             let rows = [row("Find tickets. ", role: "outcome"), row("More details needed.", role: "clarification", field: field)]
@@ -235,7 +235,7 @@ final class ComputerUseBrowserGoalPlannerTests: XCTestCase {
         XCTAssertEqual(body["max_tokens"] as? Int, 1_024); XCTAssertEqual(body["cache_prompt"] as? Bool, false)
         let format = try XCTUnwrap(body["response_format"] as? [String: Any])
         let contract = try XCTUnwrap(format["json_schema"] as? [String: Any])
-        XCTAssertEqual(contract["name"] as? String, "browser_goal_proposal_v3")
+        XCTAssertEqual(contract["name"] as? String, "browser_goal_proposal_v4")
         let schema = try XCTUnwrap(contract["schema"] as? [String: Any])
         XCTAssertEqual(schema["additionalProperties"] as? Bool, false)
         XCTAssertEqual(Set(try XCTUnwrap(schema["required"] as? [String])), ["disposition", "requirements", "question"])

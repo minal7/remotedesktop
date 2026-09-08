@@ -3,7 +3,7 @@ import Foundation
 /// Host-authored task questions only. Account authentication continues to use
 /// visible manual takeover, not this answer channel or model-authored text.
 enum ComputerUseBrowserClarificationTopic: String, CaseIterable, Sendable {
-    case origin, destination, location, date, time, quantity, currency, priceBasis, fees
+    case origin, destination, location, date, time, quantity, currency, priceBasis, fees, source
     var question: String {
         switch self {
         case .origin: return "Where will you be traveling from?"
@@ -15,9 +15,12 @@ enum ComputerUseBrowserClarificationTopic: String, CaseIterable, Sendable {
         case .currency: return "Which currency do you mean? Please give its three-letter code."
         case .priceBasis: return "Is the budget a total, per person or per ticket?"
         case .fees: return "Should the price limit include fees?"
+        case .source: return "Which exact websites should I include or exclude, and does that limit the pages I may visit or only the sources of the results I report? Please include the domain names."
         }
     }
     func accepts(_ requirement: ComputerUseBrowserGoalProposal.Requirement) -> Bool {
+        if self == .source, scopeFields.contains(requirement.field),
+           requirement.role == .prohibition || requirement.role == .order { return true }
         if requirement.role == .outcome { return true } // A missing detail may have no separate source clause.
         guard requirement.role == .condition || requirement.role == .clarification else { return false }
         return scopeFields.contains(requirement.field)
@@ -32,6 +35,7 @@ enum ComputerUseBrowserClarificationTopic: String, CaseIterable, Sendable {
         case .quantity: return [.quantity]
         case .currency, .priceBasis: return [.price]
         case .fees: return [.fees, .price]
+        case .source: return [.source, .navigationSource, .answerSource]
         }
     }
 }

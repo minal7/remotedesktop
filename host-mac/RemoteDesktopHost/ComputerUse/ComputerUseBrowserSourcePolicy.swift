@@ -75,15 +75,37 @@ struct ComputerUseBrowserSourcePolicy: Equatable, Sendable, CustomStringConverti
     var debugDescription: String { description }
 }
 
-/// Provider and document constraints are selected atomically by host policy.
+/// Eligibility of the document supplying an answer's evidence, independently
+/// of auxiliary navigation. This cannot establish the seller, offer, public
+/// link, relevance or other requested facts merely from the document's origin.
+struct ComputerUseBrowserAnswerSourcePolicy: Equatable, Sendable {
+    private let origins: ComputerUseBrowserSourcePolicy
+    let goalRevision: String
+    let digest: String
+    init(goal: ComputerUseBrowserGoalInput, allowedOrigins: [ComputerUseBrowserSourceOrigin]? = nil,
+         excludedOrigins: [ComputerUseBrowserSourceOrigin] = []) throws {
+        origins = try .init(goal: goal, allowedOrigins: allowedOrigins, excludedOrigins: excludedOrigins)
+        goalRevision = goal.digest
+        digest = ComputerUseTaskContract.digest(["browser-answer-source-policy-v1", origins.digest])
+    }
+    func permitsEvidenceFrom(_ url: URL) -> Bool { origins.permits(url) }
+}
+
+/// Provider, document constraints and answer sources are selected atomically.
 /// An omitted plan retains the unresolved task instead of widening its scope.
 struct ComputerUseBrowserResearchSources: Sendable {
     let provider: ComputerUseBrowserSearchProvider
     let policy: ComputerUseBrowserSourcePolicy
+    let answerPolicy: ComputerUseBrowserAnswerSourcePolicy
+    let digest: String
     init(goal: ComputerUseBrowserGoalInput, provider: ComputerUseBrowserSearchProvider,
-         allowedOrigins: [ComputerUseBrowserSourceOrigin]? = nil, excludedOrigins: [ComputerUseBrowserSourceOrigin] = []) throws {
+         allowedOrigins: [ComputerUseBrowserSourceOrigin]? = nil, excludedOrigins: [ComputerUseBrowserSourceOrigin] = [],
+         answerAllowedOrigins: [ComputerUseBrowserSourceOrigin]? = nil, answerExcludedOrigins: [ComputerUseBrowserSourceOrigin] = []) throws {
         let policy = try ComputerUseBrowserSourcePolicy(goal: goal, allowedOrigins: allowedOrigins, excludedOrigins: excludedOrigins)
         try provider.validateSourcePolicy(policy)
-        self.provider = provider; self.policy = policy
+        let answerPolicy = try ComputerUseBrowserAnswerSourcePolicy(goal: goal,
+            allowedOrigins: answerAllowedOrigins, excludedOrigins: answerExcludedOrigins)
+        self.provider = provider; self.policy = policy; self.answerPolicy = answerPolicy
+        digest = ComputerUseTaskContract.digest(["browser-research-sources-v1", provider.digest, policy.digest, answerPolicy.digest])
     }
 }

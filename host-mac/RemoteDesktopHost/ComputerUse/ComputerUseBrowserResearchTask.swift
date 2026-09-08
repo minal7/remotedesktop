@@ -34,6 +34,7 @@ final class ComputerUseBrowserResearchTask {
     struct Interpretation: Sendable {
         let proposal: ComputerUseBrowserGoalProposal
         let scalars: ComputerUseBrowserScalarRequirements
+        var sources: ComputerUseBrowserSourceRequirements { .init(proposal: proposal) }
     }
     struct LinkChoice: Sendable { let candidateID: String; let linkID: String }
     enum InitialSearchState: Equatable, Sendable { case notPrepared, pending, confirmed }
@@ -51,6 +52,7 @@ final class ComputerUseBrowserResearchTask {
     private var browserAdmissionID: UUID?
     private var initialSearch: ComputerUseBrowserInitialSearch?
     private var sourcePolicy: ComputerUseBrowserSourcePolicy?
+    private var researchSources: ComputerUseBrowserResearchSources?
     private var sourcePolicyInstalled = false
     private var interpretation: Interpretation?
     private var latestCandidates: ComputerUseBrowserResultCandidates?
@@ -90,15 +92,32 @@ final class ComputerUseBrowserResearchTask {
     /// Configure one immutable policy per accepted goal revision. Pending
     /// effects retain their original policy; no browser is allocated here.
     func configureSourcePolicy(_ policy: ComputerUseBrowserSourcePolicy) throws {
+        try configureSourcePolicy(policy, sources: nil)
+    }
+
+    private func configureSourcePolicy(_ policy: ComputerUseBrowserSourcePolicy, sources: ComputerUseBrowserResearchSources?) throws {
         try requireIdle()
         guard !hasPendingNavigation, !hasQuestion, policy.taskID == taskID,
               policy.rootDigest == input.rootDigest, policy.goalRevision == input.digest else { throw Failure.goalChanged }
         if let sourcePolicy, sourcePolicy.goalRevision == policy.goalRevision, sourcePolicy != policy { throw Failure.goalChanged }
         let captured = input, epoch = controlEpoch
         if let session { try browser.installSourcePolicy(policy, replacing: sourcePolicyInstalled ? sourcePolicy?.digest : nil, session: session) }
-        if !isRetired, input == captured { sourcePolicy = policy; sourcePolicyInstalled = session != nil; latestCandidates = nil }
+        if !isRetired, input == captured {
+            sourcePolicy = policy; sourcePolicyInstalled = session != nil; latestCandidates = nil
+            // Retain the complete selected plan alongside a known native
+            // installation before a reentrant Pause can reject publication.
+            if let sources { researchSources = sources }
+        }
         try checkCurrent(captured)
         guard controlEpoch == epoch else { throw Failure.paused }
+    }
+
+    func configureResearchSources(_ sources: ComputerUseBrowserResearchSources) throws {
+        try requireIdle()
+        guard sources.answerPolicy.goalRevision == input.digest else { throw Failure.goalChanged }
+        if let previous = researchSources, previous.policy.goalRevision == input.digest,
+           previous.digest != sources.digest { throw Failure.goalChanged }
+        try configureSourcePolicy(sources.policy, sources: sources)
     }
 
     init(input: ComputerUseBrowserGoalInput, browser: ComputerUseOwnedBrowser,
@@ -141,8 +160,14 @@ final class ComputerUseBrowserResearchTask {
         guard !hasPendingNavigation else { throw Failure.navigationPending }
         guard !hasQuestion else { throw Failure.questionPending }
         guard let interpretation, interpretation.proposal.input.digest == input.digest else { throw Failure.interpretationRequired }
-        guard let question = interpretation.proposal.question else { return nil }
-        return .init(taskID: taskID, inputDigest: input.digest, topic: question.topic, requirementIDs: question.requirementIDs)
+        if let question = interpretation.proposal.question {
+            return .init(taskID: taskID, inputDigest: input.digest, topic: question.topic, requirementIDs: question.requirementIDs)
+        }
+        guard interpretation.proposal.disposition == .research else { return nil }
+        let unresolved = Set(interpretation.sources.unresolved.map(\.requirementID))
+        let scope = interpretation.proposal.requirements.filter { unresolved.contains($0.id) && ComputerUseBrowserClarificationTopic.source.accepts($0) }
+        guard !scope.isEmpty else { return nil }
+        return .init(taskID: taskID, inputDigest: input.digest, topic: .source, requirementIDs: Array(scope.prefix(8)).map(\.id))
     }
 
     /// Propose a first search from the complete retained user source. This
@@ -565,7 +590,9 @@ final class ComputerUseBrowserResearchTask {
         let page = try ComputerUseBrowserResultPageInput(page: evidence.page)
         let proposal = try await resultPlanner.propose(goal: goal, page: page)
         try checkCurrent(goal)
-        let bound = try await browser.prepareResultCandidates(proposal, goal: goal, evidence: evidence)
+        let answerPolicy = researchSources?.answerPolicy
+        guard answerPolicy == nil || answerPolicy?.goalRevision == goal.digest else { throw Failure.goalChanged }
+        let bound = try await browser.prepareResultCandidates(proposal, goal: goal, evidence: evidence, answerPolicy: answerPolicy)
         try checkCurrent(goal)
         return bound
     }
