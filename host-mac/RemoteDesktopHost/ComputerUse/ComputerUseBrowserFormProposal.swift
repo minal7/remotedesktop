@@ -21,7 +21,7 @@ struct ComputerUseBrowserFormProposal: Equatable, Sendable, CustomStringConverti
     }
     struct Preservation: Equatable, Sendable {
         let field: String
-        let requirementIndex: Int
+        let source: ComputerUseBrowserFormSource
     }
     private let input: ComputerUseBrowserResearchFormInput
     let edits: [Edit]
@@ -91,8 +91,8 @@ struct ComputerUseBrowserFormProposal: Equatable, Sendable, CustomStringConverti
                 let index = try requirementIndex(reference, input: input)
                 guard [.outcome, .condition, .prohibition].contains(input.interpretation.requirements[index].role) else { throw invalid }
                 if let required = preserved.first(where: { $0.field == alias }) {
-                    guard required.requirementIndex == index else { throw invalid }
-                } else { preserved.append(.init(field: alias, requirementIndex: index)) }
+                    guard try required.source.indices(in: input.interpretation).contains(index) else { throw invalid }
+                } else { preserved.append(.init(field: alias, source: try .init(index: index, interpretation: input.interpretation))) }
             }
             return .init(input: input, edits: edits, preserved: preserved)
         } catch { throw invalid }

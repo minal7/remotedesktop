@@ -6,6 +6,7 @@ struct ComputerUseBrowserResearchFormContinuation: Equatable, Sendable, CustomSt
     let taskID: String
     let rootDigest: String
     let goalRevision: String
+    let goal: ComputerUseBrowserGoalInput
     let document: ComputerUseBrowserDocument
     let documentID: String
     let formID: String?
@@ -13,18 +14,19 @@ struct ComputerUseBrowserResearchFormContinuation: Equatable, Sendable, CustomSt
     let finalValues: [String: String]
     let editedTargetIDs: Set<String>
     let inputOperationIDs: [String]
-    let preservedControls: [ComputerUseBrowserControlPreservation]
-    let editedRequirements: [String: [Int]]
+    let preservedControls: [ComputerUseBrowserFormPreservationSource]
+    let editedSources: [String: [ComputerUseBrowserFormSource]]
     let digest: String
 
     @MainActor fileprivate init(stage: ComputerUseBrowserResearchFormStage, current: ComputerUseTextTaskContinuation) throws {
         let input = stage.input, previous = input.previous
         guard current.taskID == input.interpretation.input.taskID,
               current.contractDigest == stage.contract.contractDigest,
-              previous == nil || (previous?.goalRevision == input.interpretation.input.digest
+              previous == nil || (previous.map { input.interpretation.input.continues($0.goal) } == true
                 && previous?.document == input.evidence.page.document && previous?.documentID == input.evidence.page.documentID
                 && previous?.formID == input.selectedFormID) else { throw ComputerUseBrowserResearchFormStage.Failure.invalidStage }
         taskID = current.taskID; rootDigest = input.interpretation.input.rootDigest; goalRevision = input.interpretation.input.digest
+        goal = input.interpretation.input
         document = input.evidence.page.document; documentID = input.evidence.page.documentID; formID = input.selectedFormID
         stageIDs = (previous?.stageIDs ?? []) + [stage.id]
         inputOperationIDs = (previous?.inputOperationIDs ?? []) + current.inputOperationIDs
@@ -41,25 +43,30 @@ struct ComputerUseBrowserResearchFormContinuation: Equatable, Sendable, CustomSt
             throw ComputerUseBrowserResearchFormStage.Failure.invalidStage
         }
         preservedControls = try stage.proposal.preserved.map {
-            .init(controlID: try input.field(for: $0.field).control.id, requirementIndex: $0.requirementIndex)
+            .init(controlID: try input.field(for: $0.field).control.id, source: $0.source)
         }
-        var requirements = previous?.editedRequirements ?? [:]
+        var sources = previous?.editedSources ?? [:]
         for edit in stage.proposal.edits {
             let targetID = try input.field(for: edit.field).editable.snapshot.targetID
             switch edit.payload {
             case .text(let query):
-                requirements[targetID] = try query.terms.map { term in
+                sources[targetID] = try query.terms.map { term in
                     guard let index = input.interpretation.requirements.firstIndex(where: { $0.id == term.requirementID }) else {
                         throw ComputerUseBrowserResearchFormStage.Failure.invalidStage
                     }
-                    return index
+                    return try .init(index: index, interpretation: input.interpretation)
                 }
-            case .normalized(let value): requirements[targetID] = [value.requirementIndex]
-            case .choice(_, let index): requirements[targetID] = [index]
+            case .normalized(let value): sources[targetID] = [try .init(index: value.requirementIndex, interpretation: input.interpretation)]
+            case .choice(_, let index): sources[targetID] = [try .init(index: index, interpretation: input.interpretation)]
             }
+            // Several query terms may cite the same original clause. Retain
+            // that source once, without repeating it in every later context.
+            var unique: [ComputerUseBrowserFormSource] = []
+            for source in sources[targetID] ?? [] where !unique.contains(source) { unique.append(source) }
+            sources[targetID] = unique
         }
-        editedRequirements = requirements
-        digest = ComputerUseTaskContract.digest(["browser-research-form-continuation-v1", taskID, rootDigest, goalRevision,
+        editedSources = sources
+        digest = ComputerUseTaskContract.digest(["browser-research-form-continuation-v2", taskID, rootDigest, goalRevision,
             document.contextID, String(document.generation), documentID, formID ?? "", previous?.digest ?? "", current.digest]
             + stageIDs + inputOperationIDs)
     }
@@ -194,7 +201,7 @@ final class ComputerUseBrowserResearchFormStage {
         guard !isExecuting else { throw Failure.busy }
         guard !isRetired else { throw Failure.retired }
         guard completed != nil, let continuation else { throw Failure.notVerified }
-        guard interpretation == input.interpretation, formID == input.selectedFormID,
+        guard interpretation.disposition == .research, interpretation.input.continues(input.interpretation.input), formID == input.selectedFormID,
               page.document == input.evidence.page.document, page.documentID == input.evidence.page.documentID else {
             throw ComputerUseBrowserActionPlanError.retainedFormRequiresExtension
         }

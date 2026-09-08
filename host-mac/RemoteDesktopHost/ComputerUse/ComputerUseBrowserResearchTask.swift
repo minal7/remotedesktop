@@ -301,7 +301,7 @@ final class ComputerUseBrowserResearchTask {
         guard !hasQuestion else { throw Failure.questionPending }
         guard let interpretation, interpretation.proposal.input == input,
               interpretation.proposal.disposition == .research else { throw Failure.interpretationRequired }
-        guard sourcePolicy == nil || sourcePolicyInstalled else { throw Failure.navigationUnavailable }
+        guard sourcePolicy == nil || (sourcePolicyInstalled && sourcePolicy?.goalRevision == input.digest) else { throw Failure.navigationUnavailable }
         let captured = input
         latestCandidates = nil; latestForm = nil; latestAction = nil
         let action = try await operate { [self] in
@@ -354,7 +354,7 @@ final class ComputerUseBrowserResearchTask {
         guard !hasQuestion else { throw Failure.questionPending }
         guard let interpretation, interpretation.proposal.input == input,
               interpretation.proposal.disposition == .research else { throw Failure.interpretationRequired }
-        guard sourcePolicy == nil || sourcePolicyInstalled else { throw Failure.navigationUnavailable }
+        guard sourcePolicy == nil || (sourcePolicyInstalled && sourcePolicy?.goalRevision == input.digest) else { throw Failure.navigationUnavailable }
         let captured = input
         latestCandidates = nil; latestForm = nil; latestAction = nil
         let prepared = try await operate { [self] in
@@ -481,7 +481,8 @@ final class ComputerUseBrowserResearchTask {
         guard !hasPendingNavigation else { throw Failure.navigationPending }
         guard !hasQuestion else { throw Failure.questionPending }
         guard let formStage else { return nil }
-        guard formStage.input.interpretation.input == input else { throw Failure.goalChanged }
+        guard formStage.input.interpretation.input == input
+                || (formStage.nativeReceipt != nil && input.continues(formStage.input.interpretation.input)) else { throw Failure.goalChanged }
         latestForm = nil; latestAction = nil; latestCandidates = nil
         return try await runForm(formStage)
     }
@@ -542,7 +543,7 @@ final class ComputerUseBrowserResearchTask {
             try requireCompletedForm(receipt)
             guard let formStage, let directory = navigationDirectory else { throw Failure.formUnavailable }
             query = try .init(form: receipt, controlID: controlID, evidence: evidence, stage: formStage,
-                browser: browser, journalDirectory: directory, makeStore: navigationStore)
+                browser: browser, journalDirectory: directory, currentGoal: input, makeStore: navigationStore)
             formNavigation = query
         }
         guard query.goal == input else { throw Failure.goalChanged }
@@ -576,7 +577,8 @@ final class ComputerUseBrowserResearchTask {
         guard !hasPendingForm else { throw Failure.formPending }
         guard !hasQuestion else { throw Failure.questionPending }
         guard let formStage, formStage.id == receipt.stageID, confirmedFormHistory.last == receipt,
-              formStage.input.interpretation.input == input else { throw Failure.formUnavailable }
+              input.continues(formStage.input.interpretation.input) else { throw Failure.formUnavailable }
+        guard sourcePolicy == nil || (sourcePolicyInstalled && sourcePolicy?.goalRevision == input.digest) else { throw Failure.navigationUnavailable }
     }
 
     func readCandidates() async throws -> ComputerUseBrowserResultCandidates {

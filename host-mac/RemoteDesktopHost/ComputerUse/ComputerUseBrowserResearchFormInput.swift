@@ -8,6 +8,51 @@ struct ComputerUseBrowserControlPreservation: Equatable, Sendable {
     let requirementIndex: Int
 }
 
+/// Historical source bytes, independent of a later model's requirement IDs
+/// and segmentation. A projection identifies overlap, not semantic equivalence.
+struct ComputerUseBrowserFormSource: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    let turn: Int
+    let offset: Int
+    let source: String
+    let role: ComputerUseBrowserGoalProposal.Role
+    let field: ComputerUseBrowserGoalProposal.Field
+
+    init(index: Int, interpretation: ComputerUseBrowserGoalProposal) throws {
+        guard interpretation.requirements.indices.contains(index),
+              let source = interpretation.source(of: interpretation.requirements[index]) else { throw ComputerUseBrowserResearchFormError.invalidInput }
+        let requirement = interpretation.requirements[index]
+        turn = requirement.sourceTurnIndex; offset = requirement.sourceByteOffset; self.source = source
+        role = requirement.role; field = requirement.field
+    }
+
+    func indices(in interpretation: ComputerUseBrowserGoalProposal) throws -> [Int] {
+        guard interpretation.input.userTurns.indices.contains(turn) else { throw ComputerUseBrowserResearchFormError.inputChanged }
+        let bytes = Array(interpretation.input.userTurns[turn].utf8), end = offset + source.utf8.count
+        guard offset >= 0, end <= bytes.count, bytes[offset..<end].elementsEqual(source.utf8) else {
+            throw ComputerUseBrowserResearchFormError.inputChanged
+        }
+        let indices = interpretation.requirements.indices.filter {
+            let current = interpretation.requirements[$0]
+            return current.sourceTurnIndex == turn && current.sourceByteOffset < end
+                && offset < current.sourceByteOffset + current.sourceByteCount
+        }
+        guard !indices.isEmpty else { throw ComputerUseBrowserResearchFormError.inputChanged }
+        return indices
+    }
+
+    func context(in interpretation: ComputerUseBrowserGoalProposal) throws -> [String: Any] {
+        ["turn":turn, "sourceByteOffset":offset, "source":source, "role_at_edit":role.rawValue,
+            "field_at_edit":field.rawValue, "requirements":try indices(in: interpretation)]
+    }
+    var description: String { "BrowserFormSource" }
+    var debugDescription: String { description }
+}
+
+struct ComputerUseBrowserFormPreservationSource: Equatable, Sendable {
+    let controlID: String
+    let source: ComputerUseBrowserFormSource
+}
+
 /// Proposal-only form context. Aliases describe native correspondence, not
 /// permission to edit or submit. The original request and every accepted answer
 /// remain intact; a later compiler must account for the remaining requirements.
@@ -58,7 +103,7 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
               Set(preservedControls.map(\.controlID)).count == preservedControls.count else { throw ComputerUseBrowserResearchFormError.invalidInput }
         if let previous {
             guard previous.taskID == interpretation.input.taskID, previous.rootDigest == interpretation.input.rootDigest,
-                  previous.goalRevision == interpretation.input.digest, previous.formID == selectedFormID,
+                  interpretation.input.continues(previous.goal), previous.formID == selectedFormID,
                   previous.document == evidence.page.document, previous.documentID == evidence.page.documentID,
                   previous.finalValues.allSatisfy({ id, value in
                       evidence.fields.contains { $0.editable.snapshot.targetID == id && $0.editable.snapshot.value.utf8.elementsEqual(value.utf8) }
@@ -66,9 +111,11 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
         }
         var carriedControls = previous?.preservedControls ?? []
         for control in preservedControls {
+            let source = try ComputerUseBrowserFormSource(index: control.requirementIndex, interpretation: interpretation)
+            guard [.outcome, .condition, .prohibition].contains(source.role) else { throw ComputerUseBrowserResearchFormError.invalidInput }
             if let earlier = carriedControls.first(where: { $0.controlID == control.controlID }) {
-                guard earlier == control else { throw ComputerUseBrowserResearchFormError.invalidInput }
-            } else { carriedControls.append(control) }
+                guard try earlier.source.indices(in: interpretation).contains(control.requirementIndex) else { throw ComputerUseBrowserResearchFormError.invalidInput }
+            } else { carriedControls.append(.init(controlID: control.controlID, source: source)) }
         }
         let serialized = try ComputerUseBrowserPlanningContext(page: evidence.page.page).serialized()
         guard let page = try JSONSerialization.jsonObject(with: Data(serialized.utf8)) as? [String: Any],
@@ -82,11 +129,11 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
         let aliases = evidence.fields.indices.map { "field\($0 + 1)" }
         let preserved: [ComputerUseBrowserFormProposal.Preservation] = try carriedControls.map { item in
             guard let index = evidence.fields.firstIndex(where: { $0.control.id == item.controlID }),
-                  interpretation.requirements.indices.contains(item.requirementIndex),
-                  [.outcome, .condition, .prohibition].contains(interpretation.requirements[item.requirementIndex].role) else {
+                  [.outcome, .condition, .prohibition].contains(item.source.role) else {
                 throw ComputerUseBrowserResearchFormError.invalidInput
             }
-            return .init(field: aliases[index], requirementIndex: item.requirementIndex)
+            _ = try item.source.indices(in: interpretation)
+            return .init(field: aliases[index], source: item.source)
         }
         let preservedIDs = Set(carriedControls.map(\.controlID))
         if let selectedFormID {
@@ -109,14 +156,15 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
                 "relation":requirement.relation.rawValue, "values":requirement.values]
         }
         let normalized = Self.normalizations(for: interpretation)
-        let priorEdits: [[String: Any]] = zip(aliases, evidence.fields).compactMap { alias, field in
-            guard let indices = previous?.editedRequirements[field.editable.snapshot.targetID] else { return nil }
-            return ["field":alias, "requirements":indices]
+        let priorEdits: [[String: Any]] = try zip(aliases, evidence.fields).compactMap { alias, field in
+            guard let sources = previous?.editedSources[field.editable.snapshot.targetID] else { return nil }
+            return ["field":alias, "sources":try sources.map { try $0.context(in: interpretation) }]
         }
-        let context: [String: Any] = ["version":5, "goal":interpretation.input.plannerContext,
+        let context: [String: Any] = ["version":6, "goal":interpretation.input.plannerContext,
             "selected_form":selectedFormID.map { $0 as Any } ?? NSNull(),
-            "required_preservation":preserved.map { ["field":$0.field, "requirement":$0.requirementIndex] as [String: Any] },
+            "required_preservation":try preserved.map { ["field":$0.field, "source":try $0.source.context(in: interpretation)] as [String: Any] },
             "previous_edits":priorEdits,
+            "current_goal_revision_at_previous_stage":previous.map { $0.goalRevision == interpretation.input.digest } ?? true,
             "requirements":requirements, "page":page, "field_bindings":bindings,
             "normalized_values":normalized.map { ["id":$0.id, "requirement":$0.requirementIndex,
                 "kind":$0.kind.rawValue, "value":$0.value, "unit":$0.unit] as [String: Any] }]

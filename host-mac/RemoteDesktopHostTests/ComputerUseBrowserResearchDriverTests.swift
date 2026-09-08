@@ -614,10 +614,12 @@ final class DriverFixtureState {
 @MainActor
 final class DriverGoalFixture: ComputerUseBrowserGoalPlanning {
     let base = BrowserResearchGoalFixture()
+    var select: ((ComputerUseBrowserGoalInput) throws -> String)?
     var unsupported = false
     var inputs: [ComputerUseBrowserGoalInput] = []
     func propose(_ input: ComputerUseBrowserGoalInput) async throws -> ComputerUseBrowserGoalProposal {
         inputs.append(input)
+        if let select { return try .decode(content: select(input), input: input) }
         if !unsupported { return try await base.propose(input) }
         let rows: [[String: Any]] = input.userTurns.enumerated().map {
             ["turn":$0.offset, "source":$0.element, "role":"unsupported", "field":"other", "relation":"unspecified", "values":[]]

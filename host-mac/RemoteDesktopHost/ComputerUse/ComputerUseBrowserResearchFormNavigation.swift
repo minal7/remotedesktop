@@ -24,9 +24,11 @@ final class ComputerUseBrowserResearchFormNavigation {
 
     init(form: ComputerUseBrowserResearchFormReceipt, controlID: String, evidence: ComputerUseBrowserPageEvidence,
          stage: ComputerUseBrowserResearchFormStage, browser: ComputerUseOwnedBrowser, journalDirectory: URL,
+         currentGoal: ComputerUseBrowserGoalInput? = nil,
          makeStore: @escaping (URL) throws -> ComputerUseTaskJournalStore = { try .init(directory: $0) }) throws {
-        let goal = stage.input.interpretation.input
-        guard form.stageID == stage.id, form.taskID == goal.taskID, form.rootDigest == goal.rootDigest, form.goalRevision == goal.digest,
+        let original = stage.input.interpretation.input, goal = currentGoal ?? original
+        guard goal.continues(original), form.stageID == stage.id, form.taskID == goal.taskID, form.rootDigest == goal.rootDigest,
+              form.goalRevision == original.digest,
               form.contractDigest == stage.contract.contractDigest, evidence.document == stage.input.evidence.page.document,
               evidence.documentID == stage.input.evidence.page.documentID,
               evidence.page.controls.contains(where: { $0.id == controlID && $0.kind == "submit" && !$0.disabled }) else {
@@ -34,7 +36,7 @@ final class ComputerUseBrowserResearchFormNavigation {
         }
         self.form = form; self.controlID = controlID; self.evidence = evidence; self.goal = goal
         self.stage = stage; self.browser = browser
-        operationID = ComputerUseTaskContract.digest(["browser-research-form-query-stage-v1", goal.taskID, goal.rootDigest, stage.id])
+        operationID = ComputerUseTaskContract.digest(["browser-research-form-query-stage-v2", goal.taskID, goal.rootDigest, stage.id, goal.digest])
         navigation = .init(browser: browser, journalDirectory: journalDirectory, observedNavigationStore: makeStore)
     }
 

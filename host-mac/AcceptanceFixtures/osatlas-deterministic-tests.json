@@ -247,7 +247,8 @@
     "RemoteDesktopHostTests/ComputerUseBrowserFormBindingTests",
     "RemoteDesktopHostTests/ComputerUseBrowserFormPlannerTests",
     "RemoteDesktopHostTests/ComputerUseBrowserActionPlannerTests",
-    "RemoteDesktopHostTests/ComputerUseBrowserFormExtensionTests"
+    "RemoteDesktopHostTests/ComputerUseBrowserFormExtensionTests",
+    "RemoteDesktopHostTests/ComputerUseBrowserFormClarificationTests"
   ],
   "expectedTests": [
     "RemoteDesktopHostTests/AppleFoundationMCPPlannerTests/testCountedInputExpandsBeforeEffectAndTerminalQueries",
@@ -457,6 +458,13 @@
     "RemoteDesktopHostTests/ComputerUseBrowserFormBindingTests/testScopedDiscoveryIncludesExternalFormMembersAndExcludesUnrelatedPrivateFields",
     "RemoteDesktopHostTests/ComputerUseBrowserFormBindingTests/testScopedDiscoveryRejectsInvalidReferencesAndStalePagesBeforeClearingInputReceipts",
     "RemoteDesktopHostTests/ComputerUseBrowserFormBindingTests/testScopedRetainedMembershipRejectsFormChangesButIgnoresUnrelatedFieldChanges",
+    "RemoteDesktopHostTests/ComputerUseBrowserFormClarificationTests/testAnswerRequiresCurrentSourcePolicyBeforeExtendingOrPreparingAHistoricalQuery",
+    "RemoteDesktopHostTests/ComputerUseBrowserFormClarificationTests/testChangedAnswerCannotRestoreLostNativeAuthorityOrMakeAnOldActionCurrent",
+    "RemoteDesktopHostTests/ComputerUseBrowserFormClarificationTests/testCurrentQueryIntentUsesTheAcceptedGoalWithoutRewritingHistoricalInputReceipts",
+    "RemoteDesktopHostTests/ComputerUseBrowserFormClarificationTests/testDefaultDriverContinuesAQuestionAfterInputAcrossResegmentedRequirements",
+    "RemoteDesktopHostTests/ComputerUseBrowserFormClarificationTests/testExactSourceProjectionHandlesSplitsMergesAndUnicodeWithoutChangingHistoricalMeaning",
+    "RemoteDesktopHostTests/ComputerUseBrowserFormClarificationTests/testGoalLineageRejectsSiblingAnswersChangedClockAndShorterHistory",
+    "RemoteDesktopHostTests/ComputerUseBrowserFormClarificationTests/testTwoAcceptedAnswersKeepEachStagesOriginalSourceAndCurrentQueryGoalSeparate",
     "RemoteDesktopHostTests/ComputerUseBrowserFormExtensionTests/testAnExplicitLaterEditSupersedesOnlyItsOwnEarlierExpectedValue",
     "RemoteDesktopHostTests/ComputerUseBrowserFormExtensionTests/testChangedEarlierCriteriaAndReplacedRequiredObjectsCannotBecomeFreshAuthority",
     "RemoteDesktopHostTests/ComputerUseBrowserFormExtensionTests/testCombinedContinuationRetainsMoreThanOneStagesEightInputLimit",

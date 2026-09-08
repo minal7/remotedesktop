@@ -52,6 +52,17 @@ struct ComputerUseBrowserGoalInput: Equatable, Sendable, CustomStringConvertible
         return .init(continuing: self, turn: turn)
     }
 
+    /// Only this exact root and an unchanged prefix of accepted answers may
+    /// continue historical native work. A sibling answer is a different path.
+    func continues(_ earlier: Self) -> Bool {
+        taskID == earlier.taskID && rootDigest == earlier.rootDigest
+            && prompt.utf8.elementsEqual(earlier.prompt.utf8)
+            && referenceMilliseconds == earlier.referenceMilliseconds
+            && timeZoneIdentifier.utf8.elementsEqual(earlier.timeZoneIdentifier.utf8)
+            && clarifications.count >= earlier.clarifications.count
+            && Array(clarifications.prefix(earlier.clarifications.count)) == earlier.clarifications
+    }
+
     /// Shared structured user input for proposal-only browser planners.
     /// Transport/session identities and revision hashes stay host-side.
     var plannerContext: [String: Any] {
