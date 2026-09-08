@@ -72,7 +72,7 @@ final class ComputerUseBrowserDeclaredStateTests: XCTestCase {
             <style>[role]{display:block;min-height:24px}</style><article><h2>Concert Alpha</h2>
             <div role=slider aria-label='Account number' aria-valuenow=12345678></div>
             <div role=slider aria-label='Saved count' name='account-number' aria-valuenow=87654321></div>
-            <button role=combobox aria-label=Location>Paris</button><div role=listbox aria-label=Locations>Paris</div>
+            <button role=grid aria-label=Location>Paris</button><div role=textbox aria-label=Locations>Paris</div>
             <div role=spinbutton contenteditable=true aria-label=Quantity aria-valuenow=5>Five</div>
             <div role=heading aria-level=2>Details</div></article>
             """)

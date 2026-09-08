@@ -157,14 +157,16 @@ struct ComputerUseBrowserPageSnapshot: Decodable, Equatable, Sendable, CustomStr
         let options: [Option]
         let form: Form?
         let researchReadable: Bool
+        let compositeRole: String?
         init(id: String, containerID: String, label: String, kind: String, name: String, disabled: Bool,
              readOnly: Bool, required: Bool, multiple: Bool, constraints: [String: String], options: [Option],
-             form: Form? = nil, researchReadable: Bool = false) {
+             form: Form? = nil, researchReadable: Bool = false, compositeRole: String? = nil) {
             self.id = id; self.containerID = containerID; self.label = label; self.kind = kind; self.name = name
             self.disabled = disabled; self.readOnly = readOnly; self.required = required; self.multiple = multiple
             self.constraints = constraints; self.options = options; self.form = form; self.researchReadable = researchReadable
+            self.compositeRole = compositeRole
         }
-        private enum CodingKeys: String, CodingKey { case id, containerID, label, kind, name, disabled, readOnly, required, multiple, constraints, options, form, researchReadable }
+        private enum CodingKeys: String, CodingKey { case id, containerID, label, kind, name, disabled, readOnly, required, multiple, constraints, options, form, researchReadable, compositeRole }
         init(from decoder: Decoder) throws {
             let values = try decoder.container(keyedBy: CodingKeys.self)
             self.init(id: try values.decode(String.self, forKey: .id), containerID: try values.decode(String.self, forKey: .containerID),
@@ -173,7 +175,15 @@ struct ComputerUseBrowserPageSnapshot: Decodable, Equatable, Sendable, CustomStr
                 readOnly: try values.decode(Bool.self, forKey: .readOnly), required: try values.decode(Bool.self, forKey: .required),
                 multiple: try values.decode(Bool.self, forKey: .multiple), constraints: try values.decode([String: String].self, forKey: .constraints),
                 options: try values.decode([Option].self, forKey: .options), form: try values.decodeIfPresent(Form.self, forKey: .form),
-                researchReadable: values.contains(.researchReadable) ? try values.decode(Bool.self, forKey: .researchReadable) : false)
+                researchReadable: values.contains(.researchReadable) ? try values.decode(Bool.self, forKey: .researchReadable) : false,
+                compositeRole: try values.decodeIfPresent(String.self, forKey: .compositeRole))
+        }
+        var compositeMetadataIsWellFormed: Bool {
+            guard let compositeRole else { return !ComputerUseBrowserCompositeState.kinds.contains(kind) }
+            guard !label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+            if compositeRole == "combobox", ["text", "search"].contains(kind) { return true }
+            return ["combobox", "listbox"].contains(compositeRole) && kind == "aria-" + compositeRole
+                && form == nil && constraints.isEmpty && options.isEmpty
         }
         var description: String { "BrowserControl(kind: \(kind), options: \(options.count))" }
         var debugDescription: String { description }
@@ -182,7 +192,7 @@ struct ComputerUseBrowserPageSnapshot: Decodable, Equatable, Sendable, CustomStr
             let own = [id, containerID, label, kind, name].reduce(0) { $0 + $1.utf8.count }
                 + constraints.reduce(0) { $0 + $1.key.utf8.count + $1.value.utf8.count }
                 + options.reduce(0) { $0 + $1.id.utf8.count + $1.label.utf8.count + $1.value.utf8.count + $1.groupLabel.utf8.count }
-            return own + (form.map { [$0.id, $0.method, $0.action, $0.target, $0.encoding].reduce(0) { $0 + $1.utf8.count } } ?? 0)
+            return own + (compositeRole?.utf8.count ?? 0) + (form.map { [$0.id, $0.method, $0.action, $0.target, $0.encoding].reduce(0) { $0 + $1.utf8.count } } ?? 0)
         }
     }
     let id: String
@@ -310,9 +320,10 @@ struct ComputerUseBrowserPageSnapshot: Decodable, Equatable, Sendable, CustomStr
               Set(controls.flatMap { $0.options.map(\.id) }).count == controls.reduce(0, { $0 + $1.options.count }),
               controls.allSatisfy({ control in
                   identifier(control.id, prefix: "c") && identifier(control.containerID, prefix: "g")
-                  && control.label.utf8.count <= 256 && control.name.utf8.count <= 256
+                  && control.label.utf8.count <= 256 && control.name.utf8.count <= 256 && control.compositeMetadataIsWellFormed
                   && (["text", "search", "url", "tel", "email", "textarea", "date", "datetime-local", "month", "week", "time", "number", "checkbox", "radio", "select", "button", "submit", "reset", "image"].contains(control.kind)
-                      || (ComputerUseBrowserDeclaredState.kinds.contains(control.kind) && control.form == nil && control.constraints.isEmpty && !control.multiple))
+                      || (ComputerUseBrowserDeclaredState.kinds.contains(control.kind) && control.form == nil && control.constraints.isEmpty && !control.multiple)
+                      || ComputerUseBrowserCompositeState.kinds.contains(control.kind))
                   && Set(control.constraints.keys).isSubset(of: ["min", "max", "step", "pattern", "minlength", "maxlength"])
                   && control.constraints.values.allSatisfy({ $0.utf8.count <= 512 })
                   && control.options.count <= 64 && (control.kind == "select" || control.options.isEmpty)
@@ -352,6 +363,7 @@ struct ComputerUseBrowserPlanningContext: Equatable, Sendable, CustomStringConve
     private let includesControlState: Bool
     private let includesScopedState: Bool
     private let includesDeclaredControls: Bool
+    private let includesCompositeControls: Bool
 
     var recordCount: Int { records.count }
     var description: String { "ComputerUseBrowserPlanningContext(records: \(records.count))" }
@@ -362,6 +374,7 @@ struct ComputerUseBrowserPlanningContext: Equatable, Sendable, CustomStringConve
         includesControlState = includingControlState
         includesScopedState = includingControlState && !page.scopedControlIDs.isEmpty
         includesDeclaredControls = page.controls.contains { ComputerUseBrowserDeclaredState.kinds.contains($0.kind) }
+        includesCompositeControls = page.controls.contains { $0.compositeRole != nil }
         let quote = AppleFoundationVisualActionRouter.foundationJSONString
         var projected: [String] = []
         var bytes = 0
@@ -424,13 +437,14 @@ struct ComputerUseBrowserPlanningContext: Equatable, Sendable, CustomStringConve
             }.joined(separator: ",")
             let formID = control.form.map { quote($0.id) } ?? "null"
             let method = control.form.map { quote($0.method) } ?? "null"
+            let composite = control.compositeRole.map { ",\"composite_role\":" + quote($0) } ?? ""
             var state = ""
             if includingControlState {
                 let value: Any = page.controlStates.first { $0.controlID == control.id }.map { $0.plannerContext as Any } ?? NSNull()
                 let encoded = String(decoding: try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .fragmentsAllowed]), as: UTF8.self)
                 state = ",\"observed_state\":" + encoded
             }
-            _ = append("{\"kind\":\"control\",\"id\":\(quote(control.id)),\"group\":\(quote(control.containerID)),\"label\":\(quote(control.label)),\"control_kind\":\(quote(control.kind)),\"disabled\":\(control.disabled),\"read_only\":\(control.readOnly),\"required\":\(control.required),\"multiple\":\(control.multiple),\"form_id\":\(formID),\"form_method\":\(method),\"constraints\":{\(constraints)},\"options\":[\(options)]\(state)}")
+            _ = append("{\"kind\":\"control\",\"id\":\(quote(control.id)),\"group\":\(quote(control.containerID)),\"label\":\(quote(control.label)),\"control_kind\":\(quote(control.kind))\(composite),\"disabled\":\(control.disabled),\"read_only\":\(control.readOnly),\"required\":\(control.required),\"multiple\":\(control.multiple),\"form_id\":\(formID),\"form_method\":\(method),\"constraints\":{\(constraints)},\"options\":[\(options)]\(state)}")
         }
         for (index, text) in page.texts.enumerated() {
             if appendContainers(for: text.containerID),
@@ -454,7 +468,7 @@ struct ComputerUseBrowserPlanningContext: Equatable, Sendable, CustomStringConve
     /// and a document whose evidence did not fit the local planner's budget.
     func serialized(maximumRecords: Int? = nil) -> String {
         let count = max(0, min(maximumRecords ?? records.count, records.count))
-        return "{\"version\":\(includesDeclaredControls ? 7 : (includesScopedState ? 6 : (includesControlState ? 4 : Self.version))),\"source_truncated\":\(sourceTruncated),\"omitted_embedded_content\":\(omittedEmbeddedContent),\"omitted_controls\":\(omittedControls),\"omitted_structure\":\(omittedStructure),\"projection_omitted_records\":\(projectionOmittedRecords),\"budget_omitted_records\":\(count < records.count),\"records\":[\(records.prefix(count).joined(separator: ","))]}"
+        return "{\"version\":\(includesCompositeControls ? 8 : (includesDeclaredControls ? 7 : (includesScopedState ? 6 : (includesControlState ? 4 : Self.version)))),\"source_truncated\":\(sourceTruncated),\"omitted_embedded_content\":\(omittedEmbeddedContent),\"omitted_controls\":\(omittedControls),\"omitted_structure\":\(omittedStructure),\"projection_omitted_records\":\(projectionOmittedRecords),\"budget_omitted_records\":\(count < records.count),\"records\":[\(records.prefix(count).joined(separator: ","))]}"
     }
 
     func promptSection(maximumRecords: Int? = nil) -> String {
@@ -910,6 +924,7 @@ enum ComputerUseBrowserDOM {
           .toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()));
       }
       function researchScopeAllowed(element, control) {
+        if (control.compositeRole) return !!control.label.trim() && !researchValueProtected(element, control);
         if (['aria-checkbox','aria-radio','aria-switch','aria-button','aria-slider','aria-spinbutton'].includes(control.kind)) {
           return !!control.label.trim() && !researchValueProtected(element, control);
         }
@@ -921,7 +936,7 @@ enum ComputerUseBrowserDOM {
         // The text pass reads rendered text nodes, never form values,
         // innerHTML, scripts or frame documents. A separate opt-in pass below
         // observes native properties or scoped declarations. Omitted surfaces remain explicit.
-        const excluded = 'script,style,noscript,template,input,textarea,select,option,[contenteditable]:not([contenteditable="false"]),[role="textbox"],[hidden],[inert],[aria-hidden="true"]';
+        const excluded = 'script,style,noscript,template,input,textarea,select,option,[contenteditable]:not([contenteditable="false"]),[role="textbox"],[role="combobox"],[role="listbox"],[role="option"],[hidden],[inert],[aria-hidden="true"]';
         const texts = [], links = [], controls = [], controlStates = [], structure = [], anchors = new Map(), buttons = new Map(), containers = new Map();
         const textRange = doc.createRange();
         const pageParent = node => node.assignedSlot || parent(node);
@@ -1088,11 +1103,21 @@ enum ComputerUseBrowserDOM {
           return small(result.action, 8192) && small(result.target, 256) && small(result.encoding, 128)
             && ['get','post','dialog'].includes(result.method) ? result : undefined;
         }
-        function researchControlState(element, control) {
+        \#(ComputerUseBrowserCompositeState.script)
+        const compositeMembers = new Set(), representedLists = new Set(), pendingOptions = [];
+        function researchControlState(element, control, details) {
           const base = {controlID:control.id}, unavailable = {...base, kind:'unavailable'};
-          if (['button','submit','reset','image'].includes(control.kind)) return {...base, kind:'stateless'};
+          if (!control.compositeRole && ['button','submit','reset','image'].includes(control.kind)) return {...base, kind:'stateless'};
           if (researchValueProtected(element, control)) return unavailable;
           const scoped = scopedControlIDs.includes(control.id) && researchScopeAllowed(element, control);
+          if (control.compositeRole) {
+            if (!scoped) return unavailable;
+            const result = compositeState(element, control);
+            details.references = result.references;
+            if (result.state.kind === 'composite') for (const member of result.members) compositeMembers.add(member);
+            else omittedControls = true;
+            return result.state;
+          }
           if (control.kind.startsWith('aria-')) {
             if (!scoped) return unavailable;
             const attributes = {}, keys = control.kind === 'aria-button' ? ['aria-pressed']
@@ -1148,8 +1173,10 @@ enum ComputerUseBrowserDOM {
           const native = element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement
             || element instanceof HTMLSelectElement || element instanceof HTMLButtonElement;
           const role = element.getAttribute('role') || '';
+          if (role === 'option') { if (renderedControl(element)) pendingOptions.push(element); continue; }
+          const nativeCombobox = element instanceof HTMLInputElement && ['text','search'].includes(element.type) && role === 'combobox';
           const declaredRole = (!native || element instanceof HTMLButtonElement)
-            && (['checkbox','radio','switch','slider','spinbutton'].includes(role) ? role
+            && (['checkbox','radio','switch','slider','spinbutton','combobox','listbox'].includes(role) ? role
               : ((role === 'button' || (!role && element instanceof HTMLButtonElement)) && element.hasAttribute('aria-pressed') ? 'button' : null));
           if ((!native && !declaredRole) || (element instanceof HTMLButtonElement && role && role !== 'button' && !declaredRole)) {
             if ((element.isContentEditable || role.split(/\s+/).some(value => ['button','textbox','searchbox','combobox','listbox','checkbox','radio','slider','spinbutton','switch','tab','option','menuitemcheckbox','menuitemradio'].includes(value)) || element instanceof HTMLButtonElement)
@@ -1157,8 +1184,10 @@ enum ComputerUseBrowserDOM {
             continue;
           }
           if (declaredRole && element.isContentEditable) { if (renderedControl(element)) omittedControls = true; continue; }
+          if (role === 'combobox' && native && !declaredRole && !nativeCombobox) { if (renderedControl(element)) omittedControls = true; continue; }
           if (!renderedControl(element)) continue;
           const kind = declaredRole ? 'aria-' + declaredRole : element instanceof HTMLTextAreaElement ? 'textarea' : element instanceof HTMLSelectElement ? 'select' : element.type;
+          const compositeRole = nativeCombobox ? 'combobox' : ['combobox','listbox'].includes(declaredRole) ? declaredRole : null;
           if (!declaredRole && !controlKinds.has(kind)) { omittedControls = true; continue; }
           if (controls.length >= 64) { truncated = true; omittedControls = true; break; }
           let label = labelFor(element).label;
@@ -1168,6 +1197,7 @@ enum ComputerUseBrowserDOM {
             // Browser-localized default captions are not literal page labels.
             label = kind === 'image' ? (element.getAttribute('alt') || '') : (element.getAttribute('value') || '');
           }
+          if (compositeRole && !label.trim()) { omittedControls = true; continue; }
           const name = declaredRole ? '' : element.name || '', constraints = {};
           if (!declaredRole) for (const attribute of constraintNames) if (element.hasAttribute(attribute)) constraints[attribute] = element.getAttribute(attribute);
           const form = declaredRole ? null : formMetadata(element, kind);
@@ -1194,16 +1224,27 @@ enum ComputerUseBrowserDOM {
             disabled: element.matches(':disabled') || element.getAttribute('aria-disabled') === 'true',
             readOnly: declaredRole ? element.getAttribute('aria-readonly') === 'true' : !!element.readOnly,
             required: declaredRole ? element.getAttribute('aria-required') === 'true' : !!element.required,
-            multiple: declaredRole ? false : !!element.multiple, constraints, options, form};
+            multiple: declaredRole ? compositeRole === 'listbox' && element.getAttribute('aria-multiselectable') === 'true' : !!element.multiple,
+            constraints, options, form, compositeRole};
           control.researchReadable = researchScopeAllowed(element, control);
-          const state = includeControlState ? researchControlState(element, control) : null;
+          const details = {references:[]};
+          const state = includeControlState ? researchControlState(element, control, details) : null;
           const size = encoder.encode(JSON.stringify(control)).length + (state ? encoder.encode(JSON.stringify(state)).length : 0);
           if (bytes + size > 65536) { truncated = true; omittedControls = true; continue; }
           bytes += size; controls.push(control);
           if (state) controlStates.push(state);
-          const signature = declaredRole ? JSON.stringify(['role','name','autocomplete','aria-label','aria-labelledby','aria-describedby','aria-controls','aria-owns',
+          if (compositeRole === 'listbox') representedLists.add(element);
+          const signature = declaredRole || compositeRole ? JSON.stringify(['role','name','autocomplete','aria-label','aria-labelledby','aria-describedby','aria-controls','aria-owns',
             'aria-details','aria-haspopup','aria-expanded','aria-orientation','aria-roledescription','aria-invalid','aria-busy'].map(key => [key, element.getAttribute(key)])) : null;
-          controlBindings.set(control.id, {element, form: declaredRole ? null : element.form, metadata: control, signature});
+          controlBindings.set(control.id, {element, form: declaredRole ? null : element.form, metadata: control, signature, references:details.references});
+        }
+        for (const option of pendingOptions) {
+          if (compositeMembers.has(option)) continue;
+          let represented = false;
+          for (let node = pageParent(option), depth = 0; node && depth < 128; node = pageParent(node), depth++) {
+            if (representedLists.has(node)) { represented = true; break; }
+          }
+          if (!represented) omittedControls = true;
         }
         return {texts, links, controls, controlStates, controlStateObserved:includeControlState, scopedControlIDs, containers:structure, omittedStructure, truncated, omittedEmbeddedContent, omittedControls, viewport: readViewport()};
       }
@@ -1401,7 +1442,8 @@ enum ComputerUseBrowserDOM {
                 || controls.size !== lastPageSnapshot.controls.size
                 || Array.from(controls).some(([id, binding]) => {
                   const previous = lastPageSnapshot.controls.get(id);
-                  return !previous || previous.element !== binding.element || previous.form !== binding.form || previous.signature !== binding.signature;
+                  return !previous || previous.element !== binding.element || previous.form !== binding.form || previous.signature !== binding.signature
+                    || previous.references.length !== binding.references.length || previous.references.some((node,index) => node !== binding.references[index]);
                 }) || links.size !== lastPageSnapshot.links.size
                 || Array.from(links).some(([id, binding]) => {
                   const previous = lastPageSnapshot.links.get(id);
