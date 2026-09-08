@@ -11,6 +11,7 @@ final class ComputerUseBrowserResearchNavigation {
         let candidateID: String
         let linkID: String
     }
+    enum ReplanResult: Equatable, Sendable { case noPendingStage, requiresReconciliation, noSelection, updated }
     private struct Stage {
         let selection: Selection
         let operationID: String
@@ -26,9 +27,10 @@ final class ComputerUseBrowserResearchNavigation {
     private var isRetired = false
     var pendingSelection: Selection? { pending?.selection }
 
-    init(input: ComputerUseBrowserGoalInput, browser: ComputerUseOwnedBrowser, journalDirectory: URL) {
+    init(input: ComputerUseBrowserGoalInput, browser: ComputerUseOwnedBrowser, journalDirectory: URL,
+         navigationStore: @escaping (URL) throws -> ComputerUseTaskJournalStore = { try .init(directory: $0) }) {
         taskID = input.taskID; rootDigest = input.rootDigest; self.browser = browser
-        navigation = .init(browser: browser, journalDirectory: journalDirectory)
+        navigation = .init(browser: browser, journalDirectory: journalDirectory, observedNavigationStore: navigationStore)
     }
 
     /// A receipt proves a historical navigation, not a current result page or
@@ -76,4 +78,53 @@ final class ComputerUseBrowserResearchNavigation {
     }
 
     func retire() { isRetired = true; pending = nil; completed.removeAll() }
+
+    /// The durable/native no-attempt proof and execution lease surround the
+    /// fresh reading, selection and binding replacement. This never navigates.
+    func replan(goal: ComputerUseBrowserGoalInput,
+                prepare: () async throws -> (Selection, ComputerUseBrowserResultCandidates)?,
+                checkCurrent: () throws -> Void) async throws -> ReplanResult {
+        guard !isExecuting else { throw Failure.busy }
+        guard !isRetired else { throw Failure.retired }
+        guard let previous = pending else { return .noPendingStage }
+        guard goal.taskID == taskID, goal.rootDigest == rootDigest, goal.digest == previous.selection.goalRevision else {
+            throw Failure.invalidSelection
+        }
+        isExecuting = true
+        defer { isExecuting = false }
+        func check() throws {
+            try Task.checkCancellation()
+            guard !isRetired else { throw Failure.retired }
+            try checkCurrent()
+        }
+        try check()
+        var prepared: Stage?
+        let result = try await navigation.replanUnsentObservedDestination(previous.target, promptDigest: rootDigest,
+            operationID: previous.operationID, prepare: {
+                guard let (selection, candidates) = try await prepare() else { return nil }
+                try check()
+                guard selection.goalRevision == goal.digest, completed[selection] == nil else { throw Failure.invalidSelection }
+                let target = try await browser.prepareResultLinkNavigation(candidates, candidateID: selection.candidateID,
+                    linkID: selection.linkID, goal: goal)
+                try check()
+                prepared = Stage(selection: selection, operationID: previous.operationID, target: target)
+                return target
+            })
+        switch result {
+        case .requiresReconciliation:
+            try check()
+            return .requiresReconciliation
+        case .noSelection:
+            try check()
+            return .noSelection
+        case .refreshed(let target):
+            guard let prepared, prepared.target == target else { throw Failure.invalidSelection }
+            // A completed durable replacement remains a fact after a late
+            // Pause. Retain its matching target before surfacing cancellation;
+            // otherwise Resume would use the old binding against the new file.
+            if !isRetired, pending?.operationID == previous.operationID { pending = prepared }
+            try check()
+            return .updated
+        }
+    }
 }

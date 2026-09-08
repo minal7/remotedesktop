@@ -255,6 +255,23 @@ final class ComputerUseBrowserNavigationTask {
     func refreshUnsentObservedDestination(_ target: ComputerUseBrowserNavigationTarget,
         promptDigest: String, operationID: String,
         prepare: () async throws -> ComputerUseBrowserNavigationTarget?) async throws -> ComputerUseBrowserNavigationTarget? {
+        switch try await replanUnsentObservedDestination(target, promptDigest: promptDigest, operationID: operationID, prepare: prepare) {
+        case .refreshed(let target), .requiresReconciliation(let target): return target
+        case .noSelection: return nil
+        }
+    }
+
+    enum ObservedReplanResult {
+        case refreshed(ComputerUseBrowserNavigationTarget)
+        case requiresReconciliation(ComputerUseBrowserNavigationTarget)
+        case noSelection
+    }
+
+    /// Distinguish a committed refresh from a retained attempted target, even
+    /// when both have the same payload. Target equality is not replan authority.
+    func replanUnsentObservedDestination(_ target: ComputerUseBrowserNavigationTarget,
+        promptDigest: String, operationID: String,
+        prepare: () async throws -> ComputerUseBrowserNavigationTarget?) async throws -> ObservedReplanResult {
         let identity = try Self.observedIdentity(target, promptDigest: promptDigest, operationID: operationID)
         guard browser.contextID == target.contextID,
               let session = browser.handbackRequirement(taskID: target.taskID, required: true) else {
@@ -273,20 +290,20 @@ final class ComputerUseBrowserNavigationTask {
         }
         try checkOwnership()
         guard persisted == nil || persisted?.statuses == [.planned],
-              !browser.hasObservedNavigationAttempt(operationID: operationID) else { return target }
-        guard let fresh = try await prepare() else { return nil }
+              !browser.hasObservedNavigationAttempt(operationID: operationID) else { return .requiresReconciliation(target) }
+        guard let fresh = try await prepare() else { return .noSelection }
         try checkOwnership()
         guard fresh.taskID.utf8.elementsEqual(target.taskID.utf8), fresh.contextID == target.contextID else {
             throw ComputerUseTaskExecutionError.journalMismatch
         }
         try await browser.validateObservedDestination(fresh)
         try checkOwnership()
-        guard !browser.hasObservedNavigationAttempt(operationID: operationID) else { return target }
+        guard !browser.hasObservedNavigationAttempt(operationID: operationID) else { return .requiresReconciliation(target) }
         let replacement = try Self.observedIdentity(fresh, promptDigest: promptDigest, operationID: operationID)
         if let persisted { try store.replaceUnattemptedBinding(replacement, replacing: persisted) }
         else { try store.save(replacement, replacing: nil) }
         // A failed durable write must not publish a replacement to the caller.
-        return fresh
+        return .refreshed(fresh)
     }
 
     private static func observedIdentity(_ target: ComputerUseBrowserNavigationTarget,

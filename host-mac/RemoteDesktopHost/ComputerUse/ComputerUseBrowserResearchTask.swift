@@ -10,6 +10,7 @@ final class ComputerUseBrowserResearchTask {
         let proposal: ComputerUseBrowserGoalProposal
         let scalars: ComputerUseBrowserScalarRequirements
     }
+    struct LinkChoice: Sendable { let candidateID: String; let linkID: String }
     let taskID: String
     private let browser: ComputerUseOwnedBrowser
     private let goalPlanner: any ComputerUseBrowserGoalPlanning
@@ -38,10 +39,11 @@ final class ComputerUseBrowserResearchTask {
     init(input: ComputerUseBrowserGoalInput, browser: ComputerUseOwnedBrowser,
          goalPlanner: any ComputerUseBrowserGoalPlanning, resultPlanner: any ComputerUseBrowserResultPlanning,
          navigationJournalDirectory: URL? = nil,
+         navigationStore: @escaping (URL) throws -> ComputerUseTaskJournalStore = { try .init(directory: $0) },
          mayAct: @escaping @MainActor () -> Bool, now: @escaping () -> Date = Date.init) {
         taskID = input.taskID; self.browser = browser; self.goalPlanner = goalPlanner; self.resultPlanner = resultPlanner
         self.mayAct = mayAct; clarification = .init(input: input, now: now)
-        navigation = navigationJournalDirectory.map { .init(input: input, browser: browser, journalDirectory: $0) }
+        navigation = navigationJournalDirectory.map { .init(input: input, browser: browser, journalDirectory: $0, navigationStore: navigationStore) }
     }
 
     func interpretGoal() async throws -> Interpretation {
@@ -84,13 +86,7 @@ final class ComputerUseBrowserResearchTask {
         let captured = input
         latestCandidates = nil
         let batch = try await operate { [self] in
-            let evidence = try await observeOwnedPage(goal: captured)
-            let page = try ComputerUseBrowserResultPageInput(page: evidence.page)
-            let proposal = try await resultPlanner.propose(goal: captured, page: page)
-            try checkCurrent(captured)
-            let bound = try await browser.prepareResultCandidates(proposal, goal: captured, evidence: evidence)
-            try checkCurrent(captured)
-            return bound
+            try await readCurrentCandidates(goal: captured)
         }
         latestCandidates = batch
         return batch
@@ -138,6 +134,28 @@ final class ComputerUseBrowserResearchTask {
         let captured = input
         return try await operate { [self] in
             try await navigation.open(selection, goal: captured, candidates: nil, checkCurrent: { try self.checkCurrent(captured) })
+        }
+    }
+
+    /// Only the proven-unsent pending stage may read/select fresh candidates.
+    /// The caller must choose for the whole goal; no first-result shortcut or
+    /// automatic navigation follows this read-only replacement.
+    func replanPendingCandidateNavigation(select: @escaping @MainActor @Sendable
+        (ComputerUseBrowserGoalInput, ComputerUseBrowserResultCandidates) async throws -> LinkChoice?) async throws -> ComputerUseBrowserResearchNavigation.ReplanResult {
+        try requireIdle()
+        guard !hasQuestion else { throw Failure.questionPending }
+        guard let navigation else { throw Failure.navigationUnavailable }
+        guard let interpretation, interpretation.proposal.input.digest == input.digest,
+              interpretation.proposal.disposition == .research else { throw Failure.interpretationRequired }
+        let captured = input
+        latestCandidates = nil
+        return try await operate { [self] in
+            try await navigation.replan(goal: captured, prepare: {
+                let candidates = try await self.readCurrentCandidates(goal: captured)
+                guard let choice = try await select(captured, candidates) else { return nil }
+                try self.checkCurrent(captured)
+                return (.init(goalRevision: captured.digest, candidateID: choice.candidateID, linkID: choice.linkID), candidates)
+            }, checkCurrent: { try self.checkCurrent(captured) })
         }
     }
 
@@ -256,6 +274,16 @@ final class ComputerUseBrowserResearchTask {
         let evidence = try await browser.observePage(document: document)
         try checkCurrent(goal)
         return evidence
+    }
+
+    private func readCurrentCandidates(goal: ComputerUseBrowserGoalInput) async throws -> ComputerUseBrowserResultCandidates {
+        let evidence = try await observeOwnedPage(goal: goal)
+        let page = try ComputerUseBrowserResultPageInput(page: evidence.page)
+        let proposal = try await resultPlanner.propose(goal: goal, page: page)
+        try checkCurrent(goal)
+        let bound = try await browser.prepareResultCandidates(proposal, goal: goal, evidence: evidence)
+        try checkCurrent(goal)
+        return bound
     }
 
     private func requireIdle() throws {
