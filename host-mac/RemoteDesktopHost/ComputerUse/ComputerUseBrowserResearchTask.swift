@@ -521,20 +521,48 @@ final class ComputerUseBrowserResearchTask {
         }
     }
 
+    /// Preserve only a natively verified prefix, together with the explicit
+    /// unfinished-edit obligations. The same adapter remains the next stage's
+    /// authority; this does not publish whole-stage or research completion.
+    func retainPendingFormPrefix() async throws -> ComputerUseBrowserResearchFormReceipt? {
+        try requireIdle()
+        guard !hasPendingNavigation else { throw Failure.navigationPending }
+        guard !hasQuestion else { throw Failure.questionPending }
+        guard hasPendingForm, let stage = formStage else { return nil }
+        guard stage.input.interpretation.input == input else { throw Failure.goalChanged }
+        let captured = input
+        latestForm = nil; latestAction = nil; latestCandidates = nil
+        return try await operate { [self] in
+            guard let resolution = try await stage.retainVerifiedPrefix(checkCurrent: { try self.checkCurrent(captured) }) else { return nil }
+            try recordForm(resolution.receipt, stage: stage, goal: captured)
+            try checkCurrent(captured)
+            return resolution.receipt
+        }
+    }
+
+    private func recordForm(_ receipt: ComputerUseBrowserResearchFormReceipt, stage: ComputerUseBrowserResearchFormStage,
+                            goal: ComputerUseBrowserGoalInput) throws {
+        guard !isRetired else { return }
+        guard formStage === stage, stage.nativeReceipt == receipt,
+              receipt.taskID == taskID, receipt.rootDigest == goal.rootDigest else { throw Failure.goalChanged }
+        if let previous = confirmedFormHistory.first(where: { $0.stageID == receipt.stageID }) {
+            guard previous == receipt else { throw Failure.goalChanged }
+        } else {
+            guard receipt.goalRevision == goal.digest, receipt.index == confirmedFormHistory.count else { throw Failure.goalChanged }
+            confirmedFormHistory.append(receipt)
+        }
+        if let resolution = stage.nativePrefixResolution {
+            guard resolution.receipt == receipt else { throw Failure.goalChanged }
+            if !retiredFormHistory.contains(resolution.retirement) { retiredFormHistory.append(resolution.retirement) }
+        }
+        lastVerifiedFormStage = stage
+    }
+
     private func runForm(_ stage: ComputerUseBrowserResearchFormStage) async throws -> ComputerUseBrowserResearchFormReceipt {
         let captured = input
         return try await operate { [self] in
             let receipt = try await stage.run(checkCurrent: { try self.checkCurrent(captured) })
-            if !isRetired {
-                if let previous = confirmedFormHistory.first(where: { $0.stageID == receipt.stageID }) {
-                    guard previous == receipt else { throw Failure.goalChanged }
-                } else {
-                    guard receipt.taskID == taskID, receipt.goalRevision == captured.digest,
-                          receipt.index == confirmedFormHistory.count else { throw Failure.goalChanged }
-                    confirmedFormHistory.append(receipt)
-                }
-                lastVerifiedFormStage = stage
-            }
+            try recordForm(receipt, stage: stage, goal: captured)
             try checkCurrent(captured)
             return receipt
         }

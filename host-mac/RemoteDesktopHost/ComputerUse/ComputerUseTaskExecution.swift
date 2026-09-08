@@ -128,13 +128,17 @@ struct ComputerUseTaskJournal: Codable, Equatable, Sendable {
     let contractDigest: String
     let stepIDs: [String]
     var statuses: [ComputerUseTaskStepStatus]
-    /// A durable tombstone for a plan proven to have sent no input. This is
-    /// not an effect status or permission to revive the old contract.
+    /// A durable tombstone for a plan's proven-unsent input, optionally its
+    /// remaining suffix. This never permits reviving the old contract.
     let retirementDigest: String?
+    /// A retired suffix may keep a verified prefix as historical work.
+    /// Without a count, retirement means none of this plan's input began.
+    let retainedPrefixCount: Int?
     init(taskID: String, promptDigest: String, contractDigest: String, stepIDs: [String],
-         statuses: [ComputerUseTaskStepStatus], retirementDigest: String? = nil) {
+         statuses: [ComputerUseTaskStepStatus], retirementDigest: String? = nil, retainedPrefixCount: Int? = nil) {
         self.taskID = taskID; self.promptDigest = promptDigest; self.contractDigest = contractDigest
         self.stepIDs = stepIDs; self.statuses = statuses; self.retirementDigest = retirementDigest
+        self.retainedPrefixCount = retainedPrefixCount
     }
 }
 
@@ -178,7 +182,8 @@ final class ComputerUseTaskExecution {
             contractDigest: contract.contractDigest, stepIDs: contract.steps.map(\.id),
             statuses: contract.steps.map { _ in .planned })
         if let recovered {
-            guard recovered.retirementDigest == nil, recovered.taskID == initial.taskID, recovered.promptDigest == initial.promptDigest,
+            guard recovered.retirementDigest == nil, recovered.retainedPrefixCount == nil,
+                  recovered.taskID == initial.taskID, recovered.promptDigest == initial.promptDigest,
                   recovered.contractDigest == initial.contractDigest, recovered.stepIDs == initial.stepIDs,
                   recovered.statuses.count == initial.statuses.count else {
                 throw ComputerUseTaskExecutionError.journalMismatch

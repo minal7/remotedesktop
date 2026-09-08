@@ -23,13 +23,20 @@ struct ComputerUseBrowserFormProposal: Equatable, Sendable, CustomStringConverti
         let field: String
         let source: ComputerUseBrowserFormSource
     }
+    struct Resumption: Equatable, Sendable {
+        let pending: String
+        let field: String
+    }
     private let input: ComputerUseBrowserResearchFormInput
     let edits: [Edit]
     let question: Question?
     let preserved: [Preservation]
+    let resumptions: [Resumption]
     var isUnavailable: Bool { edits.isEmpty && question == nil }
-    private init(input: ComputerUseBrowserResearchFormInput, edits: [Edit] = [], question: Question? = nil, preserved: [Preservation] = []) {
+    private init(input: ComputerUseBrowserResearchFormInput, edits: [Edit] = [], question: Question? = nil,
+                 preserved: [Preservation] = [], resumptions: [Resumption] = []) {
         self.input = input; self.edits = edits; self.question = question; self.preserved = preserved
+        self.resumptions = resumptions
     }
 
     static func decode(content: String, input: ComputerUseBrowserResearchFormInput) throws -> Self {
@@ -49,7 +56,8 @@ struct ComputerUseBrowserFormProposal: Equatable, Sendable, CustomStringConverti
                 guard requirements.allSatisfy(topic.accepts) else { throw invalid }
                 return .init(input: input, question: .init(topic: topic, requirementIDs: requirements.map(\.id)))
             }
-            guard Set(root.keys) == ["edits", "preserve"], case .array(let rows)? = root["edits"], (1...8).contains(rows.count),
+            let keys: Set<String> = input.pendingEditAliases.isEmpty ? ["edits", "preserve"] : ["edits", "preserve", "resume"]
+            guard Set(root.keys) == keys, case .array(let rows)? = root["edits"], (1...8).contains(rows.count),
                   case .array(let preservationRows)? = root["preserve"], preservationRows.count <= 16 else { throw invalid }
             var edits: [Edit] = [], usedFields: Set<String> = []
             for row in rows {
@@ -86,6 +94,18 @@ struct ComputerUseBrowserFormProposal: Equatable, Sendable, CustomStringConverti
             // invariant at its newly observed value. Repair every such field
             // with a new goal-backed operation before this stage can run.
             guard Set(input.requiredRepairFieldAliases).isSubset(of: usedFields) else { throw invalid }
+            var resumptions: [Resumption] = []
+            if !input.pendingEditAliases.isEmpty {
+                guard case .array(let rows)? = root["resume"], rows.count == input.pendingEditAliases.count else { throw invalid }
+                var pendingIDs: Set<String> = [], fields: Set<String> = []
+                for row in rows {
+                    guard case .object(let item) = row, Set(item.keys) == ["pending", "field"],
+                          case .string(let pending)? = item["pending"], input.pendingEditAliases.contains(pending),
+                          pendingIDs.insert(pending).inserted, case .string(let field)? = item["field"],
+                          usedFields.contains(field), fields.insert(field).inserted else { throw invalid }
+                    resumptions.append(.init(pending: pending, field: field))
+                }
+            }
             var preserved = input.requiredPreservation
             for row in preservationRows {
                 guard case .object(let value) = row, Set(value.keys) == ["field", "requirement"],
@@ -98,7 +118,7 @@ struct ComputerUseBrowserFormProposal: Equatable, Sendable, CustomStringConverti
                     guard try required.source.indices(in: input.interpretation).contains(index) else { throw invalid }
                 } else { preserved.append(.init(field: alias, source: try .init(index: index, interpretation: input.interpretation))) }
             }
-            return .init(input: input, edits: edits, preserved: preserved)
+            return .init(input: input, edits: edits, preserved: preserved, resumptions: resumptions)
         } catch { throw invalid }
     }
 
@@ -110,6 +130,38 @@ struct ComputerUseBrowserFormProposal: Equatable, Sendable, CustomStringConverti
 
     func validate(for current: ComputerUseBrowserResearchFormInput) throws {
         guard input == current else { throw ComputerUseBrowserResearchFormError.inputChanged }
+    }
+
+    func sources(for edit: Edit) throws -> [ComputerUseBrowserFormSource] {
+        let indices: [Int]
+        switch edit.payload {
+        case .text(let query):
+            indices = try query.terms.map { term in
+                guard let index = input.interpretation.requirements.firstIndex(where: { $0.id == term.requirementID }) else {
+                    throw ComputerUseBrowserResearchFormError.invalidProposal
+                }
+                return index
+            }
+        case .normalized(let value): indices = [value.requirementIndex]
+        case .choice(_, let index): indices = [index]
+        }
+        var sources: [ComputerUseBrowserFormSource] = []
+        for index in indices {
+            let source = try ComputerUseBrowserFormSource(index: index, interpretation: input.interpretation)
+            if !sources.contains(source) { sources.append(source) }
+        }
+        return sources
+    }
+
+    func pendingEdit(for edit: Edit) throws -> ComputerUseBrowserFormPendingEdit {
+        let field = try input.field(for: edit.field)
+        var sources = try self.sources(for: edit)
+        if let resumption = resumptions.first(where: { $0.field == edit.field }),
+           let index = input.pendingEditAliases.firstIndex(of: resumption.pending),
+           let previous = input.previous {
+            for source in previous.pendingEdits[index].sources where !sources.contains(source) { sources.append(source) }
+        }
+        return .init(label: field.control.label, kind: field.control.kind, sources: sources)
     }
 
     /// An exact edit contract for native representability/preflight and later

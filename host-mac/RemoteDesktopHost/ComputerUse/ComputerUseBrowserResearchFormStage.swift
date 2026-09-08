@@ -17,12 +17,16 @@ struct ComputerUseBrowserResearchFormContinuation: Equatable, Sendable, CustomSt
     let preservedControls: [ComputerUseBrowserFormPreservationSource]
     let preservedTargetIDs: Set<String>
     let editedSources: [String: [ComputerUseBrowserFormSource]]
+    let pendingEdits: [ComputerUseBrowserFormPendingEdit]
     var repairableTargetIDs: Set<String> { editedTargetIDs.subtracting(preservedTargetIDs) }
     let digest: String
 
-    @MainActor fileprivate init(stage: ComputerUseBrowserResearchFormStage, current: ComputerUseTextTaskContinuation) throws {
+    @MainActor fileprivate init(stage: ComputerUseBrowserResearchFormStage, current: ComputerUseTextTaskContinuation,
+                               completedEditCount: Int? = nil) throws {
         let input = stage.input, previous = input.previous
-        guard current.taskID == input.interpretation.input.taskID,
+        let count = completedEditCount ?? stage.proposal.edits.count
+        guard (1...stage.proposal.edits.count).contains(count), current.inputOperationIDs.count == count,
+              current.taskID == input.interpretation.input.taskID,
               current.contractDigest == stage.contract.contractDigest,
               previous == nil || (previous.map { input.interpretation.input.continues($0.goal) } == true
                 && previous?.document == input.evidence.page.document && previous?.documentID == input.evidence.page.documentID
@@ -36,9 +40,10 @@ struct ComputerUseBrowserResearchFormContinuation: Equatable, Sendable, CustomSt
               (1...64).contains(inputOperationIDs.count), Set(inputOperationIDs).count == inputOperationIDs.count else {
             throw ComputerUseBrowserResearchFormStage.Failure.invalidStage
         }
-        // The next contract explicitly carries earlier values for fields it
-        // does not edit; an intentional new edit supersedes that field only.
-        finalValues = current.finalValues
+        // Only a verified edit supersedes an earlier criterion. A future
+        // suffix edit may have removed it from this contract's invariants;
+        // retain that earlier intent until its replacement is verified.
+        finalValues = (previous?.finalValues ?? [:]).merging(current.finalValues) { _, current in current }
         editedTargetIDs = (previous?.editedTargetIDs ?? []).union(current.editedTargetIDs)
         guard editedTargetIDs.isSubset(of: Set(finalValues.keys)),
               Set(previous?.finalValues.keys.map { $0 } ?? []).isSubset(of: Set(finalValues.keys)) else {
@@ -49,29 +54,15 @@ struct ComputerUseBrowserResearchFormContinuation: Equatable, Sendable, CustomSt
         }
         preservedTargetIDs = Set(try stage.proposal.preserved.map { try input.field(for: $0.field).editable.snapshot.targetID })
         var sources = previous?.editedSources ?? [:]
-        for edit in stage.proposal.edits {
+        for edit in stage.proposal.edits.prefix(count) {
             let targetID = try input.field(for: edit.field).editable.snapshot.targetID
-            switch edit.payload {
-            case .text(let query):
-                sources[targetID] = try query.terms.map { term in
-                    guard let index = input.interpretation.requirements.firstIndex(where: { $0.id == term.requirementID }) else {
-                        throw ComputerUseBrowserResearchFormStage.Failure.invalidStage
-                    }
-                    return try .init(index: index, interpretation: input.interpretation)
-                }
-            case .normalized(let value): sources[targetID] = [try .init(index: value.requirementIndex, interpretation: input.interpretation)]
-            case .choice(_, let index): sources[targetID] = [try .init(index: index, interpretation: input.interpretation)]
-            }
-            // Several query terms may cite the same original clause. Retain
-            // that source once, without repeating it in every later context.
-            var unique: [ComputerUseBrowserFormSource] = []
-            for source in sources[targetID] ?? [] where !unique.contains(source) { unique.append(source) }
-            sources[targetID] = unique
+            sources[targetID] = try stage.proposal.sources(for: edit)
         }
         editedSources = sources
-        digest = ComputerUseTaskContract.digest(["browser-research-form-continuation-v3", taskID, rootDigest, goalRevision,
+        pendingEdits = try stage.proposal.edits.dropFirst(count).map { try stage.proposal.pendingEdit(for: $0) }
+        digest = ComputerUseTaskContract.digest(["browser-research-form-continuation-v4", taskID, rootDigest, goalRevision,
             document.contextID, String(document.generation), documentID, formID ?? "", previous?.digest ?? "", current.digest]
-            + stageIDs + inputOperationIDs)
+            + [stage.contract.contractDigest, String(count)] + stageIDs + inputOperationIDs)
     }
 
     var description: String { "BrowserResearchFormContinuation(stages: \(stageIDs.count))" }
@@ -88,10 +79,13 @@ struct ComputerUseBrowserResearchFormReceipt: Equatable, Sendable, CustomStringC
     let index: Int
     let contractDigest: String
     let editCount: Int
-    @MainActor fileprivate init(stage: ComputerUseBrowserResearchFormStage) {
+    let plannedEditCount: Int
+    var isCompleteStage: Bool { editCount == plannedEditCount }
+    @MainActor fileprivate init(stage: ComputerUseBrowserResearchFormStage, completedEditCount: Int? = nil) {
         taskID = stage.input.interpretation.input.taskID; rootDigest = stage.input.interpretation.input.rootDigest
         goalRevision = stage.input.interpretation.input.digest
-        stageID = stage.id; index = stage.index; contractDigest = stage.contract.contractDigest; editCount = stage.contract.steps.count
+        stageID = stage.id; index = stage.index; contractDigest = stage.contract.contractDigest
+        plannedEditCount = stage.contract.steps.count; editCount = completedEditCount ?? plannedEditCount
     }
     var description: String { "BrowserResearchFormReceipt(edits: \(editCount))" }
     var debugDescription: String { description }
@@ -115,6 +109,13 @@ final class ComputerUseBrowserResearchFormStage {
             contractDigest = stage.contract.contractDigest; self.digest = digest
         }
     }
+    struct PrefixResolution: Equatable, Sendable {
+        let retirement: Retirement
+        let receipt: ComputerUseBrowserResearchFormReceipt
+        fileprivate init(retirement: Retirement, receipt: ComputerUseBrowserResearchFormReceipt) {
+            self.retirement = retirement; self.receipt = receipt
+        }
+    }
     let input: ComputerUseBrowserResearchFormInput
     let proposal: ComputerUseBrowserFormProposal
     let id: String
@@ -131,6 +132,7 @@ final class ComputerUseBrowserResearchFormStage {
     private var retirementPending = false
     private var retirement: Retirement?
     private var observedNativeAttempt = false
+    private(set) var nativePrefixResolution: PrefixResolution?
     var nativeReceipt: ComputerUseBrowserResearchFormReceipt? { completed }
     var nativeContinuation: ComputerUseBrowserResearchFormContinuation? { continuation }
 
@@ -158,8 +160,8 @@ final class ComputerUseBrowserResearchFormStage {
             try checkCurrent()
         }
         try check()
-        guard !retirementPending else { throw Failure.retirementPending }
         if let completed { return completed } // Historical receipt; no replay or new page adoption.
+        guard !retirementPending else { throw Failure.retirementPending }
         let store = try makeStore(directory)
         var persisted = try store.load(taskID: contract.taskID)
         let lease = try store.acquireExecution(taskID: contract.taskID, expected: persisted)
@@ -231,6 +233,7 @@ final class ComputerUseBrowserResearchFormStage {
         if let persisted {
             guard persisted.taskID == initial.taskID, persisted.promptDigest == initial.promptDigest,
                   persisted.contractDigest == initial.contractDigest, persisted.stepIDs == initial.stepIDs,
+                  persisted.retainedPrefixCount == nil,
                   persisted.retirementDigest == nil || persisted.retirementDigest == digest else { throw ComputerUseTextTaskError.journalMismatch }
             guard !persisted.statuses.contains(.verified) else { return nil }
         }
@@ -261,6 +264,62 @@ final class ComputerUseBrowserResearchFormStage {
             // Publication is historical even if Pause closes the outer return.
             try check()
             return receipt
+        } catch {
+            await browser.joinDOMCompletion(document: input.evidence.page.document)
+            throw error
+        }
+    }
+
+    /// Retain verified historical work while revoking the unfinished suffix.
+    /// Disk flags identify a candidate prefix; the original native receipts,
+    /// required objects and exact no-attempt ledger must prove it atomically.
+    func retainVerifiedPrefix(checkCurrent: @escaping @MainActor () throws -> Void) async throws -> PrefixResolution? {
+        guard !isExecuting else { throw Failure.busy }
+        try Task.checkCancellation(); try checkCurrent()
+        guard !isRetired else { throw Failure.retired }
+        if let nativePrefixResolution { return nativePrefixResolution }
+        guard completed == nil else { return nil }
+        isExecuting = true
+        defer { isExecuting = false }
+        let plan = try ComputerUseTextTask(contract: contract, read: { _ in nil },
+            apply: { _, _ in throw Failure.invalidStage }, persist: { _ in throw Failure.invalidStage }, mayAct: { false })
+        let store = try makeStore(directory), persisted = try store.load(taskID: contract.taskID)
+        let lease = try store.acquireExecution(taskID: contract.taskID, expected: persisted)
+        defer { lease.release() }
+        guard let persisted, let prefix = try plan.historicalPrefixRequirements(in: persisted) else { return nil }
+        let count = prefix.inputOperationIDs.count
+        let digest = ComputerUseTaskContract.digest(["browser-form-suffix-retirement-v1", id,
+            input.interpretation.input.rootDigest, input.interpretation.input.digest, contract.contractDigest, String(count)])
+        guard (persisted.retirementDigest == nil && persisted.retainedPrefixCount == nil)
+                || (persisted.retirementDigest == digest && persisted.retainedPrefixCount == count) else {
+            throw ComputerUseTextTaskError.journalMismatch
+        }
+        let retained = try ComputerUseBrowserResearchFormContinuation(stage: self, current: prefix, completedEditCount: count)
+        let retired = ComputerUseTaskJournal(taskID: persisted.taskID, promptDigest: persisted.promptDigest,
+            contractDigest: persisted.contractDigest, stepIDs: persisted.stepIDs, statuses: persisted.statuses,
+            retirementDigest: digest, retainedPrefixCount: count)
+        func check() throws {
+            try Task.checkCancellation(); try checkCurrent(); try lease.assertOwnership()
+            guard !isRetired else { throw Failure.retired }
+        }
+        do {
+            try check()
+            retirementPending = true
+            if persisted.retirementDigest == nil {
+                guard try await target.retireUnsentInputs(operationIDs: Array(plan.inputOperationIDs.dropFirst(count)), after: retained) else {
+                    retirementPending = false
+                    return nil
+                }
+            }
+            try check()
+            try store.retireRemainingInput(retired, replacing: persisted)
+            let receipt = ComputerUseBrowserResearchFormReceipt(stage: self, completedEditCount: count)
+            let resolution = PrefixResolution(retirement: .init(stage: self, digest: digest), receipt: receipt)
+            continuation = retained; completed = receipt; nativePrefixResolution = resolution
+            // Persisted native facts survive a late Pause. A later return can
+            // publish this exact partial receipt, but cannot replay the suffix.
+            try check()
+            return resolution
         } catch {
             await browser.joinDOMCompletion(document: input.evidence.page.document)
             throw error

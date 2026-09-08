@@ -1185,6 +1185,10 @@ enum ComputerUseBrowserDOM {
           const ids = args.operationIDs;
           if (!Array.isArray(ids) || ids.length < 1 || ids.length > 8 || new Set(ids).size !== ids.length
               || ids.some(id => typeof id !== 'string' || !/^[a-f0-9]{64}$/.test(id))) return reply('unsupported');
+          if (args.requirements !== undefined) {
+            if (!formRequirementsCurrent(args.requirements, args.repairableFieldIDs)
+                || ids.some(id => args.requirements.inputOperationIDs.includes(id))) return reply('stale');
+          } else if (args.repairableFieldIDs !== undefined) return reply('unsupported');
           if (ids.some(id => operations.has(id))) return reply('unproven');
           if (retiredInputs.size + ids.filter(id => !retiredInputs.has(id)).length > 512) return reply('limit');
           // Same ledger, no attempt, and no await: revoke all old operation
@@ -1445,6 +1449,7 @@ struct ComputerUseBrowserFormQueryRequirements: Sendable, CustomStringConvertibl
 
     fileprivate init(document: ComputerUseBrowserDocument, documentID: String,
                      continuation: ComputerUseTextTaskContinuation, targets: [String: String]) throws {
+        guard continuation.isCompleteTask else { throw ComputerUseBrowserError.formQueryUnavailable }
         try self.init(document: document, documentID: documentID, taskID: continuation.taskID,
             finalValues: continuation.finalValues, editedTargetIDs: continuation.editedTargetIDs,
             inputOperationIDs: continuation.inputOperationIDs, continuationDigest: continuation.digest, targets: targets)
@@ -1669,6 +1674,7 @@ final class ComputerUseBrowserTextTarget {
     func prepareFormQuery(controlID: String, evidence: ComputerUseBrowserPageEvidence,
                           after continuation: ComputerUseBrowserResearchFormContinuation) async throws -> ComputerUseBrowserNavigationTarget {
         try validate()
+        guard continuation.pendingEdits.isEmpty else { throw ComputerUseBrowserError.formQueryUnavailable }
         guard evidence.document == document, let documentID, evidence.documentID == documentID else { throw ComputerUseBrowserError.pageChanged }
         let requirements = try ComputerUseBrowserFormQueryRequirements(document: document, documentID: documentID,
             continuation: continuation, targets: targets)
@@ -1798,12 +1804,19 @@ final class ComputerUseBrowserTextTarget {
     /// Absence is proof only in the exact ledger retained at discovery. A
     /// reset ledger cannot prove that old input was never sent. Revocation is
     /// idempotent for the same unattempted IDs and prevents their later use.
-    func retireUnsentInputs(operationIDs: [String]) async throws -> Bool {
+    func retireUnsentInputs(operationIDs: [String], after continuation: ComputerUseBrowserResearchFormContinuation? = nil) async throws -> Bool {
         try validate()
         guard let documentID, let inputLedgerID, (1...8).contains(operationIDs.count),
               Set(operationIDs).count == operationIDs.count else { throw ComputerUseBrowserError.pageChanged }
-        let reply = try await browser.callDOM(.retireUnsentInputs, arguments: ["documentID":documentID,
-            "inputLedgerID":inputLedgerID, "operationIDs":operationIDs], document: document)
+        var arguments: [String: Any] = ["documentID":documentID, "inputLedgerID":inputLedgerID, "operationIDs":operationIDs]
+        if let continuation {
+            guard Set(operationIDs).isDisjoint(with: continuation.inputOperationIDs) else { throw ComputerUseBrowserError.pageChanged }
+            let requirements = try ComputerUseBrowserFormQueryRequirements(document: document, documentID: documentID,
+                continuation: continuation, targets: targets)
+            arguments["requirements"] = requirements.domArguments
+            arguments["repairableFieldIDs"] = try repairableNativeIDs(after: continuation)
+        }
+        let reply = try await browser.callDOM(.retireUnsentInputs, arguments: arguments, document: document)
         try validate()
         guard reply.documentID == documentID, reply.inputLedgerID == inputLedgerID else { throw ComputerUseBrowserError.pageChanged }
         if reply.status == "unproven" { return false }

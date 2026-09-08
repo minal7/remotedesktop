@@ -220,14 +220,20 @@ struct ComputerUseTextTaskContinuation: Sendable, CustomStringConvertible, Custo
     let finalValues: [String: String]
     let editedTargetIDs: Set<String>
     let inputOperationIDs: [String]
+    let isCompleteTask: Bool
     let digest: String
 
-    fileprivate init(contract: ComputerUseTextTaskContract, inputOperationIDs: [String]) {
+    fileprivate init(contract: ComputerUseTextTaskContract, inputOperationIDs: [String], completedStepCount: Int? = nil) {
         taskID = contract.taskID; promptDigest = contract.promptDigest; contractDigest = contract.contractDigest
-        let finalValues = contract.finalValues, editedTargetIDs = Set(contract.steps.map(\.targetID))
+        let steps = Array(contract.steps.prefix(completedStepCount ?? contract.steps.count))
+        var finalValues = contract.unchangedValues
+        for step in steps { finalValues[step.targetID] = step.after }
+        let editedTargetIDs = Set(steps.map(\.targetID))
         self.finalValues = finalValues; self.editedTargetIDs = editedTargetIDs
         self.inputOperationIDs = inputOperationIDs
-        digest = ComputerUseTaskContract.digest(["verified-text-continuation-v1", taskID, promptDigest, contractDigest,
+        isCompleteTask = completedStepCount == nil
+        let domain = completedStepCount == nil ? "verified-text-continuation-v1" : "verified-text-prefix-requirements-v1"
+        digest = ComputerUseTaskContract.digest([domain, taskID, promptDigest, contractDigest,
             String(inputOperationIDs.count)] + inputOperationIDs + [String(finalValues.count)]
             + finalValues.keys.sorted().flatMap { [$0, finalValues[$0]!, editedTargetIDs.contains($0) ? "edited" : "unchanged"] })
     }
@@ -332,7 +338,8 @@ final class ComputerUseTextTask {
         self.retainedPredicateIDs = retained
         var recoveredExecution: ComputerUseTaskJournal?
         if let recovered {
-            guard recovered.retirementDigest == nil, recovered.taskID == contract.taskID, recovered.promptDigest == contract.promptDigest,
+            guard recovered.retirementDigest == nil, recovered.retainedPrefixCount == nil,
+                  recovered.taskID == contract.taskID, recovered.promptDigest == contract.promptDigest,
                   recovered.contractDigest == contract.contractDigest, recovered.stepIDs == contract.steps.map(\.id) else {
                 throw ComputerUseTextTaskError.journalMismatch
             }
@@ -431,9 +438,23 @@ final class ComputerUseTextTask {
         return .init(contract: contract, inputOperationIDs: inputOperationIDs)
     }
 
+    /// Historical requirements only. The browser must independently validate
+    /// the original native receipts/objects and retire every remaining input
+    /// ID before adopting this prefix as a continuation.
+    func historicalPrefixRequirements(in journal: ComputerUseTextStepJournal) throws -> ComputerUseTextTaskContinuation? {
+        guard journal.taskID == contract.taskID, journal.promptDigest == contract.promptDigest,
+              journal.contractDigest == contract.contractDigest, journal.stepIDs == contract.steps.map(\.id),
+              journal.statuses.count == contract.steps.count else { throw ComputerUseTextTaskError.journalMismatch }
+        let count = journal.statuses.prefix { $0 == .verified }.count
+        guard count > 0, count < contract.steps.count else { return nil }
+        guard !journal.statuses.dropFirst(count).contains(.verified) else { throw ComputerUseTextTaskError.journalMismatch }
+        return .init(contract: contract, inputOperationIDs: Array(inputOperationIDs.prefix(count)), completedStepCount: count)
+    }
+
     private static func textJournal(_ journal: ComputerUseTaskJournal,
                                     contract: ComputerUseTextTaskContract) -> ComputerUseTextStepJournal {
         ComputerUseTextStepJournal(taskID: journal.taskID, promptDigest: journal.promptDigest,
-            contractDigest: contract.contractDigest, stepIDs: journal.stepIDs, statuses: journal.statuses, retirementDigest: journal.retirementDigest)
+            contractDigest: contract.contractDigest, stepIDs: journal.stepIDs, statuses: journal.statuses,
+            retirementDigest: journal.retirementDigest, retainedPrefixCount: journal.retainedPrefixCount)
     }
 }

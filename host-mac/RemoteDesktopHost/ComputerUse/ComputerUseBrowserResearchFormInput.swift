@@ -53,6 +53,19 @@ struct ComputerUseBrowserFormPreservationSource: Equatable, Sendable {
     let source: ComputerUseBrowserFormSource
 }
 
+/// An unfinished proposed edit, not permission to reuse a native target or
+/// payload. A later plan must explicitly map it to a fresh source-backed edit.
+struct ComputerUseBrowserFormPendingEdit: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    let label: String
+    let kind: String
+    let sources: [ComputerUseBrowserFormSource]
+    func context(in interpretation: ComputerUseBrowserGoalProposal) throws -> [String: Any] {
+        ["label":label, "kind":kind, "sources":try sources.map { try $0.context(in: interpretation) }]
+    }
+    var description: String { "BrowserFormPendingEdit" }
+    var debugDescription: String { description }
+}
+
 /// Proposal-only form context. Aliases describe native correspondence, not
 /// permission to edit or submit. The original request and every accepted answer
 /// remain intact; a later compiler must account for the remaining requirements.
@@ -65,6 +78,7 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
     let selectedFormID: String?
     let requiredPreservation: [ComputerUseBrowserFormProposal.Preservation]
     let requiredRepairFieldAliases: [String]
+    let pendingEditAliases: [String]
     let previous: ComputerUseBrowserResearchFormContinuation?
     struct Normalization: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
         enum Kind: String, Sendable { case date, partySize }
@@ -168,11 +182,19 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
             guard let sources = previous?.editedSources[field.editable.snapshot.targetID] else { return nil }
             return ["field":alias, "sources":try sources.map { try $0.context(in: interpretation) }, "requires_repair":repairs.contains(alias)]
         }
-        let context: [String: Any] = ["version":7, "goal":interpretation.input.plannerContext,
+        let unfinished = previous?.pendingEdits ?? []
+        let pendingAliases = unfinished.indices.map { "pending\($0 + 1)" }
+        let pendingContext: [[String: Any]] = try zip(pendingAliases, unfinished).map { alias, edit in
+            var row = try edit.context(in: interpretation)
+            row["id"] = alias
+            return row
+        }
+        let context: [String: Any] = ["version":8, "goal":interpretation.input.plannerContext,
             "selected_form":selectedFormID.map { $0 as Any } ?? NSNull(),
             "required_preservation":try preserved.map { ["field":$0.field, "source":try $0.source.context(in: interpretation)] as [String: Any] },
             "previous_edits":priorEdits,
             "required_repairs":repairs,
+            "unfinished_edits":pendingContext,
             "current_goal_revision_at_previous_stage":previous.map { $0.goalRevision == interpretation.input.digest } ?? true,
             "requirements":requirements, "page":page, "field_bindings":bindings,
             "normalized_values":normalized.map { ["id":$0.id, "requirement":$0.requirementIndex,
@@ -182,6 +204,7 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
         normalizations = normalized; editableFieldAliases = editable; self.selectedFormID = selectedFormID
         requiredPreservation = preserved
         requiredRepairFieldAliases = repairs
+        pendingEditAliases = pendingAliases
         self.previous = previous
     }
 

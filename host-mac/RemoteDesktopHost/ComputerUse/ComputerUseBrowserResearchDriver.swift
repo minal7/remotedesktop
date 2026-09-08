@@ -312,6 +312,7 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                 || error as? ComputerUseTextTaskError == .incompleteOutcome
                 || error as? ComputerUseTextEditError == .deliveryUncertain
                 || error as? ComputerUseBrowserResearchFormStage.Failure == .retirementPending else { return false }
+        if try await owner.retainPendingFormPrefix() != nil { return true }
         return try await owner.retirePendingUnsentForm() != nil
     }
     private var reconciliationRequired: ComputerUseExecutionResult {

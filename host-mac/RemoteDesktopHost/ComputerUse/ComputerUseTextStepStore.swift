@@ -182,6 +182,7 @@ final class ComputerUseTaskJournalStore {
     func replaceUnattemptedBinding(_ journal: ComputerUseTaskJournal, replacing expected: ComputerUseTaskJournal) throws {
         guard Self.isValid(journal), Self.isValid(expected) else { throw StoreError.invalidFile }
         guard journal.retirementDigest == nil, expected.retirementDigest == nil,
+              journal.retainedPrefixCount == nil, expected.retainedPrefixCount == nil,
               journal.taskID.utf8.elementsEqual(expected.taskID.utf8), journal.promptDigest == expected.promptDigest,
               journal.stepIDs.count == expected.stepIDs.count,
               zip(journal.stepIDs, expected.stepIDs).allSatisfy({ $0.0.utf8.elementsEqual($0.1.utf8) }),
@@ -204,9 +205,28 @@ final class ComputerUseTaskJournalStore {
     /// IDs. A failed write remains ambiguous until a fresh leased load.
     func retireUnsent(_ retired: ComputerUseTaskJournal, replacing expected: ComputerUseTaskJournal?) throws {
         guard Self.isValid(retired), expected.map(Self.isValid) ?? true,
+              retired.retainedPrefixCount == nil, expected?.retainedPrefixCount == nil,
               let digest = retired.retirementDigest, !retired.statuses.contains(.verified),
               expected.map({ Self.sameIdentity($0, retired) && $0.statuses == retired.statuses
                   && ($0.retirementDigest == nil || $0.retirementDigest == digest) }) ?? true else { throw StoreError.invalidTransition }
+        try writeRetirement(retired, replacing: expected)
+    }
+
+    /// Keep the exact verified prefix and retire only its unsent remainder.
+    /// The caller must atomically verify original native receipts and revoke
+    /// every remaining ID first. Statuses are historical and never reset.
+    func retireRemainingInput(_ retired: ComputerUseTaskJournal, replacing expected: ComputerUseTaskJournal) throws {
+        guard Self.isValid(retired), Self.isValid(expected),
+              let digest = retired.retirementDigest, let count = retired.retainedPrefixCount,
+              Self.sameIdentity(expected, retired), expected.statuses == retired.statuses,
+              (expected.retirementDigest == nil && expected.retainedPrefixCount == nil)
+                || (expected.retirementDigest == digest && expected.retainedPrefixCount == count) else {
+            throw StoreError.invalidTransition
+        }
+        try writeRetirement(retired, replacing: expected)
+    }
+
+    private func writeRetirement(_ retired: ComputerUseTaskJournal, replacing expected: ComputerUseTaskJournal?) throws {
         let data = try JSONEncoder().encode(retired)
         guard data.count <= 65_536 else { throw StoreError.invalidFile }
         try withJournalLock(taskID: retired.taskID, exclusive: true) {
@@ -300,8 +320,13 @@ final class ComputerUseTaskJournalStore {
               (1...64).contains(journal.stepIDs.count), journal.stepIDs.allSatisfy(validID),
               Set(journal.stepIDs).count == journal.stepIDs.count, journal.statuses.count == journal.stepIDs.count else { return false }
         if let digest = journal.retirementDigest {
-            guard validDigest(digest), !journal.statuses.contains(.verified) else { return false }
-        }
+            guard validDigest(digest) else { return false }
+            if let count = journal.retainedPrefixCount {
+                guard count > 0, count < journal.statuses.count,
+                      journal.statuses.prefix(count).allSatisfy({ $0 == .verified }),
+                      !journal.statuses.dropFirst(count).contains(.verified) else { return false }
+            } else if journal.statuses.contains(.verified) { return false }
+        } else if journal.retainedPrefixCount != nil { return false }
         var sawUnverified = false
         for status in journal.statuses {
             if sawUnverified && status != .planned { return false }
@@ -319,13 +344,15 @@ final class ComputerUseTaskJournalStore {
     private static func matches(_ left: ComputerUseTaskJournal?, _ right: ComputerUseTaskJournal?) -> Bool {
         switch (left, right) {
         case (nil, nil): return true
-        case let (left?, right?): return sameIdentity(left, right) && left.statuses == right.statuses && left.retirementDigest == right.retirementDigest
+        case let (left?, right?): return sameIdentity(left, right) && left.statuses == right.statuses
+            && left.retirementDigest == right.retirementDigest && left.retainedPrefixCount == right.retainedPrefixCount
         default: return false
         }
     }
 
     private static func isAllowedTransition(from previous: ComputerUseTaskJournal?, to next: ComputerUseTaskJournal) -> Bool {
-        guard previous?.retirementDigest == nil, next.retirementDigest == nil else { return false }
+        guard previous?.retirementDigest == nil, next.retirementDigest == nil,
+              previous?.retainedPrefixCount == nil, next.retainedPrefixCount == nil else { return false }
         guard let previous else {
             return next.statuses.allSatisfy { $0 == .planned }
                 || (next.statuses.first == .attempted && next.statuses.dropFirst().allSatisfy { $0 == .planned })
