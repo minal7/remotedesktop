@@ -117,6 +117,20 @@ struct ComputerUseRuntimeBrowserResultPlanner: ComputerUseBrowserResultPlanning 
     }
 }
 
+/// Search-query proposals share the same verified native model and lease;
+/// they do not allocate an independent worker or issue a browser request.
+struct ComputerUseRuntimeBrowserSearchPlanner: ComputerUseBrowserSearchPlanning {
+    let inputs: ComputerUseNativeTextRuntimeInputs
+    var runtime: OSAtlasLlamaRuntime = .shared
+
+    func propose(_ interpretation: ComputerUseBrowserGoalProposal) async throws -> ComputerUseBrowserSearchQuery {
+        try Task.checkCancellation()
+        guard interpretation.disposition == .research else { throw ComputerUseBrowserSearchPlanError.invalidProposal }
+        let endpoint = try await runtime.activateNativeText(inputs)
+        return try await runtime.proposeBrowserSearch(endpoint: endpoint, interpretation: interpretation)
+    }
+}
+
 struct OSAtlasLlamaEndpoint: Equatable, Sendable {
     let generation: UInt64
     /// Nil for the independent text planner; never label it as OS-Atlas.
@@ -1453,6 +1467,34 @@ actor OSAtlasLlamaRuntime {
             let planner = ComputerUseLocalBrowserResultPlanner(connection: connection, transport: server.transport)
             let proposal = try await withTaskCancellationHandler {
                 try await planner.propose(goal: goal, page: page)
+            } onCancel: {
+                Task { await self.cancel(endpoint: endpoint) }
+            }
+            try Task.checkCancellation()
+            guard active?.endpoint == endpoint else { throw OSAtlasLlamaRuntimeError.inactiveSession }
+            return proposal
+        } catch {
+            if active?.endpoint == endpoint { try await stopActiveServerUnserialized() }
+            throw error
+        }
+    }
+
+    func proposeBrowserSearch(endpoint: OSAtlasLlamaEndpoint,
+                              interpretation: ComputerUseBrowserGoalProposal) async throws -> ComputerUseBrowserSearchQuery {
+        try Task.checkCancellation()
+        guard interpretation.disposition == .research else { throw ComputerUseBrowserSearchPlanError.invalidProposal }
+        let lease = try await acquireModelAccessLease()
+        defer { releaseModelAccessLease(lease) }
+        guard let server = active, server.endpoint == endpoint, server.inputs.nativeText != nil else {
+            throw OSAtlasLlamaRuntimeError.inactiveSession
+        }
+        do {
+            try validateResources(minimumReclaimableBytes: server.resourceProfile.minimumInferenceMemoryBytes)
+            let connection = try ComputerUseTextModelConnection(baseURL: endpoint.baseURL, bearerToken: endpoint.bearerToken,
+                modelAlias: ComputerUseNativeTextRuntimeInputs.modelAlias)
+            let planner = ComputerUseLocalBrowserSearchPlanner(connection: connection, transport: server.transport)
+            let proposal = try await withTaskCancellationHandler {
+                try await planner.propose(interpretation)
             } onCancel: {
                 Task { await self.cancel(endpoint: endpoint) }
             }

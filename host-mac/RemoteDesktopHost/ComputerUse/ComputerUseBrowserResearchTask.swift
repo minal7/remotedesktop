@@ -86,6 +86,27 @@ final class ComputerUseBrowserResearchTask {
         return .init(taskID: taskID, inputDigest: input.digest, topic: question.topic, requirementIDs: question.requirementIDs)
     }
 
+    /// Propose a first search from the complete retained user source. This
+    /// neither chooses a website nor opens a page, and cannot replace a pending
+    /// navigation or a question. Dispatch requires its own retained action.
+    func planInitialSearch(using planner: any ComputerUseBrowserSearchPlanning) async throws -> ComputerUseBrowserSearchQuery {
+        try requireIdle()
+        guard !hasPendingNavigation else { throw Failure.navigationPending }
+        guard !hasQuestion else { throw Failure.questionPending }
+        guard let interpretation, interpretation.proposal.input.digest == input.digest,
+              interpretation.proposal.disposition == .research else { throw Failure.interpretationRequired }
+        let captured = input
+        return try await operate { [self] in
+            if browser.taskID == taskID { _ = try await observeOwnedPage(goal: captured) }
+            let query = try await planner.propose(interpretation.proposal)
+            try checkCurrent(captured)
+            guard query.goalDigest == captured.digest, query.interpretationDigest == interpretation.proposal.digest else {
+                throw Failure.goalChanged
+            }
+            return query
+        }
+    }
+
     func readCandidates() async throws -> ComputerUseBrowserResultCandidates {
         try requireIdle()
         guard !hasPendingNavigation else { throw Failure.navigationPending }
