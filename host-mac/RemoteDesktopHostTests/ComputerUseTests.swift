@@ -744,7 +744,7 @@ final class ComputerUseTests: XCTestCase {
     func test_managerBrowserQuestionsPreserveRootAcrossExactAnswersLocalPauseAndDurableReplay() async throws {
         let url = temporaryLedgerURL(), executor = BrowserQuestionLifecycleExecutor()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-        let fixture = try browserControlFixture(executor: executor, ledgerURL: url)
+        let fixture = try browserControlFixture(executor: executor.capabilityExecutor(), ledgerURL: url)
         defer { fixture.manager.stop(); fixture.browser.close() }
         let prompt = makeEnvelope(id: "browser-question-root", kind: .prompt,
             body: try ComputerUsePromptRequest(prompt: "Find concert tickets tomorrow. Do not buy anything.", supportsApprovedActionEvidence: true).encodedBody())
@@ -792,7 +792,7 @@ final class ComputerUseTests: XCTestCase {
         for retirement in ["cancel", "disconnect", "controller-change", "new-request"] {
             let url = temporaryLedgerURL(), executor = BrowserQuestionLifecycleExecutor()
             defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-            let fixture = try browserControlFixture(executor: executor, ledgerURL: url)
+            let fixture = try browserControlFixture(executor: executor.capabilityExecutor(), ledgerURL: url)
             defer { fixture.manager.stop(); fixture.browser.close() }
             let prompt = makeEnvelope(id: "browser-\(retirement)", kind: .prompt, body: "Find movie tickets.")
             fixture.manager.authorizePeer(senderID: prompt.senderID)
@@ -841,7 +841,7 @@ final class ComputerUseTests: XCTestCase {
         let url = temporaryLedgerURL(), executor = BrowserQuestionLifecycleExecutor()
         let directory = url.deletingLastPathComponent()
         defer { try? FileManager.default.removeItem(at: directory) }
-        let fixture = try browserControlFixture(executor: executor, ledgerURL: url)
+        let fixture = try browserControlFixture(executor: executor.capabilityExecutor(), ledgerURL: url)
         defer { fixture.manager.stop(); fixture.browser.close() }
         executor.beforeQuestion = {
             try FileManager.default.removeItem(at: directory)
@@ -878,7 +878,7 @@ final class ComputerUseTests: XCTestCase {
         defer { server.stop() }
         let url = temporaryLedgerURL(), executor = BrowserQuestionLifecycleExecutor()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-        let fixture = try browserControlFixture(executor: executor, ledgerURL: url)
+        let fixture = try browserControlFixture(executor: executor.capabilityExecutor(), ledgerURL: url)
         defer { executor.preparePage = nil; fixture.manager.stop(); fixture.browser.close() }
         executor.preparePage = { root in
             try fixture.browser.claim(taskID: root)

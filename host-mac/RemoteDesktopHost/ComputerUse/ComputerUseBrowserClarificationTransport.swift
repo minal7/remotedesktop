@@ -15,6 +15,15 @@ protocol ComputerUseBrowserResearchContinuing {
         tools: ComputerUseHostTools, progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult
 }
 
+/// Admission receives only the complete current user request. A nil result
+/// is a no-effect decline before retaining an owner; once prepared, that
+/// owner must continue through the typed research entry, including on errors.
+@MainActor
+protocol ComputerUseBrowserResearchExecuting: ComputerUseBrowserResearchContinuing {
+    func executeBrowserResearch(taskID: String, prompt: String,
+        tools: ComputerUseHostTools, progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult?
+}
+
 /// Maps the existing opaque phone reference to one host-held browser root.
 /// The phone never supplies a browser identity or reconstructs the goal.
 @MainActor

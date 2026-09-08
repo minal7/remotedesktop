@@ -13,14 +13,22 @@ protocol ComputerUseTextClarificationContinuing {
 /// to reconstruct and replay the goal through another executor.
 @MainActor
 final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
-    MCPApprovalContinuing, ComputerUseVisualApprovalContinuing, ComputerUseTextClarificationContinuing {
+    MCPApprovalContinuing, ComputerUseVisualApprovalContinuing, ComputerUseTextClarificationContinuing,
+    ComputerUseBrowserResearchContinuing {
     typealias NativeExecution = @MainActor (String, String, @escaping (String) -> Void) async throws -> ComputerUseExecutionResult?
     typealias DesktopFactory = @MainActor (@escaping (String) -> Void) async throws -> any ComputerUseExecuting
 
-    enum RoutingError: Error { case taskChanged, missingContinuation, alreadyExecuting }
-    private enum Route { case native, desktop }
+    enum RoutingError: Error, Equatable { case taskChanged, missingContinuation, alreadyExecuting }
+    private enum Route { case native, research, desktop }
+    private struct ResearchState {
+        let owner: ComputerUseBrowserResearchTask
+        let input: ComputerUseBrowserGoalInput
+    }
     private let nativeExecution: NativeExecution
     private let nativeClarification: ComputerUseNativeTextExecutor?
+    private let browserResearch: (any ComputerUseBrowserResearchExecuting)?
+    private var researchState: ResearchState?
+    private var researchAdmissionStarted = false
     private var desktopFactory: DesktopFactory?
     private var desktopIncludesVisualControl: Bool
     private var taskID: String?
@@ -30,17 +38,20 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
     private var isExecuting = false
 
     init(nativeExecution: @escaping NativeExecution, desktopFactory: DesktopFactory? = nil,
-         desktopIncludesVisualControl: Bool = true, nativeClarification: ComputerUseNativeTextExecutor? = nil) {
+         desktopIncludesVisualControl: Bool = true, nativeClarification: ComputerUseNativeTextExecutor? = nil,
+         browserResearch: (any ComputerUseBrowserResearchExecuting)? = nil) {
         self.nativeExecution = nativeExecution
         self.nativeClarification = nativeClarification
+        self.browserResearch = browserResearch
         self.desktopFactory = desktopFactory
         self.desktopIncludesVisualControl = desktopFactory != nil && desktopIncludesVisualControl
     }
 
-    convenience init(native: ComputerUseNativeTextExecutor, desktopFactory: DesktopFactory? = nil) {
+    convenience init(native: ComputerUseNativeTextExecutor, desktopFactory: DesktopFactory? = nil,
+                     browserResearch: (any ComputerUseBrowserResearchExecuting)? = nil) {
         self.init(nativeExecution: { taskID, prompt, progress in
             try await native.execute(taskID: taskID, prompt: prompt, progress: progress)
-        }, desktopFactory: desktopFactory, nativeClarification: native)
+        }, desktopFactory: desktopFactory, nativeClarification: native, browserResearch: browserResearch)
     }
 
     let isReady = true
@@ -84,6 +95,9 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
         if self.taskID == taskID {
             guard promptDigest == digest else { throw RoutingError.taskChanged }
         } else {
+            researchState?.owner.retire()
+            researchState = nil
+            researchAdmissionStarted = false
             nativeClarification?.invalidateClarification()
             (desktop as? any MCPApprovalContinuing)?.cancelMCPWork()
             desktop = nil
@@ -95,6 +109,7 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
             if let browserResult = try await tools.executeOwnedBrowserTaskIfSupported(
                 taskID: taskID, prompt: currentUserPrompt, progress: progress) {
                 try Task.checkCancellation()
+                try rejectUnroutedResearchQuestion(browserResult)
                 return browserResult
             }
             // This receives only the current user request. Conversation and
@@ -102,9 +117,17 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
             let nativeResult = try await nativeExecution(taskID, currentUserPrompt, progress)
             try Task.checkCancellation()
             if let result = nativeResult {
+                try rejectUnroutedResearchQuestion(result)
                 return result
             }
             try Task.checkCancellation()
+            route = browserResearch == nil ? .desktop : .research
+        }
+        if route == .research {
+            // Commit the route before admission can suspend or prepare an
+            // owner. An error/cancellation is never a no-effect decline.
+            if let result = try await executeResearchRoute(taskID: taskID, prompt: currentUserPrompt,
+                tools: tools, progress: progress) { return result }
             route = .desktop
         }
         if desktop == nil {
@@ -125,7 +148,118 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
         let result = try await desktop.execute(taskID: taskID, modelPrompt: modelPrompt,
             currentUserPrompt: currentUserPrompt, conversation: conversation, tools: tools, progress: progress)
         try Task.checkCancellation()
+        try rejectUnroutedResearchQuestion(result)
         return result
+    }
+
+    private func executeResearchRoute(taskID: String, prompt: String, tools: ComputerUseHostTools,
+                                      progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult? {
+        guard let browserResearch else { throw RoutingError.missingContinuation }
+        let rootID = researchState?.owner.taskID ?? taskID
+        do {
+            if let owner = try captureResearchOwner(rootID: rootID, prompt: prompt, tools: tools) {
+                guard let retained = researchState else { throw RoutingError.missingContinuation }
+                try owner.validateDriverContinuation(retained.input)
+                let result = try await browserResearch.continueBrowserResearch(taskID: taskID, research: owner,
+                    tools: tools, progress: progress)
+                try validateResearchResult(result, tools: tools)
+                return result
+            }
+            guard !researchAdmissionStarted else { throw RoutingError.missingContinuation }
+            let result = try await tools.withOwnedBrowserResearchAdmission(didPrepare: { [self] owner in
+                researchAdmissionStarted = true
+                guard try captureResearchOwner(rootID: rootID, prompt: prompt, tools: tools) === owner else {
+                    throw RoutingError.taskChanged
+                }
+            }, operation: {
+                try await browserResearch.executeBrowserResearch(taskID: taskID, prompt: prompt,
+                    tools: tools, progress: progress)
+            })
+            let owner = try captureResearchOwner(rootID: rootID, prompt: prompt, tools: tools)
+            try Task.checkCancellation()
+            guard let result else {
+                guard owner == nil, !researchAdmissionStarted else { throw RoutingError.missingContinuation }
+                return nil
+            }
+            guard owner != nil else { throw RoutingError.missingContinuation }
+            try validateResearchResult(result, tools: tools)
+            return result
+        } catch {
+            // Preparation may have succeeded before a planner threw or ignored
+            // cancellation. Keep that exact owner for Resume; do not re-admit.
+            _ = try? captureResearchOwner(rootID: rootID, prompt: prompt, tools: tools)
+            throw error
+        }
+    }
+
+    private func captureResearchOwner(rootID: String, prompt: String,
+                                      tools: ComputerUseHostTools) throws -> ComputerUseBrowserResearchTask? {
+        guard let actual = tools.ownedBrowserResearch(taskID: rootID) else {
+            guard researchState == nil else { throw RoutingError.missingContinuation }
+            return nil
+        }
+        if let retained = researchState {
+            guard actual === retained.owner, actual.input == retained.input,
+                  actual.executionTaskID == taskID else { throw RoutingError.taskChanged }
+        } else {
+            guard actual.taskID == taskID, actual.executionTaskID == taskID,
+                  actual.input.clarifications.isEmpty, actual.input.prompt.utf8.elementsEqual(prompt.utf8) else {
+                throw RoutingError.taskChanged
+            }
+            researchState = .init(owner: actual, input: actual.input)
+        }
+        return actual
+    }
+
+    func continueBrowserResearch(taskID: String, research: ComputerUseBrowserResearchTask,
+        tools: ComputerUseHostTools, progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
+        guard !isExecuting else { throw RoutingError.alreadyExecuting }
+        isExecuting = true
+        defer { isExecuting = false }
+        try Task.checkCancellation()
+        guard route == .research, let browserResearch, let retained = researchState,
+              retained.owner === research, tools.ownedBrowserResearch(taskID: research.taskID) === research,
+              research.executionTaskID == taskID else { throw RoutingError.missingContinuation }
+        let current = research.input
+        if current == retained.input {
+            guard self.taskID == taskID else { throw RoutingError.taskChanged }
+        } else {
+            guard self.taskID == (retained.input.clarifications.last?.answerTaskID ?? retained.input.taskID),
+                  let answer = current.clarifications.last,
+                  (try? retained.input.appending(answer)) == current else { throw RoutingError.taskChanged }
+        }
+        try research.validateDriverContinuation(current)
+        // Advance before awaiting: Resume of an accepted answer uses this same
+        // revision and cannot append it again or return to native admission.
+        self.taskID = taskID
+        researchState = .init(owner: research, input: current)
+        let result = try await browserResearch.continueBrowserResearch(taskID: taskID, research: research,
+            tools: tools, progress: progress)
+        try validateResearchResult(result, tools: tools)
+        return result
+    }
+
+    private func validateResearchResult(_ result: ComputerUseExecutionResult, tools: ComputerUseHostTools) throws {
+        try Task.checkCancellation()
+        guard let retained = researchState, tools.ownedBrowserResearch(taskID: retained.owner.taskID) === retained.owner,
+              retained.owner.executionTaskID == taskID else { throw RoutingError.missingContinuation }
+        try retained.owner.validateDriverContinuation(retained.input)
+        switch result {
+        case .browserClarificationRequired(let request):
+            guard request.taskID == retained.owner.taskID, request.inputDigest == retained.input.digest,
+                  let expected = try? retained.owner.proposedQuestionRequest(), expected == request else {
+                throw RoutingError.missingContinuation
+            }
+        case .clarificationRequired, .approvalRequired, .mcpApprovalRequired:
+            // This route has typed questions and manual handback. An unrelated
+            // native/visual/MCP continuation cannot complete research work.
+            throw RoutingError.missingContinuation
+        case .completed, .unableToComplete, .userInterventionRequired: break
+        }
+    }
+
+    private func rejectUnroutedResearchQuestion(_ result: ComputerUseExecutionResult) throws {
+        if case .browserClarificationRequired = result { throw RoutingError.missingContinuation }
     }
 
     func clarification(taskID: String) throws -> ComputerUseNativeTextExecutor.Clarification? {
@@ -155,8 +289,10 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
         defer { isExecuting = false }
         // A scoped answer never enters navigation, desktop fallback or a
         // general conversation route, including on decline and resume.
-        return try await native.continueClarification(taskID: taskID, originatingTaskID: originatingTaskID,
+        let result = try await native.continueClarification(taskID: taskID, originatingTaskID: originatingTaskID,
             goal: goal, progress: progress)
+        try rejectUnroutedResearchQuestion(result)
+        return result
     }
 
     func continueAfterApproval(_ prepared: MCPPreparedApproval, tools: ComputerUseHostTools,
@@ -187,6 +323,7 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
         let result = try await continuing.continueAfterApprovedVisualAction(continuation,
             action: action, tools: tools, progress: progress)
         try Task.checkCancellation()
+        try rejectUnroutedResearchQuestion(result)
         return result
     }
 

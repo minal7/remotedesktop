@@ -129,7 +129,7 @@ final class ComputerUseBrowserClarificationTransportTests: XCTestCase {
 /// Shared by the host/phone composition fixtures. Only local task state and
 /// decoded fake proposals are exercised; the default terminal claims no research result.
 @MainActor
-final class BrowserQuestionLifecycleExecutor: ComputerUseExecuting, ComputerUseBrowserResearchContinuing {
+final class BrowserQuestionLifecycleExecutor: ComputerUseExecuting, ComputerUseBrowserResearchExecuting {
     let isReady = true
     let requiresMacControlHelper = false
     let runtimeName = "Prepared browser-question fixture"
@@ -140,6 +140,20 @@ final class BrowserQuestionLifecycleExecutor: ComputerUseExecuting, ComputerUseB
     var pauseFirstAnswer = false
     var beforeQuestion: (() throws -> Void)?
     var preparePage: ((String) async throws -> Void)?
+
+    /// Host/phone cases use the production capability wrapper around this
+    /// controlled driver, so scoped answers cross the real routing boundary.
+    func capabilityExecutor() -> ComputerUseCapabilityExecutor {
+        .init(nativeExecution: { _, _, _ in nil }, desktopFactory: { _ in
+            XCTFail("Retained research must not load desktop fallback")
+            return self
+        }, browserResearch: self)
+    }
+
+    func executeBrowserResearch(taskID: String, prompt: String, tools: ComputerUseHostTools,
+                                progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult? {
+        try await execute(taskID: taskID, prompt: prompt, trustedUserPrompt: prompt, tools: tools, progress: progress)
+    }
 
     func execute(prompt: String, tools: ComputerUseHostTools, progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
         XCTFail("The host must retain the original task identity")

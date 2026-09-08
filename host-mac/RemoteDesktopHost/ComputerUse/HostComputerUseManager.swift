@@ -1002,6 +1002,7 @@ final class ComputerUseHostTools {
     private let textTarget: any ComputerUseNativeTextTarget
     private let textEditorOverride: ComputerUseTextEditor?
     private var browserNavigationTask: ComputerUseBrowserNavigationTask?
+    private var browserResearchAdmissionObserver: (@MainActor (ComputerUseBrowserResearchTask) throws -> Void)?
     private var browserTaskControls: ComputerUseBrowserTaskControls?
     private var browserTaskControlHandler: ((ComputerUseBrowserTaskControls, ComputerUseBrowserTaskControls.Action) -> Void)?
     /// Deterministic seam used to exercise a gate close after one low-level
@@ -1224,8 +1225,20 @@ final class ComputerUseHostTools {
             publishOwnedBrowserTaskControls()
         }
         guard let browserNavigationTask else { throw ComputerUseBrowserError.closed }
-        return try browserNavigationTask.prepareResearchTask(taskID: taskID, prompt: prompt, goalPlanner: goalPlanner,
+        let owner = try browserNavigationTask.prepareResearchTask(taskID: taskID, prompt: prompt, goalPlanner: goalPlanner,
             resultPlanner: resultPlanner, mayAct: mayAct, referenceDate: referenceDate, timeZoneIdentifier: timeZoneIdentifier)
+        // Capture admission synchronously. The owner may be closed/replaced
+        // while the driver awaits, so a later lookup cannot prove no admission.
+        try browserResearchAdmissionObserver?(owner)
+        return owner
+    }
+
+    func withOwnedBrowserResearchAdmission(didPrepare: @escaping @MainActor (ComputerUseBrowserResearchTask) throws -> Void,
+        operation: @MainActor () async throws -> ComputerUseExecutionResult?) async throws -> ComputerUseExecutionResult? {
+        guard browserResearchAdmissionObserver == nil else { throw ComputerUseBrowserResearchTask.Failure.busy }
+        browserResearchAdmissionObserver = didPrepare
+        defer { browserResearchAdmissionObserver = nil }
+        return try await operation()
     }
 
     func pauseOwnedBrowserResearch(taskID: String) { browserNavigationTask?.pauseResearchTask(taskID: taskID) }

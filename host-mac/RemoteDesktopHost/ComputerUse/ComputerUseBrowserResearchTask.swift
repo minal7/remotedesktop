@@ -36,6 +36,15 @@ final class ComputerUseBrowserResearchTask {
     var isOperating: Bool { operationID != nil }
     var hasPendingNavigation: Bool { navigation?.pendingSelection != nil }
 
+    /// The capability router checks the retained revision and local lifecycle
+    /// around delegation. Individual owner operations still validate the actual
+    /// browser session, page and effect evidence at their own boundaries.
+    func validateDriverContinuation(_ expected: ComputerUseBrowserGoalInput) throws {
+        try requireIdle()
+        guard !hasQuestion else { throw Failure.questionPending }
+        guard input == expected else { throw Failure.goalChanged }
+    }
+
     init(input: ComputerUseBrowserGoalInput, browser: ComputerUseOwnedBrowser,
          goalPlanner: any ComputerUseBrowserGoalPlanning, resultPlanner: any ComputerUseBrowserResultPlanning,
          navigationJournalDirectory: URL? = nil,
