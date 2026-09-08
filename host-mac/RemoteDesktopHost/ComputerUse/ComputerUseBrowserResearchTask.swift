@@ -311,14 +311,47 @@ final class ComputerUseBrowserResearchTask {
         let captured = input
         latestForm = nil
         try await operate { [self] in
-            guard browser.hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
-            try browser.validateSourceDocument(proposed.evidence.page.document)
-            try await retained.target.validateFormEvidence(proposed.evidence)
-            try checkCurrent(captured)
-            guard browser.hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
-            try browser.validateSourceDocument(proposed.evidence.page.document)
+            try await validatePreparedForm(retained, goal: captured)
         }
         latestForm = retained
+    }
+
+    /// Planning and native preflight share the owner's operation. Pause joins
+    /// the actual planner before releasing it; no edit is dispatched here.
+    func planForm(_ proposed: ComputerUseBrowserResearchFormInput, using planner: any ComputerUseBrowserFormPlanning) async throws -> ComputerUseBrowserFormProposal {
+        try requireIdle()
+        guard !hasPendingNavigation else { throw Failure.navigationPending }
+        guard !hasQuestion else { throw Failure.questionPending }
+        guard let retained = latestForm, retained.input == proposed,
+              interpretation?.proposal == proposed.interpretation, proposed.interpretation.input == input else {
+            throw ComputerUseBrowserResearchFormError.inputChanged
+        }
+        let captured = input
+        latestForm = nil
+        let result = try await operate { [self] in
+            try await validatePreparedForm(retained, goal: captured)
+            let proposal = try await planner.propose(proposed)
+            try checkCurrent(captured)
+            try proposal.validate(for: proposed)
+            try await validatePreparedForm(retained, goal: captured)
+            if let contract = try proposal.textContract(for: proposed) {
+                try await retained.target.validateRepresentability(of: contract)
+                try await validatePreparedForm(retained, goal: captured)
+            }
+            return proposal
+        }
+        latestForm = retained
+        return result
+    }
+
+    private func validatePreparedForm(_ prepared: PreparedForm, goal: ComputerUseBrowserGoalInput) async throws {
+        try checkCurrent(goal)
+        guard browser.hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
+        try browser.validateSourceDocument(prepared.input.evidence.page.document)
+        try await prepared.target.validateFormEvidence(prepared.input.evidence)
+        try checkCurrent(goal)
+        guard browser.hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
+        try browser.validateSourceDocument(prepared.input.evidence.page.document)
     }
 
     func readCandidates() async throws -> ComputerUseBrowserResultCandidates {

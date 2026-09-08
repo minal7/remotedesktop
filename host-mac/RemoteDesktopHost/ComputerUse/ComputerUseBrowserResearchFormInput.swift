@@ -1,6 +1,6 @@
 import Foundation
 
-enum ComputerUseBrowserResearchFormError: Error, Equatable { case invalidInput, inputChanged, contextLimit }
+enum ComputerUseBrowserResearchFormError: Error, Equatable { case invalidInput, invalidProposal, inputChanged, contextLimit }
 
 /// Proposal-only form context. Aliases describe native correspondence, not
 /// permission to edit or submit. The original request and every accepted answer
@@ -10,6 +10,35 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
     let evidence: ComputerUseBrowserFormEvidence
     let contextJSON: String
     let fieldAliases: [String]
+    struct Normalization: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+        enum Kind: String, Sendable { case date, partySize }
+        let id: String
+        let requirementIndex: Int
+        let kind: Kind
+        let value: String
+        let unit: String
+        var description: String { "BrowserFormNormalization(kind: \(kind.rawValue))" }
+        var debugDescription: String { description }
+    }
+    let normalizations: [Normalization]
+
+    /// Only exact dates and explicit party counts have an unambiguous scalar
+    /// representation for these native input kinds. Ranges, maxima and counts
+    /// of desired results cannot silently become an exact day or party size.
+    static func normalizations(for interpretation: ComputerUseBrowserGoalProposal) -> [Normalization] {
+        let ledger = ComputerUseBrowserScalarRequirements(proposal: interpretation)
+        return ledger.entries.enumerated().compactMap { index, entry in
+            guard case .bound(let condition) = entry.resolution else { return nil }
+            switch condition.predicate {
+            case .day(let range):
+                guard let day = range.lower, range.upper == day, range.lowerInclusive, range.upperInclusive else { return nil }
+                return .init(id: "value\(index + 1)", requirementIndex: index, kind: .date, value: day.iso8601, unit: "civilDay")
+            case .quantity(.equal, let count, let unit) where unit.isPartySize:
+                return .init(id: "value\(index + 1)", requirementIndex: index, kind: .partySize, value: String(count), unit: unit.rawValue)
+            default: return nil
+            }
+        }
+    }
 
     init(interpretation: ComputerUseBrowserGoalProposal, evidence: ComputerUseBrowserFormEvidence) throws {
         guard interpretation.disposition == .research,
@@ -33,10 +62,14 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
                 "source":source, "role":requirement.role.rawValue, "field":requirement.field.rawValue,
                 "relation":requirement.relation.rawValue, "values":requirement.values]
         }
-        let context: [String: Any] = ["version":1, "goal":interpretation.input.plannerContext,
-            "requirements":requirements, "page":page, "field_bindings":bindings]
+        let normalized = Self.normalizations(for: interpretation)
+        let context: [String: Any] = ["version":2, "goal":interpretation.input.plannerContext,
+            "requirements":requirements, "page":page, "field_bindings":bindings,
+            "normalized_values":normalized.map { ["id":$0.id, "requirement":$0.requirementIndex,
+                "kind":$0.kind.rawValue, "value":$0.value, "unit":$0.unit] as [String: Any] }]
         contextJSON = String(decoding: try JSONSerialization.data(withJSONObject: context, options: [.sortedKeys]), as: UTF8.self)
         self.interpretation = interpretation; self.evidence = evidence; fieldAliases = aliases
+        normalizations = normalized
     }
 
     /// Resolve only an offered reference in this immutable input. Execution

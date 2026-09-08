@@ -89,7 +89,9 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
                 }
                 // The number of discovered cards is not the number of unique,
                 // qualifying offers, nor evidence of inventory for a party.
-                if case .quantity = condition.predicate { return result(.needsResultSet) }
+                if case .quantity(_, _, let unit) = condition.predicate {
+                    return result(unit.isPartySize ? .needsSemanticVerification : .needsResultSet)
+                }
                 let kind: ComputerUseBrowserResultProposal.Kind
                 switch condition.predicate { case .price: kind = .price; case .day: kind = .date; case .quantity: return result(.needsResultSet) }
                 let indices = quotes.indices.filter { quotes[$0].kind == kind }

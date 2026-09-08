@@ -11,7 +11,7 @@ enum ComputerUseBrowserClarificationTopic: String, CaseIterable, Sendable {
         case .location: return "Which city or area should I search?"
         case .date: return "Which date or date range do you mean? You can use YYYY-MM-DD."
         case .time: return "What local time or time range should I use?"
-        case .quantity: return "How many results or tickets do you want? Please specify which."
+        case .quantity: return "How many results, tickets or people do you mean? Please specify which, and adult/child counts when relevant."
         case .currency: return "Which currency do you mean? Please give its three-letter code."
         case .priceBasis: return "Is the budget a total, per person or per ticket?"
         case .fees: return "Should the price limit include fees?"

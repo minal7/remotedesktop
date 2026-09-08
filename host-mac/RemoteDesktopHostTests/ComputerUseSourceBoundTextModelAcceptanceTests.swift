@@ -194,6 +194,7 @@ final class ComputerUseSourceBoundTextModelAcceptanceTests: XCTestCase {
                         for operation in operations {
                             let index = try XCTUnwrap(fields.firstIndex(where: { $0.snapshot.targetID == operation.targetID }))
                             switch operation {
+                            case .selectChoice: throw ComputerUseLocalTextPlanError.invalidResponse
                             case .enterText(let edit): edits.append(.init(field: index, mode: edit.mode.rawValue, value: edit.text))
                             case .copyField(let sourceID, _, let mode):
                                 let source = try XCTUnwrap(fields.firstIndex(where: { $0.snapshot.targetID == sourceID }))

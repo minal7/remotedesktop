@@ -15,11 +15,14 @@ enum ComputerUseTextGoalProposal: Equatable, Sendable {
 enum ComputerUseTextGoalOperation: Equatable, Sendable {
     case enterText(ComputerUseTextPlanEdit)
     case copyField(sourceTargetID: String, targetID: String, mode: ComputerUseTextEditMode)
+    /// A separately bound native choice, never a string interpreted as an ID.
+    case selectChoice(targetID: String, choiceID: String)
 
     var targetID: String {
         switch self {
         case .enterText(let edit): return edit.targetID
         case .copyField(_, let targetID, _): return targetID
+        case .selectChoice(let targetID, _): return targetID
         }
     }
 }

@@ -234,6 +234,7 @@ private final class ObservedFieldOperationsPlanner: ComputerUseTextGoalPlanning 
             operations = try plan.map { operation in
                 let target = try XCTUnwrap(fields.firstIndex { $0.snapshot.targetID == operation.targetID })
                 switch operation {
+                case .selectChoice: throw ComputerUseLocalTextPlanError.invalidResponse
                 case .enterText(let edit): return .init(field: target, mode: edit.mode.rawValue, value: edit.text)
                 case .copyField(let sourceID, _, let mode):
                     let source = try XCTUnwrap(fields.firstIndex { $0.snapshot.targetID == sourceID })

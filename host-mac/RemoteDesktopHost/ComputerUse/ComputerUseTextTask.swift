@@ -96,8 +96,16 @@ struct ComputerUseTextTaskContract: Sendable {
         for (index, operation) in operations.enumerated() {
             var edit: ComputerUseTextPlanEdit
             let source: ComputerUseTextSnapshot?
+            var selectedChoiceID: String?
             switch operation {
             case .enterText(let literal): edit = literal; source = nil
+            case .selectChoice(let targetID, let choiceID):
+                guard let choices = catalog[targetID]?.choices,
+                      choices.contains(where: { $0.id == choiceID && !$0.disabled && !$0.hidden }) else {
+                    throw ComputerUseTextEditError.valueNotRepresentable
+                }
+                selectedChoiceID = choiceID
+                edit = .init(targetID: targetID, mode: .replaceAll, text: choiceID); source = nil
             case .copyField(let sourceTargetID, let targetID, let mode):
                 guard let observed = values[sourceTargetID], observed.isEditable, !observed.isSecure else {
                     throw ComputerUseTextTaskError.invalidPlan
@@ -120,9 +128,11 @@ struct ComputerUseTextTaskContract: Sendable {
             let isChoiceSelection = catalog[edit.targetID]?.choices != nil
             if let choices = catalog[edit.targetID]?.choices {
                 guard edit.mode == .replaceAll else { throw ComputerUseTextEditError.valueNotRepresentable }
-                let matches = choices.filter { !$0.disabled && !$0.hidden && $0.label.utf8.elementsEqual(edit.text.utf8) }
-                guard matches.count == 1, let choice = matches.first else { throw ComputerUseTextEditError.valueNotRepresentable }
-                edit = .init(targetID: edit.targetID, mode: .replaceAll, text: choice.id)
+                if selectedChoiceID == nil {
+                    let matches = choices.filter { !$0.disabled && !$0.hidden && $0.label.utf8.elementsEqual(edit.text.utf8) }
+                    guard matches.count == 1, let choice = matches.first else { throw ComputerUseTextEditError.valueNotRepresentable }
+                    edit = .init(targetID: edit.targetID, mode: .replaceAll, text: choice.id)
+                }
             }
             let range: NSRange
             switch edit.mode {

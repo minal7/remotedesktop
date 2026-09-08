@@ -57,7 +57,10 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
             }
         }
     }
-    enum QuantityUnit: String, Sendable { case results, options, flights, concerts, movies, tickets }
+    enum QuantityUnit: String, Sendable {
+        case results, options, flights, concerts, movies, tickets, people, adults, children
+        var isPartySize: Bool { [.people, .adults, .children].contains(self) }
+    }
     enum PriceBasis: String, Sendable { case unspecified, total, perPerson, perTicket }
     enum Fees: String, Sendable { case unspecified, included, excluded }
     enum Currency: String, Sendable {
@@ -384,7 +387,7 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
         }
     }
     private static func quantity(_ source: String) -> Result<(Predicate, ComputerUseBrowserGoalProposal.Relation), BindingFailure> {
-        guard let values = groups(#"^(?:(at least|at most|more than|fewer than|exactly)\s+)?([0-9]{1,3}|one|two|three|four|five|six|seven|eight|nine|ten)\s+(results|options|flights|concerts|movies|tickets)$"#, source),
+        guard let values = groups(#"^(?:for\s+)?(?:(at least|at most|more than|fewer than|exactly)\s+)?([0-9]{1,3}|one|two|three|four|five|six|seven|eight|nine|ten)\s+(results|options|flights|concerts|movies|tickets|people|adults|children)$"#, source),
               let comparison = comparison(values[0]), let unit = QuantityUnit(rawValue: values[2].lowercased()) else {
             return .failure(.init(reason: .unrecognizedSource))
         }
