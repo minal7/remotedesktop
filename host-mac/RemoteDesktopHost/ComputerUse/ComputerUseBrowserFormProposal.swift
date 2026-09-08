@@ -78,7 +78,7 @@ struct ComputerUseBrowserFormProposal: Equatable, Sendable, CustomStringConverti
                 } else if Set(item.keys) == ["field", "normalized"] {
                     guard case .string(let id)? = item["normalized"], let normalized = input.normalizations.first(where: { $0.id == id }),
                           (normalized.kind == .date && field.control.kind == "date")
-                            || (normalized.kind == .partySize && field.control.kind == "number") else { throw invalid }
+                            || ([.partySize, .ticketCount].contains(normalized.kind) && field.control.kind == "number") else { throw invalid }
                     payload = .normalized(normalized)
                 } else if Set(item.keys) == ["field", "choice", "requirement"] {
                     guard field.control.kind == "select", case .string(let id)? = item["choice"],

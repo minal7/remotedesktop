@@ -35,10 +35,10 @@ final class ComputerUseBrowserFormPlannerTests: XCTestCase {
             row("at most four people. ", field: "quantity"), row("after tomorrow. ", field: "date"),
             row("from 2026-03-09 to 2026-03-12. ", field: "date"), row("not tomorrow.", field: "date")])
         let values = ComputerUseBrowserResearchFormInput.normalizations(for: goal)
-        XCTAssertEqual(values.map(\.requirementIndex), [1, 2, 3, 4])
-        XCTAssertEqual(values.map(\.value), ["2026-03-08", "2", "3", "0"])
-        XCTAssertEqual(values.map(\.unit), ["civilDay", "people", "adults", "children"])
-        XCTAssertEqual(values.map(\.kind), [.date, .partySize, .partySize, .partySize])
+        XCTAssertEqual(values.map(\.requirementIndex), [1, 2, 3, 4, 6])
+        XCTAssertEqual(values.map(\.value), ["2026-03-08", "2", "3", "0", "2"])
+        XCTAssertEqual(values.map(\.unit), ["civilDay", "people", "adults", "children", "tickets"])
+        XCTAssertEqual(values.map(\.kind), [.date, .partySize, .partySize, .partySize, .ticketCount])
         for value in values { XCTAssertFalse(String(reflecting: value).contains(value.id)) }
         let ledger = ComputerUseBrowserScalarRequirements(proposal: goal)
         XCTAssertEqual(ledger.entries.count, goal.requirements.count)
@@ -61,7 +61,89 @@ final class ComputerUseBrowserFormPlannerTests: XCTestCase {
         let reading = try await fixture.browser.prepareResultCandidates(proposal, goal: goal.input, evidence: evidence, interpretation: goal)
         let assessment = try ComputerUseBrowserResultAssessment(interpretation: goal, reading: reading)
         let statuses = try XCTUnwrap(assessment.candidates.first).requirements.map(\.status)
-        XCTAssertEqual(statuses, [.needsSemanticVerification, .needsSemanticVerification, .needsResultSet])
+        XCTAssertEqual(statuses, [.needsSemanticVerification, .needsPartyCapacity, .needsResultSet])
+    }
+
+    func testTicketNormalizationsDoNotTurnResultsBoundsOrAmbiguousCountsIntoBookingQuantities() throws {
+        let goal = try proposal(rows: [row("Find concert options. ", role: "outcome", field: "category"),
+            row("two tickets. ", field: "quantity"), row("three options. ", field: "quantity"),
+            row("two people. ", field: "quantity"), row("at most four tickets. ", field: "quantity"),
+            row("at least three tickets. ", field: "quantity"), row("zero tickets. ", field: "quantity"),
+            row("two tickets or three tickets.", field: "quantity")])
+        let values = ComputerUseBrowserResearchFormInput.normalizations(for: goal)
+        XCTAssertEqual(values.map(\.requirementIndex), [1, 3])
+        XCTAssertEqual(values.map(\.kind), [.ticketCount, .partySize])
+        XCTAssertEqual(values.map(\.unit), ["tickets", "people"])
+        XCTAssertEqual(values.map(\.value), ["2", "2"])
+        XCTAssertEqual(values.map(\.id), ["value2", "value4"])
+        XCTAssertEqual(ComputerUseBrowserScalarRequirements(proposal: goal).entries.count, goal.requirements.count)
+    }
+
+    func testTicketAndAdultCountsReachDistinctNativeFieldsAndOneVerifiedQuery() async throws {
+        let goal = try proposal(rows: [row("Find concert options. ", role: "outcome", field: "category"),
+            row("three options. ", field: "quantity"), row("two tickets. ", field: "quantity"), row("two adults.", field: "quantity")])
+        let body = """
+        <form action='/results'><label>Tickets<input type='number' name='tickets' min='1' max='8' value='1'></label>
+        <label>Adults<input type='number' name='adults' min='1' max='8' value='1'></label>
+        <label>Results shown<input type='number' name='shown' value='5'></label><button>Search</button></form>
+        """
+        var edits = 0
+        let fixture = try await FormPlannerFixture(goal: goal, body: body,
+            additionalRoutes: ["/results?tickets=2&adults=2&shown=5":.init(body: "<p>Search received</p>")],
+            domScriptDidDispatch: { if $0 == .edit { edits += 1 } })
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { fixture.close(); try? FileManager.default.removeItem(at: directory) }
+        let owner = fixture.owner(journalDirectory: directory)
+        defer { owner.retire() }
+        _ = try await owner.interpretGoal()
+        let input = try await owner.prepareFormInput()
+        XCTAssertEqual(input.normalizations.map(\.kind), [.ticketCount, .partySize])
+        XCTAssertEqual(input.normalizations.map(\.unit), ["tickets", "adults"])
+        XCTAssertEqual(input.normalizations.map(\.requirementIndex), [2, 3])
+        let content = try plan([["field":"field1", "normalized":"value3"], ["field":"field2", "normalized":"value4"]])
+        let transport = FormPlannerTransport(content: content), planner = try local(transport)
+        let proposed = try await owner.planForm(input, using: planner)
+        let calls = await transport.requests
+        XCTAssertEqual(calls.count, 2); XCTAssertEqual(calls[0].httpBody, calls[1].httpBody)
+        let request = try object(XCTUnwrap(calls.last?.httpBody))
+        let messages = try XCTUnwrap(request["messages"] as? [[String: String]])
+        XCTAssertEqual(messages.last?["content"], input.contextJSON)
+        let format = try XCTUnwrap(request["response_format"] as? [String: Any])
+        XCTAssertEqual((format["json_schema"] as? [String: Any])?["name"] as? String, "browser_form_plan_v8")
+        XCTAssertEqual(try object(Data(input.contextJSON.utf8))["version"] as? Int, 9)
+        let normalized = try XCTUnwrap(object(Data(input.contextJSON.utf8))["normalized_values"] as? [[String: Any]])
+        XCTAssertEqual(normalized.map { $0["kind"] as? String }, ["ticketCount", "partySize"])
+        XCTAssertEqual(edits, 0)
+        let receipt = try await owner.executeForm(proposed, input: input)
+        let page = try await owner.observeFormResultPage(after: receipt), control = try XCTUnwrap(page.page.controls.first { $0.kind == "submit" }).id
+        let first = try await owner.openFormQuery(after: receipt, controlID: control, evidence: page)
+        let repeated = try await owner.openFormQuery(after: receipt, controlID: control, evidence: page)
+        XCTAssertEqual(first, repeated); XCTAssertEqual(edits, 2)
+        XCTAssertEqual(fixture.server.count("/results?tickets=2&adults=2&shown=5"), 1)
+        XCTAssertEqual(owner.confirmedFormHistory, [receipt]); XCTAssertEqual(owner.input, goal.input)
+        XCTAssertEqual(owner.confirmedNavigationHistory.map(\.kind), [.formQuery])
+        XCTAssertFalse(owner.hasPendingFormNavigation)
+    }
+
+    func testTicketCountRetainsNativeTypeAndRepresentabilityChecksBeforeAnyInput() async throws {
+        let goal = try proposal(rows: [row("Find concert tickets. ", role: "outcome", field: "category"), row("two tickets.", field: "quantity")])
+        var edits = 0
+        let fixture = try await FormPlannerFixture(goal: goal, body: """
+        <form><label>Tickets<input type='number' min='1' max='1'></label>
+        <label>Note<input></label><label>Day<input type='date'></label><button>Search</button></form>
+        """, domScriptDidDispatch: { if $0 == .edit { edits += 1 } })
+        defer { fixture.close() }
+        for field in ["field2", "field3"] {
+            XCTAssertThrowsError(try ComputerUseBrowserFormProposal.decode(content: plan([["field":field,"normalized":"value2"]]), input: fixture.input))
+        }
+        XCTAssertThrowsError(try ComputerUseBrowserFormProposal.decode(content: plan([["field":"field1","normalized":"2"]]), input: fixture.input))
+        let owner = fixture.owner()
+        defer { owner.retire() }
+        _ = try await owner.interpretGoal()
+        let input = try await owner.prepareFormInput(), planner = FormProposalFixture(content: try plan([["field":"field1","normalized":"value2"]]))
+        do { _ = try await owner.planForm(input, using: planner); XCTFail("The observed maximum cannot hold two tickets") }
+        catch { XCTAssertEqual(error as? ComputerUseTextEditError, .valueNotRepresentable) }
+        XCTAssertEqual(planner.inputs.count, 1); XCTAssertEqual(edits, 0); XCTAssertTrue(owner.confirmedFormHistory.isEmpty)
     }
 
     func testCompleteGoalProducesSourceTextHostDatePartySizeAndExactChoiceContract() async throws {

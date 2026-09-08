@@ -7,6 +7,7 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
     typealias Scalars = ComputerUseBrowserScalarRequirements
     enum Status: String, Sendable {
         case needsSemanticVerification, needsResultSet, uncompiledRequirement, clarificationApplied
+        case needsTicketInventory, needsPartyCapacity
         case missingQuote, ambiguousQuotes, unparsedQuote
         case quotedValueMatches, quotedValueConflicts, incompatibleLiteral
         case reviewMixedOffers, reviewUnresolved, reviewPageContext, reviewQualifiedPrice
@@ -21,6 +22,7 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
         let role: ComputerUseBrowserGoalProposal.Role
         let field: ComputerUseBrowserGoalProposal.Field
         let relation: ComputerUseBrowserGoalProposal.Relation
+        let quantityScope: Scalars.QuantityScope?
     }
     struct Quote: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
         let fieldIndex: Int
@@ -56,13 +58,18 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
         try reading.review?.validateInterpretation(interpretation)
         goalRevision = interpretation.input.digest; interpretationDigest = interpretation.digest
         readingIdentity = reading.requirementAssessmentIdentity
-        requirements = interpretation.requirements.map {
-            .init(id: $0.id, turn: $0.sourceTurnIndex, sourceByteOffset: $0.sourceByteOffset, sourceByteCount: $0.sourceByteCount,
-                  role: $0.role, field: $0.field, relation: $0.relation)
-        }
         let scalars = Scalars(proposal: interpretation), sources = ComputerUseBrowserSourceRequirements(proposal: interpretation)
         let unresolvedSources = Set(sources.unresolved.map(\.requirementID))
         let conditions = Dictionary(uniqueKeysWithValues: scalars.entries.map { ($0.requirementID, $0.resolution) })
+        requirements = interpretation.requirements.map { requirement in
+            let scope: Scalars.QuantityScope?
+            if case .bound(let condition)? = conditions[requirement.id], case .quantity(_, _, let unit) = condition.predicate {
+                scope = unit.scope
+            } else { scope = nil }
+            return .init(id: requirement.id, turn: requirement.sourceTurnIndex, sourceByteOffset: requirement.sourceByteOffset,
+                sourceByteCount: requirement.sourceByteCount, role: requirement.role, field: requirement.field,
+                relation: requirement.relation, quantityScope: scope)
+        }
         let pageIncomplete = reading.sourceTruncated || reading.omittedStructure || reading.omittedEmbeddedContent
             || reading.projectionOmittedRecords
         candidates = reading.candidates.enumerated().map { candidateIndex, candidate in
@@ -100,7 +107,12 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
                 // The number of discovered cards is not the number of unique,
                 // qualifying offers, nor evidence of inventory for a party.
                 if case .quantity(_, _, let unit) = condition.predicate {
-                    return result(unit.isPartySize ? .needsSemanticVerification : .needsResultSet)
+                    let indices = quotes.indices.filter { quotes[$0].kind == .quantity }
+                    switch unit.scope {
+                    case .resultSet: return result(.needsResultSet)
+                    case .ticketInventory: return result(.needsTicketInventory, quotes: indices)
+                    case .party: return result(.needsPartyCapacity, quotes: indices)
+                    }
                 }
                 let kind: ComputerUseBrowserResultProposal.Kind
                 switch condition.predicate { case .price: kind = .price; case .day: kind = .date; case .quantity: return result(.needsResultSet) }
@@ -137,10 +149,11 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
     /// Planning gets indices and existing text references, never native URLs,
     /// goal/session hashes, candidate authority or invented normalized prose.
     var plannerContext: [String: Any] {
-        ["version":2,
+        ["version":3,
          "requirements":requirements.enumerated().map { index, value in
              ["index":index, "turn":value.turn, "sourceByteOffset":value.sourceByteOffset, "sourceByteCount":value.sourceByteCount,
-              "role":value.role.rawValue, "field":value.field.rawValue, "relation":value.relation.rawValue] as [String: Any]
+              "role":value.role.rawValue, "field":value.field.rawValue, "relation":value.relation.rawValue,
+              "quantity_scope":value.quantityScope.map { $0.rawValue as Any } ?? NSNull()] as [String: Any]
          },
          "candidates":candidates.enumerated().map { index, candidate in
              ["index":index, "quotes":candidate.quotes.map {

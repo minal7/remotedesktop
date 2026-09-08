@@ -81,7 +81,7 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
     let pendingEditAliases: [String]
     let previous: ComputerUseBrowserResearchFormContinuation?
     struct Normalization: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
-        enum Kind: String, Sendable { case date, partySize }
+        enum Kind: String, Sendable { case date, partySize, ticketCount }
         let id: String
         let requirementIndex: Int
         let kind: Kind
@@ -92,9 +92,9 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
     }
     let normalizations: [Normalization]
 
-    /// Only exact dates and explicit party counts have an unambiguous scalar
+    /// Only exact dates and explicit party/ticket counts have a scalar
     /// representation for these native input kinds. Ranges, maxima and counts
-    /// of desired results cannot silently become an exact day or party size.
+    /// of desired results cannot silently become an exact day or booking size.
     static func normalizations(for interpretation: ComputerUseBrowserGoalProposal) -> [Normalization] {
         let ledger = ComputerUseBrowserScalarRequirements(proposal: interpretation)
         return ledger.entries.enumerated().compactMap { index, entry in
@@ -103,8 +103,14 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
             case .day(let range):
                 guard let day = range.lower, range.upper == day, range.lowerInclusive, range.upperInclusive else { return nil }
                 return .init(id: "value\(index + 1)", requirementIndex: index, kind: .date, value: day.iso8601, unit: "civilDay")
-            case .quantity(.equal, let count, let unit) where unit.isPartySize:
-                return .init(id: "value\(index + 1)", requirementIndex: index, kind: .partySize, value: String(count), unit: unit.rawValue)
+            case .quantity(.equal, let count, let unit):
+                let kind: Normalization.Kind
+                switch unit.scope {
+                case .resultSet: return nil
+                case .ticketInventory: kind = .ticketCount
+                case .party: kind = .partySize
+                }
+                return .init(id: "value\(index + 1)", requirementIndex: index, kind: kind, value: String(count), unit: unit.rawValue)
             default: return nil
             }
         }
@@ -189,7 +195,7 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
             row["id"] = alias
             return row
         }
-        let context: [String: Any] = ["version":8, "goal":interpretation.input.plannerContext,
+        let context: [String: Any] = ["version":9, "goal":interpretation.input.plannerContext,
             "selected_form":selectedFormID.map { $0 as Any } ?? NSNull(),
             "required_preservation":try preserved.map { ["field":$0.field, "source":try $0.source.context(in: interpretation)] as [String: Any] },
             "previous_edits":priorEdits,

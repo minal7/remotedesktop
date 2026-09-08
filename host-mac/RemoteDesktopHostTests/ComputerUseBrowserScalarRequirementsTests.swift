@@ -49,6 +49,26 @@ final class ComputerUseBrowserScalarRequirementsTests: XCTestCase {
         XCTAssertEqual(try compile("999 results", field: "quantity").evaluate(.quantity(999, .results)), .satisfied)
     }
 
+    func testQuantityScopesDistinguishListingsTicketInventoryAndPartyWithoutConvertingUnits() throws {
+        let groups: [(Scalar.QuantityScope, [Scalar.QuantityUnit])] = [
+            (.resultSet, [.results, .options, .flights, .concerts, .movies]),
+            (.ticketInventory, [.tickets]), (.party, [.people, .adults, .children])]
+        for (scope, units) in groups {
+            for unit in units {
+                XCTAssertEqual(unit.scope, scope)
+                let condition = try compile("two \(unit.rawValue)", field: "quantity")
+                XCTAssertEqual(condition.predicate, .quantity(.equal, 2, unit))
+                for other in groups.flatMap({ $0.1 }) where other != unit {
+                    XCTAssertEqual(condition.compareLiteral(.quantity(2, other)), .unverifiable)
+                }
+            }
+        }
+        XCTAssertFalse(Scalar.QuantityUnit.tickets.isPartySize)
+        // An arithmetic count comparison is still not an availability test:
+        // a page's number may mean stock, pack size or a purchase limit.
+        XCTAssertEqual(try compile("two tickets", field: "quantity").compareLiteral(.quantity(3, .tickets)), .notSatisfied)
+    }
+
     func testPriceComparisonUsesExactDecimalAndStrictOrInclusiveBounds() throws {
         let cases: [(String, Scalar.Comparison, [Scalar.Evaluation])] = [
             ("under", .below, [.satisfied, .notSatisfied, .notSatisfied]),

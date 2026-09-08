@@ -57,9 +57,17 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
             }
         }
     }
+    enum QuantityScope: String, Sendable { case resultSet, ticketInventory, party }
     enum QuantityUnit: String, Sendable {
         case results, options, flights, concerts, movies, tickets, people, adults, children
-        var isPartySize: Bool { [.people, .adults, .children].contains(self) }
+        var scope: QuantityScope {
+            switch self {
+            case .results, .options, .flights, .concerts, .movies: return .resultSet
+            case .tickets: return .ticketInventory
+            case .people, .adults, .children: return .party
+            }
+        }
+        var isPartySize: Bool { scope == .party }
     }
     enum PriceBasis: String, Sendable { case unspecified, total, perPerson, perTicket }
     enum Fees: String, Sendable { case unspecified, included, excluded }

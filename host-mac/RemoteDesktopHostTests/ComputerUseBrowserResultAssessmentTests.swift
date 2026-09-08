@@ -91,10 +91,55 @@ final class ComputerUseBrowserResultAssessmentTests: XCTestCase {
         let result = try await reading(rows, fields: [.init(.price, ["USD 40"]), .init(.quantity, ["3 tickets"])])
         defer { result.fixture.close() }
         let candidate = try XCTUnwrap(result.batch.requirementAssessment?.candidates.first)
-        XCTAssertEqual(candidate.requirements.map(\.status), [.needsSemanticVerification, .quotedValueMatches, .needsResultSet, .sourceOriginExcluded])
+        XCTAssertEqual(candidate.requirements.map(\.status), [.needsSemanticVerification, .quotedValueMatches, .needsTicketInventory, .sourceOriginExcluded])
         XCTAssertEqual(candidate.quotes[1].literal, .quantity(3, .tickets))
         XCTAssertEqual(result.batch.documentAnswerSourceStatus, .excluded)
         XCTAssertEqual(result.fixture.server.count("/search?q=concerts"), 1)
+    }
+
+    func testQuantityAssessmentSeparatesOptionCountTicketsAndPartyDespiteMatchingQuotedNumbers() async throws {
+        let rows = [row("Find concerts. "), row("3 options. ", field: "quantity"),
+            row("2 tickets. ", field: "quantity"), row("2 adults.", field: "quantity")]
+        let result = try await reading(rows, fields: [.init(.quantity, ["2 tickets"])])
+        defer { result.fixture.close() }
+        let assessment = try XCTUnwrap(result.batch.requirementAssessment)
+        XCTAssertEqual(assessment.requirements.map(\.quantityScope), [nil, .resultSet, .ticketInventory, .party])
+        let candidate = try XCTUnwrap(assessment.candidates.first)
+        XCTAssertEqual(candidate.requirements.map(\.status), [.needsSemanticVerification, .needsResultSet, .needsTicketInventory, .needsPartyCapacity])
+        XCTAssertEqual(candidate.quotes.first?.literal, .quantity(2, .tickets))
+        XCTAssertEqual(candidate.requirements[1].quoteIndices, [])
+        XCTAssertEqual(candidate.requirements[2].quoteIndices, [0])
+        let context = assessment.plannerContext, requirements = try XCTUnwrap(context["requirements"] as? [[String: Any]])
+        XCTAssertEqual(context["version"] as? Int, 3)
+        XCTAssertEqual(requirements.dropFirst().map { $0["quantity_scope"] as? String }, ["resultSet", "ticketInventory", "party"])
+        let linkInput = try XCTUnwrap(result.links.inputs.first), object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(linkInput.contextJSON.utf8)) as? [String: Any])
+        let projected = try XCTUnwrap(object["requirement_assessment"] as? [String: Any])
+        XCTAssertEqual((projected["candidates"] as? [[String: Any]])?.first?["requirements"] as? [String], candidate.requirements.map(\.status.rawValue))
+        XCTAssertEqual(result.owner.input, result.interpretation.input)
+    }
+
+    func testTicketAnswerAddsInventoryWorkWithoutReplacingTheRequestedResultCountOrClock() async throws {
+        let rows = [row("Find concerts. "), row("3 options.", field: "quantity")]
+        let result = try await reading(rows, fields: [.init(.quantity, ["2 tickets"])])
+        defer { result.fixture.close() }
+        let original = result.owner.input
+        let question = try result.owner.issueQuestion(topic: .quantity, requirementIDs: [result.interpretation.requirements[0].id],
+            controllerID: "phone", controllerSessionID: "session")
+        let updated = try result.owner.answerQuestion(questionID: question.id, answerTaskID: "ticket-answer", answer: "2 tickets.", controllerID: "phone", controllerSessionID: "session")
+        var answerRow = row("2 tickets.", field: "quantity"); answerRow["turn"] = 1
+        let current = try proposal(rows + [answerRow], input: updated)
+        result.goals.value = current
+        _ = try await result.owner.interpretGoal()
+        let sources = try XCTUnwrap(ComputerUseBrowserSourceRequirements(proposal: current).selectSources(from: [result.fixture.policy.provider]))
+        try result.owner.configureResearchSources(sources)
+        let reading = try await result.owner.readCandidates(), assessment = try XCTUnwrap(reading.requirementAssessment)
+        XCTAssertEqual(assessment.requirements.map(\.quantityScope), [nil, .resultSet, .ticketInventory])
+        XCTAssertEqual(assessment.candidates[0].requirements.map(\.status), [.needsSemanticVerification, .needsResultSet, .needsTicketInventory])
+        XCTAssertEqual(ComputerUseBrowserResearchFormInput.normalizations(for: current).map(\.kind), [.ticketCount])
+        XCTAssertEqual(updated.rootDigest, original.rootDigest); XCTAssertEqual(updated.referenceMilliseconds, original.referenceMilliseconds)
+        XCTAssertEqual(updated.userTurns, [original.prompt, "2 tickets."])
+        XCTAssertEqual(result.fixture.server.count("/search?q=concerts"), 1)
+        try await result.fixture.browser.validateResultAssessment(assessment, reading: reading, interpretation: current)
     }
 
     func testAssessmentRequiresTheSameInterpretationFreshNativeReadingAndLiveControl() async throws {
