@@ -190,9 +190,11 @@ struct ComputerUseBrowserResultCandidates: Sendable, CustomStringConvertible, Cu
     let projectionOmittedRecords: Bool
     fileprivate let evidence: ComputerUseBrowserPageEvidence
     fileprivate let rootTaskID: String
+    fileprivate let readingInput: ComputerUseBrowserResultPageInput
 
     fileprivate init(proposal: ComputerUseBrowserResultProposal, goal: ComputerUseBrowserGoalInput, evidence: ComputerUseBrowserPageEvidence) {
         self.evidence = evidence; goalRevision = goal.digest; rootTaskID = goal.taskID
+        readingInput = proposal.input
         let page = evidence.page, tree = ComputerUseBrowserResultProposal.Tree(page)
         containers = page.containers
         sourceTruncated = page.truncated; omittedStructure = page.omittedStructure
@@ -221,6 +223,59 @@ struct ComputerUseBrowserResultCandidates: Sendable, CustomStringConvertible, Cu
         surroundingLinks = page.links.filter { !includedLinks.contains($0.id) }.map(link)
     }
     var description: String { "BrowserResultCandidates(candidates: \(candidates.count), truncated: \(sourceTruncated))" }
+    var debugDescription: String { description }
+}
+
+/// Immutable proposal context for one bound reading and confirmed history.
+/// The original bounded page projection remains intact; native destinations,
+/// session identity and candidate authority stay outside the model message.
+struct ComputerUseBrowserLinkSelectionInput: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    private struct Choice: Equatable, Sendable { let candidateID: String; let links: [String] }
+    private let choices: [Choice]
+    private let bindingDigest: String
+    let contextJSON: String
+    var candidateCount: Int { choices.count }
+    var selectableLinkIDs: [String] { Array(Set(choices.flatMap(\.links))).sorted() }
+    var hasSelectableLinks: Bool { choices.contains { !$0.links.isEmpty } }
+
+    init(goal: ComputerUseBrowserGoalInput, candidates: ComputerUseBrowserResultCandidates,
+         history: [ComputerUseBrowserResearchVisit]) throws {
+        guard candidates.goalRevision == goal.digest, candidates.rootTaskID == goal.taskID,
+              history.count <= 33, history.allSatisfy({ $0.rootDigest == goal.rootDigest }),
+              Set(history.map(\.operationID)).count == history.count else {
+            throw ComputerUseBrowserLinkPlanError.inputChanged
+        }
+        choices = candidates.candidates.map { .init(candidateID: $0.id, links: $0.selectedLinkIDs) }
+        let groups: [[String: Any]] = candidates.candidates.enumerated().map { index, candidate in
+            ["index":index, "container":candidate.containerID,
+             "fields":candidate.fields.map { ["kind":$0.kind.rawValue, "texts":$0.textIDs] as [String: Any] },
+             "links":candidate.selectedLinkIDs,
+             "unclassified_texts":candidate.unclassifiedTextIDs.filter { candidates.readingInput.textIDs.contains($0) },
+             "unprojected_text_count":candidate.unprojectedTextIDs.count,
+             "unprojected_link_count":candidate.unprojectedLinkIDs.count]
+        }
+        let visits: [[String: Any]] = history.enumerated().map {
+            ["step":$0.offset, "kind":$0.element.kind.rawValue, "current_goal_revision":$0.element.goalRevision == goal.digest]
+        }
+        let context: [String: Any] = ["version":1, "goal":goal.plannerContext,
+            "page":try JSONSerialization.jsonObject(with: Data(candidates.readingInput.contextJSON.utf8)),
+            "candidates":groups, "navigation_history":visits]
+        contextJSON = String(decoding: try JSONSerialization.data(withJSONObject: context, options: [.sortedKeys]), as: UTF8.self)
+        let evidence = candidates.evidence
+        bindingDigest = ComputerUseTaskContract.digest(["browser-link-selection-input-v1", goal.digest,
+            evidence.document.contextID, String(evidence.document.generation), evidence.documentID, evidence.page.id, contextJSON]
+            + choices.flatMap { [$0.candidateID, String($0.links.count)] + $0.links }
+            + history.flatMap { [$0.operationID, $0.goalRevision, $0.kind.rawValue] })
+    }
+
+    func resolve(candidate: Int, link: String) throws -> ComputerUseBrowserResearchTask.LinkChoice? {
+        if candidate == -1, link.isEmpty { return nil }
+        guard choices.indices.contains(candidate), choices[candidate].links.contains(link) else {
+            throw ComputerUseBrowserLinkPlanError.invalidProposal
+        }
+        return .init(candidateID: choices[candidate].candidateID, linkID: link)
+    }
+    var description: String { "BrowserLinkSelectionInput(candidates: \(candidateCount))" }
     var debugDescription: String { description }
 }
 

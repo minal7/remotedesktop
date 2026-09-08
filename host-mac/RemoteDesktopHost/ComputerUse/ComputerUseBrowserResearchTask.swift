@@ -19,8 +19,9 @@ struct ComputerUseBrowserResearchVisit: Equatable, Sendable {
     let kind: Kind
     let operationID: String
     let goalRevision: String
+    let rootDigest: String
     fileprivate init(kind: Kind, document: ComputerUseBrowserDocument, goal: ComputerUseBrowserGoalInput) {
-        self.kind = kind; operationID = document.operationID; goalRevision = goal.digest
+        self.kind = kind; operationID = document.operationID; goalRevision = goal.digest; rootDigest = goal.rootDigest
     }
 }
 

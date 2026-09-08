@@ -319,7 +319,7 @@ final class ComputerUseBrowserResearchDriverTests: XCTestCase {
 }
 
 @MainActor
-private struct ResearchDriverFixture {
+struct ResearchDriverFixture {
     static let root = "research-driver"
     static let prompt = "Find concerts under USD 50. Do not buy."
     static let date = Date(timeIntervalSince1970: 1_800_000_000)
@@ -337,12 +337,16 @@ private struct ResearchDriverFixture {
     let driver: ComputerUseBrowserResearchDriver
     var searchDirectory: URL { directory.appendingPathComponent("Research/Initial Search") }
 
-    static func make(seedPage: Bool = false, navigationLimit: Int = 8) async throws -> Self {
-        func card(_ path: String) -> String { "<article><h2>Concert Alpha</h2><a href='\(path)'>Alpha details</a></article>" }
+    static func make(seedPage: Bool = false, navigationLimit: Int = 8,
+                     linkPlanner: (any ComputerUseBrowserLinkPlanning)? = nil,
+                     resultPlanner: (any ComputerUseBrowserResultPlanning)? = nil,
+                     additionalCardHTML: String = "") async throws -> Self {
+        func card(_ path: String) -> String { "<article><h2>Concert Alpha</h2><a href='\(path)'>Alpha details</a></article>" + additionalCardHTML }
         let server = try OwnedBrowserHTTPFixture(routes: ["/before": .init(body: card("/old")),
             "/search?q=concerts": .init(body: card("/details")), "/details": .init(body: card("/offers")),
             "/offers": .init(body: card("/more")), "/account": .init(body: "<label>Password<input type=password></label>"),
-            "/account-ready": .init(body: card("/logged-in-offer")), "/logged-in-offer": .init(body: card("/more"))])
+            "/account-ready": .init(body: card("/logged-in-offer")), "/logged-in-offer": .init(body: card("/more")),
+            "/beta": .init(body: card("/more"))])
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString), state = DriverFixtureState()
         let browser = ComputerUseOwnedBrowser(presentsWindow: false, domScriptDidDispatch: {
             state.commands.append($0); state.onCommand?($0)
@@ -364,8 +368,11 @@ private struct ResearchDriverFixture {
             let goal = DriverGoalFixture(), results = BrowserResearchResultFixture(), search = DriverSearchFixture()
             results.selectedLinkLabel = "Alpha details"
             let policy = DriverPlanningFixture(provider: try .init(endpoint: base.appendingPathComponent("search"), queryParameter: "q"))
-            let driver = ComputerUseBrowserResearchDriver(goalPlanner: goal, resultPlanner: results, searchPlanner: search,
-                planning: policy, navigationLimit: navigationLimit, now: { date }, timeZoneIdentifier: { "America/Los_Angeles" })
+            let planning: any ComputerUseBrowserResearchPlanning
+            if let linkPlanner { planning = ComputerUseModelBrowserResearchPlanning(provider: { _ in policy.provider }, linkPlanner: linkPlanner) }
+            else { planning = policy }
+            let driver = ComputerUseBrowserResearchDriver(goalPlanner: goal, resultPlanner: resultPlanner ?? results, searchPlanner: search,
+                planning: planning, navigationLimit: navigationLimit, now: { date }, timeZoneIdentifier: { "America/Los_Angeles" })
             return .init(server: server, base: base, directory: directory, browser: browser, coordinator: coordinator,
                 tools: tools, goal: goal, results: results, search: search, policy: policy, state: state, driver: driver)
         } catch { browser.close(); server.stop(); try? FileManager.default.removeItem(at: directory); throw error }
@@ -405,7 +412,7 @@ private struct ResearchDriverFixture {
 }
 
 @MainActor
-private final class DriverFixtureState {
+final class DriverFixtureState {
     var allowed = true
     var commands: [ComputerUseBrowserDOMCommand] = []
     var onCommand: ((ComputerUseBrowserDOMCommand) -> Void)?
@@ -415,7 +422,7 @@ private final class DriverFixtureState {
 }
 
 @MainActor
-private final class DriverGoalFixture: ComputerUseBrowserGoalPlanning {
+final class DriverGoalFixture: ComputerUseBrowserGoalPlanning {
     let base = BrowserResearchGoalFixture()
     var unsupported = false
     var inputs: [ComputerUseBrowserGoalInput] = []
@@ -432,7 +439,7 @@ private final class DriverGoalFixture: ComputerUseBrowserGoalPlanning {
 }
 
 @MainActor
-private final class DriverSearchFixture: ComputerUseBrowserSearchPlanning {
+final class DriverSearchFixture: ComputerUseBrowserSearchPlanning {
     var inputs: [ComputerUseBrowserGoalProposal] = []
     var empty = false
     func propose(_ interpretation: ComputerUseBrowserGoalProposal) async throws -> ComputerUseBrowserSearchQuery {
@@ -442,7 +449,7 @@ private final class DriverSearchFixture: ComputerUseBrowserSearchPlanning {
 }
 
 @MainActor
-private final class DriverPlanningFixture: ComputerUseBrowserResearchPlanning {
+final class DriverPlanningFixture: ComputerUseBrowserResearchPlanning {
     let provider: ComputerUseBrowserSearchProvider
     var providerEnabled = true
     var providerCalls = 0
