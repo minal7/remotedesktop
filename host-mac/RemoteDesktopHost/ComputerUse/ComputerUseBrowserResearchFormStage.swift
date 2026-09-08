@@ -130,7 +130,7 @@ final class ComputerUseBrowserResearchFormStage {
     private var isRetired = false
     private var retirementPending = false
     private var retirement: Retirement?
-    private var observedAttempt = false
+    private var observedNativeAttempt = false
     var nativeReceipt: ComputerUseBrowserResearchFormReceipt? { completed }
     var nativeContinuation: ComputerUseBrowserResearchFormContinuation? { continuation }
 
@@ -162,7 +162,6 @@ final class ComputerUseBrowserResearchFormStage {
         if let completed { return completed } // Historical receipt; no replay or new page adoption.
         let store = try makeStore(directory)
         var persisted = try store.load(taskID: contract.taskID)
-        if persisted?.statuses.contains(where: { $0 != .planned }) == true { observedAttempt = true }
         let lease = try store.acquireExecution(taskID: contract.taskID, expected: persisted)
         defer { lease.release() }
         try check(); try lease.assertOwnership()
@@ -174,7 +173,6 @@ final class ComputerUseBrowserResearchFormStage {
                 return value
             }, apply: { _, _ in throw ComputerUseTextTaskError.invalidPlan },
             applyWithIdentity: { [self] dispatch in
-                observedAttempt = true
                 try check(); try browser.validateSourceDocument(input.evidence.page.document)
                 try await target.apply(dispatch)
                 try check(); try browser.validateSourceDocument(input.evidence.page.document)
@@ -211,15 +209,15 @@ final class ComputerUseBrowserResearchFormStage {
         }
     }
 
-    /// Retire stale no-attempt work under the same disk lease used to execute
+    /// Retire work with no native input under the same disk lease used to execute
     /// it. Native revocation precedes the durable tombstone. If either return
     /// is lost, only this retirement can resume; the old plan cannot run.
-    func retireUnattempted(checkCurrent: @escaping @MainActor () throws -> Void) async throws -> Retirement? {
+    func retireUnsent(checkCurrent: @escaping @MainActor () throws -> Void) async throws -> Retirement? {
         guard !isExecuting else { throw Failure.busy }
         try Task.checkCancellation(); try checkCurrent()
         if let retirement { return retirement }
         guard !isRetired else { throw Failure.retired }
-        guard completed == nil, !observedAttempt else { return nil }
+        guard completed == nil, !observedNativeAttempt else { return nil }
         isExecuting = true
         defer { isExecuting = false }
         let plan = try ComputerUseTextTask(contract: contract, read: { _ in nil },
@@ -227,8 +225,6 @@ final class ComputerUseBrowserResearchFormStage {
         let initial = plan.journal
         let digest = ComputerUseTaskContract.digest(["browser-unsent-form-retirement-v1", id,
             input.interpretation.input.rootDigest, input.interpretation.input.digest, contract.contractDigest])
-        let retired = ComputerUseTaskJournal(taskID: initial.taskID, promptDigest: initial.promptDigest,
-            contractDigest: initial.contractDigest, stepIDs: initial.stepIDs, statuses: initial.statuses, retirementDigest: digest)
         let store = try makeStore(directory), persisted = try store.load(taskID: contract.taskID)
         let lease = try store.acquireExecution(taskID: contract.taskID, expected: persisted)
         defer { lease.release() }
@@ -236,8 +232,13 @@ final class ComputerUseBrowserResearchFormStage {
             guard persisted.taskID == initial.taskID, persisted.promptDigest == initial.promptDigest,
                   persisted.contractDigest == initial.contractDigest, persisted.stepIDs == initial.stepIDs,
                   persisted.retirementDigest == nil || persisted.retirementDigest == digest else { throw ComputerUseTextTaskError.journalMismatch }
-            guard persisted.statuses.allSatisfy({ $0 == .planned }) else { observedAttempt = true; return nil }
+            guard !persisted.statuses.contains(.verified) else { return nil }
         }
+        // Preserve the disk attempt/uncertainty history. Only native proof
+        // permits retirement; no status is rewritten to planned.
+        let retired = ComputerUseTaskJournal(taskID: initial.taskID, promptDigest: initial.promptDigest,
+            contractDigest: initial.contractDigest, stepIDs: initial.stepIDs,
+            statuses: persisted?.statuses ?? initial.statuses, retirementDigest: digest)
         func check() throws {
             try Task.checkCancellation(); try checkCurrent(); try lease.assertOwnership()
             guard !isRetired else { throw Failure.retired }
@@ -250,11 +251,11 @@ final class ComputerUseBrowserResearchFormStage {
             // do not manufacture a new absence claim from the new ledger.
             if persisted?.retirementDigest == nil {
                 guard try await target.retireUnsentInputs(operationIDs: plan.inputOperationIDs) else {
-                    retirementPending = false; observedAttempt = true; return nil
+                    retirementPending = false; observedNativeAttempt = true; return nil
                 }
             }
             try check()
-            try store.retireUnattempted(retired, replacing: persisted)
+            try store.retireUnsent(retired, replacing: persisted)
             let receipt = Retirement(stage: self, digest: digest)
             retirement = receipt
             // Publication is historical even if Pause closes the outer return.

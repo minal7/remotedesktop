@@ -199,12 +199,12 @@ final class ComputerUseTaskJournalStore {
         }
     }
 
-    /// Retire only the exact all-planned journal under a held execution lease.
+    /// Retire an exact journal with no verified step under an execution lease.
     /// The capability must first prove and revoke its original native input
     /// IDs. A failed write remains ambiguous until a fresh leased load.
-    func retireUnattempted(_ retired: ComputerUseTaskJournal, replacing expected: ComputerUseTaskJournal?) throws {
+    func retireUnsent(_ retired: ComputerUseTaskJournal, replacing expected: ComputerUseTaskJournal?) throws {
         guard Self.isValid(retired), expected.map(Self.isValid) ?? true,
-              let digest = retired.retirementDigest, retired.statuses.allSatisfy({ $0 == .planned }),
+              let digest = retired.retirementDigest, !retired.statuses.contains(.verified),
               expected.map({ Self.sameIdentity($0, retired) && $0.statuses == retired.statuses
                   && ($0.retirementDigest == nil || $0.retirementDigest == digest) }) ?? true else { throw StoreError.invalidTransition }
         let data = try JSONEncoder().encode(retired)
@@ -300,7 +300,7 @@ final class ComputerUseTaskJournalStore {
               (1...64).contains(journal.stepIDs.count), journal.stepIDs.allSatisfy(validID),
               Set(journal.stepIDs).count == journal.stepIDs.count, journal.statuses.count == journal.stepIDs.count else { return false }
         if let digest = journal.retirementDigest {
-            guard validDigest(digest), journal.statuses.allSatisfy({ $0 == .planned }) else { return false }
+            guard validDigest(digest), !journal.statuses.contains(.verified) else { return false }
         }
         var sawUnverified = false
         for status in journal.statuses {

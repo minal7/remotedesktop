@@ -56,22 +56,20 @@ final class ComputerUseBrowserFormReplanTests: XCTestCase {
         XCTAssertFalse(input.contextJSON.contains("private-reference"))
     }
 
-    func testAttemptedAndVerifiedJournalsCannotBeRetiredEvenAfterAWriteFailure() async throws {
-        for offset in [1, 2] {
-            let fixture = try await make(mutation: "")
-            defer { fixture.close() }
-            let owner = try fixture.owner(), input = try await prepare(fixture)
-            let proposal = try ComputerUseBrowserFormProposal.decode(content: plan(input), input: input)
-            fixture.state.failureAtWrite = fixture.state.writes + offset
-            do { _ = try await owner.executeForm(proposal, input: input); XCTFail("Keep the uncertain write pending") }
-            catch { XCTAssertEqual(error as? ComputerUseTaskJournalStore.StoreError, .unavailable) }
-            fixture.state.failureAtWrite = nil
-            let retired = try await owner.retirePendingUnsentForm()
-            XCTAssertNil(retired); XCTAssertTrue(owner.retiredFormHistory.isEmpty); XCTAssertTrue(owner.hasPendingForm)
-            XCTAssertEqual(fixture.state.commands.filter { $0 == .retireUnsentInputs }.count, 0)
-            XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, offset - 1)
-            XCTAssertEqual(fixture.server.count("/filtered?category=concerts&city=Paris"), 0)
-        }
+    func testVerifiedJournalPrefixCannotBeRetiredEvenAfterAWriteFailure() async throws {
+        let fixture = try await make(mutation: "")
+        defer { fixture.close() }
+        let owner = try fixture.owner(), input = try await prepare(fixture)
+        let proposal = try ComputerUseBrowserFormProposal.decode(content: plan(input), input: input)
+        fixture.state.failureAtWrite = fixture.state.writes + 2
+        do { _ = try await owner.executeForm(proposal, input: input); XCTFail("Keep the uncertain write pending") }
+        catch { XCTAssertEqual(error as? ComputerUseTaskJournalStore.StoreError, .unavailable) }
+        fixture.state.failureAtWrite = nil
+        let retired = try await owner.retirePendingUnsentForm()
+        XCTAssertNil(retired); XCTAssertTrue(owner.retiredFormHistory.isEmpty); XCTAssertTrue(owner.hasPendingForm)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .retireUnsentInputs }.count, 0)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 1)
+        XCTAssertEqual(fixture.server.count("/filtered?category=concerts&city=Paris"), 0)
     }
 
     func testFailedRetirementWriteRequiresFreshLeasedResolutionBeforeAnotherPlan() async throws {
@@ -141,10 +139,10 @@ final class ComputerUseBrowserFormReplanTests: XCTestCase {
         let store = try ComputerUseTaskJournalStore(directory: formDirectory(retired, fixture: fixture))
         XCTAssertThrowsError(try store.save(clear, replacing: stored))
         XCTAssertThrowsError(try store.replaceUnattemptedBinding(clear, replacing: stored))
-        XCTAssertThrowsError(try store.retireUnattempted(stored, replacing: stored), "Retirement requires the caller's execution lease")
+        XCTAssertThrowsError(try store.retireUnsent(stored, replacing: stored), "Retirement requires the caller's execution lease")
         let lease = try store.acquireExecution(taskID: stored.taskID, expected: stored)
         defer { lease.release() }
-        try store.retireUnattempted(stored, replacing: stored)
+        try store.retireUnsent(stored, replacing: stored)
         let contract = try XCTUnwrap(pending.proposal.textContract(for: pending.input, stageID: retired.stageID))
         XCTAssertThrowsError(try ComputerUseTextTask(contract: contract, recovered: stored, read: { _ in nil },
             apply: { _, _ in XCTFail("No retired input") }, persist: { _ in XCTFail("No revived journal") }, mayAct: { true }))

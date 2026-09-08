@@ -115,7 +115,7 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
         do { return try await navigate(run, tools: tools, progress: progress) }
         catch ComputerUseBrowserError.observedNavigationUncertain, ComputerUseTaskExecutionError.uncertainEffect,
               ComputerUseTaskExecutionError.journalMismatch, ComputerUseTextTaskError.uncertainEffect,
-              ComputerUseTextTaskError.journalMismatch {
+              ComputerUseTextTaskError.journalMismatch, ComputerUseTextEditError.deliveryUncertain {
             try validate(run, tools: tools)
             return reconciliationRequired
         } catch is ComputerUseTaskJournalStore.StoreError {
@@ -199,7 +199,7 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                 do {
                     guard try await owner.resumeForm() != nil else { throw Failure.invalidContinuation }
                 } catch {
-                    guard try await retireStaleUnsentForm(owner, after: error) else { throw error }
+                    guard try await retireProvenUnsentForm(owner, after: error) else { throw error }
                 }
                 try check()
                 continue // Choose the next capability using the retained verified stage.
@@ -270,7 +270,7 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                     }
                     do { _ = try await owner.executeForm(proposal, input: input) }
                     catch {
-                        guard try await retireStaleUnsentForm(owner, after: error) else { throw error }
+                        guard try await retireProvenUnsentForm(owner, after: error) else { throw error }
                     }
                     try check()
                     continue
@@ -304,10 +304,13 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
     private var selectionRequired: ComputerUseExecutionResult {
         .userInterventionRequired("I could not select another result link that advances the complete request. More page interaction or result verification is needed; the original task is still pending.")
     }
-    private func retireStaleUnsentForm(_ owner: ComputerUseBrowserResearchTask, after error: Error) async throws -> Bool {
+    private func retireProvenUnsentForm(_ owner: ComputerUseBrowserResearchTask, after error: Error) async throws -> Bool {
         guard error as? ComputerUseBrowserError == .pageChanged
                 || error as? ComputerUseBrowserResearchFormError == .inputChanged
                 || error as? ComputerUseTextTaskError == .staleTarget
+                || error as? ComputerUseTextTaskError == .uncertainEffect
+                || error as? ComputerUseTextTaskError == .incompleteOutcome
+                || error as? ComputerUseTextEditError == .deliveryUncertain
                 || error as? ComputerUseBrowserResearchFormStage.Failure == .retirementPending else { return false }
         return try await owner.retirePendingUnsentForm() != nil
     }

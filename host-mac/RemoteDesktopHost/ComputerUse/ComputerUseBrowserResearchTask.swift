@@ -511,7 +511,7 @@ final class ComputerUseBrowserResearchTask {
         let captured = input
         latestForm = nil; latestAction = nil; latestCandidates = nil
         return try await operate { [self] in
-            guard let receipt = try await stage.retireUnattempted(checkCurrent: { try self.checkCurrent(captured) }) else { return nil }
+            guard let receipt = try await stage.retireUnsent(checkCurrent: { try self.checkCurrent(captured) }) else { return nil }
             try checkCurrent(captured)
             guard formStage === stage else { throw Failure.formUnavailable }
             if !retiredFormHistory.contains(receipt) { retiredFormHistory.append(receipt) }
