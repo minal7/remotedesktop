@@ -69,6 +69,29 @@ final class ComputerUseBrowserScalarRequirementsTests: XCTestCase {
         XCTAssertEqual(try compile("two tickets", field: "quantity").compareLiteral(.quantity(3, .tickets)), .notSatisfied)
     }
 
+    func testProposedCapacityArithmeticRequiresMatchingInventoryUnitsAndAnExactOrMinimumRequest() throws {
+        for unit in [Scalar.QuantityUnit.tickets, .people, .adults, .children] {
+            for source in ["two", "at least 2"] {
+                let bound = try compile("\(source) \(unit.rawValue)", field: "quantity")
+                XCTAssertEqual([1, 2, 3].map { bound.compareProposedCapacity(.quantity($0, unit)) }, [.notSatisfied, .satisfied, .satisfied])
+                XCTAssertEqual(bound.compareProposedCapacity(.quantity(-1, unit)), .unverifiable)
+                for other in [Scalar.QuantityUnit.results, .tickets, .people, .adults, .children] where other != unit {
+                    XCTAssertEqual(bound.compareProposedCapacity(.quantity(3, other)), .unverifiable)
+                }
+            }
+            let above = try compile("more than 2 \(unit.rawValue)", field: "quantity")
+            XCTAssertEqual(above.compareProposedCapacity(.quantity(2, unit)), .notSatisfied)
+            XCTAssertEqual(above.compareProposedCapacity(.quantity(3, unit)), .satisfied)
+            for source in ["at most 2", "fewer than 2"] {
+                XCTAssertEqual(try compile("\(source) \(unit.rawValue)", field: "quantity").compareProposedCapacity(.quantity(3, unit)), .unverifiable)
+            }
+        }
+        XCTAssertEqual(try compile("two results", field: "quantity").compareProposedCapacity(.quantity(3, .results)), .unverifiable)
+        let tickets = try compile("two tickets", field: "quantity")
+        XCTAssertEqual(tickets.compareLiteral(.quantity(3, .tickets)), .notSatisfied, "Literal equality keeps its original meaning")
+        XCTAssertEqual(tickets.compareProposedCapacity(.day(try civil("2027-01-16"))), .unverifiable)
+    }
+
     func testPriceComparisonUsesExactDecimalAndStrictOrInclusiveBounds() throws {
         let cases: [(String, Scalar.Comparison, [Scalar.Evaluation])] = [
             ("under", .below, [.satisfied, .notSatisfied, .notSatisfied]),

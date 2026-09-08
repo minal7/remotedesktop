@@ -192,6 +192,27 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
             }
             return accepted ? .satisfied : .notSatisfied
         }
+        /// Arithmetic conditional on a separately proposed capacity meaning.
+        /// This does not establish stock, date/type applicability, a current
+        /// selection or a bookable offer. Never call it on selected counts,
+        /// package sizes, policy limits or the number of result cards.
+        func compareProposedCapacity(_ literal: Literal) -> Evaluation {
+            guard case .quantity(let comparison, let expected, let unit) = predicate,
+                  unit.scope != .resultSet, expected >= 0,
+                  case .quantity(let actual, let observedUnit) = literal, actual >= 0, observedUnit == unit else {
+                return .unverifiable
+            }
+            let minimum: Int64
+            switch comparison {
+            case .equal, .atLeast: minimum = expected
+            case .above:
+                let incremented = expected.addingReportingOverflow(1)
+                guard !incremented.overflow else { return .unverifiable }
+                minimum = incremented.partialValue
+            case .atMost, .below: return .unverifiable // No exact/minimum selection can be inferred.
+            }
+            return actual >= minimum ? .satisfied : .notSatisfied
+        }
         var description: String { "BrowserScalarCondition" }
         var debugDescription: String { description }
     }

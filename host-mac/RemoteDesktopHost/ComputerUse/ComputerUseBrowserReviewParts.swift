@@ -18,11 +18,12 @@ struct ComputerUseBrowserReviewPart: Equatable, Sendable {
         func index(_ values: [Int]) -> [String: Any] { values.isEmpty ? ["type":"integer"] : ["type":"integer", "enum":values] }
         let references: [String: Any] = ["type":"array", "maxItems":min(8, input.textIDs.count),
             "items":input.textIDs.isEmpty ? ["type":"string"] : enumeration(input.textIDs)]
-        let field: [String: Any] = ["type":"object", "additionalProperties":false,
-            "properties":["field":index(fields),
+        var fieldProperties: [String: Any] = ["field":index(fields),
                 "scope":enumeration(input.permitsOfferAssertions ? ["offer", "page", "unknown"] : ["page", "unknown"]),
-                "price":enumeration(ComputerUseBrowserResultReview.Price.allCases.map(\.rawValue)), "qualifiers":references],
-            "required":["field", "scope", "price", "qualifiers"]]
+                "price":enumeration(ComputerUseBrowserResultReview.Price.allCases.map(\.rawValue)), "qualifiers":references]
+        if input.hasQuantityFields { fieldProperties["quantity"] = input.quantitySchema }
+        let field: [String: Any] = ["type":"object", "additionalProperties":false,
+            "properties":fieldProperties, "required":input.fieldKeys.union(["field"]).sorted()]
         let requirement: [String: Any] = ["type":"object", "additionalProperties":false,
             "properties":["requirement":index(requirements),
                 "judgment":enumeration(input.permitsOfferAssertions ? ["supports", "conflicts", "unknown"] : ["conflicts", "unknown"]), "texts":references],
@@ -49,7 +50,9 @@ struct ComputerUseBrowserReviewPart: Equatable, Sendable {
     /// Use longest allowed enum spellings and eight longest observed IDs.
     private static func rowBounds(_ input: ComputerUseBrowserResultReviewInput) -> (field: [String: Any], requirement: [String: Any]) {
         let ids = Array(input.textIDs.sorted { $0.utf8.count > $1.utf8.count }.prefix(8))
-        return (["scope":"unknown", "price":"qualified", "qualifiers":ids],
+        var field: [String: Any] = ["scope":"unknown", "price":"qualified", "qualifiers":ids]
+        if input.hasQuantityFields { field["quantity"] = "availableQuantity" }
+        return (field,
             ["requirement":31, "judgment":"conflicts", "texts":ids])
     }
     static func wholeOutputFits(_ input: ComputerUseBrowserResultReviewInput) throws -> Bool {
@@ -106,7 +109,12 @@ struct ComputerUseBrowserReviewPartReply: Sendable {
         let scope: String
         let price: String
         let qualifiers: [String]
-        var value: [String: Any] { ["scope":scope, "price":price, "qualifiers":qualifiers] }
+        let quantity: String?
+        var value: [String: Any] {
+            var value: [String: Any] = ["scope":scope, "price":price, "qualifiers":qualifiers]
+            if let quantity { value["quantity"] = quantity }
+            return value
+        }
     }
     struct Requirement: Decodable, Sendable {
         let requirement: Int
@@ -137,7 +145,7 @@ struct ComputerUseBrowserReviewPartReply: Sendable {
                 throw ComputerUseBrowserResultReviewError.invalidProposal
             }
             for row in fields {
-                guard case .object(let value) = row, Set(value.keys) == ["field", "scope", "price", "qualifiers"] else {
+                guard case .object(let value) = row, Set(value.keys) == part.input.fieldKeys.union(["field"]) else {
                     throw ComputerUseBrowserResultReviewError.invalidProposal
                 }
             }
@@ -150,10 +158,17 @@ struct ComputerUseBrowserReviewPartReply: Sendable {
             func valid(_ references: [String]) -> Bool {
                 references.count <= 8 && Set(references).count == references.count && Set(references).isSubset(of: observed)
             }
+            func validQuantity(_ value: String?) -> Bool {
+                if part.input.hasQuantityFields {
+                    guard let value else { return false }
+                    return ComputerUseBrowserResultReview.QuantityMeaning(rawValue: value) != nil
+                }
+                return value == nil
+            }
             guard body.candidate == part.candidate, ComputerUseBrowserResultReview.Association(rawValue: body.association) != nil,
                   body.fields.map(\.field) == part.fields, body.requirements.map(\.requirement) == part.requirements,
                   body.fields.allSatisfy({ ComputerUseBrowserResultReview.Scope(rawValue: $0.scope) != nil
-                    && ComputerUseBrowserResultReview.Price(rawValue: $0.price) != nil && valid($0.qualifiers) }),
+                    && ComputerUseBrowserResultReview.Price(rawValue: $0.price) != nil && valid($0.qualifiers) && validQuantity($0.quantity) }),
                   body.requirements.allSatisfy({ ComputerUseBrowserResultReview.Judgment(rawValue: $0.judgment) != nil
                     && valid($0.texts) && $0.texts.allSatisfy { part.input.permitsReference($0, for: part.candidate) } }) else {
                 throw ComputerUseBrowserResultReviewError.invalidProposal

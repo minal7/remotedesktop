@@ -8,6 +8,8 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
     enum Status: String, Sendable {
         case needsSemanticVerification, needsResultSet, uncompiledRequirement, clarificationApplied
         case needsTicketInventory, needsPartyCapacity
+        case reviewSelectedQuantity, reviewPurchaseLimit, reviewPackageSize, reviewQuantityUnresolved
+        case quotedCapacitySufficient, quotedCapacityInsufficient
         case missingQuote, ambiguousQuotes, unparsedQuote
         case quotedValueMatches, quotedValueConflicts, incompatibleLiteral
         case reviewMixedOffers, reviewUnresolved, reviewPageContext, reviewQualifiedPrice
@@ -108,10 +110,34 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
                 // qualifying offers, nor evidence of inventory for a party.
                 if case .quantity(_, _, let unit) = condition.predicate {
                     let indices = quotes.indices.filter { quotes[$0].kind == .quantity }
-                    switch unit.scope {
-                    case .resultSet: return result(.needsResultSet)
-                    case .ticketInventory: return result(.needsTicketInventory, quotes: indices)
-                    case .party: return result(.needsPartyCapacity, quotes: indices)
+                    if unit.scope == .resultSet { return result(.needsResultSet) }
+                    let pending: Status = unit.scope == .ticketInventory ? .needsTicketInventory : .needsPartyCapacity
+                    guard !incomplete else { return result(.incompletePage, quotes: indices) }
+                    guard let review, !indices.isEmpty else { return result(pending, quotes: indices) }
+                    guard review.association != .mixedOffers else { return result(.reviewMixedOffers, quotes: indices) }
+                    guard review.association == .singleOffer else { return result(.reviewUnresolved, quotes: indices) }
+                    let available = indices.filter { review.fields[quotes[$0].fieldIndex].quantity == .availableQuantity }
+                    if available.isEmpty {
+                        let meanings = indices.map { review.fields[quotes[$0].fieldIndex].quantity }
+                        if meanings.allSatisfy({ $0 == .selectedQuantity }) { return result(.reviewSelectedQuantity, quotes: indices) }
+                        if meanings.allSatisfy({ $0 == .purchaseLimit }) { return result(.reviewPurchaseLimit, quotes: indices) }
+                        if meanings.allSatisfy({ $0 == .packageSize }) { return result(.reviewPackageSize, quotes: indices) }
+                        return result(.reviewQuantityUnresolved, quotes: indices)
+                    }
+                    // Do not discard another proposed capacity whose unit or
+                    // complete literal cannot be parsed; it could conflict.
+                    guard available.allSatisfy({ quotes[$0].literal != nil }) else { return result(.unparsedQuote, quotes: available) }
+                    let matching = available.filter {
+                        if case .quantity(_, let observedUnit)? = quotes[$0].literal { return observedUnit == unit }
+                        return false
+                    }
+                    guard !matching.isEmpty else { return result(.incompatibleLiteral, quotes: available) }
+                    guard matching.count == 1 else { return result(.ambiguousQuotes, quotes: matching) }
+                    guard let literal = quotes[matching[0]].literal else { return result(.unparsedQuote, quotes: matching) }
+                    switch condition.compareProposedCapacity(literal) {
+                    case .satisfied: return result(.quotedCapacitySufficient, quotes: matching)
+                    case .notSatisfied: return result(.quotedCapacityInsufficient, quotes: matching)
+                    case .unverifiable: return result(pending, quotes: matching)
                     }
                 }
                 let kind: ComputerUseBrowserResultProposal.Kind
@@ -168,7 +194,7 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
         case .price: return price(text)
         case .date: return day(text).map { .day($0) }
         case .quantity:
-            guard let parts = groups(#"^([0-9]{1,3}) (results|options|flights|concerts|movies|tickets)$"#, text),
+            guard let parts = groups(#"^([0-9]{1,3}) (results|options|flights|concerts|movies|tickets|people|adults|children)$"#, text),
                   let count = Int64(parts[0]), let unit = Scalars.QuantityUnit(rawValue: parts[1].lowercased()) else { return nil }
             return .quantity(count, unit)
         default: return nil

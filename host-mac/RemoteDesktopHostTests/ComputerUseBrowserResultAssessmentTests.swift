@@ -118,6 +118,67 @@ final class ComputerUseBrowserResultAssessmentTests: XCTestCase {
         XCTAssertEqual(result.owner.input, result.interpretation.input)
     }
 
+    func testQuantityReviewKeepsSelectedCountsLimitsPackagesAndConditionalCapacityDistinct() async throws {
+        typealias Meaning = ComputerUseBrowserResultReview.QuantityMeaning
+        let rows = [row("Find concerts. "), row("2 tickets. ", field: "quantity"), row("3 options.", field: "quantity")]
+        let cases: [(String, Meaning, Status)] = [
+            ("3 tickets", .availableQuantity, .quotedCapacitySufficient), ("0 tickets", .availableQuantity, .quotedCapacityInsufficient),
+            ("3 tickets", .selectedQuantity, .reviewSelectedQuantity), ("3 tickets", .purchaseLimit, .reviewPurchaseLimit),
+            ("3 tickets", .packageSize, .reviewPackageSize), ("3 tickets", .unknown, .reviewQuantityUnresolved),
+            ("3 adults", .availableQuantity, .incompatibleLiteral), ("3 results", .availableQuantity, .incompatibleLiteral),
+            ("1 ticket", .availableQuantity, .unparsedQuote),
+            ("Up to 3 tickets", .unknown, .reviewQuantityUnresolved),
+            ("3 tickets if released", .availableQuantity, .unparsedQuote)]
+        for (text, meaning, expected) in cases {
+            let result = try await reading(rows, fields: [.init(.quantity, [text])], extraHTML: "<p>Available for this offer</p>",
+                reviewer: AssessmentInventoryReview(meanings: [meaning]))
+            defer { result.fixture.close() }
+            let assessment = try XCTUnwrap(result.batch.requirementAssessment), candidate = assessment.candidates[0]
+            XCTAssertEqual(candidate.requirements.map(\.status), [.reviewRequirementUnresolved, expected, .needsResultSet])
+            XCTAssertEqual(candidate.quotes[0].source, text)
+            XCTAssertEqual(candidate.requirements[1].quoteIndices, [0])
+            let review = try XCTUnwrap(result.batch.review)
+            XCTAssertEqual(review.candidates[0].fields[1].quantity, meaning)
+            try await result.fixture.browser.validateResultAssessment(assessment, reading: result.batch, interpretation: result.interpretation)
+            let link = try XCTUnwrap(result.links.inputs.first)
+            let context = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(link.contextJSON.utf8)) as? [String: Any])
+            let projected = try XCTUnwrap(context["requirement_assessment"] as? [String: Any])
+            XCTAssertEqual((projected["candidates"] as? [[String: Any]])?.first?["requirements"] as? [String], candidate.requirements.map(\.status.rawValue))
+            let archive = try result.owner.researchEvidence(for: result.owner.input), recalled = try archive.recall(0, goal: result.owner.input)
+            let observation = try XCTUnwrap(recalled["observation"] as? [String: Any])
+            let reviews = try XCTUnwrap(observation["field_review"] as? [[String: Any]])
+            let fields = try XCTUnwrap(reviews[0]["fields"] as? [[String: Any]])
+            XCTAssertEqual(fields[1]["quantity"] as? String, meaning.rawValue)
+            if meaning == .availableQuantity {
+                let qualifiers = try XCTUnwrap(fields[1]["qualifiers"] as? [String])
+                XCTAssertFalse(qualifiers.isEmpty); XCTAssertTrue(qualifiers.allSatisfy { $0.hasPrefix("r0/") })
+            }
+            XCTAssertEqual(result.fixture.server.count("/search?q=concerts"), 1)
+            XCTAssertEqual(result.fixture.server.count("/details"), 0, "The helper requires a partial report, never completed research")
+        }
+    }
+
+    func testCapacityComparisonRetainsAmbiguousQuotesAndSeparatesTicketAndAdultUnits() async throws {
+        let rows = [row("Find concerts. "), row("2 tickets. ", field: "quantity"), row("2 adults.", field: "quantity")]
+        let cases: [([String], [Status])] = [
+            (["3 tickets", "0 adults"], [.quotedCapacitySufficient, .quotedCapacityInsufficient]),
+            (["3 tickets", "4 tickets"], [.ambiguousQuotes, .incompatibleLiteral]),
+            (["3 tickets", "Remaining quantity is conditional"], [.unparsedQuote, .unparsedQuote])]
+        for (texts, expected) in cases {
+            let result = try await reading(rows, fields: texts.map { .init(.quantity, [$0]) }, extraHTML: "<p>Available for this offer</p>",
+                reviewer: AssessmentInventoryReview(meanings: Array(repeating: .availableQuantity, count: texts.count)))
+            defer { result.fixture.close() }
+            let candidate = try XCTUnwrap(result.batch.requirementAssessment?.candidates.first)
+            XCTAssertEqual(Array(candidate.requirements.dropFirst().map(\.status)), expected)
+            XCTAssertEqual(candidate.quotes.map(\.source), texts)
+            if expected[0] == .quotedCapacitySufficient {
+                XCTAssertEqual(candidate.requirements[1].quoteIndices, [0]); XCTAssertEqual(candidate.requirements[2].quoteIndices, [1])
+            } else {
+                XCTAssertEqual(candidate.requirements[1].quoteIndices, [0, 1])
+            }
+        }
+    }
+
     func testTicketAnswerAddsInventoryWorkWithoutReplacingTheRequestedResultCountOrClock() async throws {
         let rows = [row("Find concerts. "), row("3 options.", field: "quantity")]
         let result = try await reading(rows, fields: [.init(.quantity, ["2 tickets"])])
@@ -273,7 +334,8 @@ final class ComputerUseBrowserResultAssessmentTests: XCTestCase {
         let links: AssessmentLinkFixture
         let goals: AssessmentGoalFixture
     }
-    private func reading(_ rows: [[String: Any]], fields: [Spec], extraHTML: String = "", empty: Bool = false) async throws -> Reading {
+    private func reading(_ rows: [[String: Any]], fields: [Spec], extraHTML: String = "", empty: Bool = false,
+                         reviewer: (any ComputerUseBrowserResultReviewPlanning)? = nil) async throws -> Reading {
         func escaped(_ source: String) -> String { source.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;").replacingOccurrences(of: ">", with: "&gt;") }
         let html = fields.flatMap(\.texts).map { "<p>" + escaped($0) + "</p>" }.joined() + extraHTML
         let fixture = try await ResearchDriverFixture.make(candidateBodyHTML: html)
@@ -281,8 +343,12 @@ final class ComputerUseBrowserResultAssessmentTests: XCTestCase {
             let input = try ComputerUseBrowserGoalInput(taskID: ResearchDriverFixture.root, prompt: rows.compactMap { $0["source"] as? String }.joined(),
                 referenceDate: ResearchDriverFixture.date, timeZoneIdentifier: "America/Los_Angeles")
             let interpretation = try proposal(rows, input: input), links = AssessmentLinkFixture(), goals = AssessmentGoalFixture(value: interpretation)
+            let base = AssessmentResultFixture(fields: fields, empty: empty)
+            let reader: any ComputerUseBrowserResultPlanning
+            if let reviewer { reader = ComputerUseReviewedBrowserResultPlanner(reader: base, reviewer: reviewer) }
+            else { reader = base }
             let driver = ComputerUseBrowserResearchDriver(goalPlanner: goals,
-                resultPlanner: AssessmentResultFixture(fields: fields, empty: empty), searchPlanner: fixture.search, actionPlanner: BrowserResearchActionFixture(), formPlanner: BrowserResearchFormFixture(),
+                resultPlanner: reader, searchPlanner: fixture.search, actionPlanner: BrowserResearchActionFixture(), formPlanner: BrowserResearchFormFixture(),
                 planning: ComputerUseModelBrowserResearchPlanning(providers: [fixture.policy.provider], linkPlanner: links),
                 now: { ResearchDriverFixture.date }, timeZoneIdentifier: { "America/Los_Angeles" })
             let result = try await driver.executeBrowserResearch(taskID: input.taskID, prompt: input.prompt, tools: fixture.tools, progress: { _ in })
@@ -346,5 +412,32 @@ private struct AssessmentResultFixture: ComputerUseBrowserResultPlanning {
         let link = try XCTUnwrap(records.first { $0["kind"] as? String == "link" && $0["label"] as? String == "Alpha details" })
         let data = try JSONSerialization.data(withJSONObject: ["candidates":[["container":container, "fields":rows, "links":[try XCTUnwrap(link["id"] as? String)]]]])
         return try .decode(content: String(decoding: data, as: UTF8.self), input: page, goal: goal)
+    }
+}
+
+/// Deliberately supplies semantic proposals, including incorrect proposals in
+/// negative cases. It cannot bypass the full review or native quote admission.
+private struct AssessmentInventoryReview: ComputerUseBrowserResultReviewPlanning {
+    let meanings: [ComputerUseBrowserResultReview.QuantityMeaning]
+    func propose(_ input: ComputerUseBrowserResultReviewInput) async throws -> ComputerUseBrowserResultReview {
+        let context = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(input.contextJSON.utf8)) as? [String: Any])
+        let page = try XCTUnwrap(context["page"] as? [String: Any]), records = try XCTUnwrap(page["records"] as? [[String: Any]])
+        let qualifier = try XCTUnwrap(records.first { $0["text"] as? String == "Available for this offer" }?["id"] as? String)
+        let candidates: [[String: Any]] = try (0..<input.candidateCount).map { candidate in
+            var next = 0
+            let fields: [[String: Any]] = try (0..<input.fieldCounts[candidate]).map { field in
+                var meaning = ComputerUseBrowserResultReview.QuantityMeaning.notQuantity
+                if input.fieldKind(candidate: candidate, field: field) == .quantity {
+                    guard meanings.indices.contains(next) else { throw ComputerUseBrowserResultReviewError.invalidInput }
+                    meaning = meanings[next]; next += 1
+                }
+                return ["scope":"offer", "price":"notPrice", "quantity":meaning.rawValue,
+                    "qualifiers":meaning == .availableQuantity ? [qualifier] : []]
+            }
+            return ["association":"singleOffer", "fields":fields,
+                "requirements":(0..<input.requirementCount).map { ["requirement":$0, "judgment":"unknown", "texts":[]] as [String: Any] }]
+        }
+        let content = String(decoding: try JSONSerialization.data(withJSONObject: ["candidates":candidates]), as: UTF8.self)
+        return try .decode(content: content, input: input)
     }
 }

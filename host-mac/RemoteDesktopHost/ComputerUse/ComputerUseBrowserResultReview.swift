@@ -16,6 +16,12 @@ struct ComputerUseBrowserResultReviewInput: Equatable, Sendable, CustomStringCon
     var candidateCount: Int { selections.count }
     var fieldCounts: [Int] { selections.map { $0.fields.count } }
     var requirementCount: Int { interpretation?.requirements.count ?? 0 }
+    var hasQuantityFields: Bool { selections.contains { $0.fields.contains { $0.kind == .quantity } } }
+    var fieldKeys: Set<String> { Set(["scope", "price", "qualifiers"] + (hasQuantityFields ? ["quantity"] : [])) }
+    var quantitySchema: [String: Any] {
+        ["type":"string", "enum":ComputerUseBrowserResultReview.QuantityMeaning.allCases
+            .filter { permitsOfferAssertions || $0 != .availableQuantity }.map(\.rawValue)]
+    }
     func fieldTextIDs(candidate: Int, field: Int) -> [String] { selections[candidate].fields[field].textIDs }
     func fieldAddressesRequirement(candidate: Int, field: Int, requirement: Int) -> Bool {
         guard let interpretation, interpretation.requirements.indices.contains(requirement),
@@ -68,8 +74,10 @@ struct ComputerUseBrowserResultReviewInput: Equatable, Sendable, CustomStringCon
                  ["index":$0.offset, "kind":$0.element.kind.rawValue, "texts":$0.element.textIDs] as [String: Any]
              }, "links":selection.linkIDs]
         }
-        var context: [String: Any] = ["version":interpretation == nil ? 1 : 2, "goal":goal.plannerContext, "page":projection,
+        let quantityReview = selections.contains { $0.fields.contains { $0.kind == .quantity } }
+        var context: [String: Any] = ["version":quantityReview ? 3 : (interpretation == nil ? 1 : 2), "goal":goal.plannerContext, "page":projection,
             "candidates":candidates, "offer_assertions_allowed":permitsOfferAssertions]
+        if quantityReview { context["quantity_meaning_required"] = true }
         if let interpretation {
             context["requirements"] = try interpretation.requirements.enumerated().map { index, requirement -> [String: Any] in
                 guard let source = interpretation.source(of: requirement) else { throw ComputerUseBrowserResultReviewError.invalidInput }
@@ -93,6 +101,9 @@ struct ComputerUseBrowserResultReview: Equatable, Sendable, CustomStringConverti
     enum Scope: String, CaseIterable, Sendable { case offer, page, unknown }
     enum Price: String, CaseIterable, Sendable { case exact, qualified, unknown, notPrice }
     enum Judgment: String, CaseIterable, Sendable { case supports, conflicts, unknown }
+    enum QuantityMeaning: String, CaseIterable, Sendable {
+        case availableQuantity, selectedQuantity, purchaseLimit, packageSize, unknown, notQuantity
+    }
     struct Requirement: Equatable, Sendable {
         let judgment: Judgment
         let textIDs: [String]
@@ -101,6 +112,7 @@ struct ComputerUseBrowserResultReview: Equatable, Sendable, CustomStringConverti
         let scope: Scope
         let price: Price
         let qualifierTextIDs: [String]
+        let quantity: QuantityMeaning?
     }
     struct Candidate: Equatable, Sendable {
         let association: Association
@@ -136,7 +148,7 @@ struct ComputerUseBrowserResultReview: Equatable, Sendable, CustomStringConverti
                       case .array(let fieldRows)? = candidate["fields"], fieldRows.count == input.fieldCounts[index] else { throw ComputerUseBrowserResultReviewError.invalidProposal }
                 var fields: [Field] = []
                 for (fieldIndex, row) in fieldRows.enumerated() {
-                    guard case .object(let field) = row, Set(field.keys) == ["scope", "price", "qualifiers"],
+                    guard case .object(let field) = row, Set(field.keys) == input.fieldKeys,
                           case .string(let scopeName)? = field["scope"], let scope = Scope(rawValue: scopeName),
                           case .string(let priceName)? = field["price"], let price = Price(rawValue: priceName),
                           case .array(let references)? = field["qualifiers"], references.count <= 8,
@@ -151,7 +163,28 @@ struct ComputerUseBrowserResultReview: Equatable, Sendable, CustomStringConverti
                         qualifiers.append(id); referenceCount += 1
                     }
                     guard referenceCount <= fieldReferenceLimit, price != .qualified || !qualifiers.isEmpty else { throw ComputerUseBrowserResultReviewError.invalidProposal }
-                    fields.append(.init(scope: scope, price: price, qualifierTextIDs: qualifiers))
+                    let quantity: QuantityMeaning?
+                    if input.hasQuantityFields {
+                        guard case .string(let name)? = field["quantity"], let meaning = QuantityMeaning(rawValue: name),
+                              (kind == .quantity ? meaning != .notQuantity : meaning == .notQuantity) else {
+                            throw ComputerUseBrowserResultReviewError.invalidProposal
+                        }
+                        if meaning == .availableQuantity {
+                            guard association == .singleOffer, scope == .offer, input.permitsOfferAssertions,
+                                  !qualifiers.isEmpty, qualifiers.allSatisfy({ input.permitsReference($0, for: index) }) else {
+                                throw ComputerUseBrowserResultReviewError.invalidProposal
+                            }
+                            let cited = Set(qualifiers)
+                            for other in 0..<input.fieldCounts[index] {
+                                let complete = Set(input.fieldTextIDs(candidate: index, field: other))
+                                guard cited.isDisjoint(with: complete) || cited.isSuperset(of: complete) else {
+                                    throw ComputerUseBrowserResultReviewError.invalidProposal
+                                }
+                            }
+                        }
+                        quantity = meaning
+                    } else { quantity = nil }
+                    fields.append(.init(scope: scope, price: price, qualifierTextIDs: qualifiers, quantity: quantity))
                 }
                 var requirements: [Requirement]?
                 if input.interpretation != nil {
@@ -213,10 +246,11 @@ struct ComputerUseBrowserResultReview: Equatable, Sendable, CustomStringConverti
     /// Native candidate identity includes the entire review. The private
     /// input is separately compared exactly before attaching the review.
     var digest: String {
-        ComputerUseTaskContract.digest([hasRequirementMapping ? "browser-result-review-v2" : "browser-result-review-v1", input.contextJSON, String(candidates.count)]
+        ComputerUseTaskContract.digest([input.hasQuantityFields ? "browser-result-review-v3" : (hasRequirementMapping ? "browser-result-review-v2" : "browser-result-review-v1"), input.contextJSON, String(candidates.count)]
             + candidates.flatMap { candidate in
                 [candidate.association.rawValue, String(candidate.fields.count)] + candidate.fields.flatMap {
                     [$0.scope.rawValue, $0.price.rawValue, String($0.qualifierTextIDs.count)] + $0.qualifierTextIDs
+                        + ($0.quantity.map { ["quantity", $0.rawValue] } ?? [])
                 } + (candidate.requirements.map { ["requirements", String($0.count)] + $0.flatMap {
                     [$0.judgment.rawValue, String($0.textIDs.count)] + $0.textIDs
                 } } ?? [])
@@ -226,7 +260,9 @@ struct ComputerUseBrowserResultReview: Equatable, Sendable, CustomStringConverti
     var plannerContext: [[String: Any]] {
         candidates.map { candidate in
             var context: [String: Any] = ["association":candidate.association.rawValue, "fields":candidate.fields.map {
-                ["scope":$0.scope.rawValue, "price":$0.price.rawValue, "qualifiers":$0.qualifierTextIDs] as [String: Any]
+                var field: [String: Any] = ["scope":$0.scope.rawValue, "price":$0.price.rawValue, "qualifiers":$0.qualifierTextIDs]
+                if let quantity = $0.quantity { field["quantity"] = quantity.rawValue }
+                return field
             }]
             if let requirements = candidate.requirements {
                 context["requirements"] = requirements.enumerated().map {

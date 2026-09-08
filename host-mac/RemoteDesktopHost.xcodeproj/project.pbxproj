@@ -75,6 +75,7 @@
 		105BD79269685EC285D0F7AA /* ComputerUseBrowserPriceClarificationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 08F8F296BAAA6FB28D346BD6 /* ComputerUseBrowserPriceClarificationTests.swift */; };
 		3FC09C5454C79B21317D6252 /* ComputerUseBrowserResultReviewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0821B51CA79738B878C4C699 /* ComputerUseBrowserResultReviewTests.swift */; };
 		EF7D72050B82556522B7D922 /* ComputerUseBrowserReviewPartsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 87B3B77EA727E57F4BF3925E /* ComputerUseBrowserReviewPartsTests.swift */; };
+		F03F0999A412669041393F03 /* ComputerUseBrowserQuantityReviewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 306FAAA9B301134A5E2581CF /* ComputerUseBrowserQuantityReviewTests.swift */; };
 		83B7278F26BB55E8A421B4C8 /* ComputerUseBrowserResearchEvidenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6986D151669E3DB2D5388AB0 /* ComputerUseBrowserResearchEvidenceTests.swift */; };
 		7C765DF5EF24564570FD9EE9 /* ComputerUseBrowserFormPlannerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EDE8916658B0376507BCD2ED /* ComputerUseBrowserFormPlannerTests.swift */; };
 		3B1151212CEDEEA671B3C809 /* ComputerUseBrowserActionPlannerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F3A9F4854E8562F7A4D0712 /* ComputerUseBrowserActionPlannerTests.swift */; };
@@ -423,6 +424,7 @@
 		08F8F296BAAA6FB28D346BD6 /* ComputerUseBrowserPriceClarificationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseBrowserPriceClarificationTests.swift; sourceTree = "<group>"; };
 		0821B51CA79738B878C4C699 /* ComputerUseBrowserResultReviewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseBrowserResultReviewTests.swift; sourceTree = "<group>"; };
 		87B3B77EA727E57F4BF3925E /* ComputerUseBrowserReviewPartsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseBrowserReviewPartsTests.swift; sourceTree = "<group>"; };
+		306FAAA9B301134A5E2581CF /* ComputerUseBrowserQuantityReviewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseBrowserQuantityReviewTests.swift; sourceTree = "<group>"; };
 		6986D151669E3DB2D5388AB0 /* ComputerUseBrowserResearchEvidenceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseBrowserResearchEvidenceTests.swift; sourceTree = "<group>"; };
 		EDE8916658B0376507BCD2ED /* ComputerUseBrowserFormPlannerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseBrowserFormPlannerTests.swift; sourceTree = "<group>"; };
 		4F3A9F4854E8562F7A4D0712 /* ComputerUseBrowserActionPlannerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseBrowserActionPlannerTests.swift; sourceTree = "<group>"; };
@@ -595,6 +597,7 @@
 				08F8F296BAAA6FB28D346BD6 /* ComputerUseBrowserPriceClarificationTests.swift */,
 				0821B51CA79738B878C4C699 /* ComputerUseBrowserResultReviewTests.swift */,
 				87B3B77EA727E57F4BF3925E /* ComputerUseBrowserReviewPartsTests.swift */,
+				306FAAA9B301134A5E2581CF /* ComputerUseBrowserQuantityReviewTests.swift */,
 				6986D151669E3DB2D5388AB0 /* ComputerUseBrowserResearchEvidenceTests.swift */,
 				EDE8916658B0376507BCD2ED /* ComputerUseBrowserFormPlannerTests.swift */,
 				4F3A9F4854E8562F7A4D0712 /* ComputerUseBrowserActionPlannerTests.swift */,
@@ -990,6 +993,7 @@
 				105BD79269685EC285D0F7AA /* ComputerUseBrowserPriceClarificationTests.swift in Sources */,
 				3FC09C5454C79B21317D6252 /* ComputerUseBrowserResultReviewTests.swift in Sources */,
 				EF7D72050B82556522B7D922 /* ComputerUseBrowserReviewPartsTests.swift in Sources */,
+				F03F0999A412669041393F03 /* ComputerUseBrowserQuantityReviewTests.swift in Sources */,
 				83B7278F26BB55E8A421B4C8 /* ComputerUseBrowserResearchEvidenceTests.swift in Sources */,
 				7C765DF5EF24564570FD9EE9 /* ComputerUseBrowserFormPlannerTests.swift in Sources */,
 				3B1151212CEDEEA671B3C809 /* ComputerUseBrowserActionPlannerTests.swift in Sources */,
