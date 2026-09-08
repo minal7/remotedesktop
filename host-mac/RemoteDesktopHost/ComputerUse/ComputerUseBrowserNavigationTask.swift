@@ -193,7 +193,7 @@ final class ComputerUseBrowserNavigationTask: ComputerUseBrowserResearchAdmittin
         guard research?.isOperating != true else { throw ComputerUseBrowserResearchTask.Failure.busy }
         let replacement = ComputerUseBrowserResearchTask(input: input, browser: browser, goalPlanner: goalPlanner,
             resultPlanner: resultPlanner, navigationJournalDirectory: journalDirectory.appendingPathComponent("Research", isDirectory: true),
-            browserAdmission: self, mayAct: mayAct)
+            navigationStore: observedNavigationStore, browserAdmission: self, mayAct: mayAct)
         research?.retire()
         research = replacement
         return replacement

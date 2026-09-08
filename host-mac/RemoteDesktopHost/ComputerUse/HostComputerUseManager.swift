@@ -1211,13 +1211,19 @@ final class ComputerUseHostTools {
         browserNavigationTask = nil
     }
 
-    /// Explicit preparation entry for the research driver. This does not
-    /// route an arbitrary request, open a page or start either planner.
-    func prepareOwnedBrowserResearch(taskID: String, prompt: String,
-        goalPlanner: any ComputerUseBrowserGoalPlanning, resultPlanner: any ComputerUseBrowserResultPlanning,
-        referenceDate: Date = Date(), timeZoneIdentifier: String = TimeZone.current.identifier) throws -> ComputerUseBrowserResearchTask {
+    /// Read-only admission gate before text-only research planning.
+    func validateBrowserResearchAdmission() throws {
         try Task.checkCancellation()
         guard mayAct() else { throw ToolError.paused }
+    }
+
+    /// Capture the exact prepared owner before either scoped callback can
+    /// fail or suspend its caller. This does not navigate or invoke a planner.
+    func prepareOwnedBrowserResearch(taskID: String, prompt: String,
+        goalPlanner: any ComputerUseBrowserGoalPlanning, resultPlanner: any ComputerUseBrowserResultPlanning,
+        referenceDate: Date = Date(), timeZoneIdentifier: String = TimeZone.current.identifier,
+        didPrepare: (@MainActor (ComputerUseBrowserResearchTask) throws -> Void)? = nil) throws -> ComputerUseBrowserResearchTask {
+        try validateBrowserResearchAdmission()
         if browserNavigationTask == nil {
             guard !HostRuntimeContext.isRunningUnitTests else { throw ComputerUseBrowserResearchTask.Failure.browserRequired }
             browserNavigationTask = .init(browser: ComputerUseOwnedBrowser(mayAct: mayAct),
@@ -1229,6 +1235,7 @@ final class ComputerUseHostTools {
             resultPlanner: resultPlanner, mayAct: mayAct, referenceDate: referenceDate, timeZoneIdentifier: timeZoneIdentifier)
         // Capture admission synchronously. The owner may be closed/replaced
         // while the driver awaits, so a later lookup cannot prove no admission.
+        try didPrepare?(owner)
         try browserResearchAdmissionObserver?(owner)
         return owner
     }

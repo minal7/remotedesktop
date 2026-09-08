@@ -12,6 +12,18 @@ struct ComputerUseBrowserResearchAdmissionPause: Error {
     fileprivate init(_ reason: ComputerUseBrowserError) { self.reason = reason }
 }
 
+/// Historical navigation only. A receipt is neither a verified offer nor an
+/// answer. No URL, account state or model-authored description is retained here.
+struct ComputerUseBrowserResearchVisit: Equatable, Sendable {
+    enum Kind: String, Sendable { case search, resultLink }
+    let kind: Kind
+    let operationID: String
+    let goalRevision: String
+    fileprivate init(kind: Kind, document: ComputerUseBrowserDocument, goal: ComputerUseBrowserGoalInput) {
+        self.kind = kind; operationID = document.operationID; goalRevision = goal.digest
+    }
+}
+
 /// Owns the canonical goal revision and read/planning work for one browser
 /// research task, including retained result-link navigation. It does not
 /// compile the complete research action plan or terminal research answers.
@@ -47,6 +59,7 @@ final class ComputerUseBrowserResearchTask {
     private var cancelOperation: (() -> Void)?
     private var controlEpoch = UUID()
     private var hasQuestion = false
+    private(set) var confirmedNavigationHistory: [ComputerUseBrowserResearchVisit] = []
 
     var input: ComputerUseBrowserGoalInput { clarification.input }
     /// Transport correlation advances with accepted answers; browser effects,
@@ -162,7 +175,9 @@ final class ComputerUseBrowserResearchTask {
                     startingPage: startingPage, makeStore: navigationStore)
             }
             guard let initialSearch else { throw Failure.navigationUnavailable }
-            return try await initialSearch.open(checkCurrent: { try self.checkCurrent(captured) })
+            let document = try await initialSearch.open(checkCurrent: { try self.checkCurrent(captured) })
+            try recordNavigation(.search, document: document, goal: captured)
+            return document
         }
     }
 
@@ -175,7 +190,9 @@ final class ComputerUseBrowserResearchTask {
         guard let initialSearch, initialSearch.isPending else { return nil }
         let captured = input
         return try await operate { [self] in
-            try await initialSearch.open(checkCurrent: { try self.checkCurrent(captured) })
+            let document = try await initialSearch.open(checkCurrent: { try self.checkCurrent(captured) })
+            try recordNavigation(.search, document: document, goal: captured)
+            return document
         }
     }
 
@@ -240,8 +257,40 @@ final class ComputerUseBrowserResearchTask {
         let selection = ComputerUseBrowserResearchNavigation.Selection(goalRevision: captured.digest, candidateID: candidateID, linkID: linkID)
         latestCandidates = nil
         return try await operate { [self] in
-            try await navigation.open(selection, goal: captured, candidates: candidates, checkCurrent: { try self.checkCurrent(captured) })
+            let receipt = try await navigation.open(selection, goal: captured, candidates: candidates, checkCurrent: { try self.checkCurrent(captured) })
+            try recordNavigation(.resultLink, document: receipt.document, goal: captured)
+            return receipt
         }
+    }
+
+    /// Keep fresh reading and no-effect link selection inside the same owner
+    /// operation. Pause must cancel/join the selector before another owner can
+    /// take over. The selected link is still natively bound again when opened.
+    func planCandidateNavigation(select: @escaping @MainActor @Sendable
+        (ComputerUseBrowserGoalInput, ComputerUseBrowserResultCandidates) async throws -> LinkChoice?) async throws -> LinkChoice? {
+        try requireIdle()
+        guard !hasPendingNavigation else { throw Failure.navigationPending }
+        guard !hasQuestion else { throw Failure.questionPending }
+        guard let interpretation, interpretation.proposal.input.digest == input.digest,
+              interpretation.proposal.disposition == .research else { throw Failure.interpretationRequired }
+        let captured = input, epoch = controlEpoch
+        latestCandidates = nil
+        let result = try await operate { [self] in
+            let candidates = try await readCurrentCandidates(goal: captured)
+            let choice = try await select(captured, candidates)
+            try checkCurrent(captured)
+            try await browser.validateResultCandidates(candidates, goal: captured)
+            try checkCurrent(captured)
+            if let choice {
+                guard let candidate = candidates.candidates.first(where: { $0.id == choice.candidateID }),
+                      candidate.selectedLinkIDs.contains(choice.linkID) else { throw ComputerUseBrowserResultError.invalidProposal }
+            }
+            return (choice, candidates)
+        }
+        try checkCurrent(captured)
+        guard controlEpoch == epoch else { throw Failure.paused }
+        latestCandidates = result.1
+        return result.0
     }
 
     /// Resume the retained stage before planning another action or question.
@@ -253,7 +302,9 @@ final class ComputerUseBrowserResearchTask {
         guard !hasQuestion else { throw Failure.questionPending }
         let captured = input
         return try await operate { [self] in
-            try await navigation.open(selection, goal: captured, candidates: nil, checkCurrent: { try self.checkCurrent(captured) })
+            let receipt = try await navigation.open(selection, goal: captured, candidates: nil, checkCurrent: { try self.checkCurrent(captured) })
+            try recordNavigation(.resultLink, document: receipt.document, goal: captured)
+            return receipt
         }
     }
 
@@ -388,7 +439,21 @@ final class ComputerUseBrowserResearchTask {
 
     func retire() {
         isRetired = true; controlEpoch = UUID(); latestCandidates = nil; interpretation = nil
+        confirmedNavigationHistory.removeAll()
         clarification.retire(); navigation?.retire(); initialSearch?.retire(); hasQuestion = false; cancelOperation?()
+    }
+
+    /// Retain native facts inside the serialized child before the outer
+    /// operation checks cancellation. Pause cannot erase a completed visit;
+    /// retirement must never publish late history into a replacement task.
+    private func recordNavigation(_ kind: ComputerUseBrowserResearchVisit.Kind,
+        document: ComputerUseBrowserDocument, goal: ComputerUseBrowserGoalInput) throws {
+        guard !isRetired else { return }
+        guard document.taskID == taskID, goal.taskID == taskID else { throw Failure.goalChanged }
+        let visit = ComputerUseBrowserResearchVisit(kind: kind, document: document, goal: goal)
+        if let previous = confirmedNavigationHistory.first(where: { $0.operationID == visit.operationID }) {
+            guard previous == visit else { throw Failure.goalChanged }
+        } else { confirmedNavigationHistory.append(visit) }
     }
 
     private func questionContext(controllerID: String, controllerSessionID: String) throws -> ComputerUseBrowserGoalClarification.Context {
