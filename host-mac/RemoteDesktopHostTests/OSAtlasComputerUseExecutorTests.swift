@@ -15701,7 +15701,7 @@ final class OSAtlasActualModelAcceptanceTests: XCTestCase {
                 return .noTerminalResult
             }
             switch result {
-            case .clarificationRequired, .userInterventionRequired,
+            case .browserClarificationRequired, .clarificationRequired, .userInterventionRequired,
                     .approvalRequired,
                     .mcpApprovalRequired:
                 return .terminal(.userInterventionRequired)

@@ -1231,6 +1231,8 @@ final class ComputerUseHostTools {
     func pauseOwnedBrowserResearch(taskID: String) { browserNavigationTask?.pauseResearchTask(taskID: taskID) }
     func resumeOwnedBrowserResearch(taskID: String) async throws { try await browserNavigationTask?.resumeResearchTask(taskID: taskID) }
     func retireOwnedBrowserResearch(taskID: String) { browserNavigationTask?.retireResearchTask(taskID: taskID) }
+    func ownedBrowserResearch(taskID: String) -> ComputerUseBrowserResearchTask? { browserNavigationTask?.researchTask(taskID: taskID) }
+    func ownedBrowserTaskID(forExecution taskID: String) -> String { browserNavigationTask?.browserTaskID(forExecution: taskID) ?? taskID }
 
     /// Read-only evidence for browser capabilities. It does not open a window,
     /// claim that a search finished, or feed raw destinations into a model.
@@ -1283,7 +1285,7 @@ final class ComputerUseHostTools {
 
     func ownedBrowserHandbackRequirement(taskID: String, required: Bool = false) -> ComputerUseBrowserHandbackRequirement? {
         guard let browserNavigationTask else { return required ? .unavailable(taskID: taskID) : nil }
-        return browserNavigationTask.handbackRequirement(taskID: taskID, required: required)
+        return browserNavigationTask.handbackRequirement(taskID: ownedBrowserTaskID(forExecution: taskID), required: required)
     }
 
     func reacquireOwnedBrowserAfterUserControl(_ requirement: ComputerUseBrowserHandbackRequirement) async throws {
@@ -3252,6 +3254,9 @@ enum ComputerUseExecutionResult: Equatable {
     /// A retained native form issues a scoped reference for the answer task;
     /// other capabilities may use recent conversation as planning context.
     case clarificationRequired(String)
+    /// A browser question retains the original research owner while the
+    /// existing phone protocol correlates the next exact answer separately.
+    case browserClarificationRequired(ComputerUseBrowserQuestionRequest)
     /// The requested task is still active, but the next step must be performed
     /// by the person (for example, entering account credentials). The manager
     /// preserves the task context and pauses all automation until Resume.
@@ -3748,6 +3753,7 @@ final class HostComputerUseManager: ObservableObject {
         /// resume/replan prose is deliberately not inserted into these turns.
         let conversation: [ComputerUseConversationTurn]
         let textClarification: TextClarificationContinuation?
+        let browserClarification: ComputerUseBrowserClarificationTransport.Continuation?
         /// False only when a versioned Pause reached the durable ledger before
         /// its Prompt. Resume can then claim and start that Prompt exactly once
         /// instead of treating it as work that needs a continuation replan.
@@ -3760,6 +3766,7 @@ final class HostComputerUseManager: ObservableObject {
             trustedUserPrompt: String? = nil,
             conversation: [ComputerUseConversationTurn]? = nil,
             textClarification: TextClarificationContinuation? = nil,
+            browserClarification: ComputerUseBrowserClarificationTransport.Continuation? = nil,
             hasStarted: Bool = true,
             browserHandbackRequirement: ComputerUseBrowserHandbackRequirement? = nil
         ) {
@@ -3773,12 +3780,14 @@ final class HostComputerUseManager: ObservableObject {
                     envelope.body).conversation
             self.hasStarted = hasStarted
             self.textClarification = textClarification
+            self.browserClarification = browserClarification
             self.browserHandbackRequirement = browserHandbackRequirement
         }
 
         func retainingBrowserHandback(_ requirement: ComputerUseBrowserHandbackRequirement?) -> Self {
             .init(envelope: envelope, channel: channel, trustedUserPrompt: trustedUserPrompt,
                 conversation: conversation, textClarification: textClarification,
+                browserClarification: browserClarification,
                 hasStarted: hasStarted, browserHandbackRequirement: requirement)
         }
 
@@ -3828,6 +3837,7 @@ final class HostComputerUseManager: ObservableObject {
     private let executorComposer: ComputerUseExecutorComposer
     private let taskLedger: ComputerUseTaskLedger
     private let textClarifications: ComputerUseTextClarificationStore
+    private let browserClarifications = ComputerUseBrowserClarificationTransport()
     private let transportTeardownTimeout: Duration
     /// False only for app-hosted test sessions. Direct manager constructions
     /// keep the production default so their installer lifecycle tests retain
@@ -4188,7 +4198,10 @@ final class HostComputerUseManager: ObservableObject {
         supportsOrderedComputerUseControls: Bool = true
     ) {
         guard !senderID.isEmpty else { return }
-        if authorizedPeerID != senderID { actionEvidenceAuthorizationGeneration &+= 1 }
+        if authorizedPeerID != senderID {
+            invalidateTextClarification()
+            actionEvidenceAuthorizationGeneration &+= 1
+        }
         authorizedPeerID = senderID
         authorizedPeerSupportsOrderedComputerUseControls =
             supportsOrderedComputerUseControls
@@ -4648,7 +4661,7 @@ final class HostComputerUseManager: ObservableObject {
             tools.updateOwnedBrowserTaskControls(nil)
             return
         }
-        var identity = BrowserControlIdentity(taskID: context.envelope.id,
+        var identity = BrowserControlIdentity(taskID: tools.ownedBrowserTaskID(forExecution: context.envelope.id),
             senderID: context.envelope.senderID, sessionID: context.envelope.sessionID,
             executionToken: currentExecutionToken,
             authorizationGeneration: actionEvidenceAuthorizationGeneration,
@@ -4683,7 +4696,7 @@ final class HostComputerUseManager: ObservableObject {
         guard let current = browserControlSnapshot,
               current.taskID == displayed.taskID, current.scopeID == displayed.scopeID,
               let context = currentExecution ?? pausedExecution ?? pendingApproval?.context,
-              context.envelope.id == current.taskID else { return }
+              tools.ownedBrowserTaskID(forExecution: context.envelope.id) == current.taskID else { return }
         switch action {
         case .takeControl:
             guard current.phase != .paused else { return }
@@ -4779,6 +4792,7 @@ final class HostComputerUseManager: ObservableObject {
         let replyChannel = context?.channel ?? channel
 
         if resolution.state == .cancelled {
+            browserClarifications.invalidate(for: replyEnvelope)
             textClarifications.invalidate(for: replyEnvelope)
             (executor as? any ComputerUseTextClarificationContinuing)?.invalidateClarification(taskID: request.taskID)
         }
@@ -5062,6 +5076,7 @@ final class HostComputerUseManager: ObservableObject {
             trustedUserPrompt: pausedExecution.trustedUserPrompt,
             conversation: pausedExecution.conversation,
             textClarification: pausedExecution.textClarification,
+            browserClarification: pausedExecution.browserClarification,
             browserHandbackRequirement: pausedExecution.browserHandbackRequirement,
             channel: pausedExecution.channel,
             isResuming: true)
@@ -5072,6 +5087,7 @@ final class HostComputerUseManager: ObservableObject {
             ?? pausedExecution?.envelope.id
             ?? pendingApproval?.context.envelope.id
         guard activeTaskID == context.envelope.id else { return }
+        browserClarifications.invalidate(for: context.envelope)
         textClarifications.invalidate(for: context.envelope)
         (executor as? any ComputerUseTextClarificationContinuing)?.invalidateClarification(taskID: context.envelope.id)
         // Cancel is terminal for this execution. Keep the automation gate
@@ -6076,8 +6092,16 @@ final class HostComputerUseManager: ObservableObject {
         }
 
         let continuation: TextClarificationContinuation?
+        let browserContinuation: ComputerUseBrowserClarificationTransport.Continuation?
         do {
-            if let reference = request.clarification {
+            if let reference = request.clarification, browserClarifications.matches(reference) {
+                guard executor is any ComputerUseBrowserResearchContinuing else {
+                    throw ComputerUseBrowserClarificationTransport.Failure.invalidOwner
+                }
+                browserContinuation = try browserClarifications.consume(reference, answer: request.prompt, for: envelope,
+                    retainedOwner: { tools.ownedBrowserResearch(taskID: $0) })
+                continuation = nil
+            } else if let reference = request.clarification {
                 guard let continuing = executor as? any ComputerUseTextClarificationContinuing,
                       let pending = try continuing.clarification(taskID: reference.taskID) else {
                     throw ComputerUseTextClarificationStore.Failure.invalidReference
@@ -6085,8 +6109,10 @@ final class HostComputerUseManager: ObservableObject {
                 let goal = try textClarifications.consume(reference, answer: request.prompt,
                     scope: pending.scope, for: envelope)
                 continuation = TextClarificationContinuation(originatingTaskID: reference.taskID, goal: goal)
+                browserContinuation = nil
             } else {
                 continuation = nil
+                browserContinuation = nil
             }
         } catch {
             sendDurableTerminal("I couldn't validate this request or its clarification. Start a new request with the complete instruction.",
@@ -6095,7 +6121,7 @@ final class HostComputerUseManager: ObservableObject {
             return
         }
         let clarification: String?
-        if continuation != nil {
+        if continuation != nil || browserContinuation != nil {
             clarification = nil
         } else if request.prompt.isEmpty {
             clarification = "What would you like me to do on your Mac?"
@@ -6134,6 +6160,7 @@ final class HostComputerUseManager: ObservableObject {
             trustedUserPrompt: request.prompt,
             conversation: request.conversation,
             textClarification: continuation,
+            browserClarification: browserContinuation,
             channel: channel)
     }
 
@@ -6143,6 +6170,7 @@ final class HostComputerUseManager: ObservableObject {
         trustedUserPrompt: String,
         conversation: [ComputerUseConversationTurn],
         textClarification: TextClarificationContinuation? = nil,
+        browserClarification: ComputerUseBrowserClarificationTransport.Continuation? = nil,
         browserHandbackRequirement: ComputerUseBrowserHandbackRequirement? = nil,
         channel: any HostComputerUseChannel,
         isResuming: Bool = false
@@ -6159,6 +6187,7 @@ final class HostComputerUseManager: ObservableObject {
             trustedUserPrompt: trustedUserPrompt,
             conversation: conversation,
             textClarification: textClarification,
+            browserClarification: browserClarification,
             browserHandbackRequirement: browserHandbackRequirement)
         let token = UUID()
         currentExecution = context
@@ -6221,7 +6250,17 @@ final class HostComputerUseManager: ObservableObject {
                     // pause captures the session then owned by the same task.
                     context = context.retainingBrowserHandback(nil)
                     currentExecution = context
-                    if let textClarification {
+                    if let browserClarification {
+                        guard let continuing = executor as? any ComputerUseBrowserResearchContinuing,
+                              tools.ownedBrowserResearch(taskID: browserClarification.owner.taskID) === browserClarification.owner,
+                              browserClarification.answerTaskID == envelope.id,
+                              browserClarification.owner.executionTaskID == envelope.id,
+                              browserClarification.owner.input.digest == browserClarification.inputDigest else {
+                            throw ComputerUseBrowserClarificationTransport.Failure.invalidOwner
+                        }
+                        result = try await continuing.continueBrowserResearch(taskID: envelope.id, research: browserClarification.owner,
+                            tools: tools, progress: progress)
+                    } else if let textClarification {
                         guard let continuing = executor as? any ComputerUseTextClarificationContinuing else {
                             throw ComputerUseTextClarificationStore.Failure.invalidReference
                         }
@@ -6501,6 +6540,7 @@ final class HostComputerUseManager: ObservableObject {
             trustedUserPrompt: context.trustedUserPrompt,
             conversation: context.conversation,
             textClarification: context.textClarification,
+            browserClarification: context.browserClarification,
             channel: context.channel,
             isResuming: true)
     }
@@ -6678,6 +6718,7 @@ final class HostComputerUseManager: ObservableObject {
             sendStatus("ready", replyingTo: envelope, channel: context.channel)
 
         case .clarificationRequired(let response):
+            guard context.browserClarification == nil else { throw ComputerUseBrowserClarificationTransport.Failure.invalidOwner }
             let reference: ComputerUseClarificationReference?
             if let pending = try (executor as? any ComputerUseTextClarificationContinuing)?.clarification(taskID: envelope.id) {
                 let goal = try context.textClarification?.goal
@@ -6698,6 +6739,24 @@ final class HostComputerUseManager: ObservableObject {
                 replyingTo: envelope,
                 channel: context.channel,
                 clarification: reference)
+            currentExecution = nil
+            currentExecutionToken = nil
+            executionTask = nil
+            actionGate.endAutomation(allowsActions: true)
+            activity = .idle
+            sendStatus("ready", replyingTo: envelope, channel: context.channel)
+
+        case .browserClarificationRequired(let request):
+            guard executor is any ComputerUseBrowserResearchContinuing, context.textClarification == nil,
+                  let owner = tools.ownedBrowserResearch(taskID: request.taskID), owner.executionTaskID == envelope.id else {
+                throw ComputerUseBrowserClarificationTransport.Failure.invalidOwner
+            }
+            textClarifications.invalidate()
+            (executor as? any ComputerUseTextClarificationContinuing)?.invalidateClarification(taskID: nil)
+            let question = try browserClarifications.issue(request, owner: owner, for: envelope)
+            try Task.checkCancellation()
+            sendDurableTerminal(question.text, outcome: .userInterventionRequired, replyingTo: envelope,
+                channel: context.channel, clarification: question.reference)
             currentExecution = nil
             currentExecutionToken = nil
             executionTask = nil
@@ -6860,16 +6919,21 @@ final class HostComputerUseManager: ObservableObject {
         channel: any HostComputerUseChannel,
         clarification: ComputerUseClarificationReference? = nil
     ) {
-        // A durable terminal ends this research owner even if saving the
-        // terminal fails. Resumable browser questions must use their retained
-        // question/answer lifecycle, not this legacy text-task terminal path.
-        tools.retireOwnedBrowserResearch(taskID: envelope.id)
+        // Only this host's exact retained browser question can carry its
+        // original owner across a terminal transport reply. All other results
+        // end the current execution, including failed terminal persistence.
+        let preservesBrowserQuestion = browserClarifications.retains(clarification, for: envelope)
+        if !preservesBrowserQuestion { tools.retireOwnedBrowserResearch(taskID: envelope.id) }
         do {
             let terminal = try taskLedger.complete(
                 taskID: envelope.id,
                 response: response,
                 outcome: outcome,
                 clarification: clarification)
+            if !preservesBrowserQuestion || terminal.clarification != clarification || terminal.outcome != .userInterventionRequired {
+                browserClarifications.invalidate(for: envelope)
+                tools.retireOwnedBrowserResearch(taskID: envelope.id)
+            }
             if terminal.clarification == nil || (clarification != nil && terminal.clarification != clarification) {
                 textClarifications.invalidate(for: envelope)
                 (executor as? any ComputerUseTextClarificationContinuing)?.invalidateClarification(taskID: envelope.id)
@@ -6882,6 +6946,8 @@ final class HostComputerUseManager: ObservableObject {
                 outcome: terminal.outcome,
                 clarification: terminal.clarification)
         } catch {
+            browserClarifications.invalidate(for: envelope)
+            tools.retireOwnedBrowserResearch(taskID: envelope.id)
             textClarifications.invalidate(for: envelope)
             (executor as? any ComputerUseTextClarificationContinuing)?.invalidateClarification(taskID: envelope.id)
             send(
@@ -6894,6 +6960,7 @@ final class HostComputerUseManager: ObservableObject {
     }
 
     private func invalidateTextClarification() {
+        browserClarifications.invalidate()
         textClarifications.invalidate()
         (executor as? any ComputerUseTextClarificationContinuing)?.invalidateClarification(taskID: nil)
     }

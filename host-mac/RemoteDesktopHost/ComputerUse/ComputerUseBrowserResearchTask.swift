@@ -27,6 +27,9 @@ final class ComputerUseBrowserResearchTask {
     private var hasQuestion = false
 
     var input: ComputerUseBrowserGoalInput { clarification.input }
+    /// Transport correlation advances with accepted answers; browser effects,
+    /// session identity and the original goal keep taskID as their root.
+    var executionTaskID: String { input.clarifications.last?.answerTaskID ?? taskID }
     var isOperating: Bool { operationID != nil }
 
     init(input: ComputerUseBrowserGoalInput, browser: ComputerUseOwnedBrowser,

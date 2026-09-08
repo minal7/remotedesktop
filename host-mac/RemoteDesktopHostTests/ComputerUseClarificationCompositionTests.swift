@@ -12,6 +12,64 @@ private typealias FormOracle = ComputerUseOwnedBrowserModelAcceptanceTests
 
 @MainActor
 final class ComputerUseClarificationCompositionTests: XCTestCase {
+    func testShippedClientAnswersBrowserQuestionsWithoutReplacingOriginalGoalOrClock() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let hostID = UUID().uuidString, clientID = UUID().uuidString, sessionID = UUID().uuidString, pairingCode = "842193"
+        let mailbox = LocalHostComputerUseChannel(hostID: hostID, pairingCode: pairingCode)
+        let bridge = SerializedClarificationClientChannel(mailbox: mailbox, hostID: hostID, clientID: clientID,
+            sessionID: sessionID, pairingCode: pairingCode)
+        let executor = BrowserQuestionLifecycleExecutor()
+        let manager = HostComputerUseManager(injector: InputInjector(), executor: executor,
+            taskLedger: .init(fileURL: directory.appendingPathComponent("ledger.json")), browserNavigationFactory: { mayAct in
+                .init(browser: ComputerUseOwnedBrowser(presentsWindow: false, mayAct: mayAct),
+                    journalDirectory: directory.appendingPathComponent("browser"))
+            }, allowsExternalServices: false, channelFactory: { _ in mailbox })
+        let client = ClientModel(hostName: "Fixture Mac", pairingCode: pairingCode, hostID: hostID, sessionID: sessionID,
+            pendingStore: CompositionPendingStore(), channel: bridge, promptRefreshInterval: .seconds(600))
+        defer { client.stop(); manager.stop() }
+        manager.authorizePeer(senderID: clientID)
+        client.start()
+        let original = "Find concert tickets. Do not purchase anything."
+        let turns = [original, "  Paris e\u{301} 😀\n  ", "2026-10-15"]
+        var reference: RemoteDesktopClientCore.ComputerUseClarificationReference?
+        var rootID: String?
+        for (index, text) in turns.enumerated() {
+            XCTAssertTrue(client.sendPrompt(text))
+            try await pumpHost(manager, mailbox: mailbox) { !client.hasActivePrompt }
+            let prompts = await bridge.prompts(), sent = try XCTUnwrap(prompts.last)
+            let decoded = try RemoteDesktopClientCore.ComputerUsePromptRequest.decodeBody(sent.body)
+            XCTAssertEqual(decoded.clarification, reference)
+            XCTAssertTrue(decoded.prompt.utf8.elementsEqual(text.utf8))
+            XCTAssertTrue(decoded.conversation.isEmpty)
+            if rootID == nil { rootID = sent.id }
+            let owner = try XCTUnwrap(executor.owner)
+            XCTAssertEqual(owner.input.taskID, rootID)
+            XCTAssertEqual(owner.executionTaskID, sent.id)
+            XCTAssertEqual(owner.input.referenceMilliseconds, 1_800_000_000_000)
+            XCTAssertEqual(owner.input.timeZoneIdentifier, "America/Los_Angeles")
+            XCTAssertEqual(owner.input.userTurns.count, index + 1)
+            XCTAssertTrue(zip(owner.input.userTurns, turns.prefix(index + 1)).allSatisfy { $0.utf8.elementsEqual($1.utf8) })
+            if index < turns.count - 1 {
+                guard case .answer(let next, _) = client.composerMode else { return XCTFail("A browser question must use the existing exact-answer composer") }
+                reference = next
+                XCTAssertEqual(next.taskID, sent.id)
+                XCTAssertEqual(client.messages.last(where: { $0.author == .assistant })?.text,
+                    index == 0 ? ComputerUseBrowserClarificationTopic.location.question : ComputerUseBrowserClarificationTopic.date.question)
+            } else {
+                XCTAssertEqual(client.latestTerminalOutcome, .unableToComplete)
+                XCTAssertEqual(client.composerMode, .request)
+            }
+            let before = await bridge.terminals(taskID: sent.id).count
+            try await bridge.replay(sent)
+            try await pumpHost(manager, mailbox: mailbox) { await bridge.terminals(taskID: sent.id).count > before }
+            XCTAssertEqual(executor.continued.count, index)
+            XCTAssertEqual(executor.ordinaryPrompts, [original])
+        }
+        XCTAssertEqual(executor.planner.inputs.count, 3)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.appendingPathComponent("browser").path))
+    }
+
     func testCurrentClientCapabilityPassesHostAdmissionAcrossScopedAnswersAndDurableReplay() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

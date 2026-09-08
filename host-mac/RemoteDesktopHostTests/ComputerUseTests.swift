@@ -741,6 +741,187 @@ final class ComputerUseTests: XCTestCase {
                                          promptBody: "Find tickets"), .completed(ComputerUseTaskLedger.stoppedResponse))
     }
 
+    func test_managerBrowserQuestionsPreserveRootAcrossExactAnswersLocalPauseAndDurableReplay() async throws {
+        let url = temporaryLedgerURL(), executor = BrowserQuestionLifecycleExecutor()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let fixture = try browserControlFixture(executor: executor, ledgerURL: url)
+        defer { fixture.manager.stop(); fixture.browser.close() }
+        let prompt = makeEnvelope(id: "browser-question-root", kind: .prompt,
+            body: try ComputerUsePromptRequest(prompt: "Find concert tickets tomorrow. Do not buy anything.", supportsApprovedActionEvidence: true).encodedBody())
+        fixture.manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(fixture.manager.handle(prompt, channel: fixture.channel))
+        let first = try await clarificationUpdate(taskID: prompt.id, channel: fixture.channel)
+        let owner = try XCTUnwrap(executor.owner), original = owner.input
+        XCTAssertEqual(first.text, ComputerUseBrowserClarificationTopic.location.question)
+        let answerText = "  Paris e\u{301} 😀\n  "
+        let answer = makeEnvelope(id: "browser-answer-1", kind: .prompt,
+            body: try ComputerUsePromptRequest.answering(XCTUnwrap(first.clarification), text: answerText, supportsApprovedActionEvidence: true).encodedBody())
+        executor.pauseFirstAnswer = true
+        XCTAssertTrue(fixture.manager.handle(answer, channel: fixture.channel))
+        await waitUntil { fixture.manager.activity == .paused }
+        let paused = try XCTUnwrap(fixture.browser.taskControls)
+        XCTAssertEqual(paused.taskID, original.taskID, "The local browser stays attached to the original task after an answer")
+        XCTAssertEqual(owner.executionTaskID, answer.id)
+        fixture.browser.requestTaskControl(.resume, displayed: paused)
+        let second = try await clarificationUpdate(taskID: answer.id, channel: fixture.channel)
+        XCTAssertEqual(second.text, ComputerUseBrowserClarificationTopic.date.question)
+        XCTAssertEqual(second.clarification?.taskID, answer.id)
+        let final = makeEnvelope(id: "browser-answer-2", kind: .prompt,
+            body: try ComputerUsePromptRequest.answering(XCTUnwrap(second.clarification), text: "2026-10-15", supportsApprovedActionEvidence: true).encodedBody())
+        XCTAssertTrue(fixture.manager.handle(final, channel: fixture.channel))
+        let terminal = try await clarificationUpdate(taskID: final.id, channel: fixture.channel)
+        XCTAssertEqual(terminal.outcome, .unableToComplete, "This fixture verifies continuation, not website research")
+        XCTAssertNil(terminal.clarification)
+        XCTAssertEqual(owner.input.taskID, original.taskID)
+        XCTAssertEqual(owner.input.rootDigest, original.rootDigest)
+        XCTAssertEqual(owner.input.referenceMilliseconds, original.referenceMilliseconds)
+        XCTAssertEqual(owner.input.userTurns, [original.prompt, answerText, "2026-10-15"])
+        XCTAssertEqual(executor.ordinaryPrompts, [original.prompt])
+        XCTAssertEqual(executor.continued.map(\.taskID), [answer.id, answer.id, final.id])
+        XCTAssertEqual(executor.continued[0].goal, executor.continued[1].goal)
+        XCTAssertTrue(executor.continued.allSatisfy { $0.goal.taskID == original.taskID })
+        let before = await fixture.channel.sentMessages().filter { $0.kind == .assistant }.count
+        XCTAssertTrue(fixture.manager.handle(final, channel: fixture.channel))
+        await waitUntil { await fixture.channel.sentMessages().filter { $0.kind == .assistant }.count > before }
+        XCTAssertEqual(executor.continued.count, 3)
+        do { _ = try await owner.interpretGoal(); XCTFail("The final answer task must retire the original owner") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserResearchTask.Failure, .retired) }
+    }
+
+    func test_managerBrowserQuestionRejectsForeignAnswersAndRetiresOnCancelDisconnectOrControllerChange() async throws {
+        for retirement in ["cancel", "disconnect", "controller-change", "new-request"] {
+            let url = temporaryLedgerURL(), executor = BrowserQuestionLifecycleExecutor()
+            defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+            let fixture = try browserControlFixture(executor: executor, ledgerURL: url)
+            defer { fixture.manager.stop(); fixture.browser.close() }
+            let prompt = makeEnvelope(id: "browser-\(retirement)", kind: .prompt, body: "Find movie tickets.")
+            fixture.manager.authorizePeer(senderID: prompt.senderID)
+            XCTAssertTrue(fixture.manager.handle(prompt, channel: fixture.channel))
+            let question = try await clarificationUpdate(taskID: prompt.id, channel: fixture.channel)
+            let reference = try XCTUnwrap(question.clarification), owner = try XCTUnwrap(executor.owner), original = owner.input
+            let forged = try ComputerUseClarificationReference(taskID: prompt.id, expiresAt: reference.expiresAt)
+            for mode in ["forged", "session"] {
+                let bad = ComputerUseEnvelope(id: "bad-\(retirement)-\(mode)", senderID: prompt.senderID, targetID: prompt.targetID,
+                    pairingCode: prompt.pairingCode, sessionID: mode == "session" ? "other-session" : prompt.sessionID, kind: .prompt,
+                    body: try ComputerUsePromptRequest.answering(mode == "forged" ? forged : reference, text: "Paris", supportsApprovedActionEvidence: true).encodedBody())
+                XCTAssertTrue(fixture.manager.handle(bad, channel: fixture.channel))
+                let rejected = try await clarificationUpdate(taskID: bad.id, channel: fixture.channel)
+                XCTAssertEqual(rejected.outcome, .unableToComplete)
+                XCTAssertEqual(owner.input, original)
+            }
+            switch retirement {
+            case "cancel":
+                XCTAssertTrue(fixture.manager.handle(try makeControlEnvelope(kind: .cancel, taskID: prompt.id, revision: 1), channel: fixture.channel))
+            case "disconnect": fixture.manager.stop()
+            case "new-request":
+                let fresh = makeEnvelope(id: "replacement-browser-root", kind: .prompt, body: "Find flights.")
+                XCTAssertTrue(fixture.manager.handle(fresh, channel: fixture.channel))
+                _ = try await clarificationUpdate(taskID: fresh.id, channel: fixture.channel)
+                let replacement = try XCTUnwrap(executor.owner), replacementInput = replacement.input
+                let late = makeEnvelope(id: "late-replaced-browser-answer", kind: .prompt,
+                    body: try ComputerUsePromptRequest.answering(reference, text: "Paris", supportsApprovedActionEvidence: true).encodedBody())
+                XCTAssertTrue(fixture.manager.handle(late, channel: fixture.channel))
+                let rejected = try await clarificationUpdate(taskID: late.id, channel: fixture.channel)
+                XCTAssertEqual(rejected.outcome, .unableToComplete)
+                XCTAssertTrue(executor.owner === replacement)
+                XCTAssertEqual(replacement.input, replacementInput)
+                XCTAssertNotNil(try replacement.pendingQuestion(controllerID: fresh.senderID, controllerSessionID: fresh.sessionID))
+            default:
+                fixture.manager.authorizePeer(senderID: "replacement-controller")
+                fixture.manager.authorizePeer(senderID: prompt.senderID)
+            }
+            do { _ = try await owner.interpretGoal(); XCTFail("The unanswered browser question must not survive \(retirement)") }
+            catch { XCTAssertEqual(error as? ComputerUseBrowserResearchTask.Failure, .retired) }
+            XCTAssertTrue(executor.continued.isEmpty)
+            XCTAssertEqual(executor.ordinaryPrompts, retirement == "new-request" ? [original.prompt, "Find flights."] : [original.prompt])
+        }
+    }
+
+    func test_managerBrowserQuestionPersistenceFailureRetiresOwnerAndWithholdsReference() async throws {
+        let url = temporaryLedgerURL(), executor = BrowserQuestionLifecycleExecutor()
+        let directory = url.deletingLastPathComponent()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = try browserControlFixture(executor: executor, ledgerURL: url)
+        defer { fixture.manager.stop(); fixture.browser.close() }
+        executor.beforeQuestion = {
+            try FileManager.default.removeItem(at: directory)
+            try Data("Blocks the ledger directory".utf8).write(to: directory)
+        }
+        let prompt = makeEnvelope(id: "browser-question-storage", kind: .prompt, body: "Find concert tickets.")
+        fixture.manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(fixture.manager.handle(prompt, channel: fixture.channel))
+        let terminal = try await clarificationUpdate(taskID: prompt.id, channel: fixture.channel)
+        XCTAssertEqual(terminal.outcome, .unableToComplete)
+        XCTAssertNil(terminal.clarification)
+        let owner = try XCTUnwrap(executor.owner)
+        do { _ = try await owner.interpretGoal(); XCTFail("An unsaved question cannot retain an executable owner") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserResearchTask.Failure, .retired) }
+        XCTAssertTrue(executor.continued.isEmpty)
+    }
+
+    func test_managerBrowserAnswerLoginHandbackKeepsRootSessionAndDoesNotRepeatNavigation() async throws {
+        let server = try OwnedBrowserHTTPFixture(routes: [
+            "/form": .init(body: """
+                <article><h2>Concert Alpha</h2></article><div id='login'></div><script>
+                fetch('/show-login').then(() => {
+                    document.getElementById('login').innerHTML = '<label>Password<input type=password autocomplete=current-password></label>';
+                    fetch('/login-visible');
+                    fetch('/finish-login').then(() => {
+                        document.getElementById('login').remove(); history.replaceState({}, '', '/account'); fetch('/logged-in');
+                    });
+                });
+                </script>
+                """),
+            "/show-login": .init(held: true), "/finish-login": .init(held: true),
+        ])
+        let base = try await server.start()
+        defer { server.stop() }
+        let url = temporaryLedgerURL(), executor = BrowserQuestionLifecycleExecutor()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let fixture = try browserControlFixture(executor: executor, ledgerURL: url)
+        defer { executor.preparePage = nil; fixture.manager.stop(); fixture.browser.close() }
+        executor.preparePage = { root in
+            try fixture.browser.claim(taskID: root)
+            _ = try await fixture.browser.navigate(taskID: root, operationID: "fixture-open", to: base.appendingPathComponent("form"))
+        }
+        let prompt = makeEnvelope(id: "browser-login-root", kind: .prompt, body: "Find concert tickets.")
+        fixture.manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(fixture.manager.handle(prompt, channel: fixture.channel))
+        await waitUntil(timeoutIterations: 1_000) { await fixture.channel.sentMessages().contains { $0.kind == .assistant } }
+        let question = try await clarificationUpdate(taskID: prompt.id, channel: fixture.channel)
+        let owner = try XCTUnwrap(executor.owner), original = owner.input
+        await waitUntil(timeoutIterations: 1_000) { server.count("/show-login") == 1 }
+        server.releaseHeldResponses()
+        await waitUntil(timeoutIterations: 1_000) { server.count("/login-visible") == 1 && server.count("/finish-login") == 1 }
+        let answer = makeEnvelope(id: "browser-login-answer", kind: .prompt,
+            body: try ComputerUsePromptRequest.answering(XCTUnwrap(question.clarification), text: "Paris", supportsApprovedActionEvidence: true).encodedBody())
+        XCTAssertTrue(fixture.manager.handle(answer, channel: fixture.channel))
+        await waitUntil(timeoutIterations: 1_000) { fixture.manager.activity == .paused }
+        XCTAssertEqual(executor.planner.inputs, [original], "Visible authentication must stop before another goal proposal")
+        let paused = try XCTUnwrap(fixture.browser.taskControls)
+        XCTAssertEqual(paused.taskID, prompt.id)
+        XCTAssertEqual(fixture.browser.taskID, prompt.id)
+        server.releaseHeldResponses()
+        await waitUntil(timeoutIterations: 1_000) { server.count("/logged-in") == 1 && fixture.browser.hasPageAwaitingHandback }
+        fixture.browser.requestTaskControl(.resume, displayed: paused)
+        await waitUntil(timeoutIterations: 1_000) {
+            await fixture.channel.sentMessages().contains { $0.kind == .assistant && (try? ComputerUseTaskUpdate.decodeBody($0.body).taskID) == answer.id }
+        }
+        let next = try await clarificationUpdate(taskID: answer.id, channel: fixture.channel)
+        XCTAssertEqual(next.clarification?.taskID, answer.id)
+        XCTAssertEqual(next.text, ComputerUseBrowserClarificationTopic.date.question)
+        XCTAssertEqual(executor.planner.inputs.count, 2)
+        XCTAssertEqual(owner.input.taskID, prompt.id)
+        XCTAssertEqual(owner.input.referenceMilliseconds, original.referenceMilliseconds)
+        XCTAssertEqual(owner.input.userTurns, [original.prompt, "Paris"])
+        XCTAssertEqual(fixture.browser.taskID, prompt.id)
+        XCTAssertEqual(server.count("/form"), 1)
+        XCTAssertTrue(fixture.manager.handle(try makeControlEnvelope(kind: .cancel, taskID: answer.id, revision: 1,
+            hostEpoch: fixture.ledger.hostControlEpoch(taskID: answer.id)), channel: fixture.channel))
+        do { _ = try await owner.interpretGoal(); XCTFail("Stopping the question after login retires its original browser task") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserResearchTask.Failure, .retired) }
+    }
+
     func test_managerRetainsResearchOwnerThroughExplicitHandbackAndRetiresOnStopOrDisconnect() async throws {
         for terminal in ["stop", "disconnect"] {
             let url = temporaryLedgerURL()

@@ -196,11 +196,15 @@ final class ComputerUseBrowserNavigationTask {
         return replacement
     }
 
-    func pauseResearchTask(taskID: String) { if research?.taskID == taskID { research?.pause() } }
-    func resumeResearchTask(taskID: String) async throws {
-        if research?.taskID == taskID { try await research?.resumeAfterUserControl() }
+    func researchTask(taskID: String) -> ComputerUseBrowserResearchTask? { research?.taskID == taskID ? research : nil }
+    func browserTaskID(forExecution taskID: String) -> String {
+        research?.executionTaskID == taskID ? (research?.taskID ?? taskID) : taskID
     }
-    func retireResearchTask(taskID: String) { if research?.taskID == taskID { research?.retire() } }
+    func pauseResearchTask(taskID: String) { if research?.executionTaskID == taskID { research?.pause() } }
+    func resumeResearchTask(taskID: String) async throws {
+        if research?.executionTaskID == taskID { try await research?.resumeAfterUserControl() }
+    }
+    func retireResearchTask(taskID: String) { if research?.executionTaskID == taskID { research?.retire() } }
 
     func close() { research?.retire(); browser.close() }
 
