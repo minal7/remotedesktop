@@ -704,6 +704,22 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             && (lhs.port ?? (lhs.scheme?.lowercased() == "https" ? 443 : 80)) == (rhs.port ?? (rhs.scheme?.lowercased() == "https" ? 443 : 80))
     }
 
+    /// A proven-unsent research query may refresh its page nonce. Keep the
+    /// exact private destination, submitter reference and verified edit contract;
+    /// equal visible labels cannot authorize changed query parameters or action.
+    func validateFormQueryRefresh(_ previous: ComputerUseBrowserNavigationTarget,
+                                  replacement: ComputerUseBrowserNavigationTarget) throws {
+        guard case .formQuery(let beforeControl, _, let beforeRequirements) = previous.source,
+              case .formQuery(let afterControl, _, let afterRequirements) = replacement.source,
+              beforeRequirements != nil, beforeRequirements == afterRequirements, beforeControl == afterControl,
+              previous.evidence.document == replacement.evidence.document,
+              previous.evidence.documentID == replacement.evidence.documentID,
+              previous.destination.absoluteString.utf8.elementsEqual(replacement.destination.absoluteString.utf8),
+              previous.sourcePolicyDigest == replacement.sourcePolicyDigest else {
+            throw ComputerUseBrowserError.formQueryUnavailable
+        }
+    }
+
     /// Read-only validation, also used before durably rebinding an unsent plan.
     func validateObservedDestination(_ target: ComputerUseBrowserNavigationTarget) async throws {
         guard target.sourcePolicyDigest == sourcePolicy?.digest else { throw ComputerUseBrowserError.pageChanged }

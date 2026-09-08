@@ -316,6 +316,77 @@ final class ComputerUseBrowserResearchDriverTests: XCTestCase {
             }
         }
     }
+    func testDriverReconcilesPendingFormQueriesBeforeReadingOrSelectingAnotherAction() async throws {
+        for mode in ["unsent", "attempted", "verified-write", "late-pause"] {
+            let fixture = try await ResearchDriverFixture.make(searchForm: true)
+            defer { fixture.close() }
+            _ = try await fixture.start()
+            let owner = try fixture.owner(), original = owner.input
+            let input = try await owner.prepareFormInput()
+            let plan = try ComputerUseBrowserFormProposal.decode(
+                content: #"{"edits":[{"field":"field1","terms":[{"requirement":0,"text":"concerts"}]}],"preserve":[]}"#, input: input)
+            let form = try await owner.executeForm(plan, input: input)
+            let page = try await owner.observeFormResultPage(after: form)
+            let control = try XCTUnwrap(page.page.controls.first { $0.kind == "submit" })
+            let startingWrites = fixture.state.writes
+            if mode == "verified-write" { fixture.state.failureAtWrite = startingWrites + 3 }
+            else {
+                fixture.state.onWrite = {
+                    let offset = mode == "unsent" ? 1 : mode == "attempted" ? 2 : 3
+                    if fixture.state.writes == startingWrites + offset { owner.pause() }
+                }
+            }
+            do { _ = try await owner.openFormQuery(after: form, controlID: control.id, evidence: page); XCTFail("Keep the interrupted query pending") }
+            catch {
+                if mode == "verified-write" { XCTAssertEqual(error as? ComputerUseTaskJournalStore.StoreError, .unavailable) }
+                else { XCTAssertTrue(error is CancellationError) }
+            }
+            fixture.state.onWrite = nil; fixture.state.failureAtWrite = nil
+            XCTAssertTrue(owner.hasPendingFormNavigation)
+            if mode != "verified-write" { try await owner.resumeAfterUserControl() }
+            let readings = fixture.results.inputs.count, selections = fixture.policy.goals.count
+            let result = try await fixture.resume()
+            guard case .userInterventionRequired = result else { return XCTFail("Query navigation is not a verified research answer") }
+            XCTAssertEqual(owner.input, original); XCTAssertEqual(fixture.goal.inputs.count, 1); XCTAssertEqual(fixture.search.inputs.count, 1)
+            XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 1)
+            XCTAssertEqual(fixture.server.count("/search?q=concerts"), 1)
+            if mode == "attempted" {
+                XCTAssertEqual(fixture.server.count("/filtered?q=concerts"), 0)
+                XCTAssertEqual(fixture.results.inputs.count, readings); XCTAssertEqual(fixture.policy.goals.count, selections)
+                XCTAssertTrue(owner.hasPendingFormNavigation); XCTAssertEqual(owner.confirmedNavigationHistory.map(\.kind), [.search])
+            } else {
+                XCTAssertEqual(fixture.server.count("/filtered?q=concerts"), 1)
+                XCTAssertEqual(owner.confirmedNavigationHistory.map(\.kind), [.search, .formQuery])
+                XCTAssertEqual(fixture.policy.histories.last?.map(\.kind), [.search, .formQuery])
+                XCTAssertFalse(owner.hasPendingNavigation)
+                _ = try await fixture.resume()
+                XCTAssertEqual(fixture.server.count("/filtered?q=concerts"), 1)
+            }
+        }
+    }
+
+    func testDriverReconcilesPendingFormEditsWithoutTreatingThemAsSubmissionOrAnAnswer() async throws {
+        let fixture = try await ResearchDriverFixture.make(searchForm: true)
+        defer { fixture.close() }
+        _ = try await fixture.start()
+        let owner = try fixture.owner(), original = owner.input
+        let input = try await owner.prepareFormInput()
+        let plan = try ComputerUseBrowserFormProposal.decode(
+            content: #"{"edits":[{"field":"field1","terms":[{"requirement":0,"text":"concerts"}]}],"preserve":[]}"#, input: input)
+        fixture.state.failureAtWrite = fixture.state.writes + 2
+        do { _ = try await owner.executeForm(plan, input: input); XCTFail("The verified write must report its failure") }
+        catch { XCTAssertEqual(error as? ComputerUseTaskJournalStore.StoreError, .unavailable) }
+        fixture.state.failureAtWrite = nil
+        XCTAssertTrue(owner.hasPendingForm)
+        let readings = fixture.results.inputs.count, selections = fixture.policy.goals.count
+        let result = try await fixture.resume()
+        guard case .userInterventionRequired = result else { return XCTFail("The driver still needs a form action decision") }
+        XCTAssertFalse(owner.hasPendingForm); XCTAssertEqual(owner.confirmedFormHistory.count, 1)
+        XCTAssertEqual(fixture.server.count("/filtered?q=concerts"), 0)
+        XCTAssertEqual(owner.confirmedNavigationHistory.map(\.kind), [.search]); XCTAssertEqual(owner.input, original)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 1)
+        XCTAssertEqual(fixture.results.inputs.count, readings); XCTAssertEqual(fixture.policy.goals.count, selections)
+    }
 }
 
 @MainActor
@@ -341,10 +412,12 @@ struct ResearchDriverFixture {
                      linkPlanner: (any ComputerUseBrowserLinkPlanning)? = nil,
                      resultPlanner: (any ComputerUseBrowserResultPlanning)? = nil,
                      additionalCardHTML: String = "", linkDestinationOverride: String? = nil,
-                     candidateBodyHTML: String = "") async throws -> Self {
+                     candidateBodyHTML: String = "", searchForm: Bool = false) async throws -> Self {
         func card(_ path: String) -> String { "<article><h2>Concert Alpha</h2><a href='\(linkDestinationOverride ?? path)'>Alpha details</a>\(candidateBodyHTML)</article>" + additionalCardHTML }
+        let form = searchForm ? "<form action='/filtered'><label>Query<input name='q' value='old'></label><button>Search</button></form>" : ""
         let server = try OwnedBrowserHTTPFixture(routes: ["/before": .init(body: card("/old")),
-            "/search?q=concerts": .init(body: card("/details")), "/details": .init(body: card("/offers")),
+            "/search?q=concerts": .init(body: card("/details") + form), "/details": .init(body: card("/offers")),
+            "/filtered?q=concerts": .init(body: card("/more")),
             "/offers": .init(body: card("/more")), "/account": .init(body: "<label>Password<input type=password></label>"),
             "/account-ready": .init(body: card("/logged-in-offer")), "/logged-in-offer": .init(body: card("/more")),
             "/beta": .init(body: card("/more"))])
@@ -362,6 +435,7 @@ struct ResearchDriverFixture {
                 observedNavigationStore: { try .init(directory: $0, afterReplacement: {
                     try MainActor.assumeIsolated {
                         state.writes += 1
+                        state.onWrite?()
                         if state.failureAtWrite == state.writes { throw ComputerUseTaskJournalStore.StoreError.unavailable }
                     }
                 }) })
@@ -409,7 +483,7 @@ struct ResearchDriverFixture {
         XCTAssertEqual(files.count, 1)
         return try JSONDecoder().decode(ComputerUseTaskJournal.self, from: Data(contentsOf: XCTUnwrap(files.first)))
     }
-    func close() { state.onCommand = nil; state.onMayAct = nil; policy.beforeSelection = nil; coordinator.close(); server.stop(); try? FileManager.default.removeItem(at: directory) }
+    func close() { state.onCommand = nil; state.onMayAct = nil; state.onWrite = nil; policy.beforeSelection = nil; coordinator.close(); server.stop(); try? FileManager.default.removeItem(at: directory) }
 }
 
 @MainActor
@@ -419,6 +493,7 @@ final class DriverFixtureState {
     var onCommand: ((ComputerUseBrowserDOMCommand) -> Void)?
     var onMayAct: (() -> Void)?
     var writes = 0
+    var onWrite: (() -> Void)?
     var failureAtWrite: Int?
 }
 

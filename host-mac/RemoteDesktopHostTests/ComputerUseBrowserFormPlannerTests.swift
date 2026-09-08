@@ -581,6 +581,231 @@ final class ComputerUseBrowserFormPlannerTests: XCTestCase {
         XCTAssertTrue(owner.hasPendingForm)
     }
 
+    func testOwnerJournalsFormQueryOnceUnderTheOriginalGoalAndKeepsHistoricalReceipts() async throws {
+        var edits = 0
+        let fixture = try await FormPlannerFixture(goal: proposal(), domScriptDidDispatch: { if $0 == .edit { edits += 1 } })
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { fixture.close(); try? FileManager.default.removeItem(at: directory) }
+        let owner = fixture.owner(journalDirectory: directory)
+        defer { owner.retire() }
+        let (form, page, control) = try await prepareQuery(owner)
+        let original = owner.input
+        let first = try await owner.openFormQuery(after: form, controlID: control, evidence: page)
+        let repeated = try await owner.openFormQuery(after: form, controlID: control, evidence: page)
+        let resumed = try await owner.resumeFormNavigation()
+        XCTAssertEqual(first, repeated); XCTAssertEqual(first, resumed)
+        XCTAssertEqual(edits, 1); XCTAssertEqual(queryRequests(fixture), 1)
+        XCTAssertEqual(owner.input, original); XCTAssertEqual(owner.confirmedFormHistory, [form])
+        XCTAssertEqual(owner.confirmedNavigationHistory.map(\.kind), [.formQuery])
+        XCTAssertEqual(owner.confirmedNavigationHistory.first?.goalRevision, original.digest)
+        XCTAssertFalse(owner.hasPendingFormNavigation); XCTAssertFalse(owner.hasPendingNavigation)
+        let journal = try queryJournal(directory)
+        XCTAssertEqual(journal.promptDigest, original.rootDigest); XCTAssertEqual(journal.statuses, [.verified])
+        XCTAssertEqual(journal.stepIDs, [first.document.operationID])
+        let text = String(decoding: try JSONEncoder().encode(journal), as: UTF8.self)
+        for value in ["2026-03-08", "private-reference", "/results", "old-origin", original.prompt] { XCTAssertFalse(text.contains(value)) }
+    }
+
+    func testUnsentFormQueryRefreshesAfterHandbackWithoutChangingItsOperationOrEditingAgain() async throws {
+        for failRefresh in [false, true] {
+            var owner: ComputerUseBrowserResearchTask?, queryWrites = 0, edits = 0
+            let fixture = try await FormPlannerFixture(goal: proposal(), domScriptDidDispatch: { if $0 == .edit { edits += 1 } })
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { owner?.retire(); fixture.close(); try? FileManager.default.removeItem(at: directory) }
+            let current = fixture.owner(journalDirectory: directory, makeStore: { location in
+                try .init(directory: location, afterReplacement: {
+                    if location.lastPathComponent == "Observed Destinations" {
+                        queryWrites += 1
+                        if queryWrites == 1 { owner?.pause() }
+                        if failRefresh && queryWrites == 2 { throw ComputerUseTaskJournalStore.StoreError.unavailable }
+                    }
+                })
+            })
+            owner = current
+            let (form, page, control) = try await prepareQuery(current)
+            do { _ = try await current.openFormQuery(after: form, controlID: control, evidence: page); XCTFail("Pause must leave the query unsent") }
+            catch { XCTAssertTrue(error is CancellationError) }
+            let before = try queryJournal(directory)
+            XCTAssertEqual(before.statuses, [.planned]); XCTAssertEqual(queryRequests(fixture), 0)
+            XCTAssertTrue(current.hasPendingNavigation); XCTAssertTrue(current.hasPendingFormNavigation)
+            try await current.resumeAfterUserControl()
+            do { _ = try await current.prepareFormInput(); XCTFail("A pending submission cannot be replaced by another edit stage") }
+            catch { XCTAssertEqual(error as? ComputerUseBrowserResearchTask.Failure, .navigationPending) }
+            if failRefresh {
+                do { _ = try await current.resumeFormNavigation(); XCTFail("A failed replacement must preserve both known bindings") }
+                catch { XCTAssertEqual(error as? ComputerUseTaskJournalStore.StoreError, .unavailable) }
+                XCTAssertEqual(try queryJournal(directory).statuses, [.planned]); XCTAssertEqual(queryRequests(fixture), 0)
+            }
+            let resumed = try await current.resumeFormNavigation(), receipt = try XCTUnwrap(resumed)
+            let after = try queryJournal(directory)
+            XCTAssertEqual(after.taskID, before.taskID); XCTAssertEqual(after.stepIDs, before.stepIDs)
+            XCTAssertEqual(after.promptDigest, before.promptDigest); XCTAssertNotEqual(after.contractDigest, before.contractDigest)
+            XCTAssertEqual(after.statuses, [.verified]); XCTAssertEqual(after.stepIDs, [receipt.document.operationID])
+            XCTAssertEqual(queryRequests(fixture), 1); XCTAssertEqual(edits, 1)
+            XCTAssertEqual(current.confirmedNavigationHistory.count, 1)
+        }
+    }
+
+    func testFormQueryReconcilesAVisibleVerifiedWriteFailureWithoutRepreparingOrReloading() async throws {
+        var queryWrites = 0, preparations = 0
+        let fixture = try await FormPlannerFixture(goal: proposal(), domScriptDidDispatch: { if $0 == .prepareFormQuery { preparations += 1 } })
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { fixture.close(); try? FileManager.default.removeItem(at: directory) }
+        let owner = fixture.owner(journalDirectory: directory, makeStore: { location in
+            try .init(directory: location, afterReplacement: {
+                if location.lastPathComponent == "Observed Destinations" {
+                    queryWrites += 1
+                    if queryWrites == 3 { throw ComputerUseTaskJournalStore.StoreError.unavailable }
+                }
+            })
+        })
+        defer { owner.retire() }
+        let (form, page, control) = try await prepareQuery(owner)
+        do { _ = try await owner.openFormQuery(after: form, controlID: control, evidence: page); XCTFail("A failed verified write cannot publish navigation") }
+        catch { XCTAssertEqual(error as? ComputerUseTaskJournalStore.StoreError, .unavailable) }
+        XCTAssertEqual(try queryJournal(directory).statuses, [.verified]); XCTAssertTrue(owner.hasPendingFormNavigation)
+        XCTAssertTrue(owner.confirmedNavigationHistory.isEmpty); XCTAssertEqual(queryRequests(fixture), 1)
+        let calls = preparations
+        _ = try await owner.resumeFormNavigation()
+        XCTAssertEqual(preparations, calls); XCTAssertEqual(queryRequests(fixture), 1)
+        XCTAssertEqual(owner.confirmedNavigationHistory.map(\.kind), [.formQuery])
+    }
+
+    func testAttemptedFormQueryWithoutNativeReceiptCannotBeReplannedOrSubmittedAgain() async throws {
+        var owner: ComputerUseBrowserResearchTask?, queryWrites = 0, preparations = 0
+        let fixture = try await FormPlannerFixture(goal: proposal(), domScriptDidDispatch: { if $0 == .prepareFormQuery { preparations += 1 } })
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { owner?.retire(); fixture.close(); try? FileManager.default.removeItem(at: directory) }
+        let current = fixture.owner(journalDirectory: directory, makeStore: { location in
+            try .init(directory: location, afterReplacement: {
+                if location.lastPathComponent == "Observed Destinations" {
+                    queryWrites += 1; if queryWrites == 2 { owner?.pause() }
+                }
+            })
+        })
+        owner = current
+        let (form, page, control) = try await prepareQuery(current)
+        do { _ = try await current.openFormQuery(after: form, controlID: control, evidence: page); XCTFail("Pause after attempt must stop the load") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertEqual(queryRequests(fixture), 0); XCTAssertEqual(try queryJournal(directory).statuses, [.uncertain])
+        try await current.resumeAfterUserControl()
+        let calls = preparations
+        do { _ = try await current.resumeFormNavigation(); XCTFail("An attempted query requires its original native receipt") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .observedNavigationUncertain) }
+        XCTAssertEqual(queryRequests(fixture), 0); XCTAssertEqual(preparations, calls)
+        XCTAssertTrue(current.hasPendingFormNavigation); XCTAssertTrue(current.confirmedNavigationHistory.isEmpty)
+    }
+
+    func testUnsentQueryRejectsChangedPrivateDestinationAndParametersOrVisibleContext() async throws {
+        for mutation in ["action", "value", "page"] {
+            var owner: ComputerUseBrowserResearchTask?, writes = 0
+            let script: String
+            switch mutation {
+            case "action": script = "document.querySelector('form').action = '/changed-destination';"
+            case "value": script = "document.querySelector('[name=reference]').value = 'changed-reference';"
+            default: script = "document.body.insertAdjacentHTML('beforeend', '<p>Changed context</p>');"
+            }
+            let fixture = try await FormPlannerFixture(goal: proposal(), body: FormPlannerFixture.body + """
+                <script>fetch('/signal').then(() => { \(script) fetch('/changed'); });</script>
+                """, heldSignal: true)
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { owner?.retire(); fixture.close(); try? FileManager.default.removeItem(at: directory) }
+            let current = fixture.owner(journalDirectory: directory, makeStore: { location in
+                try .init(directory: location, afterReplacement: {
+                    if location.lastPathComponent == "Observed Destinations" { writes += 1; if writes == 1 { owner?.pause() } }
+                })
+            })
+            owner = current
+            let (form, page, control) = try await prepareQuery(current)
+            do { _ = try await current.openFormQuery(after: form, controlID: control, evidence: page); XCTFail("Retain the planned query") }
+            catch { XCTAssertTrue(error is CancellationError) }
+            let before = try queryJournal(directory)
+            try await fixture.wait { fixture.server.count("/signal") == 1 }
+            fixture.server.releaseHeldResponses()
+            try await fixture.wait { fixture.server.count("/changed") == 1 }
+            try await current.resumeAfterUserControl()
+            do { _ = try await current.resumeFormNavigation(); XCTFail("A fresh nonce cannot authorize a different query") }
+            catch { XCTAssertEqual(error as? ComputerUseBrowserError, mutation == "page" ? .pageChanged : .formQueryUnavailable) }
+            XCTAssertEqual(try queryJournal(directory), before)
+            XCTAssertEqual(queryRequests(fixture), 0); XCTAssertEqual(fixture.server.count("/changed-destination"), 0)
+            XCTAssertTrue(current.hasPendingFormNavigation)
+        }
+    }
+
+    func testPendingQueryCannotSwitchItsSubmitterOrAcceptAnotherGoalAnswer() async throws {
+        var owner: ComputerUseBrowserResearchTask?, writes = 0
+        let body = FormPlannerFixture.body.replacingOccurrences(of: "</form>", with: "<button>Another search</button></form>")
+        let fixture = try await FormPlannerFixture(goal: proposal(), body: body)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { owner?.retire(); fixture.close(); try? FileManager.default.removeItem(at: directory) }
+        let current = fixture.owner(journalDirectory: directory, makeStore: { location in
+            try .init(directory: location, afterReplacement: {
+                if location.lastPathComponent == "Observed Destinations" { writes += 1; if writes == 1 { owner?.pause() } }
+            })
+        })
+        owner = current
+        let (form, page, control) = try await prepareQuery(current)
+        let other = try XCTUnwrap(page.page.controls.first { $0.kind == "submit" && $0.id != control })
+        do { _ = try await current.openFormQuery(after: form, controlID: control, evidence: page); XCTFail("Retain the original submitter") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        try await current.resumeAfterUserControl()
+        do { _ = try await current.openFormQuery(after: form, controlID: other.id, evidence: page); XCTFail("A pending query cannot switch buttons") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserResearchTask.Failure, .formUnavailable) }
+        XCTAssertThrowsError(try current.issueQuestion(topic: .date,
+            requirementIDs: [try proposal().requirements[3].id], controllerID: "phone", controllerSessionID: "session")) {
+            XCTAssertEqual($0 as? ComputerUseBrowserResearchTask.Failure, .navigationPending)
+        }
+        XCTAssertEqual(queryRequests(fixture), 0)
+        _ = try await current.resumeFormNavigation()
+        XCTAssertEqual(queryRequests(fixture), 1)
+    }
+
+    func testFormQueryHandbackCannotReplaceOriginalFieldAuthorityAfterLoginNavigation() async throws {
+        var owner: ComputerUseBrowserResearchTask?, writes = 0, edits = 0
+        let fixture = try await FormPlannerFixture(goal: proposal(), additionalRoutes: [
+            "/account":.init(body: "<label>Password<input type='password' autocomplete='current-password'></label>"),
+            "/account-ready":.init(body: FormPlannerFixture.body)], domScriptDidDispatch: { if $0 == .edit { edits += 1 } })
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { owner?.retire(); fixture.close(); try? FileManager.default.removeItem(at: directory) }
+        let current = fixture.owner(journalDirectory: directory, makeStore: { location in
+            try .init(directory: location, afterReplacement: {
+                if location.lastPathComponent == "Observed Destinations" { writes += 1; if writes == 1 { owner?.pause() } }
+            })
+        })
+        owner = current
+        let (form, page, control) = try await prepareQuery(current), original = current.input
+        do { _ = try await current.openFormQuery(after: form, controlID: control, evidence: page); XCTFail("Keep the query pending across manual control") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        let before = try queryJournal(directory), base = page.document.committedURL.deletingLastPathComponent()
+        _ = try await fixture.browser.navigate(taskID: current.taskID, operationID: "manual-account", to: base.appendingPathComponent("account"))
+        do { try await current.resumeAfterUserControl(); XCTFail("The password page still requires manual control") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .authenticationRequired) }
+        do { _ = try await current.resumeFormNavigation(); XCTFail("Query recovery cannot implicitly take back control") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserResearchTask.Failure, .paused) }
+        _ = try await fixture.browser.navigate(taskID: current.taskID, operationID: "manual-ready", to: base.appendingPathComponent("account-ready"))
+        try await current.resumeAfterUserControl()
+        do { _ = try await current.resumeFormNavigation(); XCTFail("An identical-looking authenticated form has different native authority") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+        XCTAssertEqual(current.input, original); XCTAssertEqual(try queryJournal(directory), before)
+        XCTAssertEqual(queryRequests(fixture), 0); XCTAssertEqual(edits, 1); XCTAssertTrue(current.hasPendingFormNavigation)
+    }
+
+    private func prepareQuery(_ owner: ComputerUseBrowserResearchTask) async throws -> (ComputerUseBrowserResearchFormReceipt, ComputerUseBrowserPageEvidence, String) {
+        _ = try await owner.interpretGoal()
+        let input = try await owner.prepareFormInput()
+        let proposed = try ComputerUseBrowserFormProposal.decode(content: plan([["field":"field3", "normalized":"value4"]]), input: input)
+        let form = try await owner.executeForm(proposed, input: input)
+        let page = try await owner.observeFormResultPage(after: form)
+        return (form, page, try XCTUnwrap(page.page.controls.first { $0.kind == "submit" }).id)
+    }
+    private func queryRequests(_ fixture: FormPlannerFixture) -> Int { fixture.server.requestedPaths.filter { $0.hasPrefix("/results?") }.count }
+    private func queryJournal(_ directory: URL) throws -> ComputerUseTaskJournal {
+        let files = try FileManager.default.contentsOfDirectory(at: directory.appendingPathComponent("Observed Destinations"),
+            includingPropertiesForKeys: nil).filter { $0.pathExtension == "json" }
+        guard files.count == 1, let file = files.first else { throw ComputerUseBrowserResearchFormNavigation.Failure.invalidIntent }
+        return try JSONDecoder().decode(ComputerUseTaskJournal.self, from: Data(contentsOf: file))
+    }
+
     private func stageJournalData(_ directory: URL) throws -> [Data] {
         let forms = directory.appendingPathComponent("Research Forms")
         guard FileManager.default.fileExists(atPath: forms.path) else { return [] }

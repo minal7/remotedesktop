@@ -110,7 +110,8 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                          progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
         do { return try await navigate(run, tools: tools, progress: progress) }
         catch ComputerUseBrowserError.observedNavigationUncertain, ComputerUseTaskExecutionError.uncertainEffect,
-              ComputerUseTaskExecutionError.journalMismatch {
+              ComputerUseTaskExecutionError.journalMismatch, ComputerUseTextTaskError.uncertainEffect,
+              ComputerUseTextTaskError.journalMismatch {
             try validate(run, tools: tools)
             return reconciliationRequired
         } catch is ComputerUseTaskJournalStore.StoreError {
@@ -119,6 +120,11 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
         } catch ComputerUseBrowserError.pageChanged, ComputerUseBrowserError.linkNavigationUnavailable {
             try validate(run, tools: tools)
             return .userInterventionRequired("The page changed before the next browser action. Check the page, then choose Resume to continue the original request.")
+        } catch ComputerUseBrowserError.formQueryUnavailable, ComputerUseBrowserError.formQueryInvalid,
+                ComputerUseBrowserResearchFormError.inputChanged, ComputerUseTextTaskError.staleTarget,
+                ComputerUseTextTaskError.incompleteOutcome {
+            try validate(run, tools: tools)
+            return .userInterventionRequired("The retained form or search cannot be verified on this page. The original request remains pending; review the form before continuing.")
         } catch ComputerUseBrowserError.sourceNotAllowed {
             try validate(run, tools: tools)
             return .userInterventionRequired(ComputerUseBrowserError.sourceNotAllowed.localizedDescription)
@@ -179,6 +185,20 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                     document = try await owner.resumeInitialSearch()
                 }
                 guard let document, try record(.search, document) else { return reconciliationRequired }
+                continue
+            }
+            if owner.hasPendingForm {
+                progress("Checking the pending form entries…")
+                guard try await owner.resumeForm() != nil else { throw Failure.invalidContinuation }
+                try check()
+                // Form/query action selection is still a separate, incomplete
+                // integration. Verified typing cannot become a research answer.
+                return .userInterventionRequired("The form entries are verified. Choosing the next form action still needs attention; the original request remains pending.")
+            }
+            if owner.hasPendingFormNavigation {
+                progress("Checking the pending form search…")
+                guard let receipt = try await owner.resumeFormNavigation(),
+                      try record(.formQuery, receipt.document) else { return reconciliationRequired }
                 continue
             }
             if owner.hasPendingNavigation {
