@@ -147,6 +147,9 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
         } catch is ComputerUseBrowserActionPlanError, is ComputerUseBrowserResearchFormError {
             try validate(run, tools: tools)
             return .userInterventionRequired("The browser could not prepare the next form or reading action from the complete request. Earlier work and the original task remain pending.")
+        } catch ComputerUseBrowserLinkPlanError.deadlineExceeded {
+            try validate(run, tools: tools)
+            return .userInterventionRequired("Choosing the next research link ran out of time. Earlier findings and the original task remain pending. Review the page, then choose Resume to continue.")
         } catch is ComputerUseBrowserLinkPlanError {
             try validate(run, tools: tools)
             return .userInterventionRequired("I could not choose the next step from the complete request and available readings. Earlier findings and the original task remain pending.")

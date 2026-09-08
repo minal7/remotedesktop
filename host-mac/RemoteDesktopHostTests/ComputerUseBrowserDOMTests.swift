@@ -326,6 +326,38 @@ final class ComputerUseBrowserDOMTests: XCTestCase {
         XCTAssertEqual(prepared.fixture.server.count("/alpha"), 1)
     }
 
+    func testResearchLinkReplanDeadlineKeepsOriginalJournalAndLeaseUntilSelectorJoins() async throws {
+        let prepared = try await pendingResearchLinkFixture(), gate = BrowserResearchGate()
+        defer { gate.release(); prepared.owner.retire(); prepared.fixture.close(); try? FileManager.default.removeItem(at: prepared.directory) }
+        try await prepared.owner.resumeAfterUserControl()
+        let original = prepared.owner.input, planned = try observedNavigationJournal(in: prepared.directory)
+        var cancelled = false
+        let work = Task {
+            try await prepared.owner.replanPendingCandidateNavigation(budget: .milliseconds(50)) { _, candidates in
+                do { try await Task.sleep(for: .seconds(60)) }
+                catch { cancelled = error is CancellationError; await gate.suspend() }
+                let candidate = try XCTUnwrap(candidates.candidates.first)
+                return .init(candidateID: candidate.id, linkID: try XCTUnwrap(candidate.selectedLinkIDs.first))
+            }
+        }
+        try await gate.waitUntilStarted()
+        XCTAssertTrue(cancelled); XCTAssertTrue(prepared.owner.isOperating)
+        let competing = try ComputerUseTaskJournalStore(directory: prepared.directory.appendingPathComponent("Observed Destinations"))
+        XCTAssertThrowsError(try competing.acquireExecution(taskID: planned.taskID, expected: planned)) {
+            XCTAssertEqual($0 as? ComputerUseTaskJournalStore.StoreError, .busy)
+        }
+        gate.release()
+        do { _ = try await work.value; XCTFail("No late replacement can escape a timed-out decision") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserLinkPlanError, .deadlineExceeded) }
+        XCTAssertEqual(try observedNavigationJournal(in: prepared.directory), planned)
+        XCTAssertTrue(prepared.owner.hasPendingNavigation); XCTAssertFalse(prepared.owner.isOperating)
+        XCTAssertEqual(prepared.owner.input, original); XCTAssertEqual(prepared.fixture.server.count("/alpha"), 0)
+        _ = try await replanResearchLink(prepared.owner)
+        _ = try await prepared.owner.resumeCandidateNavigation()
+        XCTAssertEqual(prepared.fixture.server.count("/alpha"), 1)
+        XCTAssertEqual(try observedNavigationJournal(in: prepared.directory).taskID, planned.taskID)
+    }
+
     func testResearchNavigationRetainsCommittedReplanAcrossPauseAndDoesNotReviveRetiredOwner() async throws {
         for retires in [false, true] {
             let prepared = try await pendingResearchLinkFixture(body: """

@@ -497,7 +497,14 @@ extension ComputerUseOwnedBrowser {
         guard goal.digest == batch.goalRevision, goal.taskID.utf8.elementsEqual(batch.rootTaskID.utf8) else {
             throw ComputerUseBrowserResultError.goalChanged
         }
-        try await validatePageEvidence(batch.evidence)
-        try Task.checkCancellation()
+        do {
+            try await validatePageEvidence(batch.evidence)
+            try Task.checkCancellation()
+        } catch {
+            // A timeout may win while WebKit still owns a validation callback.
+            // Do not release the research operation until that work has joined.
+            await joinDOMCompletion(document: batch.evidence.document)
+            throw error
+        }
     }
 }

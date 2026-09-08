@@ -769,7 +769,7 @@ final class ComputerUseBrowserResearchTask {
     /// Keep fresh reading and no-effect link selection inside the same owner
     /// operation. Pause must cancel/join the selector before another owner can
     /// take over. The selected link is still natively bound again when opened.
-    func planCandidateNavigation(select: @escaping @MainActor @Sendable
+    func planCandidateNavigation(budget: Duration = .seconds(30), select: @escaping @MainActor @Sendable
         (ComputerUseBrowserGoalInput, ComputerUseBrowserResultCandidates) async throws -> LinkChoice?) async throws -> LinkChoice? {
         try requireIdle()
         guard !hasPendingForm else { throw Failure.formPending }
@@ -777,24 +777,57 @@ final class ComputerUseBrowserResearchTask {
         guard !hasQuestion else { throw Failure.questionPending }
         guard let interpretation, interpretation.proposal.input.digest == input.digest,
               interpretation.proposal.disposition == .research else { throw Failure.interpretationRequired }
+        guard budget > .zero else { throw ComputerUseBrowserLinkPlanError.deadlineExceeded }
         let captured = input, epoch = controlEpoch
         latestCandidates = nil; latestForm = nil; latestAction = nil
         let result = try await operate { [self] in
             let candidates = try await readCurrentCandidates(goal: captured)
-            let choice = try await select(captured, candidates)
-            try checkCurrent(captured)
-            try await browser.validateResultCandidates(candidates, goal: captured)
-            try checkCurrent(captured)
-            if let choice {
-                guard let candidate = candidates.candidates.first(where: { $0.id == choice.candidateID }),
-                      candidate.selectedLinkIDs.contains(choice.linkID) else { throw ComputerUseBrowserResultError.invalidProposal }
-            }
+            let choice = try await selectCandidateLink(goal: captured, candidates: candidates, budget: budget, select: select)
             return (choice, candidates)
         }
         try checkCurrent(captured)
         guard controlEpoch == epoch else { throw Failure.paused }
         latestCandidates = result.1
         return result.0
+    }
+
+    /// One deadline covers the entire no-effect decision, including recalled
+    /// readings and final native validation. The preceding reading/review has
+    /// its own admission; selecting another recall cannot restart this clock.
+    /// Structured cancellation joins the selector before releasing the owner.
+    private func selectCandidateLink(goal: ComputerUseBrowserGoalInput, candidates: ComputerUseBrowserResultCandidates,
+        budget: Duration, select: @escaping @MainActor @Sendable
+        (ComputerUseBrowserGoalInput, ComputerUseBrowserResultCandidates) async throws -> LinkChoice?) async throws -> LinkChoice? {
+        let deadline = ContinuousClock.now.advanced(by: min(.seconds(30), max(.zero, budget)))
+        try checkCandidateLinkDecision(goal: goal, deadline: deadline)
+        return try await withThrowingTaskGroup(of: LinkChoice?.self) { group in
+            group.addTask { @MainActor [self] in
+                try checkCandidateLinkDecision(goal: goal, deadline: deadline)
+                let choice = try await select(goal, candidates)
+                try checkCandidateLinkDecision(goal: goal, deadline: deadline)
+                try await browser.validateResultCandidates(candidates, goal: goal)
+                try checkCandidateLinkDecision(goal: goal, deadline: deadline)
+                if let choice {
+                    guard let candidate = candidates.candidates.first(where: { $0.id == choice.candidateID }),
+                          candidate.selectedLinkIDs.contains(choice.linkID) else { throw ComputerUseBrowserResultError.invalidProposal }
+                }
+                return choice
+            }
+            group.addTask {
+                try await Task.sleep(until: deadline, clock: .continuous)
+                try Task.checkCancellation()
+                throw ComputerUseBrowserLinkPlanError.deadlineExceeded
+            }
+            defer { group.cancelAll() }
+            guard let choice = try await group.next() else { throw ComputerUseBrowserLinkPlanError.invalidProposal }
+            try checkCandidateLinkDecision(goal: goal, deadline: deadline)
+            return choice
+        }
+    }
+
+    private func checkCandidateLinkDecision(goal: ComputerUseBrowserGoalInput, deadline: ContinuousClock.Instant) throws {
+        try checkCurrent(goal)
+        guard ContinuousClock.now < deadline else { throw ComputerUseBrowserLinkPlanError.deadlineExceeded }
     }
 
     /// Resume the retained stage before planning another action or question.
@@ -816,7 +849,7 @@ final class ComputerUseBrowserResearchTask {
     /// Only the proven-unsent pending stage may read/select fresh candidates.
     /// The caller must choose for the whole goal; no first-result shortcut or
     /// automatic navigation follows this read-only replacement.
-    func replanPendingCandidateNavigation(select: @escaping @MainActor @Sendable
+    func replanPendingCandidateNavigation(budget: Duration = .seconds(30), select: @escaping @MainActor @Sendable
         (ComputerUseBrowserGoalInput, ComputerUseBrowserResultCandidates) async throws -> LinkChoice?) async throws -> ComputerUseBrowserResearchNavigation.ReplanResult {
         try requireIdle()
         guard !hasPendingForm else { throw Failure.formPending }
@@ -825,12 +858,13 @@ final class ComputerUseBrowserResearchTask {
         guard let navigation else { throw Failure.navigationUnavailable }
         guard let interpretation, interpretation.proposal.input.digest == input.digest,
               interpretation.proposal.disposition == .research else { throw Failure.interpretationRequired }
+        guard budget > .zero else { throw ComputerUseBrowserLinkPlanError.deadlineExceeded }
         let captured = input
         latestCandidates = nil; latestForm = nil; latestAction = nil
         return try await operate { [self] in
             try await navigation.replan(goal: captured, prepare: {
                 let candidates = try await self.readCurrentCandidates(goal: captured)
-                guard let choice = try await select(captured, candidates) else { return nil }
+                guard let choice = try await self.selectCandidateLink(goal: captured, candidates: candidates, budget: budget, select: select) else { return nil }
                 try self.checkCurrent(captured)
                 return (.init(goalRevision: captured.digest, candidateID: choice.candidateID, linkID: choice.linkID), candidates)
             }, checkCurrent: { try self.checkCurrent(captured) })

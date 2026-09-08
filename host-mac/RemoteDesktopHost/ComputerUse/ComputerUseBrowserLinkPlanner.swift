@@ -1,12 +1,13 @@
 import Foundation
 
 enum ComputerUseBrowserLinkPlanError: Error, Equatable, LocalizedError {
-    case invalidProposal, inputChanged, contextLimit
+    case invalidProposal, inputChanged, contextLimit, deadlineExceeded
     var errorDescription: String? {
         switch self {
         case .invalidProposal: return "The local planner did not select a valid observed result link."
         case .inputChanged: return "The research goal or result reading changed before link selection."
         case .contextLimit: return "The complete request and result reading do not fit the local link planner."
+        case .deadlineExceeded: return "Choosing the next research link ran out of time."
         }
     }
 }

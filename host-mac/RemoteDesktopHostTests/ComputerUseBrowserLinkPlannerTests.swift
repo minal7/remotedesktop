@@ -196,6 +196,138 @@ final class ComputerUseBrowserLinkPlannerTests: XCTestCase {
         XCTAssertEqual(controlled.server.count("/search?q=concerts"), 1)
     }
 
+    func testExpiredLinkDecisionStartsNoReadingOrSelectionAndKeepsEarlierEvidence() async throws {
+        let fixture = try await ResearchDriverFixture.make()
+        defer { fixture.close() }
+        _ = try await fixture.start()
+        let owner = try fixture.owner(), original = owner.input, archive = try owner.researchEvidence(for: owner.input)
+        let commands = fixture.state.commands.count, reads = fixture.results.inputs.count
+        for budget in [Duration.zero, .seconds(-1)] {
+            do {
+                _ = try await owner.planCandidateNavigation(budget: budget) { _, _ in
+                    XCTFail("An expired decision cannot call a selector"); return nil
+                }
+                XCTFail("Expired selection cannot publish")
+            } catch { XCTAssertEqual(error as? ComputerUseBrowserLinkPlanError, .deadlineExceeded) }
+        }
+        XCTAssertEqual(fixture.results.inputs.count, reads); XCTAssertEqual(fixture.state.commands.count, commands)
+        XCTAssertEqual(try owner.researchEvidence(for: original).digest, archive.digest)
+        XCTAssertEqual(owner.input, original); XCTAssertFalse(owner.isOperating)
+    }
+
+    func testOneLinkDeadlineCancelsLaterRecallTokenCountingOrCompletionWithoutPublishing() async throws {
+        for phase in ["count", "complete"] {
+            let fixture = try await ResearchDriverFixture.make()
+            defer { fixture.close() }
+            _ = try await fixture.start()
+            let owner = try fixture.owner(), original = owner.input, before = try owner.researchEvidence(for: owner.input)
+            let transport = LinkDeadlineTransport(phase: phase)
+            let planning = ComputerUseModelBrowserResearchPlanning(providers: [fixture.policy.provider], linkPlanner: try local(transport))
+            do {
+                _ = try await owner.planCandidateNavigation(budget: .seconds(1)) { goal, candidates in
+                    try await planning.selectLink(goal: goal, candidates: candidates, history: owner.confirmedNavigationHistory,
+                        evidence: owner.researchEvidence(for: goal))
+                }
+                XCTFail("Recall cannot restart the decision deadline")
+            } catch { XCTAssertEqual(error as? ComputerUseBrowserLinkPlanError, .deadlineExceeded) }
+            let calls = await transport.calls, cancelled = await transport.cancelled, waiting = await transport.waiting
+            XCTAssertEqual(calls.counts.count, 2); XCTAssertEqual(calls.completions.count, phase == "count" ? 1 : 2)
+            XCTAssertTrue(cancelled); XCTAssertFalse(waiting); XCTAssertFalse(owner.isOperating)
+            XCTAssertEqual(try owner.researchEvidence(for: original).count, before.count + 1, "The validated reading remains historical evidence")
+            do { _ = try await owner.revalidateCandidates(); XCTFail("No timed-out selection can publish its current candidate cache") }
+            catch { XCTAssertEqual(error as? ComputerUseBrowserResearchTask.Failure, .interpretationRequired) }
+            let secondBody = try object(XCTUnwrap(calls.counts[1].httpBody))
+            let messages = try XCTUnwrap(secondBody["messages"] as? [[String: String]])
+            let context = try object(Data(XCTUnwrap(messages.last?["content"]).utf8))
+            XCTAssertEqual((context["recalled_readings"] as? [[String: Any]])?.count, 1)
+            XCTAssertEqual((context["goal"] as? [String: Any])?["request"] as? String, original.prompt)
+            XCTAssertEqual(fixture.server.count("/search?q=concerts"), 1); XCTAssertEqual(fixture.server.count("/details"), 0)
+            let none = try await owner.planCandidateNavigation { _, _ in nil }
+            XCTAssertNil(none); XCTAssertEqual(owner.input, original)
+        }
+    }
+
+    func testTimedOutLinkSelectorKeepsOwnerBusyUntilCancellationCleanupJoins() async throws {
+        let fixture = try await ResearchDriverFixture.make(), gate = BrowserResearchGate()
+        defer { gate.release(); fixture.close() }
+        _ = try await fixture.start()
+        let owner = try fixture.owner(), original = owner.input
+        var cancelled = false, finished = false
+        let work = Task {
+            defer { finished = true }
+            return try await owner.planCandidateNavigation(budget: .milliseconds(50)) { _, batch in
+                do { try await Task.sleep(for: .seconds(60)) }
+                catch {
+                    cancelled = error is CancellationError
+                    await gate.suspend() // Deliberately uncooperative cleanup.
+                }
+                let candidate = try XCTUnwrap(batch.candidates.first)
+                return .init(candidateID: candidate.id, linkID: try XCTUnwrap(candidate.selectedLinkIDs.first))
+            }
+        }
+        try await gate.waitUntilStarted()
+        XCTAssertTrue(cancelled); XCTAssertTrue(owner.isOperating); XCTAssertFalse(finished)
+        do { _ = try await owner.readCandidates(); XCTFail("A cancelled selector still owns the operation") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserResearchTask.Failure, .busy) }
+        gate.release()
+        do { _ = try await work.value; XCTFail("Late valid-looking choices cannot escape the deadline") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserLinkPlanError, .deadlineExceeded) }
+        XCTAssertFalse(owner.isOperating); XCTAssertTrue(finished); XCTAssertEqual(owner.input, original)
+        XCTAssertEqual(fixture.server.count("/details"), 0)
+    }
+
+    func testLinkDecisionRevalidatesThePageEvenWhenTheSelectorReturnsNoChoice() async throws {
+        let fixture = try await ResearchDriverFixture.make()
+        defer { fixture.close() }
+        _ = try await fixture.start()
+        let owner = try fixture.owner()
+        do {
+            _ = try await owner.planCandidateNavigation { _, _ in
+                _ = try await fixture.browser.navigate(taskID: owner.taskID, operationID: "changed-during-selection", to: fixture.base.appendingPathComponent("beta"))
+                return nil
+            }
+            XCTFail("No selection cannot validate a superseded page")
+        } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+        XCTAssertFalse(owner.isOperating); XCTAssertEqual(fixture.server.count("/details"), 0)
+    }
+
+    func testPauseDuringFinalLinkValidationJoinsNativeWorkAndRequiresExplicitHandback() async throws {
+        let fixture = try await ResearchDriverFixture.make()
+        defer { fixture.close() }
+        _ = try await fixture.start()
+        let owner = try fixture.owner(), original = owner.input
+        var validationStarted = false
+        do {
+            _ = try await owner.planCandidateNavigation { _, candidates in
+                fixture.state.onCommand = { command in
+                    if command == .validatePageSnapshot {
+                        fixture.state.onCommand = nil; validationStarted = true; owner.pause()
+                    }
+                }
+                let candidate = try XCTUnwrap(candidates.candidates.first)
+                return .init(candidateID: candidate.id, linkID: try XCTUnwrap(candidate.selectedLinkIDs.first))
+            }
+            XCTFail("A choice cannot publish through Pause during native validation")
+        } catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertTrue(validationStarted); XCTAssertFalse(owner.isOperating); XCTAssertTrue(owner.isPaused)
+        XCTAssertEqual(owner.input, original); XCTAssertEqual(fixture.server.count("/details"), 0)
+        try await owner.resumeAfterUserControl()
+        let none = try await owner.planCandidateNavigation { _, _ in nil }
+        XCTAssertNil(none); XCTAssertEqual(fixture.server.count("/search?q=concerts"), 1)
+    }
+
+    func testLinkDeadlineReachesDriverAsAResumableOriginalTask() async throws {
+        let fixture = try await ResearchDriverFixture.make(linkPlanner: LinkDeadlineReply())
+        defer { fixture.close() }
+        let result = try await fixture.start()
+        guard case .userInterventionRequired(let message)? = result else { return XCTFail("A timeout cannot complete research") }
+        XCTAssertTrue(message.contains("ran out of time")); XCTAssertTrue(message.contains("original task"))
+        let owner = try fixture.owner()
+        XCTAssertEqual(owner.input.prompt, ResearchDriverFixture.prompt); XCTAssertFalse(owner.isOperating)
+        XCTAssertEqual(try owner.researchEvidence(for: owner.input).count, 1)
+        XCTAssertEqual(fixture.server.count("/search?q=concerts"), 1); XCTAssertEqual(fixture.server.count("/details"), 0)
+    }
+
     private func reading(_ fixture: ResearchDriverFixture) async throws -> (ComputerUseBrowserLinkSelectionInput, ComputerUseBrowserResultCandidates) {
         let owner = try fixture.owner(), batch = try await owner.readCandidates()
         return (try .init(goal: owner.input, candidates: batch, history: owner.confirmedNavigationHistory), batch)
@@ -211,6 +343,41 @@ final class ComputerUseBrowserLinkPlannerTests: XCTestCase {
     private func local(_ transport: any ComputerUseTextModelTransport) throws -> ComputerUseLocalBrowserLinkPlanner {
         try .init(connection: .init(baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:54321")),
             bearerToken: "fixture-token-value", modelAlias: "fixture-model"), transport: transport)
+    }
+}
+
+private struct LinkDeadlineReply: ComputerUseBrowserLinkPlanning {
+    func propose(_ input: ComputerUseBrowserLinkSelectionInput) async throws -> ComputerUseBrowserLinkProposal {
+        throw ComputerUseBrowserLinkPlanError.deadlineExceeded
+    }
+}
+
+private actor LinkDeadlineTransport: ComputerUseTextModelTransport {
+    let phase: String
+    private(set) var calls: (counts: [URLRequest], completions: [URLRequest]) = ([], [])
+    private(set) var cancelled = false
+    private(set) var waiting = false
+    init(phase: String) { self.phase = phase }
+    func exactInputTokenCount(completionRequest: URLRequest) async throws -> Int {
+        calls.counts.append(completionRequest)
+        if phase == "count", calls.counts.count == 2 { try await stall() }
+        return 100
+    }
+    func complete(request: URLRequest) async throws -> Data {
+        calls.completions.append(request)
+        if phase == "complete", calls.completions.count == 2 { try await stall() }
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
+        let messages = try XCTUnwrap(body["messages"] as? [[String: String]])
+        let context = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(XCTUnwrap(messages.last?["content"]).utf8)) as? [String: Any])
+        let available = try XCTUnwrap(context["recallable_readings"] as? [Int])
+        let content = String(decoding: try JSONSerialization.data(withJSONObject: ["reading":try XCTUnwrap(available.first)]), as: UTF8.self)
+        return try JSONSerialization.data(withJSONObject: ["model":"fixture-model", "choices":[["finish_reason":"stop", "message":["role":"assistant", "content":content]]]])
+    }
+    private func stall() async throws {
+        waiting = true
+        defer { waiting = false }
+        do { try await Task.sleep(for: .seconds(60)) }
+        catch { cancelled = error is CancellationError; throw error }
     }
 }
 
