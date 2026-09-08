@@ -1,7 +1,7 @@
 import Foundation
 
 /// A research-only observation of a native control, never an edit or proof
-/// that this selection belongs to an offer. Submission values stay private.
+/// that this selection belongs to an offer. Option submission codes stay private.
 struct ComputerUseBrowserControlState: Decodable, Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     enum Kind: String, Decodable, Sendable { case scalar, text, selection, checked, stateless, unavailable }
     let controlID: String
@@ -11,25 +11,34 @@ struct ComputerUseBrowserControlState: Decodable, Equatable, Sendable, CustomStr
     let checked: Bool?
     let indeterminate: Bool?
 
+    func requiresScope(for control: ComputerUseBrowserPageSnapshot.Control) -> Bool {
+        kind == .text || (kind != .stateless && kind != .unavailable && (control.disabled || control.readOnly))
+    }
+
+    // Shape validation only. The complete snapshot separately requires scope
+    // membership for text states and read-only/disabled value observations.
     func isValid(for control: ComputerUseBrowserPageSnapshot.Control) -> Bool {
         guard controlID == control.id else { return false }
         switch kind {
         case .text:
-            return ComputerUseBrowserControlRead.allows(control) && value != nil && (value?.utf8.count ?? 0) <= 2_048
+            return ["text", "search"].contains(control.kind) && ComputerUseBrowserControlRead.allows(control)
+                && value != nil && (value?.utf8.count ?? 0) <= 2_048
                 && selectedOptionIDs == nil && checked == nil && indeterminate == nil
         case .scalar:
             return ["date", "datetime-local", "month", "week", "time", "number"].contains(control.kind)
-                && !control.disabled && !control.readOnly
+                && ((!control.disabled && !control.readOnly) || ComputerUseBrowserControlRead.allows(control))
                 && value != nil && (value?.utf8.count ?? 0) <= 2_048
                 && selectedOptionIDs == nil && checked == nil && indeterminate == nil
         case .selection:
-            guard control.kind == "select", !control.disabled, !control.readOnly, value == nil, checked == nil, indeterminate == nil,
+            guard control.kind == "select", (!control.disabled && !control.readOnly) || ComputerUseBrowserControlRead.allows(control),
+                  value == nil, checked == nil, indeterminate == nil,
                   let selectedOptionIDs, Set(selectedOptionIDs).count == selectedOptionIDs.count,
                   Set(selectedOptionIDs).isSubset(of: Set(control.options.map(\.id))),
                   control.multiple || selectedOptionIDs.count <= 1 else { return false }
             return control.options.filter { selectedOptionIDs.contains($0.id) }.map(\.id) == selectedOptionIDs
         case .checked:
-            return ["checkbox", "radio"].contains(control.kind) && !control.disabled && !control.readOnly
+            return ["checkbox", "radio"].contains(control.kind)
+                && ((!control.disabled && !control.readOnly) || ComputerUseBrowserControlRead.allows(control))
                 && value == nil && selectedOptionIDs == nil
                 && checked != nil && indeterminate != nil && (control.kind == "checkbox" || indeterminate == false)
         case .stateless:

@@ -191,7 +191,7 @@ struct ComputerUseBrowserPageSnapshot: Decodable, Equatable, Sendable, CustomStr
     let controls: [Control]
     let controlStates: [ComputerUseBrowserControlState]
     let controlStateObserved: Bool
-    let textControlIDs: [String]
+    let scopedControlIDs: [String]
     let containers: [Container]
     let omittedStructure: Bool
     let truncated: Bool
@@ -202,16 +202,16 @@ struct ComputerUseBrowserPageSnapshot: Decodable, Equatable, Sendable, CustomStr
     init(id: String, texts: [Text], links: [Link], controls: [Control] = [],
          truncated: Bool, omittedEmbeddedContent: Bool, omittedControls: Bool = false,
          viewport: ComputerUseBrowserViewport? = nil, containers: [Container] = [], omittedStructure: Bool = true,
-         controlStates: [ComputerUseBrowserControlState] = [], controlStateObserved: Bool = false, textControlIDs: [String] = []) {
+         controlStates: [ComputerUseBrowserControlState] = [], controlStateObserved: Bool = false, scopedControlIDs: [String] = []) {
         self.id = id; self.texts = texts; self.links = links; self.controls = controls
         self.controlStates = controlStates; self.controlStateObserved = controlStateObserved
-        self.textControlIDs = textControlIDs
+        self.scopedControlIDs = scopedControlIDs
         self.truncated = truncated; self.omittedEmbeddedContent = omittedEmbeddedContent; self.omittedControls = omittedControls
         self.viewport = viewport
         self.containers = containers; self.omittedStructure = omittedStructure
     }
 
-    private enum CodingKeys: String, CodingKey { case id, texts, links, controls, controlStates, controlStateObserved, textControlIDs, containers, omittedStructure, truncated, omittedEmbeddedContent, omittedControls, viewport }
+    private enum CodingKeys: String, CodingKey { case id, texts, links, controls, controlStates, controlStateObserved, scopedControlIDs, containers, omittedStructure, truncated, omittedEmbeddedContent, omittedControls, viewport }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         let controls: [Control]
@@ -234,7 +234,7 @@ struct ComputerUseBrowserPageSnapshot: Decodable, Equatable, Sendable, CustomStr
             omittedStructure: values.contains(.omittedStructure) ? try values.decode(Bool.self, forKey: .omittedStructure) : true,
             controlStates: values.contains(.controlStates) ? try values.decode([ComputerUseBrowserControlState].self, forKey: .controlStates) : [],
             controlStateObserved: values.contains(.controlStateObserved) ? try values.decode(Bool.self, forKey: .controlStateObserved) : false,
-            textControlIDs: values.contains(.textControlIDs) ? try values.decode([String].self, forKey: .textControlIDs) : [])
+            scopedControlIDs: values.contains(.scopedControlIDs) ? try values.decode([String].self, forKey: .scopedControlIDs) : [])
     }
 
     var description: String {
@@ -262,13 +262,14 @@ struct ComputerUseBrowserPageSnapshot: Decodable, Equatable, Sendable, CustomStr
     }
 
     var isWellFormed: Bool {
-        guard textControlIDs.count <= 16, Set(textControlIDs).count == textControlIDs.count,
-              textControlIDs.isEmpty || controlStateObserved,
-              textControlIDs.allSatisfy({ id in controls.contains { $0.id == id && ComputerUseBrowserControlRead.allows($0) } }),
-              controlStates.allSatisfy({ $0.kind != .text || textControlIDs.contains($0.controlID) }) else { return false }
+        guard scopedControlIDs.count <= 16, Set(scopedControlIDs).count == scopedControlIDs.count,
+              scopedControlIDs.isEmpty || controlStateObserved,
+              scopedControlIDs.allSatisfy({ id in controls.contains { $0.id == id && ComputerUseBrowserControlRead.allows($0) } }) else { return false }
         if controlStateObserved {
             guard controlStates.count == controls.count,
-                  zip(controlStates, controls).allSatisfy({ pair in pair.0.isValid(for: pair.1) }) else { return false }
+                  zip(controlStates, controls).allSatisfy({ pair in
+                      pair.0.isValid(for: pair.1) && (!pair.0.requiresScope(for: pair.1) || scopedControlIDs.contains(pair.1.id))
+                  }) else { return false }
         } else if !controlStates.isEmpty { return false }
         func identifier(_ value: String, prefix: String) -> Bool {
             value.hasPrefix(prefix) && value.utf8.count <= 32
@@ -329,7 +330,7 @@ struct ComputerUseBrowserPageSnapshot: Decodable, Equatable, Sendable, CustomStr
             + links.reduce(0) { $0 + $1.label.utf8.count + $1.destination.utf8.count }
             + controls.reduce(0) { $0 + $1.valueByteCount }
             + controlStates.reduce(0) { $0 + $1.byteCount }
-            + textControlIDs.reduce(0) { $0 + $1.utf8.count }
+            + scopedControlIDs.reduce(0) { $0 + $1.utf8.count }
             + containers.reduce(0) { $0 + $1.id.utf8.count + ($1.parentID?.utf8.count ?? 0) + $1.kind.utf8.count } <= 65_536
     }
 }
@@ -348,7 +349,7 @@ struct ComputerUseBrowserPlanningContext: Equatable, Sendable, CustomStringConve
     private let omittedStructure: Bool
     private let projectionOmittedRecords: Bool
     private let includesControlState: Bool
-    private let includesTextState: Bool
+    private let includesScopedState: Bool
 
     var recordCount: Int { records.count }
     var description: String { "ComputerUseBrowserPlanningContext(records: \(records.count))" }
@@ -357,7 +358,7 @@ struct ComputerUseBrowserPlanningContext: Equatable, Sendable, CustomStringConve
     init(page: ComputerUseBrowserPageSnapshot, includingControlState: Bool = false) throws {
         guard page.isWellFormed else { throw ComputerUseBrowserError.pageEvidenceUnavailable }
         includesControlState = includingControlState
-        includesTextState = includingControlState && !page.textControlIDs.isEmpty
+        includesScopedState = includingControlState && !page.scopedControlIDs.isEmpty
         let quote = AppleFoundationVisualActionRouter.foundationJSONString
         var projected: [String] = []
         var bytes = 0
@@ -450,7 +451,7 @@ struct ComputerUseBrowserPlanningContext: Equatable, Sendable, CustomStringConve
     /// and a document whose evidence did not fit the local planner's budget.
     func serialized(maximumRecords: Int? = nil) -> String {
         let count = max(0, min(maximumRecords ?? records.count, records.count))
-        return "{\"version\":\(includesTextState ? 5 : (includesControlState ? 4 : Self.version)),\"source_truncated\":\(sourceTruncated),\"omitted_embedded_content\":\(omittedEmbeddedContent),\"omitted_controls\":\(omittedControls),\"omitted_structure\":\(omittedStructure),\"projection_omitted_records\":\(projectionOmittedRecords),\"budget_omitted_records\":\(count < records.count),\"records\":[\(records.prefix(count).joined(separator: ","))]}"
+        return "{\"version\":\(includesScopedState ? 6 : (includesControlState ? 4 : Self.version)),\"source_truncated\":\(sourceTruncated),\"omitted_embedded_content\":\(omittedEmbeddedContent),\"omitted_controls\":\(omittedControls),\"omitted_structure\":\(omittedStructure),\"projection_omitted_records\":\(projectionOmittedRecords),\"budget_omitted_records\":\(count < records.count),\"records\":[\(records.prefix(count).joined(separator: ","))]}"
     }
 
     func promptSection(maximumRecords: Int? = nil) -> String {
@@ -905,11 +906,12 @@ enum ComputerUseBrowserDOM {
         return metadata.some(value => privateWords.test(value.replace(/([a-z0-9])([A-Z])/g, '$1 $2')
           .toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()));
       }
-      function researchTextAllowed(element, control) {
-        return ['text','search'].includes(control.kind) && !control.disabled && !control.readOnly
+      function researchScopeAllowed(element, control) {
+        return ['text','search','date','datetime-local','month','week','time','number','select','checkbox','radio'].includes(control.kind)
+          && (['text','search'].includes(control.kind) || control.disabled || control.readOnly)
           && !!control.label.trim() && !researchValueProtected(element, control);
       }
-      function pageContent(linkBindings, controlBindings, containerBindings, includeControlState = false, textControlIDs = []) {
+      function pageContent(linkBindings, controlBindings, containerBindings, includeControlState = false, scopedControlIDs = []) {
         // The text pass reads rendered text nodes, never form values,
         // innerHTML, scripts or frame documents. A separate opt-in pass below
         // observes native control state. Omitted surfaces remain explicit.
@@ -976,7 +978,7 @@ enum ComputerUseBrowserDOM {
             return NodeFilter.FILTER_ACCEPT;
           }
         };
-        if (filter.acceptNode(root) === NodeFilter.FILTER_REJECT) return {texts, links, controls, controlStates, controlStateObserved:includeControlState, textControlIDs, containers:structure, omittedStructure, truncated, omittedEmbeddedContent, omittedControls, viewport: readViewport()};
+        if (filter.acceptNode(root) === NodeFilter.FILTER_REJECT) return {texts, links, controls, controlStates, controlStateObserved:includeControlState, scopedControlIDs, containers:structure, omittedStructure, truncated, omittedEmbeddedContent, omittedControls, viewport: readViewport()};
         // display:contents has no own rectangle but its descendants can render.
         const walkers = [doc.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, filter)];
         while (walkers.length) {
@@ -1084,8 +1086,9 @@ enum ComputerUseBrowserDOM {
           const base = {controlID:control.id}, unavailable = {...base, kind:'unavailable'};
           if (['button','submit','reset','image'].includes(control.kind)) return {...base, kind:'stateless'};
           if (researchValueProtected(element, control)) return unavailable;
-          if (control.disabled || control.readOnly) return unavailable;
-          if (textControlIDs.includes(control.id) && researchTextAllowed(element, control)) {
+          const scoped = scopedControlIDs.includes(control.id) && researchScopeAllowed(element, control);
+          if ((control.disabled || control.readOnly) && !scoped) return unavailable;
+          if (scoped && ['text','search'].includes(control.kind)) {
             const value = valueGetters[0].call(element);
             return small(value, 2048) ? {...base, kind:'text', value} : unavailable;
           }
@@ -1154,7 +1157,7 @@ enum ComputerUseBrowserDOM {
           const control = {id: pageControlIDs.get(element), containerID, label, kind, name,
             disabled: element.matches(':disabled') || element.getAttribute('aria-disabled') === 'true',
             readOnly: !!element.readOnly, required: !!element.required, multiple: !!element.multiple, constraints, options, form};
-          control.researchReadable = researchTextAllowed(element, control);
+          control.researchReadable = researchScopeAllowed(element, control);
           const state = includeControlState ? researchControlState(element, control) : null;
           const size = encoder.encode(JSON.stringify(control)).length + (state ? encoder.encode(JSON.stringify(state)).length : 0);
           if (bytes + size > 65536) { truncated = true; omittedControls = true; continue; }
@@ -1162,7 +1165,7 @@ enum ComputerUseBrowserDOM {
           if (state) controlStates.push(state);
           controlBindings.set(control.id, {element, form: element.form, metadata: control});
         }
-        return {texts, links, controls, controlStates, controlStateObserved:includeControlState, textControlIDs, containers:structure, omittedStructure, truncated, omittedEmbeddedContent, omittedControls, viewport: readViewport()};
+        return {texts, links, controls, controlStates, controlStateObserved:includeControlState, scopedControlIDs, containers:structure, omittedStructure, truncated, omittedEmbeddedContent, omittedControls, viewport: readViewport()};
       }
       function readFormQuery(binding) {
         if (!binding || binding.metadata.kind !== 'submit' || binding.metadata.disabled || !binding.form) return {status:'unsupported'};
@@ -1342,8 +1345,8 @@ enum ComputerUseBrowserDOM {
           const links = new Map(), controls = new Map(), containers = new Map();
           if (command === 'pageSnapshot' && args.includeControlState !== undefined && typeof args.includeControlState !== 'boolean') return reply('unsupported');
           const includeControlState = command === 'pageSnapshot' ? args.includeControlState === true : lastPageSnapshot?.includeControlState === true;
-          const textControlIDs = command === 'pageSnapshot' ? [] : lastPageSnapshot?.textControlIDs || [];
-          const content = pageContent(links, controls, containers, includeControlState, textControlIDs), serialized = JSON.stringify(content);
+          const scopedControlIDs = command === 'pageSnapshot' ? [] : lastPageSnapshot?.scopedControlIDs || [];
+          const content = pageContent(links, controls, containers, includeControlState, scopedControlIDs), serialized = JSON.stringify(content);
           if (command !== 'pageSnapshot') {
             // Re-read the projection, including rendering and resolved URLs.
             // Mutation records alone miss CSSOM/value-property changes.
@@ -1376,11 +1379,11 @@ enum ComputerUseBrowserDOM {
               const ids = args.readControlIDs;
               if (!Array.isArray(ids) || ids.length < 1 || ids.length > 16 || new Set(ids).size !== ids.length
                   || ids.some(id => typeof id !== 'string' || !controls.has(id)
-                    || !researchTextAllowed(controls.get(id).element, controls.get(id).metadata))) return reply('unsupported');
+                    || !researchScopeAllowed(controls.get(id).element, controls.get(id).metadata))) return reply('unsupported');
               const observedLinks = new Map(), observedControls = new Map(), observedContainers = new Map();
               const reading = pageContent(observedLinks, observedControls, observedContainers, true, ids), id = nonce();
               formQueries.clear();
-              lastPageSnapshot = {id, documentID, serialized:JSON.stringify(reading), includeControlState:true, textControlIDs:ids,
+              lastPageSnapshot = {id, documentID, serialized:JSON.stringify(reading), includeControlState:true, scopedControlIDs:ids,
                 url:doc.URL, scroller:doc.scrollingElement, links:observedLinks, controls:observedControls, containers:observedContainers};
               return {status:'page-snapshot', documentID, page:{id, ...reading}};
             }
@@ -1476,7 +1479,7 @@ enum ComputerUseBrowserDOM {
           }
           const id = nonce();
           formQueries.clear();
-          lastPageSnapshot = {id, documentID, serialized, includeControlState, textControlIDs, url: doc.URL, scroller: doc.scrollingElement, links, controls, containers};
+          lastPageSnapshot = {id, documentID, serialized, includeControlState, scopedControlIDs, url: doc.URL, scroller: doc.scrollingElement, links, controls, containers};
           return {status: 'page-snapshot', documentID, page: {id, ...content}};
         }
         if (command !== 'fields' && args.documentID !== documentID) return reply('stale');

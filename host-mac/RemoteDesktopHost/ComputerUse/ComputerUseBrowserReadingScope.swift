@@ -1,6 +1,6 @@
 import Foundation
 
-/// A proposed read scope, selected from metadata before any text value enters
+/// A proposed read scope, selected from metadata before any scoped value enters
 /// research context. A source reference is not proof of semantic relevance.
 struct ComputerUseBrowserControlRead: Equatable, Sendable {
     let controlID: String
@@ -8,18 +8,19 @@ struct ComputerUseBrowserControlRead: Equatable, Sendable {
 
     static func accepts(_ requirement: ComputerUseBrowserGoalProposal.Requirement) -> Bool {
         [.outcome, .condition].contains(requirement.role)
-            && [.category, .origin, .destination, .location, .date, .time, .quantity].contains(requirement.field)
+            && ![.source, .navigationSource, .answerSource].contains(requirement.field)
     }
 
     static func allows(_ control: ComputerUseBrowserPageSnapshot.Control) -> Bool {
-        control.researchReadable && ["text", "search"].contains(control.kind) && !control.disabled && !control.readOnly
+        control.researchReadable && ["text", "search", "date", "datetime-local", "month", "week", "time", "number", "select", "checkbox", "radio"].contains(control.kind)
+            && (["text", "search"].contains(control.kind) || control.disabled || control.readOnly)
             && !control.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 }
 
 extension ComputerUseOwnedBrowser {
     /// The script first revalidates the metadata snapshot and native objects,
-    /// then reads only the selected text controls in that same invocation.
+    /// then reads only the explicitly selected restricted controls in that invocation.
     func observeResearchControls(for action: ComputerUseBrowserActionProposal) async throws -> ComputerUseBrowserPageEvidence {
         let evidence = action.input.evidence
         guard case .readResults = action.step, !action.readControls.isEmpty,
@@ -31,7 +32,7 @@ extension ComputerUseOwnedBrowser {
             "snapshotID":evidence.page.id, "readControlIDs":ids], document: evidence.document)
         guard hasRequiredPresentation, result.status == "page-snapshot", result.fields == nil,
               result.documentID == evidence.documentID, let page = result.page, page.isWellFormed,
-              page.controlStateObserved, page.textControlIDs == ids else { throw ComputerUseBrowserError.pageChanged }
+              page.controlStateObserved, page.scopedControlIDs == ids else { throw ComputerUseBrowserError.pageChanged }
         try validateSourceDocument(evidence.document)
         return .init(document: evidence.document, documentID: result.documentID, page: page)
     }

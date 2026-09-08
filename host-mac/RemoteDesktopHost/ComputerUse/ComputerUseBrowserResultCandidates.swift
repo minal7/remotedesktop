@@ -6,7 +6,7 @@ enum ComputerUseBrowserResultError: Error, Equatable {
 
 /// Exact host snapshot plus the bounded projection offered for interpretation.
 /// Research-only native control states remain separate from quoted page text.
-/// No destination, submission value or document authority enters its JSON.
+/// No destination URL, option submission code or document authority enters its JSON.
 struct ComputerUseBrowserResultPageInput: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     fileprivate let page: ComputerUseBrowserPageSnapshot
     let contextJSON: String
@@ -27,7 +27,7 @@ struct ComputerUseBrowserResultPageInput: Equatable, Sendable, CustomStringConve
             truncated: page.truncated, omittedEmbeddedContent: page.omittedEmbeddedContent,
             omittedControls: page.omittedControls || (page.controlStateObserved ? page.controlStates.contains { $0.kind == .unavailable } : !page.controls.isEmpty),
             viewport: page.viewport, containers: page.containers, omittedStructure: page.omittedStructure,
-            controlStates: page.controlStates, controlStateObserved: page.controlStateObserved, textControlIDs: page.textControlIDs)
+            controlStates: page.controlStates, controlStateObserved: page.controlStateObserved, scopedControlIDs: page.scopedControlIDs)
         let context = try ComputerUseBrowserPlanningContext(page: reading, includingControlState: page.controlStateObserved).serialized()
         contextJSON = context
         var parser = StrictSemanticJSONParser(context, maximumValueCount: 2_048)

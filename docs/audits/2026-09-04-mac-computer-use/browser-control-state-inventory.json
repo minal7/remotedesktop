@@ -122,7 +122,8 @@
     "RemoteDesktopHostTests/ComputerUseBrowserResearchHistoryTests",
     "RemoteDesktopHostTests/ComputerUseBrowserControlStateTests",
     "RemoteDesktopHostTests/ComputerUseBrowserReadingScopeTests",
-    "RemoteDesktopHostTests/ComputerUseBrowserControlRelevanceTests"
+    "RemoteDesktopHostTests/ComputerUseBrowserControlRelevanceTests",
+    "RemoteDesktopHostTests/ComputerUseBrowserReadonlyReadingTests"
   ],
   "expectedTests": [
     "RemoteDesktopHostTests/ComputerUseBrowserActionPlannerTests/testActionContextRetainsTheWholeGoalAndObservedFormsWithoutPrivateValuesOrTargets",
@@ -396,6 +397,13 @@
     "RemoteDesktopHostTests/ComputerUseBrowserReadingScopeTests/testPropertyOnlyTextChangeInvalidatesTheReadingAndRequiresANewScope",
     "RemoteDesktopHostTests/ComputerUseBrowserReadingScopeTests/testReplacementProtectionAndLoginChangesRejectTheOldScopeBeforeCollection",
     "RemoteDesktopHostTests/ComputerUseBrowserReadingScopeTests/testScopeUsesOfferedControlsAndOriginalRequirementsBeforeReadingValues",
+    "RemoteDesktopHostTests/ComputerUseBrowserReadonlyReadingTests/testChangedReadOnlyFlagsInvalidateEarlierScopeAndRefreshOrdinaryReading",
+    "RemoteDesktopHostTests/ComputerUseBrowserReadonlyReadingTests/testDriverRequiresIndependentResultDatesForScopedReadOnlySettings",
+    "RemoteDesktopHostTests/ComputerUseBrowserReadonlyReadingTests/testPropertyOnlyChangesInvalidateScopedNoneditableStates",
+    "RemoteDesktopHostTests/ComputerUseBrowserReadonlyReadingTests/testProtectedNoneditableFieldsRemainOutsideBothProposedAndNativeScopes",
+    "RemoteDesktopHostTests/ComputerUseBrowserReadonlyReadingTests/testReadPermissionCannotAuthorizeFormEditsOrSurvivePauseAndHandback",
+    "RemoteDesktopHostTests/ComputerUseBrowserReadonlyReadingTests/testScopeOffersNoneditableCriteriaWithoutCollectingTheirValuesGenerally",
+    "RemoteDesktopHostTests/ComputerUseBrowserReadonlyReadingTests/testScopedNativeValuesKeepInteractivityFlagsAndRequireTheExactScope",
     "RemoteDesktopHostTests/ComputerUseBrowserRequirementReviewTests/testChangedInterpretationOrCitationCannotReuseReviewIdentity",
     "RemoteDesktopHostTests/ComputerUseBrowserRequirementReviewTests/testNativeResearchAssessmentKeepsContradictionsAndUnknownsAheadOfMatchingNumbers",
     "RemoteDesktopHostTests/ComputerUseBrowserRequirementReviewTests/testRequirementCitationsCannotBorrowAnotherCandidateOrCutASelectedField",

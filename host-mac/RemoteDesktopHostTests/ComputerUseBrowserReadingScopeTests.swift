@@ -8,7 +8,7 @@ final class ComputerUseBrowserReadingScopeTests: XCTestCase {
         let fixture = try await ControlStateFixture(body: """
             <article><h2>Concert Alpha</h2><label>Location<input value=Paris></label><label>Notes<input value=privateNotes></label>
             <label>Email<input value=privateEmail></label><label>Account name<input value=privateAccount></label>
-            <label>Card details<input autocomplete=cc-number value=privateCard></label><label>Saved city<input readonly value=privateCity></label>
+            <label>Card details<input autocomplete=cc-number value=privateCard></label><label>Saved account city<input readonly value=privateCity></label>
             <label>Stored card<input type=number autocomplete=cc-number value=4111111111111111></label>
             <label>Date of birth<input type=date value=1990-01-02></label>
             <label>Details<textarea>privateDetails</textarea></label></article>
@@ -37,8 +37,8 @@ final class ComputerUseBrowserReadingScopeTests: XCTestCase {
         let planner = try ComputerUseLocalBrowserActionPlanner(connection: .init(baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:54321")), bearerToken: "fixture", modelAlias: "fixture-model"), transport: ControlStateUnusedTransport())
         let request = try planner.makeRequest(input), body = try ResearchAnswerFixture.object(XCTUnwrap(request.httpBody))
         let format = try XCTUnwrap(body["response_format"] as? [String: Any])
-        XCTAssertEqual((format["json_schema"] as? [String: Any])?["name"] as? String, "browser_research_action_v8")
-        XCTAssertEqual(try object(input.contextJSON)["version"] as? Int, 8)
+        XCTAssertEqual((format["json_schema"] as? [String: Any])?["name"] as? String, "browser_research_action_v9")
+        XCTAssertEqual(try object(input.contextJSON)["version"] as? Int, 9)
         let values = try await fixture.browser.observePage(document: fixture.document, includingControlState: true)
         XCTAssertEqual(try fixture.state("Stored card", in: values.page).kind, .unavailable)
         XCTAssertEqual(try fixture.state("Date of birth", in: values.page).kind, .unavailable)
@@ -52,26 +52,26 @@ final class ComputerUseBrowserReadingScopeTests: XCTestCase {
         defer { fixture.close() }
         let input = try await context(fixture), action = try scope(input)
         let reading = try await fixture.browser.observeResearchControls(for: action)
-        XCTAssertEqual(reading.page.textControlIDs, action.readControls.map(\.controlID))
+        XCTAssertEqual(reading.page.scopedControlIDs, action.readControls.map(\.controlID))
         XCTAssertEqual(try fixture.state("Location", in: reading.page).value?.utf8.map { $0 }, Array(value.utf8))
         XCTAssertEqual(try fixture.state("Notes", in: reading.page).kind, .unavailable)
         let projected = try ComputerUseBrowserResultPageInput(page: reading.page)
         XCTAssertFalse(projected.contextJSON.contains("privateNotes"))
-        XCTAssertEqual(try object(projected.contextJSON)["version"] as? Int, 5)
+        XCTAssertEqual(try object(projected.contextJSON)["version"] as? Int, 6)
         XCTAssertEqual(try object(projected.contextJSON)["omitted_controls"] as? Bool, true)
         try await fixture.browser.validatePageEvidence(reading)
         do { _ = try await fixture.browser.observeResearchControls(for: action); XCTFail("The consumed metadata scope cannot bind another observation") }
         catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
         let page = reading.page
-        for ids in [[], ["c999"], page.textControlIDs + page.textControlIDs] {
+        for ids in [[], ["c999"], page.scopedControlIDs + page.scopedControlIDs] {
             let invalid = ComputerUseBrowserPageSnapshot(id: page.id, texts: page.texts, links: page.links, controls: page.controls,
                 truncated: page.truncated, omittedEmbeddedContent: page.omittedEmbeddedContent, omittedControls: page.omittedControls,
                 viewport: page.viewport, containers: page.containers, omittedStructure: page.omittedStructure,
-                controlStates: page.controlStates, controlStateObserved: true, textControlIDs: ids)
+                controlStates: page.controlStates, controlStateObserved: true, scopedControlIDs: ids)
             XCTAssertFalse(invalid.isWellFormed)
         }
         let metadata = try await fixture.browser.observePage(document: fixture.document, includingControlState: true)
-        XCTAssertTrue(metadata.page.textControlIDs.isEmpty)
+        XCTAssertTrue(metadata.page.scopedControlIDs.isEmpty)
         XCTAssertEqual(try fixture.state("Location", in: metadata.page).kind, .unavailable)
     }
 
