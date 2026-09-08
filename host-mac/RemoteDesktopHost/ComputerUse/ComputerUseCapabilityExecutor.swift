@@ -447,6 +447,8 @@ enum ComputerUseNativeTextExecutorLoader {
                 reader: ComputerUseRuntimeBrowserResultPlanner(inputs: inputs, runtime: runtime),
                 reviewer: ComputerUseRuntimeBrowserResultReviewPlanner(inputs: inputs, runtime: runtime)),
             searchPlanner: ComputerUseRuntimeBrowserSearchPlanner(inputs: inputs, runtime: runtime),
+            actionPlanner: ComputerUseRuntimeBrowserActionPlanner(inputs: inputs, runtime: runtime),
+            formPlanner: ComputerUseRuntimeBrowserFormPlanner(inputs: inputs, runtime: runtime),
             planning: ComputerUseModelBrowserResearchPlanning(providers: providers,
                 linkPlanner: ComputerUseRuntimeBrowserLinkPlanner(inputs: inputs, runtime: runtime)))
         return ComputerUseCapabilityExecutor(native: native, browserResearch: research)

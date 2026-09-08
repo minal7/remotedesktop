@@ -65,6 +65,7 @@ final class ComputerUseBrowserResearchTask {
     private var interpretation: Interpretation?
     private var latestCandidates: ComputerUseBrowserResultCandidates?
     private var latestForm: PreparedForm?
+    private var latestAction: ComputerUseBrowserActionProposal?
     private var formStage: ComputerUseBrowserResearchFormStage?
     private var formNavigation: ComputerUseBrowserResearchFormNavigation?
     private var retainedEvidence: ComputerUseBrowserResearchEvidence
@@ -132,7 +133,7 @@ final class ComputerUseBrowserResearchTask {
         let captured = input, epoch = controlEpoch
         if let session { try browser.installSourcePolicy(policy, replacing: sourcePolicyInstalled ? sourcePolicy?.digest : nil, session: session) }
         if !isRetired, input == captured {
-            sourcePolicy = policy; sourcePolicyInstalled = session != nil; latestCandidates = nil; latestForm = nil
+            sourcePolicy = policy; sourcePolicyInstalled = session != nil; latestCandidates = nil; latestForm = nil; latestAction = nil
             // Retain the complete selected plan alongside a known native
             // installation before a reentrant Pause can reject publication.
             if let sources { researchSources = sources }
@@ -237,7 +238,7 @@ final class ComputerUseBrowserResearchTask {
             provider: provider, sourcePolicy: sourcePolicy)
         if let initialSearch, initialSearch.request != request { throw ComputerUseBrowserInitialSearchError.pendingStage }
         let captured = input
-        latestCandidates = nil; latestForm = nil
+        latestCandidates = nil; latestForm = nil; latestAction = nil
         return try await operate { [self] in
             try checkCurrent(captured)
             if initialSearch == nil {
@@ -285,15 +286,15 @@ final class ComputerUseBrowserResearchTask {
         guard let initialSearch, initialSearch.isPending else { return .noPendingStage }
         guard initialSearch.request.goal.digest == input.digest else { throw Failure.goalChanged }
         let captured = input
-        latestCandidates = nil; latestForm = nil
+        latestCandidates = nil; latestForm = nil; latestAction = nil
         return try await operate { [self] in
             try await initialSearch.refreshStartingPage(checkCurrent: { try self.checkCurrent(captured) })
         }
     }
 
-    /// Prepare native field correspondence before semantic form planning.
-    /// This only observes; it neither runs a model nor edits/submits a form.
-    func prepareFormInput() async throws -> ComputerUseBrowserResearchFormInput {
+    /// Select an interaction capability before interpreting a page as offers.
+    /// Observation and planning preserve retained native field receipts.
+    func planNextAction(using planner: any ComputerUseBrowserActionPlanning) async throws -> ComputerUseBrowserActionProposal {
         try requireIdle()
         guard !hasPendingForm else { throw Failure.formPending }
         guard !hasPendingNavigation else { throw Failure.navigationPending }
@@ -302,17 +303,87 @@ final class ComputerUseBrowserResearchTask {
               interpretation.proposal.disposition == .research else { throw Failure.interpretationRequired }
         guard sourcePolicy == nil || sourcePolicyInstalled else { throw Failure.navigationUnavailable }
         let captured = input
-        latestCandidates = nil; latestForm = nil
-        let prepared = try await operate { [self] in
+        latestCandidates = nil; latestForm = nil; latestAction = nil
+        let action = try await operate { [self] in
             let page = try await observeOwnedPage(goal: captured, enforceSources: true)
+            let context = try ComputerUseBrowserActionInput(interpretation: interpretation.proposal, evidence: page,
+                navigationHistory: confirmedNavigationHistory, formHistory: confirmedFormHistory, latestForm: formStage)
+            let proposal = try await planner.propose(context)
+            try checkCurrent(captured)
+            try proposal.validate(for: context)
+            try await browser.validatePageEvidence(page)
+            try checkCurrent(captured); try browser.validateSourceDocument(page.document)
+            return proposal
+        }
+        latestAction = action
+        return action
+    }
+
+    private func validateAction(_ action: ComputerUseBrowserActionProposal) throws {
+        try requireIdle()
+        guard !hasPendingForm else { throw Failure.formPending }
+        guard !hasPendingNavigation else { throw Failure.navigationPending }
+        guard !hasQuestion else { throw Failure.questionPending }
+        guard latestAction == action, action.input.interpretation.input == input,
+              action.input.interpretation == interpretation?.proposal else { throw ComputerUseBrowserActionPlanError.inputChanged }
+    }
+
+    func openFormQuery(for action: ComputerUseBrowserActionProposal) async throws -> ComputerUseBrowserNavigationReceipt {
+        try validateAction(action)
+        guard case .openQuery(let controlID, let receipt) = action.step else { throw ComputerUseBrowserActionPlanError.invalidProposal }
+        latestAction = nil
+        return try await openFormQuery(after: receipt, controlID: controlID, evidence: action.input.evidence)
+    }
+
+    /// Prepare native field correspondence before semantic form planning.
+    /// This only observes; it neither runs a model nor edits/submits a form.
+    func prepareFormInput() async throws -> ComputerUseBrowserResearchFormInput {
+        try await prepareFormInput(action: nil)
+    }
+
+    func prepareFormInput(for action: ComputerUseBrowserActionProposal) async throws -> ComputerUseBrowserResearchFormInput {
+        try validateAction(action)
+        guard case .editForm = action.step else { throw ComputerUseBrowserActionPlanError.invalidProposal }
+        return try await prepareFormInput(action: action)
+    }
+
+    private func prepareFormInput(action: ComputerUseBrowserActionProposal?) async throws -> ComputerUseBrowserResearchFormInput {
+        try requireIdle()
+        guard !hasPendingForm else { throw Failure.formPending }
+        guard !hasPendingNavigation else { throw Failure.navigationPending }
+        guard !hasQuestion else { throw Failure.questionPending }
+        guard let interpretation, interpretation.proposal.input == input,
+              interpretation.proposal.disposition == .research else { throw Failure.interpretationRequired }
+        guard sourcePolicy == nil || sourcePolicyInstalled else { throw Failure.navigationUnavailable }
+        let captured = input
+        latestCandidates = nil; latestForm = nil; latestAction = nil
+        let prepared = try await operate { [self] in
+            let page: ComputerUseBrowserPageEvidence
+            let selectedFormID: String?
+            if let action, case .editForm(let formID) = action.step {
+                try checkCurrent(captured)
+                try await browser.validatePageEvidence(action.input.evidence)
+                try browser.validateSourceDocument(action.input.evidence.document)
+                page = action.input.evidence; selectedFormID = formID
+            } else {
+                page = try await observeOwnedPage(goal: captured, enforceSources: true)
+                selectedFormID = nil
+            }
             guard browser.hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
+            // New discovery clears native input receipts. Until retained
+            // field extension/aggregate continuations are implemented, an
+            // automatic dependent edit must preserve that earlier authority.
+            if action != nil, let formStage, formStage.nativeReceipt != nil,
+               formStage.input.evidence.page.document == page.document {
+                throw ComputerUseBrowserActionPlanError.retainedFormRequiresExtension
+            }
             let target = ComputerUseBrowserTextTarget(browser: browser, document: page.document,
                 requiresFrontmost: browser.isFrontmostWindow)
             let fields = try await target.fields()
             let evidence = try await target.bindFields(fields, to: page)
             try checkCurrent(captured)
             guard browser.hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
-            return PreparedForm(target: target, input: try .init(interpretation: interpretation.proposal, evidence: evidence))
+            return PreparedForm(target: target, input: try .init(interpretation: interpretation.proposal, evidence: evidence, selectedFormID: selectedFormID))
         }
         latestForm = prepared
         return prepared.input
@@ -329,7 +400,7 @@ final class ComputerUseBrowserResearchTask {
               interpretation?.proposal == proposed.interpretation,
               proposed.interpretation.input == input else { throw ComputerUseBrowserResearchFormError.inputChanged }
         let captured = input
-        latestForm = nil
+        latestForm = nil; latestAction = nil
         try await operate { [self] in
             try await validatePreparedForm(retained, goal: captured)
         }
@@ -348,7 +419,7 @@ final class ComputerUseBrowserResearchTask {
             throw ComputerUseBrowserResearchFormError.inputChanged
         }
         let captured = input
-        latestForm = nil
+        latestForm = nil; latestAction = nil
         let result = try await operate { [self] in
             try await validatePreparedForm(retained, goal: captured)
             let proposal = try await planner.propose(proposed)
@@ -392,7 +463,7 @@ final class ComputerUseBrowserResearchTask {
                 index: confirmedFormHistory.count, journalDirectory: directory, makeStore: navigationStore)
             formStage = stage // Retain before any disk write, native await or effect.
         }
-        latestForm = nil; latestCandidates = nil
+        latestForm = nil; latestAction = nil; latestCandidates = nil
         return try await runForm(stage)
     }
 
@@ -402,7 +473,7 @@ final class ComputerUseBrowserResearchTask {
         guard !hasQuestion else { throw Failure.questionPending }
         guard let formStage else { return nil }
         guard formStage.input.interpretation.input == input else { throw Failure.goalChanged }
-        latestForm = nil; latestCandidates = nil
+        latestForm = nil; latestAction = nil; latestCandidates = nil
         return try await runForm(formStage)
     }
 
@@ -466,7 +537,7 @@ final class ComputerUseBrowserResearchTask {
             formNavigation = query
         }
         guard query.goal == input else { throw Failure.goalChanged }
-        latestForm = nil; latestCandidates = nil
+        latestForm = nil; latestAction = nil; latestCandidates = nil
         return try await runFormNavigation(query)
     }
 
@@ -477,7 +548,7 @@ final class ComputerUseBrowserResearchTask {
         guard !hasQuestion else { throw Failure.questionPending }
         guard let formNavigation else { return nil }
         guard formNavigation.goal == input else { throw Failure.goalChanged }
-        latestForm = nil; latestCandidates = nil
+        latestForm = nil; latestAction = nil; latestCandidates = nil
         return try await runFormNavigation(formNavigation)
     }
 
@@ -507,7 +578,7 @@ final class ComputerUseBrowserResearchTask {
         guard let interpretation, interpretation.proposal.input.digest == input.digest,
               interpretation.proposal.disposition == .research else { throw Failure.interpretationRequired }
         let captured = input
-        latestCandidates = nil; latestForm = nil
+        latestCandidates = nil; latestForm = nil; latestAction = nil
         let batch = try await operate { [self] in
             try await readCurrentCandidates(goal: captured)
         }
@@ -524,7 +595,7 @@ final class ComputerUseBrowserResearchTask {
         guard !hasQuestion else { throw Failure.questionPending }
         guard let retained = latestCandidates else { throw Failure.interpretationRequired }
         let captured = input
-        latestCandidates = nil; latestForm = nil
+        latestCandidates = nil; latestForm = nil; latestAction = nil
         let batch = try await operate { [self] in
             try checkCurrent(captured)
             try await browser.validateResultCandidates(retained, goal: captured)
@@ -545,7 +616,7 @@ final class ComputerUseBrowserResearchTask {
               interpretation.proposal.disposition == .research else { throw Failure.interpretationRequired }
         let captured = input, candidates = latestCandidates
         let selection = ComputerUseBrowserResearchNavigation.Selection(goalRevision: captured.digest, candidateID: candidateID, linkID: linkID)
-        latestCandidates = nil; latestForm = nil
+        latestCandidates = nil; latestForm = nil; latestAction = nil
         return try await operate { [self] in
             let receipt = try await navigation.open(selection, goal: captured, candidates: candidates, checkCurrent: { try self.checkCurrent(captured) })
             try recordNavigation(.resultLink, document: receipt.document, goal: captured)
@@ -565,7 +636,7 @@ final class ComputerUseBrowserResearchTask {
         guard let interpretation, interpretation.proposal.input.digest == input.digest,
               interpretation.proposal.disposition == .research else { throw Failure.interpretationRequired }
         let captured = input, epoch = controlEpoch
-        latestCandidates = nil; latestForm = nil
+        latestCandidates = nil; latestForm = nil; latestAction = nil
         let result = try await operate { [self] in
             let candidates = try await readCurrentCandidates(goal: captured)
             let choice = try await select(captured, candidates)
@@ -613,7 +684,7 @@ final class ComputerUseBrowserResearchTask {
         guard let interpretation, interpretation.proposal.input.digest == input.digest,
               interpretation.proposal.disposition == .research else { throw Failure.interpretationRequired }
         let captured = input
-        latestCandidates = nil; latestForm = nil
+        latestCandidates = nil; latestForm = nil; latestAction = nil
         return try await operate { [self] in
             try await navigation.replan(goal: captured, prepare: {
                 let candidates = try await self.readCurrentCandidates(goal: captured)
@@ -635,7 +706,7 @@ final class ComputerUseBrowserResearchTask {
         guard let interpretation, interpretation.proposal.input.digest == input.digest else { throw Failure.interpretationRequired }
         let context = try questionContext(controllerID: controllerID, controllerSessionID: controllerSessionID)
         let question = try clarification.issue(proposal: interpretation.proposal, topic: topic, requirementIDs: requirementIDs, context: context)
-        hasQuestion = true; latestCandidates = nil; latestForm = nil
+        hasQuestion = true; latestCandidates = nil; latestForm = nil; latestAction = nil
         return question
     }
 
@@ -651,7 +722,7 @@ final class ComputerUseBrowserResearchTask {
             hasQuestion = false
             throw ComputerUseBrowserGoalClarification.Failure.expired
         }
-        interpretation = nil; latestCandidates = nil; latestForm = nil; hasQuestion = false
+        interpretation = nil; latestCandidates = nil; latestForm = nil; latestAction = nil; hasQuestion = false
         return updated
     }
 
@@ -676,7 +747,7 @@ final class ComputerUseBrowserResearchTask {
         if handback == nil {
             handback = session ?? (browser.taskID == taskID ? browser.handbackRequirement(taskID: taskID, required: true) : nil)
         }
-        latestCandidates = nil; latestForm = nil; clarification.invalidateQuestion(); hasQuestion = false
+        latestCandidates = nil; latestForm = nil; latestAction = nil; clarification.invalidateQuestion(); hasQuestion = false
         cancelOperation?()
     }
 
@@ -733,7 +804,7 @@ final class ComputerUseBrowserResearchTask {
     }
 
     func retire() {
-        isRetired = true; controlEpoch = UUID(); latestCandidates = nil; latestForm = nil; interpretation = nil
+        isRetired = true; controlEpoch = UUID(); latestCandidates = nil; latestForm = nil; latestAction = nil; interpretation = nil
         confirmedNavigationHistory.removeAll()
         formStage?.retire(); formStage = nil; confirmedFormHistory.removeAll()
         formNavigation?.retire(); formNavigation = nil

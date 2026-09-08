@@ -201,7 +201,7 @@ final class ComputerUseBrowserResultReviewTests: XCTestCase {
             let fixture = try await ResearchDriverFixture.make(additionalCardHTML: "<p>From</p>", candidateBodyHTML: "<p>USD 40</p>")
             defer { fixture.close() }
             let links = ResultReviewLinks(), driver = ComputerUseBrowserResearchDriver(goalPlanner: ResultReviewGoal(), resultPlanner: composite,
-                searchPlanner: fixture.search, planning: ComputerUseModelBrowserResearchPlanning(providers: [fixture.policy.provider], linkPlanner: links),
+                searchPlanner: fixture.search, actionPlanner: BrowserResearchActionFixture(), formPlanner: BrowserResearchFormFixture(), planning: ComputerUseModelBrowserResearchPlanning(providers: [fixture.policy.provider], linkPlanner: links),
                 now: { ResearchDriverFixture.date }, timeZoneIdentifier: { "America/Los_Angeles" })
             let result = try await driver.executeBrowserResearch(taskID: ResearchDriverFixture.root, prompt: ResearchDriverFixture.prompt, tools: fixture.tools, progress: { _ in })
             guard case .userInterventionRequired = result else { return XCTFail("Even an exact label is not a completed research answer") }

@@ -53,7 +53,7 @@ struct ComputerUseBrowserFormProposal: Equatable, Sendable, CustomStringConverti
                   case .array(let preservationRows)? = root["preserve"], preservationRows.count <= 16 else { throw invalid }
             var edits: [Edit] = [], usedFields: Set<String> = []
             for row in rows {
-                guard case .object(let item) = row, case .string(let alias)? = item["field"], usedFields.insert(alias).inserted else { throw invalid }
+                guard case .object(let item) = row, case .string(let alias)? = item["field"], input.editableFieldAliases.contains(alias), usedFields.insert(alias).inserted else { throw invalid }
                 let field = try input.field(for: alias), payload: Payload
                 if Set(item.keys) == ["field", "terms"] {
                     guard ["text", "search", "url", "tel", "email", "textarea"].contains(field.control.kind),

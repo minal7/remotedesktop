@@ -155,6 +155,18 @@ struct ComputerUseRuntimeBrowserFormPlanner: ComputerUseBrowserFormPlanning {
     }
 }
 
+/// Form-versus-reading decisions use the same local model owner.
+struct ComputerUseRuntimeBrowserActionPlanner: ComputerUseBrowserActionPlanning {
+    let inputs: ComputerUseNativeTextRuntimeInputs
+    var runtime: OSAtlasLlamaRuntime = .shared
+    func propose(_ input: ComputerUseBrowserActionInput) async throws -> ComputerUseBrowserActionProposal {
+        try Task.checkCancellation()
+        if !input.needsFormDecision { return try .decode(content: #"{"read_results":true}"#, input: input) }
+        let endpoint = try await runtime.activateNativeText(inputs)
+        return try await runtime.proposeBrowserAction(endpoint: endpoint, input: input)
+    }
+}
+
 /// Result-link choices share the same verified model, with no new worker.
 struct ComputerUseRuntimeBrowserLinkPlanner: ComputerUseBrowserLinkPlanning {
     let inputs: ComputerUseNativeTextRuntimeInputs
@@ -1556,6 +1568,33 @@ actor OSAtlasLlamaRuntime {
             let connection = try ComputerUseTextModelConnection(baseURL: endpoint.baseURL, bearerToken: endpoint.bearerToken,
                 modelAlias: ComputerUseNativeTextRuntimeInputs.modelAlias)
             let planner = ComputerUseLocalBrowserFormPlanner(connection: connection, transport: server.transport)
+            let proposal = try await withTaskCancellationHandler {
+                try await planner.propose(input)
+            } onCancel: {
+                Task { await self.cancel(endpoint: endpoint) }
+            }
+            try Task.checkCancellation()
+            guard active?.endpoint == endpoint else { throw OSAtlasLlamaRuntimeError.inactiveSession }
+            return proposal
+        } catch {
+            if active?.endpoint == endpoint { try await stopActiveServerUnserialized() }
+            throw error
+        }
+    }
+
+    func proposeBrowserAction(endpoint: OSAtlasLlamaEndpoint,
+                            input: ComputerUseBrowserActionInput) async throws -> ComputerUseBrowserActionProposal {
+        try Task.checkCancellation()
+        let lease = try await acquireModelAccessLease()
+        defer { releaseModelAccessLease(lease) }
+        guard let server = active, server.endpoint == endpoint, server.inputs.nativeText != nil else {
+            throw OSAtlasLlamaRuntimeError.inactiveSession
+        }
+        do {
+            try validateResources(minimumReclaimableBytes: server.resourceProfile.minimumInferenceMemoryBytes)
+            let connection = try ComputerUseTextModelConnection(baseURL: endpoint.baseURL, bearerToken: endpoint.bearerToken,
+                modelAlias: ComputerUseNativeTextRuntimeInputs.modelAlias)
+            let planner = ComputerUseLocalBrowserActionPlanner(connection: connection, transport: server.transport)
             let proposal = try await withTaskCancellationHandler {
                 try await planner.propose(input)
             } onCancel: {

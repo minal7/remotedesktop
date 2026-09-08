@@ -10,6 +10,8 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
     let evidence: ComputerUseBrowserFormEvidence
     let contextJSON: String
     let fieldAliases: [String]
+    let editableFieldAliases: [String]
+    let selectedFormID: String?
     struct Normalization: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
         enum Kind: String, Sendable { case date, partySize }
         let id: String
@@ -40,7 +42,7 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
         }
     }
 
-    init(interpretation: ComputerUseBrowserGoalProposal, evidence: ComputerUseBrowserFormEvidence) throws {
+    init(interpretation: ComputerUseBrowserGoalProposal, evidence: ComputerUseBrowserFormEvidence, selectedFormID: String? = nil) throws {
         guard interpretation.disposition == .research,
               interpretation.input.taskID.utf8.elementsEqual(evidence.page.document.taskID.utf8),
               !evidence.fields.isEmpty else { throw ComputerUseBrowserResearchFormError.invalidInput }
@@ -54,7 +56,13 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
             throw ComputerUseBrowserResearchFormError.contextLimit
         }
         let aliases = evidence.fields.indices.map { "field\($0 + 1)" }
-        let bindings = zip(aliases, evidence.fields).map { ["field":$0.0, "control":$0.1.control.id] }
+        let editable = zip(aliases, evidence.fields).compactMap { alias, field in
+            selectedFormID == nil || field.control.form?.id == selectedFormID ? alias : nil
+        }
+        guard !editable.isEmpty else { throw ComputerUseBrowserResearchFormError.invalidInput }
+        let bindings = zip(aliases, evidence.fields).map {
+            ["field":$0.0, "control":$0.1.control.id, "editable":editable.contains($0.0)] as [String: Any]
+        }
         let requirements: [[String: Any]] = try interpretation.requirements.enumerated().map { index, requirement in
             guard let source = interpretation.source(of: requirement) else { throw ComputerUseBrowserResearchFormError.invalidInput }
             return ["index":index, "turn":requirement.sourceTurnIndex,
@@ -63,13 +71,14 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
                 "relation":requirement.relation.rawValue, "values":requirement.values]
         }
         let normalized = Self.normalizations(for: interpretation)
-        let context: [String: Any] = ["version":2, "goal":interpretation.input.plannerContext,
+        let context: [String: Any] = ["version":3, "goal":interpretation.input.plannerContext,
+            "selected_form":selectedFormID.map { $0 as Any } ?? NSNull(),
             "requirements":requirements, "page":page, "field_bindings":bindings,
             "normalized_values":normalized.map { ["id":$0.id, "requirement":$0.requirementIndex,
                 "kind":$0.kind.rawValue, "value":$0.value, "unit":$0.unit] as [String: Any] }]
         contextJSON = String(decoding: try JSONSerialization.data(withJSONObject: context, options: [.sortedKeys]), as: UTF8.self)
         self.interpretation = interpretation; self.evidence = evidence; fieldAliases = aliases
-        normalizations = normalized
+        normalizations = normalized; editableFieldAliases = editable; self.selectedFormID = selectedFormID
     }
 
     /// Resolve only an offered reference in this immutable input. Execution

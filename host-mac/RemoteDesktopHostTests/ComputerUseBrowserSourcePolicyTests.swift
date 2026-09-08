@@ -199,7 +199,7 @@ final class ComputerUseBrowserSourcePolicyTests: XCTestCase {
         policy.allowedOrigins = [try ComputerUseBrowserSourceOrigin(base)]
         let results = BrowserResearchResultFixture(), search = DriverSearchFixture()
         results.selectedLinkLabel = "Alpha details"
-        let driver = ComputerUseBrowserResearchDriver(goalPlanner: DriverGoalFixture(), resultPlanner: results, searchPlanner: search,
+        let driver = ComputerUseBrowserResearchDriver(goalPlanner: DriverGoalFixture(), resultPlanner: results, searchPlanner: search, actionPlanner: BrowserResearchActionFixture(), formPlanner: BrowserResearchFormFixture(),
             planning: policy, now: { ResearchDriverFixture.date }, timeZoneIdentifier: { "America/Los_Angeles" })
         _ = try await driver.executeBrowserResearch(taskID: "login-policy", prompt: ResearchDriverFixture.prompt, tools: tools, progress: { _ in })
         let owner = try XCTUnwrap(tools.ownedBrowserResearch(taskID: "login-policy")), original = owner.input

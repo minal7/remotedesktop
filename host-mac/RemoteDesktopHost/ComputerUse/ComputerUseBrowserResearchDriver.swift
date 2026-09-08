@@ -18,8 +18,8 @@ extension ComputerUseBrowserResearchPlanning {
 }
 
 /// Concrete navigation orchestration for retained research. Policy is supplied
-/// separately; general form actions and verified answers remain to be
-/// integrated. A page load cannot declare research success.
+/// separately; supported native forms use retained edit/query stages. General
+/// widgets and verified research answers remain incomplete. A page load cannot declare research success.
 @MainActor
 final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecuting {
     enum Failure: Error, Equatable { case busy, alreadyAdmitted, invalidContinuation, invalidProposal }
@@ -42,6 +42,8 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
     private let goalPlanner: any ComputerUseBrowserGoalPlanning
     private let resultPlanner: any ComputerUseBrowserResultPlanning
     private let searchPlanner: any ComputerUseBrowserSearchPlanning
+    private let actionPlanner: any ComputerUseBrowserActionPlanning
+    private let formPlanner: any ComputerUseBrowserFormPlanning
     private let planning: any ComputerUseBrowserResearchPlanning
     private let now: () -> Date
     private let timeZoneIdentifier: () -> String
@@ -50,10 +52,12 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
     private var isExecuting = false
 
     init(goalPlanner: any ComputerUseBrowserGoalPlanning, resultPlanner: any ComputerUseBrowserResultPlanning,
-         searchPlanner: any ComputerUseBrowserSearchPlanning, planning: any ComputerUseBrowserResearchPlanning,
+         searchPlanner: any ComputerUseBrowserSearchPlanning, actionPlanner: any ComputerUseBrowserActionPlanning,
+         formPlanner: any ComputerUseBrowserFormPlanning, planning: any ComputerUseBrowserResearchPlanning,
          navigationLimit: Int = 24, now: @escaping () -> Date = Date.init,
          timeZoneIdentifier: @escaping () -> String = { TimeZone.current.identifier }) {
         self.goalPlanner = goalPlanner; self.resultPlanner = resultPlanner; self.searchPlanner = searchPlanner
+        self.actionPlanner = actionPlanner; self.formPlanner = formPlanner
         self.planning = planning; self.now = now; self.timeZoneIdentifier = timeZoneIdentifier
         self.navigationLimit = min(32, max(1, navigationLimit))
     }
@@ -134,6 +138,9 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
         } catch is ComputerUseBrowserResearchEvidenceError {
             try validate(run, tools: tools)
             return .userInterventionRequired("The browser could not retain another reading for this research task. Earlier findings and the original request remain pending.")
+        } catch is ComputerUseBrowserActionPlanError, is ComputerUseBrowserResearchFormError {
+            try validate(run, tools: tools)
+            return .userInterventionRequired("The browser could not prepare the next form or reading action from the complete request. Earlier work and the original task remain pending.")
         } catch is ComputerUseBrowserLinkPlanError {
             try validate(run, tools: tools)
             return .userInterventionRequired("I could not choose the next step from the complete request and available readings. Earlier findings and the original task remain pending.")
@@ -191,9 +198,7 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                 progress("Checking the pending form entries…")
                 guard try await owner.resumeForm() != nil else { throw Failure.invalidContinuation }
                 try check()
-                // Form/query action selection is still a separate, incomplete
-                // integration. Verified typing cannot become a research answer.
-                return .userInterventionRequired("The form entries are verified. Choosing the next form action still needs attention; the original request remains pending.")
+                continue // Choose the next capability using the retained verified stage.
             }
             if owner.hasPendingFormNavigation {
                 progress("Checking the pending form search…")
@@ -243,6 +248,37 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                 let document = try await owner.openInitialSearch(query, provider: sources.provider)
                 guard try record(.search, document) else { return reconciliationRequired }
             } else {
+                progress("Choosing the next step for the complete request…")
+                let action = try await owner.planNextAction(using: actionPlanner)
+                try check()
+                switch action.step {
+                case .editForm:
+                    guard owner.confirmedFormHistory.count < 32 else {
+                        return .userInterventionRequired("The browser reached this task's form-action limit. The original request remains pending.")
+                    }
+                    let input = try await owner.prepareFormInput(for: action)
+                    progress("Preparing the requested form entries…")
+                    let proposal = try await owner.planForm(input, using: formPlanner)
+                    try check()
+                    if let question = try proposal.questionRequest(for: input) { return .browserClarificationRequired(question) }
+                    guard !proposal.isUnavailable else {
+                        return .userInterventionRequired("I could not prepare justified entries for this form. The original request remains pending.")
+                    }
+                    _ = try await owner.executeForm(proposal, input: input)
+                    try check()
+                    continue
+                case .openQuery:
+                    progress("Opening the verified form search…")
+                    let receipt = try await owner.openFormQuery(for: action)
+                    guard try record(.formQuery, receipt.document) else { return reconciliationRequired }
+                    continue
+                case .question:
+                    guard let question = action.questionRequest else { throw Failure.invalidProposal }
+                    return .browserClarificationRequired(question)
+                case .unavailable:
+                    return .userInterventionRequired("I could not choose a supported next step for the complete request on this page. The original task remains pending.")
+                case .readResults: break
+                }
                 progress("Reading the page against the original request…")
                 let history = run.visits
                 let choice = try await owner.planCandidateNavigation(select: { [planning] goal, candidates in

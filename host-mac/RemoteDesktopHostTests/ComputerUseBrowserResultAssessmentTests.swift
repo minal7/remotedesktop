@@ -237,7 +237,7 @@ final class ComputerUseBrowserResultAssessmentTests: XCTestCase {
                 referenceDate: ResearchDriverFixture.date, timeZoneIdentifier: "America/Los_Angeles")
             let interpretation = try proposal(rows, input: input), links = AssessmentLinkFixture(), goals = AssessmentGoalFixture(value: interpretation)
             let driver = ComputerUseBrowserResearchDriver(goalPlanner: goals,
-                resultPlanner: AssessmentResultFixture(fields: fields, empty: empty), searchPlanner: fixture.search,
+                resultPlanner: AssessmentResultFixture(fields: fields, empty: empty), searchPlanner: fixture.search, actionPlanner: BrowserResearchActionFixture(), formPlanner: BrowserResearchFormFixture(),
                 planning: ComputerUseModelBrowserResearchPlanning(providers: [fixture.policy.provider], linkPlanner: links),
                 now: { ResearchDriverFixture.date }, timeZoneIdentifier: { "America/Los_Angeles" })
             let result = try await driver.executeBrowserResearch(taskID: input.taskID, prompt: input.prompt, tools: fixture.tools, progress: { _ in })

@@ -26,7 +26,7 @@ final class ComputerUseBrowserResearchFormNavigation {
          stage: ComputerUseBrowserResearchFormStage, browser: ComputerUseOwnedBrowser, journalDirectory: URL,
          makeStore: @escaping (URL) throws -> ComputerUseTaskJournalStore = { try .init(directory: $0) }) throws {
         let goal = stage.input.interpretation.input
-        guard form.stageID == stage.id, form.taskID == goal.taskID, form.goalRevision == goal.digest,
+        guard form.stageID == stage.id, form.taskID == goal.taskID, form.rootDigest == goal.rootDigest, form.goalRevision == goal.digest,
               form.contractDigest == stage.contract.contractDigest, evidence.document == stage.input.evidence.page.document,
               evidence.documentID == stage.input.evidence.page.documentID,
               evidence.page.controls.contains(where: { $0.id == controlID && $0.kind == "submit" && !$0.disabled }) else {

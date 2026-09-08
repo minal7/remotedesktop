@@ -4,13 +4,15 @@ import Foundation
 /// or a completed research answer. Construction stays with native execution.
 struct ComputerUseBrowserResearchFormReceipt: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     let taskID: String
+    let rootDigest: String
     let goalRevision: String
     let stageID: String
     let index: Int
     let contractDigest: String
     let editCount: Int
     @MainActor fileprivate init(stage: ComputerUseBrowserResearchFormStage) {
-        taskID = stage.input.interpretation.input.taskID; goalRevision = stage.input.interpretation.input.digest
+        taskID = stage.input.interpretation.input.taskID; rootDigest = stage.input.interpretation.input.rootDigest
+        goalRevision = stage.input.interpretation.input.digest
         stageID = stage.id; index = stage.index; contractDigest = stage.contract.contractDigest; editCount = stage.contract.steps.count
     }
     var description: String { "BrowserResearchFormReceipt(edits: \(editCount))" }
@@ -37,6 +39,7 @@ final class ComputerUseBrowserResearchFormStage {
     private var continuation: ComputerUseTextTaskContinuation?
     private var isExecuting = false
     private var isRetired = false
+    var nativeReceipt: ComputerUseBrowserResearchFormReceipt? { completed }
 
     init(input: ComputerUseBrowserResearchFormInput, proposal: ComputerUseBrowserFormProposal,
          target: ComputerUseBrowserTextTarget, browser: ComputerUseOwnedBrowser, index: Int, journalDirectory: URL,

@@ -154,7 +154,7 @@ final class ComputerUseBrowserSourceRequirementsTests: XCTestCase {
         let rows = [row("Find concerts. "), row("Only report results from tickets.test.", field: "answerSource", values: ["tickets.test"])]
         let initial = try proposal(rows, id: ResearchDriverFixture.root, date: ResearchDriverFixture.date)
         let links = SourceLinkFixture(), goals = SourceGoalFixture(initial)
-        let driver = ComputerUseBrowserResearchDriver(goalPlanner: goals, resultPlanner: fixture.results, searchPlanner: fixture.search,
+        let driver = ComputerUseBrowserResearchDriver(goalPlanner: goals, resultPlanner: fixture.results, searchPlanner: fixture.search, actionPlanner: BrowserResearchActionFixture(), formPlanner: BrowserResearchFormFixture(),
             planning: ComputerUseModelBrowserResearchPlanning(providers: [fixture.policy.provider], linkPlanner: links),
             now: { ResearchDriverFixture.date }, timeZoneIdentifier: { "America/Los_Angeles" })
         let result = try await driver.executeBrowserResearch(taskID: initial.input.taskID, prompt: initial.input.prompt, tools: fixture.tools, progress: { _ in })

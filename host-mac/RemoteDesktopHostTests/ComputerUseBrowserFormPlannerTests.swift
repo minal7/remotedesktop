@@ -725,7 +725,7 @@ final class ComputerUseBrowserFormPlannerTests: XCTestCase {
             try await fixture.wait { fixture.server.count("/changed") == 1 }
             try await current.resumeAfterUserControl()
             do { _ = try await current.resumeFormNavigation(); XCTFail("A fresh nonce cannot authorize a different query") }
-            catch { XCTAssertEqual(error as? ComputerUseBrowserError, mutation == "page" ? .pageChanged : .formQueryUnavailable) }
+            catch { XCTAssertEqual(error as? ComputerUseBrowserError, mutation == "value" ? .formQueryUnavailable : .pageChanged) }
             XCTAssertEqual(try queryJournal(directory), before)
             XCTAssertEqual(queryRequests(fixture), 0); XCTAssertEqual(fixture.server.count("/changed-destination"), 0)
             XCTAssertTrue(current.hasPendingFormNavigation)

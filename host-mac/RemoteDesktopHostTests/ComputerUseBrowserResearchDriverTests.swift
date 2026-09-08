@@ -380,12 +380,119 @@ final class ComputerUseBrowserResearchDriverTests: XCTestCase {
         XCTAssertTrue(owner.hasPendingForm)
         let readings = fixture.results.inputs.count, selections = fixture.policy.goals.count
         let result = try await fixture.resume()
-        guard case .userInterventionRequired = result else { return XCTFail("The driver still needs a form action decision") }
+        guard case .userInterventionRequired = result else { return XCTFail("Reading after form recovery is still not a completed answer") }
         XCTAssertFalse(owner.hasPendingForm); XCTAssertEqual(owner.confirmedFormHistory.count, 1)
         XCTAssertEqual(fixture.server.count("/filtered?q=concerts"), 0)
         XCTAssertEqual(owner.confirmedNavigationHistory.map(\.kind), [.search]); XCTAssertEqual(owner.input, original)
         XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 1)
-        XCTAssertEqual(fixture.results.inputs.count, readings); XCTAssertEqual(fixture.policy.goals.count, selections)
+        XCTAssertEqual(fixture.results.inputs.count, readings + 1); XCTAssertEqual(fixture.policy.goals.count, selections + 1)
+    }
+    func testDriverChoosesAndExecutesAFormBeforeReadingResultsUnderTheCompleteGoal() async throws {
+        let fixture = try await ResearchDriverFixture.make(searchForm: true)
+        defer { fixture.close() }
+        configureAutomaticFormQueries(fixture)
+        let result = try await fixture.start()
+        guard case .userInterventionRequired? = result else { return XCTFail("A searched page is not a verified answer") }
+        let owner = try fixture.owner(), original = owner.input
+        XCTAssertEqual(fixture.actions.inputs.count, 3); XCTAssertEqual(fixture.forms.inputs.count, 1)
+        XCTAssertEqual(fixture.forms.inputs.first?.interpretation.input, original)
+        XCTAssertNotNil(fixture.forms.inputs.first?.selectedFormID)
+        XCTAssertEqual(fixture.results.inputs, [original], "The initial form page must not first be interpreted as a result set")
+        XCTAssertTrue(fixture.actions.inputs.allSatisfy { $0.interpretation.input == original })
+        XCTAssertEqual(fixture.actions.inputs[1].queryReceipt, owner.confirmedFormHistory.first)
+        XCTAssertEqual(owner.confirmedNavigationHistory.map(\.kind), [.search, .formQuery])
+        XCTAssertEqual(fixture.goal.inputs, [original]); XCTAssertEqual(fixture.search.inputs.map(\.input), [original])
+        XCTAssertEqual(fixture.server.count("/filtered?q=concerts"), 1)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 1)
+        _ = try await fixture.resume()
+        XCTAssertEqual(fixture.server.count("/search?q=concerts"), 1); XCTAssertEqual(fixture.server.count("/filtered?q=concerts"), 1)
+        XCTAssertEqual(fixture.forms.inputs.count, 1); XCTAssertEqual(owner.input, original)
+    }
+
+    func testDriverFormQuestionPreservesTheRootAndClockThroughItsAcceptedAnswer() async throws {
+        let fixture = try await ResearchDriverFixture.make(searchForm: true)
+        defer { fixture.close() }
+        configureAutomaticFormQueries(fixture)
+        fixture.forms.content = #"{"question":{"topic":"date","requirements":[0]}}"#
+        let result = try await fixture.start()
+        guard case .browserClarificationRequired(let request)? = result else { return XCTFail("A scoped form question must use the research continuation") }
+        let owner = try fixture.owner(), original = owner.input
+        XCTAssertEqual(request.taskID, original.taskID); XCTAssertEqual(request.inputDigest, original.digest)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 0)
+        let question = try owner.issueQuestion(topic: request.topic, requirementIDs: request.requirementIDs,
+            controllerID: "phone", controllerSessionID: "session")
+        _ = try owner.answerQuestion(questionID: question.id, answerTaskID: "form-answer", answer: "Tomorrow.",
+            controllerID: "phone", controllerSessionID: "session")
+        fixture.forms.content = formContent
+        let continued = try await fixture.resume()
+        guard case .userInterventionRequired = continued else { return XCTFail("Further result verification remains necessary") }
+        XCTAssertEqual(owner.input.prompt, original.prompt); XCTAssertEqual(owner.input.referenceMilliseconds, original.referenceMilliseconds)
+        XCTAssertEqual(owner.input.timeZoneIdentifier, original.timeZoneIdentifier); XCTAssertEqual(owner.executionTaskID, "form-answer")
+        XCTAssertEqual(fixture.forms.inputs.map { $0.interpretation.input }, [original, owner.input])
+        XCTAssertEqual(fixture.search.inputs.count, 1); XCTAssertEqual(fixture.server.count("/filtered?q=concerts"), 1)
+        XCTAssertEqual(owner.confirmedFormHistory.first?.goalRevision, owner.input.digest)
+        XCTAssertEqual(owner.confirmedFormHistory.first?.rootDigest, original.rootDigest)
+    }
+
+    func testDriverPauseDuringFormPlanningKeepsOwnershipAndReplansOnlyUnattemptedInput() async throws {
+        let fixture = try await ResearchDriverFixture.make(searchForm: true), gate = BrowserResearchGate()
+        defer { gate.release(); fixture.close() }
+        configureAutomaticFormQueries(fixture)
+        fixture.forms.beforeReply = { await gate.suspend() }
+        let running = Task { try await fixture.start() }
+        try await gate.waitUntilStarted()
+        let owner = try fixture.owner(), original = owner.input
+        owner.pause()
+        XCTAssertTrue(owner.isOperating)
+        do { _ = try await fixture.resume(); XCTFail("The original form planner must unwind first") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserResearchDriver.Failure, .busy) }
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 0)
+        gate.release()
+        do { _ = try await running.value; XCTFail("The late model reply cannot authorize input") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        fixture.forms.beforeReply = nil
+        try await owner.resumeAfterUserControl()
+        _ = try await fixture.resume()
+        XCTAssertEqual(fixture.forms.inputs.count, 2)
+        XCTAssertTrue(fixture.forms.inputs.allSatisfy { $0.interpretation.input == original })
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 1)
+        XCTAssertEqual(fixture.server.count("/filtered?q=concerts"), 1); XCTAssertEqual(fixture.search.inputs.count, 1)
+    }
+
+    func testDriverResumesCommittedFormInputThenSelectsTheQueryWithoutAnotherFormProposal() async throws {
+        let fixture = try await ResearchDriverFixture.make(searchForm: true)
+        defer { fixture.close() }
+        configureAutomaticFormQueries(fixture)
+        fixture.forms.beforeReply = {
+            let targetWrite = fixture.state.writes + 2
+            fixture.state.onWrite = {
+                if fixture.state.writes == targetWrite { fixture.tools.ownedBrowserResearch(taskID: ResearchDriverFixture.root)?.pause() }
+            }
+        }
+        do { _ = try await fixture.start(); XCTFail("Pause after the verified input write must preserve the stage") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        let owner = try fixture.owner(), original = owner.input
+        XCTAssertTrue(owner.hasPendingForm); XCTAssertEqual(fixture.server.count("/filtered?q=concerts"), 0)
+        fixture.state.onWrite = nil; fixture.forms.beforeReply = nil
+        try await owner.resumeAfterUserControl()
+        _ = try await fixture.resume()
+        XCTAssertEqual(owner.input, original); XCTAssertFalse(owner.hasPendingForm)
+        XCTAssertEqual(owner.confirmedFormHistory.count, 1); XCTAssertEqual(fixture.forms.inputs.count, 1)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 1)
+        XCTAssertEqual(fixture.server.count("/filtered?q=concerts"), 1)
+        XCTAssertEqual(owner.confirmedNavigationHistory.map(\.kind), [.search, .formQuery])
+    }
+
+    private var formContent: String { #"{"edits":[{"field":"field1","terms":[{"requirement":0,"text":"concerts"}]}],"preserve":[]}"# }
+    private func configureAutomaticFormQueries(_ fixture: ResearchDriverFixture) {
+        fixture.forms.content = formContent
+        fixture.actions.select = { input in
+            let choice: [String: Any]
+            if let control = input.queryControlIDs.first { choice = ["query":control] }
+            else if let form = input.formIDs.first { choice = ["form":form] }
+            else { choice = ["read_results":true] }
+            return String(decoding: try JSONSerialization.data(withJSONObject: choice), as: UTF8.self)
+        }
     }
 }
 
@@ -403,6 +510,8 @@ struct ResearchDriverFixture {
     let goal: DriverGoalFixture
     let results: BrowserResearchResultFixture
     let search: DriverSearchFixture
+    let actions: BrowserResearchActionFixture
+    let forms: BrowserResearchFormFixture
     let policy: DriverPlanningFixture
     let state: DriverFixtureState
     let driver: ComputerUseBrowserResearchDriver
@@ -412,7 +521,9 @@ struct ResearchDriverFixture {
                      linkPlanner: (any ComputerUseBrowserLinkPlanning)? = nil,
                      resultPlanner: (any ComputerUseBrowserResultPlanning)? = nil,
                      additionalCardHTML: String = "", linkDestinationOverride: String? = nil,
-                     candidateBodyHTML: String = "", searchForm: Bool = false) async throws -> Self {
+                     candidateBodyHTML: String = "", searchForm: Bool = false,
+                     actionPlanner: (any ComputerUseBrowserActionPlanning)? = nil,
+                     formPlanner: (any ComputerUseBrowserFormPlanning)? = nil) async throws -> Self {
         func card(_ path: String) -> String { "<article><h2>Concert Alpha</h2><a href='\(linkDestinationOverride ?? path)'>Alpha details</a>\(candidateBodyHTML)</article>" + additionalCardHTML }
         let form = searchForm ? "<form action='/filtered'><label>Query<input name='q' value='old'></label><button>Search</button></form>" : ""
         let server = try OwnedBrowserHTTPFixture(routes: ["/before": .init(body: card("/old")),
@@ -441,15 +552,16 @@ struct ResearchDriverFixture {
                 }) })
             let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { state.onMayAct?(); return state.allowed }, browserNavigationTask: coordinator)
             let goal = DriverGoalFixture(), results = BrowserResearchResultFixture(), search = DriverSearchFixture()
+            let actions = BrowserResearchActionFixture(), forms = BrowserResearchFormFixture()
             results.selectedLinkLabel = "Alpha details"
             let policy = DriverPlanningFixture(provider: try .init(endpoint: base.appendingPathComponent("search"), queryParameter: "q"))
             let planning: any ComputerUseBrowserResearchPlanning
             if let linkPlanner { planning = ComputerUseModelBrowserResearchPlanning(sourcePlan: { try policy.sources(for: $0) }, linkPlanner: linkPlanner) }
             else { planning = policy }
-            let driver = ComputerUseBrowserResearchDriver(goalPlanner: goal, resultPlanner: resultPlanner ?? results, searchPlanner: search,
+            let driver = ComputerUseBrowserResearchDriver(goalPlanner: goal, resultPlanner: resultPlanner ?? results, searchPlanner: search, actionPlanner: actionPlanner ?? actions, formPlanner: formPlanner ?? forms,
                 planning: planning, navigationLimit: navigationLimit, now: { date }, timeZoneIdentifier: { "America/Los_Angeles" })
             return .init(server: server, base: base, directory: directory, browser: browser, coordinator: coordinator,
-                tools: tools, goal: goal, results: results, search: search, policy: policy, state: state, driver: driver)
+                tools: tools, goal: goal, results: results, search: search, actions: actions, forms: forms, policy: policy, state: state, driver: driver)
         } catch { browser.close(); server.stop(); try? FileManager.default.removeItem(at: directory); throw error }
     }
     func owner() throws -> ComputerUseBrowserResearchTask { try XCTUnwrap(tools.ownedBrowserResearch(taskID: Self.root)) }
@@ -483,7 +595,7 @@ struct ResearchDriverFixture {
         XCTAssertEqual(files.count, 1)
         return try JSONDecoder().decode(ComputerUseTaskJournal.self, from: Data(contentsOf: XCTUnwrap(files.first)))
     }
-    func close() { state.onCommand = nil; state.onMayAct = nil; state.onWrite = nil; policy.beforeSelection = nil; coordinator.close(); server.stop(); try? FileManager.default.removeItem(at: directory) }
+    func close() { state.onCommand = nil; state.onMayAct = nil; state.onWrite = nil; policy.beforeSelection = nil; actions.beforeReply = nil; forms.beforeReply = nil; coordinator.close(); server.stop(); try? FileManager.default.removeItem(at: directory) }
 }
 
 @MainActor
@@ -551,5 +663,28 @@ final class DriverPlanningFixture: ComputerUseBrowserResearchPlanning {
         let candidate = try XCTUnwrap(candidates.candidates.first)
         if invalidChoice { return .init(candidateID: candidate.id, linkID: "not-observed") }
         return .init(candidateID: candidate.id, linkID: try XCTUnwrap(candidate.selectedLinkIDs.first))
+    }
+}
+
+@MainActor
+final class BrowserResearchActionFixture: ComputerUseBrowserActionPlanning {
+    var select: ((ComputerUseBrowserActionInput) throws -> String)?
+    var beforeReply: (@MainActor () async throws -> Void)?
+    private(set) var inputs: [ComputerUseBrowserActionInput] = []
+    func propose(_ input: ComputerUseBrowserActionInput) async throws -> ComputerUseBrowserActionProposal {
+        inputs.append(input)
+        if let beforeReply { try await beforeReply() }
+        return try .decode(content: select?(input) ?? #"{"read_results":true}"#, input: input)
+    }
+}
+@MainActor
+final class BrowserResearchFormFixture: ComputerUseBrowserFormPlanning {
+    var content = #"{"unavailable":true}"#
+    var beforeReply: (@MainActor () async throws -> Void)?
+    private(set) var inputs: [ComputerUseBrowserResearchFormInput] = []
+    func propose(_ input: ComputerUseBrowserResearchFormInput) async throws -> ComputerUseBrowserFormProposal {
+        inputs.append(input)
+        if let beforeReply { try await beforeReply() }
+        return try .decode(content: content, input: input)
     }
 }
