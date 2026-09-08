@@ -37,8 +37,8 @@ final class ComputerUseBrowserReadingScopeTests: XCTestCase {
         let planner = try ComputerUseLocalBrowserActionPlanner(connection: .init(baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:54321")), bearerToken: "fixture", modelAlias: "fixture-model"), transport: ControlStateUnusedTransport())
         let request = try planner.makeRequest(input), body = try ResearchAnswerFixture.object(XCTUnwrap(request.httpBody))
         let format = try XCTUnwrap(body["response_format"] as? [String: Any])
-        XCTAssertEqual((format["json_schema"] as? [String: Any])?["name"] as? String, "browser_research_action_v9")
-        XCTAssertEqual(try object(input.contextJSON)["version"] as? Int, 9)
+        XCTAssertEqual((format["json_schema"] as? [String: Any])?["name"] as? String, "browser_research_action_v10")
+        XCTAssertEqual(try object(input.contextJSON)["version"] as? Int, 10)
         let values = try await fixture.browser.observePage(document: fixture.document, includingControlState: true)
         XCTAssertEqual(try fixture.state("Stored card", in: values.page).kind, .unavailable)
         XCTAssertEqual(try fixture.state("Date of birth", in: values.page).kind, .unavailable)
@@ -122,7 +122,7 @@ final class ComputerUseBrowserReadingScopeTests: XCTestCase {
             if selectValues {
                 guard case .browserResearchAnswer(let answer)? = result else { return XCTFail("Complete result evidence can include scoped current settings") }
                 try owner.validateAnswer(answer)
-                XCTAssertTrue(answer.message.contains("Location: Paris")); XCTAssertTrue(answer.message.contains("Native control observations"))
+                XCTAssertTrue(answer.message.contains("Location: Paris")); XCTAssertTrue(answer.message.contains("Control observations"))
                 let reads = fixture.source.state.commands.filter { $0 == .observeResearchControls }.count
                 XCTAssertGreaterThan(reads, 0); XCTAssertEqual(reads, fixture.source.actions.inputs.count)
                 let reading = try await owner.revalidateCandidates()

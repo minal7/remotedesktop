@@ -311,7 +311,8 @@ struct ComputerUseBrowserPageSnapshot: Decodable, Equatable, Sendable, CustomStr
               controls.allSatisfy({ control in
                   identifier(control.id, prefix: "c") && identifier(control.containerID, prefix: "g")
                   && control.label.utf8.count <= 256 && control.name.utf8.count <= 256
-                  && ["text", "search", "url", "tel", "email", "textarea", "date", "datetime-local", "month", "week", "time", "number", "checkbox", "radio", "select", "button", "submit", "reset", "image"].contains(control.kind)
+                  && (["text", "search", "url", "tel", "email", "textarea", "date", "datetime-local", "month", "week", "time", "number", "checkbox", "radio", "select", "button", "submit", "reset", "image"].contains(control.kind)
+                      || (ComputerUseBrowserDeclaredState.kinds.contains(control.kind) && control.form == nil && control.constraints.isEmpty && !control.multiple))
                   && Set(control.constraints.keys).isSubset(of: ["min", "max", "step", "pattern", "minlength", "maxlength"])
                   && control.constraints.values.allSatisfy({ $0.utf8.count <= 512 })
                   && control.options.count <= 64 && (control.kind == "select" || control.options.isEmpty)
@@ -350,6 +351,7 @@ struct ComputerUseBrowserPlanningContext: Equatable, Sendable, CustomStringConve
     private let projectionOmittedRecords: Bool
     private let includesControlState: Bool
     private let includesScopedState: Bool
+    private let includesDeclaredControls: Bool
 
     var recordCount: Int { records.count }
     var description: String { "ComputerUseBrowserPlanningContext(records: \(records.count))" }
@@ -359,6 +361,7 @@ struct ComputerUseBrowserPlanningContext: Equatable, Sendable, CustomStringConve
         guard page.isWellFormed else { throw ComputerUseBrowserError.pageEvidenceUnavailable }
         includesControlState = includingControlState
         includesScopedState = includingControlState && !page.scopedControlIDs.isEmpty
+        includesDeclaredControls = page.controls.contains { ComputerUseBrowserDeclaredState.kinds.contains($0.kind) }
         let quote = AppleFoundationVisualActionRouter.foundationJSONString
         var projected: [String] = []
         var bytes = 0
@@ -451,7 +454,7 @@ struct ComputerUseBrowserPlanningContext: Equatable, Sendable, CustomStringConve
     /// and a document whose evidence did not fit the local planner's budget.
     func serialized(maximumRecords: Int? = nil) -> String {
         let count = max(0, min(maximumRecords ?? records.count, records.count))
-        return "{\"version\":\(includesScopedState ? 6 : (includesControlState ? 4 : Self.version)),\"source_truncated\":\(sourceTruncated),\"omitted_embedded_content\":\(omittedEmbeddedContent),\"omitted_controls\":\(omittedControls),\"omitted_structure\":\(omittedStructure),\"projection_omitted_records\":\(projectionOmittedRecords),\"budget_omitted_records\":\(count < records.count),\"records\":[\(records.prefix(count).joined(separator: ","))]}"
+        return "{\"version\":\(includesDeclaredControls ? 7 : (includesScopedState ? 6 : (includesControlState ? 4 : Self.version))),\"source_truncated\":\(sourceTruncated),\"omitted_embedded_content\":\(omittedEmbeddedContent),\"omitted_controls\":\(omittedControls),\"omitted_structure\":\(omittedStructure),\"projection_omitted_records\":\(projectionOmittedRecords),\"budget_omitted_records\":\(count < records.count),\"records\":[\(records.prefix(count).joined(separator: ","))]}"
     }
 
     func promptSection(maximumRecords: Int? = nil) -> String {
@@ -900,13 +903,16 @@ enum ComputerUseBrowserDOM {
         const autocomplete = (element.getAttribute('autocomplete') || '').toLowerCase().split(/\s+/);
         if (autocomplete.some(t => ['username','email','name','given-name','family-name','tel','one-time-code'].includes(t)
             || t.includes('password') || t.startsWith('cc-') || t === 'bday' || t.startsWith('bday-'))) return true;
-        const metadata = [control.label, element.id || '', control.name];
+        const metadata = [control.label, element.id || '', control.name, element.getAttribute('name') || ''];
         if (metadata.some(credentialLabel)) return true;
         const privateWords = /\b(?:email|e mail|user name|username|login|log in|sign in|account|billing|password|passcode|full name|first name|last name|phone|street address|card number|credit card|cvv|cvc|loyalty|passport|date of birth|birth date|birthday)\b/;
         return metadata.some(value => privateWords.test(value.replace(/([a-z0-9])([A-Z])/g, '$1 $2')
           .toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()));
       }
       function researchScopeAllowed(element, control) {
+        if (['aria-checkbox','aria-radio','aria-switch','aria-button','aria-slider','aria-spinbutton'].includes(control.kind)) {
+          return !!control.label.trim() && !researchValueProtected(element, control);
+        }
         return ['text','search','date','datetime-local','month','week','time','number','select','checkbox','radio'].includes(control.kind)
           && (['text','search'].includes(control.kind) || control.disabled || control.readOnly)
           && !!control.label.trim() && !researchValueProtected(element, control);
@@ -914,7 +920,7 @@ enum ComputerUseBrowserDOM {
       function pageContent(linkBindings, controlBindings, containerBindings, includeControlState = false, scopedControlIDs = []) {
         // The text pass reads rendered text nodes, never form values,
         // innerHTML, scripts or frame documents. A separate opt-in pass below
-        // observes native control state. Omitted surfaces remain explicit.
+        // observes native properties or scoped declarations. Omitted surfaces remain explicit.
         const excluded = 'script,style,noscript,template,input,textarea,select,option,[contenteditable]:not([contenteditable="false"]),[role="textbox"],[hidden],[inert],[aria-hidden="true"]';
         const texts = [], links = [], controls = [], controlStates = [], structure = [], anchors = new Map(), buttons = new Map(), containers = new Map();
         const textRange = doc.createRange();
@@ -1087,6 +1093,30 @@ enum ComputerUseBrowserDOM {
           if (['button','submit','reset','image'].includes(control.kind)) return {...base, kind:'stateless'};
           if (researchValueProtected(element, control)) return unavailable;
           const scoped = scopedControlIDs.includes(control.id) && researchScopeAllowed(element, control);
+          if (control.kind.startsWith('aria-')) {
+            if (!scoped) return unavailable;
+            const attributes = {}, keys = control.kind === 'aria-button' ? ['aria-pressed']
+              : ['aria-checkbox','aria-radio','aria-switch'].includes(control.kind) ? ['aria-checked']
+              : ['aria-valuenow','aria-valuemin','aria-valuemax','aria-valuetext'];
+            // No implicit defaults or browser repairs become observed values.
+            for (const key of keys) if (element.hasAttribute(key)) {
+              const value = element.getAttribute(key);
+              if (!small(value, 512) || !value) return unavailable;
+              attributes[key] = value;
+            }
+            if (keys.length === 1) {
+              const value = attributes[keys[0]];
+              if (!['true','false'].includes(value) && !(value === 'mixed' && ['aria-checkbox','aria-button'].includes(control.kind))) return unavailable;
+            } else {
+              const numeric = value => typeof value === 'string' && /^-?(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$/.test(value) && Number.isFinite(Number(value));
+              if (!numeric(attributes['aria-valuenow']) || ['aria-valuemin','aria-valuemax'].some(key => attributes[key] !== undefined && !numeric(attributes[key]))) return unavailable;
+              const now = Number(attributes['aria-valuenow']);
+              if (attributes['aria-valuemin'] !== undefined && now < Number(attributes['aria-valuemin'])
+                  || attributes['aria-valuemax'] !== undefined && now > Number(attributes['aria-valuemax'])) return unavailable;
+            }
+            const value = JSON.stringify(attributes);
+            return small(value, 2048) ? {...base, kind:'declared', value} : unavailable;
+          }
           if ((control.disabled || control.readOnly) && !scoped) return unavailable;
           if (scoped && ['text','search'].includes(control.kind)) {
             const value = valueGetters[0].call(element);
@@ -1117,24 +1147,30 @@ enum ComputerUseBrowserDOM {
           if (element.shadowRoot) controlWalkers.push(doc.createTreeWalker(element.shadowRoot, NodeFilter.SHOW_ELEMENT, controlFilter));
           const native = element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement
             || element instanceof HTMLSelectElement || element instanceof HTMLButtonElement;
-          if (!native) {
-            if ((element.isContentEditable || ['button','textbox','searchbox','combobox','listbox','checkbox','radio','slider','switch'].includes(element.getAttribute('role')))
+          const role = element.getAttribute('role') || '';
+          const declaredRole = (!native || element instanceof HTMLButtonElement)
+            && (['checkbox','radio','switch','slider','spinbutton'].includes(role) ? role
+              : ((role === 'button' || (!role && element instanceof HTMLButtonElement)) && element.hasAttribute('aria-pressed') ? 'button' : null));
+          if ((!native && !declaredRole) || (element instanceof HTMLButtonElement && role && role !== 'button' && !declaredRole)) {
+            if ((element.isContentEditable || role.split(/\s+/).some(value => ['button','textbox','searchbox','combobox','listbox','checkbox','radio','slider','spinbutton','switch','tab','option','menuitemcheckbox','menuitemradio'].includes(value)) || element instanceof HTMLButtonElement)
                 && renderedControl(element)) omittedControls = true;
             continue;
           }
+          if (declaredRole && element.isContentEditable) { if (renderedControl(element)) omittedControls = true; continue; }
           if (!renderedControl(element)) continue;
-          const kind = element instanceof HTMLTextAreaElement ? 'textarea' : element instanceof HTMLSelectElement ? 'select' : element.type;
-          if (!controlKinds.has(kind)) { omittedControls = true; continue; }
+          const kind = declaredRole ? 'aria-' + declaredRole : element instanceof HTMLTextAreaElement ? 'textarea' : element instanceof HTMLSelectElement ? 'select' : element.type;
+          if (!declaredRole && !controlKinds.has(kind)) { omittedControls = true; continue; }
           if (controls.length >= 64) { truncated = true; omittedControls = true; break; }
           let label = labelFor(element).label;
+          if (!label && declaredRole && ['checkbox','radio','switch','button'].includes(declaredRole)) label = labelText(element).trim();
           if (!label && element instanceof HTMLButtonElement) label = (buttons.get(element) || []).map(entry => entry.text).join(' ');
           if (!label && element instanceof HTMLInputElement && ['button','submit','reset','image'].includes(kind)) {
             // Browser-localized default captions are not literal page labels.
             label = kind === 'image' ? (element.getAttribute('alt') || '') : (element.getAttribute('value') || '');
           }
-          const name = element.name || '', constraints = {};
-          for (const attribute of constraintNames) if (element.hasAttribute(attribute)) constraints[attribute] = element.getAttribute(attribute);
-          const form = formMetadata(element, kind);
+          const name = declaredRole ? '' : element.name || '', constraints = {};
+          if (!declaredRole) for (const attribute of constraintNames) if (element.hasAttribute(attribute)) constraints[attribute] = element.getAttribute(attribute);
+          const form = declaredRole ? null : formMetadata(element, kind);
           if (!small(label, 256) || !small(name, 256) || Object.values(constraints).some(value => !small(value, 512)) || form === undefined) {
             truncated = true; omittedControls = true; continue;
           }
@@ -1156,14 +1192,18 @@ enum ComputerUseBrowserDOM {
           if (!containerID) { omittedControls = true; continue; }
           const control = {id: pageControlIDs.get(element), containerID, label, kind, name,
             disabled: element.matches(':disabled') || element.getAttribute('aria-disabled') === 'true',
-            readOnly: !!element.readOnly, required: !!element.required, multiple: !!element.multiple, constraints, options, form};
+            readOnly: declaredRole ? element.getAttribute('aria-readonly') === 'true' : !!element.readOnly,
+            required: declaredRole ? element.getAttribute('aria-required') === 'true' : !!element.required,
+            multiple: declaredRole ? false : !!element.multiple, constraints, options, form};
           control.researchReadable = researchScopeAllowed(element, control);
           const state = includeControlState ? researchControlState(element, control) : null;
           const size = encoder.encode(JSON.stringify(control)).length + (state ? encoder.encode(JSON.stringify(state)).length : 0);
           if (bytes + size > 65536) { truncated = true; omittedControls = true; continue; }
           bytes += size; controls.push(control);
           if (state) controlStates.push(state);
-          controlBindings.set(control.id, {element, form: element.form, metadata: control});
+          const signature = declaredRole ? JSON.stringify(['role','name','autocomplete','aria-label','aria-labelledby','aria-describedby','aria-controls','aria-owns',
+            'aria-details','aria-haspopup','aria-expanded','aria-orientation','aria-roledescription','aria-invalid','aria-busy'].map(key => [key, element.getAttribute(key)])) : null;
+          controlBindings.set(control.id, {element, form: declaredRole ? null : element.form, metadata: control, signature});
         }
         return {texts, links, controls, controlStates, controlStateObserved:includeControlState, scopedControlIDs, containers:structure, omittedStructure, truncated, omittedEmbeddedContent, omittedControls, viewport: readViewport()};
       }
@@ -1361,7 +1401,7 @@ enum ComputerUseBrowserDOM {
                 || controls.size !== lastPageSnapshot.controls.size
                 || Array.from(controls).some(([id, binding]) => {
                   const previous = lastPageSnapshot.controls.get(id);
-                  return !previous || previous.element !== binding.element || previous.form !== binding.form;
+                  return !previous || previous.element !== binding.element || previous.form !== binding.form || previous.signature !== binding.signature;
                 }) || links.size !== lastPageSnapshot.links.size
                 || Array.from(links).some(([id, binding]) => {
                   const previous = lastPageSnapshot.links.get(id);

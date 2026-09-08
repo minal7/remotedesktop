@@ -123,7 +123,8 @@
     "RemoteDesktopHostTests/ComputerUseBrowserControlStateTests",
     "RemoteDesktopHostTests/ComputerUseBrowserReadingScopeTests",
     "RemoteDesktopHostTests/ComputerUseBrowserControlRelevanceTests",
-    "RemoteDesktopHostTests/ComputerUseBrowserReadonlyReadingTests"
+    "RemoteDesktopHostTests/ComputerUseBrowserReadonlyReadingTests",
+    "RemoteDesktopHostTests/ComputerUseBrowserDeclaredStateTests"
   ],
   "expectedTests": [
     "RemoteDesktopHostTests/ComputerUseBrowserActionPlannerTests/testActionContextRetainsTheWholeGoalAndObservedFormsWithoutPrivateValuesOrTargets",
@@ -212,6 +213,12 @@
     "RemoteDesktopHostTests/ComputerUseBrowserDOMTests/testResultCandidatesRejectReplacedNativeContainersBeforePreparationAndReporting",
     "RemoteDesktopHostTests/ComputerUseBrowserDOMTests/testResultCandidatesRetainEverySourceFragmentAndKeepOfferAndGlobalContextSeparate",
     "RemoteDesktopHostTests/ComputerUseBrowserDOMTests/testUnsentDestinationRefreshReobservesLinkAndQueryWithoutChangingTaskOrOperation",
+    "RemoteDesktopHostTests/ComputerUseBrowserDeclaredStateTests/testAttributeRelationshipAndObjectChangesInvalidateDeclaredReadings",
+    "RemoteDesktopHostTests/ComputerUseBrowserDeclaredStateTests/testCustomAndButtonBackedTogglesAreMetadataUntilExplicitlyScoped",
+    "RemoteDesktopHostTests/ComputerUseBrowserDeclaredStateTests/testDriverRetainsWebsiteDeclaredStateBesideIndependentResultFactsWithoutClicking",
+    "RemoteDesktopHostTests/ComputerUseBrowserDeclaredStateTests/testInvalidDeclarationsStayUnavailableWithoutInventingDefaultsOrRepairs",
+    "RemoteDesktopHostTests/ComputerUseBrowserDeclaredStateTests/testProtectedAndUnsupportedCustomControlsCannotBecomeReadableNativeActions",
+    "RemoteDesktopHostTests/ComputerUseBrowserDeclaredStateTests/testScopedDeclarationsKeepCompleteAttributesAndExplicitProvenance",
     "RemoteDesktopHostTests/ComputerUseBrowserFormBindingTests/testBindingAndMalformedIDRequestsPreserveVerifiedInputReceipts",
     "RemoteDesktopHostTests/ComputerUseBrowserFormBindingTests/testBindingRejectsSupersededPageAndForeignAdapterWithoutRediscovery",
     "RemoteDesktopHostTests/ComputerUseBrowserFormBindingTests/testBindingRejectsValueCaretMembershipAndNativeIdentityChanges",

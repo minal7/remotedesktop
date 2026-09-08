@@ -205,12 +205,12 @@ struct ComputerUseBrowserResearchAnswer: Equatable, Sendable, CustomStringConver
             let observed = formatter.string(from: Date(timeIntervalSince1970: Double(passage.observedAtMilliseconds) / 1_000))
             message += "\nOption \(offset + 1) — page details (quoted):\nSource page: " + passage.source
                 + "\nObserved: " + observed + "\n" + quote(passage.text) + "\n"
-            if !passage.controls.isEmpty { message += "\nNative control observations for this option:\n" + passage.controls + "\n" }
+            if !passage.controls.isEmpty { message += "\nControl observations for this option:\n" + passage.controls + "\n" }
         }
         var included: Set<String> = []
         for passage in passages where included.insert(passage.readingIdentity).inserted {
             if !passage.surroundingText.isEmpty { message += "\nOther observed page text from " + passage.source + " (quoted):\n" + quote(passage.surroundingText) + "\n" }
-            if !passage.surroundingControls.isEmpty { message += "\nOther native control observations from " + passage.source + ":\n" + passage.surroundingControls + "\n" }
+            if !passage.surroundingControls.isEmpty { message += "\nOther control observations from " + passage.source + ":\n" + passage.surroundingControls + "\n" }
         }
         message += "\nRequest and constraints used:\n" + requirements.map(quote).joined(separator: "\n")
         message += "\n\nThese are source-reported details, not a booking confirmation. Availability can change after each observation."

@@ -12,8 +12,9 @@ struct ComputerUseBrowserControlRead: Equatable, Sendable {
     }
 
     static func allows(_ control: ComputerUseBrowserPageSnapshot.Control) -> Bool {
-        control.researchReadable && ["text", "search", "date", "datetime-local", "month", "week", "time", "number", "select", "checkbox", "radio"].contains(control.kind)
-            && (["text", "search"].contains(control.kind) || control.disabled || control.readOnly)
+        control.researchReadable && (["text", "search", "date", "datetime-local", "month", "week", "time", "number", "select", "checkbox", "radio"].contains(control.kind)
+            || ComputerUseBrowserDeclaredState.kinds.contains(control.kind))
+            && (["text", "search"].contains(control.kind) || control.disabled || control.readOnly || ComputerUseBrowserDeclaredState.kinds.contains(control.kind))
             && !control.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 }

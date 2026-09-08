@@ -1,9 +1,9 @@
 import Foundation
 
-/// A research-only observation of a native control, never an edit or proof
+/// A research-only observation of a control, never an edit or proof
 /// that this selection belongs to an offer. Option submission codes stay private.
 struct ComputerUseBrowserControlState: Decodable, Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
-    enum Kind: String, Decodable, Sendable { case scalar, text, selection, checked, stateless, unavailable }
+    enum Kind: String, Decodable, Sendable { case scalar, text, selection, checked, declared, stateless, unavailable }
     let controlID: String
     let kind: Kind
     let value: String?
@@ -12,14 +12,17 @@ struct ComputerUseBrowserControlState: Decodable, Equatable, Sendable, CustomStr
     let indeterminate: Bool?
 
     func requiresScope(for control: ComputerUseBrowserPageSnapshot.Control) -> Bool {
-        kind == .text || (kind != .stateless && kind != .unavailable && (control.disabled || control.readOnly))
+        kind == .text || kind == .declared || (kind != .stateless && kind != .unavailable && (control.disabled || control.readOnly))
     }
 
     // Shape validation only. The complete snapshot separately requires scope
-    // membership for text states and read-only/disabled value observations.
+    // membership for text, declared and read-only/disabled value observations.
     func isValid(for control: ComputerUseBrowserPageSnapshot.Control) -> Bool {
         guard controlID == control.id else { return false }
         switch kind {
+        case .declared:
+            return ComputerUseBrowserControlRead.allows(control) && value.flatMap { ComputerUseBrowserDeclaredState.attributes($0, kind: control.kind) } != nil
+                && selectedOptionIDs == nil && checked == nil && indeterminate == nil
         case .text:
             return ["text", "search"].contains(control.kind) && ComputerUseBrowserControlRead.allows(control)
                 && value != nil && (value?.utf8.count ?? 0) <= 2_048
@@ -49,9 +52,11 @@ struct ComputerUseBrowserControlState: Decodable, Equatable, Sendable, CustomStr
         }
     }
 
-    /// The entire observed scalar, scoped text or selected option labels. A checked flag
+    /// The entire observed scalar, scoped text, declaration or selected option labels. A checked flag
     /// is not a numeric quantity; a selection is never available inventory.
     func fieldSource(for control: ComputerUseBrowserPageSnapshot.Control) -> String? {
+        if kind == .declared, let value, let attributes = ComputerUseBrowserDeclaredState.attributes(value, kind: control.kind),
+           attributes["aria-checked"] == "mixed" || attributes["aria-pressed"] == "mixed" { return nil }
         guard indeterminate != true, let value = observedValue(for: control),
               !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
         return value
@@ -60,7 +65,7 @@ struct ComputerUseBrowserControlState: Decodable, Equatable, Sendable, CustomStr
     private func observedValue(for control: ComputerUseBrowserPageSnapshot.Control) -> String? {
         guard isValid(for: control) else { return nil }
         switch kind {
-        case .scalar, .text: return value
+        case .scalar, .text, .declared: return value
         case .selection:
             let ids = selectedOptionIDs ?? []
             return control.options.filter { ids.contains($0.id) }.map {
@@ -73,7 +78,12 @@ struct ComputerUseBrowserControlState: Decodable, Equatable, Sendable, CustomStr
 
     var plannerContext: [String: Any] {
         var result: [String: Any] = ["kind":kind.rawValue]
-        if let value { result["value"] = value }
+        if kind == .declared { result["provenance"] = "websiteDeclaredARIA" }
+        if let value {
+            if kind == .declared, let attributes = try? JSONSerialization.jsonObject(with: Data(value.utf8)) {
+                result["declared_attributes"] = attributes
+            } else { result["value"] = value }
+        }
         if let selectedOptionIDs { result["selected_options"] = selectedOptionIDs }
         if let checked { result["checked"] = checked }
         if let indeterminate { result["indeterminate"] = indeterminate }
@@ -85,6 +95,7 @@ struct ComputerUseBrowserControlState: Decodable, Equatable, Sendable, CustomStr
         var lines = [quote(control.label) + " (" + control.kind + "): " + (observedValue(for: control).map(quote) ?? (kind == .stateless ? "Action control; no selected value." : "State unavailable.")),
             "Disabled: \(control.disabled); read only: \(control.readOnly); required: \(control.required); multiple: \(control.multiple)."]
         if let checked, let indeterminate { lines.append("Checked: \(checked); indeterminate: \(indeterminate).") }
+        if kind == .declared { lines.append("Website-declared accessibility state; not a native input value or provider result.") }
         for (key, value) in control.constraints.sorted(by: { $0.key < $1.key }) { lines.append(key + ": " + quote(value)) }
         for option in control.options {
             lines.append("Option " + quote(option.label) + (option.groupLabel.isEmpty ? "" : " in " + quote(option.groupLabel))

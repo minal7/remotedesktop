@@ -269,7 +269,8 @@
     "RemoteDesktopHostTests/ComputerUseBrowserControlStateTests",
     "RemoteDesktopHostTests/ComputerUseBrowserReadingScopeTests",
     "RemoteDesktopHostTests/ComputerUseBrowserControlRelevanceTests",
-    "RemoteDesktopHostTests/ComputerUseBrowserReadonlyReadingTests"
+    "RemoteDesktopHostTests/ComputerUseBrowserReadonlyReadingTests",
+    "RemoteDesktopHostTests/ComputerUseBrowserDeclaredStateTests"
   ],
   "expectedTests": [
     "RemoteDesktopHostTests/AppleFoundationMCPPlannerTests/testCountedInputExpandsBeforeEffectAndTerminalQueries",
@@ -496,6 +497,12 @@
     "RemoteDesktopHostTests/ComputerUseBrowserDOMTests/testViewportScrollMovesDocumentWithoutWheelOrFocusedControlEvents",
     "RemoteDesktopHostTests/ComputerUseBrowserDOMTests/testViewportScrollRejectsStaleOffsetsGeometryAndSnapshotBeforeMovement",
     "RemoteDesktopHostTests/ComputerUseBrowserDOMTests/testVisibleAuthenticationMetadataBlocksAllFormValuesIncludingEarlierFields",
+    "RemoteDesktopHostTests/ComputerUseBrowserDeclaredStateTests/testAttributeRelationshipAndObjectChangesInvalidateDeclaredReadings",
+    "RemoteDesktopHostTests/ComputerUseBrowserDeclaredStateTests/testCustomAndButtonBackedTogglesAreMetadataUntilExplicitlyScoped",
+    "RemoteDesktopHostTests/ComputerUseBrowserDeclaredStateTests/testDriverRetainsWebsiteDeclaredStateBesideIndependentResultFactsWithoutClicking",
+    "RemoteDesktopHostTests/ComputerUseBrowserDeclaredStateTests/testInvalidDeclarationsStayUnavailableWithoutInventingDefaultsOrRepairs",
+    "RemoteDesktopHostTests/ComputerUseBrowserDeclaredStateTests/testProtectedAndUnsupportedCustomControlsCannotBecomeReadableNativeActions",
+    "RemoteDesktopHostTests/ComputerUseBrowserDeclaredStateTests/testScopedDeclarationsKeepCompleteAttributesAndExplicitProvenance",
     "RemoteDesktopHostTests/ComputerUseBrowserFormBindingTests/testBindingAndMalformedIDRequestsPreserveVerifiedInputReceipts",
     "RemoteDesktopHostTests/ComputerUseBrowserFormBindingTests/testBindingRejectsSupersededPageAndForeignAdapterWithoutRediscovery",
     "RemoteDesktopHostTests/ComputerUseBrowserFormBindingTests/testBindingRejectsValueCaretMembershipAndNativeIdentityChanges",

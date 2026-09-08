@@ -133,9 +133,9 @@ final class ComputerUseBrowserControlStateTests: XCTestCase {
                 guard case .browserResearchAnswer(let answer)? = result else { return XCTFail("Expected an answer grounded in the selected date") }
                 try owner.validateAnswer(answer)
                 XCTAssertEqual(status, .quotedValueMatches)
-                for text in ["Native control observations", "General admission", "2026-09-20", "2026-09-01", "2026-09-30", "On 2026-09-20.", "Do not buy."] { XCTAssertTrue(answer.message.contains(text), text) }
+                for text in ["Control observations", "General admission", "2026-09-20", "2026-09-01", "2026-09-30", "On 2026-09-20.", "Do not buy."] { XCTAssertTrue(answer.message.contains(text), text) }
                 XCTAssertFalse(answer.message.contains("private-code"))
-                XCTAssertFalse(answer.message.contains("│ Native control observations"))
+                XCTAssertFalse(answer.message.contains("│ Control observations"))
             } else {
                 guard case .userInterventionRequired? = result else { return XCTFail("A conflicting selected date cannot complete the request") }
                 XCTAssertEqual(status, .selectedValueConflicts)
