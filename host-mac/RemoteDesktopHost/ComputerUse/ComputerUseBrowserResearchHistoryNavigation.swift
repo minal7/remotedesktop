@@ -5,7 +5,16 @@ import Foundation
 /// distinct native targets; recovery cannot silently switch between them.
 @MainActor
 final class ComputerUseBrowserResearchHistoryNavigation {
-    enum Failure: Error, Equatable { case invalidIntent, busy, retired }
+    enum Failure: Error, Equatable { case invalidIntent, busy, retired, retirementPending }
+    struct Retirement: Equatable, Sendable {
+        let operationID: String
+        let visit: Int
+        let goalRevision: String
+        let digest: String
+        fileprivate init(stage: ComputerUseBrowserResearchHistoryNavigation, digest: String) {
+            operationID = stage.operationID; visit = stage.option.visit; goalRevision = stage.goal.digest; self.digest = digest
+        }
+    }
     let option: ComputerUseBrowserHistoryOption
     let goal: ComputerUseBrowserGoalInput
     let operationID: String
@@ -17,6 +26,8 @@ final class ComputerUseBrowserResearchHistoryNavigation {
     private var completed: ComputerUseBrowserNavigationReceipt?
     private var isExecuting = false
     private var isRetired = false
+    private var retirementPending = false
+    private var retirement: Retirement?
 
     init(option: ComputerUseBrowserHistoryOption, goal: ComputerUseBrowserGoalInput, sequence: Int,
          browser: ComputerUseOwnedBrowser, journalDirectory: URL,
@@ -38,14 +49,11 @@ final class ComputerUseBrowserResearchHistoryNavigation {
             try checkCurrent()
         }
         try check()
+        guard !retirementPending else { throw Failure.retirementPending }
         if let completed { return completed }
         do {
             if didBegin {
-                if let alternative {
-                    target = try navigation.resolveUnconfirmedObservedDestination(target, replacement: alternative,
-                        promptDigest: goal.rootDigest, operationID: operationID, checkCurrent: check)
-                    self.alternative = nil
-                }
+                try resolvePendingBinding(checkCurrent: check)
                 var prepared: ComputerUseBrowserNavigationTarget?
                 do {
                     let previous = target
@@ -84,6 +92,35 @@ final class ComputerUseBrowserResearchHistoryNavigation {
             if let document = browser.currentDocument(taskID: goal.taskID) { await browser.joinDOMCompletion(document: document) }
             throw error
         }
+    }
+
+    private func resolvePendingBinding(checkCurrent: () throws -> Void) throws {
+        if let alternative {
+            target = try navigation.resolveUnconfirmedObservedDestination(target, replacement: alternative,
+                promptDigest: goal.rootDigest, operationID: operationID, checkCurrent: checkCurrent)
+            self.alternative = nil
+        }
+    }
+
+    func retireUnsent(checkCurrent: () throws -> Void) throws -> Retirement? {
+        guard !isExecuting else { throw Failure.busy }
+        func check() throws {
+            try Task.checkCancellation(); try checkCurrent()
+            guard !isRetired else { throw Failure.retired }
+        }
+        try check()
+        if let retirement { return retirement }
+        guard completed == nil else { return nil }
+        isExecuting = true
+        defer { isExecuting = false }
+        try resolvePendingBinding(checkCurrent: check)
+        retirementPending = true
+        guard let digest = try navigation.retireUnsentObservedDestination(target, promptDigest: goal.rootDigest,
+            operationID: operationID, checkCurrent: check) else { retirementPending = false; return nil }
+        let receipt = Retirement(stage: self, digest: digest)
+        retirement = receipt
+        try check()
+        return receipt
     }
 
     func retire() { isRetired = true; alternative = nil; completed = nil }

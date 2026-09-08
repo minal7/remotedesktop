@@ -310,6 +310,7 @@ final class ComputerUseBrowserNavigationTask: ComputerUseBrowserResearchAdmittin
         defer { lease.release() }
         try Task.checkCancellation(); try checkCurrent()
         try lease.assertOwnership(); try browser.validateWorkflowSession(session)
+        try browser.validateUnretiredNavigation(operationID: operationID)
         return resolved
     }
 
@@ -333,6 +334,7 @@ final class ComputerUseBrowserNavigationTask: ComputerUseBrowserResearchAdmittin
             try Task.checkCancellation()
             try lease.assertOwnership()
             try browser.validateWorkflowSession(session)
+            try browser.validateUnretiredNavigation(operationID: operationID)
         }
         try checkOwnership()
         guard persisted == nil || persisted?.statuses == [.planned],
@@ -367,13 +369,58 @@ final class ComputerUseBrowserNavigationTask: ComputerUseBrowserResearchAdmittin
             stepIDs: [operationID], statuses: [.planned])
     }
 
-    private static func matchesObservedIdentity(_ saved: ComputerUseTaskJournal, _ identity: ComputerUseTaskJournal) -> Bool {
+    private static func matchesObservedBinding(_ saved: ComputerUseTaskJournal, _ identity: ComputerUseTaskJournal) -> Bool {
         saved.taskID == identity.taskID && saved.promptDigest == identity.promptDigest
             && saved.contractDigest == identity.contractDigest && saved.stepIDs == identity.stepIDs && saved.statuses.count == 1
     }
 
+    private static func matchesObservedIdentity(_ saved: ComputerUseTaskJournal, _ identity: ComputerUseTaskJournal) -> Bool {
+        matchesObservedBinding(saved, identity) && saved.retirementDigest == nil && saved.retainedPrefixCount == nil
+    }
+
     private static func validateObservedIdentity(_ saved: ComputerUseTaskJournal, _ identity: ComputerUseTaskJournal) throws {
         guard matchesObservedIdentity(saved, identity) else { throw ComputerUseTaskExecutionError.journalMismatch }
+    }
+
+    /// Permanently cancel one proven-unsent operation before another proposal
+    /// gets a new identity. Never clear attempted/uncertain/verified history.
+    /// A matching tombstone is rewritten to resolve an earlier flush failure.
+    func retireUnsentObservedDestination(_ target: ComputerUseBrowserNavigationTarget,
+        promptDigest: String, operationID: String, checkCurrent: () throws -> Void) throws -> String? {
+        try Task.checkCancellation(); try checkCurrent()
+        guard browser.contextID == target.contextID,
+              let session = browser.handbackRequirement(taskID: target.taskID, required: true) else {
+            throw ComputerUseBrowserError.ownershipLost
+        }
+        try browser.validateWorkflowSession(session)
+        let identity = try Self.observedIdentity(target, promptDigest: promptDigest, operationID: operationID)
+        let digest = ComputerUseTaskContract.digest(["observed-browser-unsent-retirement-v1",
+            identity.taskID, identity.promptDigest, identity.contractDigest])
+        let store = try observedNavigationStore(journalDirectory.appendingPathComponent("Observed Destinations", isDirectory: true))
+        let persisted = try store.load(taskID: identity.taskID)
+        let lease = try store.acquireExecution(taskID: identity.taskID, expected: persisted)
+        defer { lease.release() }
+        if let persisted {
+            guard Self.matchesObservedBinding(persisted, identity), persisted.retainedPrefixCount == nil,
+                  persisted.retirementDigest == nil || persisted.retirementDigest == digest else {
+                throw ComputerUseTaskExecutionError.journalMismatch
+            }
+            guard persisted.statuses == [.planned] else { return nil }
+        }
+        func check() throws {
+            try Task.checkCancellation(); try checkCurrent(); try lease.assertOwnership()
+            try browser.validateWorkflowSession(session)
+        }
+        try check()
+        guard try browser.retireUnsentObservedDestination(target, operationID: operationID) else { return nil }
+        try check()
+        let retired = ComputerUseTaskJournal(taskID: identity.taskID, promptDigest: identity.promptDigest,
+            contractDigest: identity.contractDigest, stepIDs: identity.stepIDs, statuses: persisted?.statuses ?? identity.statuses,
+            retirementDigest: digest)
+        try store.retireUnsent(retired, replacing: persisted)
+        // Publish the durable fact before the owner's post-operation control
+        // check. A late Pause must not erase a successful retirement.
+        return digest
     }
 
     /// Persist one host-selected effect independently of the whole task's
@@ -404,6 +451,7 @@ final class ComputerUseBrowserNavigationTask: ComputerUseBrowserResearchAdmittin
             persisted = next
         }
         try checkOwnership()
+        try browser.validateUnretiredNavigation(operationID: operationID)
         if let status = persisted?.statuses.first, status != .planned {
             // No call to the effectful API during recovery. Even a verified
             // journal is insufficient to recreate a lost browser document.

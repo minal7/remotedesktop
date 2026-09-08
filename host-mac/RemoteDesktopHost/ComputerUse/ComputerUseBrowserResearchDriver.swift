@@ -233,8 +233,12 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
             if owner.hasPendingNavigation {
                 if owner.hasPendingHistoryNavigation {
                     progress("Checking the pending return to an earlier page…")
-                    let receipt = try await owner.resumeHistoryNavigation()
-                    guard try record(.revisit, receipt.document) else { return reconciliationRequired }
+                    do {
+                        let receipt = try await owner.resumeHistoryNavigation()
+                        guard try record(.revisit, receipt.document) else { return reconciliationRequired }
+                    } catch {
+                        guard try await retireProvenUnsentHistory(owner, after: error) else { throw error }
+                    }
                     continue
                 }
                 progress("Checking the pending result link…")
@@ -285,8 +289,12 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                 case .recall: throw Failure.invalidProposal // Resolved inside the owner, never an executable action.
                 case .revisit:
                     progress("Returning to an earlier page…")
-                    let receipt = try await owner.revisit(for: action)
-                    guard try record(.revisit, receipt.document) else { return reconciliationRequired }
+                    do {
+                        let receipt = try await owner.revisit(for: action)
+                        guard try record(.revisit, receipt.document) else { return reconciliationRequired }
+                    } catch {
+                        guard try await retireProvenUnsentHistory(owner, after: error) else { throw error }
+                    }
                     continue
                 case .editForm:
                     guard owner.confirmedFormHistory.count < 32 else {
@@ -326,8 +334,12 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                 try check()
                 switch decision {
                 case .revisit(let option):
-                    let receipt = try await owner.revisitAfterReading(option)
-                    guard try record(.revisit, receipt.document) else { return reconciliationRequired }
+                    do {
+                        let receipt = try await owner.revisitAfterReading(option)
+                        guard try record(.revisit, receipt.document) else { return reconciliationRequired }
+                    } catch {
+                        guard try await retireProvenUnsentHistory(owner, after: error) else { throw error }
+                    }
                     continue
                 case .answer(let selection):
                     let answer = try await owner.prepareAnswer(selection)
@@ -352,6 +364,13 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
 
     private var selectionRequired: ComputerUseExecutionResult {
         .userInterventionRequired("I could not select another result link that advances the complete request. More page interaction or result verification is needed; the original task is still pending.")
+    }
+    private func retireProvenUnsentHistory(_ owner: ComputerUseBrowserResearchTask, after error: Error) async throws -> Bool {
+        guard error as? ComputerUseBrowserError == .pageChanged
+                || error as? ComputerUseBrowserError == .observedNavigationUnavailable
+                || error as? ComputerUseBrowserError == .sourceNotAllowed
+                || error as? ComputerUseBrowserResearchHistoryNavigation.Failure == .retirementPending else { return false }
+        return try await owner.retirePendingUnsentHistoryNavigation() != nil
     }
     private func retireProvenUnsentForm(_ owner: ComputerUseBrowserResearchTask, after error: Error) async throws -> Bool {
         guard error as? ComputerUseBrowserError == .pageChanged

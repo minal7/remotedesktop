@@ -184,6 +184,7 @@ struct ComputerUseBrowserNavigationReceipt: Equatable, Sendable, CustomStringCon
 }
 
 enum ComputerUseBrowserError: Error, LocalizedError, Equatable {
+    case observedNavigationRetired
     case invalidURL, busy, ownershipLost, pageChanged, navigationFailed, deadlineExceeded, closed, unsupportedDocument, pageEvidenceUnavailable, documentUnresponsive, windowNotActive, authenticationRequired, signInWindowOpen, handbackContextLost, viewportScrollUnavailable, viewportScrollUncertain, linkNavigationUnavailable, observedNavigationUnavailable, observedNavigationUncertain, formQueryUnavailable, formQueryInvalid, sourceNotAllowed
     var errorDescription: String? {
         switch self {
@@ -205,6 +206,7 @@ enum ComputerUseBrowserError: Error, LocalizedError, Equatable {
         case .linkNavigationUnavailable: return "This page link cannot be opened as a document in the current AI browser."
         case .observedNavigationUnavailable: return "This browser destination cannot be opened with its current reference."
         case .observedNavigationUncertain: return "I couldn't verify the navigation. Check the AI browser before continuing."
+        case .observedNavigationRetired: return "This earlier navigation was cancelled before it started. Choose a new step from the current page."
         case .handbackContextLost: return "The AI browser session for this task was closed or replaced. Start a new browser task to continue."
         case .formQueryUnavailable: return "This form cannot be opened as a verified query in the AI browser."
         case .formQueryInvalid: return "The form contains a value that does not meet its requirements. Check the form before continuing."
@@ -244,6 +246,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     }
     private var historyReceipts: [String: HistoryReceipt] = [:]
     private var navigationAttemptIDs: Set<String> = []
+    private var retiredNavigationOperations: [String: String] = [:]
     private struct ObservedNavigationAttempt {
         let payloadDigest: String
         var receipt: ComputerUseBrowserNavigationReceipt?
@@ -374,6 +377,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             receipts.removeAll()
             historyReceipts.removeAll()
             navigationAttemptIDs.removeAll()
+            retiredNavigationOperations.removeAll()
             observedNavigationAttempts.removeAll()
         }
     }
@@ -845,6 +849,30 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         hasNavigationAttempt(operationID: operationID)
     }
 
+    func validateUnretiredNavigation(operationID: String) throws {
+        guard retiredNavigationOperations[operationID] == nil else { throw ComputerUseBrowserError.observedNavigationRetired }
+    }
+
+    /// Synchronous native no-attempt proof and revocation. The caller holds
+    /// the original operation's disk execution lease until its tombstone is
+    /// durable. Stale document references can be retired, never dispatched.
+    func retireUnsentObservedDestination(_ target: ComputerUseBrowserNavigationTarget, operationID: String) throws -> Bool {
+        try Task.checkCancellation()
+        guard hasOwnership(taskID: target.taskID), target.contextID == contextID else { throw ComputerUseBrowserError.ownershipLost }
+        guard operationID.utf8.count == 64, operationID.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else {
+            throw ComputerUseBrowserError.observedNavigationUnavailable
+        }
+        guard pending == nil, pendingDOM == nil, observedNavigation == nil else { throw ComputerUseBrowserError.busy }
+        guard !hasNavigationAttempt(operationID: operationID) else { return false }
+        if let retired = retiredNavigationOperations[operationID] {
+            guard retired == target.payloadDigest else { throw ComputerUseBrowserError.observedNavigationRetired }
+            return true
+        }
+        guard retiredNavigationOperations.count < 64 else { throw ComputerUseBrowserError.observedNavigationUnavailable }
+        retiredNavigationOperations[operationID] = target.payloadDigest
+        return true
+    }
+
     /// Open the previously bound HTTP(S) destination with the native browser
     /// loader. This intentionally has navigation semantics, not DOM click
     /// semantics: it dispatches no click, submit, formdata, or invalid event.
@@ -858,6 +886,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
               operationID.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else {
             throw ComputerUseBrowserError.observedNavigationUnavailable
         }
+        try validateUnretiredNavigation(operationID: operationID)
         if let attempted = observedNavigationAttempts[operationID] {
             guard attempted.payloadDigest == target.payloadDigest, let receipt = attempted.receipt else {
                 throw ComputerUseBrowserError.observedNavigationUncertain
@@ -1098,6 +1127,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             throw ComputerUseBrowserError.observedNavigationUnavailable
         }
         func checkSource() throws {
+            try validateUnretiredNavigation(operationID: operationID)
             guard sourcePolicy == capturedPolicy else { throw ComputerUseBrowserError.pageChanged }
             try validateSourceURL(url)
             if let historyTarget {

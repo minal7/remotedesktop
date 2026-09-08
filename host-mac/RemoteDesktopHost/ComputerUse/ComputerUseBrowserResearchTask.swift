@@ -87,6 +87,7 @@ final class ComputerUseBrowserResearchTask {
     private(set) var confirmedNavigationHistory: [ComputerUseBrowserResearchVisit] = []
     private(set) var confirmedFormHistory: [ComputerUseBrowserResearchFormReceipt] = []
     private(set) var retiredFormHistory: [ComputerUseBrowserResearchFormStage.Retirement] = []
+    private(set) var retiredHistoryNavigations: [ComputerUseBrowserResearchHistoryNavigation.Retirement] = []
 
     var input: ComputerUseBrowserGoalInput { clarification.input }
     /// Available during the serialized selector operation as well as idle.
@@ -431,6 +432,27 @@ final class ComputerUseBrowserResearchTask {
             let receipt = try await stage.run(prepareCurrent: { try await self.observeOwnedPage(goal: captured, enforceSources: true) },
                 checkCurrent: { try self.checkCurrent(captured) })
             try recordNavigation(.revisit, document: receipt.document, goal: captured)
+            return receipt
+        }
+    }
+
+    /// A changed visit can release the planner only after the original
+    /// operation is natively revoked and durably retired as never attempted.
+    func retirePendingUnsentHistoryNavigation() async throws -> ComputerUseBrowserResearchHistoryNavigation.Retirement? {
+        try requireIdle()
+        guard !hasPendingForm, initialSearch?.isPending != true, !hasPendingFormNavigation,
+              navigation?.pendingSelection == nil, !hasQuestion else { throw Failure.navigationPending }
+        guard hasPendingHistoryNavigation, let stage = historyNavigation else { return nil }
+        guard stage.goal == input else { throw Failure.goalChanged }
+        let captured = input
+        latestAction = nil; latestCandidates = nil; latestForm = nil
+        return try await operate { [self] in
+            guard let receipt = try stage.retireUnsent(checkCurrent: { try self.checkCurrent(captured) }) else { return nil }
+            try checkCurrent(captured)
+            guard historyNavigation === stage else { throw Failure.navigationUnavailable }
+            if !retiredHistoryNavigations.contains(receipt) { retiredHistoryNavigations.append(receipt) }
+            historyNavigation = nil
+            stage.retire()
             return receipt
         }
     }
@@ -1087,6 +1109,7 @@ final class ComputerUseBrowserResearchTask {
         confirmedFormHistory.removeAll(); retiredFormHistory.removeAll()
         formNavigation?.retire(); formNavigation = nil
         historyNavigation?.retire(); historyNavigation = nil
+        retiredHistoryNavigations.removeAll()
         retainedEvidence = .init(goal: input)
         clarification.retire(); navigation?.retire(); initialSearch?.retire(); hasQuestion = false; cancelOperation?()
     }
