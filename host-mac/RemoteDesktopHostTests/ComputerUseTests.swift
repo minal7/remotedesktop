@@ -897,6 +897,80 @@ final class ComputerUseTests: XCTestCase {
         XCTAssertEqual(domCalls, 0)
     }
 
+    func test_managerPreservesNewResearchWhenPreviousBrowserIsBusyBeforeAdmission() async throws {
+        let server = try OwnedBrowserHTTPFixture(routes: ["/held": .init(held: true)]), base = try await server.start()
+        defer { server.stop() }
+        let url = temporaryLedgerURL(), executor = BrowserQuestionLifecycleExecutor()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let fixture = try browserControlFixture(executor: executor.capabilityExecutor(), ledgerURL: url)
+        var loading: Task<ComputerUseBrowserDocument, Error>?
+        defer { executor.preparePage = nil; loading?.cancel(); fixture.manager.stop(); fixture.browser.close() }
+        executor.preparePage = { _ in
+            try fixture.browser.claim(taskID: "previous")
+            loading = Task { try await fixture.browser.navigate(taskID: "previous", operationID: "held-open", to: base.appendingPathComponent("held")) }
+            await self.waitUntil(timeoutIterations: 1_000) { server.count("/held") == 1 }
+        }
+        let prompt = makeEnvelope(id: "busy-admission", kind: .prompt, body: "Find concert tickets.")
+        fixture.manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(fixture.manager.handle(prompt, channel: fixture.channel))
+        await waitUntil(timeoutIterations: 1_000) { fixture.manager.activity == .paused }
+        let owner = try XCTUnwrap(executor.owner)
+        XCTAssertEqual(owner.input.prompt, "Find concert tickets.")
+        XCTAssertTrue(executor.planner.inputs.isEmpty)
+        let paused = try XCTUnwrap(fixture.browser.taskControls)
+        XCTAssertEqual(paused.taskID, prompt.id)
+        let messages = await fixture.channel.sentMessages()
+        XCTAssertFalse(messages.contains { $0.kind == .assistant && (try? ComputerUseTaskUpdate.decodeBody($0.body).taskID) == prompt.id })
+        do { _ = try await owner.interpretGoal(); XCTFail("Busy admission must retain a paused owner") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserResearchTask.Failure, .paused) }
+        loading?.cancel()
+        _ = try? await loading?.value
+    }
+
+    func test_managerAdmitsPreviousBrowserIntoNewResearchAndHandsLoginBackToItsNewRoot() async throws {
+        let server = try OwnedBrowserHTTPFixture(routes: ["/login": .init(body: """
+            <input id='auth' type='password' autocomplete='current-password'><h1>Account</h1>
+            <script>fetch('/finish-login').then(() => {
+                document.getElementById('auth').remove(); sessionStorage.fixtureAccount = 'retained';
+                history.replaceState({}, '', '/account'); fetch('/logged-in');
+            });</script>
+            """), "/finish-login": .init(held: true)])
+        let base = try await server.start()
+        defer { server.stop() }
+        let url = temporaryLedgerURL(), executor = BrowserQuestionLifecycleExecutor()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let fixture = try browserControlFixture(executor: executor.capabilityExecutor(), ledgerURL: url)
+        defer { fixture.manager.stop(); fixture.browser.close() }
+        let previous = makeEnvelope(id: "previous-native", kind: .prompt, body: "Open \(base.appendingPathComponent("login").absoluteString)")
+        fixture.manager.authorizePeer(senderID: previous.senderID)
+        XCTAssertTrue(fixture.manager.handle(previous, channel: fixture.channel))
+        let opened = try await clarificationUpdate(taskID: previous.id, channel: fixture.channel)
+        XCTAssertEqual(opened.outcome, .taskCompleted)
+        let priorSession = try XCTUnwrap(fixture.browser.handbackRequirement(taskID: previous.id, required: true))
+        let prompt = makeEnvelope(id: "new-research", kind: .prompt, body: "Find concert tickets tomorrow. Do not buy anything.")
+        XCTAssertTrue(fixture.manager.handle(prompt, channel: fixture.channel))
+        await waitUntil(timeoutIterations: 1_000) { fixture.manager.activity == .paused }
+        let owner = try XCTUnwrap(executor.owner), original = owner.input
+        XCTAssertTrue(executor.planner.inputs.isEmpty, "Existing authentication must precede new model inference")
+        XCTAssertEqual(fixture.browser.taskID, prompt.id)
+        let paused = try XCTUnwrap(fixture.browser.taskControls)
+        XCTAssertEqual(paused.taskID, prompt.id)
+        do { try await fixture.browser.reacquireAfterUserControl(taskID: previous.id, requirement: priorSession); XCTFail("The old request cannot take control back") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .handbackContextLost) }
+        await waitUntil(timeoutIterations: 1_000) { server.count("/finish-login") == 1 }
+        server.releaseHeldResponses()
+        await waitUntil(timeoutIterations: 1_000) { server.count("/logged-in") == 1 && fixture.browser.hasPageAwaitingHandback }
+        fixture.browser.requestTaskControl(.resume, displayed: paused)
+        let question = try await clarificationUpdate(taskID: prompt.id, channel: fixture.channel)
+        XCTAssertEqual(question.clarification?.taskID, prompt.id)
+        XCTAssertEqual(question.text, ComputerUseBrowserClarificationTopic.location.question)
+        XCTAssertEqual(executor.planner.inputs, [original])
+        XCTAssertEqual(executor.ordinaryPrompts, [original.prompt])
+        XCTAssertEqual(executor.continued.map(\.taskID), [prompt.id])
+        XCTAssertEqual(owner.input, original)
+        XCTAssertEqual(server.count("/login"), 1)
+    }
+
     func test_managerBrowserAnswerLoginHandbackKeepsRootSessionAndDoesNotRepeatNavigation() async throws {
         let server = try OwnedBrowserHTTPFixture(routes: [
             "/form": .init(body: """

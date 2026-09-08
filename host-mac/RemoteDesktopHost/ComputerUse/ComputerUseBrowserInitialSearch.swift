@@ -77,6 +77,8 @@ struct ComputerUseBrowserInitialSearchRequest: Equatable, Sendable, CustomString
 final class ComputerUseBrowserInitialSearch {
     let request: ComputerUseBrowserInitialSearchRequest
     private let session: ComputerUseBrowserHandbackRequirement
+    private let startingDocument: ComputerUseBrowserDocument?
+    private let startingDocumentID: String?
     private let browser: ComputerUseOwnedBrowser
     private let directory: URL
     private let makeStore: (URL) throws -> ComputerUseTaskJournalStore
@@ -88,15 +90,28 @@ final class ComputerUseBrowserInitialSearch {
 
     init(request: ComputerUseBrowserInitialSearchRequest, session: ComputerUseBrowserHandbackRequirement,
          browser: ComputerUseOwnedBrowser, directory: URL,
+         startingPage: ComputerUseBrowserPageEvidence? = nil,
          makeStore: @escaping (URL) throws -> ComputerUseTaskJournalStore = { try .init(directory: $0) }) throws {
         guard request.goal.taskID == session.taskID else { throw ComputerUseBrowserInitialSearchError.invalidRequest }
         try browser.validateWorkflowSession(session)
+        if let startingPage {
+            guard startingPage.document.taskID == request.goal.taskID, browser.validate(startingPage.document) else {
+                throw ComputerUseBrowserError.pageChanged
+            }
+        }
         self.request = request; self.session = session; self.browser = browser
+        startingDocument = startingPage?.document; startingDocumentID = startingPage?.documentID
         self.directory = directory.appendingPathComponent("Initial Search", isDirectory: true); self.makeStore = makeStore
         operationID = ComputerUseTaskContract.digest(["browser-initial-search-stage-v1", request.goal.taskID])
+        var binding = ["browser-initial-search-binding-v1", request.digest, session.sessionBindingDigest]
+        if let startingPage {
+            binding += ["observed-starting-document-v1", startingPage.documentID,
+                startingPage.document.contextID, String(startingPage.document.generation), startingPage.document.operationID,
+                startingPage.document.committedURL.absoluteString]
+        }
         identity = .init(taskID: ComputerUseTaskContract.digest(["browser-initial-search-record-v1", request.goal.taskID]),
             promptDigest: request.goal.rootDigest,
-            contractDigest: ComputerUseTaskContract.digest(["browser-initial-search-binding-v1", request.digest, session.sessionBindingDigest]),
+            contractDigest: ComputerUseTaskContract.digest(binding),
             stepIDs: [operationID], statuses: [.planned])
     }
 
@@ -155,9 +170,19 @@ final class ComputerUseBrowserInitialSearch {
         if persisted == nil { try save(.planned) }
         do {
             try checkLeased()
-            guard try browser.isUnnavigatedSession(session) else { throw ComputerUseBrowserError.pageChanged }
+            if let startingDocument {
+                guard browser.validate(startingDocument) else { throw ComputerUseBrowserError.pageChanged }
+                // Query/provider authority comes from the host and full goal,
+                // not page controls. Re-read authentication on the same native
+                // Document; a refreshed snapshot nonce is not a page change.
+                let fresh = try await browser.observePage(document: startingDocument)
+                guard fresh.documentID == startingDocumentID else { throw ComputerUseBrowserError.pageChanged }
+            }
+            else { guard try browser.isUnnavigatedSession(session) else { throw ComputerUseBrowserError.pageChanged } }
+            try checkLeased()
             let result = try await browser.navigate(taskID: request.goal.taskID, operationID: operationID,
-                to: request.destination, requiringUnnavigatedSession: session, willBeginEffect: {
+                to: request.destination, from: startingDocument,
+                requiringUnnavigatedSession: startingDocument == nil ? session : nil, willBeginEffect: {
                     try checkLeased()
                     try save(.attempted)
                 })

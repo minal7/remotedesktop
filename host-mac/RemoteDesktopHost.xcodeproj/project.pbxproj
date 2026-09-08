@@ -48,6 +48,7 @@
 		4CE9E7EF6E81F064528BD9B4 /* ComputerUseBrowserGoalPlannerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09F7E4C1F30148D110DB98F2 /* ComputerUseBrowserGoalPlannerTests.swift */; };
 		FC757DF56C11F83B51F00703 /* ComputerUseBrowserSearchPlannerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 05D7FF7950686402FC1DFEAE /* ComputerUseBrowserSearchPlannerTests.swift */; };
 		6C6F029527DE54EC69635752 /* ComputerUseBrowserInitialSearchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4AB4E1CC1D2901B01AD8B11A /* ComputerUseBrowserInitialSearchTests.swift */; };
+		9B82ADE8B12887888C953CAA /* ComputerUseBrowserAdmissionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E78557387CFA57801E4C340E /* ComputerUseBrowserAdmissionTests.swift */; };
 		629A0396CD7885D9AE9BEB37 /* ComputerUseBrowserClarificationTransportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E121F3A554A2033351C7109C /* ComputerUseBrowserClarificationTransportTests.swift */; };
 		07B63BDC0027C619C0000758 /* ComputerUseBrowserResearchTaskTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5556658314C3928FFF104419 /* ComputerUseBrowserResearchTaskTests.swift */; };
 		55919820E18778F26517C0F0 /* ComputerUseBrowserResultPlannerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61CBA82F086AB02B6DC09665 /* ComputerUseBrowserResultPlannerTests.swift */; };
@@ -357,6 +358,7 @@
 		09F7E4C1F30148D110DB98F2 /* ComputerUseBrowserGoalPlannerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseBrowserGoalPlannerTests.swift; sourceTree = "<group>"; };
 		05D7FF7950686402FC1DFEAE /* ComputerUseBrowserSearchPlannerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseBrowserSearchPlannerTests.swift; sourceTree = "<group>"; };
 		4AB4E1CC1D2901B01AD8B11A /* ComputerUseBrowserInitialSearchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseBrowserInitialSearchTests.swift; sourceTree = "<group>"; };
+		E78557387CFA57801E4C340E /* ComputerUseBrowserAdmissionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseBrowserAdmissionTests.swift; sourceTree = "<group>"; };
 		E121F3A554A2033351C7109C /* ComputerUseBrowserClarificationTransportTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseBrowserClarificationTransportTests.swift; sourceTree = "<group>"; };
 		5556658314C3928FFF104419 /* ComputerUseBrowserResearchTaskTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseBrowserResearchTaskTests.swift; sourceTree = "<group>"; };
 		61CBA82F086AB02B6DC09665 /* ComputerUseBrowserResultPlannerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseBrowserResultPlannerTests.swift; sourceTree = "<group>"; };
@@ -506,6 +508,7 @@
 				09F7E4C1F30148D110DB98F2 /* ComputerUseBrowserGoalPlannerTests.swift */,
 				05D7FF7950686402FC1DFEAE /* ComputerUseBrowserSearchPlannerTests.swift */,
 				4AB4E1CC1D2901B01AD8B11A /* ComputerUseBrowserInitialSearchTests.swift */,
+				E78557387CFA57801E4C340E /* ComputerUseBrowserAdmissionTests.swift */,
 				E121F3A554A2033351C7109C /* ComputerUseBrowserClarificationTransportTests.swift */,
 				5556658314C3928FFF104419 /* ComputerUseBrowserResearchTaskTests.swift */,
 				61CBA82F086AB02B6DC09665 /* ComputerUseBrowserResultPlannerTests.swift */,
@@ -862,6 +865,7 @@
 				4CE9E7EF6E81F064528BD9B4 /* ComputerUseBrowserGoalPlannerTests.swift in Sources */,
 				FC757DF56C11F83B51F00703 /* ComputerUseBrowserSearchPlannerTests.swift in Sources */,
 				6C6F029527DE54EC69635752 /* ComputerUseBrowserInitialSearchTests.swift in Sources */,
+				9B82ADE8B12887888C953CAA /* ComputerUseBrowserAdmissionTests.swift in Sources */,
 				629A0396CD7885D9AE9BEB37 /* ComputerUseBrowserClarificationTransportTests.swift in Sources */,
 				07B63BDC0027C619C0000758 /* ComputerUseBrowserResearchTaskTests.swift in Sources */,
 				55919820E18778F26517C0F0 /* ComputerUseBrowserResultPlannerTests.swift in Sources */,

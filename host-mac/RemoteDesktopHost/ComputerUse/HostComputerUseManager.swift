@@ -6305,6 +6305,12 @@ final class HostComputerUseManager: ObservableObject {
                     context: context,
                     token: token)
                 return
+            } catch let admission as ComputerUseBrowserResearchAdmissionPause {
+                guard currentExecutionToken == token else { return }
+                // No session may belong to this root yet. Preserve the goal
+                // and let explicit Resume retry its current owner admission;
+                // an unavailable fabricated handback seal would strand it.
+                pauseForLocalIntervention(context, guidance: admission.reason.localizedDescription)
             } catch ComputerUseBrowserError.authenticationRequired {
                 guard currentExecutionToken == token else { return }
                 pauseForLocalIntervention(context, guidance: ComputerUseBrowserError.authenticationRequired.localizedDescription,

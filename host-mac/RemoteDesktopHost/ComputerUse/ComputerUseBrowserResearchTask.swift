@@ -1,5 +1,17 @@
 import Foundation
 
+@MainActor
+protocol ComputerUseBrowserResearchAdmitting: AnyObject {
+    func admitBrowser(for owner: ComputerUseBrowserResearchTask, admissionID: UUID, checkCurrent: () throws -> Void) async throws -> ComputerUseBrowserHandbackRequirement
+}
+
+/// Only the admission path can request this pre-session handoff. A busy or
+/// inactive previous page is not a terminal failure of the new research goal.
+struct ComputerUseBrowserResearchAdmissionPause: Error {
+    let reason: ComputerUseBrowserError
+    fileprivate init(_ reason: ComputerUseBrowserError) { self.reason = reason }
+}
+
 /// Owns the canonical goal revision and read/planning work for one browser
 /// research task, including retained result-link navigation. It does not
 /// compile the complete research action plan or terminal research answers.
@@ -21,6 +33,9 @@ final class ComputerUseBrowserResearchTask {
     private let navigation: ComputerUseBrowserResearchNavigation?
     private let navigationDirectory: URL?
     private let navigationStore: (URL) throws -> ComputerUseTaskJournalStore
+    private weak var browserAdmission: (any ComputerUseBrowserResearchAdmitting)?
+    private let requiresBrowserAdmission: Bool
+    private var browserAdmissionID: UUID?
     private var initialSearch: ComputerUseBrowserInitialSearch?
     private var interpretation: Interpretation?
     private var latestCandidates: ComputerUseBrowserResultCandidates?
@@ -60,10 +75,12 @@ final class ComputerUseBrowserResearchTask {
          goalPlanner: any ComputerUseBrowserGoalPlanning, resultPlanner: any ComputerUseBrowserResultPlanning,
          navigationJournalDirectory: URL? = nil,
          navigationStore: @escaping (URL) throws -> ComputerUseTaskJournalStore = { try .init(directory: $0) },
+         browserAdmission: (any ComputerUseBrowserResearchAdmitting)? = nil,
          mayAct: @escaping @MainActor () -> Bool, now: @escaping () -> Date = Date.init) {
         taskID = input.taskID; self.browser = browser; self.goalPlanner = goalPlanner; self.resultPlanner = resultPlanner
         self.mayAct = mayAct; clarification = .init(input: input, now: now)
         navigationDirectory = navigationJournalDirectory; self.navigationStore = navigationStore
+        self.browserAdmission = browserAdmission; requiresBrowserAdmission = browserAdmission != nil
         navigation = navigationJournalDirectory.map { .init(input: input, browser: browser, journalDirectory: $0, navigationStore: navigationStore) }
     }
 
@@ -134,11 +151,15 @@ final class ComputerUseBrowserResearchTask {
         return try await operate { [self] in
             try checkCurrent(captured)
             if initialSearch == nil {
-                guard browser.taskID == nil || browser.taskID == taskID else { throw ComputerUseBrowserError.ownershipLost }
-                let prepared = try browser.prepareWorkflowSession(taskID: taskID)
-                try captureSession()
+                let prepared = try await prepareBrowser(goal: captured)
                 guard session == prepared else { throw ComputerUseBrowserError.handbackContextLost }
-                initialSearch = try .init(request: request, session: prepared, browser: browser, directory: directory, makeStore: navigationStore)
+                let startingPage: ComputerUseBrowserPageEvidence?
+                if requiresBrowserAdmission, try !browser.isUnnavigatedSession(prepared) {
+                    startingPage = try await observeOwnedPage(goal: captured)
+                } else { startingPage = nil }
+                try checkCurrent(captured)
+                initialSearch = try .init(request: request, session: prepared, browser: browser, directory: directory,
+                    startingPage: startingPage, makeStore: navigationStore)
             }
             guard let initialSearch else { throw Failure.navigationUnavailable }
             return try await initialSearch.open(checkCurrent: { try self.checkCurrent(captured) })
@@ -321,6 +342,23 @@ final class ComputerUseBrowserResearchTask {
                 try browser.validateWorkflowSession(expected)
                 return expected
             }
+            if session == nil, requiresBrowserAdmission, browser.hasSession {
+                let prepared = try await performBrowserAdmission(checkCurrent: {
+                    try Task.checkCancellation()
+                    guard !self.isRetired, self.isPaused, self.controlEpoch == epoch, self.operationID == id,
+                          self.input.digest == captured.digest, self.mayAct() else { throw Failure.paused }
+                })
+                // Admission is now a native fact. Retain its seal before a
+                // page/authentication check can require another handback.
+                if !isRetired, controlEpoch == epoch, operationID == id { session = prepared; handback = prepared }
+                try Task.checkCancellation()
+                if try !browser.isUnnavigatedSession(prepared) {
+                    let document = try await browser.acquireObservedDocument(taskID: taskID)
+                    _ = try await browser.observePage(document: document)
+                }
+                try Task.checkCancellation(); try browser.validateWorkflowSession(prepared)
+                return prepared
+            }
             guard session == nil, browser.taskID == nil else { throw ComputerUseBrowserError.handbackContextLost }
             return nil
         }
@@ -364,10 +402,48 @@ final class ComputerUseBrowserResearchTask {
 
     private func checkPageBeforePlanning(goal: ComputerUseBrowserGoalInput) async throws {
         try checkCurrent(goal)
+        if session == nil, requiresBrowserAdmission, browser.hasSession { _ = try await prepareBrowser(goal: goal) }
         guard browser.taskID == taskID else { return }
         try captureSession()
         if let session, try browser.isUnnavigatedSession(session) { return }
         _ = try await observeOwnedPage(goal: goal)
+    }
+
+    private func prepareBrowser(goal: ComputerUseBrowserGoalInput) async throws -> ComputerUseBrowserHandbackRequirement {
+        try checkCurrent(goal)
+        if let session { return session }
+        let prepared: ComputerUseBrowserHandbackRequirement
+        if requiresBrowserAdmission {
+            prepared = try await performBrowserAdmission(checkCurrent: { try self.checkCurrent(goal) })
+        } else {
+            guard browser.taskID == nil || browser.taskID == taskID else { throw ComputerUseBrowserError.ownershipLost }
+            prepared = try browser.prepareWorkflowSession(taskID: taskID)
+        }
+        if !isRetired, input.digest == goal.digest { session = prepared }
+        try checkCurrent(goal)
+        try captureSession()
+        return prepared
+    }
+
+    private func performBrowserAdmission(checkCurrent: () throws -> Void) async throws -> ComputerUseBrowserHandbackRequirement {
+        guard browserAdmissionID == nil, let browserAdmission else { throw ComputerUseBrowserError.handbackContextLost }
+        let id = UUID(); browserAdmissionID = id
+        defer { if browserAdmissionID == id { browserAdmissionID = nil } }
+        do { return try await browserAdmission.admitBrowser(for: self, admissionID: id, checkCurrent: checkCurrent) }
+        catch let reason as ComputerUseBrowserError {
+            try Task.checkCancellation()
+            switch reason {
+            case .busy, .windowNotActive, .pageChanged, .documentUnresponsive, .signInWindowOpen:
+                throw ComputerUseBrowserResearchAdmissionPause(reason)
+            default: throw reason
+            }
+        }
+    }
+
+    func validateBrowserAdmission(_ id: UUID) throws {
+        try Task.checkCancellation()
+        guard !isRetired else { throw Failure.retired }
+        guard operationID != nil, browserAdmissionID == id else { throw ComputerUseBrowserError.handbackContextLost }
     }
 
     private func readCurrentCandidates(goal: ComputerUseBrowserGoalInput) async throws -> ComputerUseBrowserResultCandidates {

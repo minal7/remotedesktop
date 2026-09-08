@@ -40,7 +40,7 @@ enum ComputerUseBrowserNavigationRequest {
 }
 
 @MainActor
-final class ComputerUseBrowserNavigationTask {
+final class ComputerUseBrowserNavigationTask: ComputerUseBrowserResearchAdmitting {
     private let browser: ComputerUseOwnedBrowser
     private let journalDirectory: URL
     private let effectNamespace: String?
@@ -189,11 +189,24 @@ final class ComputerUseBrowserNavigationTask {
             return research
         }
         let input = try ComputerUseBrowserGoalInput(taskID: taskID, prompt: prompt, referenceDate: referenceDate, timeZoneIdentifier: timeZoneIdentifier)
+        guard research?.isOperating != true else { throw ComputerUseBrowserResearchTask.Failure.busy }
         let replacement = ComputerUseBrowserResearchTask(input: input, browser: browser, goalPlanner: goalPlanner,
-            resultPlanner: resultPlanner, navigationJournalDirectory: journalDirectory.appendingPathComponent("Research", isDirectory: true), mayAct: mayAct)
+            resultPlanner: resultPlanner, navigationJournalDirectory: journalDirectory.appendingPathComponent("Research", isDirectory: true),
+            browserAdmission: self, mayAct: mayAct)
         research?.retire()
         research = replacement
         return replacement
+    }
+
+    func admitBrowser(for owner: ComputerUseBrowserResearchTask, admissionID: UUID, checkCurrent: () throws -> Void) async throws -> ComputerUseBrowserHandbackRequirement {
+        try Task.checkCancellation(); try checkCurrent()
+        guard research === owner else { throw ComputerUseBrowserError.handbackContextLost }
+        try owner.validateBrowserAdmission(admissionID)
+        return try await browser.admitResearchSession(taskID: owner.taskID, assertAdmission: {
+            try checkCurrent()
+            guard self.research === owner else { throw ComputerUseBrowserError.handbackContextLost }
+            try owner.validateBrowserAdmission(admissionID)
+        })
     }
 
     func researchTask(taskID: String) -> ComputerUseBrowserResearchTask? { research?.taskID == taskID ? research : nil }
