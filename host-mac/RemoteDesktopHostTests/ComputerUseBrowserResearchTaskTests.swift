@@ -255,6 +255,7 @@ final class BrowserResearchGoalFixture: ComputerUseBrowserGoalPlanning {
 final class BrowserResearchResultFixture: ComputerUseBrowserResultPlanning {
     private(set) var inputs: [ComputerUseBrowserGoalInput] = []
     var beforeReply: (@MainActor () async -> Void)?
+    var selectedLinkLabel: String?
     func propose(goal: ComputerUseBrowserGoalInput, page: ComputerUseBrowserResultPageInput) async throws -> ComputerUseBrowserResultProposal {
         inputs.append(goal)
         if let beforeReply { await beforeReply() }
@@ -267,7 +268,12 @@ final class BrowserResearchResultFixture: ComputerUseBrowserResultPlanning {
             group = try XCTUnwrap(container["parent"] as? String)
         }
         let field: [String: Any] = ["kind":"title", "texts":[try XCTUnwrap(title["id"] as? String)]]
-        let candidate: [String: Any] = ["container":group, "fields":[field], "links":[]]
+        var links: [String] = []
+        if let selectedLinkLabel {
+            let link = try XCTUnwrap(records.first { $0["kind"] as? String == "link" && $0["label"] as? String == selectedLinkLabel })
+            links = [try XCTUnwrap(link["id"] as? String)]
+        }
+        let candidate: [String: Any] = ["container":group, "fields":[field], "links":links]
         let data = try JSONSerialization.data(withJSONObject: ["candidates":[candidate]])
         return try .decode(content: String(decoding: data, as: UTF8.self), input: page, goal: goal)
     }

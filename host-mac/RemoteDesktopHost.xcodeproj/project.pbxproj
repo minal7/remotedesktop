@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		FC552127F0C32B6F93C059BC /* ComputerUseBrowserGoalPlanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 154E7F0EDA005E7A53ABC0F2 /* ComputerUseBrowserGoalPlanner.swift */; };
+		ED70D5418FFBCD5DAF030564 /* ComputerUseBrowserResearchNavigation.swift in Sources */ = {isa = PBXBuildFile; fileRef = B48E6DB8409FE2D211E97796 /* ComputerUseBrowserResearchNavigation.swift */; };
 		074C0E375F9440C713CFB675 /* ComputerUseBrowserClarificationTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7DA873EA05726B4FB7EE789B /* ComputerUseBrowserClarificationTransport.swift */; };
 		DDAB70E0F89E196E2F2F5B35 /* ComputerUseBrowserResearchTask.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD1D35EC3C35438B2368C499 /* ComputerUseBrowserResearchTask.swift */; };
 		F2618D3FD03875CD851EC403 /* ComputerUseBrowserResultPlanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12D34E83DA992E0748E5BFAF /* ComputerUseBrowserResultPlanner.swift */; };
@@ -207,6 +208,7 @@
 
 /* Begin PBXFileReference section */
 		154E7F0EDA005E7A53ABC0F2 /* ComputerUseBrowserGoalPlanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseBrowserGoalPlanner.swift; sourceTree = "<group>"; };
+		B48E6DB8409FE2D211E97796 /* ComputerUseBrowserResearchNavigation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseBrowserResearchNavigation.swift; sourceTree = "<group>"; };
 		7DA873EA05726B4FB7EE789B /* ComputerUseBrowserClarificationTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseBrowserClarificationTransport.swift; sourceTree = "<group>"; };
 		AD1D35EC3C35438B2368C499 /* ComputerUseBrowserResearchTask.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseBrowserResearchTask.swift; sourceTree = "<group>"; };
 		12D34E83DA992E0748E5BFAF /* ComputerUseBrowserResultPlanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseBrowserResultPlanner.swift; sourceTree = "<group>"; };
@@ -532,6 +534,7 @@
 				F2B773EF76537ED2F15FB0A0 /* ComputerUseBrowserDOM.swift */,
 				8BB5BF4DDC8661BF90D3A538 /* ComputerUseBrowserNavigationTask.swift */,
 				154E7F0EDA005E7A53ABC0F2 /* ComputerUseBrowserGoalPlanner.swift */,
+				B48E6DB8409FE2D211E97796 /* ComputerUseBrowserResearchNavigation.swift */,
 				7DA873EA05726B4FB7EE789B /* ComputerUseBrowserClarificationTransport.swift */,
 				AD1D35EC3C35438B2368C499 /* ComputerUseBrowserResearchTask.swift */,
 				12D34E83DA992E0748E5BFAF /* ComputerUseBrowserResultPlanner.swift */,
@@ -890,6 +893,7 @@
 				145E4D8EB7756F17D37A0CBA /* ComputerUseBrowserDOM.swift in Sources */,
 				4C2907C9599BA45F37F3BFC3 /* ComputerUseBrowserNavigationTask.swift in Sources */,
 				FC552127F0C32B6F93C059BC /* ComputerUseBrowserGoalPlanner.swift in Sources */,
+				ED70D5418FFBCD5DAF030564 /* ComputerUseBrowserResearchNavigation.swift in Sources */,
 				074C0E375F9440C713CFB675 /* ComputerUseBrowserClarificationTransport.swift in Sources */,
 				DDAB70E0F89E196E2F2F5B35 /* ComputerUseBrowserResearchTask.swift in Sources */,
 				F2618D3FD03875CD851EC403 /* ComputerUseBrowserResultPlanner.swift in Sources */,

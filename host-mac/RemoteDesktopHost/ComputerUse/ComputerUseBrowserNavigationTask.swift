@@ -190,7 +190,7 @@ final class ComputerUseBrowserNavigationTask {
         }
         let input = try ComputerUseBrowserGoalInput(taskID: taskID, prompt: prompt, referenceDate: referenceDate, timeZoneIdentifier: timeZoneIdentifier)
         let replacement = ComputerUseBrowserResearchTask(input: input, browser: browser, goalPlanner: goalPlanner,
-            resultPlanner: resultPlanner, mayAct: mayAct)
+            resultPlanner: resultPlanner, navigationJournalDirectory: journalDirectory.appendingPathComponent("Research", isDirectory: true), mayAct: mayAct)
         research?.retire()
         research = replacement
         return replacement

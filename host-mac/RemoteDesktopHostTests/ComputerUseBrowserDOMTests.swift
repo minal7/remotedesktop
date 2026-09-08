@@ -3,6 +3,171 @@ import XCTest
 
 @MainActor
 final class ComputerUseBrowserDOMTests: XCTestCase {
+    func testResearchCandidateLinkRequiresSelectedCandidateCurrentGoalAndNativeDestination() async throws {
+        let fixture = try await DOMFixture(body: """
+            <article><h2>Concert Alpha</h2><a id='details' href='/alpha'>Alpha details</a><a href='/extra'>Extra</a></article>
+            <a href='/global'>Global</a><script>fetch('/signal').then(() => {
+                document.getElementById('details').href = '/changed-destination'; fetch('/changed');
+            });</script>
+            """, heldSignal: true)
+        defer { fixture.close() }
+        let goal = try browserResultGoal(), evidence = try await fixture.browser.observePage(document: fixture.document)
+        let proposal = try browserResultProposal(evidence, goal: goal)
+        let batch = try await fixture.browser.prepareResultCandidates(proposal, goal: goal, evidence: evidence)
+        let candidate = try XCTUnwrap(batch.candidates.first), selected = try XCTUnwrap(candidate.selectedLinkIDs.first)
+        for (id, link) in [("foreign", selected), (candidate.id, "missing"),
+            (candidate.id, try XCTUnwrap(evidence.page.links.first { $0.label == "Extra" }).id),
+            (candidate.id, try XCTUnwrap(evidence.page.links.first { $0.label == "Global" }).id)] {
+            do { _ = try await fixture.browser.prepareResultLinkNavigation(batch, candidateID: id, linkID: link, goal: goal); XCTFail("Only the selected candidate link may be prepared") }
+            catch { XCTAssertEqual(error as? ComputerUseBrowserResultError, .invalidProposal) }
+        }
+        do { _ = try await fixture.browser.prepareResultLinkNavigation(batch, candidateID: candidate.id, linkID: selected,
+            goal: browserResultGoal(prompt: "Find other tickets.")); XCTFail("A changed goal cannot reuse this reading") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserResultError, .goalChanged) }
+        _ = try await fixture.browser.prepareResultLinkNavigation(batch, candidateID: candidate.id, linkID: selected, goal: goal)
+        XCTAssertEqual(fixture.server.count("/alpha"), 0, "Preparation is not navigation")
+        try await fixture.wait { fixture.server.count("/signal") == 1 }
+        fixture.server.releaseHeldResponses()
+        try await fixture.wait { fixture.server.count("/changed") == 1 }
+        do { _ = try await fixture.browser.prepareResultLinkNavigation(batch, candidateID: candidate.id, linkID: selected, goal: goal); XCTFail("An invisible destination change invalidates the selection") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+        XCTAssertEqual(fixture.server.count("/alpha"), 0); XCTAssertEqual(fixture.server.count("/changed-destination"), 0)
+    }
+
+    func testResearchCandidateNavigationKeepsRootJournalAndReplaysOnlyHistoricalReceipt() async throws {
+        let fixture = try await DOMFixture(body: "<article><h2>Concert Alpha</h2><a href='/alpha'>Alpha details</a></article>")
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { fixture.close(); try? FileManager.default.removeItem(at: directory) }
+        let goal = try browserResultGoal(), reader = BrowserResearchResultFixture()
+        reader.selectedLinkLabel = "Alpha details"
+        let owner = ComputerUseBrowserResearchTask(input: goal, browser: fixture.browser, goalPlanner: BrowserResearchGoalFixture(),
+            resultPlanner: reader, navigationJournalDirectory: directory, mayAct: { true })
+        _ = try await owner.interpretGoal()
+        let batch = try await owner.readCandidates()
+        let candidate = try XCTUnwrap(batch.candidates.first), link = try XCTUnwrap(candidate.selectedLinkIDs.first)
+        let receipt = try await owner.openCandidateLink(candidateID: candidate.id, linkID: link)
+        XCTAssertEqual(receipt.document.taskID, goal.taskID)
+        XCTAssertEqual(receipt.document.operationID, ComputerUseTaskContract.digest(["browser-research-link-stage-v1", goal.taskID, goal.rootDigest, "0"]))
+        XCTAssertFalse(owner.hasPendingNavigation)
+        let replay = try await owner.openCandidateLink(candidateID: candidate.id, linkID: link)
+        XCTAssertEqual(replay, receipt); XCTAssertEqual(fixture.server.count("/alpha"), 1)
+        let noPending = try await owner.resumeCandidateNavigation()
+        XCTAssertNil(noPending)
+        do { _ = try await owner.revalidateCandidates(); XCTFail("Navigation must retire the old candidate reading") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserResearchTask.Failure, .interpretationRequired) }
+        let journal = try observedNavigationJournal(in: directory)
+        XCTAssertEqual(journal.promptDigest, goal.rootDigest); XCTAssertEqual(journal.statuses, [.verified])
+        XCTAssertEqual(owner.input, goal)
+        owner.retire()
+        do { _ = try await owner.openCandidateLink(candidateID: candidate.id, linkID: link); XCTFail("Retirement cannot issue another request") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserResearchTask.Failure, .retired) }
+        XCTAssertEqual(fixture.server.count("/alpha"), 1)
+    }
+
+    func testResearchCandidateNavigationRetainsUnsentStageThroughPauseAndDoesNotReplayUncertainAttempt() async throws {
+        for mode in ["resume", "uncertain"] {
+            var owner: ComputerUseBrowserResearchTask?, pauseBeforeDispatch = true
+            let fixture = try await DOMFixture(body: "<article><h2>Concert Alpha</h2><a href='/alpha'>Alpha details</a></article>", domScriptDidDispatch: { command in
+                if command == .validatePageLink, pauseBeforeDispatch, let owner, owner.hasPendingNavigation {
+                    pauseBeforeDispatch = false; owner.pause()
+                }
+            })
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { owner?.retire(); owner = nil; fixture.close(); try? FileManager.default.removeItem(at: directory) }
+            let goal = try browserResultGoal(), reader = BrowserResearchResultFixture()
+            reader.selectedLinkLabel = "Alpha details"
+            let research = ComputerUseBrowserResearchTask(input: goal, browser: fixture.browser, goalPlanner: BrowserResearchGoalFixture(),
+                resultPlanner: reader, navigationJournalDirectory: directory, mayAct: { true })
+            owner = research
+            let interpretation = try await research.interpretGoal()
+            let batch = try await research.readCandidates()
+            let candidate = try XCTUnwrap(batch.candidates.first), link = try XCTUnwrap(candidate.selectedLinkIDs.first)
+            do { _ = try await research.openCandidateLink(candidateID: candidate.id, linkID: link); XCTFail("Pause must stop the native dispatch") }
+            catch { XCTAssertTrue(error is CancellationError) }
+            XCTAssertTrue(research.hasPendingNavigation); XCTAssertFalse(research.isOperating)
+            let planned = try observedNavigationJournal(in: directory)
+            XCTAssertEqual(planned.statuses, [.planned]); XCTAssertEqual(fixture.server.count("/alpha"), 0)
+            try await research.resumeAfterUserControl()
+            do { _ = try await research.readCandidates(); XCTFail("Resolve the retained action before choosing another") }
+            catch { XCTAssertEqual(error as? ComputerUseBrowserResearchTask.Failure, .navigationPending) }
+            XCTAssertThrowsError(try research.issueQuestion(topic: .location, requirementIDs: [interpretation.proposal.requirements[0].id],
+                controllerID: "controller", controllerSessionID: "session"))
+            if mode == "uncertain" {
+                let store = try ComputerUseTaskJournalStore(directory: directory.appendingPathComponent("Observed Destinations"))
+                var attempted = planned; attempted.statuses = [.attempted]
+                try store.save(attempted, replacing: planned) // Simulated crash after the durable attempt, without a native receipt.
+                do { _ = try await research.resumeCandidateNavigation(); XCTFail("Missing receipt must not reopen the effect path") }
+                catch { XCTAssertEqual(error as? ComputerUseBrowserError, .observedNavigationUncertain) }
+                XCTAssertEqual(try observedNavigationJournal(in: directory).statuses, [.uncertain])
+                XCTAssertEqual(fixture.server.count("/alpha"), 0); XCTAssertTrue(research.hasPendingNavigation)
+            } else {
+                let result = try await research.resumeCandidateNavigation()
+                let resumed = try XCTUnwrap(result)
+                XCTAssertEqual(resumed.document.operationID, planned.stepIDs[0])
+                XCTAssertEqual(try observedNavigationJournal(in: directory).statuses, [.verified])
+                XCTAssertEqual(fixture.server.count("/alpha"), 1); XCTAssertFalse(research.hasPendingNavigation)
+            }
+        }
+    }
+
+    func testResearchCandidateNavigationKeepsStageSequenceAcrossAnExactClarificationAnswer() async throws {
+        let fixture = try await DOMFixture(body: "<article><h2>Concert Alpha</h2><a href='/form'>Alpha details</a></article>")
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { fixture.close(); try? FileManager.default.removeItem(at: directory) }
+        let goal = try browserResultGoal(), reader = BrowserResearchResultFixture()
+        reader.selectedLinkLabel = "Alpha details"
+        let navigation = ComputerUseBrowserNavigationTask(browser: fixture.browser, journalDirectory: directory)
+        let owner = try navigation.prepareResearchTask(taskID: goal.taskID, prompt: goal.prompt, goalPlanner: BrowserResearchGoalFixture(),
+            resultPlanner: reader, mayAct: { true }, referenceDate: Date(timeIntervalSince1970: 1_800_000_000), timeZoneIdentifier: goal.timeZoneIdentifier)
+        let interpretation = try await owner.interpretGoal()
+        let firstBatch = try await owner.readCandidates()
+        let first = try XCTUnwrap(firstBatch.candidates.first)
+        let firstReceipt = try await owner.openCandidateLink(candidateID: first.id, linkID: XCTUnwrap(first.selectedLinkIDs.first))
+        let question = try owner.issueQuestion(topic: .location, requirementIDs: [interpretation.proposal.requirements[0].id],
+            controllerID: "controller", controllerSessionID: "session")
+        let answer = "  Paris e\u{301}\n  "
+        _ = try owner.answerQuestion(questionID: question.id, answerTaskID: "answer", answer: answer, controllerID: "controller", controllerSessionID: "session")
+        _ = try await owner.interpretGoal()
+        let secondBatch = try await owner.readCandidates()
+        let second = try XCTUnwrap(secondBatch.candidates.first)
+        let secondReceipt = try await owner.openCandidateLink(candidateID: second.id, linkID: XCTUnwrap(second.selectedLinkIDs.first))
+        XCTAssertNotEqual(firstReceipt.document.operationID, secondReceipt.document.operationID)
+        XCTAssertEqual(secondReceipt.document.operationID, ComputerUseTaskContract.digest(["browser-research-link-stage-v1", goal.taskID, goal.rootDigest, "1"]))
+        XCTAssertEqual(owner.input.rootDigest, goal.rootDigest); XCTAssertEqual(owner.input.userTurns, [goal.prompt, answer])
+        XCTAssertEqual(owner.executionTaskID, "answer"); XCTAssertEqual(fixture.browser.taskID, goal.taskID)
+        XCTAssertEqual(fixture.server.count("/form"), 3)
+        let files = try FileManager.default.contentsOfDirectory(at: directory.appendingPathComponent("Research/Observed Destinations"), includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "json" }
+        XCTAssertEqual(files.count, 2)
+        for file in files {
+            let journal = try JSONDecoder().decode(ComputerUseTaskJournal.self, from: Data(contentsOf: file))
+            XCTAssertEqual(journal.promptDigest, goal.rootDigest); XCTAssertEqual(journal.statuses, [.verified])
+        }
+    }
+
+    func testResearchCandidateNavigationStorageFailureRetainsSameStageBeforeAnyLoad() async throws {
+        let fixture = try await DOMFixture(body: "<article><h2>Concert Alpha</h2><a href='/alpha'>Alpha details</a></article>")
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { fixture.close(); try? FileManager.default.removeItem(at: directory) }
+        try Data("Blocks the journal directory".utf8).write(to: directory)
+        let goal = try browserResultGoal(), reader = BrowserResearchResultFixture()
+        reader.selectedLinkLabel = "Alpha details"
+        let owner = ComputerUseBrowserResearchTask(input: goal, browser: fixture.browser, goalPlanner: BrowserResearchGoalFixture(),
+            resultPlanner: reader, navigationJournalDirectory: directory, mayAct: { true })
+        _ = try await owner.interpretGoal()
+        let batch = try await owner.readCandidates(), candidate = try XCTUnwrap(batch.candidates.first)
+        do { _ = try await owner.openCandidateLink(candidateID: candidate.id, linkID: XCTUnwrap(candidate.selectedLinkIDs.first)); XCTFail("An unsaved stage cannot load a page") }
+        catch { XCTAssertFalse(error is CancellationError) }
+        XCTAssertTrue(owner.hasPendingNavigation); XCTAssertEqual(fixture.server.count("/alpha"), 0)
+        do { _ = try await owner.openCandidateLink(candidateID: candidate.id, linkID: "different-link"); XCTFail("A failed write cannot replace the retained choice") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserResearchNavigation.Failure, .pendingStage) }
+        try FileManager.default.removeItem(at: directory)
+        let result = try await owner.resumeCandidateNavigation(), receipt = try XCTUnwrap(result)
+        XCTAssertEqual(receipt.document.operationID, ComputerUseTaskContract.digest(["browser-research-link-stage-v1", goal.taskID, goal.rootDigest, "0"]))
+        XCTAssertEqual(fixture.server.count("/alpha"), 1); XCTAssertFalse(owner.hasPendingNavigation)
+        XCTAssertEqual(try observedNavigationJournal(in: directory).statuses, [.verified])
+    }
+
     func testResearchOwnerReadsCanonicalGoalAndClearsStaleCandidateCache() async throws {
         let fixture = try await DOMFixture(body: """
             <article><h2>Concert Alpha</h2><p id='price'>USD 35</p></article>

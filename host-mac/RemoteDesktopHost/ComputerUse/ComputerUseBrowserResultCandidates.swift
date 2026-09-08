@@ -225,6 +225,21 @@ struct ComputerUseBrowserResultCandidates: Sendable, CustomStringConvertible, Cu
 }
 
 extension ComputerUseOwnedBrowser {
+    /// Drill into a link selected from one actual reading candidate. Exact
+    /// destinations remain inside native evidence and are revalidated by the
+    /// existing link-navigation boundary. This does not certify offer meaning.
+    func prepareResultLinkNavigation(_ batch: ComputerUseBrowserResultCandidates, candidateID: String, linkID: String,
+                                     goal: ComputerUseBrowserGoalInput) async throws -> ComputerUseBrowserNavigationTarget {
+        try Task.checkCancellation()
+        guard let candidate = batch.candidates.first(where: { $0.id == candidateID }),
+              candidate.selectedLinkIDs.contains(linkID), candidate.links.contains(where: { $0.id == linkID }) else {
+            throw ComputerUseBrowserResultError.invalidProposal
+        }
+        try await validateResultCandidates(batch, goal: goal)
+        try Task.checkCancellation()
+        return try await prepareLinkNavigation(linkID: linkID, evidence: batch.evidence)
+    }
+
     /// Preparation rereads the native page before returning source bindings.
     /// It neither follows links nor certifies semantic offer associations.
     func prepareResultCandidates(_ proposal: ComputerUseBrowserResultProposal, goal: ComputerUseBrowserGoalInput,

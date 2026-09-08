@@ -1,10 +1,11 @@
 import Foundation
 
 /// Owns the canonical goal revision and read/planning work for one browser
-/// research task. It does not compile actions or terminal research answers.
+/// research task, including retained result-link navigation. It does not
+/// compile the complete research action plan or terminal research answers.
 @MainActor
 final class ComputerUseBrowserResearchTask {
-    enum Failure: Error, Equatable { case busy, paused, retired, goalChanged, interpretationRequired, questionPending, browserRequired }
+    enum Failure: Error, Equatable { case busy, paused, retired, goalChanged, interpretationRequired, questionPending, browserRequired, navigationPending, navigationUnavailable }
     struct Interpretation: Sendable {
         let proposal: ComputerUseBrowserGoalProposal
         let scalars: ComputerUseBrowserScalarRequirements
@@ -15,6 +16,7 @@ final class ComputerUseBrowserResearchTask {
     private let resultPlanner: any ComputerUseBrowserResultPlanning
     private let mayAct: @MainActor () -> Bool
     private let clarification: ComputerUseBrowserGoalClarification
+    private let navigation: ComputerUseBrowserResearchNavigation?
     private var interpretation: Interpretation?
     private var latestCandidates: ComputerUseBrowserResultCandidates?
     private var session: ComputerUseBrowserHandbackRequirement?
@@ -31,16 +33,20 @@ final class ComputerUseBrowserResearchTask {
     /// session identity and the original goal keep taskID as their root.
     var executionTaskID: String { input.clarifications.last?.answerTaskID ?? taskID }
     var isOperating: Bool { operationID != nil }
+    var hasPendingNavigation: Bool { navigation?.pendingSelection != nil }
 
     init(input: ComputerUseBrowserGoalInput, browser: ComputerUseOwnedBrowser,
          goalPlanner: any ComputerUseBrowserGoalPlanning, resultPlanner: any ComputerUseBrowserResultPlanning,
+         navigationJournalDirectory: URL? = nil,
          mayAct: @escaping @MainActor () -> Bool, now: @escaping () -> Date = Date.init) {
         taskID = input.taskID; self.browser = browser; self.goalPlanner = goalPlanner; self.resultPlanner = resultPlanner
         self.mayAct = mayAct; clarification = .init(input: input, now: now)
+        navigation = navigationJournalDirectory.map { .init(input: input, browser: browser, journalDirectory: $0) }
     }
 
     func interpretGoal() async throws -> Interpretation {
         try requireIdle()
+        guard !hasPendingNavigation else { throw Failure.navigationPending }
         guard !hasQuestion else { throw Failure.questionPending }
         if let interpretation, interpretation.proposal.input.digest == input.digest { return interpretation }
         let captured = input
@@ -62,6 +68,7 @@ final class ComputerUseBrowserResearchTask {
     /// another proposal; the host still binds the live controller/session.
     func proposedQuestionRequest() throws -> ComputerUseBrowserQuestionRequest? {
         try requireIdle()
+        guard !hasPendingNavigation else { throw Failure.navigationPending }
         guard !hasQuestion else { throw Failure.questionPending }
         guard let interpretation, interpretation.proposal.input.digest == input.digest else { throw Failure.interpretationRequired }
         guard let question = interpretation.proposal.question else { return nil }
@@ -70,6 +77,7 @@ final class ComputerUseBrowserResearchTask {
 
     func readCandidates() async throws -> ComputerUseBrowserResultCandidates {
         try requireIdle()
+        guard !hasPendingNavigation else { throw Failure.navigationPending }
         guard !hasQuestion else { throw Failure.questionPending }
         guard let interpretation, interpretation.proposal.input.digest == input.digest,
               interpretation.proposal.disposition == .research else { throw Failure.interpretationRequired }
@@ -92,6 +100,7 @@ final class ComputerUseBrowserResearchTask {
     /// semantics or a complete answer. Failed validation retires the cache.
     func revalidateCandidates() async throws -> ComputerUseBrowserResultCandidates {
         try requireIdle()
+        guard !hasPendingNavigation else { throw Failure.navigationPending }
         guard !hasQuestion else { throw Failure.questionPending }
         guard let retained = latestCandidates else { throw Failure.interpretationRequired }
         let captured = input
@@ -106,12 +115,39 @@ final class ComputerUseBrowserResearchTask {
         return batch
     }
 
+    func openCandidateLink(candidateID: String, linkID: String) async throws -> ComputerUseBrowserNavigationReceipt {
+        try requireIdle()
+        guard !hasQuestion else { throw Failure.questionPending }
+        guard let navigation else { throw Failure.navigationUnavailable }
+        guard let interpretation, interpretation.proposal.input.digest == input.digest,
+              interpretation.proposal.disposition == .research else { throw Failure.interpretationRequired }
+        let captured = input, candidates = latestCandidates
+        let selection = ComputerUseBrowserResearchNavigation.Selection(goalRevision: captured.digest, candidateID: candidateID, linkID: linkID)
+        latestCandidates = nil
+        return try await operate { [self] in
+            try await navigation.open(selection, goal: captured, candidates: candidates, checkCurrent: { try self.checkCurrent(captured) })
+        }
+    }
+
+    /// Resume the retained stage before planning another action or question.
+    /// Its journal reconciles attempts; missing receipts never authorize replay.
+    func resumeCandidateNavigation() async throws -> ComputerUseBrowserNavigationReceipt? {
+        try requireIdle()
+        guard let navigation, let selection = navigation.pendingSelection else { return nil }
+        guard !hasQuestion else { throw Failure.questionPending }
+        let captured = input
+        return try await operate { [self] in
+            try await navigation.open(selection, goal: captured, candidates: nil, checkCurrent: { try self.checkCurrent(captured) })
+        }
+    }
+
     /// Controller identifiers must come from authenticated host transport.
     /// Browser scope is derived here from this owner's actual live session,
     /// never accepted as a client-supplied digest.
     func issueQuestion(topic: ComputerUseBrowserClarificationTopic, requirementIDs: [String],
                        controllerID: String, controllerSessionID: String) throws -> ComputerUseBrowserGoalClarification.Question {
         try requireIdle()
+        guard !hasPendingNavigation else { throw Failure.navigationPending }
         guard let interpretation, interpretation.proposal.input.digest == input.digest else { throw Failure.interpretationRequired }
         let context = try questionContext(controllerID: controllerID, controllerSessionID: controllerSessionID)
         let question = try clarification.issue(proposal: interpretation.proposal, topic: topic, requirementIDs: requirementIDs, context: context)
@@ -122,6 +158,7 @@ final class ComputerUseBrowserResearchTask {
     func answerQuestion(questionID: String, answerTaskID: String, answer: String,
                         controllerID: String, controllerSessionID: String) throws -> ComputerUseBrowserGoalInput {
         try requireIdle()
+        guard !hasPendingNavigation else { throw Failure.navigationPending }
         let context = try questionContext(controllerID: controllerID, controllerSessionID: controllerSessionID)
         let updated: ComputerUseBrowserGoalInput
         do { updated = try clarification.consume(questionID: questionID, answerTaskID: answerTaskID, answer: answer, context: context) }
@@ -193,7 +230,7 @@ final class ComputerUseBrowserResearchTask {
 
     func retire() {
         isRetired = true; controlEpoch = UUID(); latestCandidates = nil; interpretation = nil
-        clarification.retire(); hasQuestion = false; cancelOperation?()
+        clarification.retire(); navigation?.retire(); hasQuestion = false; cancelOperation?()
     }
 
     private func questionContext(controllerID: String, controllerSessionID: String) throws -> ComputerUseBrowserGoalClarification.Context {
