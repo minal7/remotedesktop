@@ -763,6 +763,7 @@ struct ComputerUseView: View {
             if message.author == .user { Spacer(minLength: 44) }
             VStack(alignment: .leading, spacing: 8) {
                 Text(message.text)
+                    .textSelection(.enabled)
                     .accessibilityLabel(message.author == .user ? "You: \(message.text)" : "AI: \(message.text)")
                 if let evidence = message.approvedActionEvidence {
                     Divider()

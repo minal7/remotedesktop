@@ -9,7 +9,7 @@ final class ComputerUseBrowserResearchEvidenceTests: XCTestCase {
         let fixture = try await ResearchDriverFixture.make(linkPlanner: planner, candidateBodyHTML: "<p>USD 40</p>")
         defer { fixture.close() }
         let result = try await fixture.start()
-        guard case .userInterventionRequired = result else { return XCTFail("Readings are not a completed answer") }
+        guard case .browserResearchProgress = result else { return XCTFail("Readings are not a completed answer") }
         let owner = try fixture.owner(), evidence = try owner.researchEvidence(for: owner.input)
         XCTAssertEqual(evidence.count, 2); XCTAssertEqual(planner.inputs.count, 3)
         XCTAssertEqual(fixture.server.count("/search?q=concerts"), 1); XCTAssertEqual(fixture.server.count("/details"), 1)

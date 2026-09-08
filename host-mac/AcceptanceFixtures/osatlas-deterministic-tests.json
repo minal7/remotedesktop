@@ -255,7 +255,9 @@
     "RemoteDesktopHostTests/ComputerUseBrowserFormPrefixTests",
     "RemoteDesktopHostTests/ComputerUseBrowserPendingChangeTests",
     "RemoteDesktopHostTests/ComputerUseNativeTextRecoveryTests",
-    "RemoteDesktopHostTests/ComputerUseBrowserUnsentInputTests"
+    "RemoteDesktopHostTests/ComputerUseBrowserUnsentInputTests",
+    "RemoteDesktopHostTests/ComputerUseBrowserResearchReportTests",
+    "RemoteDesktopHostTests/ComputerUseTests/test_managerResearchReportUsesResumableStatusAndReplaysWithoutAnotherReadOrSearch"
   ],
   "expectedTests": [
     "RemoteDesktopHostTests/AppleFoundationMCPPlannerTests/testCountedInputExpandsBeforeEffectAndTerminalQueries",
@@ -645,6 +647,12 @@
     "RemoteDesktopHostTests/ComputerUseBrowserResearchEvidenceTests/testRecallContractRejectsUnlistedHybridRepeatedAndStaleRequests",
     "RemoteDesktopHostTests/ComputerUseBrowserResearchEvidenceTests/testRecallLoopIsBoundedAndRetainsAllPreviouslyRequestedReadings",
     "RemoteDesktopHostTests/ComputerUseBrowserResearchEvidenceTests/testRecallRunsWithoutCurrentLinksAndExactCountingKeepsEveryRecalledPage",
+    "RemoteDesktopHostTests/ComputerUseBrowserResearchReportTests/testDriverReportsAllObservedCandidateTextAndRequirementsWithoutCompletingResearch",
+    "RemoteDesktopHostTests/ComputerUseBrowserResearchReportTests/testExcludedAnswerSourceDoesNotProduceAReportEvenWhenNavigationIsAllowed",
+    "RemoteDesktopHostTests/ComputerUseBrowserResearchReportTests/testProgressWireIsBoundedAndCannotBecomeTerminalOrUnorderedControlTraffic",
+    "RemoteDesktopHostTests/ComputerUseBrowserResearchReportTests/testReportBudgetRetainsWholeRequirementsAndPassagesAndRefusesSilentTruncation",
+    "RemoteDesktopHostTests/ComputerUseBrowserResearchReportTests/testReportCannotPublishAfterPageChangePauseOrNativeCallbackCancellation",
+    "RemoteDesktopHostTests/ComputerUseBrowserResearchReportTests/testReportURLsKeepExactAddressesOrOmitThemWithoutInventingSourceLinks",
     "RemoteDesktopHostTests/ComputerUseBrowserResearchTaskTests/testExpiredQuestionAndPauseCannotLeavePhantomPendingState",
     "RemoteDesktopHostTests/ComputerUseBrowserResearchTaskTests/testHostPreparationRetainsClockAndWiresPauseResumeStopAndReplacement",
     "RemoteDesktopHostTests/ComputerUseBrowserResearchTaskTests/testParentCancellationRetainsExclusionWithoutInventingACompletedInterpretation",
@@ -967,6 +975,7 @@
     "RemoteDesktopHostTests/ComputerUseTests/test_managerPreservesNewResearchWhenPreviousBrowserIsBusyBeforeAdmission",
     "RemoteDesktopHostTests/ComputerUseTests/test_managerRejectsEarlyPopupHandbackThenContinuesTheExactNativeGoal",
     "RemoteDesktopHostTests/ComputerUseTests/test_managerRejectsMalformedForgedSessionMismatchedAndCancelledAnswersWithoutFallback",
+    "RemoteDesktopHostTests/ComputerUseTests/test_managerResearchReportUsesResumableStatusAndReplaysWithoutAnotherReadOrSearch",
     "RemoteDesktopHostTests/ComputerUseTests/test_managerResearchResumesBeforeFirstPageWithoutReadmissionOrLosingGoal",
     "RemoteDesktopHostTests/ComputerUseTests/test_managerResumesClaimedAnswerWithTypedGoalAndRejectsRestartedReference",
     "RemoteDesktopHostTests/ComputerUseTests/test_managerResumesExactNativeGoalAfterHistoryLoginWithoutReloadOrOldTargets",

@@ -4972,6 +4972,54 @@ final class ComputerUseTests: XCTestCase {
         manager.stop()
     }
 
+    func test_managerResearchReportUsesResumableStatusAndReplaysWithoutAnotherReadOrSearch() async throws {
+        let source = try await ResearchDriverFixture.make(candidateBodyHTML: "<p>" + String(repeating: "Observed passage. ", count: 45) + "</p>")
+        defer { source.close() }
+        let executor = ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in nil },
+            desktopFactory: { _ in throw ComputerUseBrowserResearchDriver.Failure.invalidContinuation }, browserResearch: source.driver)
+        let url = temporaryLedgerURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let fixture = try browserControlFixture(executor: executor, ledgerURL: url)
+        defer { fixture.manager.stop(); fixture.browser.close() }
+        let prompt = makeEnvelope(id: ResearchDriverFixture.root, kind: .prompt, body: ResearchDriverFixture.prompt)
+        fixture.manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(fixture.manager.handle(prompt, channel: fixture.channel))
+        func reports(_ minimum: Int) async throws -> [ComputerUseTaskUpdate] {
+            for _ in 0..<200 {
+                let sent = await fixture.channel.sentMessages()
+                let updates = sent.filter { $0.kind == .status }.compactMap { try? ComputerUseTaskUpdate.decodeBody($0.body) }
+                    .filter { $0.researchProgress != nil }
+                if updates.count >= minimum { return updates }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            XCTFail("The host did not deliver the expected research status")
+            return []
+        }
+        let delivered = try await reports(1)
+        let first = try XCTUnwrap(delivered.first)
+        let progress = try XCTUnwrap(first.researchProgress)
+        XCTAssertGreaterThan(progress.text.count, 500)
+        XCTAssertEqual(first.outcome, .userInterventionRequired)
+        XCTAssertNotNil(ComputerUseStatusSignal.userInterventionMessage(from: first.text))
+        XCTAssertEqual(fixture.manager.activity, .paused)
+        XCTAssertNil(fixture.ledger.terminalOutcome(taskID: prompt.id))
+        let original = try XCTUnwrap(source.goal.inputs.first)
+        let reads = source.results.inputs.count
+        XCTAssertTrue(fixture.manager.handle(prompt, channel: fixture.channel))
+        let repeated = try await reports(2)
+        XCTAssertEqual(repeated.last?.researchProgress, progress)
+        XCTAssertEqual(source.results.inputs.count, reads)
+        let resume = try makeControlEnvelope(kind: .resume, taskID: prompt.id, revision: 1, hostEpoch: first.hostControlEpoch)
+        XCTAssertTrue(fixture.manager.handle(resume, channel: fixture.channel))
+        _ = try await reports(3)
+        XCTAssertTrue(source.policy.goals.allSatisfy { $0 == original })
+        XCTAssertEqual(source.server.count("/search?q=concerts"), 1)
+        XCTAssertEqual(source.results.inputs.count, reads + 1)
+        XCTAssertNil(fixture.ledger.terminalOutcome(taskID: prompt.id))
+        let sent = await fixture.channel.sentMessages()
+        XCTAssertFalse(sent.contains { $0.kind == .assistant })
+    }
+
     func test_executorRequestedUserInterventionPausesWithoutCompletingAndResumesTask() async throws {
         let guidance = "Sign in yourself, then tap Let AI continue."
         let trustedPrompt = "Continue the visible task"

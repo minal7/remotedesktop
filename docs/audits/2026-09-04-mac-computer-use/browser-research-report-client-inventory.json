@@ -1,0 +1,34 @@
+{
+  "selectors": [
+    "RemoteDesktopTests/ComputerUseSetupTests/test_hostControlEpochWireKeepsLegacyDefaultsAndExcludesHistoricalEvidence",
+    "RemoteDesktopTests/ComputerUseSetupTests/test_hostTakeoverSupersedesInFlightResumeAndRecoversWithoutReissuingIt",
+    "RemoteDesktopTests/ComputerUseSetupTests/test_localHandbackSupersedesPhonePauseAndRejectsOlderLifecycleTraffic",
+    "RemoteDesktopTests/ComputerUseSetupTests/test_hostEpochCannotAcknowledgeStopAndRecoveryKeepsItsOriginalEpoch",
+    "RemoteDesktopTests/ComputerUseSetupTests/test_hostEpochInvalidatesApprovalAndNewCardEchoesHandbackEpoch",
+    "RemoteDesktopTests/ComputerUseSetupTests/test_hostEpochScopeAndPersistenceFailureCannotUpgradeAnOldIntent",
+    "RemoteDesktopTests/ComputerUseSetupTests/test_hostEpochSupersessionRetainsActualAcknowledgementAcrossRecovery",
+    "RemoteDesktopTests/LocalComputerUseTests/testPendingPromptRebindPreservesExactTaskAcrossHostRestart",
+    "RemoteDesktopTests/ComputerUseSetupTests/test_versionedControlAcknowledgementsRejectOlderAndGenericStatuses",
+    "RemoteDesktopTests/ComputerUseSetupTests/test_resumeRejectsStaleInterventionButAcceptsCurrentPausedState",
+    "RemoteDesktopTests/ComputerUseSetupTests/test_versionedPausedAcknowledgementPreservesTypedInterventionGuidance",
+    "RemoteDesktopTests/ComputerUseSetupTests/test_safetyInterventionClearsApprovalAndRestoresDurablePause",
+    "RemoteDesktopTests/ComputerUseSetupTests/testResearchProgressKeepsFullFindingsDeduplicatesAndRejectsStaleOrMisroutedDelivery",
+    "RemoteDesktopTests/ComputerUseSetupTests/testResearchProgressCanBeReplayedAfterPhoneRecoveryWithoutReplacingThePendingPrompt"
+  ],
+  "expectedTests": [
+    "RemoteDesktopTests/ComputerUseSetupTests/testResearchProgressCanBeReplayedAfterPhoneRecoveryWithoutReplacingThePendingPrompt",
+    "RemoteDesktopTests/ComputerUseSetupTests/testResearchProgressKeepsFullFindingsDeduplicatesAndRejectsStaleOrMisroutedDelivery",
+    "RemoteDesktopTests/ComputerUseSetupTests/test_hostControlEpochWireKeepsLegacyDefaultsAndExcludesHistoricalEvidence",
+    "RemoteDesktopTests/ComputerUseSetupTests/test_hostEpochCannotAcknowledgeStopAndRecoveryKeepsItsOriginalEpoch",
+    "RemoteDesktopTests/ComputerUseSetupTests/test_hostEpochInvalidatesApprovalAndNewCardEchoesHandbackEpoch",
+    "RemoteDesktopTests/ComputerUseSetupTests/test_hostEpochScopeAndPersistenceFailureCannotUpgradeAnOldIntent",
+    "RemoteDesktopTests/ComputerUseSetupTests/test_hostEpochSupersessionRetainsActualAcknowledgementAcrossRecovery",
+    "RemoteDesktopTests/ComputerUseSetupTests/test_hostTakeoverSupersedesInFlightResumeAndRecoversWithoutReissuingIt",
+    "RemoteDesktopTests/ComputerUseSetupTests/test_localHandbackSupersedesPhonePauseAndRejectsOlderLifecycleTraffic",
+    "RemoteDesktopTests/ComputerUseSetupTests/test_resumeRejectsStaleInterventionButAcceptsCurrentPausedState",
+    "RemoteDesktopTests/ComputerUseSetupTests/test_safetyInterventionClearsApprovalAndRestoresDurablePause",
+    "RemoteDesktopTests/ComputerUseSetupTests/test_versionedControlAcknowledgementsRejectOlderAndGenericStatuses",
+    "RemoteDesktopTests/ComputerUseSetupTests/test_versionedPausedAcknowledgementPreservesTypedInterventionGuidance",
+    "RemoteDesktopTests/LocalComputerUseTests/testPendingPromptRebindPreservesExactTaskAcrossHostRestart"
+  ]
+}

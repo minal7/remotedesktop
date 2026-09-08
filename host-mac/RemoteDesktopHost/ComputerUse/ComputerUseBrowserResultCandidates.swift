@@ -362,6 +362,57 @@ struct ComputerUseBrowserLinkSelectionInput: Equatable, Sendable, CustomStringCo
 }
 
 extension ComputerUseOwnedBrowser {
+    /// Fresh observations for the user's progress update, without promoting
+    /// model grouping, scalar comparisons or historical readings to success.
+    func prepareResearchReport(_ batch: ComputerUseBrowserResultCandidates, goal: ComputerUseBrowserGoalInput,
+                               policy: ComputerUseBrowserAnswerSourcePolicy) async throws -> ComputerUseBrowserResearchReport? {
+        do {
+            guard batch.documentAnswerSourceStatus == .permitted else { return nil }
+            try await validateResultAnswerSource(batch, goal: goal, policy: policy)
+            guard let interpretation = batch.goalInterpretation, interpretation.input == goal,
+                  interpretation.disposition == .research, !batch.candidates.isEmpty else { return nil }
+            let requirements = try interpretation.requirements.map { requirement -> String in
+                guard let source = interpretation.source(of: requirement) else { throw ComputerUseBrowserResultError.goalChanged }
+                return source
+            }
+            var passages: [ComputerUseBrowserResearchReport.Passage] = []
+            for candidate in batch.candidates {
+                let text = candidate.texts.map(\.text).joined(separator: "\n")
+                var links: [String] = []
+                for id in candidate.selectedLinkIDs.prefix(2) {
+                    guard let native = batch.evidence.page.links.first(where: { $0.id == id }),
+                          let url = URL(string: native.destination), policy.permitsEvidenceFrom(url),
+                          let exported = ComputerUseBrowserResearchReport.reportableURL(url) else { continue }
+                    // Verify this exact retained anchor and its destination.
+                    // Preparation does not open it, submit a form or infer
+                    // that its destination contains the quoted page passage.
+                    do {
+                        _ = try await prepareResultLinkNavigation(batch, candidateID: candidate.id, linkID: id, goal: goal)
+                    } catch ComputerUseBrowserError.linkNavigationUnavailable { continue }
+                      catch ComputerUseBrowserError.sourceNotAllowed { continue }
+                    try Task.checkCancellation()
+                    if !links.contains(exported) { links.append(exported) }
+                }
+                passages.append(.init(text: text, detailsLinks: links, omittedLinks: candidate.selectedLinkIDs.count - links.count))
+            }
+            let report = ComputerUseBrowserResearchReport(rootTaskID: goal.taskID, goalRevision: goal.digest, readingIdentity: batch.requirementAssessmentIdentity,
+                site: ComputerUseBrowserSite.displayName(for: batch.evidence.document.committedURL),
+                sourceLink: ComputerUseBrowserResearchReport.reportableURL(batch.evidence.document.committedURL),
+                passages: passages, surroundingText: batch.surroundingTexts.map(\.text).joined(separator: "\n"),
+                requirements: requirements, incompleteReading: batch.sourceTruncated || batch.omittedStructure
+                    || batch.omittedEmbeddedContent || batch.omittedControls || batch.projectionOmittedRecords
+                    || batch.candidates.contains { !$0.unprojectedTextIDs.isEmpty || !$0.unprojectedLinkIDs.isEmpty })
+            try await validateResultAnswerSource(batch, goal: goal, policy: policy)
+            try Task.checkCancellation()
+            return report
+        } catch {
+            // Retain the research owner's operation slot until any native
+            // DOM callback outliving cancellation has actually finished.
+            await joinDOMCompletion(document: batch.evidence.document)
+            throw error
+        }
+    }
+
     /// Drill into a link selected from one actual reading candidate. Exact
     /// destinations remain inside native evidence and are revalidated by the
     /// existing link-navigation boundary. This does not certify offer meaning.

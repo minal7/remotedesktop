@@ -245,6 +245,8 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
               retained.owner.executionTaskID == taskID else { throw RoutingError.missingContinuation }
         try retained.owner.validateDriverContinuation(retained.input)
         switch result {
+        case .browserResearchProgress(let report):
+            try retained.owner.validateProgressReport(report)
         case .browserClarificationRequired(let request):
             guard request.taskID == retained.owner.taskID, request.inputDigest == retained.input.digest,
                   let expected = try? retained.owner.proposedQuestionRequest(), expected == request else {
@@ -260,6 +262,7 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
 
     private func rejectUnroutedResearchQuestion(_ result: ComputerUseExecutionResult) throws {
         if case .browserClarificationRequired = result { throw RoutingError.missingContinuation }
+        if case .browserResearchProgress = result { throw RoutingError.missingContinuation }
     }
 
     func clarification(taskID: String) throws -> ComputerUseNativeTextExecutor.Clarification? {

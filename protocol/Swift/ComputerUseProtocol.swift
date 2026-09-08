@@ -635,6 +635,31 @@ public struct ComputerUseApprovedActionEvidence: Codable, Equatable, Sendable {
     }
 }
 
+/// Observed research passages, never a terminal answer or authority to act.
+/// Kept separate from the short intervention signal so findings are not cut
+/// off by its 500-character limit. Render the text literally, not as Markdown.
+public struct ComputerUseResearchProgress: Codable, Equatable, Sendable {
+    public static let maximumTextBytes = 16 * 1_024
+    public let reportID: String
+    public let text: String
+
+    public init(reportID: String, text: String) throws {
+        guard reportID.utf8.count == 64,
+              reportID.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }),
+              !text.isEmpty, text.utf8.count <= Self.maximumTextBytes else {
+            throw ComputerUsePayloadError.invalidResearchProgress
+        }
+        self.reportID = reportID; self.text = text
+    }
+
+    private enum CodingKeys: String, CodingKey { case reportID, text }
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(reportID: values.decode(String.self, forKey: .reportID),
+            text: values.decode(String.self, forKey: .text))
+    }
+}
+
 /// Correlates assistant/status traffic with the stable privileged prompt ID.
 /// A delayed lifecycle replay cannot replace a newer task, while optional
 /// action evidence can still annotate its original request.
@@ -658,6 +683,8 @@ public struct ComputerUseTaskUpdate: Codable, Equatable, Sendable {
     /// Carried in a status envelope. It updates historical evidence only and
     /// cannot acknowledge controls, finish a task or open an approval flow.
     public let isApprovedActionEvidenceOnly: Bool
+    /// Only valid on a scoped, ordered, resumable intervention status.
+    public let researchProgress: ComputerUseResearchProgress?
 
     public init(
         taskID: String,
@@ -667,7 +694,8 @@ public struct ComputerUseTaskUpdate: Codable, Equatable, Sendable {
         outcome: ComputerUseTerminalOutcome? = nil,
         clarification: ComputerUseClarificationReference? = nil,
         approvedActionEvidence: ComputerUseApprovedActionEvidence? = nil,
-        isApprovedActionEvidenceOnly: Bool = false
+        isApprovedActionEvidenceOnly: Bool = false,
+        researchProgress: ComputerUseResearchProgress? = nil
     ) {
         self.taskID = taskID
         self.text = String(text.prefix(8_000))
@@ -677,6 +705,7 @@ public struct ComputerUseTaskUpdate: Codable, Equatable, Sendable {
         self.clarification = outcome == .userInterventionRequired && clarification?.taskID == taskID ? clarification : nil
         self.approvedActionEvidence = approvedActionEvidence
         self.isApprovedActionEvidenceOnly = isApprovedActionEvidenceOnly
+        self.researchProgress = researchProgress
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -688,6 +717,7 @@ public struct ComputerUseTaskUpdate: Codable, Equatable, Sendable {
         case clarification
         case approvedActionEvidence
         case isApprovedActionEvidenceOnly
+        case researchProgress
     }
 
     public init(from decoder: Decoder) throws {
@@ -713,6 +743,8 @@ public struct ComputerUseTaskUpdate: Codable, Equatable, Sendable {
         clarification = outcome == .userInterventionRequired && reference?.taskID == taskID ? reference : nil
         approvedActionEvidence = try values.decodeIfPresent(ComputerUseApprovedActionEvidence.self, forKey: .approvedActionEvidence)
         isApprovedActionEvidenceOnly = try values.decodeIfPresent(Bool.self, forKey: .isApprovedActionEvidenceOnly) ?? false
+        researchProgress = try values.decodeIfPresent(ComputerUseResearchProgress.self, forKey: .researchProgress)
+        if researchProgress != nil && reference != nil { throw ComputerUsePayloadError.invalidResearchProgress }
         if isApprovedActionEvidenceOnly && (rawOutcome != nil || reference != nil) {
             throw ComputerUsePayloadError.invalidActionEvidence
         }
@@ -732,9 +764,18 @@ public struct ComputerUseTaskUpdate: Codable, Equatable, Sendable {
         try values.encodeIfPresent(clarification, forKey: .clarification)
         try values.encodeIfPresent(approvedActionEvidence, forKey: .approvedActionEvidence)
         if isApprovedActionEvidenceOnly { try values.encode(true, forKey: .isApprovedActionEvidenceOnly) }
+        try values.encodeIfPresent(researchProgress, forKey: .researchProgress)
     }
 
     private func validateActionEvidenceUse() throws {
+        if researchProgress != nil {
+            guard !isApprovedActionEvidenceOnly, clarification == nil,
+                  outcome == .userInterventionRequired,
+                  appliedControlRevision != nil, hostControlEpoch != nil,
+                  ComputerUseStatusSignal.userInterventionMessage(from: text) != nil else {
+                throw ComputerUsePayloadError.invalidResearchProgress
+            }
+        }
         guard !isApprovedActionEvidenceOnly || (approvedActionEvidence != nil && text.isEmpty
             && appliedControlRevision == nil && hostControlEpoch == nil && outcome == nil && clarification == nil) else {
             throw ComputerUsePayloadError.invalidActionEvidence
@@ -1000,4 +1041,5 @@ private enum ComputerUsePayloadError: Error {
     case invalidIdentifier
     case payloadTooLarge
     case invalidActionEvidence
+    case invalidResearchProgress
 }

@@ -3281,6 +3281,8 @@ enum ComputerUseExecutionResult: Equatable {
     /// by the person (for example, entering account credentials). The manager
     /// preserves the task context and pauses all automation until Resume.
     case userInterventionRequired(String)
+    /// A current reading to review while the original research remains paused.
+    case browserResearchProgress(ComputerUseBrowserResearchReport)
     case approvalRequired(
         message: String,
         action: ComputerUsePredictedAction,
@@ -3889,7 +3891,7 @@ final class HostComputerUseManager: ObservableObject {
     /// bounded instruction lets a duplicate accepted Prompt replay the same
     /// typed handoff instead of replacing useful sign-in guidance with a
     /// generic pause explanation.
-    private var lastUserIntervention: (taskID: String, guidance: String)?
+    private var lastUserIntervention: (taskID: String, guidance: String, report: ComputerUseResearchProgress?)?
     private var currentExecutionToken: UUID?
     private var pendingApproval: PendingApproval?
     private var activeVisualApprovalContinuation:
@@ -4985,15 +4987,18 @@ final class HostComputerUseManager: ObservableObject {
     }
 
     private func pauseForLocalIntervention(_ context: ExecutionContext, guidance: String? = nil,
-                                            requiresBrowserHandback: Bool = false) {
+                                            requiresBrowserHandback: Bool = false,
+                                            report: ComputerUseResearchProgress? = nil) {
         let context = context.retainingBrowserHandback(context.browserHandbackRequirement
             ?? (requiresBrowserHandback ? tools.ownedBrowserHandbackRequirement(taskID: context.envelope.id, required: true) : nil))
         actionGate.endAutomation(allowsActions: false)
         let persisted = persistLocalControl(.pause, context: context)
-        pauseExecution(context, guidance: persisted ? guidance : Self.localControlPersistenceFailureGuidance)
+        pauseExecution(context, guidance: persisted ? guidance : Self.localControlPersistenceFailureGuidance,
+            report: persisted ? report : nil)
     }
 
-    private func pauseExecution(_ context: ExecutionContext, guidance: String? = nil) {
+    private func pauseExecution(_ context: ExecutionContext, guidance: String? = nil,
+                                report: ComputerUseResearchProgress? = nil) {
         let context = context.retainingBrowserHandback(context.browserHandbackRequirement
             ?? (context.hasStarted ? tools.ownedBrowserHandbackRequirement(taskID: context.envelope.id) : nil))
         let guidance = guidance ?? Self.userInterventionGuidance
@@ -5008,7 +5013,7 @@ final class HostComputerUseManager: ObservableObject {
             if guidance == Self.userInterventionGuidance {
                 sendStatus("paused", replyingTo: context.envelope, channel: context.channel)
             } else {
-                sendUserInterventionStatus(guidance, replyingTo: context.envelope, channel: context.channel)
+                sendUserInterventionStatus(guidance, replyingTo: context.envelope, channel: context.channel, report: report)
             }
             return
         }
@@ -5033,7 +5038,8 @@ final class HostComputerUseManager: ObservableObject {
         sendUserInterventionStatus(
             guidance,
             replyingTo: context.envelope,
-            channel: context.channel)
+            channel: context.channel,
+            report: report)
     }
 
     private func resumeExecution(
@@ -5058,6 +5064,7 @@ final class HostComputerUseManager: ObservableObject {
         }
 
         self.pausedExecution = nil
+        lastUserIntervention = nil
         actionGate.setAllowsActions(true)
         actionGate.endAutomation(allowsActions: true)
         activity = .idle
@@ -6034,7 +6041,8 @@ final class HostComputerUseManager: ObservableObject {
                         sendUserInterventionStatus(
                             guidance,
                             replyingTo: envelope,
-                            channel: channel)
+                            channel: channel,
+                            report: lastUserIntervention?.taskID == envelope.id ? lastUserIntervention?.report : nil)
                     case .awaitingApproval:
                         sendStatus(
                             "Waiting for your approval before continuing…",
@@ -6790,6 +6798,15 @@ final class HostComputerUseManager: ObservableObject {
             activity = .idle
             sendStatus("ready", replyingTo: envelope, channel: context.channel)
 
+        case .browserResearchProgress(let report):
+            guard executor is any ComputerUseBrowserResearchContinuing,
+                  let owner = tools.ownedBrowserResearch(taskID: report.rootTaskID),
+                  owner.executionTaskID == envelope.id, let progress = report.progress else {
+                throw ComputerUseBrowserClarificationTransport.Failure.invalidOwner
+            }
+            try owner.validateProgressReport(report)
+            pauseForLocalIntervention(context, guidance: ComputerUseBrowserResearchReport.guidance, report: progress)
+
         case .userInterventionRequired(let message):
             // This is not a terminal assistant response and must not complete
             // the idempotency ledger. Preserve the exact prompt so the user
@@ -6918,20 +6935,26 @@ final class HostComputerUseManager: ObservableObject {
     private func sendUserInterventionStatus(
         _ guidance: String,
         replyingTo envelope: ComputerUseEnvelope,
-        channel: any HostComputerUseChannel
+        channel: any HostComputerUseChannel,
+        report: ComputerUseResearchProgress? = nil
     ) {
         let signal = ComputerUseStatusSignal.userIntervention(guidance)
         if let boundedGuidance = ComputerUseStatusSignal
             .userInterventionMessage(from: signal) {
             lastUserIntervention = (
                 taskID: envelope.id,
-                guidance: boundedGuidance)
+                guidance: boundedGuidance,
+                report: report)
         }
-        sendStatus(
-            signal,
+        send(
+            kind: .status,
+            body: signal,
             replyingTo: envelope,
             channel: channel,
-            outcome: .userInterventionRequired)
+            outcome: .userInterventionRequired,
+            researchProgress: report,
+            evidenceDeliveryGeneration: report == nil ? nil :
+                (transport: transportGeneration, authorization: actionEvidenceAuthorizationGeneration))
     }
 
     /// A terminal reply is authoritative only after its first-result-wins
@@ -7022,6 +7045,7 @@ final class HostComputerUseManager: ObservableObject {
         channel: any HostComputerUseChannel,
         outcome: ComputerUseTerminalOutcome? = nil,
         clarification: ComputerUseClarificationReference? = nil,
+        researchProgress: ComputerUseResearchProgress? = nil,
         isApprovedActionEvidenceOnly: Bool = false,
         evidenceDeliveryGeneration: (transport: UInt64, authorization: UInt64)? = nil
     ) {
@@ -7043,7 +7067,8 @@ final class HostComputerUseManager: ObservableObject {
                 hostControlEpoch: isApprovedActionEvidenceOnly ? nil : taskLedger.hostControlEpoch(taskID: envelope.id),
                 outcome: needsIdentityRecovery && kind == .assistant ? .unableToComplete : outcome,
                 clarification: needsIdentityRecovery ? nil : clarification, approvedActionEvidence: evidence,
-                isApprovedActionEvidenceOnly: isApprovedActionEvidenceOnly).encodedBody()) ?? responseBody
+                isApprovedActionEvidenceOnly: isApprovedActionEvidenceOnly,
+                researchProgress: needsIdentityRecovery ? nil : researchProgress).encodedBody()) ?? responseBody
         default:
             wireBody = body
         }

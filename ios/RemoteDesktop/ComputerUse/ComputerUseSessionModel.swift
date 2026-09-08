@@ -45,6 +45,7 @@ final class ComputerUseSessionModel: ObservableObject {
         let text: String
         let createdAt: Date
         var approvedActionEvidence: ComputerUseApprovedActionEvidence? = nil
+        var researchProgress: ComputerUseResearchProgress? = nil
     }
 
     enum State: Equatable {
@@ -854,7 +855,7 @@ final class ComputerUseSessionModel: ObservableObject {
             switch envelope.kind {
             case .assistant:
                 let update = try? ComputerUseTaskUpdate.decodeBody(envelope.body)
-                if update?.isApprovedActionEvidenceOnly == true { continue }
+                if update?.isApprovedActionEvidenceOnly == true || update?.researchProgress != nil { continue }
                 if let update { consumeActionEvidence(update, from: envelope) }
                 let trimmed = envelope.body.trimmingCharacters(in: .whitespacesAndNewlines)
                 if update == nil && (trimmed.first == "{" || trimmed.first == "[") { continue }
@@ -911,6 +912,16 @@ final class ComputerUseSessionModel: ObservableObject {
                     retryWireBody = nil
                     recordTaskProgress(update.text, outcome: update.outcome)
                     applyHostStatus(update.text, outcome: update.outcome)
+                    if let report = update.researchProgress, hasHostControlScope(envelope) {
+                        // Accepted only after the current task and both control
+                        // clocks. Repeated delivery gets one literal bubble;
+                        // it never clears the pending prompt or creates an answer.
+                        let id = "research:\(update.taskID):\(report.reportID)"
+                        if !messages.contains(where: { $0.id == id }) {
+                            messages.append(ChatMessage(id: id, author: .assistant, text: report.text,
+                                createdAt: envelope.createdAt, researchProgress: report))
+                        }
+                    }
                 } else {
                     let trimmed = envelope.body.trimmingCharacters(in: .whitespacesAndNewlines)
                     if trimmed.first == "{" || trimmed.first == "[" { continue }
@@ -1598,6 +1609,7 @@ final class ComputerUseSessionModel: ObservableObject {
         let assistant = messages[messages.count - 1]
         guard priorUser.author == .user,
               assistant.author == .assistant,
+              assistant.researchProgress == nil,
               assistant.text
                 .trimmingCharacters(in: .whitespacesAndNewlines)
                 .hasSuffix("?") else {

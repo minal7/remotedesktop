@@ -292,7 +292,14 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                     try await planning.selectLink(goal: goal, candidates: candidates, history: history, evidence: owner.researchEvidence(for: goal))
                 })
                 try check()
-                guard let choice else { return selectionRequired }
+                guard let choice else {
+                    if let report = try await owner.prepareProgressReport() {
+                        try check()
+                        return .browserResearchProgress(report)
+                    }
+                    try check()
+                    return selectionRequired
+                }
                 let receipt = try await owner.openCandidateLink(candidateID: choice.candidateID, linkID: choice.linkID)
                 guard try record(.resultLink, receipt.document) else { return reconciliationRequired }
             }

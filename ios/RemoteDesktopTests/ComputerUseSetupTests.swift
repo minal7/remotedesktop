@@ -4,6 +4,71 @@ import XCTest
 
 @MainActor
 final class ComputerUseSetupTests: XCTestCase {
+    func testResearchProgressKeepsFullFindingsDeduplicatesAndRejectsStaleOrMisroutedDelivery() async throws {
+        let store = InMemoryComputerUsePendingPromptStore(), channel = FakeComputerUseSessionChannel()
+        let (model, prompt) = try await epochClientFixture(store: store, channel: channel)
+        defer { model.stop() }
+        let report = try ComputerUseResearchProgress(reportID: String(repeating: "a", count: 64),
+            text: String(repeating: "Observed page text 😀\n", count: 70) + "Still to verify: all requested dates, prices and fees.")
+        let signal = ComputerUseStatusSignal.userIntervention("Review the findings, then choose Resume.")
+        let update = ComputerUseTaskUpdate(taskID: prompt.id, text: signal, appliedControlRevision: 0,
+            hostControlEpoch: 1, outcome: .userInterventionRequired, researchProgress: report)
+        // A valid payload on the terminal envelope must never end this task.
+        var acknowledged = await channel.acknowledgedEnvelopeCount()
+        try await channel.enqueueHostEnvelope(kind: .assistant, body: update.encodedBody())
+        await waitUntilAsync { await channel.acknowledgedEnvelopeCount() > acknowledged }
+        XCTAssertTrue(model.hasActivePrompt); XCTAssertTrue(model.messages.allSatisfy { $0.researchProgress == nil })
+        for _ in 0..<2 { try await channel.enqueueHostEnvelope(kind: .status, body: update.encodedBody()) }
+        await waitUntilAsync { await channel.acknowledgedEnvelopeCount() >= acknowledged + 3 }
+        XCTAssertEqual(model.messages.filter { $0.researchProgress != nil }.map(\.text), [report.text])
+        XCTAssertEqual(model.state, .paused); XCTAssertTrue(model.hasActivePrompt)
+        XCTAssertEqual(model.composerMode, .request)
+        XCTAssertEqual(store.load(hostID: "HOST-ID", pairingCode: "123456")?.messageID, prompt.id)
+        model.resumeAI()
+        _ = await waitForSentMessage(kind: .resume, channel: channel)
+        try await channel.enqueueHostEnvelope(kind: .status, body: ComputerUseTaskUpdate(taskID: prompt.id,
+            text: "working", appliedControlRevision: 1, hostControlEpoch: 1).encodedBody())
+        await waitUntil { model.statusText == "Your Mac is working on it…" }
+        let other = try ComputerUseResearchProgress(reportID: String(repeating: "b", count: 64), text: "Stale findings")
+        let stale = ComputerUseTaskUpdate(taskID: prompt.id, text: signal, appliedControlRevision: 0,
+            hostControlEpoch: 1, outcome: .userInterventionRequired, researchProgress: other)
+        acknowledged = await channel.acknowledgedEnvelopeCount()
+        try await channel.enqueueHostEnvelope(kind: .status, body: stale.encodedBody())
+        try await channel.enqueueHostEnvelope(kind: .status, body: stale.encodedBody(), senderID: "OTHER-HOST")
+        let foreign = ComputerUseTaskUpdate(taskID: "other-task", text: signal, appliedControlRevision: 100,
+            hostControlEpoch: 100, outcome: .userInterventionRequired, researchProgress: other)
+        try await channel.enqueueHostEnvelope(kind: .status, body: foreign.encodedBody())
+        await waitUntilAsync { await channel.acknowledgedEnvelopeCount() >= acknowledged + 3 }
+        XCTAssertEqual(model.state, .working)
+        XCTAssertEqual(model.messages.filter { $0.researchProgress != nil }.map(\.text), [report.text])
+        XCTAssertTrue(model.hasActivePrompt)
+    }
+
+    func testResearchProgressCanBeReplayedAfterPhoneRecoveryWithoutReplacingThePendingPrompt() async throws {
+        let store = InMemoryComputerUsePendingPromptStore(), channel = FakeComputerUseSessionChannel()
+        let (model, prompt) = try await epochClientFixture(store: store, channel: channel)
+        defer { model.stop() }
+        let report = try ComputerUseResearchProgress(reportID: String(repeating: "c", count: 64), text: "Quoted findings. The original task is pending.")
+        let update = ComputerUseTaskUpdate(taskID: prompt.id,
+            text: ComputerUseStatusSignal.userIntervention("Review findings and Resume."), appliedControlRevision: 0,
+            hostControlEpoch: 2, outcome: .userInterventionRequired, researchProgress: report)
+        try await channel.enqueueHostEnvelope(kind: .status, body: update.encodedBody())
+        await waitUntil { model.state == .paused }
+        model.stop()
+        let recovery = FakeComputerUseSessionChannel()
+        let restored = ComputerUseSessionModel(hostName: "Mac", pairingCode: "123456", hostID: "HOST-ID",
+            sessionID: "session-1", pendingStore: store, channel: recovery)
+        defer { restored.stop() }
+        restored.start()
+        try await recovery.enqueueHostEnvelope(kind: .status, body: update.encodedBody())
+        await waitUntil { restored.messages.contains { $0.researchProgress == report } }
+        XCTAssertEqual(restored.state, .paused); XCTAssertTrue(restored.hasActivePrompt)
+        restored.resumeAI()
+        let sent = await waitForSentMessage(kind: .resume, channel: recovery)
+        let control = try ComputerUseControlRequest.decodeBody(XCTUnwrap(sent).body)
+        XCTAssertEqual(control.taskID, prompt.id); XCTAssertEqual(control.observedHostControlEpoch, 2)
+    }
+
     func test_hostControlEpochWireKeepsLegacyDefaultsAndExcludesHistoricalEvidence() throws {
         let legacy = try ComputerUseControlRequest.decodeBody(#"{"version":1,"taskID":"task","revision":9}"#)
         XCTAssertNil(legacy.observedHostControlEpoch)

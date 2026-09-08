@@ -680,6 +680,32 @@ final class ComputerUseBrowserResearchTask {
         return batch
     }
 
+    /// User-visible partial findings from the current permitted document.
+    /// No new planning, navigation, completion claim or historical promotion.
+    func validateProgressReport(_ report: ComputerUseBrowserResearchReport) throws {
+        try requireIdle()
+        try checkCurrent(input)
+        guard report.rootTaskID == taskID, report.goalRevision == input.digest,
+              report.readingIdentity == latestCandidates?.requirementAssessmentIdentity else { throw Failure.goalChanged }
+    }
+
+    func prepareProgressReport() async throws -> ComputerUseBrowserResearchReport? {
+        try requireIdle()
+        guard !hasPendingForm else { throw Failure.formPending }
+        guard initialSearch?.isPending != true, !hasPendingNavigation, !hasPendingFormNavigation else { throw Failure.navigationPending }
+        guard !hasQuestion else { throw Failure.questionPending }
+        guard let retained = latestCandidates, let policy = researchSources?.answerPolicy else { return nil }
+        let captured = input
+        return try await operate { [self] in
+            try checkCurrent(captured)
+            let report = try await browser.prepareResearchReport(retained, goal: captured, policy: policy)
+            try checkCurrent(captured)
+            guard report == nil || (report?.goalRevision == captured.digest
+                && report?.readingIdentity == retained.requirementAssessmentIdentity) else { throw Failure.goalChanged }
+            return report
+        }
+    }
+
     func openCandidateLink(candidateID: String, linkID: String) async throws -> ComputerUseBrowserNavigationReceipt {
         try requireIdle()
         guard !hasPendingForm else { throw Failure.formPending }

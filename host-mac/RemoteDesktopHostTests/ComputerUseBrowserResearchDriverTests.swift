@@ -18,7 +18,7 @@ final class ComputerUseBrowserResearchDriverTests: XCTestCase {
                 tools: fixture.tools, progress: { _ in })
         }
         let result = try await execute()
-        guard case .userInterventionRequired = result else { return XCTFail("Page loads are not a verified research answer") }
+        guard case .browserResearchProgress = result else { return XCTFail("Page loads are not a verified research answer") }
         let owner = try fixture.owner(), original = owner.input
         XCTAssertEqual(fixture.server.count("/search?q=concerts"), 1)
         XCTAssertEqual(fixture.server.count("/details"), 1); XCTAssertEqual(fixture.server.count("/offers"), 1)
@@ -84,7 +84,7 @@ final class ComputerUseBrowserResearchDriverTests: XCTestCase {
         fixture.goal.base.questionTopic = nil
         let continued = try await executor.continueBrowserResearch(taskID: "answer", research: owner,
             tools: fixture.tools, progress: { _ in })
-        guard case .userInterventionRequired = continued else { return XCTFail("Navigation is still not a verified answer") }
+        guard case .browserResearchProgress = continued else { return XCTFail("Navigation is still not a verified answer") }
         XCTAssertEqual(owner.input.prompt, original.prompt); XCTAssertEqual(owner.input.referenceMilliseconds, original.referenceMilliseconds)
         XCTAssertEqual(owner.input.timeZoneIdentifier, original.timeZoneIdentifier); XCTAssertEqual(owner.input.clarifications.count, 1)
         XCTAssertEqual(fixture.goal.inputs, [original, owner.input])
@@ -346,7 +346,11 @@ final class ComputerUseBrowserResearchDriverTests: XCTestCase {
             if mode != "verified-write" { try await owner.resumeAfterUserControl() }
             let readings = fixture.results.inputs.count, selections = fixture.policy.goals.count
             let result = try await fixture.resume()
-            guard case .userInterventionRequired = result else { return XCTFail("Query navigation is not a verified research answer") }
+            if mode == "attempted" {
+                guard case .userInterventionRequired = result else { return XCTFail("The uncertain query remains pending") }
+            } else {
+                guard case .browserResearchProgress = result else { return XCTFail("Query navigation yields partial findings only") }
+            }
             XCTAssertEqual(owner.input, original); XCTAssertEqual(fixture.goal.inputs.count, 1); XCTAssertEqual(fixture.search.inputs.count, 1)
             XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 1)
             XCTAssertEqual(fixture.server.count("/search?q=concerts"), 1)
@@ -380,7 +384,7 @@ final class ComputerUseBrowserResearchDriverTests: XCTestCase {
         XCTAssertTrue(owner.hasPendingForm)
         let readings = fixture.results.inputs.count, selections = fixture.policy.goals.count
         let result = try await fixture.resume()
-        guard case .userInterventionRequired = result else { return XCTFail("Reading after form recovery is still not a completed answer") }
+        guard case .browserResearchProgress = result else { return XCTFail("Reading after form recovery is still not a completed answer") }
         XCTAssertFalse(owner.hasPendingForm); XCTAssertEqual(owner.confirmedFormHistory.count, 1)
         XCTAssertEqual(fixture.server.count("/filtered?q=concerts"), 0)
         XCTAssertEqual(owner.confirmedNavigationHistory.map(\.kind), [.search]); XCTAssertEqual(owner.input, original)
@@ -392,7 +396,7 @@ final class ComputerUseBrowserResearchDriverTests: XCTestCase {
         defer { fixture.close() }
         configureAutomaticFormQueries(fixture)
         let result = try await fixture.start()
-        guard case .userInterventionRequired? = result else { return XCTFail("A searched page is not a verified answer") }
+        guard case .browserResearchProgress? = result else { return XCTFail("A searched page is not a verified answer") }
         let owner = try fixture.owner(), original = owner.input
         XCTAssertEqual(fixture.actions.inputs.count, 3); XCTAssertEqual(fixture.forms.inputs.count, 1)
         XCTAssertEqual(fixture.forms.inputs.first?.interpretation.input, original)
@@ -425,7 +429,7 @@ final class ComputerUseBrowserResearchDriverTests: XCTestCase {
             controllerID: "phone", controllerSessionID: "session")
         fixture.forms.content = formContent
         let continued = try await fixture.resume()
-        guard case .userInterventionRequired = continued else { return XCTFail("Further result verification remains necessary") }
+        guard case .browserResearchProgress = continued else { return XCTFail("Further result verification remains necessary") }
         XCTAssertEqual(owner.input.prompt, original.prompt); XCTAssertEqual(owner.input.referenceMilliseconds, original.referenceMilliseconds)
         XCTAssertEqual(owner.input.timeZoneIdentifier, original.timeZoneIdentifier); XCTAssertEqual(owner.executionTaskID, "form-answer")
         XCTAssertEqual(fixture.forms.inputs.map { $0.interpretation.input }, [original, owner.input])
@@ -649,6 +653,7 @@ final class DriverPlanningFixture: ComputerUseBrowserResearchPlanning {
     var invalidChoice = false
     var allowedOrigins: [ComputerUseBrowserSourceOrigin]?
     var excludedOrigins: [ComputerUseBrowserSourceOrigin] = []
+    var answerExcludedOrigins: [ComputerUseBrowserSourceOrigin] = []
     var goals: [ComputerUseBrowserGoalInput] = []
     var histories: [[ComputerUseBrowserResearchVisit]] = []
     var evidenceSnapshots: [ComputerUseBrowserResearchEvidence?] = []
@@ -657,7 +662,8 @@ final class DriverPlanningFixture: ComputerUseBrowserResearchPlanning {
     func sources(for interpretation: ComputerUseBrowserResearchTask.Interpretation) throws -> ComputerUseBrowserResearchSources? {
         providerCalls += 1
         guard providerEnabled else { return nil }
-        return try .init(goal: interpretation.proposal.input, provider: provider, allowedOrigins: allowedOrigins, excludedOrigins: excludedOrigins)
+        return try .init(goal: interpretation.proposal.input, provider: provider, allowedOrigins: allowedOrigins,
+            excludedOrigins: excludedOrigins, answerExcludedOrigins: answerExcludedOrigins)
     }
     func selectLink(goal: ComputerUseBrowserGoalInput, candidates: ComputerUseBrowserResultCandidates,
                     history: [ComputerUseBrowserResearchVisit], evidence: ComputerUseBrowserResearchEvidence? = nil) async throws -> ComputerUseBrowserResearchTask.LinkChoice? {
