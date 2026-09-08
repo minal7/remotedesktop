@@ -243,7 +243,8 @@
     "RemoteDesktopHostTests/ComputerUseBrowserResultAssessmentTests",
     "RemoteDesktopHostTests/ComputerUseBrowserPriceClarificationTests",
     "RemoteDesktopHostTests/ComputerUseBrowserResultReviewTests",
-    "RemoteDesktopHostTests/ComputerUseBrowserResearchEvidenceTests"
+    "RemoteDesktopHostTests/ComputerUseBrowserResearchEvidenceTests",
+    "RemoteDesktopHostTests/ComputerUseBrowserFormBindingTests"
   ],
   "expectedTests": [
     "RemoteDesktopHostTests/AppleFoundationMCPPlannerTests/testCountedInputExpandsBeforeEffectAndTerminalQueries",
@@ -432,6 +433,15 @@
     "RemoteDesktopHostTests/ComputerUseBrowserDOMTests/testViewportScrollMovesDocumentWithoutWheelOrFocusedControlEvents",
     "RemoteDesktopHostTests/ComputerUseBrowserDOMTests/testViewportScrollRejectsStaleOffsetsGeometryAndSnapshotBeforeMovement",
     "RemoteDesktopHostTests/ComputerUseBrowserDOMTests/testVisibleAuthenticationMetadataBlocksAllFormValuesIncludingEarlierFields",
+    "RemoteDesktopHostTests/ComputerUseBrowserFormBindingTests/testBindingAndMalformedIDRequestsPreserveVerifiedInputReceipts",
+    "RemoteDesktopHostTests/ComputerUseBrowserFormBindingTests/testBindingRejectsSupersededPageAndForeignAdapterWithoutRediscovery",
+    "RemoteDesktopHostTests/ComputerUseBrowserFormBindingTests/testBindingRejectsValueCaretMembershipAndNativeIdentityChanges",
+    "RemoteDesktopHostTests/ComputerUseBrowserFormBindingTests/testBindingStopsForLoginAndLostControlBeforeReturningPrivateFields",
+    "RemoteDesktopHostTests/ComputerUseBrowserFormBindingTests/testFormInputRejectsAFieldWhoseCompleteMetadataDoesNotFitProjection",
+    "RemoteDesktopHostTests/ComputerUseBrowserFormBindingTests/testNativeBindingDistinguishesDuplicateLabelsAndKeepsValuesOutOfCompleteGoalContext",
+    "RemoteDesktopHostTests/ComputerUseBrowserFormBindingTests/testOwnerPauseAtNativeBindingCannotPublishLateFormInput",
+    "RemoteDesktopHostTests/ComputerUseBrowserFormBindingTests/testOwnerRetainsCompleteClarifiedGoalAndInvalidatesInputsAcrossQuestionAndHandback",
+    "RemoteDesktopHostTests/ComputerUseBrowserFormBindingTests/testPageAndEditableChoicesShareIdentityAndConcealmentRules",
     "RemoteDesktopHostTests/ComputerUseBrowserGoalClarificationTests/testAnswerPreservesOriginalBrowserRootClockAndExactUserBytes",
     "RemoteDesktopHostTests/ComputerUseBrowserGoalClarificationTests/testClarifiedInputStillRequiresCompleteTokenAdmissionBeforeInference",
     "RemoteDesktopHostTests/ComputerUseBrowserGoalClarificationTests/testClarifiedScalarCompilationKeepsEarlierConstraintsAndUsesOriginalDateAnchor",

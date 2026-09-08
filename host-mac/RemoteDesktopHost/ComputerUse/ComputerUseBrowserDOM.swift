@@ -4,7 +4,7 @@ import WebKit
 enum ComputerUseBrowserDOMCommand: String {
     case fields, read, edit, receipt, reobserve, preflight, pageIdentity, pageSnapshot, validatePageSnapshot
     case scrollViewport, viewportScrollReceipt, validatePageLink
-    case prepareFormQuery, validateFormQuery
+    case prepareFormQuery, validateFormQuery, bindPageFields
 }
 
 /// Private adapter output. A GET query can contain server state or user input;
@@ -412,6 +412,10 @@ struct ComputerUseBrowserPlanningContext: Equatable, Sendable, CustomStringConve
 }
 
 struct ComputerUseBrowserDOMReply: Decodable {
+    struct FormBinding: Decodable {
+        let fieldID: String
+        let controlID: String
+    }
     struct Field: Decodable {
         let id: String
         let label: String
@@ -450,6 +454,7 @@ struct ComputerUseBrowserDOMReply: Decodable {
     let page: ComputerUseBrowserPageSnapshot?
     let scroll: ComputerUseBrowserViewportScrollReceipt?
     let formQuery: ComputerUseBrowserFormQuery?
+    let formBindings: [FormBinding]?
 }
 
 /// Fixed host code in a separate WebKit script world. Page text, model output
@@ -988,17 +993,10 @@ enum ComputerUseBrowserDOM {
             if (element.options.length > 64 || optionCount + element.options.length > 128) valid = false;
             else {
               optionCount += element.options.length;
-              for (const option of element.options) {
-              const group = option.parentElement instanceof HTMLOptGroupElement ? option.parentElement : null;
-              const label = option.label, value = option.value, groupLabel = group?.label || '';
-              if (!small(label, 512) || !small(value, 2048) || !small(groupLabel, 256)) { valid = false; break; }
-              if (!pageOptionIDs.has(option)) pageOptionIDs.set(option, 'o' + (++nextPageOptionID));
-              const style = getComputedStyle(option), groupStyle = group && getComputedStyle(group);
-              options.push({id: pageOptionIDs.get(option), label, value, groupLabel,
-                disabled: !!(option.disabled || group?.disabled),
-                hidden: !!(option.hidden || group?.hidden || style.display === 'none' || style.visibility !== 'visible'
-                  || (groupStyle && (groupStyle.display === 'none' || groupStyle.visibility !== 'visible')))});
-              }
+              const choices = choiceData(element);
+              if (!choices) valid = false;
+              else options.push(...choices.map(({id, label, value, groupLabel, disabled, hidden}) =>
+                ({id, label, value, groupLabel, disabled, hidden})));
             }
           }
           if (!valid) { truncated = true; omittedControls = true; continue; }
@@ -1121,7 +1119,7 @@ enum ComputerUseBrowserDOM {
               || JSON.stringify(readViewport()) !== JSON.stringify(operation.receipt.after)) return reply('uncertain');
           return {...reply('viewport-scroll-confirmed'), scroll: operation.receipt};
         }
-        if (['pageSnapshot', 'validatePageSnapshot', 'scrollViewport', 'validatePageLink', 'prepareFormQuery', 'validateFormQuery'].includes(command)) {
+        if (['pageSnapshot', 'validatePageSnapshot', 'scrollViewport', 'validatePageLink', 'prepareFormQuery', 'validateFormQuery', 'bindPageFields'].includes(command)) {
           const status = authenticationStatus();
           if (status) { lastPageSnapshot = null; return reply(status); }
           if (doc.readyState !== 'complete') return reply('stale');
@@ -1149,6 +1147,28 @@ enum ComputerUseBrowserDOM {
                     || previous.signature !== binding.signature;
                 })) return reply('stale');
             if (command === 'validatePageSnapshot') return reply('page-current');
+            if (command === 'bindPageFields') {
+              // Join independently observed IDs only through the retained
+              // native elements, never label/name/position equality.
+              // Missing IDs must not enter fields()'s discovery branch,
+              // which deliberately clears existing operation receipts.
+              if (!Array.isArray(args.ids) || args.ids.length < 1 || args.ids.length > 16
+                  || new Set(args.ids).size !== args.ids.length) return reply('unsupported');
+              const current = fields(args.ids);
+              if (current.status !== 'ok') return current;
+              const formBindings = [], usedControls = new Set();
+              for (const field of current.fields) {
+                const binding = bindings.get(field.id);
+                const matches = Array.from(controls).filter(([, control]) => control.element === binding?.element);
+                if (matches.length !== 1) return reply('unsupported');
+                const [controlID, control] = matches[0];
+                if (usedControls.has(controlID) || control.form !== binding.form
+                    || control.metadata.disabled || control.metadata.readOnly) return reply('stale');
+                usedControls.add(controlID);
+                formBindings.push({fieldID:field.id, controlID});
+              }
+              return {...reply('page-fields-bound', current.fields), formBindings};
+            }
             if (command === 'validatePageLink') {
               const binding = links.get(args.linkID);
               return reply(binding?.canOpen ? 'link-current' : 'unsupported');
@@ -1349,6 +1369,25 @@ struct ComputerUseBrowserFormQueryRequirements: Sendable, CustomStringConvertibl
     var debugDescription: String { description }
 }
 
+/// Native correspondence between page controls and retained editable objects.
+/// Exact current values and adapter identity remain host-side.
+struct ComputerUseBrowserFormEvidence: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    struct Field: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+        let control: ComputerUseBrowserPageSnapshot.Control
+        let editable: ComputerUseTextField
+        var description: String { "BrowserFormField(kind: \(control.kind))" }
+        var debugDescription: String { description }
+    }
+    let page: ComputerUseBrowserPageEvidence
+    let fields: [Field]
+    fileprivate let adapterID: UUID
+    fileprivate init(page: ComputerUseBrowserPageEvidence, fields: [Field], adapterID: UUID) {
+        self.page = page; self.fields = fields; self.adapterID = adapterID
+    }
+    var description: String { "BrowserFormEvidence(fields: \(fields.count))" }
+    var debugDescription: String { description }
+}
+
 /// A text adapter sealed to one owned page and one set of retained DOM objects.
 /// Only labels go to the existing local planner; exact values remain host-side.
 @MainActor
@@ -1358,6 +1397,7 @@ final class ComputerUseBrowserTextTarget {
     private let requiresFrontmost: Bool
     private var documentID: String?
     private var targets: [String: String] = [:]
+    private let adapterID = UUID()
 
     init(browser: ComputerUseOwnedBrowser, document: ComputerUseBrowserDocument, requiresFrontmost: Bool = true) {
         self.browser = browser
@@ -1368,6 +1408,55 @@ final class ComputerUseBrowserTextTarget {
     func fields() async throws -> [ComputerUseTextField] {
         guard let fields = try await fieldsIfSupported() else { throw ComputerUseBrowserError.unsupportedDocument }
         return fields
+    }
+
+    /// Bind a previously discovered form to the exact observed page. This
+    /// reobserves the retained fields; it does not rediscover replacement
+    /// objects, clear input receipts, focus, edit or submit a control.
+    func bindFields(_ fields: [ComputerUseTextField], to evidence: ComputerUseBrowserPageEvidence) async throws -> ComputerUseBrowserFormEvidence {
+        try validate()
+        guard evidence.document == document, let documentID, evidence.documentID == documentID,
+              (1...16).contains(fields.count), fields.count == targets.count,
+              Set(fields.map { $0.snapshot.targetID }) == Set(targets.keys) else { throw ComputerUseBrowserError.pageChanged }
+        let reply = try await browser.callDOM(.bindPageFields, arguments: ["documentID":documentID,
+            "snapshotID":evidence.page.id, "ids":targets.values.sorted()], document: document)
+        try validate()
+        guard reply.status == "page-fields-bound", reply.documentID == documentID,
+              let current = reply.fields, let bindings = reply.formBindings,
+              current.count == fields.count, bindings.count == fields.count,
+              Set(current.map(\.id)) == Set(targets.values),
+              Set(bindings.map(\.fieldID)) == Set(targets.values),
+              Set(bindings.map(\.controlID)).count == fields.count else { throw ComputerUseBrowserError.pageChanged }
+        let nativeToTarget = Dictionary(uniqueKeysWithValues: targets.map { ($0.value, $0.key) })
+        var paired: [ComputerUseBrowserFormEvidence.Field] = []
+        for binding in bindings {
+            guard let targetID = nativeToTarget[binding.fieldID],
+                  let expected = fields.first(where: { $0.snapshot.targetID == targetID }),
+                  let observed = current.first(where: { $0.id == binding.fieldID }),
+                  let control = evidence.page.controls.first(where: { $0.id == binding.controlID }),
+                  !control.disabled, !control.readOnly, !control.multiple,
+                  ["text", "search", "url", "tel", "email", "textarea", "date", "datetime-local", "month", "week", "time", "number", "select"].contains(control.kind),
+                  control.label.utf8.elementsEqual(expected.label.utf8),
+                  observed.label.utf8.elementsEqual(expected.label.utf8), observed.choices == expected.choices,
+                  try snapshot(observed, targetID: targetID) == expected.snapshot else { throw ComputerUseBrowserError.pageChanged }
+            if control.kind == "select" {
+                let choices = control.options.map { ComputerUseTextField.Choice(id: $0.id, label: $0.label, disabled: $0.disabled, hidden: $0.hidden) }
+                guard expected.choices == choices else {
+                    throw ComputerUseBrowserError.pageChanged
+                }
+            } else if expected.choices != nil || !control.options.isEmpty { throw ComputerUseBrowserError.pageChanged }
+            paired.append(.init(control: control, editable: expected))
+        }
+        // Keep the page's observed control order, including duplicate labels.
+        let order = Dictionary(uniqueKeysWithValues: evidence.page.controls.enumerated().map { ($0.element.id, $0.offset) })
+        paired.sort { order[$0.control.id, default: 0] < order[$1.control.id, default: 0] }
+        return .init(page: evidence, fields: paired, adapterID: adapterID)
+    }
+
+    func validateFormEvidence(_ evidence: ComputerUseBrowserFormEvidence) async throws {
+        guard evidence.adapterID == adapterID else { throw ComputerUseBrowserError.pageChanged }
+        let current = try await bindFields(evidence.fields.map(\.editable), to: evidence.page)
+        guard current == evidence else { throw ComputerUseBrowserError.pageChanged }
     }
 
     /// Reuse the original retained field objects and operation receipts. Fresh

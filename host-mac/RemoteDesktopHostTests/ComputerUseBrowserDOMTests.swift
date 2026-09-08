@@ -4438,6 +4438,235 @@ private final class ResearchNavigationTestState {
 }
 
 @MainActor
+final class ComputerUseBrowserFormBindingTests: XCTestCase {
+    func testNativeBindingDistinguishesDuplicateLabelsAndKeepsValuesOutOfCompleteGoalContext() async throws {
+        var commands: [ComputerUseBrowserDOMCommand] = []
+        let fixture = try await DOMFixture(body: """
+            <form action='/private-action-a'><label>Location<input name='private-name-a' value='private-city-a'></label></form>
+            <form action='/private-action-b'><label>Location<input name='private-name-b' value='private-city-b'></label>
+              <label>Departure<input type='date' min='2026-09-01' value='2026-09-29'></label>
+              <label>People<input type='number' min='1' max='8' value='7'></label>
+              <label>Notes<textarea>private-notes</textarea></label>
+              <label>Query<input type='search' value='private-query'></label><button>Search</button></form>
+            <script>for (const type of ['input','change','focusin','submit']) document.addEventListener(type, () => fetch('/event-' + type));</script>
+            """, domScriptDidDispatch: { commands.append($0) })
+        defer { fixture.close() }
+        commands.removeAll() // Observe only the binding phase, after initial navigation.
+        let page = try await fixture.browser.observePage(document: fixture.document)
+        let fields = try await fixture.target.fields()
+        let bound = try await fixture.target.bindFields(Array(fields.reversed()), to: page)
+        XCTAssertEqual(bound.fields.map { $0.control.kind }, ["text", "text", "date", "number", "textarea", "search"])
+        XCTAssertEqual(bound.fields.prefix(2).map { $0.editable.snapshot.value }, ["private-city-a", "private-city-b"])
+        XCTAssertNotEqual(bound.fields[0].control.form?.id, bound.fields[1].control.form?.id)
+        XCTAssertEqual(bound.fields.map { $0.editable.snapshot.targetID }, fields.map { $0.snapshot.targetID })
+        let input = try ComputerUseBrowserResearchFormInput(interpretation: await proposal(), evidence: bound)
+        let context = try object(input.contextJSON), goal = try XCTUnwrap(context["goal"] as? [String: Any])
+        XCTAssertEqual(goal["request"] as? String, input.interpretation.input.prompt)
+        XCTAssertEqual(goal["timeZone"] as? String, "America/Los_Angeles")
+        XCTAssertEqual((goal["referenceUnixMilliseconds"] as? NSNumber)?.int64Value, input.interpretation.input.referenceMilliseconds)
+        XCTAssertEqual((context["requirements"] as? [[String: Any]])?.first?["source"] as? String, input.interpretation.input.prompt)
+        for hidden in ["private-city-a", "private-city-b", "private-notes", "private-query", "2026-09-29",
+                       "private-action-a", "private-name-a", fields[0].snapshot.targetID, page.documentID, page.page.id] {
+            XCTAssertFalse(input.contextJSON.contains(hidden))
+        }
+        for (index, alias) in input.fieldAliases.enumerated() {
+            XCTAssertEqual(try input.field(for: alias), bound.fields[index])
+        }
+        for invalid in ["Location", "field0", "field01", "field1 ", bound.fields[0].control.id, fields[0].snapshot.targetID] {
+            XCTAssertThrowsError(try input.field(for: invalid))
+        }
+        try await fixture.target.validateFormEvidence(bound)
+        XCTAssertTrue(commands.allSatisfy { [.pageSnapshot, .fields, .bindPageFields].contains($0) })
+        XCTAssertFalse(fixture.server.requestedPaths.contains { $0.hasPrefix("/event-") || $0.hasPrefix("/private-action") })
+        XCTAssertFalse(String(reflecting: input).contains("private")); XCTAssertFalse(String(reflecting: bound).contains("private"))
+    }
+
+    func testPageAndEditableChoicesShareIdentityAndConcealmentRules() async throws {
+        let fixture = try await DOMFixture(body: """
+            <label>Cabin<select name='private-cabin'>
+              <option value='private-e'>Standard</option><option value='private-p'>Standard</option>
+              <option style='opacity:0'>Transparent</option><option inert>Inert</option><option aria-hidden='true'>ARIA hidden</option>
+              <optgroup label='Closed' disabled hidden><option>Grouped</option></optgroup>
+            </select></label>
+            """)
+        defer { fixture.close() }
+        let page = try await fixture.browser.observePage(document: fixture.document), fields = try await fixture.target.fields()
+        let bound = try await fixture.target.bindFields(fields, to: page), field = try XCTUnwrap(bound.fields.first)
+        let choices = try XCTUnwrap(field.editable.choices)
+        XCTAssertEqual(choices.count, 6); XCTAssertNotEqual(choices[0].id, choices[1].id)
+        XCTAssertEqual(choices.map(\.hidden), [false, false, true, true, true, true])
+        XCTAssertEqual(choices.map(\.disabled), [false, false, false, false, false, true])
+        XCTAssertEqual(field.control.options.map(\.id), choices.map(\.id))
+        let input = try ComputerUseBrowserResearchFormInput(interpretation: await proposal(), evidence: bound)
+        XCTAssertFalse(input.contextJSON.contains("private-e")); XCTAssertFalse(input.contextJSON.contains("private-p"))
+        XCTAssertFalse(input.contextJSON.contains("private-cabin"))
+        try await fixture.target.validateFormEvidence(bound)
+    }
+
+    func testBindingRejectsValueCaretMembershipAndNativeIdentityChanges() async throws {
+        for change in ["field.value = 'other';", "field.setSelectionRange(0, 1);", "field.replaceWith(field.cloneNode(true));",
+                       "field.remove();", "document.body.insertAdjacentHTML('beforeend', '<label>Query<input></label>');"] {
+            let fixture = try await DOMFixture(body: """
+                <label>Query<input id='query' value='initial'></label>
+                <script>fetch('/signal').then(() => { const field = document.getElementById('query'); \(change) fetch('/changed'); });</script>
+                """, heldSignal: true)
+            defer { fixture.close() }
+            let page = try await fixture.browser.observePage(document: fixture.document), fields = try await fixture.target.fields()
+            let bound = try await fixture.target.bindFields(fields, to: page)
+            try await fixture.wait { fixture.server.count("/signal") == 1 }
+            fixture.server.releaseHeldResponses()
+            try await fixture.wait { fixture.server.count("/changed") == 1 }
+            do { try await fixture.target.validateFormEvidence(bound); XCTFail("Changed native evidence must be rejected: \(change)") }
+            catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+        }
+    }
+
+    func testBindingRejectsSupersededPageAndForeignAdapterWithoutRediscovery() async throws {
+        let fixture = try await DOMFixture(body: "<label>Query<input value='initial'></label>")
+        defer { fixture.close() }
+        let page = try await fixture.browser.observePage(document: fixture.document), fields = try await fixture.target.fields()
+        let bound = try await fixture.target.bindFields(fields, to: page)
+        let foreign = ComputerUseBrowserTextTarget(browser: fixture.browser, document: fixture.document, requiresFrontmost: false)
+        do { try await foreign.validateFormEvidence(bound); XCTFail("An unrelated adapter cannot adopt bindings") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+        try await fixture.target.validateFormEvidence(bound)
+        let newer = try await fixture.browser.observePage(document: fixture.document)
+        do { try await fixture.target.validateFormEvidence(bound); XCTFail("A snapshot superseded by another observation is stale") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+        _ = try await fixture.target.bindFields(fields, to: newer)
+        let foreignGoal = try await proposal(taskID: "different-task")
+        XCTAssertThrowsError(try ComputerUseBrowserResearchFormInput(interpretation: foreignGoal, evidence: bound))
+    }
+
+    func testBindingAndMalformedIDRequestsPreserveVerifiedInputReceipts() async throws {
+        let fixture = try await DOMFixture(body: "<form action='/results'><label>Query<input name='q' value='old'></label><button>Search</button></form>")
+        defer { fixture.close() }
+        let fields = try await fixture.target.fields(), field = try XCTUnwrap(fields.first)
+        let contract = try ComputerUseTextTaskContract(taskID: "fixture", prompt: "Set the query to Paris", fields: fields,
+            edits: [.init(targetID: field.snapshot.targetID, mode: .replaceAll, text: "Paris")])
+        let task = try fixture.textTask(contract: contract)
+        try await task.run()
+        let continuation = try task.verifiedContinuation()
+        let page = try await fixture.browser.observePage(document: fixture.document)
+        let current = try await fixture.target.reobserveRetainedFields()
+        let bound = try await fixture.target.bindFields(current, to: page)
+        for malformed in [nil, NSNull(), [] as [String], ["missing"], ["missing", "missing"]] as [Any?] {
+            var arguments: [String: Any] = ["documentID":page.documentID, "snapshotID":page.page.id]
+            if let malformed { arguments["ids"] = malformed }
+            let reply = try await fixture.browser.callDOM(.bindPageFields, arguments: arguments, document: fixture.document)
+            XCTAssertTrue(["unsupported", "stale"].contains(reply.status))
+            XCTAssertNil(reply.formBindings)
+            try await fixture.target.validateFormEvidence(bound)
+            let dispatched = try await fixture.target.didDispatchInput(operationID: continuation.inputOperationIDs[0])
+            XCTAssertTrue(dispatched)
+        }
+        let button = try XCTUnwrap(page.page.controls.first { $0.kind == "submit" })
+        _ = try await fixture.target.prepareFormQuery(controlID: button.id, evidence: page, after: continuation)
+        XCTAssertFalse(fixture.server.requestedPaths.contains { $0.hasPrefix("/results") })
+    }
+
+    func testFormInputRejectsAFieldWhoseCompleteMetadataDoesNotFitProjection() async throws {
+        let options = (0..<32).map { "<option value='\($0)'>\(String(repeating: "x", count: 240))\($0)</option>" }.joined()
+        let fixture = try await DOMFixture(body: "<label>Destination<select>\(options)</select></label>")
+        defer { fixture.close() }
+        let page = try await fixture.browser.observePage(document: fixture.document), fields = try await fixture.target.fields()
+        let bound = try await fixture.target.bindFields(fields, to: page), goal = try await proposal()
+        XCTAssertEqual(bound.fields.count, 1)
+        XCTAssertThrowsError(try ComputerUseBrowserResearchFormInput(interpretation: goal, evidence: bound)) {
+            XCTAssertEqual($0 as? ComputerUseBrowserResearchFormError, .contextLimit)
+        }
+    }
+
+    func testOwnerRetainsCompleteClarifiedGoalAndInvalidatesInputsAcrossQuestionAndHandback() async throws {
+        let fixture = try await DOMFixture(body: "<label>Location<input value='private-city'></label>")
+        defer { fixture.close() }
+        let planner = BrowserResearchGoalFixture(), reader = BrowserResearchResultFixture()
+        let goal = try goalInput(), owner = ComputerUseBrowserResearchTask(input: goal, browser: fixture.browser,
+            goalPlanner: planner, resultPlanner: reader, mayAct: { true })
+        defer { owner.retire() }
+        _ = try await owner.interpretGoal()
+        let before = try await owner.prepareFormInput()
+        try await owner.revalidateFormInput(before)
+        let question = try owner.issueQuestion(topic: .location, requirementIDs: [before.interpretation.requirements[0].id],
+            controllerID: "phone", controllerSessionID: "session")
+        do { try await owner.revalidateFormInput(before); XCTFail("A pending question closes form planning") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserResearchTask.Failure, .questionPending) }
+        let updated = try owner.answerQuestion(questionID: question.id, answerTaskID: "answer", answer: "Montréal e\u{301} 😀. Do not buy.",
+            controllerID: "phone", controllerSessionID: "session")
+        _ = try await owner.interpretGoal()
+        let after = try await owner.prepareFormInput(), context = try object(after.contextJSON)
+        let projectedGoal = try XCTUnwrap(context["goal"] as? [String: Any])
+        XCTAssertEqual(projectedGoal["request"] as? String, goal.prompt)
+        XCTAssertEqual((projectedGoal["clarifications"] as? [[String: Any]])?.first?["answer"] as? String, updated.clarifications[0].answer)
+        XCTAssertEqual(after.interpretation.input.referenceMilliseconds, goal.referenceMilliseconds)
+        XCTAssertEqual(after.interpretation.input.rootDigest, goal.rootDigest)
+        do { try await owner.revalidateFormInput(before); XCTFail("An earlier revision cannot replace current form context") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserResearchFormError, .inputChanged) }
+        try await owner.revalidateFormInput(after)
+        owner.pause()
+        try await owner.resumeAfterUserControl()
+        do { try await owner.revalidateFormInput(after); XCTFail("Explicit handback requires a new form observation") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserResearchFormError, .inputChanged) }
+        let resumed = try await owner.prepareFormInput()
+        XCTAssertEqual(resumed.interpretation.input, updated); XCTAssertNotEqual(resumed, after)
+        XCTAssertEqual(planner.inputs.count, 2); XCTAssertTrue(reader.inputs.isEmpty)
+    }
+
+    func testOwnerPauseAtNativeBindingCannotPublishLateFormInput() async throws {
+        var owner: ComputerUseBrowserResearchTask?, pauseAtBinding = false, retainedSlot = false
+        let fixture = try await DOMFixture(body: "<label>Query<input></label>", domScriptDidDispatch: { command in
+            if command == .bindPageFields, pauseAtBinding {
+                pauseAtBinding = false; owner?.pause(); retainedSlot = owner?.isOperating == true
+            }
+        })
+        defer { owner?.retire(); fixture.close() }
+        let current = ComputerUseBrowserResearchTask(input: try goalInput(), browser: fixture.browser,
+            goalPlanner: BrowserResearchGoalFixture(), resultPlanner: BrowserResearchResultFixture(), mayAct: { true })
+        owner = current
+        _ = try await current.interpretGoal(); pauseAtBinding = true
+        do { _ = try await current.prepareFormInput(); XCTFail("Pause must discard late form context") }
+        catch { XCTAssertTrue(error is CancellationError || error as? ComputerUseBrowserResearchTask.Failure == .paused) }
+        XCTAssertTrue(retainedSlot); XCTAssertFalse(current.isOperating)
+        try await fixture.browser.waitForDOMCompletion(document: fixture.document)
+        try await current.resumeAfterUserControl()
+        let fresh = try await current.prepareFormInput()
+        try await current.revalidateFormInput(fresh)
+        XCTAssertEqual(fresh.interpretation.input, current.input)
+    }
+
+    func testBindingStopsForLoginAndLostControlBeforeReturningPrivateFields() async throws {
+        var mayAct = true
+        let fixture = try await DOMFixture(body: """
+            <label>Query<input value='private-value'></label><div id='login'></div>
+            <script>fetch('/signal').then(() => { document.getElementById('login').innerHTML = '<label>Password<input type=password></label>'; fetch('/changed'); });</script>
+            """, heldSignal: true, mayAct: { mayAct })
+        defer { fixture.close() }
+        let page = try await fixture.browser.observePage(document: fixture.document), fields = try await fixture.target.fields()
+        let bound = try await fixture.target.bindFields(fields, to: page)
+        mayAct = false
+        do { try await fixture.target.validateFormEvidence(bound); XCTFail("Lost control must close the adapter") } catch { }
+        mayAct = true
+        try await fixture.target.validateFormEvidence(bound)
+        try await fixture.wait { fixture.server.count("/signal") == 1 }
+        fixture.server.releaseHeldResponses()
+        try await fixture.wait { fixture.server.count("/changed") == 1 }
+        do { try await fixture.target.validateFormEvidence(bound); XCTFail("Login must stop binding before returning field values") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .authenticationRequired) }
+    }
+
+    private func goalInput(taskID: String = "fixture") throws -> ComputerUseBrowserGoalInput {
+        try .init(taskID: taskID, prompt: "Find travel tickets tomorrow for two people. Compare the total with fees. Do not buy.",
+            referenceDate: Date(timeIntervalSince1970: 1_800_000_000), timeZoneIdentifier: "America/Los_Angeles")
+    }
+    private func proposal(taskID: String = "fixture") async throws -> ComputerUseBrowserGoalProposal {
+        try await BrowserResearchGoalFixture().propose(goalInput(taskID: taskID))
+    }
+    private func object(_ string: String) throws -> [String: Any] {
+        try XCTUnwrap(JSONSerialization.jsonObject(with: Data(string.utf8)) as? [String: Any])
+    }
+}
+
+@MainActor
 private final class DOMFixture {
     let server: OwnedBrowserHTTPFixture
     let browser: ComputerUseOwnedBrowser
