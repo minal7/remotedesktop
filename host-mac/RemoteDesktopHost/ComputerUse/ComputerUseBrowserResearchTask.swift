@@ -11,6 +11,7 @@ final class ComputerUseBrowserResearchTask {
         let scalars: ComputerUseBrowserScalarRequirements
     }
     struct LinkChoice: Sendable { let candidateID: String; let linkID: String }
+    enum InitialSearchState: Equatable, Sendable { case notPrepared, pending, confirmed }
     let taskID: String
     private let browser: ComputerUseOwnedBrowser
     private let goalPlanner: any ComputerUseBrowserGoalPlanning
@@ -18,6 +19,9 @@ final class ComputerUseBrowserResearchTask {
     private let mayAct: @MainActor () -> Bool
     private let clarification: ComputerUseBrowserGoalClarification
     private let navigation: ComputerUseBrowserResearchNavigation?
+    private let navigationDirectory: URL?
+    private let navigationStore: (URL) throws -> ComputerUseTaskJournalStore
+    private var initialSearch: ComputerUseBrowserInitialSearch?
     private var interpretation: Interpretation?
     private var latestCandidates: ComputerUseBrowserResultCandidates?
     private var session: ComputerUseBrowserHandbackRequirement?
@@ -34,7 +38,14 @@ final class ComputerUseBrowserResearchTask {
     /// session identity and the original goal keep taskID as their root.
     var executionTaskID: String { input.clarifications.last?.answerTaskID ?? taskID }
     var isOperating: Bool { operationID != nil }
-    var hasPendingNavigation: Bool { navigation?.pendingSelection != nil }
+    var hasPendingNavigation: Bool { initialSearch?.isPending == true || navigation?.pendingSelection != nil }
+    /// Confirmed means a historical navigation receipt, never a completed
+    /// research answer. A driver can continue without proposing a second first
+    /// search after handback or an accepted clarification answer.
+    var initialSearchState: InitialSearchState {
+        guard let initialSearch else { return .notPrepared }
+        return initialSearch.isPending ? .pending : .confirmed
+    }
 
     /// The capability router checks the retained revision and local lifecycle
     /// around delegation. Individual owner operations still validate the actual
@@ -52,6 +63,7 @@ final class ComputerUseBrowserResearchTask {
          mayAct: @escaping @MainActor () -> Bool, now: @escaping () -> Date = Date.init) {
         taskID = input.taskID; self.browser = browser; self.goalPlanner = goalPlanner; self.resultPlanner = resultPlanner
         self.mayAct = mayAct; clarification = .init(input: input, now: now)
+        navigationDirectory = navigationJournalDirectory; self.navigationStore = navigationStore
         navigation = navigationJournalDirectory.map { .init(input: input, browser: browser, journalDirectory: $0, navigationStore: navigationStore) }
     }
 
@@ -107,6 +119,45 @@ final class ComputerUseBrowserResearchTask {
         }
     }
 
+    /// Provider selection is host-owned and must respect the complete goal.
+    /// Neither copied query terms nor a successful first load complete it.
+    func openInitialSearch(_ query: ComputerUseBrowserSearchQuery, provider: ComputerUseBrowserSearchProvider) async throws -> ComputerUseBrowserDocument {
+        try requireIdle()
+        guard !hasQuestion else { throw Failure.questionPending }
+        guard navigation?.pendingSelection == nil else { throw Failure.navigationPending }
+        guard let directory = navigationDirectory else { throw Failure.navigationUnavailable }
+        guard let interpretation, interpretation.proposal.input.digest == input.digest else { throw Failure.interpretationRequired }
+        let request = try ComputerUseBrowserInitialSearchRequest(interpretation: interpretation.proposal, query: query, provider: provider)
+        if let initialSearch, initialSearch.request != request { throw ComputerUseBrowserInitialSearchError.pendingStage }
+        let captured = input
+        latestCandidates = nil
+        return try await operate { [self] in
+            try checkCurrent(captured)
+            if initialSearch == nil {
+                guard browser.taskID == nil || browser.taskID == taskID else { throw ComputerUseBrowserError.ownershipLost }
+                let prepared = try browser.prepareWorkflowSession(taskID: taskID)
+                try captureSession()
+                guard session == prepared else { throw ComputerUseBrowserError.handbackContextLost }
+                initialSearch = try .init(request: request, session: prepared, browser: browser, directory: directory, makeStore: navigationStore)
+            }
+            guard let initialSearch else { throw Failure.navigationUnavailable }
+            return try await initialSearch.open(checkCurrent: { try self.checkCurrent(captured) })
+        }
+    }
+
+    /// Reconcile the retained initial action before choosing another query or
+    /// asking a question. No proposal, provider selection or answer is repeated.
+    func resumeInitialSearch() async throws -> ComputerUseBrowserDocument? {
+        try requireIdle()
+        guard !hasQuestion else { throw Failure.questionPending }
+        guard navigation?.pendingSelection == nil else { throw Failure.navigationPending }
+        guard let initialSearch, initialSearch.isPending else { return nil }
+        let captured = input
+        return try await operate { [self] in
+            try await initialSearch.open(checkCurrent: { try self.checkCurrent(captured) })
+        }
+    }
+
     func readCandidates() async throws -> ComputerUseBrowserResultCandidates {
         try requireIdle()
         guard !hasPendingNavigation else { throw Failure.navigationPending }
@@ -143,6 +194,7 @@ final class ComputerUseBrowserResearchTask {
 
     func openCandidateLink(candidateID: String, linkID: String) async throws -> ComputerUseBrowserNavigationReceipt {
         try requireIdle()
+        guard initialSearch?.isPending != true else { throw Failure.navigationPending }
         guard !hasQuestion else { throw Failure.questionPending }
         guard let navigation else { throw Failure.navigationUnavailable }
         guard let interpretation, interpretation.proposal.input.digest == input.digest,
@@ -159,6 +211,7 @@ final class ComputerUseBrowserResearchTask {
     /// Its journal reconciles attempts; missing receipts never authorize replay.
     func resumeCandidateNavigation() async throws -> ComputerUseBrowserNavigationReceipt? {
         try requireIdle()
+        guard initialSearch?.isPending != true else { throw Failure.navigationPending }
         guard let navigation, let selection = navigation.pendingSelection else { return nil }
         guard !hasQuestion else { throw Failure.questionPending }
         let captured = input
@@ -173,6 +226,7 @@ final class ComputerUseBrowserResearchTask {
     func replanPendingCandidateNavigation(select: @escaping @MainActor @Sendable
         (ComputerUseBrowserGoalInput, ComputerUseBrowserResultCandidates) async throws -> LinkChoice?) async throws -> ComputerUseBrowserResearchNavigation.ReplanResult {
         try requireIdle()
+        guard initialSearch?.isPending != true else { throw Failure.navigationPending }
         guard !hasQuestion else { throw Failure.questionPending }
         guard let navigation else { throw Failure.navigationUnavailable }
         guard let interpretation, interpretation.proposal.input.digest == input.digest,
@@ -280,7 +334,7 @@ final class ComputerUseBrowserResearchTask {
 
     func retire() {
         isRetired = true; controlEpoch = UUID(); latestCandidates = nil; interpretation = nil
-        clarification.retire(); navigation?.retire(); hasQuestion = false; cancelOperation?()
+        clarification.retire(); navigation?.retire(); initialSearch?.retire(); hasQuestion = false; cancelOperation?()
     }
 
     private func questionContext(controllerID: String, controllerSessionID: String) throws -> ComputerUseBrowserGoalClarification.Context {

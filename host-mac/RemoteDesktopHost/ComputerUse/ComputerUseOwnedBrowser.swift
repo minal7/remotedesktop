@@ -845,6 +845,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
 
     func navigate(taskID: String, operationID: String, to url: URL,
                   from expectedDocument: ComputerUseBrowserDocument? = nil,
+                  requiringUnnavigatedSession expectedSession: ComputerUseBrowserHandbackRequirement? = nil,
                   willBeginEffect: () throws -> Void = {}) async throws -> ComputerUseBrowserDocument {
         try Task.checkCancellation()
         guard hasOwnership(taskID: taskID) else { throw ComputerUseBrowserError.ownershipLost }
@@ -856,6 +857,14 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         }
         guard let url = Self.validatedURL(url) else { throw ComputerUseBrowserError.invalidURL }
         if let expectedDocument, !validate(expectedDocument) { throw ComputerUseBrowserError.pageChanged }
+        func checkInitialSession() throws {
+            if let expectedSession {
+                guard expectedSession.taskID == taskID, try isUnnavigatedSession(expectedSession) else {
+                    throw ComputerUseBrowserError.pageChanged
+                }
+            }
+        }
+        try checkInitialSession()
         let browser = makeBrowser()
         presentIfNeeded(browser)
         try Task.checkCancellation()
@@ -868,6 +877,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             guard validate(expectedDocument) else { throw ComputerUseBrowserError.pageChanged }
             guard hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
         }
+        try checkInitialSession()
         try willBeginEffect()
         try Task.checkCancellation()
         guard hasOwnership(taskID: taskID) else { throw ComputerUseBrowserError.ownershipLost }
@@ -877,6 +887,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             guard validate(expectedDocument) else { throw ComputerUseBrowserError.pageChanged }
             guard hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
         }
+        try checkInitialSession()
         sessionHasNavigationActivity = true
         generation &+= 1
         document = nil
