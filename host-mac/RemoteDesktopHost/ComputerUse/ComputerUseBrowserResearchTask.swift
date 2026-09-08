@@ -379,11 +379,16 @@ final class ComputerUseBrowserResearchTask {
             }
             let target = ComputerUseBrowserTextTarget(browser: browser, document: page.document,
                 requiresFrontmost: browser.isFrontmostWindow)
-            let fields = try await target.fields()
+            let preservedControls = action?.preservedControls ?? []
+            let fields: [ComputerUseTextField]
+            if let selectedFormID {
+                fields = try await target.fields(in: selectedFormID, page: page, preserving: preservedControls.map(\.controlID))
+            } else { fields = try await target.fields() }
             let evidence = try await target.bindFields(fields, to: page)
             try checkCurrent(captured)
             guard browser.hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
-            return PreparedForm(target: target, input: try .init(interpretation: interpretation.proposal, evidence: evidence, selectedFormID: selectedFormID))
+            return PreparedForm(target: target, input: try .init(interpretation: interpretation.proposal, evidence: evidence,
+                selectedFormID: selectedFormID, preservedControls: preservedControls))
         }
         latestForm = prepared
         return prepared.input

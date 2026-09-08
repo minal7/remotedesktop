@@ -489,7 +489,7 @@ final class ComputerUseBrowserResearchDriverTests: XCTestCase {
         fixture.actions.select = { input in
             let choice: [String: Any]
             if let control = input.queryControlIDs.first { choice = ["query":control] }
-            else if let form = input.formIDs.first { choice = ["form":form] }
+            else if let form = input.formIDs.first { choice = ["form":form,"preserve":[]] }
             else { choice = ["read_results":true] }
             return String(decoding: try JSONSerialization.data(withJSONObject: choice), as: UTF8.self)
         }
@@ -501,6 +501,7 @@ struct ResearchDriverFixture {
     static let root = "research-driver"
     static let prompt = "Find concerts under USD 50. Do not buy."
     static let date = Date(timeIntervalSince1970: 1_800_000_000)
+    let request: String
     let server: OwnedBrowserHTTPFixture
     let base: URL
     let directory: URL
@@ -523,7 +524,7 @@ struct ResearchDriverFixture {
                      additionalCardHTML: String = "", linkDestinationOverride: String? = nil,
                      candidateBodyHTML: String = "", searchForm: Bool = false,
                      actionPlanner: (any ComputerUseBrowserActionPlanning)? = nil,
-                     formPlanner: (any ComputerUseBrowserFormPlanning)? = nil) async throws -> Self {
+                     formPlanner: (any ComputerUseBrowserFormPlanning)? = nil, request: String = ResearchDriverFixture.prompt) async throws -> Self {
         func card(_ path: String) -> String { "<article><h2>Concert Alpha</h2><a href='\(linkDestinationOverride ?? path)'>Alpha details</a>\(candidateBodyHTML)</article>" + additionalCardHTML }
         let form = searchForm ? "<form action='/filtered'><label>Query<input name='q' value='old'></label><button>Search</button></form>" : ""
         let server = try OwnedBrowserHTTPFixture(routes: ["/before": .init(body: card("/old")),
@@ -560,13 +561,13 @@ struct ResearchDriverFixture {
             else { planning = policy }
             let driver = ComputerUseBrowserResearchDriver(goalPlanner: goal, resultPlanner: resultPlanner ?? results, searchPlanner: search, actionPlanner: actionPlanner ?? actions, formPlanner: formPlanner ?? forms,
                 planning: planning, navigationLimit: navigationLimit, now: { date }, timeZoneIdentifier: { "America/Los_Angeles" })
-            return .init(server: server, base: base, directory: directory, browser: browser, coordinator: coordinator,
+            return .init(request: request, server: server, base: base, directory: directory, browser: browser, coordinator: coordinator,
                 tools: tools, goal: goal, results: results, search: search, actions: actions, forms: forms, policy: policy, state: state, driver: driver)
         } catch { browser.close(); server.stop(); try? FileManager.default.removeItem(at: directory); throw error }
     }
     func owner() throws -> ComputerUseBrowserResearchTask { try XCTUnwrap(tools.ownedBrowserResearch(taskID: Self.root)) }
     func start() async throws -> ComputerUseExecutionResult? {
-        try await driver.executeBrowserResearch(taskID: Self.root, prompt: Self.prompt, tools: tools, progress: { _ in })
+        try await driver.executeBrowserResearch(taskID: Self.root, prompt: request, tools: tools, progress: { _ in })
     }
     func resume() async throws -> ComputerUseExecutionResult {
         let owner = try owner()

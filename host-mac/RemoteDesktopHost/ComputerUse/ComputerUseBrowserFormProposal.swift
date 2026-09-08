@@ -82,14 +82,17 @@ struct ComputerUseBrowserFormProposal: Equatable, Sendable, CustomStringConverti
                 } else { throw invalid }
                 edits.append(.init(field: alias, payload: payload))
             }
-            let preserved: [Preservation] = try preservationRows.map { row in
+            var preserved = input.requiredPreservation
+            for row in preservationRows {
                 guard case .object(let value) = row, Set(value.keys) == ["field", "requirement"],
                       case .string(let alias)? = value["field"], usedFields.insert(alias).inserted,
                       let reference = value["requirement"] else { throw invalid }
                 _ = try input.field(for: alias)
                 let index = try requirementIndex(reference, input: input)
                 guard [.outcome, .condition, .prohibition].contains(input.interpretation.requirements[index].role) else { throw invalid }
-                return .init(field: alias, requirementIndex: index)
+                if let required = preserved.first(where: { $0.field == alias }) {
+                    guard required.requirementIndex == index else { throw invalid }
+                } else { preserved.append(.init(field: alias, requirementIndex: index)) }
             }
             return .init(input: input, edits: edits, preserved: preserved)
         } catch { throw invalid }

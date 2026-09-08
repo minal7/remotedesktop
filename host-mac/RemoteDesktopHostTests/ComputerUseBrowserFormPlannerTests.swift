@@ -4,6 +4,30 @@ import XCTest
 
 @MainActor
 final class ComputerUseBrowserFormPlannerTests: XCTestCase {
+    func testCarriedPreservationRejectsConflictingReferencesAndCannotBecomeAnEdit() async throws {
+        let fixture = try await FormPlannerFixture(goal: proposal(preserveReference: true))
+        defer { fixture.close() }
+        let original = fixture.input, field = original.evidence.fields[5]
+        let required = ComputerUseBrowserControlPreservation(controlID: field.control.id, requirementIndex: 7)
+        let input = try ComputerUseBrowserResearchFormInput(interpretation: original.interpretation, evidence: original.evidence,
+            selectedFormID: XCTUnwrap(field.control.form?.id), preservedControls: [required])
+        XCTAssertFalse(input.editableFieldAliases.contains("field6"))
+        let edits: [[String: Any]] = [["field":"field2","terms":[["requirement":2,"text":"Paris"]]]]
+        let omitted = try ComputerUseBrowserFormProposal.decode(content: plan(edits), input: input)
+        let repeated = try ComputerUseBrowserFormProposal.decode(content: plan(edits, preserve: [["field":"field6","requirement":7]]), input: input)
+        XCTAssertEqual(omitted, repeated); XCTAssertEqual(omitted.preserved, input.requiredPreservation)
+        for rows: [[String: Any]] in [[["field":"field6","requirement":0]], [["field":"field6","requirement":6]]] {
+            XCTAssertThrowsError(try ComputerUseBrowserFormProposal.decode(content: plan(edits, preserve: rows), input: input))
+        }
+        XCTAssertThrowsError(try ComputerUseBrowserFormProposal.decode(content: plan([["field":"field6","terms":[["requirement":2,"text":"Paris"]]]]), input: input))
+        for references in [[required, required], [.init(controlID: "missing", requirementIndex: 7)], [.init(controlID: field.control.id, requirementIndex: 99)]] {
+            XCTAssertThrowsError(try ComputerUseBrowserResearchFormInput(interpretation: original.interpretation, evidence: original.evidence,
+                selectedFormID: field.control.form?.id, preservedControls: references))
+        }
+        let contract = try XCTUnwrap(omitted.textContract(for: input))
+        XCTAssertEqual(contract.unchangedValues, [field.editable.snapshot.targetID:"private-reference"])
+    }
+
     func testNormalizationsSeparateExactPartyCountsFromResultCountsBoundsAndRanges() throws {
         let goal = try proposal(rows: [row("Find flights. ", role: "outcome"), row("tomorrow. ", field: "date"),
             row("for two people. ", field: "quantity"), row("three adults. ", field: "quantity"), row("0 children. ", field: "quantity"),

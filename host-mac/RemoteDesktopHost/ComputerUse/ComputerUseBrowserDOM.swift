@@ -4,7 +4,7 @@ import WebKit
 enum ComputerUseBrowserDOMCommand: String {
     case fields, read, edit, receipt, reobserve, preflight, pageIdentity, pageSnapshot, validatePageSnapshot
     case scrollViewport, viewportScrollReceipt, validatePageLink
-    case prepareFormQuery, validateFormQuery, bindPageFields
+    case prepareFormQuery, validateFormQuery, bindPageFields, formFields
 }
 
 /// Private adapter output. A GET query can contain server state or user input;
@@ -471,6 +471,7 @@ enum ComputerUseBrowserDOM {
       const pageID = nonce();
       let documentID = nonce(), root = null, nextID = 0;
       const bindings = new Map(), operations = new Map();
+      let fieldScope = null;
       // Independent of form discovery, which retires text-operation bindings.
       const viewportOperations = new Map();
       const formQueries = new Map();
@@ -535,7 +536,7 @@ enum ComputerUseBrowserDOM {
       function synchronize() {
         retire(observer.takeRecords());
         if (root !== doc.documentElement) {
-          if (root) { documentID = nonce(); bindings.clear(); operations.clear(); viewportOperations.clear(); formQueries.clear(); lastPageSnapshot = null; }
+          if (root) { documentID = nonce(); bindings.clear(); operations.clear(); fieldScope = null; viewportOperations.clear(); formQueries.clear(); lastPageSnapshot = null; }
           root = doc.documentElement;
         }
       }
@@ -735,7 +736,7 @@ enum ComputerUseBrowserDOM {
                 selectionStart: start === null ? -1 : start,
                 selectionEnd: end === null ? -1 : end};
       }
-      function fields(expectedIDs) {
+      function fields(expectedIDs, scope = null) {
         let retained = null;
         if (expectedIDs !== undefined) {
           if (!Array.isArray(expectedIDs) || expectedIDs.length < 1 || expectedIDs.length > 16 || new Set(expectedIDs).size !== expectedIDs.length) return reply('unsupported');
@@ -745,19 +746,33 @@ enum ComputerUseBrowserDOM {
             if (!binding || !binding.valid || retained.has(binding.element)) return reply('stale');
             retained.set(binding.element, binding);
           }
-        } else { bindings.clear(); operations.clear(); }
-        const found = [], walkers = [doc.createTreeWalker(doc, NodeFilter.SHOW_ELEMENT)];
+        } else { bindings.clear(); operations.clear(); fieldScope = scope; }
+        // Retained observation must reuse the same native form and explicit
+        // outside invariants. Never fall back to whole-document discovery.
+        let scoped = [], scopedIndex = 0;
+        if (fieldScope) {
+          if (!(fieldScope.form instanceof HTMLFormElement) || !fieldScope.form.isConnected
+              || fieldScope.form.ownerDocument !== doc) return reply('stale');
+          const members = formElements.call(fieldScope.form);
+          if (members.length > 10000) return reply('limit');
+          // Native form.elements includes controls associated via form=,
+          // including those outside the form's DOM subtree.
+          scoped = Array.from(new Set([...Array.from(members), ...fieldScope.additional]));
+        }
+        const found = [], walkers = fieldScope ? [] : [doc.createTreeWalker(doc, NodeFilter.SHOW_ELEMENT)];
         let count = 0, totalBytes = 0, totalChoices = 0;
-        while (walkers.length) {
-          const walker = walkers[walkers.length - 1], element = walker.nextNode();
+        while (walkers.length || scopedIndex < scoped.length) {
+          const element = fieldScope ? scoped[scopedIndex++] : walkers[walkers.length - 1].nextNode();
           if (!element) { walkers.pop(); continue; }
           if (++count > 10000) { bindings.clear(); return reply('limit'); }
-          if (element.shadowRoot) {
+          if (!fieldScope && element.shadowRoot) {
             observer.observe(element.shadowRoot, observationOptions);
             walkers.push(doc.createTreeWalker(element.shadowRoot, NodeFilter.SHOW_ELEMENT));
           }
           // Do not read values from hidden/protected/unsupported controls.
           if (!editable(element)) continue;
+          const tree = element.getRootNode();
+          if (tree instanceof ShadowRoot) observer.observe(tree, observationOptions);
           const {label, labels} = labelFor(element);
           if (!label || encoder.encode(label).length > 256) { bindings.clear(); return reply('unsupported'); }
           const binding = retained ? retained.get(element) : {id: 'e' + (++nextID), element, form: element.form, label, labels, shape: shape(element), valid: true};
@@ -1119,7 +1134,7 @@ enum ComputerUseBrowserDOM {
               || JSON.stringify(readViewport()) !== JSON.stringify(operation.receipt.after)) return reply('uncertain');
           return {...reply('viewport-scroll-confirmed'), scroll: operation.receipt};
         }
-        if (['pageSnapshot', 'validatePageSnapshot', 'scrollViewport', 'validatePageLink', 'prepareFormQuery', 'validateFormQuery', 'bindPageFields'].includes(command)) {
+        if (['pageSnapshot', 'validatePageSnapshot', 'scrollViewport', 'validatePageLink', 'prepareFormQuery', 'validateFormQuery', 'bindPageFields', 'formFields'].includes(command)) {
           const status = authenticationStatus();
           if (status) { lastPageSnapshot = null; return reply(status); }
           if (doc.readyState !== 'complete') return reply('stale');
@@ -1147,6 +1162,21 @@ enum ComputerUseBrowserDOM {
                     || previous.signature !== binding.signature;
                 })) return reply('stale');
             if (command === 'validatePageSnapshot') return reply('page-current');
+            if (command === 'formFields') {
+              if (typeof args.formID !== 'string' || !Array.isArray(args.preservedControlIDs)
+                  || args.preservedControlIDs.length > 16 || args.preservedControlIDs.some(id => typeof id !== 'string')
+                  || new Set(args.preservedControlIDs).size !== args.preservedControlIDs.length) return reply('unsupported');
+              const forms = new Set(Array.from(controls.values()).filter(control => control.metadata.form?.id === args.formID).map(control => control.form));
+              if (forms.size !== 1) return reply('unsupported');
+              const form = forms.values().next().value, additional = [];
+              if (!(form instanceof HTMLFormElement) || !form.isConnected || form.ownerDocument !== doc) return reply('stale');
+              for (const id of args.preservedControlIDs) {
+                const control = controls.get(id);
+                if (!control || !editable(control.element) || control.form !== control.element.form) return reply('unsupported');
+                additional.push(control.element);
+              }
+              return fields(undefined, {form, additional});
+            }
             if (command === 'bindPageFields') {
               // Join independently observed IDs only through the retained
               // native elements, never label/name/position equality.
@@ -1410,6 +1440,22 @@ final class ComputerUseBrowserTextTarget {
         return fields
     }
 
+    /// Read only the selected native form and source-bound preservation
+    /// controls. Selection is tied to the exact current page before discovery.
+    func fields(in formID: String, page evidence: ComputerUseBrowserPageEvidence, preserving controlIDs: [String]) async throws -> [ComputerUseTextField] {
+        try validate()
+        guard documentID == nil, evidence.document == document,
+              evidence.page.controls.contains(where: { $0.form?.id == formID }), controlIDs.count <= 16,
+              Set(controlIDs).count == controlIDs.count,
+              Set(controlIDs).isSubset(of: Set(evidence.page.controls.map(\.id))) else { throw ComputerUseBrowserError.pageChanged }
+        let reply = try await browser.callDOM(.formFields, arguments: ["documentID":evidence.documentID,
+            "snapshotID":evidence.page.id, "formID":formID, "preservedControlIDs":controlIDs], document: document)
+        try validate()
+        guard reply.documentID == evidence.documentID else { throw ComputerUseBrowserError.pageChanged }
+        guard let fields = try adoptDiscoveredFields(reply) else { throw ComputerUseBrowserError.unsupportedDocument }
+        return fields
+    }
+
     /// Bind a previously discovered form to the exact observed page. This
     /// reobserves the retained fields; it does not rediscover replacement
     /// objects, clear input receipts, focus, edit or submit a control.
@@ -1483,6 +1529,10 @@ final class ComputerUseBrowserTextTarget {
         guard documentID == nil else { throw ComputerUseBrowserError.pageChanged }
         let reply = try await browser.callDOM(.fields, arguments: [:], document: document)
         try validate()
+        return try adoptDiscoveredFields(reply)
+    }
+
+    private func adoptDiscoveredFields(_ reply: ComputerUseBrowserDOMReply) throws -> [ComputerUseTextField]? {
         if reply.status == "unsupported" || reply.status == "limit" {
             guard reply.fields == nil else { throw ComputerUseBrowserError.unsupportedDocument }
             return nil

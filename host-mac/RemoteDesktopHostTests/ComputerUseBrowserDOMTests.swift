@@ -4439,6 +4439,156 @@ private final class ResearchNavigationTestState {
 
 @MainActor
 final class ComputerUseBrowserFormBindingTests: XCTestCase {
+    func testScopedDiscoveryIncludesExternalFormMembersAndExcludesUnrelatedPrivateFields() async throws {
+        let unrelated = (0..<20).map { "<input value='private-unrelated-\($0)'>" }.joined()
+        let fixture = try await DOMFixture(body: unrelated + """
+            <form id='search'><label>Query<input value='initial-query'></label><button>Search</button></form>
+            <label>External destination<input form='search' value='initial-destination'></label>
+            """)
+        defer { fixture.close() }
+        let page = try await fixture.browser.observePage(document: fixture.document)
+        let form = try XCTUnwrap(page.page.controls.first { $0.label == "Query" }?.form?.id)
+        let fields = try await fixture.target.fields(in: form, page: page, preserving: [])
+        XCTAssertEqual(fields.map(\.label), ["Query", "External destination"])
+        XCTAssertEqual(fields.map { $0.snapshot.value }, ["initial-query", "initial-destination"])
+        let bound = try await fixture.target.bindFields(fields, to: page)
+        XCTAssertTrue(bound.fields.allSatisfy { $0.control.form?.id == form })
+        let current = try await fixture.target.reobserveRetainedFields()
+        XCTAssertEqual(current, fields)
+        do { _ = try await fixture.target.fields(in: form, page: page, preserving: []); XCTFail("An adapter cannot rediscover its retained bindings") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+        let legacy = ComputerUseBrowserTextTarget(browser: fixture.browser, document: fixture.document, requiresFrontmost: false)
+        let unsupported = try await legacy.fieldsIfSupported()
+        XCTAssertNil(unsupported, "Whole-document discovery still declines unrelated unlabelled fields")
+    }
+
+    func testScopedRetainedMembershipRejectsFormChangesButIgnoresUnrelatedFieldChanges() async throws {
+        for change in ["outside", "added", "replaced", "reassigned", "detached"] {
+            let mutation: String
+            switch change {
+            case "outside": mutation = "document.body.insertAdjacentHTML('beforeend', '<input>'); document.getElementById('outside').value = 'changed';"
+            case "added": mutation = "form.insertAdjacentHTML('beforeend', '<label>New field<input></label>');"
+            case "replaced": mutation = "query.replaceWith(query.cloneNode(true));"
+            case "reassigned": mutation = "query.setAttribute('form', 'other');"
+            default: mutation = "form.remove();"
+            }
+            let fixture = try await DOMFixture(body: """
+                <input id='outside'><form id='other'></form>
+                <form id='search'><label>Query<input id='query' value='initial'></label></form>
+                <script>fetch('/signal').then(() => {
+                  const form = document.getElementById('search'), query = document.getElementById('query');
+                  \(mutation) fetch('/changed');
+                });</script>
+                """, heldSignal: true)
+            defer { fixture.close() }
+            let page = try await fixture.browser.observePage(document: fixture.document)
+            let form = try XCTUnwrap(page.page.controls.first { $0.label == "Query" }?.form?.id)
+            let fields = try await fixture.target.fields(in: form, page: page, preserving: [])
+            _ = try await fixture.target.bindFields(fields, to: page)
+            try await fixture.wait { fixture.server.count("/signal") == 1 }
+            fixture.server.releaseHeldResponses()
+            try await fixture.wait { fixture.server.count("/changed") == 1 }
+            do {
+                let current = try await fixture.target.reobserveRetainedFields()
+                XCTAssertEqual(change, "outside"); XCTAssertEqual(current, fields)
+                let fresh = try await fixture.browser.observePage(document: fixture.document)
+                _ = try await fixture.target.bindFields(current, to: fresh)
+            } catch { XCTAssertNotEqual(change, "outside"); XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+        }
+    }
+
+    func testScopedDiscoveryRejectsInvalidReferencesAndStalePagesBeforeClearingInputReceipts() async throws {
+        let fixture = try await DOMFixture(body: "<form><label>Query<input value='initial'></label><button>Search</button></form>")
+        defer { fixture.close() }
+        let page = try await fixture.browser.observePage(document: fixture.document)
+        let control = try XCTUnwrap(page.page.controls.first { $0.label == "Query" }), form = try XCTUnwrap(control.form?.id)
+        let submit = try XCTUnwrap(page.page.controls.first { $0.kind == "submit" })
+        let fields = try await fixture.target.fields(in: form, page: page, preserving: [])
+        let field = try XCTUnwrap(fields.first)
+        let contract = try ComputerUseTextTaskContract(taskID: "fixture", prompt: "Set Query to travel", fields: fields,
+            operations: [.enterText(.init(targetID: field.snapshot.targetID, mode: .replaceAll, text: "travel"))])
+        let task = try fixture.textTask(contract: contract)
+        try await task.run()
+        let continuation = try task.verifiedContinuation()
+        let operation = try XCTUnwrap(continuation.inputOperationIDs.first)
+        for invalid: [String: Any] in [
+            ["formID":"missing","preservedControlIDs":[]],
+            ["formID":form,"preservedControlIDs":["missing"]],
+            ["formID":form,"preservedControlIDs":[submit.id]],
+            ["formID":form,"preservedControlIDs":[control.id,control.id]],
+            ["formID":form,"preservedControlIDs":Array(repeating: control.id, count: 17)]
+        ] {
+            var arguments = invalid
+            arguments["documentID"] = page.documentID; arguments["snapshotID"] = page.page.id
+            let reply = try await fixture.browser.callDOM(.formFields, arguments: arguments, document: fixture.document)
+            XCTAssertNotEqual(reply.status, "ok"); XCTAssertNil(reply.fields)
+            let dispatched = try await fixture.target.didDispatchInput(operationID: operation)
+            XCTAssertTrue(dispatched)
+        }
+        _ = try await fixture.browser.observePage(document: fixture.document)
+        let freshAdapter = ComputerUseBrowserTextTarget(browser: fixture.browser, document: fixture.document, requiresFrontmost: false)
+        do { _ = try await freshAdapter.fields(in: form, page: page, preserving: []); XCTFail("A superseded page cannot authorize discovery") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+        let dispatched = try await fixture.target.didDispatchInput(operationID: operation)
+        XCTAssertTrue(dispatched)
+    }
+
+    func testCarriedPreservationSurvivesOmittedProposalRowsAndRejectsSiteChangesBeforeAndAfterInput() async throws {
+        for inside in [false, true] {
+            for timing in ["before", "after"] {
+                let reference = "<label>Reference<input id='reference' value='private-reference'></label>"
+                let trigger = timing == "before" ? "fetch('/signal').then(change);" : "document.getElementById('query').addEventListener('input', change);"
+                var edits = 0
+                let fixture = try await DOMFixture(body: """
+                    <form action='/filtered'><label>Query<input id='query' name='q' value='initial'></label>\(inside ? reference : "")<button>Search</button></form>
+                    \(inside ? "" : reference)
+                    <script>const change = () => { document.getElementById('reference').value = 'changed'; fetch('/changed'); }; \(trigger)</script>
+                    """, heldSignal: true, domScriptDidDispatch: { if $0 == .edit { edits += 1 } })
+                defer { fixture.close() }
+                let page = try await fixture.browser.observePage(document: fixture.document)
+                let form = try XCTUnwrap(page.page.controls.first { $0.label == "Query" }?.form?.id)
+                let referenceID = try XCTUnwrap(page.page.controls.first { $0.label == "Reference" }?.id)
+                let fields = try await fixture.target.fields(in: form, page: page, preserving: [referenceID])
+                let bound = try await fixture.target.bindFields(fields, to: page)
+                let goal = try ComputerUseBrowserGoalInput(taskID: "fixture", prompt: "Find travel tickets. Leave Reference unchanged.",
+                    referenceDate: Date(timeIntervalSince1970: 1_800_000_000), timeZoneIdentifier: "America/Los_Angeles")
+                let interpretation = try await BrowserResearchGoalFixture().propose(goal)
+                let input = try ComputerUseBrowserResearchFormInput(interpretation: interpretation, evidence: bound, selectedFormID: form,
+                    preservedControls: [.init(controlID: referenceID, requirementIndex: 0)])
+                let alias = try XCTUnwrap(input.editableFieldAliases.first)
+                let content = String(decoding: try JSONSerialization.data(withJSONObject: ["edits":[["field":alias,"terms":[["requirement":0,"text":"travel"]]]],"preserve":[]]), as: UTF8.self)
+                let proposal = try ComputerUseBrowserFormProposal.decode(content: content, input: input)
+                XCTAssertEqual(proposal.preserved, input.requiredPreservation)
+                let contract = try XCTUnwrap(proposal.textContract(for: input))
+                XCTAssertEqual(Array(contract.unchangedValues.values), ["private-reference"])
+                let task = try fixture.textTask(contract: contract)
+                if timing == "before" {
+                    try await fixture.wait { fixture.server.count("/signal") == 1 }
+                    fixture.server.releaseHeldResponses()
+                    try await fixture.wait { fixture.server.count("/changed") == 1 }
+                }
+                do { try await task.run(); XCTFail("An omitted proposal row cannot erase a carried invariant") }
+                catch { XCTAssertTrue(error is ComputerUseTextTaskError) }
+                XCTAssertEqual(edits, timing == "before" ? 0 : 1)
+                do { try await task.run(); XCTFail("Reconciliation cannot erase the broken invariant") }
+                catch { XCTAssertEqual(error as? ComputerUseTextTaskError, .incompleteOutcome) }
+                XCTAssertEqual(edits, timing == "before" ? 0 : 1)
+                if timing == "before" {
+                    XCTAssertThrowsError(try task.verifiedContinuation())
+                } else {
+                    // Step receipts are historical. Native query preparation
+                    // must independently reject the now-broken invariant.
+                    let historical = try task.verifiedContinuation()
+                    let fresh = try await fixture.browser.observePage(document: fixture.document)
+                    let submit = try XCTUnwrap(fresh.page.controls.first { $0.kind == "submit" })
+                    do { _ = try await fixture.target.prepareFormQuery(controlID: submit.id, evidence: fresh, after: historical); XCTFail("A historical edit cannot authorize changed preservation values") }
+                    catch { XCTAssertEqual(error as? ComputerUseBrowserError, .formQueryUnavailable) }
+                    XCTAssertEqual(fixture.server.count("/filtered?q=travel"), 0)
+                }
+            }
+        }
+    }
+
     func testNativeBindingDistinguishesDuplicateLabelsAndKeepsValuesOutOfCompleteGoalContext() async throws {
         var commands: [ComputerUseBrowserDOMCommand] = []
         let fixture = try await DOMFixture(body: """
