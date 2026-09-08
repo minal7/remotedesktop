@@ -25,7 +25,7 @@ struct ComputerUseBrowserResultPageInput: Equatable, Sendable, CustomStringConve
             truncated: page.truncated, omittedEmbeddedContent: page.omittedEmbeddedContent,
             omittedControls: page.omittedControls || (page.controlStateObserved ? page.controlStates.contains { $0.kind == .unavailable } : !page.controls.isEmpty),
             viewport: page.viewport, containers: page.containers, omittedStructure: page.omittedStructure,
-            controlStates: page.controlStates, controlStateObserved: page.controlStateObserved)
+            controlStates: page.controlStates, controlStateObserved: page.controlStateObserved, textControlIDs: page.textControlIDs)
         let context = try ComputerUseBrowserPlanningContext(page: reading, includingControlState: page.controlStateObserved).serialized()
         contextJSON = context
         var parser = StrictSemanticJSONParser(context, maximumValueCount: 2_048)

@@ -266,7 +266,8 @@
     "RemoteDesktopHostTests/ComputerUseBrowserResearchAnswerTests",
     "RemoteDesktopHostTests/ComputerUseTests/test_managerResearchAnswerDeliversAndReplaysWholeSourceTextWithoutRepeatingWork",
     "RemoteDesktopHostTests/ComputerUseBrowserResearchHistoryTests",
-    "RemoteDesktopHostTests/ComputerUseBrowserControlStateTests"
+    "RemoteDesktopHostTests/ComputerUseBrowserControlStateTests",
+    "RemoteDesktopHostTests/ComputerUseBrowserReadingScopeTests"
   ],
   "expectedTests": [
     "RemoteDesktopHostTests/AppleFoundationMCPPlannerTests/testCountedInputExpandsBeforeEffectAndTerminalQueries",
@@ -664,6 +665,12 @@
     "RemoteDesktopHostTests/ComputerUseBrowserQuantityReviewTests/testQuantityContractRequiresMeaningForEveryFieldAndPreservesLegacyReviews",
     "RemoteDesktopHostTests/ComputerUseBrowserQuantityReviewTests/testQuantityPartsRetainMeaningWithinBoundsAndRequireCompleteNativeValidation",
     "RemoteDesktopHostTests/ComputerUseBrowserQuantityReviewTests/testWholeAndPartitionedLocalPlannersCarryTheExactQuantityContractAndInput",
+    "RemoteDesktopHostTests/ComputerUseBrowserReadingScopeTests/testDriverReadsChosenLocationScopeWithoutEditingOrTreatingItAsAResultFact",
+    "RemoteDesktopHostTests/ComputerUseBrowserReadingScopeTests/testNativeScopeReadsOnlySelectedWholeValuesAndCannotBeForgedOrReused",
+    "RemoteDesktopHostTests/ComputerUseBrowserReadingScopeTests/testPauseAndHandbackCannotReviveAnEarlierReadScope",
+    "RemoteDesktopHostTests/ComputerUseBrowserReadingScopeTests/testPropertyOnlyTextChangeInvalidatesTheReadingAndRequiresANewScope",
+    "RemoteDesktopHostTests/ComputerUseBrowserReadingScopeTests/testReplacementProtectionAndLoginChangesRejectTheOldScopeBeforeCollection",
+    "RemoteDesktopHostTests/ComputerUseBrowserReadingScopeTests/testScopeUsesOfferedControlsAndOriginalRequirementsBeforeReadingValues",
     "RemoteDesktopHostTests/ComputerUseBrowserRequirementReviewTests/testChangedInterpretationOrCitationCannotReuseReviewIdentity",
     "RemoteDesktopHostTests/ComputerUseBrowserRequirementReviewTests/testNativeResearchAssessmentKeepsContradictionsAndUnknownsAheadOfMatchingNumbers",
     "RemoteDesktopHostTests/ComputerUseBrowserRequirementReviewTests/testRequirementCitationsCannotBorrowAnotherCandidateOrCutASelectedField",

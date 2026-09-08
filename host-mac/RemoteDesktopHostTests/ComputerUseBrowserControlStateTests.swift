@@ -323,13 +323,13 @@ final class ComputerUseBrowserControlStateTests: XCTestCase {
     private func object(_ string: String) throws -> [String: Any] { try ResearchAnswerFixture.object(Data(string.utf8)) }
 }
 
-private struct ControlStateUnusedTransport: ComputerUseTextModelTransport {
+struct ControlStateUnusedTransport: ComputerUseTextModelTransport {
     func exactInputTokenCount(completionRequest: URLRequest) async throws -> Int { throw ComputerUseBrowserResultError.invalidProposal }
     func complete(request: URLRequest) async throws -> Data { throw ComputerUseBrowserResultError.invalidProposal }
 }
 
 @MainActor
-private final class ControlStateFixture {
+final class ControlStateFixture {
     let server: OwnedBrowserHTTPFixture
     let browser: ComputerUseOwnedBrowser
     let document: ComputerUseBrowserDocument

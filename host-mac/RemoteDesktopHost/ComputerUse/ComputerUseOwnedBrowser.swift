@@ -679,7 +679,8 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         let result = try await callDOM(.pageSnapshot, arguments: includingControlState ? ["includeControlState":true] : [:], document: expected)
         guard hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
         guard result.status == "page-snapshot", result.fields == nil,
-              let page = result.page, page.isWellFormed, page.controlStateObserved == includingControlState else { throw ComputerUseBrowserError.pageEvidenceUnavailable }
+              let page = result.page, page.isWellFormed, page.controlStateObserved == includingControlState,
+              page.textControlIDs.isEmpty else { throw ComputerUseBrowserError.pageEvidenceUnavailable }
         if historyReceipts[expected.operationID]?.document == expected { historyReceipts[expected.operationID]?.wasObserved = true }
         return ComputerUseBrowserPageEvidence(document: expected, documentID: result.documentID, page: page)
     }

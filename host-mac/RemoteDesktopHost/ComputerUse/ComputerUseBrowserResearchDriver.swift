@@ -328,7 +328,7 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                 }
                 progress("Reading the page against the original request…")
                 let history = run.visits
-                let decision = try await owner.planResearchDecision(select: { [planning] goal, candidates in
+                let decision = try await owner.planResearchDecision(for: action, select: { [planning] goal, candidates in
                     try await planning.selectDecision(goal: goal, candidates: candidates, history: history, evidence: owner.researchEvidence(for: goal))
                 })
                 try check()

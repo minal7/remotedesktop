@@ -201,7 +201,7 @@ final class ComputerUseBrowserActionPlannerTests: XCTestCase {
                     XCTAssertEqual(body["max_tokens"] as? Int, 1_024); XCTAssertEqual(body["cache_prompt"] as? Bool, false); XCTAssertNil(body["tools"])
                     let format = try XCTUnwrap(body["response_format"] as? [String: Any])
                     let schema = try XCTUnwrap(format["json_schema"] as? [String: Any])
-                    XCTAssertEqual(schema["name"] as? String, "browser_research_action_v6")
+                    XCTAssertEqual(schema["name"] as? String, "browser_research_action_v8")
                     let root = try XCTUnwrap(schema["schema"] as? [String: Any])
                     let alternatives = try XCTUnwrap(root["oneOf"] as? [[String: Any]])
                     let form = try XCTUnwrap(alternatives.first { ($0["required"] as? [String])?.contains("form") == true })

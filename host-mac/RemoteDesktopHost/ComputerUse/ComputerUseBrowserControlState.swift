@@ -3,7 +3,7 @@ import Foundation
 /// A research-only observation of a native control, never an edit or proof
 /// that this selection belongs to an offer. Submission values stay private.
 struct ComputerUseBrowserControlState: Decodable, Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
-    enum Kind: String, Decodable, Sendable { case scalar, selection, checked, stateless, unavailable }
+    enum Kind: String, Decodable, Sendable { case scalar, text, selection, checked, stateless, unavailable }
     let controlID: String
     let kind: Kind
     let value: String?
@@ -14,6 +14,9 @@ struct ComputerUseBrowserControlState: Decodable, Equatable, Sendable, CustomStr
     func isValid(for control: ComputerUseBrowserPageSnapshot.Control) -> Bool {
         guard controlID == control.id else { return false }
         switch kind {
+        case .text:
+            return ComputerUseBrowserControlRead.allows(control) && value != nil && (value?.utf8.count ?? 0) <= 2_048
+                && selectedOptionIDs == nil && checked == nil && indeterminate == nil
         case .scalar:
             return ["date", "datetime-local", "month", "week", "time", "number"].contains(control.kind)
                 && !control.disabled && !control.readOnly
@@ -37,7 +40,7 @@ struct ComputerUseBrowserControlState: Decodable, Equatable, Sendable, CustomStr
         }
     }
 
-    /// The entire observed scalar or selected option labels. A checked flag
+    /// The entire observed scalar, scoped text or selected option labels. A checked flag
     /// is not a numeric quantity; a selection is never available inventory.
     func fieldSource(for control: ComputerUseBrowserPageSnapshot.Control) -> String? {
         guard indeterminate != true, let value = observedValue(for: control),
@@ -48,7 +51,7 @@ struct ComputerUseBrowserControlState: Decodable, Equatable, Sendable, CustomStr
     private func observedValue(for control: ComputerUseBrowserPageSnapshot.Control) -> String? {
         guard isValid(for: control) else { return nil }
         switch kind {
-        case .scalar: return value
+        case .scalar, .text: return value
         case .selection:
             let ids = selectedOptionIDs ?? []
             return control.options.filter { ids.contains($0.id) }.map {

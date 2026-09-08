@@ -9,6 +9,8 @@ struct ComputerUseBrowserActionInput: Equatable, Sendable, CustomStringConvertib
     let evidence: ComputerUseBrowserPageEvidence
     let formIDs: [String]
     let preservableControlIDs: [String]
+    let readableControlIDs: [String]
+    let readableRequirementIndices: [Int]
     let queryControlIDs: [String]
     let queryReceipt: ComputerUseBrowserResearchFormReceipt?
     let recallableReadingIndices: [Int]
@@ -19,7 +21,7 @@ struct ComputerUseBrowserActionInput: Equatable, Sendable, CustomStringConvertib
     private let archiveDigest: String?
     let contextJSON: String
     var needsFormDecision: Bool { !formIDs.isEmpty || !queryControlIDs.isEmpty }
-    var needsPlanningDecision: Bool { needsFormDecision || !recallableReadingIndices.isEmpty || !recalledReadingIndices.isEmpty || !historyOptions.isEmpty }
+    var needsPlanningDecision: Bool { needsFormDecision || !readableControlIDs.isEmpty || !recallableReadingIndices.isEmpty || !recalledReadingIndices.isEmpty || !historyOptions.isEmpty }
 
     @MainActor
     init(interpretation: ComputerUseBrowserGoalProposal, evidence: ComputerUseBrowserPageEvidence,
@@ -57,6 +59,10 @@ struct ComputerUseBrowserActionInput: Equatable, Sendable, CustomStringConvertib
         guard let page = try JSONSerialization.jsonObject(with: Data(serialized.utf8)) as? [String: Any],
               let records = page["records"] as? [[String: Any]] else { throw ComputerUseBrowserActionPlanError.invalidInput }
         let projected = Set(records.filter { $0["kind"] as? String == "control" }.compactMap { $0["id"] as? String })
+        readableRequirementIndices = interpretation.requirements.indices.filter { ComputerUseBrowserControlRead.accepts(interpretation.requirements[$0]) }
+        readableControlIDs = readableRequirementIndices.isEmpty ? [] : evidence.page.controls.filter {
+            projected.contains($0.id) && ComputerUseBrowserControlRead.allows($0)
+        }.map(\.id)
         let editableKinds: Set<String> = ["text", "search", "url", "tel", "email", "textarea", "date", "datetime-local", "month", "week", "time", "number", "select"]
         let editableControls = evidence.page.controls.filter {
             projected.contains($0.id) && editableKinds.contains($0.kind) && !$0.disabled && !$0.readOnly && !$0.multiple
@@ -116,6 +122,11 @@ struct ComputerUseBrowserActionInput: Equatable, Sendable, CustomStringConvertib
                  "readings":researchEvidence?.readingIndices(forSource: option.target.destinationIdentity) ?? []] as [String: Any]
             }
         }
+        if !readableControlIDs.isEmpty {
+            context["version"] = 8
+            context["readable_controls"] = readableControlIDs
+            context["readable_requirements"] = readableRequirementIndices
+        }
         contextJSON = String(decoding: try JSONSerialization.data(withJSONObject: context, options: [.sortedKeys]), as: UTF8.self)
         self.interpretation = interpretation; self.evidence = evidence
         queryControlIDs = queryControls; self.queryReceipt = queryReceipt
@@ -133,8 +144,10 @@ struct ComputerUseBrowserActionProposal: Equatable, Sendable, CustomStringConver
     let input: ComputerUseBrowserActionInput
     let step: Step
     let preservedControls: [ComputerUseBrowserControlPreservation]
-    private init(input: ComputerUseBrowserActionInput, step: Step, preservedControls: [ComputerUseBrowserControlPreservation] = []) {
-        self.input = input; self.step = step; self.preservedControls = preservedControls
+    let readControls: [ComputerUseBrowserControlRead]
+    private init(input: ComputerUseBrowserActionInput, step: Step, preservedControls: [ComputerUseBrowserControlPreservation] = [],
+                 readControls: [ComputerUseBrowserControlRead] = []) {
+        self.input = input; self.step = step; self.preservedControls = preservedControls; self.readControls = readControls
     }
 
     static func decode(content: String, input: ComputerUseBrowserActionInput) throws -> Self {
@@ -143,6 +156,19 @@ struct ComputerUseBrowserActionProposal: Equatable, Sendable, CustomStringConver
             guard content.utf8.count <= 2_048 else { throw invalid }
             var parser = StrictSemanticJSONParser(content, maximumValueCount: 128)
             guard case .object(let root) = try parser.parse() else { throw invalid }
+            if Set(root.keys) == ["read_results", "read_controls"] {
+                guard case .bool(true)? = root["read_results"], case .array(let rows)? = root["read_controls"],
+                      (1...16).contains(rows.count) else { throw invalid }
+                let controls: [ComputerUseBrowserControlRead] = try rows.map { row in
+                    guard case .object(let item) = row, Set(item.keys) == ["control", "requirement"],
+                          case .string(let id)? = item["control"], input.readableControlIDs.contains(id),
+                          case .number(let number)? = item["requirement"], let index = Int(exactly: number),
+                          input.readableRequirementIndices.contains(index) else { throw invalid }
+                    return .init(controlID: id, requirementIndex: index)
+                }
+                guard Set(controls.map(\.controlID)).count == controls.count else { throw invalid }
+                return .init(input: input, step: .readResults, readControls: controls)
+            }
             if Set(root.keys) == ["form", "preserve"] {
                 guard case .string(let form)? = root["form"], input.formIDs.contains(form),
                       case .array(let rows)? = root["preserve"], rows.count <= 16 else { throw invalid }
@@ -225,6 +251,11 @@ struct ComputerUseLocalBrowserActionPlanner: ComputerUseBrowserActionPlanning {
             ["type":"object", "additionalProperties":false, "properties":properties, "required":properties.keys.sorted()]
         }
         var choices = [object(["read_results":["type":"boolean", "const":true]]), object(["unavailable":["type":"boolean", "const":true]])]
+        if !input.readableControlIDs.isEmpty {
+            choices.append(object(["read_results":["type":"boolean", "const":true], "read_controls":["type":"array", "minItems":1, "maxItems":16,
+                "items":object(["control":["type":"string", "enum":input.readableControlIDs],
+                    "requirement":["type":"integer", "enum":input.readableRequirementIndices]])]]))
+        }
         if !input.recallableReadingIndices.isEmpty {
             choices.append(object(["reading":["type":"integer", "enum":input.recallableReadingIndices]]))
         }
@@ -241,7 +272,7 @@ struct ComputerUseLocalBrowserActionPlanner: ComputerUseBrowserActionPlanning {
         let body: [String: Any] = ["model":connection.modelAlias,
             "messages":[["role":"system", "content":Self.instructions], ["role":"user", "content":input.contextJSON]],
             "temperature":0, "top_p":1, "top_k":0, "max_tokens":ComputerUseLocalBrowserGoalPlanner.outputTokens, "cache_prompt":false,
-            "response_format":["type":"json_schema", "json_schema":["name":input.allowsHistory ? "browser_research_action_v7" : "browser_research_action_v6", "strict":true, "schema":["oneOf":choices]]]]
+            "response_format":["type":"json_schema", "json_schema":["name":!input.readableControlIDs.isEmpty ? "browser_research_action_v8" : (input.allowsHistory ? "browser_research_action_v7" : "browser_research_action_v6"), "strict":true, "schema":["oneOf":choices]]]]
         var request = URLRequest(url: connection.baseURL.appendingPathComponent("v1/chat/completions"))
         request.httpMethod = "POST"; request.timeoutInterval = 30
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -261,7 +292,8 @@ struct ComputerUseLocalBrowserActionPlanner: ComputerUseBrowserActionPlanning {
     Return {"form":"ID","preserve":[]} for an offered editable_forms ID when entering search criteria in that form is the next necessary step. A separate planner will propose exact source-bound field values. For every field the USER explicitly requires to remain unchanged, include {"control":"ID","requirement":index} in preserve, using a preservable_controls reference and its motivating outcome/condition/prohibition requirement. Include those fields even outside the selected form. At most sixteen unique controls; never invent preservation for every unedited field. Discovery reads only the selected form and these explicitly requested fields. Carried preservation cannot be dropped by the later form planner. If a required field is missing or unsupported, do not silently omit it; use a justified question or unavailable. Distinguish search controls from unrelated newsletter/account/checkout forms. Do not choose login, password, MFA, payment or booking actions. Do not edit the same form again merely because its current values are hidden. Consider verified_form_stage and form_history before requesting another edit.
     form_history distinguishes verified edits from planned_edits. complete_stage=false means only a prefix was verified; unfinished_edits retains the unsent remainder with historical labels/types and original user sources. Those old labels are not current native references. Select the retained form to replan every unfinished entry; its planner must explicitly map all pending work to current edits. Query controls remain withheld until those obligations and any changed criteria are resolved. Never count a partial receipt as completion of the original stage or the research goal.
     verified_form_stage records the latest historically verified stage and accumulated edited criteria on this same native document. Each historical source retains exact user bytes and its old role/field interpretation. Its requirements list identifies overlapping CURRENT requirement indices, not semantic equivalence or proof that a criterion still matches the goal. current_goal_revision=false means accepted answers arrived after those edits; re-evaluate every earlier criterion against the complete current request and scoped answers before deciding whether to revise the form or open its query. A requires_repair=true edit identifies a changed value on its original native object. Query controls are withheld until every such criterion is repaired through a new form stage. Choose the retained form and re-evaluate the needed values from the complete user goal; never accept the changed value as success or repeat every earlier edit. This inspection does not prove values will remain unchanged or that the complete goal was satisfied. To open its search, return {"query":"ID"} using one candidate_query_controls reference. Native execution will revalidate the combined required field values, every retained stage’s input receipts and the query before loading. A later form stage must extend the same native form without replacing an earlier required object or discarding its receipts. This capability opens a native GET query; it does not run submit/click handlers or support POST forms. Never treat missing query controls as permission for another submission mechanism.
-    Return {"read_results":true} when the next step is to read and assess this page or choose an observed result link. Another stage will group results and choose a current link under the same goal and retained readings. Forms and reading are alternatives: choose based on what advances the complete task, not a fixed rule to fill every form or follow links first. Historical navigation and form counts prove neither distinct offers nor completion.
+    When readable_controls are offered, you may return {"read_results":true,"read_controls":[{"control":"ID","requirement":0}]} to read only the current text/search values needed to assess the cited original task requirements. Each reference must use an offered control and readable requirement. Choose scope from metadata before seeing values; include only task-relevant origin, destination, location, search/category, date, time or quantity fields. Never select account, identity, contact, login, payment or unrelated saved values. Do not collect every field just because it is offered. These values remain settings, not result facts or permission to edit. Omitted controls remain unknown, so do not infer their values or ignore a possible result qualification. The host validates the exact page and native objects again before collecting selected values.
+    Return {"read_results":true} when ordinary page reading is sufficient and no text-entry values are needed. This reads and assesses this page or chooses an observed result link. Another stage will group results and choose a current link under the same goal and retained readings. Forms and reading are alternatives: choose based on what advances the complete task, not a fixed rule to fill every form or follow links first. Historical navigation and form counts prove neither distinct offers nor completion.
     Return a typed question with one to eight motivating requirement indices only for a missing, ambiguous or conflicting task detail. Respect prior scoped answers. Account access uses visible user handoff and explicit return of control, never this question channel. If no justified supported next step exists, return {"unavailable":true}; the original task remains pending. Do not claim no results exist, an answer is verified or the request is complete.
     Return no URL, field value, free-form question, credentials, executable instruction, confidence, explanation or completion flag.
     """

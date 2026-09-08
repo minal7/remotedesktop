@@ -287,7 +287,7 @@ struct ResearchAnswerFixture {
                      extra: (String, String, String)? = nil, omitDetailLinks: Bool = false,
                      inventory: Int? = nil, quantityPolicy: ComputerUseBrowserResultReview.QuantityMeaning? = nil,
                      includeControls: Bool = false, multiPage: Bool = false, repeatedPage: Bool = false,
-                     historyRoute: Bool = false, controlHTML: String = "", resultDate: String? = nil) async throws -> Self {
+                     historyRoute: Bool = false, controlHTML: String = "", resultDate: String? = nil, resultLocation: String? = nil) async throws -> Self {
         let transport = ResearchAnswerTransport(followCount: multiPage ? 2 : 1, recall: multiPage ? 1 : nil, historyRoute: historyRoute)
         let local = try ComputerUseLocalBrowserLinkPlanner(connection: .init(baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:54321")),
             bearerToken: "fixture-token", modelAlias: "fixture-model"), transport: transport)
@@ -311,7 +311,7 @@ struct ResearchAnswerFixture {
         let beta = "<article><h2>Concert Beta</h2><a href='/beta'>Beta details</a><p>USD 45</p></article>"
         let source = try await ResearchDriverFixture.make(linkPlanner: planner, resultPlanner: reviewed,
             additionalCardHTML: additional, candidateBodyHTML: "<p>\(price)</p>" + inventoryHTML + controlHTML
-                + (resultDate.map { "<p>Date: \($0)</p>" } ?? ""), request: request,
+                + (resultDate.map { "<p>Date: \($0)</p>" } ?? "") + (resultLocation.map { "<p>Location: \($0)</p>" } ?? ""), request: request,
             offersBodyHTML: multiPage ? second + "<p>Beta conditions apply</p>" : nil,
             searchBodyHTML: historyRoute ? alpha + beta : nil,
             detailsBodyHTML: historyRoute ? alpha + "<p>Alpha conditions apply</p>" : nil,
@@ -365,6 +365,9 @@ private final class ResearchAnswerReader: ComputerUseBrowserResultPlanning {
             }
             for record in contained where record["kind"] as? String == "text" && (record["text"] as? String)?.hasPrefix("Date: ") == true {
                 fields.append(["kind":"date", "texts":[try XCTUnwrap(record["id"] as? String)]])
+            }
+            for record in contained where record["kind"] as? String == "text" && (record["text"] as? String)?.hasPrefix("Location: ") == true {
+                fields.append(["kind":"location", "texts":[try XCTUnwrap(record["id"] as? String)]])
             }
             for record in contained where record["kind"] as? String == "control" {
                 guard let control = record["id"] as? String, page.controlIDs.contains(control) else { continue }

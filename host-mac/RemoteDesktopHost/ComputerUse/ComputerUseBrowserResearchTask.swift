@@ -755,8 +755,12 @@ final class ComputerUseBrowserResearchTask {
         guard sourcePolicy == nil || (sourcePolicyInstalled && sourcePolicy?.goalRevision == input.digest) else { throw Failure.navigationUnavailable }
     }
 
-    func readCandidates() async throws -> ComputerUseBrowserResultCandidates {
+    func readCandidates(for action: ComputerUseBrowserActionProposal? = nil) async throws -> ComputerUseBrowserResultCandidates {
         try requireIdle()
+        if let action {
+            try validateAction(action)
+            guard case .readResults = action.step else { throw ComputerUseBrowserActionPlanError.inputChanged }
+        }
         guard !hasPendingForm else { throw Failure.formPending }
         guard !hasPendingNavigation else { throw Failure.navigationPending }
         guard !hasQuestion else { throw Failure.questionPending }
@@ -765,7 +769,7 @@ final class ComputerUseBrowserResearchTask {
         let captured = input
         latestCandidates = nil; latestForm = nil; latestAction = nil
         let batch = try await operate { [self] in
-            try await readCurrentCandidates(goal: captured)
+            try await readCurrentCandidates(goal: captured, action: action)
         }
         latestCandidates = batch
         return batch
@@ -873,9 +877,13 @@ final class ComputerUseBrowserResearchTask {
         switch decision { case .link(let choice): return choice; case .unresolved: return nil; case .answer, .revisit: throw ComputerUseBrowserLinkPlanError.invalidProposal }
     }
 
-    func planResearchDecision(budget: Duration = .seconds(30), select: @escaping @MainActor @Sendable
+    func planResearchDecision(for action: ComputerUseBrowserActionProposal? = nil, budget: Duration = .seconds(30), select: @escaping @MainActor @Sendable
         (ComputerUseBrowserGoalInput, ComputerUseBrowserResultCandidates) async throws -> Decision) async throws -> Decision {
         try requireIdle()
+        if let action {
+            try validateAction(action)
+            guard case .readResults = action.step else { throw ComputerUseBrowserActionPlanError.inputChanged }
+        }
         guard !hasPendingForm else { throw Failure.formPending }
         guard !hasPendingNavigation else { throw Failure.navigationPending }
         guard !hasQuestion else { throw Failure.questionPending }
@@ -885,7 +893,7 @@ final class ComputerUseBrowserResearchTask {
         let captured = input, epoch = controlEpoch
         latestCandidates = nil; latestForm = nil; latestAction = nil
         let result = try await operate { [self] in
-            let candidates = try await readCurrentCandidates(goal: captured)
+            let candidates = try await readCurrentCandidates(goal: captured, action: action)
             let choice = try await selectCandidateDecision(goal: captured, candidates: candidates, budget: budget, select: select)
             return (choice, candidates)
         }
@@ -1216,13 +1224,26 @@ final class ComputerUseBrowserResearchTask {
         guard operationID != nil, browserAdmissionID == id else { throw ComputerUseBrowserError.handbackContextLost }
     }
 
-    private func readCurrentCandidates(goal: ComputerUseBrowserGoalInput) async throws -> ComputerUseBrowserResultCandidates {
+    private func readCurrentCandidates(goal: ComputerUseBrowserGoalInput, action: ComputerUseBrowserActionProposal? = nil) async throws -> ComputerUseBrowserResultCandidates {
         // Authentication observation may inspect a manually reached page,
         // but its contents cannot enter result inference outside task scope.
         guard sourcePolicy == nil || sourcePolicyInstalled else { throw Failure.navigationUnavailable }
         guard let interpretation, interpretation.proposal.input == goal else { throw Failure.interpretationRequired }
         try retainedEvidence.requireCapacity()
-        let evidence = try await observeOwnedPage(goal: goal, enforceSources: true, includingControlState: true)
+        let evidence: ComputerUseBrowserPageEvidence
+        if let action, !action.readControls.isEmpty {
+            try checkCurrent(goal); try captureSession()
+            guard action.input.interpretation == interpretation.proposal else { throw ComputerUseBrowserActionPlanError.inputChanged }
+            do {
+                evidence = try await browser.observeResearchControls(for: action)
+                try checkCurrent(goal)
+            } catch {
+                await browser.joinDOMCompletion(document: action.input.evidence.document)
+                throw error
+            }
+        } else {
+            evidence = try await observeOwnedPage(goal: goal, enforceSources: true, includingControlState: true)
+        }
         let page = try ComputerUseBrowserResultPageInput(page: evidence.page)
         let proposal = try await resultPlanner.propose(interpretation: interpretation.proposal, page: page)
         try checkCurrent(goal)
