@@ -56,6 +56,7 @@ final class ComputerUseBrowserResearchEvidenceTests: XCTestCase {
         defer { fixture.close() }
         _ = try await fixture.start()
         let owner = try fixture.owner(), original = owner.input, interpretation = try await owner.interpretGoal()
+        let originalReading = try await owner.revalidateCandidates()
         let question = try owner.issueQuestion(topic: .location, requirementIDs: [interpretation.proposal.requirements[0].id], controllerID: "phone", controllerSessionID: "session")
         let updated = try owner.answerQuestion(questionID: question.id, answerTaskID: "answer", answer: "Montréal e\u{301} 😀. Do not buy.", controllerID: "phone", controllerSessionID: "session")
         _ = try await fixture.resume()
@@ -67,6 +68,9 @@ final class ComputerUseBrowserResearchEvidenceTests: XCTestCase {
         let old = try evidence.recall(0, goal: updated)
         XCTAssertEqual(old["accepted_answer_count_at_reading"] as? Int, 0)
         XCTAssertEqual(old["current_goal_revision"] as? Bool, false)
+        XCTAssertTrue(try evidence.answerReadings([0], goal: updated, current: current).isEmpty,
+            "A reading from before a clarification remains context, not answer evidence for the new goal")
+        XCTAssertThrowsError(try evidence.answerReadings([], goal: updated, current: originalReading))
         XCTAssertThrowsError(try evidence.validate(goal: original), "A later ledger cannot be rolled back to an earlier answer prefix")
         let otherRoot = try ComputerUseBrowserGoalInput(taskID: "foreign", prompt: original.prompt, referenceDate: ResearchDriverFixture.date, timeZoneIdentifier: original.timeZoneIdentifier)
         XCTAssertThrowsError(try evidence.validate(goal: otherRoot))
@@ -153,7 +157,8 @@ final class ComputerUseBrowserResearchEvidenceTests: XCTestCase {
         XCTAssertFalse(owner.isOperating)
         planner.beforeReply = nil
         try await owner.resumeAfterUserControl()
-        XCTAssertEqual(try owner.researchEvidence(for: original).digest, before.digest)
+        XCTAssertNotEqual(try owner.researchEvidence(for: original).digest, before.digest)
+        XCTAssertEqual(try owner.researchEvidence(for: original).count, before.count)
         _ = try await fixture.resume()
         XCTAssertEqual(owner.input, original)
         XCTAssertEqual(try owner.researchEvidence(for: original).count, 3)

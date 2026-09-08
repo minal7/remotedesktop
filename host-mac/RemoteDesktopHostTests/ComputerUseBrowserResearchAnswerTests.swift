@@ -4,6 +4,132 @@ import XCTest
 
 @MainActor
 final class ComputerUseBrowserResearchAnswerTests: XCTestCase {
+    func testMultiPageAnswerRecallsWholeEvidenceAndDeliversEachSourceAndObservationTime() async throws {
+        let fixture = try await ResearchAnswerFixture.make(requested: 2, multiPage: true)
+        defer { fixture.source.close() }
+        let result = try await fixture.source.start()
+        guard case .browserResearchAnswer(let answer)? = result else { return XCTFail("Two detail pages must compose one source-reported answer") }
+        let owner = try fixture.source.owner(), current = try await owner.revalidateCandidates()
+        let archive = try owner.researchEvidence(for: owner.input)
+        try owner.validateAnswer(answer)
+        XCTAssertEqual(answer.recalledReadings, [1]); XCTAssertEqual(archive.count, 3)
+        for value in ["Concert Alpha", "Concert Beta", "USD 40", "USD 45", "│ Read the conditions", "│ Beta conditions apply", "2 options.", "Do not buy."] {
+            XCTAssertTrue(answer.message.contains(value), value)
+        }
+        for path in ["details", "offers"] { XCTAssertTrue(answer.message.contains(fixture.source.base.appendingPathComponent(path).absoluteString)) }
+        XCTAssertFalse(answer.message.contains("/search?q="))
+        let options = try XCTUnwrap(fixture.inputs.last).answerOptions
+        XCTAssertEqual(options.map { $0["index"] as? Int }, [0, 1])
+        XCTAssertTrue(options[0]["reading"] is NSNull); XCTAssertEqual(options[1]["reading"] as? Int, 1)
+        let formatter = ISO8601DateFormatter(); formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        for row in options {
+            let time = try XCTUnwrap(row["observed_at_milliseconds"] as? Int64)
+            XCTAssertGreaterThan(time, 0)
+            XCTAssertTrue(answer.message.contains("Observed: " + formatter.string(from: Date(timeIntervalSince1970: Double(time) / 1_000))))
+        }
+        XCTAssertEqual(options[0]["observed_at_milliseconds"] as? Int64, current.observedAtMilliseconds)
+        let calls = await fixture.modelCalls()
+        XCTAssertEqual(calls.counts.count, 4); XCTAssertEqual(calls.completions.count, 4)
+        XCTAssertEqual(calls.counts.map(\.httpBody), calls.completions.map(\.httpBody))
+        let body = try ResearchAnswerFixture.object(XCTUnwrap(calls.completions.last?.httpBody))
+        let messages = try XCTUnwrap(body["messages"] as? [[String: String]])
+        let context = try ResearchAnswerFixture.object(Data(XCTUnwrap(messages.last?["content"]).utf8))
+        XCTAssertEqual(context["version"] as? Int, 7)
+        let recalled = try XCTUnwrap(context["recalled_readings"] as? [[String: Any]])
+        XCTAssertEqual(recalled.count, 1); XCTAssertEqual(recalled[0]["reading"] as? Int, 1)
+        XCTAssertFalse(try ResearchAnswerFixture.json(context).contains(fixture.source.base.absoluteString))
+        XCTAssertEqual(owner.input.prompt, fixture.source.request)
+        XCTAssertEqual(owner.input.referenceMilliseconds, Int64(ResearchDriverFixture.date.timeIntervalSince1970 * 1_000))
+        for path in ["/search?q=concerts", "/details", "/offers"] { XCTAssertEqual(fixture.source.server.count(path), 1) }
+        XCTAssertEqual(fixture.source.server.count("/more"), 0)
+    }
+
+    func testHistoricalAnswerOptionsRequireExplicitRecallAndExactArchiveBinding() async throws {
+        let fixture = try await ResearchAnswerFixture.make(requested: 2, multiPage: true)
+        defer { fixture.source.close() }
+        _ = try await fixture.source.start()
+        let owner = try fixture.source.owner(), current = try await owner.revalidateCandidates(), archive = try owner.researchEvidence(for: owner.input)
+        func input(_ recalled: [Int]) throws -> ComputerUseBrowserLinkSelectionInput {
+            try .init(goal: owner.input, candidates: current, history: owner.confirmedNavigationHistory,
+                evidence: archive, recalledReadings: recalled, allowsAnswer: true)
+        }
+        let unseen = try input([]), queryOnly = try input([0]), recalled = try input([1])
+        XCTAssertTrue(unseen.answerCounts.isEmpty); XCTAssertTrue(queryOnly.answerCounts.isEmpty)
+        XCTAssertEqual(recalled.answerCounts, [2])
+        XCTAssertThrowsError(try unseen.resolveAnswer(indices: [0, 1]))
+        let selection = try recalled.resolveAnswer(indices: [0, 1])
+        let old = try XCTUnwrap(current.answerEligibility(goal: owner.input, evidence: archive, recalledReadings: [1]))
+        _ = try old.answer(for: selection)
+        _ = try await owner.readCandidates()
+        let changed = try owner.researchEvidence(for: owner.input)
+        let fresh = try XCTUnwrap(current.answerEligibility(goal: owner.input, evidence: changed, recalledReadings: [1]))
+        XCTAssertThrowsError(try fresh.answer(for: selection))
+        XCTAssertThrowsError(try ComputerUseBrowserLinkSelectionInput(goal: owner.input, candidates: current, history: owner.confirmedNavigationHistory,
+            evidence: archive, recalledReadings: [1, 1], allowsAnswer: true))
+    }
+
+    func testRepeatedPassagesAcrossDifferentURLsCannotSatisfyAResultCount() async throws {
+        let fixture = try await ResearchAnswerFixture.make(requested: 2, multiPage: true, repeatedPage: true)
+        defer { fixture.source.close() }
+        let result = try await fixture.source.start()
+        guard case .userInterventionRequired? = result else { return XCTFail("A duplicate selection must remain unresolved") }
+        let input = try XCTUnwrap(fixture.inputs.last)
+        XCTAssertEqual(input.answerCandidateIndices, [0, 1])
+        XCTAssertThrowsError(try input.resolveAnswer(indices: [0, 1]))
+        XCTAssertEqual(fixture.source.server.count("/offers"), 1)
+        XCTAssertEqual(fixture.source.server.count("/more"), 0)
+    }
+
+    func testRevisitedURLSupersedesOlderAnswerEvidenceEvenWhenOnlyTheOldReadingWasRecalled() async throws {
+        let fixture = try await ResearchAnswerFixture.make(requested: 2, multiPage: true)
+        defer { fixture.source.close() }
+        _ = try await fixture.source.start()
+        let owner = try fixture.source.owner()
+        _ = try await fixture.source.browser.navigate(taskID: owner.taskID, operationID: "revisit-alpha", to: fixture.source.base.appendingPathComponent("details"))
+        let latestAlpha = try await owner.readCandidates()
+        _ = try await fixture.source.browser.navigate(taskID: owner.taskID, operationID: "return-beta", to: fixture.source.base.appendingPathComponent("offers"))
+        let current = try await owner.readCandidates(), archive = try owner.researchEvidence(for: owner.input)
+        XCTAssertEqual(archive.count, 5)
+        XCTAssertEqual(try archive.recall(1, goal: owner.input)["newer_reading"] as? Int, 3)
+        XCTAssertTrue(try archive.answerReadings([1, 2], goal: owner.input, current: current).isEmpty)
+        let stale = try ComputerUseBrowserLinkSelectionInput(goal: owner.input, candidates: current, history: owner.confirmedNavigationHistory,
+            evidence: archive, recalledReadings: [1], allowsAnswer: true)
+        XCTAssertTrue(stale.answerCounts.isEmpty)
+        let fresh = try ComputerUseBrowserLinkSelectionInput(goal: owner.input, candidates: current, history: owner.confirmedNavigationHistory,
+            evidence: archive, recalledReadings: [3], allowsAnswer: true)
+        XCTAssertEqual(fresh.answerCounts, [2])
+        XCTAssertEqual(fresh.answerOptions.last?["observed_at_milliseconds"] as? Int64, latestAlpha.observedAtMilliseconds)
+        let answer = try await owner.prepareAnswer(fresh.resolveAnswer(indices: [0, 1]))
+        try owner.validateAnswer(answer)
+    }
+
+    func testManualHandbackRetainsHistoricalContextButRequiresFreshAnswerReadings() async throws {
+        let fixture = try await ResearchAnswerFixture.make(requested: 2, multiPage: true)
+        defer { fixture.source.close() }
+        let result = try await fixture.source.start()
+        guard case .browserResearchAnswer(let original)? = result else { return XCTFail("Expected original answer") }
+        let owner = try fixture.source.owner(), goal = owner.input
+        owner.pause(); try await owner.resumeAfterUserControl()
+        let current = try await owner.readCandidates(), archive = try owner.researchEvidence(for: goal)
+        XCTAssertEqual(archive.count, 4)
+        XCTAssertNotNil(try archive.recall(1, goal: goal)["observation"])
+        XCTAssertEqual(try archive.recall(1, goal: goal)["answer_requires_fresh_reading"] as? Bool, true)
+        XCTAssertTrue(try archive.answerReadings([1], goal: goal, current: current).isEmpty)
+        let recalled = try ComputerUseBrowserLinkSelectionInput(goal: goal, candidates: current, history: owner.confirmedNavigationHistory,
+            evidence: archive, recalledReadings: [1], allowsAnswer: true)
+        XCTAssertTrue(recalled.answerCounts.isEmpty); XCTAssertThrowsError(try owner.validateAnswer(original))
+        _ = try await fixture.source.browser.navigate(taskID: owner.taskID, operationID: "fresh-alpha-after-login", to: fixture.source.base.appendingPathComponent("details"))
+        _ = try await owner.readCandidates()
+        _ = try await fixture.source.browser.navigate(taskID: owner.taskID, operationID: "fresh-beta-after-login", to: fixture.source.base.appendingPathComponent("offers"))
+        let final = try await owner.readCandidates(), after = try owner.researchEvidence(for: goal)
+        let ready = try ComputerUseBrowserLinkSelectionInput(goal: goal, candidates: final, history: owner.confirmedNavigationHistory,
+            evidence: after, recalledReadings: [4], allowsAnswer: true)
+        let answer = try await owner.prepareAnswer(ready.resolveAnswer(indices: [0, 1]))
+        try owner.validateAnswer(answer); XCTAssertEqual(owner.input, goal)
+        XCTAssertEqual(fixture.source.server.count("/search?q=concerts"), 1)
+    }
+
     func testLocalPlannerAndNativeDriverDeliverCompleteQuotedSourceAnswer() async throws {
         let fixture = try await ResearchAnswerFixture.make(count: 2, requested: 2)
         defer { fixture.source.close() }
@@ -29,7 +155,7 @@ final class ComputerUseBrowserResearchAnswerTests: XCTestCase {
         for request in calls.completions {
             let body = try ResearchAnswerFixture.object(XCTUnwrap(request.httpBody))
             let format = try XCTUnwrap(body["response_format"] as? [String: Any])
-            XCTAssertEqual((format["json_schema"] as? [String: Any])?["name"] as? String, "browser_result_link_v3")
+            XCTAssertEqual((format["json_schema"] as? [String: Any])?["name"] as? String, "browser_result_link_v4")
             XCTAssertEqual(body["max_tokens"] as? Int, 1_024)
         }
         XCTAssertEqual(owner.input.prompt, fixture.source.request)
@@ -160,8 +286,8 @@ struct ResearchAnswerFixture {
     static func make(count: Int = 1, requested: Int? = nil, price: String = "USD 40", duplicate: Bool = false,
                      extra: (String, String, String)? = nil, omitDetailLinks: Bool = false,
                      inventory: Int? = nil, quantityPolicy: ComputerUseBrowserResultReview.QuantityMeaning? = nil,
-                     includeControls: Bool = false) async throws -> Self {
-        let transport = ResearchAnswerTransport()
+                     includeControls: Bool = false, multiPage: Bool = false, repeatedPage: Bool = false) async throws -> Self {
+        let transport = ResearchAnswerTransport(followCount: multiPage ? 2 : 1, recall: multiPage ? 1 : nil)
         let local = try ComputerUseLocalBrowserLinkPlanner(connection: .init(baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:54321")),
             bearerToken: "fixture-token", modelAlias: "fixture-model"), transport: transport)
         let planner = ResearchAnswerRecordingPlanner(local: local)
@@ -178,8 +304,11 @@ struct ResearchAnswerFixture {
         }.joined() + "<p>Read the conditions</p>" + (includeControls ? "<label>Ticket type<select><option>Restricted ticket</option></select></label>" : "")
         let inventoryHTML = inventory.map { "<p>\($0) tickets</p>" + (quantityPolicy == nil ? "" : "<p>2 tickets</p>")
             + "<p>Available for this concert</p>" } ?? ""
+        let second = repeatedPage ? "<article><h2>Concert Alpha</h2><a href='/more'>Alpha details</a><p>USD 40</p></article>"
+            : "<article><h2>Concert Beta</h2><a href='/more'>Beta details</a><p>USD 45</p></article>"
         let source = try await ResearchDriverFixture.make(linkPlanner: planner, resultPlanner: reviewed,
-            additionalCardHTML: additional, candidateBodyHTML: "<p>\(price)</p>" + inventoryHTML, request: request)
+            additionalCardHTML: additional, candidateBodyHTML: "<p>\(price)</p>" + inventoryHTML, request: request,
+            offersBodyHTML: multiPage ? second + "<p>Beta conditions apply</p>" : nil)
         source.goal.select = { _ in try json(["disposition":"research", "requirements":rows, "question":["topic":"none", "requirements":[]]]) }
         return .init(source: source, planner: planner, transport: transport)
     }
@@ -257,6 +386,9 @@ private struct ResearchAnswerReviewer: ComputerUseBrowserResultReviewPlanning {
 }
 
 private actor ResearchAnswerTransport: ComputerUseTextModelTransport {
+    let followCount: Int
+    let recall: Int?
+    init(followCount: Int, recall: Int?) { self.followCount = followCount; self.recall = recall }
     private(set) var calls: (counts: [URLRequest], completions: [URLRequest]) = ([], [])
     func exactInputTokenCount(completionRequest: URLRequest) async throws -> Int { calls.counts.append(completionRequest); return 100 }
     func complete(request: URLRequest) async throws -> Data {
@@ -267,8 +399,10 @@ private actor ResearchAnswerTransport: ComputerUseTextModelTransport {
         let reply: [String: Any]
         if let count = (context["answer_counts"] as? [Int])?.max(), let indices = context["answer_candidate_indices"] as? [Int] {
             reply = ["answer":Array(indices.prefix(count))]
-        } else if calls.completions.count == 1, let link = (candidates.first?["links"] as? [String])?.first {
+        } else if calls.completions.count <= followCount, let link = (candidates.first?["links"] as? [String])?.first {
             reply = ["candidate":0, "link":link]
+        } else if let recall, (context["recallable_readings"] as? [Int])?.contains(recall) == true {
+            reply = ["reading":recall]
         } else { reply = ["candidate":-1, "link":""] }
         return try JSONSerialization.data(withJSONObject: ["model":"fixture-model", "choices":[["finish_reason":"stop", "message":["role":"assistant", "content":try ResearchAnswerFixture.json(reply)]]]])
     }

@@ -529,13 +529,13 @@ struct ResearchDriverFixture {
                      candidateBodyHTML: String = "", searchForm: Bool = false,
                      actionPlanner: (any ComputerUseBrowserActionPlanning)? = nil,
                      formPlanner: (any ComputerUseBrowserFormPlanning)? = nil, request: String = ResearchDriverFixture.prompt,
-                     searchFormHTML: String? = nil, heldSignal: Bool = false) async throws -> Self {
+                     searchFormHTML: String? = nil, heldSignal: Bool = false, offersBodyHTML: String? = nil) async throws -> Self {
         func card(_ path: String) -> String { "<article><h2>Concert Alpha</h2><a href='\(linkDestinationOverride ?? path)'>Alpha details</a>\(candidateBodyHTML)</article>" + additionalCardHTML }
         let form = searchFormHTML ?? (searchForm ? "<form action='/filtered'><label>Query<input name='q' value='old'></label><button>Search</button></form>" : "")
         let server = try OwnedBrowserHTTPFixture(routes: ["/signal": .init(held: heldSignal), "/before": .init(body: card("/old")),
             "/search?q=concerts": .init(body: card("/details") + form), "/details": .init(body: card("/offers")),
             "/filtered?q=concerts": .init(body: card("/more")),
-            "/offers": .init(body: card("/more")), "/account": .init(body: "<label>Password<input type=password></label>"),
+            "/offers": .init(body: offersBodyHTML ?? card("/more")), "/account": .init(body: "<label>Password<input type=password></label>"),
             "/account-ready": .init(body: card("/logged-in-offer")), "/logged-in-offer": .init(body: card("/more")),
             "/beta": .init(body: card("/more"))])
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString), state = DriverFixtureState()

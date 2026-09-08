@@ -16,6 +16,7 @@ struct ComputerUseBrowserResearchEvidence: Sendable, CustomStringConvertible, Cu
     private let readingLimit: Int
     private var sessionIdentity: String?
     private var entries: [Entry] = []
+    private var firstAnswerReading = 0
     var count: Int { entries.count }
     init(goal: ComputerUseBrowserGoalInput, readingLimit: Int = Self.maximumReadings) {
         rootDigest = goal.rootDigest; self.readingLimit = min(Self.maximumReadings, max(1, readingLimit))
@@ -23,6 +24,9 @@ struct ComputerUseBrowserResearchEvidence: Sendable, CustomStringConvertible, Cu
     func requireCapacity() throws {
         guard entries.count < readingLimit else { throw ComputerUseBrowserResearchEvidenceError.limitReached }
     }
+    /// Manual control may change accounts or selections without changing the
+    /// user's words. Preserve context, but require new answer evidence.
+    mutating func invalidateAnswerReadings() { firstAnswerReading = entries.count }
 
     mutating func record(_ reading: ComputerUseBrowserResultCandidates, goal: ComputerUseBrowserGoalInput) throws {
         try validate(goal: goal)
@@ -47,21 +51,43 @@ struct ComputerUseBrowserResearchEvidence: Sendable, CustomStringConvertible, Cu
                   entry.goal.rootDigest == goal.rootDigest && entry.goal.clarifications.count <= goal.clarifications.count
                     && Array(goal.clarifications.prefix(entry.goal.clarifications.count)) == entry.goal.clarifications
               }) else { throw ComputerUseBrowserResearchEvidenceError.inputChanged }
+        if let current { try current.validateHistoricalGoal(goal) }
         if let current, let sessionIdentity, current.historicalSessionIdentity != sessionIdentity {
             throw ComputerUseBrowserResearchEvidenceError.inputChanged
         }
     }
     var digest: String {
-        ComputerUseTaskContract.digest(["browser-research-evidence-v1", rootDigest, String(readingLimit), String(entries.count)]
+        ComputerUseTaskContract.digest(["browser-research-evidence-v2", rootDigest, String(readingLimit), String(entries.count), String(firstAnswerReading)]
             + entries.flatMap { [$0.goal.digest, $0.reading.requirementAssessmentIdentity] })
     }
     func selectableIndices(current: ComputerUseBrowserResultCandidates) -> [Int] {
         entries.indices.filter { entries[$0].reading.requirementAssessmentIdentity != current.requirementAssessmentIdentity }
     }
+    private func newerReading(after index: Int) -> Int? {
+        guard let latest = entries.lastIndex(where: { $0.reading.historicalSourceIdentity == entries[index].reading.historicalSourceIdentity }),
+              latest > index else { return nil }
+        return latest
+    }
+    func answerReadings(_ indices: [Int], goal: ComputerUseBrowserGoalInput,
+                        current: ComputerUseBrowserResultCandidates) throws -> [(index: Int, reading: ComputerUseBrowserResultCandidates)] {
+        try validate(goal: goal, current: current)
+        let offered = selectableIndices(current: current)
+        guard indices.count <= Self.maximumRecalledReadings, Set(indices).count == indices.count,
+              indices.allSatisfy({ offered.contains($0) }) else { throw ComputerUseBrowserResearchEvidenceError.inputChanged }
+        return indices.compactMap { index in
+            let entry = entries[index]
+            guard index >= firstAnswerReading, entry.goal == goal,
+                  entry.reading.hasSameAnswerInterpretationAndPolicy(as: current),
+                  entry.reading.historicalSourceIdentity != current.historicalSourceIdentity,
+                  newerReading(after: index) == nil else { return nil }
+            return (index, entry.reading)
+        }
+    }
     func catalog(goal: ComputerUseBrowserGoalInput, current: ComputerUseBrowserResultCandidates) throws -> [[String: Any]] {
         try validate(goal: goal, current: current)
         return entries.enumerated().map { index, entry in
-            ["reading":index, "current_goal_revision":entry.goal == goal,
+            ["reading":index, "observed_at_milliseconds":entry.reading.observedAtMilliseconds, "current_goal_revision":entry.goal == goal,
+             "answer_requires_fresh_reading":index < firstAnswerReading, "newer_reading":newerReading(after: index).map { $0 as Any } ?? NSNull(),
              "current_reading":entry.reading.requirementAssessmentIdentity == current.requirementAssessmentIdentity,
              "candidate_count":entry.reading.candidates.count, "reviewed":entry.reading.review != nil]
         }
@@ -76,7 +102,8 @@ struct ComputerUseBrowserResearchEvidence: Sendable, CustomStringConvertible, Cu
             throw ComputerUseBrowserResearchEvidenceError.inputChanged
         }
         return entries.enumerated().map { index, entry in
-            ["reading":index, "current_goal_revision":entry.goal == goal,
+            ["reading":index, "observed_at_milliseconds":entry.reading.observedAtMilliseconds, "current_goal_revision":entry.goal == goal,
+             "answer_requires_fresh_reading":index < firstAnswerReading, "newer_reading":newerReading(after: index).map { $0 as Any } ?? NSNull(),
              "candidate_count":entry.reading.candidates.count, "reviewed":entry.reading.review != nil]
         }
     }
@@ -84,7 +111,8 @@ struct ComputerUseBrowserResearchEvidence: Sendable, CustomStringConvertible, Cu
         try validate(goal: goal)
         guard entries.indices.contains(index) else { throw ComputerUseBrowserResearchEvidenceError.unavailable }
         let entry = entries[index]
-        return ["reading":index, "historical":true, "current_goal_revision":entry.goal == goal,
+        return ["reading":index, "historical":true, "observed_at_milliseconds":entry.reading.observedAtMilliseconds, "current_goal_revision":entry.goal == goal,
+                "answer_requires_fresh_reading":index < firstAnswerReading, "newer_reading":newerReading(after: index).map { $0 as Any } ?? NSNull(),
                 "accepted_answer_count_at_reading":entry.goal.clarifications.count,
                 "observation":Self.namespaceReferences(try entry.reading.historicalPlannerContext(), prefix: "r\(index)/")]
     }

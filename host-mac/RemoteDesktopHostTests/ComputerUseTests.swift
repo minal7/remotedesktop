@@ -5021,47 +5021,54 @@ final class ComputerUseTests: XCTestCase {
     }
 
     func test_managerResearchAnswerDeliversAndReplaysWholeSourceTextWithoutRepeatingWork() async throws {
-        let source = try await ResearchAnswerFixture.make(count: 2, requested: 2)
-        defer { source.source.close() }
-        let executor = ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in nil },
-            desktopFactory: { _ in throw ComputerUseBrowserResearchDriver.Failure.invalidContinuation }, browserResearch: source.source.driver)
-        let url = temporaryLedgerURL()
-        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-        let fixture = try browserControlFixture(executor: executor, ledgerURL: url)
-        defer { fixture.manager.stop(); fixture.browser.close() }
-        let prompt = makeEnvelope(id: ResearchDriverFixture.root, kind: .prompt, body: source.source.request)
-        fixture.manager.authorizePeer(senderID: prompt.senderID)
-        XCTAssertTrue(fixture.manager.handle(prompt, channel: fixture.channel))
-        func answers(_ minimum: Int) async throws -> [ComputerUseTaskUpdate] {
-            for _ in 0..<200 {
-                let sent = await fixture.channel.sentMessages()
-                let updates = sent.filter { $0.kind == .assistant }.compactMap { try? ComputerUseTaskUpdate.decodeBody($0.body) }
-                    .filter { $0.taskID == prompt.id && $0.outcome == .taskCompleted }
-                if updates.count >= minimum { return updates }
-                try await Task.sleep(for: .milliseconds(10))
+        for multiPage in [false, true] {
+            let source = try await ResearchAnswerFixture.make(count: multiPage ? 1 : 2, requested: 2, multiPage: multiPage)
+            defer { source.source.close() }
+            let executor = ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in nil },
+                desktopFactory: { _ in throw ComputerUseBrowserResearchDriver.Failure.invalidContinuation }, browserResearch: source.source.driver)
+            let url = temporaryLedgerURL()
+            defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+            let fixture = try browserControlFixture(executor: executor, ledgerURL: url)
+            defer { fixture.manager.stop(); fixture.browser.close() }
+            let prompt = makeEnvelope(id: ResearchDriverFixture.root, kind: .prompt, body: source.source.request)
+            fixture.manager.authorizePeer(senderID: prompt.senderID)
+            XCTAssertTrue(fixture.manager.handle(prompt, channel: fixture.channel))
+            func answers(_ minimum: Int) async throws -> [ComputerUseTaskUpdate] {
+                for _ in 0..<200 {
+                    let sent = await fixture.channel.sentMessages()
+                    let updates = sent.filter { $0.kind == .assistant }.compactMap { try? ComputerUseTaskUpdate.decodeBody($0.body) }
+                        .filter { $0.taskID == prompt.id && $0.outcome == .taskCompleted }
+                    if updates.count >= minimum { return updates }
+                    try await Task.sleep(for: .milliseconds(10))
+                }
+                XCTFail("The host did not deliver the admitted research answer")
+                return []
             }
-            XCTFail("The host did not deliver the admitted research answer")
-            return []
+            let delivered = try await answers(1), first = try XCTUnwrap(delivered.first)
+            for text in ["Concert Alpha", "Concert Beta", "USD 40", "2 options.", "Do not buy.", "│ Read the conditions"] {
+                XCTAssertTrue(first.text.contains(text), text)
+            }
+            XCTAssertTrue(first.text.contains(source.source.base.appendingPathComponent("details").absoluteString))
+            XCTAssertTrue(first.text.contains("Observed: "))
+            if multiPage {
+                XCTAssertTrue(first.text.contains(source.source.base.appendingPathComponent("offers").absoluteString))
+                XCTAssertTrue(first.text.contains("USD 45")); XCTAssertTrue(first.text.contains("│ Beta conditions apply"))
+            }
+            XCTAssertEqual(fixture.ledger.terminalOutcome(taskID: prompt.id), .taskCompleted)
+            XCTAssertEqual(fixture.manager.activity, .idle)
+            let reloaded = ComputerUseTaskLedger(fileURL: url)
+            XCTAssertEqual(try reloaded.claim(taskID: prompt.id, senderID: prompt.senderID,
+                sessionID: prompt.sessionID, promptBody: prompt.body), .completed(first.text))
+            let calls = await source.modelCalls()
+            XCTAssertTrue(fixture.manager.handle(prompt, channel: fixture.channel))
+            let repeated = try await answers(2)
+            XCTAssertEqual(repeated.last?.text, first.text)
+            let replayCalls = await source.modelCalls()
+            XCTAssertEqual(replayCalls.counts.count, calls.counts.count)
+            XCTAssertEqual(replayCalls.completions.count, calls.completions.count)
+            XCTAssertEqual(source.source.server.count("/search?q=concerts"), 1)
+            XCTAssertEqual(source.source.server.count("/details"), 1); XCTAssertEqual(source.source.server.count("/offers"), multiPage ? 1 : 0)
         }
-        let delivered = try await answers(1), first = try XCTUnwrap(delivered.first)
-        for text in ["Concert Alpha", "Concert Beta", "USD 40", "2 options.", "Do not buy.", "│ Read the conditions"] {
-            XCTAssertTrue(first.text.contains(text), text)
-        }
-        XCTAssertTrue(first.text.contains(source.source.base.appendingPathComponent("details").absoluteString))
-        XCTAssertEqual(fixture.ledger.terminalOutcome(taskID: prompt.id), .taskCompleted)
-        XCTAssertEqual(fixture.manager.activity, .idle)
-        let reloaded = ComputerUseTaskLedger(fileURL: url)
-        XCTAssertEqual(try reloaded.claim(taskID: prompt.id, senderID: prompt.senderID,
-            sessionID: prompt.sessionID, promptBody: prompt.body), .completed(first.text))
-        let calls = await source.modelCalls()
-        XCTAssertTrue(fixture.manager.handle(prompt, channel: fixture.channel))
-        let repeated = try await answers(2)
-        XCTAssertEqual(repeated.last?.text, first.text)
-        let replayCalls = await source.modelCalls()
-        XCTAssertEqual(replayCalls.counts.count, calls.counts.count)
-        XCTAssertEqual(replayCalls.completions.count, calls.completions.count)
-        XCTAssertEqual(source.source.server.count("/search?q=concerts"), 1)
-        XCTAssertEqual(source.source.server.count("/details"), 1); XCTAssertEqual(source.source.server.count("/offers"), 0)
     }
 
     func test_executorRequestedUserInterventionPausesWithoutCompletingAndResumesTask() async throws {

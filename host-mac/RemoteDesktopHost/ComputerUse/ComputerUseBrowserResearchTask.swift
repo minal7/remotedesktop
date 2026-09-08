@@ -758,9 +758,9 @@ final class ComputerUseBrowserResearchTask {
         guard !hasQuestion else { throw Failure.questionPending }
         guard answer.rootTaskID == taskID, answer.goalRevision == input.digest,
               let reading = latestCandidates, answer.readingIdentity == reading.requirementAssessmentIdentity,
-              let eligibility = reading.answerEligibility(goal: input) else { throw Failure.goalChanged }
+              let eligibility = try reading.answerEligibility(goal: input, evidence: retainedEvidence, recalledReadings: answer.recalledReadings) else { throw Failure.goalChanged }
         try answer.validate(for: eligibility)
-        try browser.validateResearchAnswerBinding(answer, reading: reading, goal: input)
+        try browser.validateResearchAnswerBinding(answer, reading: reading, goal: input, evidence: retainedEvidence)
     }
 
     func prepareAnswer(_ selection: ComputerUseBrowserResearchAnswer.Selection) async throws -> ComputerUseBrowserResearchAnswer {
@@ -772,7 +772,7 @@ final class ComputerUseBrowserResearchTask {
         let captured = input
         return try await operate { [self] in
             try checkCurrent(captured)
-            let answer = try await browser.prepareResearchAnswer(selection, reading: reading, goal: captured, policy: policy)
+            let answer = try await browser.prepareResearchAnswer(selection, reading: reading, goal: captured, policy: policy, evidence: retainedEvidence)
             try checkCurrent(captured)
             return answer
         }
@@ -859,7 +859,7 @@ final class ComputerUseBrowserResearchTask {
                     guard let candidate = candidates.candidates.first(where: { $0.id == choice.candidateID }),
                           candidate.selectedLinkIDs.contains(choice.linkID) else { throw ComputerUseBrowserResultError.invalidProposal }
                 case .answer(let selection):
-                    guard let eligibility = candidates.answerEligibility(goal: goal) else { throw ComputerUseBrowserLinkPlanError.inputChanged }
+                    guard let eligibility = try candidates.answerEligibility(goal: goal, evidence: retainedEvidence, recalledReadings: selection.recalledReadings) else { throw ComputerUseBrowserLinkPlanError.inputChanged }
                     _ = try eligibility.answer(for: selection)
                 case .unresolved: break
                 }
@@ -971,6 +971,7 @@ final class ComputerUseBrowserResearchTask {
     /// operation slot until the actual child task unwinds after cancellation.
     func pause() {
         guard !isRetired else { return }
+        retainedEvidence.invalidateAnswerReadings()
         isPaused = true; controlEpoch = UUID()
         if handback == nil {
             handback = session ?? (browser.taskID == taskID ? browser.handbackRequirement(taskID: taskID, required: true) : nil)

@@ -183,7 +183,8 @@ final class ComputerUseBrowserActionRecallTests: XCTestCase {
         fixture.actions.beforeReply = nil
         XCTAssertFalse(owner.isOperating)
         try await owner.resumeAfterUserControl()
-        XCTAssertEqual(try owner.researchEvidence(for: original).digest, archive.digest)
+        XCTAssertNotEqual(try owner.researchEvidence(for: original).digest, archive.digest)
+        XCTAssertEqual(try owner.researchEvidence(for: original).count, archive.count)
         let resumed = try await owner.planNextAction(using: fixture.actions)
         XCTAssertEqual(resumed.step, .readResults); XCTAssertEqual(owner.input, original)
         XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 0)

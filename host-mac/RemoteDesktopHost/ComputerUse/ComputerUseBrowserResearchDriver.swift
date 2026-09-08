@@ -25,8 +25,8 @@ extension ComputerUseBrowserResearchPlanning {
 
 /// Concrete navigation orchestration for retained research. Policy is supplied
 /// separately; supported native forms use retained edit/query stages. General
-/// widgets and multi-page answer assembly remain incomplete. Current-page
-/// informational answers require a typed selection and native source validation.
+/// widgets remain incomplete. Informational answers combine eligible current
+/// and fully recalled readings with typed selection and native source binding.
 /// A page load alone cannot declare research success.
 @MainActor
 final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecuting {

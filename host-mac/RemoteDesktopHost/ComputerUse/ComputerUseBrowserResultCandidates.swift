@@ -198,6 +198,9 @@ struct ComputerUseBrowserResultCandidates: Sendable, CustomStringConvertible, Cu
     }
     enum DocumentAnswerSourceStatus: String, Sendable { case unconfigured, permitted, excluded }
     let goalRevision: String
+    /// Host wall-clock time after native reading validation, not the user's
+    /// fixed date context and not a promise that inventory remains current.
+    let observedAtMilliseconds: Int64
     let candidates: [Candidate]
     let review: ComputerUseBrowserResultReview?
     let documentAnswerSourceStatus: DocumentAnswerSourceStatus
@@ -216,7 +219,7 @@ struct ComputerUseBrowserResultCandidates: Sendable, CustomStringConvertible, Cu
     fileprivate let readingInput: ComputerUseBrowserResultPageInput
 
     var requirementAssessmentIdentity: String {
-        ComputerUseTaskContract.digest(["browser-reading-assessment-v1", goalRevision, evidence.document.contextID,
+        ComputerUseTaskContract.digest(["browser-reading-assessment-v2", goalRevision, String(observedAtMilliseconds), evidence.document.contextID,
             String(evidence.document.generation), evidence.documentID, evidence.page.id, answerSourcePolicy?.digest ?? "", review?.digest ?? "",
             goalInterpretation?.digest ?? ""] + candidates.map(\.id))
     }
@@ -230,19 +233,29 @@ struct ComputerUseBrowserResultCandidates: Sendable, CustomStringConvertible, Cu
               goalInterpretation?.input == goal else { throw ComputerUseBrowserResearchEvidenceError.inputChanged }
     }
     var historicalSessionIdentity: String { evidence.document.contextID }
+    var historicalSourceIdentity: String { ComputerUseTaskContract.digest([evidence.document.committedURL.absoluteString]) }
+    func hasSameAnswerInterpretationAndPolicy(as current: Self) -> Bool {
+        goalInterpretation?.digest == current.goalInterpretation?.digest && answerSourcePolicy == current.answerSourcePolicy
+    }
 
-    func answerEligibility(goal: ComputerUseBrowserGoalInput) -> ComputerUseBrowserResearchAnswer.Eligibility? {
+    func answerPage(goal: ComputerUseBrowserGoalInput) -> ComputerUseBrowserResearchAnswer.Page? {
         guard goalRevision == goal.digest, rootTaskID == goal.taskID,
               let interpretation = goalInterpretation,
               let source = ComputerUseBrowserResearchReport.reportableURL(evidence.document.committedURL) else { return nil }
         return .init(goal: goal, reading: self, interpretation: interpretation, source: source)
     }
 
+    func answerEligibility(goal: ComputerUseBrowserGoalInput, evidence: ComputerUseBrowserResearchEvidence? = nil,
+                           recalledReadings: [Int] = []) throws -> ComputerUseBrowserResearchAnswer.Eligibility? {
+        try .init(goal: goal, current: self, evidence: evidence, recalledReadings: recalledReadings)
+    }
+
     /// Full original bounded reading projection with its original assessment.
     /// Native IDs/URLs remain private. Old reference IDs are local to this
     /// observation and cannot be used as current-page actions.
     func historicalPlannerContext() throws -> [String: Any] {
-        ["page":try JSONSerialization.jsonObject(with: Data(readingInput.contextJSON.utf8)),
+        ["observed_at_milliseconds":observedAtMilliseconds,
+         "page":try JSONSerialization.jsonObject(with: Data(readingInput.contextJSON.utf8)),
          "candidates":candidatePlannerContext,
          "document_answer_source_status_at_reading":documentAnswerSourceStatus.rawValue,
          "field_review":review.map { $0.plannerContext as Any } ?? NSNull(),
@@ -264,6 +277,7 @@ struct ComputerUseBrowserResultCandidates: Sendable, CustomStringConvertible, Cu
                      evidence: ComputerUseBrowserPageEvidence, answerPolicy: ComputerUseBrowserAnswerSourcePolicy?,
                      interpretation: ComputerUseBrowserGoalProposal?) {
         self.evidence = evidence; goalRevision = goal.digest; rootTaskID = goal.taskID
+        observedAtMilliseconds = Int64(Date().timeIntervalSince1970 * 1_000)
         answerSourcePolicy = answerPolicy
         goalInterpretation = interpretation; review = proposal.review
         documentAnswerSourceStatus = answerPolicy.map { $0.permitsEvidenceFrom(evidence.document.committedURL) ? .permitted : .excluded } ?? .unconfigured
@@ -312,6 +326,7 @@ struct ComputerUseBrowserLinkSelectionInput: Equatable, Sendable, CustomStringCo
     let allowsAnswer: Bool
     var answerCandidateIndices: [Int] { answerEligibility?.candidateIndices ?? [] }
     var answerCounts: [Int] { answerEligibility?.selectionCounts ?? [] }
+    var answerOptions: [[String: Any]] { answerEligibility?.plannerOptions ?? [] }
     let recallableReadingIndices: [Int]
     let contextJSON: String
     var candidateCount: Int { choices.count }
@@ -336,7 +351,7 @@ struct ComputerUseBrowserLinkSelectionInput: Equatable, Sendable, CustomStringCo
             ? available.filter { !recalledReadings.contains($0) } : []
         choices = candidates.candidates.map { .init(candidateID: $0.id, links: $0.selectedLinkIDs) }
         self.allowsAnswer = allowsAnswer
-        answerEligibility = allowsAnswer ? candidates.answerEligibility(goal: goal) : nil
+        answerEligibility = allowsAnswer ? try candidates.answerEligibility(goal: goal, evidence: evidence, recalledReadings: recalledReadings) : nil
         let visits: [[String: Any]] = history.enumerated().map {
             ["step":$0.offset, "kind":$0.element.kind.rawValue, "current_goal_revision":$0.element.goalRevision == goal.digest]
         }
@@ -348,7 +363,7 @@ struct ComputerUseBrowserLinkSelectionInput: Equatable, Sendable, CustomStringCo
             guard let evidence else { throw ComputerUseBrowserLinkPlanError.inputChanged }
             return try evidence.recall(index, goal: goal)
         }
-        var context: [String: Any] = ["version":allowsAnswer ? 6 : 5, "goal":goal.plannerContext,
+        var context: [String: Any] = ["version":allowsAnswer ? 7 : 5, "goal":goal.plannerContext,
             "page":try JSONSerialization.jsonObject(with: Data(candidates.readingInput.contextJSON.utf8)),
             "candidates":candidates.candidatePlannerContext, "navigation_history":visits,
             "reading_catalog":readingCatalog,
@@ -360,6 +375,8 @@ struct ComputerUseBrowserLinkSelectionInput: Equatable, Sendable, CustomStringCo
         if allowsAnswer {
             context["answer_candidate_indices"] = answerEligibility?.candidateIndices ?? []
             context["answer_counts"] = answerEligibility?.selectionCounts ?? []
+            context["answer_options"] = answerEligibility?.plannerOptions ?? []
+            context["observed_at_milliseconds"] = candidates.observedAtMilliseconds
         }
         contextJSON = String(decoding: try JSONSerialization.data(withJSONObject: context, options: [.sortedKeys]), as: UTF8.self)
         let nativeEvidence = candidates.evidence
@@ -389,18 +406,19 @@ struct ComputerUseBrowserLinkSelectionInput: Equatable, Sendable, CustomStringCo
 
 extension ComputerUseOwnedBrowser {
     func validateResearchAnswerBinding(_ answer: ComputerUseBrowserResearchAnswer, reading: ComputerUseBrowserResultCandidates,
-                                      goal: ComputerUseBrowserGoalInput) throws {
+                                      goal: ComputerUseBrowserGoalInput, evidence: ComputerUseBrowserResearchEvidence) throws {
         try Task.checkCancellation()
         try validateSourceDocument(reading.evidence.document)
         guard currentDocument(taskID: goal.taskID) == reading.evidence.document,
-              let eligibility = reading.answerEligibility(goal: goal) else { throw ComputerUseBrowserError.pageChanged }
+              let eligibility = try reading.answerEligibility(goal: goal, evidence: evidence, recalledReadings: answer.recalledReadings) else { throw ComputerUseBrowserError.pageChanged }
         try answer.validate(for: eligibility)
     }
 
     func prepareResearchAnswer(_ selection: ComputerUseBrowserResearchAnswer.Selection, reading: ComputerUseBrowserResultCandidates,
-                               goal: ComputerUseBrowserGoalInput, policy: ComputerUseBrowserAnswerSourcePolicy) async throws -> ComputerUseBrowserResearchAnswer {
+                               goal: ComputerUseBrowserGoalInput, policy: ComputerUseBrowserAnswerSourcePolicy,
+                               evidence: ComputerUseBrowserResearchEvidence) async throws -> ComputerUseBrowserResearchAnswer {
         try await validateResultAnswerSource(reading, goal: goal, policy: policy)
-        guard let eligibility = reading.answerEligibility(goal: goal) else { throw ComputerUseBrowserLinkPlanError.inputChanged }
+        guard let eligibility = try reading.answerEligibility(goal: goal, evidence: evidence, recalledReadings: selection.recalledReadings) else { throw ComputerUseBrowserLinkPlanError.inputChanged }
         let answer = try eligibility.answer(for: selection)
         try await validateResultAnswerSource(reading, goal: goal, policy: policy)
         try Task.checkCancellation()
