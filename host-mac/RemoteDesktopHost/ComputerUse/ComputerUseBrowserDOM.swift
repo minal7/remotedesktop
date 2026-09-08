@@ -5,6 +5,7 @@ enum ComputerUseBrowserDOMCommand: String {
     case fields, read, edit, receipt, reobserve, preflight, pageIdentity, pageSnapshot, validatePageSnapshot, observeResearchControls
     case scrollViewport, viewportScrollReceipt, validatePageLink, finishPendingChange, continueUnsentInput
     case prepareFormQuery, validateFormQuery, bindPageFields, formFields, extendFormFields, inspectFormRequirements, retireUnsentInputs
+    case preparePopup, validatePopup, openPopup, popupReceipt, retireUnsentPopup
 }
 
 /// Private adapter output. A GET query can contain server state or user input;
@@ -526,6 +527,8 @@ struct ComputerUseBrowserDOMReply: Decodable {
     let formBindings: [FormBinding]?
     let changedFieldIDs: [String]?
     let inputLedgerID: String?
+    let popupBinding: ComputerUseBrowserPopupBinding?
+    let popupReceipt: ComputerUseBrowserPopupReceipt?
 }
 
 /// Fixed host code in a separate WebKit script world. Page text, model output
@@ -611,7 +614,7 @@ enum ComputerUseBrowserDOM {
       function synchronize() {
         retire(observer.takeRecords());
         if (root !== doc.documentElement) {
-          if (root) { documentID = nonce(); inputLedgerID = nonce(); bindings.clear(); operations.clear(); pendingChanges.clear(); retiredInputs.clear(); fieldScope = null; viewportOperations.clear(); formQueries.clear(); lastPageSnapshot = null; }
+          if (root) { documentID = nonce(); inputLedgerID = nonce(); bindings.clear(); operations.clear(); pendingChanges.clear(); retiredInputs.clear(); fieldScope = null; viewportOperations.clear(); formQueries.clear(); popupPlans.clear(); popupOperations.clear(); popupRetirements.clear(); lastPageSnapshot = null; }
           root = doc.documentElement;
         }
       }
@@ -1374,6 +1377,7 @@ enum ComputerUseBrowserDOM {
           return 'dispatched';
         } catch (_) { return 'uncertain'; }
       }
+      \#(ComputerUseBrowserPopupScript.source)
       function run(command, args) {
         // Read only the identity of this loaded Document, before inspecting
         // any form metadata/value or draining target mutation records. Root
@@ -1384,6 +1388,23 @@ enum ComputerUseBrowserDOM {
         }
         synchronize();
         if (!root || doc !== document) return reply('stale');
+        if (command === 'popupReceipt') return popupHistorical(args);
+        if (command === 'retireUnsentPopup') {
+          if (args.documentID !== documentID || typeof args.operationID !== 'string' || !/^[a-f0-9]{64}$/.test(args.operationID)) return reply('stale');
+          const plan = popupPlans.get(args.bindingID);
+          if (!plan || plan.controlID !== args.controlID || plan.snapshotID !== args.snapshotID || plan.url !== doc.URL) return reply('stale');
+          if (plan.attemptID || popupOperations.has(args.operationID)) return reply('popup-attempted');
+          if (plan.retired && plan.retired !== args.operationID || popupRetirements.has(args.operationID) && popupRetirements.get(args.operationID) !== plan) return reply('stale');
+          plan.retired = args.operationID; popupRetirements.set(args.operationID,plan);
+          return reply('popup-retired-unsent');
+        }
+        if (command === 'openPopup') {
+          if (args.documentID !== documentID || typeof args.operationID !== 'string' || !/^[a-f0-9]{64}$/.test(args.operationID)) return reply('stale');
+          const previous = popupOperations.get(args.operationID), plan = popupPlans.get(args.bindingID);
+          if (popupRetirements.has(args.operationID) || plan?.retired) return reply('popup-retired');
+          if (previous) return reply(previous.plan === plan && plan.controlID === args.controlID && plan.snapshotID === args.snapshotID
+            && plan.url === doc.URL ? 'popup-already-attempted' : 'popup-uncertain');
+        }
         if (command === 'finishPendingChange') {
           if (args.documentID !== documentID || args.inputLedgerID !== inputLedgerID) return reply('stale');
           if (typeof args.operationID !== 'string' || !/^[a-f0-9]{64}$/.test(args.operationID)) return reply('unsupported');
@@ -1419,7 +1440,7 @@ enum ComputerUseBrowserDOM {
               || JSON.stringify(readViewport()) !== JSON.stringify(operation.receipt.after)) return reply('uncertain');
           return {...reply('viewport-scroll-confirmed'), scroll: operation.receipt};
         }
-        if (['pageSnapshot', 'observeResearchControls', 'validatePageSnapshot', 'scrollViewport', 'validatePageLink', 'prepareFormQuery', 'validateFormQuery', 'bindPageFields', 'formFields', 'extendFormFields', 'inspectFormRequirements'].includes(command)) {
+        if (['pageSnapshot', 'observeResearchControls', 'validatePageSnapshot', 'scrollViewport', 'validatePageLink', 'prepareFormQuery', 'validateFormQuery', 'bindPageFields', 'formFields', 'extendFormFields', 'inspectFormRequirements', 'preparePopup', 'validatePopup', 'openPopup'].includes(command)) {
           const status = authenticationStatus();
           if (status) { lastPageSnapshot = null; return reply(status); }
           if (doc.readyState !== 'complete') return reply('stale');
@@ -1451,6 +1472,31 @@ enum ComputerUseBrowserDOM {
                     || previous.signature !== binding.signature;
                 })) return reply('stale');
             if (command === 'validatePageSnapshot') return reply('page-current');
+            if (command === 'preparePopup') {
+              const binding = controls.get(args.controlID), current = binding && popupOpening(binding.element,binding.metadata);
+              if (!current) return reply('popup-unavailable');
+              let plan = Array.from(popupPlans.values()).find(plan => plan.snapshotID === args.snapshotID && plan.controlID === args.controlID
+                && !plan.retired && !plan.attemptID && plan.element === binding.element);
+              if (!plan) {
+                if (popupPlans.size >= 64) return reply('limit');
+                plan = {id:nonce(),controlID:args.controlID,snapshotID:args.snapshotID,url:doc.URL,element:binding.element,form:binding.element.form || null,...current};
+                popupPlans.set(plan.id,plan);
+              }
+              return {...reply('popup-prepared'),popupBinding:{id:plan.id,controlID:plan.controlID}};
+            }
+            if (command === 'validatePopup' || command === 'openPopup') {
+              const plan = preparedPopup(args,controls);
+              if (!plan) return reply('popup-unavailable');
+              if (command === 'validatePopup') return reply('popup-current');
+              if (popupOperations.size >= 64) return reply('limit');
+              // Record before activation. Another operation ID cannot reuse
+              // this plan, and reentrant handlers cannot dispatch it twice.
+              const operation = {plan,dispatched:true,userInputSerial:popupUserInputSerial,deadline:performance.now() + 2000};
+              plan.attemptID = args.operationID; popupOperations.set(args.operationID,operation);
+              lastPageSnapshot = null; formQueries.clear();
+              try { popupClick.call(plan.element); return reply('popup-dispatched'); }
+              catch (_) { operation.failed = true; return reply('popup-uncertain'); }
+            }
             if (command === 'inspectFormRequirements') {
               const changes = [];
               if (!formRequirementsCurrent(args.requirements, args.repairableFieldIDs, changes)) return reply('stale');

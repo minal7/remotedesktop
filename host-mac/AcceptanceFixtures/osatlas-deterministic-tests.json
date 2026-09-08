@@ -271,7 +271,8 @@
     "RemoteDesktopHostTests/ComputerUseBrowserControlRelevanceTests",
     "RemoteDesktopHostTests/ComputerUseBrowserReadonlyReadingTests",
     "RemoteDesktopHostTests/ComputerUseBrowserDeclaredStateTests",
-    "RemoteDesktopHostTests/ComputerUseBrowserCompositeStateTests"
+    "RemoteDesktopHostTests/ComputerUseBrowserCompositeStateTests",
+    "RemoteDesktopHostTests/ComputerUseBrowserPopupTests"
   ],
   "expectedTests": [
     "RemoteDesktopHostTests/AppleFoundationMCPPlannerTests/testCountedInputExpandsBeforeEffectAndTerminalQueries",
@@ -679,6 +680,15 @@
     "RemoteDesktopHostTests/ComputerUseBrowserPendingChangeTests/testPauseDuringTheTailKeepsTheExecutionLeaseAndCannotDuplicateEitherEvent",
     "RemoteDesktopHostTests/ComputerUseBrowserPendingChangeTests/testPendingAttemptConfirmationRequiresExactUnretiredStateAndTheCallersLease",
     "RemoteDesktopHostTests/ComputerUseBrowserPendingChangeTests/testResearchDriverCompletesOnlyTheMissingChangeEventAfterExplicitLoginHandback",
+    "RemoteDesktopHostTests/ComputerUseBrowserPopupTests/testAuthenticationBeforePreflightRemainsTypedAndCannotCreateAnAttempt",
+    "RemoteDesktopHostTests/ComputerUseBrowserPopupTests/testCancelledBeforeNativeDispatchResumesOnlyTheOriginalJournaledOperation",
+    "RemoteDesktopHostTests/ComputerUseBrowserPopupTests/testChangedUnsentTargetRequiresDurableRetirementBeforeFreshPreparation",
+    "RemoteDesktopHostTests/ComputerUseBrowserPopupTests/testFailedAttemptWriteNeedsFreshStoreAndKeepsTheOriginalNativeOperation",
+    "RemoteDesktopHostTests/ComputerUseBrowserPopupTests/testOpeningPersistsAttemptBeforeDispatchAndRepeatedCallsCannotClickAgain",
+    "RemoteDesktopHostTests/ComputerUseBrowserPopupTests/testPreparationIsReadOnlyIdempotentAndBoundToAnOriginalResearchRequirement",
+    "RemoteDesktopHostTests/ComputerUseBrowserPopupTests/testReplacementOrAuthenticationAfterDispatchCannotBecomeAnOpeningReceipt",
+    "RemoteDesktopHostTests/ComputerUseBrowserPopupTests/testSubmitLinksProtectedAndAmbiguousPopupTargetsAreNotActivated",
+    "RemoteDesktopHostTests/ComputerUseBrowserPopupTests/testUnconfirmedAndLateOpeningsCannotBeReplayedOrClaimedAsFreshReceipts",
     "RemoteDesktopHostTests/ComputerUseBrowserPriceClarificationTests/testCompoundNegativeAndUncertainAnswersCannotBeReducedToOneModelHint",
     "RemoteDesktopHostTests/ComputerUseBrowserPriceClarificationTests/testExplicitCurrencyBasisAndFeesCannotBeOverwrittenAndMultiPriceAnswersApplyAtomically",
     "RemoteDesktopHostTests/ComputerUseBrowserPriceClarificationTests/testFollowUpThroughAKnownEarlierAnswerKeepsTheOriginalTargetAndCannotRestoreFailedDefaults",

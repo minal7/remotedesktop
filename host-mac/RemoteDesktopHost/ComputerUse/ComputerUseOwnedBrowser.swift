@@ -1027,13 +1027,19 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         guard result.formQuery == nil || command == .prepareFormQuery else { throw ComputerUseBrowserError.unsupportedDocument }
         guard result.formBindings == nil || command == .bindPageFields else { throw ComputerUseBrowserError.unsupportedDocument }
         guard result.changedFieldIDs == nil || command == .inspectFormRequirements else { throw ComputerUseBrowserError.unsupportedDocument }
+        guard result.popupBinding == nil || command == .preparePopup,
+              result.popupReceipt == nil || command == .popupReceipt else { throw ComputerUseBrowserError.unsupportedDocument }
+        if [.preparePopup, .validatePopup, .openPopup, .popupReceipt, .retireUnsentPopup].contains(command) {
+            guard result.fields == nil, result.page == nil, result.scroll == nil, result.formQuery == nil,
+                  result.formBindings == nil, result.changedFieldIDs == nil else { throw ComputerUseBrowserError.unsupportedDocument }
+        }
         guard result.documentID.utf8.count == 32,
               result.documentID.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else {
             throw ComputerUseBrowserError.pageChanged
         }
         if result.status == "authentication-required" {
             guard result.fields == nil, result.page == nil, result.scroll == nil, result.formQuery == nil,
-                  result.formBindings == nil, result.changedFieldIDs == nil else { throw ComputerUseBrowserError.unsupportedDocument }
+                  result.formBindings == nil, result.changedFieldIDs == nil, result.popupBinding == nil, result.popupReceipt == nil else { throw ComputerUseBrowserError.unsupportedDocument }
             throw ComputerUseBrowserError.authenticationRequired
         }
         return result
