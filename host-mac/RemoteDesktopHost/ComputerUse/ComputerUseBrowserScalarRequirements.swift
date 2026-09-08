@@ -111,6 +111,13 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
         case price(Amount, PriceBasis, Fees, isExact: Bool)
         case day(CivilDay)
     }
+    /// A parsed quotation only. Neither exact offer pricing, applicability,
+    /// inventory nor association is established by a literal's spelling.
+    enum Literal: Equatable, Sendable {
+        case quantity(Int64, QuantityUnit)
+        case price(Amount, PriceBasis, Fees)
+        case day(CivilDay)
+    }
     enum Evaluation: Equatable, Sendable { case satisfied, notSatisfied, unverifiable }
     struct Condition: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
         let id: String
@@ -126,13 +133,24 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
         /// Unspecified request basis/fees impose no scalar comparison here;
         /// this does not establish adequate scope for the whole request.
         func evaluate(_ observation: Observation) -> Evaluation {
+            switch observation {
+            case .quantity(let count, let unit): return compareLiteral(.quantity(count, unit))
+            case .day(let day): return compareLiteral(.day(day))
+            case .price(let amount, let basis, let fees, let isExact):
+                guard isExact else { return .unverifiable }
+                return compareLiteral(.price(amount, basis, fees))
+            }
+        }
+        /// Arithmetic on a quotation for planning. A passing comparison must
+        /// never be promoted to a verified observation or fulfilled condition.
+        func compareLiteral(_ literal: Literal) -> Evaluation {
             let accepted: Bool
-            switch (predicate, observation) {
+            switch (predicate, literal) {
             case (.quantity(let comparison, let expected, let unit), .quantity(let actual, let observedUnit)):
                 guard actual >= 0, unit == observedUnit else { return .unverifiable }
                 accepted = comparison.accepts(actual, expected: expected)
-            case (.price(let comparison, let expected, let basis, let fees), .price(let actual, let actualBasis, let actualFees, let isExact)):
-                guard isExact, actual.currency == expected.currency,
+            case (.price(let comparison, let expected, let basis, let fees), .price(let actual, let actualBasis, let actualFees)):
+                guard actual.currency == expected.currency,
                       basis == .unspecified || basis == actualBasis,
                       fees == .unspecified || fees == actualFees else { return .unverifiable }
                 accepted = comparison.accepts(actual.hundredths, expected: expected.hundredths)

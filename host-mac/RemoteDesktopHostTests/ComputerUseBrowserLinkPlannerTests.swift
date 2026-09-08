@@ -21,7 +21,7 @@ final class ComputerUseBrowserLinkPlannerTests: XCTestCase {
         let planner = try local(LinkFixtureTransport()), requestData = try planner.makeRequest(input)
         let body = try object(XCTUnwrap(requestData.httpBody)), messages = try XCTUnwrap(body["messages"] as? [[String: String]])
         let context = try object(Data(XCTUnwrap(messages[1]["content"]).utf8))
-        XCTAssertEqual(Set(context.keys), ["version", "goal", "page", "candidates", "navigation_history", "document_answer_source_status"])
+        XCTAssertEqual(Set(context.keys), ["version", "goal", "page", "candidates", "navigation_history", "document_answer_source_status", "requirement_assessment"])
         XCTAssertEqual(context["document_answer_source_status"] as? String, "permitted")
         let goal = try XCTUnwrap(context["goal"] as? [String: Any])
         XCTAssertEqual(goal["request"] as? String, original.prompt)

@@ -340,8 +340,9 @@ struct ResearchDriverFixture {
     static func make(seedPage: Bool = false, navigationLimit: Int = 8,
                      linkPlanner: (any ComputerUseBrowserLinkPlanning)? = nil,
                      resultPlanner: (any ComputerUseBrowserResultPlanning)? = nil,
-                     additionalCardHTML: String = "", linkDestinationOverride: String? = nil) async throws -> Self {
-        func card(_ path: String) -> String { "<article><h2>Concert Alpha</h2><a href='\(linkDestinationOverride ?? path)'>Alpha details</a></article>" + additionalCardHTML }
+                     additionalCardHTML: String = "", linkDestinationOverride: String? = nil,
+                     candidateBodyHTML: String = "") async throws -> Self {
+        func card(_ path: String) -> String { "<article><h2>Concert Alpha</h2><a href='\(linkDestinationOverride ?? path)'>Alpha details</a>\(candidateBodyHTML)</article>" + additionalCardHTML }
         let server = try OwnedBrowserHTTPFixture(routes: ["/before": .init(body: card("/old")),
             "/search?q=concerts": .init(body: card("/details")), "/details": .init(body: card("/offers")),
             "/offers": .init(body: card("/more")), "/account": .init(body: "<label>Password<input type=password></label>"),

@@ -1,0 +1,268 @@
+import Foundation
+import XCTest
+@testable import RemoteDesktopHost
+
+@MainActor
+final class ComputerUseBrowserResultAssessmentTests: XCTestCase {
+    private typealias Status = ComputerUseBrowserResultAssessment.Status
+    private typealias Spec = AssessmentResultFixture.Spec
+
+    func testBoundReadingAccountsForEveryRequirementWithoutPromotingQuotesToVerifiedOffers() async throws {
+        let rows = [row("Find concerts. "), row("Under USD 50 total including fees. ", field: "price", relation: "below"),
+                    row("On 2027-01-16. ", field: "date", relation: "equal"), row("3 results. ", field: "quantity", relation: "equal"),
+                    row("In Paris. ", field: "location"), row("Do not buy.", role: "prohibition")]
+        let result = try await reading(rows, fields: [.init(.price, ["Price:", "USD 49.99 total including fees"]), .init(.date, ["16 January 2027"])])
+        defer { result.fixture.close() }
+        let assessment = try XCTUnwrap(result.batch.requirementAssessment), candidate = try XCTUnwrap(assessment.candidates.first)
+        XCTAssertEqual(assessment.requirements.map(\.id), result.interpretation.requirements.map(\.id))
+        XCTAssertEqual(candidate.requirements.map(\.requirementID), assessment.requirements.map(\.id))
+        XCTAssertEqual(candidate.requirements.map(\.status), [.needsSemanticVerification, .quotedValueMatches,
+            .quotedValueMatches, .needsResultSet, .needsSemanticVerification, .needsSemanticVerification])
+        XCTAssertEqual(candidate.quotes[0].source, "Price:\nUSD 49.99 total including fees")
+        XCTAssertEqual(candidate.requirements[1].quoteIndices, [0]); XCTAssertEqual(candidate.requirements[2].quoteIndices, [1])
+        guard case .price(let amount, .total, .included)? = candidate.quotes[0].literal else { return XCTFail("Expected a parsed quotation") }
+        XCTAssertEqual(amount.hundredths, 4_999); XCTAssertEqual(amount.currency, .usd)
+        let compiled = ComputerUseBrowserScalarRequirements(proposal: result.interpretation)
+        guard case .bound(let priceCondition) = compiled.entries[1].resolution else { return XCTFail("Expected a compiled price condition") }
+        XCTAssertEqual(priceCondition.evaluate(.price(amount, .total, .included, isExact: false)), .unverifiable,
+            "Literal comparison cannot turn an inexact offer observation into an exact one")
+        XCTAssertEqual(assessment.goalRevision, result.owner.input.digest)
+        try await result.fixture.browser.validateResultAssessment(assessment, reading: result.batch, interpretation: result.interpretation)
+        for value in [String(reflecting: assessment), String(reflecting: candidate.quotes[0])] {
+            XCTAssertFalse(value.contains("49.99")); XCTAssertFalse(value.contains(result.owner.input.taskID))
+        }
+    }
+
+    func testPriceComparisonKeepsBoundariesCurrencyBasisFeesAndQualifiersDistinct() async throws {
+        let rows = [row("Find concerts. "), row("Under USD 50 total including fees.", field: "price", relation: "below")]
+        let cases: [(String, Status)] = [("USD 49.99 total including fees", .quotedValueMatches),
+            ("USD 50 total including fees", .quotedValueConflicts), ("USD 1,000.01 total including fees", .quotedValueConflicts),
+            ("USD 40 total", .incompatibleLiteral), ("USD 40 per person including fees", .incompatibleLiteral),
+            ("USD 40 total excluding fees", .incompatibleLiteral), ("CAD 40 total including fees", .incompatibleLiteral),
+            ("$40 total including fees", .incompatibleLiteral), ("From USD 40 total including fees", .unparsedQuote),
+            ("USD 40–60 total including fees", .unparsedQuote), ("USD 40 total including fees, subject to change", .unparsedQuote),
+            ("USD 1,00 total including fees", .unparsedQuote), ("USD 40.999 total including fees", .unparsedQuote),
+            ("USD 1000000000 total including fees", .unparsedQuote)]
+        for (text, expected) in cases {
+            let result = try await reading(rows, fields: [.init(.price, [text])])
+            defer { result.fixture.close() }
+            let candidate = try XCTUnwrap(result.batch.requirementAssessment?.candidates.first)
+            XCTAssertEqual(candidate.requirements[1].status, expected, text)
+            XCTAssertEqual(candidate.quotes[0].source, text)
+        }
+    }
+
+    func testMultiplePricesCannotBeReducedToTheCheapestNumberAndMissingValuesStayMissing() async throws {
+        let rows = [row("Find concerts. "), row("Under USD 50.", field: "price", relation: "below")]
+        let cases: [([Spec], Status)] = [([], .missingQuote),
+            ([.init(.price, ["USD 40"]), .init(.price, ["USD 30"])], .ambiguousQuotes),
+            ([.init(.price, ["USD 40", "USD 30"])], .unparsedQuote)]
+        for (fields, expected) in cases {
+            let result = try await reading(rows, fields: fields)
+            defer { result.fixture.close() }
+            let candidate = try XCTUnwrap(result.batch.requirementAssessment?.candidates.first)
+            XCTAssertEqual(candidate.requirements[1].status, expected)
+            XCTAssertEqual(candidate.quotes.count, fields.count)
+        }
+        let result = try await reading(rows, fields: [.init(.price, ["USD 40"])], extraHTML: "<p>From</p><p>Additional restrictions apply</p>")
+        defer { result.fixture.close() }
+        let candidate = try XCTUnwrap(result.batch.requirementAssessment?.candidates.first)
+        XCTAssertEqual(candidate.requirements[1].status, .quotedValueMatches, "Only the numeric quotation compared; its applicability is unverified")
+        XCTAssertEqual(candidate.requirements[0].status, .needsSemanticVerification)
+        XCTAssertTrue(result.batch.candidates[0].texts.contains { $0.text == "From" && result.batch.candidates[0].unclassifiedTextIDs.contains($0.id) })
+    }
+
+    func testObservedDatesRequireAnExplicitCivilDayAndDoNotBorrowTheTaskClockForPageRelativeText() async throws {
+        let rows = [row("Find concerts. "), row("After 2027-01-15.", field: "date", relation: "later")]
+        for (text, expected) in [("2027-01-16", Status.quotedValueMatches), ("Jan 16, 2027", .quotedValueMatches),
+                                 ("Date: 16 January 2027", .quotedValueMatches), ("January 15, 2027", .quotedValueConflicts),
+                                 ("2027-02-29", .unparsedQuote), ("tomorrow", .unparsedQuote), ("01/16/2027", .unparsedQuote),
+                                 ("Jan 16", .unparsedQuote), ("Jan 16, 2027 or later", .unparsedQuote)] {
+            let result = try await reading(rows, fields: [.init(.date, [text])])
+            defer { result.fixture.close() }
+            XCTAssertEqual(result.batch.requirementAssessment?.candidates.first?.requirements[1].status, expected, text)
+        }
+    }
+
+    func testSourceEligibilityAndResultCountRemainSeparateFromPriceAndQuotedTicketCount() async throws {
+        let rows = [row("Find concerts. "), row("Under USD 50. ", field: "price", relation: "below"),
+                    row("3 tickets. ", field: "quantity", relation: "equal"),
+                    row("Only report from tickets.test.", field: "answerSource", relation: "include", values: ["tickets.test"])]
+        let result = try await reading(rows, fields: [.init(.price, ["USD 40"]), .init(.quantity, ["3 tickets"])])
+        defer { result.fixture.close() }
+        let candidate = try XCTUnwrap(result.batch.requirementAssessment?.candidates.first)
+        XCTAssertEqual(candidate.requirements.map(\.status), [.needsSemanticVerification, .quotedValueMatches, .needsResultSet, .sourceOriginExcluded])
+        XCTAssertEqual(candidate.quotes[1].literal, .quantity(3, .tickets))
+        XCTAssertEqual(result.batch.documentAnswerSourceStatus, .excluded)
+        XCTAssertEqual(result.fixture.server.count("/search?q=concerts"), 1)
+    }
+
+    func testAssessmentRequiresTheSameInterpretationFreshNativeReadingAndLiveControl() async throws {
+        let rows = [row("Find concerts. "), row("Under USD 50.", field: "price", relation: "below")]
+        let result = try await reading(rows, fields: [.init(.price, ["USD 40"])])
+        defer { result.fixture.close() }
+        let assessment = try XCTUnwrap(result.batch.requirementAssessment), browser = result.fixture.browser
+        let reinterpretation = try proposal([rows[0], row("Under USD 50.", field: "other")], input: result.owner.input)
+        do { try await browser.validateResultAssessment(assessment, reading: result.batch, interpretation: reinterpretation); XCTFail("Source coverage alone does not preserve interpretation identity") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserResultError, .goalChanged) }
+        result.owner.pause(); result.fixture.state.allowed = false
+        do { try await browser.validateResultAssessment(assessment, reading: result.batch, interpretation: result.interpretation); XCTFail("No authority during user control") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+        result.fixture.state.allowed = true; try await result.owner.resumeAfterUserControl()
+        let fresh = try await result.owner.readCandidates(), freshAssessment = try XCTUnwrap(fresh.requirementAssessment)
+        XCTAssertNotEqual(freshAssessment, assessment)
+        do { try await browser.validateResultAssessment(assessment, reading: result.batch, interpretation: result.interpretation); XCTFail("A fresh reading supersedes old evidence even on the same page") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+        try await browser.validateResultAssessment(freshAssessment, reading: fresh, interpretation: result.interpretation)
+        _ = try await browser.navigate(taskID: result.owner.taskID, operationID: "another-document", to: result.fixture.base.appendingPathComponent("details"))
+        do { try await browser.validateResultAssessment(freshAssessment, reading: fresh, interpretation: result.interpretation); XCTFail("Old document cannot report") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+    }
+
+    func testResearchDriverSuppliesAssessmentToLinkPlanningWithTheCompleteGoalAndPrivateBindings() async throws {
+        let rows = [row("Find concerts. "), row("Under USD 50. ", field: "price", relation: "below"), row("Do not buy.", role: "prohibition")]
+        let result = try await reading(rows, fields: [.init(.price, ["USD 60"])])
+        defer { result.fixture.close() }
+        XCTAssertEqual(result.links.inputs.count, 1)
+        let input = try XCTUnwrap(result.links.inputs.first)
+        let context = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(input.contextJSON.utf8)) as? [String: Any])
+        let goal = try XCTUnwrap(context["goal"] as? [String: Any]), assessment = try XCTUnwrap(context["requirement_assessment"] as? [String: Any])
+        XCTAssertEqual(goal["request"] as? String, result.owner.input.prompt)
+        XCTAssertEqual((goal["referenceUnixMilliseconds"] as? NSNumber)?.int64Value, result.owner.input.referenceMilliseconds)
+        let requirements = try XCTUnwrap(assessment["requirements"] as? [[String: Any]])
+        XCTAssertEqual(requirements.count, rows.count); XCTAssertEqual(requirements.map { $0["index"] as? Int }, [0, 1, 2])
+        let candidates = try XCTUnwrap(assessment["candidates"] as? [[String: Any]])
+        XCTAssertEqual(candidates[0]["requirements"] as? [String], ["needsSemanticVerification", "quotedValueConflicts", "needsSemanticVerification"])
+        for hidden in [result.owner.input.digest, result.interpretation.digest, result.batch.candidates[0].id,
+                       result.fixture.base.absoluteString, result.interpretation.requirements[0].id] { XCTAssertFalse(input.contextJSON.contains(hidden)) }
+        XCTAssertEqual(result.fixture.server.count("/details"), 0)
+    }
+
+    func testEmptyCandidateSelectionKeepsAllRequirementsAndDoesNotEstablishNoResults() async throws {
+        let rows = [row("Find concerts. "), row("3 results.", field: "quantity", relation: "equal")]
+        let result = try await reading(rows, fields: [], empty: true)
+        defer { result.fixture.close() }
+        let assessment = try XCTUnwrap(result.batch.requirementAssessment)
+        XCTAssertEqual(assessment.requirements.map(\.id), result.interpretation.requirements.map(\.id))
+        XCTAssertTrue(assessment.candidates.isEmpty)
+        XCTAssertEqual(result.owner.input, result.interpretation.input)
+        XCTAssertEqual(result.fixture.server.count("/search?q=concerts"), 1)
+    }
+
+    func testAcceptedAnswerAddsRequirementsWithoutReplacingTheOriginalRootClockOrEvidenceRevision() async throws {
+        let rows = [row("Find concerts. "), row("Under USD 50.", field: "price", relation: "below")]
+        let result = try await reading(rows, fields: [.init(.price, ["USD 40"])])
+        defer { result.fixture.close() }
+        let original = result.owner.input, old = try XCTUnwrap(result.batch.requirementAssessment)
+        let question = try result.owner.issueQuestion(topic: .location, requirementIDs: [result.interpretation.requirements[0].id],
+            controllerID: "phone", controllerSessionID: "session")
+        let answer = "Paris. Do not buy."
+        let updated = try result.owner.answerQuestion(questionID: question.id, answerTaskID: "answer", answer: answer,
+            controllerID: "phone", controllerSessionID: "session")
+        var location = row("Paris. ", field: "location"), prohibition = row("Do not buy.", role: "prohibition")
+        location["turn"] = 1; prohibition["turn"] = 1
+        let freshInterpretation = try proposal(rows + [location, prohibition], input: updated)
+        result.goals.value = freshInterpretation
+        _ = try await result.owner.interpretGoal()
+        let sources = try XCTUnwrap(ComputerUseBrowserSourceRequirements(proposal: freshInterpretation).selectSources(from: [result.fixture.policy.provider]))
+        try result.owner.configureResearchSources(sources)
+        let batch = try await result.owner.readCandidates(), assessment = try XCTUnwrap(batch.requirementAssessment)
+        XCTAssertEqual(updated.rootDigest, original.rootDigest); XCTAssertEqual(updated.userTurns, [original.prompt, answer])
+        XCTAssertEqual(updated.referenceMilliseconds, original.referenceMilliseconds); XCTAssertEqual(updated.timeZoneIdentifier, original.timeZoneIdentifier)
+        XCTAssertEqual(assessment.requirements.map(\.turn), [0, 0, 1, 1])
+        XCTAssertEqual(assessment.candidates[0].requirements.map(\.status), [.needsSemanticVerification, .quotedValueMatches, .needsSemanticVerification, .needsSemanticVerification])
+        XCTAssertNotEqual(assessment.interpretationDigest, old.interpretationDigest)
+        do { try await result.fixture.browser.validateResultAssessment(old, reading: batch, interpretation: freshInterpretation); XCTFail("Accepted answers retire old assessment authority") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserResultError, .goalChanged) }
+        XCTAssertEqual(result.fixture.server.count("/search?q=concerts"), 1)
+    }
+
+    func testOmittedPageRecordsCannotProduceAPositiveQuoteComparison() async throws {
+        let rows = [row("Find concerts. "), row("Under USD 50.", field: "price", relation: "below")]
+        let omitted = (0..<180).map { "<p>Additional condition \($0) must be retained when evaluating this particular concert ticket.</p>" }.joined()
+        let result = try await reading(rows, fields: [.init(.price, ["USD 40"])], extraHTML: omitted)
+        defer { result.fixture.close() }
+        let assessment = try XCTUnwrap(result.batch.requirementAssessment)
+        XCTAssertEqual(assessment.candidates.first?.requirements[1].status, .incompletePage)
+        XCTAssertEqual(assessment.candidates.first?.quotes.first?.source, "USD 40")
+    }
+
+    private struct Reading {
+        let fixture: ResearchDriverFixture
+        let owner: ComputerUseBrowserResearchTask
+        let interpretation: ComputerUseBrowserGoalProposal
+        let batch: ComputerUseBrowserResultCandidates
+        let links: AssessmentLinkFixture
+        let goals: AssessmentGoalFixture
+    }
+    private func reading(_ rows: [[String: Any]], fields: [Spec], extraHTML: String = "", empty: Bool = false) async throws -> Reading {
+        func escaped(_ source: String) -> String { source.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;").replacingOccurrences(of: ">", with: "&gt;") }
+        let html = fields.flatMap(\.texts).map { "<p>" + escaped($0) + "</p>" }.joined() + extraHTML
+        let fixture = try await ResearchDriverFixture.make(candidateBodyHTML: html)
+        do {
+            let input = try ComputerUseBrowserGoalInput(taskID: ResearchDriverFixture.root, prompt: rows.compactMap { $0["source"] as? String }.joined(),
+                referenceDate: ResearchDriverFixture.date, timeZoneIdentifier: "America/Los_Angeles")
+            let interpretation = try proposal(rows, input: input), links = AssessmentLinkFixture(), goals = AssessmentGoalFixture(value: interpretation)
+            let driver = ComputerUseBrowserResearchDriver(goalPlanner: goals,
+                resultPlanner: AssessmentResultFixture(fields: fields, empty: empty), searchPlanner: fixture.search,
+                planning: ComputerUseModelBrowserResearchPlanning(providers: [fixture.policy.provider], linkPlanner: links),
+                now: { ResearchDriverFixture.date }, timeZoneIdentifier: { "America/Los_Angeles" })
+            let result = try await driver.executeBrowserResearch(taskID: input.taskID, prompt: input.prompt, tools: fixture.tools, progress: { _ in })
+            guard case .userInterventionRequired = result else { throw ComputerUseBrowserResearchDriver.Failure.invalidProposal }
+            let owner = try fixture.owner(), batch = try await owner.readCandidates()
+            return .init(fixture: fixture, owner: owner, interpretation: interpretation, batch: batch, links: links, goals: goals)
+        } catch { fixture.close(); throw error }
+    }
+    private func row(_ source: String, role: String? = nil, field: String = "category", relation: String = "unspecified", values: [String] = []) -> [String: Any] {
+        ["turn":0, "source":source, "role":role ?? (field == "category" ? "outcome" : "condition"), "field":field, "relation":relation, "values":values]
+    }
+    private func proposal(_ rows: [[String: Any]], input: ComputerUseBrowserGoalInput) throws -> ComputerUseBrowserGoalProposal {
+        let data = try JSONSerialization.data(withJSONObject: ["disposition":"research", "requirements":rows, "question":["topic":"none", "requirements":[]]])
+        return try .decode(content: String(decoding: data, as: UTF8.self), input: input)
+    }
+}
+
+@MainActor
+private final class AssessmentGoalFixture: ComputerUseBrowserGoalPlanning {
+    var value: ComputerUseBrowserGoalProposal
+    init(value: ComputerUseBrowserGoalProposal) { self.value = value }
+    func propose(_ input: ComputerUseBrowserGoalInput) async throws -> ComputerUseBrowserGoalProposal {
+        guard value.input == input else { throw ComputerUseBrowserGoalPlanError.invalidInput }
+        return value
+    }
+}
+
+@MainActor
+private final class AssessmentLinkFixture: ComputerUseBrowserLinkPlanning {
+    var inputs: [ComputerUseBrowserLinkSelectionInput] = []
+    func propose(_ input: ComputerUseBrowserLinkSelectionInput) async throws -> ComputerUseBrowserLinkProposal {
+        inputs.append(input)
+        return try .decode(content: #"{"candidate":-1,"link":""}"#, input: input)
+    }
+}
+
+private struct AssessmentResultFixture: ComputerUseBrowserResultPlanning {
+    struct Spec: Sendable {
+        let kind: ComputerUseBrowserResultProposal.Kind
+        let texts: [String]
+        init(_ kind: ComputerUseBrowserResultProposal.Kind, _ texts: [String]) { self.kind = kind; self.texts = texts }
+    }
+    let fields: [Spec]
+    let empty: Bool
+    func propose(goal: ComputerUseBrowserGoalInput, page: ComputerUseBrowserResultPageInput) async throws -> ComputerUseBrowserResultProposal {
+        if empty { return try .decode(content: #"{"candidates":[]}"#, input: page, goal: goal) }
+        let context = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(page.contextJSON.utf8)) as? [String: Any])
+        let records = try XCTUnwrap(context["records"] as? [[String: Any]])
+        func text(_ value: String) throws -> [String: Any] { try XCTUnwrap(records.first { $0["kind"] as? String == "text" && $0["text"] as? String == value }) }
+        let title = try text("Concert Alpha")
+        var container = try XCTUnwrap(title["group"] as? String)
+        while let node = records.first(where: { $0["kind"] as? String == "container" && $0["id"] as? String == container }), node["element"] as? String != "article" {
+            container = try XCTUnwrap(node["parent"] as? String)
+        }
+        var rows: [[String: Any]] = [["kind":"title", "texts":[try XCTUnwrap(title["id"] as? String)]]]
+        for field in fields { rows.append(["kind":field.kind.rawValue, "texts":try field.texts.map { try XCTUnwrap(text($0)["id"] as? String) }]) }
+        let link = try XCTUnwrap(records.first { $0["kind"] as? String == "link" && $0["label"] as? String == "Alpha details" })
+        let data = try JSONSerialization.data(withJSONObject: ["candidates":[["container":container, "fields":rows, "links":[try XCTUnwrap(link["id"] as? String)]]]])
+        return try .decode(content: String(decoding: data, as: UTF8.self), input: page, goal: goal)
+    }
+}

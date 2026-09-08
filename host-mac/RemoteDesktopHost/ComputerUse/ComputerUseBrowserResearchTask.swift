@@ -592,7 +592,9 @@ final class ComputerUseBrowserResearchTask {
         try checkCurrent(goal)
         let answerPolicy = researchSources?.answerPolicy
         guard answerPolicy == nil || answerPolicy?.goalRevision == goal.digest else { throw Failure.goalChanged }
-        let bound = try await browser.prepareResultCandidates(proposal, goal: goal, evidence: evidence, answerPolicy: answerPolicy)
+        guard let interpretation, interpretation.proposal.input == goal else { throw Failure.interpretationRequired }
+        let bound = try await browser.prepareResultCandidates(proposal, goal: goal, evidence: evidence,
+            answerPolicy: answerPolicy, interpretation: interpretation.proposal)
         try checkCurrent(goal)
         return bound
     }

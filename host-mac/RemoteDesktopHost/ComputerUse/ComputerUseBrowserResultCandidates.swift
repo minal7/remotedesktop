@@ -183,6 +183,7 @@ struct ComputerUseBrowserResultCandidates: Sendable, CustomStringConvertible, Cu
     let candidates: [Candidate]
     let documentAnswerSourceStatus: DocumentAnswerSourceStatus
     fileprivate let answerSourcePolicy: ComputerUseBrowserAnswerSourcePolicy?
+    fileprivate let goalInterpretation: ComputerUseBrowserGoalProposal?
     let containers: [ComputerUseBrowserPageSnapshot.Container]
     let surroundingTexts: [Text]
     let surroundingLinks: [Link]
@@ -195,10 +196,21 @@ struct ComputerUseBrowserResultCandidates: Sendable, CustomStringConvertible, Cu
     fileprivate let rootTaskID: String
     fileprivate let readingInput: ComputerUseBrowserResultPageInput
 
+    var requirementAssessmentIdentity: String {
+        ComputerUseTaskContract.digest(["browser-reading-assessment-v1", goalRevision, evidence.document.contextID,
+            String(evidence.document.generation), evidence.documentID, evidence.page.id, answerSourcePolicy?.digest ?? ""] + candidates.map(\.id))
+    }
+    var requirementAssessment: ComputerUseBrowserResultAssessment? {
+        guard let goalInterpretation else { return nil }
+        return try? .init(interpretation: goalInterpretation, reading: self)
+    }
+
     fileprivate init(proposal: ComputerUseBrowserResultProposal, goal: ComputerUseBrowserGoalInput,
-                     evidence: ComputerUseBrowserPageEvidence, answerPolicy: ComputerUseBrowserAnswerSourcePolicy?) {
+                     evidence: ComputerUseBrowserPageEvidence, answerPolicy: ComputerUseBrowserAnswerSourcePolicy?,
+                     interpretation: ComputerUseBrowserGoalProposal?) {
         self.evidence = evidence; goalRevision = goal.digest; rootTaskID = goal.taskID
         answerSourcePolicy = answerPolicy
+        goalInterpretation = interpretation
         documentAnswerSourceStatus = answerPolicy.map { $0.permitsEvidenceFrom(evidence.document.committedURL) ? .permitted : .excluded } ?? .unconfigured
         readingInput = proposal.input
         let page = evidence.page, tree = ComputerUseBrowserResultProposal.Tree(page)
@@ -264,16 +276,19 @@ struct ComputerUseBrowserLinkSelectionInput: Equatable, Sendable, CustomStringCo
         let visits: [[String: Any]] = history.enumerated().map {
             ["step":$0.offset, "kind":$0.element.kind.rawValue, "current_goal_revision":$0.element.goalRevision == goal.digest]
         }
-        let context: [String: Any] = ["version":2, "goal":goal.plannerContext,
+        let assessment = candidates.requirementAssessment
+        let context: [String: Any] = ["version":3, "goal":goal.plannerContext,
             "page":try JSONSerialization.jsonObject(with: Data(candidates.readingInput.contextJSON.utf8)),
             "candidates":groups, "navigation_history":visits,
-            "document_answer_source_status":candidates.documentAnswerSourceStatus.rawValue]
+            "document_answer_source_status":candidates.documentAnswerSourceStatus.rawValue,
+            "requirement_assessment":assessment.map { $0.plannerContext as Any } ?? NSNull()]
         contextJSON = String(decoding: try JSONSerialization.data(withJSONObject: context, options: [.sortedKeys]), as: UTF8.self)
         let evidence = candidates.evidence
         bindingDigest = ComputerUseTaskContract.digest(["browser-link-selection-input-v1", goal.digest,
             evidence.document.contextID, String(evidence.document.generation), evidence.documentID, evidence.page.id, contextJSON]
             + choices.flatMap { [$0.candidateID, String($0.links.count)] + $0.links }
             + (candidates.answerSourcePolicy.map { ["answer-source-policy", $0.digest] } ?? [])
+            + (assessment.map { ["requirement-assessment", $0.interpretationDigest] } ?? [])
             + history.flatMap { [$0.operationID, $0.goalRevision, $0.kind.rawValue] })
     }
 
@@ -308,16 +323,29 @@ extension ComputerUseOwnedBrowser {
     /// It neither follows links nor certifies semantic offer associations.
     func prepareResultCandidates(_ proposal: ComputerUseBrowserResultProposal, goal: ComputerUseBrowserGoalInput,
                                  evidence: ComputerUseBrowserPageEvidence,
-                                 answerPolicy: ComputerUseBrowserAnswerSourcePolicy? = nil) async throws -> ComputerUseBrowserResultCandidates {
+                                 answerPolicy: ComputerUseBrowserAnswerSourcePolicy? = nil,
+                                 interpretation: ComputerUseBrowserGoalProposal? = nil) async throws -> ComputerUseBrowserResultCandidates {
         try Task.checkCancellation()
         guard proposal.goalRevision == goal.digest, goal.taskID.utf8.elementsEqual(evidence.document.taskID.utf8),
-              answerPolicy == nil || answerPolicy?.goalRevision == goal.digest else {
+              answerPolicy == nil || answerPolicy?.goalRevision == goal.digest,
+              interpretation == nil || interpretation?.input == goal else {
             throw ComputerUseBrowserResultError.goalChanged
         }
         guard proposal.input.page == evidence.page else { throw ComputerUseBrowserResultError.invalidPage }
         try await validatePageEvidence(evidence)
         try Task.checkCancellation()
-        return .init(proposal: proposal, goal: goal, evidence: evidence, answerPolicy: answerPolicy)
+        return .init(proposal: proposal, goal: goal, evidence: evidence, answerPolicy: answerPolicy, interpretation: interpretation)
+    }
+
+    /// Assessment is a reading fact. Current native evidence and the exact
+    /// retained interpretation are still required before using it again.
+    func validateResultAssessment(_ assessment: ComputerUseBrowserResultAssessment, reading: ComputerUseBrowserResultCandidates,
+                                  interpretation: ComputerUseBrowserGoalProposal) async throws {
+        try Task.checkCancellation()
+        guard reading.goalInterpretation == interpretation, assessment.interpretationDigest == interpretation.digest,
+              reading.requirementAssessment == assessment else { throw ComputerUseBrowserResultError.goalChanged }
+        try await validateResultCandidates(reading, goal: interpretation.input)
+        try Task.checkCancellation()
     }
 
     /// A necessary source check for future answer assembly, never sufficient
