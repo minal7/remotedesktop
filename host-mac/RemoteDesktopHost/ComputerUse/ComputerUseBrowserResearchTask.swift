@@ -50,6 +50,8 @@ final class ComputerUseBrowserResearchTask {
     private let requiresBrowserAdmission: Bool
     private var browserAdmissionID: UUID?
     private var initialSearch: ComputerUseBrowserInitialSearch?
+    private var sourcePolicy: ComputerUseBrowserSourcePolicy?
+    private var sourcePolicyInstalled = false
     private var interpretation: Interpretation?
     private var latestCandidates: ComputerUseBrowserResultCandidates?
     private var session: ComputerUseBrowserHandbackRequirement?
@@ -83,6 +85,20 @@ final class ComputerUseBrowserResearchTask {
         try requireIdle()
         guard !hasQuestion else { throw Failure.questionPending }
         guard input == expected else { throw Failure.goalChanged }
+    }
+
+    /// Configure one immutable policy per accepted goal revision. Pending
+    /// effects retain their original policy; no browser is allocated here.
+    func configureSourcePolicy(_ policy: ComputerUseBrowserSourcePolicy) throws {
+        try requireIdle()
+        guard !hasPendingNavigation, !hasQuestion, policy.taskID == taskID,
+              policy.rootDigest == input.rootDigest, policy.goalRevision == input.digest else { throw Failure.goalChanged }
+        if let sourcePolicy, sourcePolicy.goalRevision == policy.goalRevision, sourcePolicy != policy { throw Failure.goalChanged }
+        let captured = input, epoch = controlEpoch
+        if let session { try browser.installSourcePolicy(policy, replacing: sourcePolicyInstalled ? sourcePolicy?.digest : nil, session: session) }
+        if !isRetired, input == captured { sourcePolicy = policy; sourcePolicyInstalled = session != nil; latestCandidates = nil }
+        try checkCurrent(captured)
+        guard controlEpoch == epoch else { throw Failure.paused }
     }
 
     init(input: ComputerUseBrowserGoalInput, browser: ComputerUseOwnedBrowser,
@@ -158,7 +174,8 @@ final class ComputerUseBrowserResearchTask {
         guard navigation?.pendingSelection == nil else { throw Failure.navigationPending }
         guard let directory = navigationDirectory else { throw Failure.navigationUnavailable }
         guard let interpretation, interpretation.proposal.input.digest == input.digest else { throw Failure.interpretationRequired }
-        let request = try ComputerUseBrowserInitialSearchRequest(interpretation: interpretation.proposal, query: query, provider: provider)
+        let request = try ComputerUseBrowserInitialSearchRequest(interpretation: interpretation.proposal, query: query,
+            provider: provider, sourcePolicy: sourcePolicy)
         if let initialSearch, initialSearch.request != request { throw ComputerUseBrowserInitialSearchError.pendingStage }
         let captured = input
         latestCandidates = nil
@@ -473,12 +490,14 @@ final class ComputerUseBrowserResearchTask {
         }
     }
 
-    private func observeOwnedPage(goal: ComputerUseBrowserGoalInput) async throws -> ComputerUseBrowserPageEvidence {
+    private func observeOwnedPage(goal: ComputerUseBrowserGoalInput, enforceSources: Bool = false) async throws -> ComputerUseBrowserPageEvidence {
         try checkCurrent(goal); try captureSession()
         let document = try await browser.acquireObservedDocument(taskID: taskID)
         try checkCurrent(goal)
+        if enforceSources { try browser.validateSourceDocument(document) }
         let evidence = try await browser.observePage(document: document)
         try checkCurrent(goal)
+        if enforceSources { try browser.validateSourceDocument(document) }
         return evidence
     }
 
@@ -493,7 +512,10 @@ final class ComputerUseBrowserResearchTask {
 
     private func prepareBrowser(goal: ComputerUseBrowserGoalInput) async throws -> ComputerUseBrowserHandbackRequirement {
         try checkCurrent(goal)
-        if let session { return session }
+        if let session {
+            try installSourcePolicyIfNeeded(session: session)
+            return session
+        }
         let prepared: ComputerUseBrowserHandbackRequirement
         if requiresBrowserAdmission {
             prepared = try await performBrowserAdmission(checkCurrent: { try self.checkCurrent(goal) })
@@ -502,9 +524,16 @@ final class ComputerUseBrowserResearchTask {
             prepared = try browser.prepareWorkflowSession(taskID: taskID)
         }
         if !isRetired, input.digest == goal.digest { session = prepared }
+        try installSourcePolicyIfNeeded(session: prepared)
         try checkCurrent(goal)
         try captureSession()
         return prepared
+    }
+
+    private func installSourcePolicyIfNeeded(session: ComputerUseBrowserHandbackRequirement) throws {
+        guard let sourcePolicy, !sourcePolicyInstalled else { return }
+        try browser.installSourcePolicy(sourcePolicy, replacing: nil, session: session)
+        if !isRetired { sourcePolicyInstalled = true }
     }
 
     private func performBrowserAdmission(checkCurrent: () throws -> Void) async throws -> ComputerUseBrowserHandbackRequirement {
@@ -529,7 +558,10 @@ final class ComputerUseBrowserResearchTask {
     }
 
     private func readCurrentCandidates(goal: ComputerUseBrowserGoalInput) async throws -> ComputerUseBrowserResultCandidates {
-        let evidence = try await observeOwnedPage(goal: goal)
+        // Authentication observation may inspect a manually reached page,
+        // but its contents cannot enter result inference outside task scope.
+        guard sourcePolicy == nil || sourcePolicyInstalled else { throw Failure.navigationUnavailable }
+        let evidence = try await observeOwnedPage(goal: goal, enforceSources: true)
         let page = try ComputerUseBrowserResultPageInput(page: evidence.page)
         let proposal = try await resultPlanner.propose(goal: goal, page: page)
         try checkCurrent(goal)
@@ -552,7 +584,10 @@ final class ComputerUseBrowserResearchTask {
         guard !isPaused else { throw Failure.paused }
         guard mayAct() else { throw ComputerUseBrowserError.ownershipLost }
         guard goal.digest == input.digest, goal.taskID.utf8.elementsEqual(taskID.utf8) else { throw Failure.goalChanged }
-        if let session { try browser.validateWorkflowSession(session) }
+        if let session {
+            try browser.validateWorkflowSession(session)
+            try browser.validateSourcePolicy(sourcePolicyInstalled ? sourcePolicy : nil, session: session)
+        }
     }
 
     private func operate<Value: Sendable>(_ body: @escaping @MainActor @Sendable () async throws -> Value) async throws -> Value {

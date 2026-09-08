@@ -96,11 +96,11 @@ struct ComputerUseLocalBrowserLinkPlanner: ComputerUseBrowserLinkPlanning {
 /// Provider/site policy is supplied by the host; this adapter cannot invent it.
 @MainActor
 struct ComputerUseModelBrowserResearchPlanning: ComputerUseBrowserResearchPlanning {
-    let provider: (ComputerUseBrowserResearchTask.Interpretation) throws -> ComputerUseBrowserSearchProvider?
+    let sourcePlan: (ComputerUseBrowserResearchTask.Interpretation) throws -> ComputerUseBrowserResearchSources?
     let linkPlanner: any ComputerUseBrowserLinkPlanning
-    func searchProvider(for interpretation: ComputerUseBrowserResearchTask.Interpretation) throws -> ComputerUseBrowserSearchProvider? {
+    func sources(for interpretation: ComputerUseBrowserResearchTask.Interpretation) throws -> ComputerUseBrowserResearchSources? {
         try Task.checkCancellation()
-        return try provider(interpretation)
+        return try sourcePlan(interpretation)
     }
     func selectLink(goal: ComputerUseBrowserGoalInput, candidates: ComputerUseBrowserResultCandidates,
                     history: [ComputerUseBrowserResearchVisit]) async throws -> ComputerUseBrowserResearchTask.LinkChoice? {

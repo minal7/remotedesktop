@@ -171,7 +171,7 @@ final class ComputerUseBrowserLinkPlannerTests: XCTestCase {
         _ = try await fixture.start()
         let (old, _) = try await reading(fixture), (_, fresh) = try await reading(fixture), reply = LinkReplyFixture()
         reply.replacement = try .decode(content: content(-1, ""), input: old)
-        let bridge = ComputerUseModelBrowserResearchPlanning(provider: { _ in fixture.policy.provider }, linkPlanner: reply)
+        let bridge = ComputerUseModelBrowserResearchPlanning(sourcePlan: { try fixture.policy.sources(for: $0) }, linkPlanner: reply)
         do { _ = try await bridge.selectLink(goal: fixture.owner().input, candidates: fresh, history: fixture.owner().confirmedNavigationHistory); XCTFail("A no-selection answer is also bound to its original input") }
         catch { XCTAssertEqual(error as? ComputerUseBrowserLinkPlanError, .inputChanged) }
 

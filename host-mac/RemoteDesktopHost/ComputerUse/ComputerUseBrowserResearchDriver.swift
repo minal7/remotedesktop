@@ -5,7 +5,7 @@ import Foundation
 /// Native candidate binding and action journals remain the owner's authority.
 @MainActor
 protocol ComputerUseBrowserResearchPlanning {
-    func searchProvider(for interpretation: ComputerUseBrowserResearchTask.Interpretation) throws -> ComputerUseBrowserSearchProvider?
+    func sources(for interpretation: ComputerUseBrowserResearchTask.Interpretation) throws -> ComputerUseBrowserResearchSources?
     func selectLink(goal: ComputerUseBrowserGoalInput, candidates: ComputerUseBrowserResultCandidates,
                     history: [ComputerUseBrowserResearchVisit]) async throws -> ComputerUseBrowserResearchTask.LinkChoice?
 }
@@ -29,6 +29,7 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
         let owner: ComputerUseBrowserResearchTask
         var input: ComputerUseBrowserGoalInput
         var visits: [ComputerUseBrowserResearchVisit] = []
+        var sources: ComputerUseBrowserResearchSources?
         init(owner: ComputerUseBrowserResearchTask) { self.owner = owner; input = owner.input }
     }
     private let goalPlanner: any ComputerUseBrowserGoalPlanning
@@ -111,6 +112,9 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
         } catch ComputerUseBrowserError.pageChanged, ComputerUseBrowserError.linkNavigationUnavailable {
             try validate(run, tools: tools)
             return .userInterventionRequired("The page changed before the next browser action. Check the page, then choose Resume to continue the original request.")
+        } catch ComputerUseBrowserError.sourceNotAllowed {
+            try validate(run, tools: tools)
+            return .userInterventionRequired(ComputerUseBrowserError.sourceNotAllowed.localizedDescription)
         }
     }
 
@@ -183,19 +187,24 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
             guard interpretation.proposal.disposition == .research else {
                 return .userInterventionRequired("The complete request still has unresolved work. Review the original task before continuing.")
             }
-            if owner.initialSearchState == .notPrepared {
-                let provider = try planning.searchProvider(for: interpretation)
+            if run.sources?.policy.goalRevision != run.input.digest {
+                let sources = try planning.sources(for: interpretation)
                 try check()
-                guard let provider else {
+                guard let sources else {
                     return .userInterventionRequired("I need a search source that matches your request. The original task is still pending.")
                 }
+                try owner.configureSourcePolicy(sources.policy)
+                run.sources = sources
+            }
+            if owner.initialSearchState == .notPrepared {
+                guard let sources = run.sources else { throw Failure.invalidContinuation }
                 let query = try await owner.planInitialSearch(using: searchPlanner)
                 try check()
                 guard query.query != nil else {
                     return .userInterventionRequired("I could not form a search for the complete request. The original task is still pending.")
                 }
                 progress("Searching for the requested information…")
-                let document = try await owner.openInitialSearch(query, provider: provider)
+                let document = try await owner.openInitialSearch(query, provider: sources.provider)
                 guard try record(.search, document) else { return reconciliationRequired }
             } else {
                 progress("Reading the page against the original request…")

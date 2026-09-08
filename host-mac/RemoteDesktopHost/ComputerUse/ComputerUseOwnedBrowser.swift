@@ -114,15 +114,17 @@ struct ComputerUseBrowserNavigationTarget: Equatable, Sendable, CustomStringConv
     fileprivate let evidence: ComputerUseBrowserPageEvidence
     fileprivate let source: Source
     fileprivate let destination: URL
+    fileprivate let sourcePolicyDigest: String?
     let payloadDigest: String
     var taskID: String { evidence.document.taskID }
     var contextID: String { evidence.document.contextID }
 
-    fileprivate init(evidence: ComputerUseBrowserPageEvidence, source: Source, destination: URL) {
+    fileprivate init(evidence: ComputerUseBrowserPageEvidence, source: Source, destination: URL, sourcePolicyDigest: String? = nil) {
         self.evidence = evidence; self.source = source; self.destination = destination
+        self.sourcePolicyDigest = sourcePolicyDigest
         payloadDigest = ComputerUseTaskContract.digest(["browser-observed-destination-v1", evidence.document.contextID,
             evidence.document.taskID, String(evidence.document.generation), evidence.documentID, evidence.page.id,
-            destination.absoluteString] + source.identity)
+            destination.absoluteString] + source.identity + (sourcePolicyDigest.map { ["source-policy", $0] } ?? []))
     }
 
     var description: String { "BrowserObservedDestination(site: \(ComputerUseBrowserSite.displayName(for: destination)))" }
@@ -164,7 +166,7 @@ struct ComputerUseBrowserNavigationReceipt: Equatable, Sendable, CustomStringCon
 }
 
 enum ComputerUseBrowserError: Error, LocalizedError, Equatable {
-    case invalidURL, busy, ownershipLost, pageChanged, navigationFailed, deadlineExceeded, closed, unsupportedDocument, pageEvidenceUnavailable, documentUnresponsive, windowNotActive, authenticationRequired, signInWindowOpen, handbackContextLost, viewportScrollUnavailable, viewportScrollUncertain, linkNavigationUnavailable, observedNavigationUnavailable, observedNavigationUncertain, formQueryUnavailable, formQueryInvalid
+    case invalidURL, busy, ownershipLost, pageChanged, navigationFailed, deadlineExceeded, closed, unsupportedDocument, pageEvidenceUnavailable, documentUnresponsive, windowNotActive, authenticationRequired, signInWindowOpen, handbackContextLost, viewportScrollUnavailable, viewportScrollUncertain, linkNavigationUnavailable, observedNavigationUnavailable, observedNavigationUncertain, formQueryUnavailable, formQueryInvalid, sourceNotAllowed
     var errorDescription: String? {
         switch self {
         case .invalidURL: return "The browser needs an HTTP or HTTPS URL without embedded credentials."
@@ -188,6 +190,7 @@ enum ComputerUseBrowserError: Error, LocalizedError, Equatable {
         case .handbackContextLost: return "The AI browser session for this task was closed or replaced. Start a new browser task to continue."
         case .formQueryUnavailable: return "This form cannot be opened as a verified query in the AI browser."
         case .formQueryInvalid: return "The form contains a value that does not meet its requirements. Check the form before continuing."
+        case .sourceNotAllowed: return "This page is outside the sources allowed for your request. Return to an allowed source, then choose Resume. The original request remains pending."
         }
     }
 }
@@ -213,6 +216,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     private var sessionHasNavigationActivity = false
     private var locationRevision: UInt64 = 0
     private var document: ComputerUseBrowserDocument?
+    private var sourcePolicy: ComputerUseBrowserSourcePolicy?
     private var receipts: [String: ComputerUseBrowserDocument] = [:]
     private var navigationAttemptIDs: Set<String> = []
     private struct ObservedNavigationAttempt {
@@ -331,6 +335,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         if self.taskID != taskID {
             ownershipEpoch = UUID()
             self.taskID = taskID
+            sourcePolicy = nil
             generation &+= 1
             document = nil
             observedUserPage = nil
@@ -506,6 +511,31 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         guard hasOwnership(taskID: requirement.taskID) else { throw ComputerUseBrowserError.ownershipLost }
     }
 
+    func installSourcePolicy(_ policy: ComputerUseBrowserSourcePolicy, replacing expectedDigest: String?,
+                             session: ComputerUseBrowserHandbackRequirement) throws {
+        try validateWorkflowSession(session)
+        guard pending == nil, pendingDOM == nil, observedNavigation == nil else { throw ComputerUseBrowserError.busy }
+        guard policy.taskID == session.taskID, sourcePolicy?.digest == expectedDigest else { throw ComputerUseBrowserError.pageChanged }
+        try Task.checkCancellation()
+        try validateSessionIdentity(session, taskID: session.taskID)
+        sourcePolicy = policy
+    }
+
+    func validateSourcePolicy(_ expected: ComputerUseBrowserSourcePolicy?, session: ComputerUseBrowserHandbackRequirement) throws {
+        try validateSessionIdentity(session, taskID: session.taskID)
+        guard sourcePolicy == expected else { throw ComputerUseBrowserError.pageChanged }
+    }
+
+    private func validateSourceURL(_ url: URL) throws {
+        guard sourcePolicy?.permits(url) != false else { throw ComputerUseBrowserError.sourceNotAllowed }
+    }
+
+    func validateSourceDocument(_ expected: ComputerUseBrowserDocument) throws {
+        try Task.checkCancellation()
+        guard validate(expected) else { throw ComputerUseBrowserError.pageChanged }
+        try validateSourceURL(expected.committedURL)
+    }
+
     private var hasUnnavigatedContents: Bool {
         guard let browser else { return false }
         return !sessionHasNavigationActivity && browser.url == nil && !browser.isLoading
@@ -621,12 +651,14 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     /// script separately re-reads text, rendering and destinations. A fresh
     /// read replaces the prior observation rather than extending its lease.
     func validatePageEvidence(_ evidence: ComputerUseBrowserPageEvidence) async throws {
+        try validateSourceDocument(evidence.document)
         guard hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
         let result = try await callDOM(.validatePageSnapshot,
             arguments: ["documentID": evidence.documentID, "snapshotID": evidence.page.id], document: evidence.document)
         guard hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
         guard result.status == "page-current", result.documentID == evidence.documentID,
               result.fields == nil, result.page == nil else { throw ComputerUseBrowserError.pageChanged }
+        try validateSourceDocument(evidence.document)
     }
 
     func prepareLinkNavigation(linkID: String, evidence: ComputerUseBrowserPageEvidence) async throws -> ComputerUseBrowserNavigationTarget {
@@ -635,7 +667,8 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
               let destination = URL(string: link.destination).flatMap(Self.validatedURL) else {
             throw ComputerUseBrowserError.linkNavigationUnavailable
         }
-        let target = ComputerUseBrowserNavigationTarget(evidence: evidence, source: .link(linkID), destination: destination)
+        let target = ComputerUseBrowserNavigationTarget(evidence: evidence, source: .link(linkID), destination: destination,
+            sourcePolicyDigest: sourcePolicy?.digest)
         try await validateObservedDestination(target)
         return target
     }
@@ -661,7 +694,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             throw ComputerUseBrowserError.formQueryUnavailable
         }
         return .init(evidence: evidence, source: .formQuery(controlID: controlID, queryID: query.id,
-            requirementsDigest: requirements?.digest), destination: destination)
+            requirementsDigest: requirements?.digest), destination: destination, sourcePolicyDigest: sourcePolicy?.digest)
     }
 
     private static func sameOrigin(_ lhs: URL, _ rhs: URL) -> Bool {
@@ -671,6 +704,8 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
 
     /// Read-only validation, also used before durably rebinding an unsent plan.
     func validateObservedDestination(_ target: ComputerUseBrowserNavigationTarget) async throws {
+        guard target.sourcePolicyDigest == sourcePolicy?.digest else { throw ComputerUseBrowserError.pageChanged }
+        try validateSourceURL(target.destination)
         guard hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
         let evidence = target.evidence
         var arguments: [String: Any] = ["documentID": evidence.documentID, "snapshotID": evidence.page.id]
@@ -683,6 +718,8 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             command = .validateFormQuery; expectedStatus = "form-query-current"
         }
         let result = try await callDOM(command, arguments: arguments, document: evidence.document)
+        guard target.sourcePolicyDigest == sourcePolicy?.digest else { throw ComputerUseBrowserError.pageChanged }
+        try validateSourceURL(target.destination)
         guard hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
         if result.status == "form-invalid" { throw ComputerUseBrowserError.formQueryInvalid }
         guard result.status == expectedStatus, result.documentID == evidence.documentID,
@@ -918,6 +955,12 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             throw ComputerUseBrowserError.pageChanged
         }
         guard let url = Self.validatedURL(url) else { throw ComputerUseBrowserError.invalidURL }
+        let capturedPolicy = sourcePolicy
+        func checkSource() throws {
+            guard sourcePolicy == capturedPolicy else { throw ComputerUseBrowserError.pageChanged }
+            try validateSourceURL(url)
+        }
+        try checkSource()
         if let expectedDocument, !validate(expectedDocument) { throw ComputerUseBrowserError.pageChanged }
         func checkInitialSession() throws {
             if let expectedSession {
@@ -940,6 +983,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             guard hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
         }
         try checkInitialSession()
+        try checkSource()
         try willBeginEffect()
         try Task.checkCancellation()
         guard hasOwnership(taskID: taskID) else { throw ComputerUseBrowserError.ownershipLost }
@@ -950,6 +994,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             guard hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
         }
         try checkInitialSession()
+        try checkSource()
         guard !navigationAttemptIDs.contains(operationID), navigationAttemptIDs.count < 64 else { throw ComputerUseBrowserError.pageChanged }
         navigationAttemptIDs.insert(operationID)
         sessionHasNavigationActivity = true
@@ -1007,6 +1052,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         if let pending { failPending(id: pending.id, error: .ownershipLost) }
         if let pendingDOM { interruptDOM(id: pendingDOM.id, error: ComputerUseBrowserError.ownershipLost) }
         taskID = nil
+        sourcePolicy = nil
         ownershipEpoch = UUID()
         generation &+= 1
         document = nil
@@ -1296,6 +1342,12 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             failPending(id: pending.id, error: .ownershipLost)
             return
         }
+        if (pending != nil || mayAct()), sourcePolicy?.permits(url) == false {
+            decisionHandler(.cancel)
+            detail = "Blocked a page outside this task's allowed sources."
+            if let pending { failPending(id: pending.id, error: .sourceNotAllowed) }
+            return
+        }
         decisionHandler(.allow)
     }
 
@@ -1324,9 +1376,40 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             if let pending { failPending(id: pending.id, error: .navigationFailed) }
             return
         }
+        if (pending != nil || mayAct()), sourcePolicy?.permits(url) == false {
+            decisionHandler(.cancel)
+            detail = "Blocked a page outside this task's allowed sources."
+            observedNavigation = nil; observedUserPage = nil; observedActivePage = nil
+            if let pending { failPending(id: pending.id, error: .sourceNotAllowed) }
+            return
+        }
         pending?.receivedSuccessfulResponse = true
         observedNavigation?.successfulResponseURL = response.url
         decisionHandler(.allow)
+    }
+
+    /// Instant Back can restore a suspended page without the normal load
+    /// callbacks. Apply the same task policy before allowing that restoration.
+    @available(macOS 26.0, *)
+    func webView(_ webView: WKWebView, shouldGoTo backForwardListItem: WKBackForwardListItem,
+                 willUseInstantBack: Bool, completionHandler: @escaping (Bool) -> Void) {
+        let url = backForwardListItem.url
+        if webView === signInBrowser {
+            completionHandler(canNavigateSignInWindow && Self.isSignInLocation(url))
+            return
+        }
+        guard webView === browser, Self.validatedURL(url) != nil else { completionHandler(false); return }
+        if let pending, !hasOwnership(taskID: pending.taskID) {
+            completionHandler(false); failPending(id: pending.id, error: .ownershipLost)
+            return
+        }
+        if (pending != nil || mayAct()), sourcePolicy?.permits(url) == false {
+            completionHandler(false)
+            detail = "Blocked a page outside this task's allowed sources."
+            if let pending { failPending(id: pending.id, error: .sourceNotAllowed) }
+            return
+        }
+        completionHandler(true)
     }
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
@@ -1372,6 +1455,10 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         guard hasOwnership(taskID: pending.taskID), pending.generation == generation,
               pending.receivedSuccessfulResponse, let url = webView.url, Self.validatedURL(url) != nil else {
             failPending(id: pending.id, error: .ownershipLost)
+            return
+        }
+        guard sourcePolicy?.permits(url) != false else {
+            failPending(id: pending.id, error: .sourceNotAllowed)
             return
         }
         let receipt = ComputerUseBrowserDocument(contextID: contextID, taskID: pending.taskID,

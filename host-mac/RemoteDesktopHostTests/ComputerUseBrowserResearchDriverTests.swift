@@ -340,8 +340,8 @@ struct ResearchDriverFixture {
     static func make(seedPage: Bool = false, navigationLimit: Int = 8,
                      linkPlanner: (any ComputerUseBrowserLinkPlanning)? = nil,
                      resultPlanner: (any ComputerUseBrowserResultPlanning)? = nil,
-                     additionalCardHTML: String = "") async throws -> Self {
-        func card(_ path: String) -> String { "<article><h2>Concert Alpha</h2><a href='\(path)'>Alpha details</a></article>" + additionalCardHTML }
+                     additionalCardHTML: String = "", linkDestinationOverride: String? = nil) async throws -> Self {
+        func card(_ path: String) -> String { "<article><h2>Concert Alpha</h2><a href='\(linkDestinationOverride ?? path)'>Alpha details</a></article>" + additionalCardHTML }
         let server = try OwnedBrowserHTTPFixture(routes: ["/before": .init(body: card("/old")),
             "/search?q=concerts": .init(body: card("/details")), "/details": .init(body: card("/offers")),
             "/offers": .init(body: card("/more")), "/account": .init(body: "<label>Password<input type=password></label>"),
@@ -369,7 +369,7 @@ struct ResearchDriverFixture {
             results.selectedLinkLabel = "Alpha details"
             let policy = DriverPlanningFixture(provider: try .init(endpoint: base.appendingPathComponent("search"), queryParameter: "q"))
             let planning: any ComputerUseBrowserResearchPlanning
-            if let linkPlanner { planning = ComputerUseModelBrowserResearchPlanning(provider: { _ in policy.provider }, linkPlanner: linkPlanner) }
+            if let linkPlanner { planning = ComputerUseModelBrowserResearchPlanning(sourcePlan: { try policy.sources(for: $0) }, linkPlanner: linkPlanner) }
             else { planning = policy }
             let driver = ComputerUseBrowserResearchDriver(goalPlanner: goal, resultPlanner: resultPlanner ?? results, searchPlanner: search,
                 planning: planning, navigationLimit: navigationLimit, now: { date }, timeZoneIdentifier: { "America/Los_Angeles" })
@@ -455,13 +455,16 @@ final class DriverPlanningFixture: ComputerUseBrowserResearchPlanning {
     var providerCalls = 0
     var choices: [Bool] = []
     var invalidChoice = false
+    var allowedOrigins: [ComputerUseBrowserSourceOrigin]?
+    var excludedOrigins: [ComputerUseBrowserSourceOrigin] = []
     var goals: [ComputerUseBrowserGoalInput] = []
     var histories: [[ComputerUseBrowserResearchVisit]] = []
     var beforeSelection: (@MainActor () async -> Void)?
     init(provider: ComputerUseBrowserSearchProvider) { self.provider = provider }
-    func searchProvider(for interpretation: ComputerUseBrowserResearchTask.Interpretation) throws -> ComputerUseBrowserSearchProvider? {
+    func sources(for interpretation: ComputerUseBrowserResearchTask.Interpretation) throws -> ComputerUseBrowserResearchSources? {
         providerCalls += 1
-        return providerEnabled ? provider : nil
+        guard providerEnabled else { return nil }
+        return try .init(goal: interpretation.proposal.input, provider: provider, allowedOrigins: allowedOrigins, excludedOrigins: excludedOrigins)
     }
     func selectLink(goal: ComputerUseBrowserGoalInput, candidates: ComputerUseBrowserResultCandidates,
                     history: [ComputerUseBrowserResearchVisit]) async throws -> ComputerUseBrowserResearchTask.LinkChoice? {

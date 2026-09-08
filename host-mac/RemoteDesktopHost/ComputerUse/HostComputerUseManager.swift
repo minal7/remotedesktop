@@ -6253,7 +6253,7 @@ final class HostComputerUseManager: ObservableObject {
                         } catch {
                             let guidance: String
                             switch error as? ComputerUseBrowserError {
-                            case .signInWindowOpen?, .handbackContextLost?, .windowNotActive?:
+                            case .signInWindowOpen?, .handbackContextLost?, .windowNotActive?, .sourceNotAllowed?:
                                 guidance = error.localizedDescription
                             default:
                                 guidance = "The AI browser is not ready to continue. Finish signing in or loading the page, then choose Resume."

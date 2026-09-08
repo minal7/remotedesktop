@@ -12,6 +12,10 @@ struct ComputerUseBrowserSearchProvider: Equatable, Sendable, CustomStringConver
     var description: String { "BrowserSearchProvider" }
     var debugDescription: String { description }
 
+    func validateSourcePolicy(_ policy: ComputerUseBrowserSourcePolicy) throws {
+        guard policy.permits(endpoint) else { throw ComputerUseBrowserError.sourceNotAllowed }
+    }
+
     init(endpoint: URL, queryParameter: String) throws {
         guard endpoint.absoluteString.utf8.count <= 1_024,
               let parts = URLComponents(url: endpoint, resolvingAgainstBaseURL: false),
@@ -57,15 +61,19 @@ struct ComputerUseBrowserInitialSearchRequest: Equatable, Sendable, CustomString
     var debugDescription: String { description }
 
     init(interpretation: ComputerUseBrowserGoalProposal, query: ComputerUseBrowserSearchQuery,
-         provider: ComputerUseBrowserSearchProvider) throws {
+         provider: ComputerUseBrowserSearchProvider, sourcePolicy: ComputerUseBrowserSourcePolicy? = nil) throws {
         guard interpretation.disposition == .research, query.goalDigest == interpretation.input.digest,
               query.interpretationDigest == interpretation.digest, let text = query.query else {
             throw ComputerUseBrowserInitialSearchError.invalidRequest
         }
         goal = interpretation.input; queryDigest = query.digest; providerDigest = provider.digest
+        if let sourcePolicy {
+            guard sourcePolicy.goalRevision == goal.digest else { throw ComputerUseBrowserInitialSearchError.invalidRequest }
+            try provider.validateSourcePolicy(sourcePolicy)
+        }
         destination = try provider.destination(query: text)
         digest = ComputerUseTaskContract.digest(["browser-initial-search-request-v1", goal.digest,
-            query.digest, provider.digest, destination.absoluteString])
+            query.digest, provider.digest, destination.absoluteString] + (sourcePolicy.map { ["source-policy", $0.digest] } ?? []))
     }
 }
 
