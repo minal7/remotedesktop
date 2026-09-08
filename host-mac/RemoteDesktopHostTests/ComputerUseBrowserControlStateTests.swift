@@ -117,16 +117,16 @@ final class ComputerUseBrowserControlStateTests: XCTestCase {
         let request = try planner.makeRequest(goal: goal, page: input), body = try ResearchAnswerFixture.object(XCTUnwrap(request.httpBody))
         let format = try XCTUnwrap(body["response_format"] as? [String: Any])
         XCTAssertEqual((format["json_schema"] as? [String: Any])?["name"] as? String, "browser_result_candidates_v2")
-        XCTAssertEqual(try object(reviewInput.contextJSON)["version"] as? Int, 4)
+        XCTAssertEqual(try object(reviewInput.contextJSON)["version"] as? Int, 5)
     }
 
     func testDriverUsesTheSelectedDateAndReportsControlObservationsSeparatelyFromQuotes() async throws {
         for selected in ["2026-09-20", "2026-09-21"] {
             let fixture = try await ResearchAnswerFixture.make(extra: ("On 2026-09-20. ", "condition", "date"),
-                controlHTML: "<label>Date<input type=date value='\(selected)' min=2026-09-01 max=2026-09-30></label><label>Type<select><option value=private-code>General admission</option></select></label>")
+                controlHTML: "<label>Date<input type=date value='\(selected)' min=2026-09-01 max=2026-09-30></label><label>Type<select><option value=private-code>General admission</option></select></label>", resultDate: "2026-09-20")
             defer { fixture.source.close() }
             let result = try await fixture.source.start(), owner = try fixture.source.owner(), reading = try await owner.revalidateCandidates()
-            let field = try XCTUnwrap(reading.candidates.first?.fields.first { $0.kind == .date })
+            let field = try XCTUnwrap(reading.candidates.first?.fields.first { $0.kind == .date && !$0.controlIDs.isEmpty })
             XCTAssertTrue(field.textIDs.isEmpty); XCTAssertEqual(field.controlIDs.count, 1)
             let status = try XCTUnwrap(reading.requirementAssessment?.candidates.first?.requirements[2].status)
             if selected == "2026-09-20" {
@@ -138,7 +138,7 @@ final class ComputerUseBrowserControlStateTests: XCTestCase {
                 XCTAssertFalse(answer.message.contains("│ Native control observations"))
             } else {
                 guard case .userInterventionRequired? = result else { return XCTFail("A conflicting selected date cannot complete the request") }
-                XCTAssertEqual(status, .quotedValueConflicts)
+                XCTAssertEqual(status, .selectedValueConflicts)
             }
             XCTAssertEqual(owner.input.prompt, fixture.source.request); XCTAssertEqual(fixture.source.server.count("/offers"), 0)
         }
@@ -153,6 +153,134 @@ final class ComputerUseBrowserControlStateTests: XCTestCase {
         XCTAssertEqual(reading.review?.candidates[0].fields.last?.quantity, .selectedQuantity)
         XCTAssertNil(try reading.answerEligibility(goal: owner.input, evidence: owner.researchEvidence(for: owner.input))?.selectionCounts.first)
         XCTAssertEqual(owner.input.prompt, fixture.source.request)
+    }
+
+    func testMatchingSelectionWithoutAResultDateKeepsTheOriginalTaskOpen() async throws {
+        let fixture = try await ResearchAnswerFixture.make(extra: ("On 2026-09-20. ", "condition", "date"),
+            controlHTML: "<label>Date<input type=date value=2026-09-20></label>")
+        defer { fixture.source.close() }
+        let result = try await fixture.source.start()
+        guard case .userInterventionRequired? = result else { return XCTFail("A chosen setting does not establish the displayed result date") }
+        let owner = try fixture.source.owner(), reading = try await owner.revalidateCandidates()
+        let assessment = try XCTUnwrap(reading.requirementAssessment)
+        XCTAssertEqual(assessment.candidates[0].requirements[2].status, .needsResultObservation)
+        XCTAssertEqual(assessment.candidates[0].quotes.last?.sourceKind, .controlState)
+        XCTAssertTrue(try XCTUnwrap(assessment.candidates[0].quotes.last).textIDs.isEmpty)
+        XCTAssertEqual(try object(ResearchAnswerFixture.json(assessment.plannerContext))["version"] as? Int, 4)
+        XCTAssertTrue(fixture.inputs.allSatisfy { $0.answerCounts.isEmpty })
+        XCTAssertEqual(owner.input.prompt, fixture.source.request)
+    }
+
+    func testMatchingSelectionCannotReplaceAnEarlierDisplayedResultDate() async throws {
+        let fixture = try await ResearchAnswerFixture.make(extra: ("On 2026-09-20. ", "condition", "date"),
+            controlHTML: "<label>Date<input type=date value=2026-09-20></label>", resultDate: "2026-09-19")
+        defer { fixture.source.close() }
+        let result = try await fixture.source.start()
+        guard case .userInterventionRequired? = result else { return XCTFail("Unrefreshed result text cannot inherit the chosen date") }
+        let owner = try fixture.source.owner(), reading = try await owner.revalidateCandidates()
+        let candidate = try XCTUnwrap(reading.requirementAssessment?.candidates.first)
+        XCTAssertEqual(candidate.requirements[2].status, .quotedValueConflicts)
+        let dates = candidate.quotes.filter { $0.kind == .date }
+        XCTAssertEqual(dates.map(\.sourceKind), [.pageText, .controlState])
+        XCTAssertEqual(dates.map(\.source), ["Date: 2026-09-19", "2026-09-20"])
+        XCTAssertTrue(fixture.inputs.allSatisfy { $0.answerCounts.isEmpty })
+        XCTAssertEqual(owner.input.prompt, fixture.source.request)
+    }
+
+    func testEveryProposedDateSelectionMustAgreeWithTheDisplayedResult() async throws {
+        for second in ["2026-09-20", "2026-09-21"] {
+            let fixture = try await ResearchAnswerFixture.make(extra: ("On 2026-09-20. ", "condition", "date"),
+                controlHTML: "<label>First date<input type=date value=2026-09-20></label><label>Second date<input type=date value='\(second)'></label>", resultDate: "2026-09-20")
+            defer { fixture.source.close() }
+            let result = try await fixture.source.start(), owner = try fixture.source.owner(), reading = try await owner.revalidateCandidates()
+            let assessment = try XCTUnwrap(reading.requirementAssessment?.candidates.first)
+            XCTAssertEqual(assessment.quotes.filter { $0.sourceKind == .controlState }.count, 2)
+            if second == "2026-09-20" {
+                guard case .browserResearchAnswer(let answer)? = result else { return XCTFail("Consistent settings and result text remain usable") }
+                try owner.validateAnswer(answer)
+                XCTAssertEqual(assessment.requirements[2].status, .quotedValueMatches)
+                XCTAssertTrue(answer.message.contains("First date")); XCTAssertTrue(answer.message.contains("Second date"))
+            } else {
+                guard case .userInterventionRequired? = result else { return XCTFail("A matching selection cannot hide a conflicting one") }
+                XCTAssertEqual(assessment.requirements[2].status, .selectedValueConflicts)
+            }
+            XCTAssertEqual(owner.input.prompt, fixture.source.request)
+        }
+    }
+
+    func testControlAndMixedSourcesCannotSupportResultFactsThroughWholeOrSegmentedReview() async throws {
+        for (kind, clause, displayed) in [("date", "On 2026-09-20.", "2026-09-20"),
+            ("time", "At 19:00.", "19:00"), ("location", "In Paris.", "Paris"),
+            ("availability", "With available seats.", "Seats available"), ("price", "Under USD 50.", "USD 40")] {
+            let fixture = try await ControlStateFixture(body: "<article><h2>Concert Alpha</h2><p>\(displayed)</p><label>Chosen setting<select><option>\(displayed)</option></select></label></article>")
+            defer { fixture.close() }
+            let evidence = try await fixture.browser.observePage(document: fixture.document, includingControlState: true)
+            let page = try ComputerUseBrowserResultPageInput(page: evidence.page)
+            let goal = try ComputerUseBrowserGoalInput(taskID: fixture.document.taskID, prompt: "Find concerts. " + clause,
+                referenceDate: ResearchDriverFixture.date, timeZoneIdentifier: "America/Los_Angeles")
+            let rows: [[String: Any]] = [
+                ["turn":0, "source":"Find concerts. ", "role":"outcome", "field":"category", "relation":"unspecified", "values":[]],
+                ["turn":0, "source":clause, "role":"condition", "field":kind, "relation":"unspecified", "values":[]]]
+            let interpretation = try ComputerUseBrowserGoalProposal.decode(content: ResearchAnswerFixture.json([
+                "disposition":"research", "requirements":rows, "question":["topic":"none", "requirements":[]]]), input: goal)
+            let article = try XCTUnwrap(evidence.page.containers.first { $0.kind == "article" })
+            let title = try XCTUnwrap(evidence.page.texts.first { $0.text == "Concert Alpha" })
+            let result = try XCTUnwrap(evidence.page.texts.first { $0.text == displayed })
+            let control = try XCTUnwrap(evidence.page.controls.first { $0.kind == "select" })
+            for sourceKind in ["controlState", "mixed", "pageText"] {
+                let texts = sourceKind == "controlState" ? [] : [result.id]
+                let controls = sourceKind == "pageText" ? [] : [control.id]
+                let proposal = try ComputerUseBrowserResultProposal.decode(content: ResearchAnswerFixture.json([
+                    "candidates":[["container":article.id, "fields":[["kind":"title", "texts":[title.id], "controls":[]],
+                        ["kind":kind, "texts":texts, "controls":controls]], "links":[]]]]), input: page, goal: goal)
+                let input = try ComputerUseBrowserResultReviewInput(goal: goal, page: page, proposal: proposal, interpretation: interpretation)
+                let fieldRows: [[String: Any]] = [["scope":"offer", "price":"notPrice", "qualifiers":[]],
+                    ["scope":"offer", "price":kind == "price" ? "exact" : "notPrice", "qualifiers":[]]]
+                let requirements: [[String: Any]] = [
+                    ["requirement":0, "judgment":"supports", "texts":[title.id]],
+                    ["requirement":1, "judgment":"supports", "texts":texts + controls]]
+                let content = try ResearchAnswerFixture.json(["candidates":[["association":"singleOffer", "fields":fieldRows, "requirements":requirements]]])
+                XCTAssertEqual(input.fieldAllowsResultSupport(candidate: 0, field: 1), sourceKind == "pageText")
+                let context = try object(input.contextJSON)
+                let contextCandidates = try XCTUnwrap(context["candidates"] as? [[String: Any]])
+                let contextFields = try XCTUnwrap(contextCandidates[0]["fields"] as? [[String: Any]])
+                XCTAssertEqual(contextFields[1]["source_kind"] as? String, sourceKind)
+                XCTAssertEqual(contextFields[1]["result_support_allowed"] as? Bool, sourceKind == "pageText")
+                if sourceKind == "pageText" { _ = try ComputerUseBrowserResultReview.decode(content: content, input: input) }
+                else { XCTAssertThrowsError(try ComputerUseBrowserResultReview.decode(content: content, input: input), kind + ": " + sourceKind) }
+                var unresolved = requirements, contextualFields = fieldRows
+                unresolved[1]["judgment"] = "unknown"
+                if kind == "price" && sourceKind != "pageText" { contextualFields[1]["price"] = "unknown" }
+                let unresolvedReview = try ComputerUseBrowserResultReview.decode(content: ResearchAnswerFixture.json([
+                    "candidates":[["association":"singleOffer", "fields":contextualFields, "requirements":unresolved]]]), input: input)
+                if ["date", "price"].contains(kind) && sourceKind != "pageText" {
+                    let reviewed = try proposal.reviewed(unresolvedReview, goal: goal, interpretation: interpretation)
+                    let reading = try await fixture.browser.prepareResultCandidates(reviewed, goal: goal, evidence: evidence, interpretation: interpretation)
+                    XCTAssertEqual(reading.requirementAssessment?.candidates[0].requirements[1].status,
+                        sourceKind == "mixed" ? .unparsedSelection : .needsResultObservation)
+                }
+
+                let parts = try ComputerUseBrowserReviewPart.plan(input)
+                var assembly = try ComputerUseBrowserReviewAssembly(input: input, parts: parts)
+                for part in parts {
+                    let fields = part.fields.map { index -> [String: Any] in var field = fieldRows[index]; field["field"] = index; return field }
+                    let reply = try ResearchAnswerFixture.json(["candidate":0, "association":"singleOffer", "fields":fields,
+                        "requirements":part.requirements.map { requirements[$0] }])
+                    try assembly.append(.decode(reply, part: part))
+                }
+                if sourceKind == "pageText" { _ = try ComputerUseBrowserResultReview.assemble(assembly) }
+                else { XCTAssertThrowsError(try ComputerUseBrowserResultReview.assemble(assembly)) }
+
+                let planner = try ComputerUseLocalBrowserResultReviewPlanner(connection: .init(baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:54321")), bearerToken: "fixture", modelAlias: "fixture-model"), transport: ControlStateUnusedTransport())
+                for part in [nil, parts.first] {
+                    let request = try planner.makeRequest(input, part: part)
+                    let body = try ResearchAnswerFixture.object(XCTUnwrap(request.httpBody))
+                    let format = try XCTUnwrap(body["response_format"] as? [String: Any])
+                    XCTAssertEqual((format["json_schema"] as? [String: Any])?["name"] as? String,
+                        part == nil ? "browser_result_review_v5" : "browser_result_review_part_v4")
+                }
+            }
+        }
     }
 
     func testAuthenticationAndUnscopedValuesRemainOutsideResearchState() async throws {

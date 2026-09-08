@@ -61,9 +61,14 @@ struct ComputerUseBrowserResultProposal: Equatable, Sendable, CustomStringConver
         case title, category, origin, destination, location, date, time, price, fees, availability, quantity, other
     }
     struct Field: Equatable, Sendable {
+        // Derived after native reference admission; never a model-supplied
+        // assertion that a setting has produced the displayed result.
+        enum SourceKind: String, Sendable { case pageText, controlState, mixed }
         let kind: Kind
         let textIDs: [String]
         let controlIDs: [String]
+        var sourceKind: SourceKind { controlIDs.isEmpty ? .pageText : (textIDs.isEmpty ? .controlState : .mixed) }
+        var allowsResultSupport: Bool { !textIDs.isEmpty && controlIDs.isEmpty }
         init(kind: Kind, textIDs: [String], controlIDs: [String] = []) { self.kind = kind; self.textIDs = textIDs; self.controlIDs = controlIDs }
     }
     struct Selection: Equatable, Sendable {
@@ -307,7 +312,8 @@ struct ComputerUseBrowserResultCandidates: Sendable, CustomStringConvertible, Cu
     fileprivate var candidatePlannerContext: [[String: Any]] {
         candidates.enumerated().map { index, candidate in
             ["index":index, "container":candidate.containerID,
-             "fields":candidate.fields.map { ["kind":$0.kind.rawValue, "texts":$0.textIDs, "controls":$0.controlIDs] as [String: Any] },
+             "fields":candidate.fields.map { ["kind":$0.kind.rawValue, "texts":$0.textIDs, "controls":$0.controlIDs,
+                 "source_kind":$0.sourceKind.rawValue, "result_support_allowed":$0.allowsResultSupport] as [String: Any] },
              "links":candidate.selectedLinkIDs,
              "unclassified_texts":candidate.unclassifiedTextIDs.filter { readingInput.textIDs.contains($0) },
              "unprojected_text_count":candidate.unprojectedTextIDs.count,

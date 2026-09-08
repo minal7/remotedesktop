@@ -25,6 +25,7 @@ struct ComputerUseBrowserResultReviewInput: Equatable, Sendable, CustomStringCon
     }
     func fieldTextIDs(candidate: Int, field: Int) -> [String] { selections[candidate].fields[field].textIDs + selections[candidate].fields[field].controlIDs }
     func fieldUsesControlState(candidate: Int, field: Int) -> Bool { !selections[candidate].fields[field].controlIDs.isEmpty }
+    func fieldAllowsResultSupport(candidate: Int, field: Int) -> Bool { selections[candidate].fields[field].allowsResultSupport }
     func fieldAddressesRequirement(candidate: Int, field: Int, requirement: Int) -> Bool {
         guard let interpretation, interpretation.requirements.indices.contains(requirement),
               let kind = fieldKind(candidate: candidate, field: field) else { return false }
@@ -75,11 +76,12 @@ struct ComputerUseBrowserResultReviewInput: Equatable, Sendable, CustomStringCon
         let candidates: [[String: Any]] = selections.enumerated().map { index, selection in
             ["index":index, "container":selection.containerID,
              "fields":selection.fields.enumerated().map {
-                 ["index":$0.offset, "kind":$0.element.kind.rawValue, "texts":$0.element.textIDs, "controls":$0.element.controlIDs] as [String: Any]
+                 ["index":$0.offset, "kind":$0.element.kind.rawValue, "texts":$0.element.textIDs, "controls":$0.element.controlIDs,
+                  "source_kind":$0.element.sourceKind.rawValue, "result_support_allowed":$0.element.allowsResultSupport] as [String: Any]
              }, "links":selection.linkIDs]
         }
         let quantityReview = selections.contains { $0.fields.contains { $0.kind == .quantity } }
-        var context: [String: Any] = ["version":hasControlSources ? 4 : (quantityReview ? 3 : (interpretation == nil ? 1 : 2)), "goal":goal.plannerContext, "page":projection,
+        var context: [String: Any] = ["version":hasControlSources ? 5 : (quantityReview ? 3 : (interpretation == nil ? 1 : 2)), "goal":goal.plannerContext, "page":projection,
             "candidates":candidates, "offer_assertions_allowed":permitsOfferAssertions]
         if quantityReview { context["quantity_meaning_required"] = true }
         if let interpretation {
@@ -159,7 +161,8 @@ struct ComputerUseBrowserResultReview: Equatable, Sendable, CustomStringConverti
                           let kind = input.fieldKind(candidate: index, field: fieldIndex) else { throw ComputerUseBrowserResultReviewError.invalidProposal }
                     guard scope != .offer || (association == .singleOffer && input.permitsOfferAssertions),
                           (kind == .price ? price != .notPrice : price == .notPrice),
-                          price != .exact || (scope == .offer && association == .singleOffer) else { throw ComputerUseBrowserResultReviewError.invalidProposal }
+                          price != .exact || (scope == .offer && association == .singleOffer
+                              && input.fieldAllowsResultSupport(candidate: index, field: fieldIndex)) else { throw ComputerUseBrowserResultReviewError.invalidProposal }
                     if association == .singleOffer, kind == .title, scope != .offer { throw ComputerUseBrowserResultReviewError.invalidProposal }
                     var qualifiers: [String] = []
                     for reference in references {
@@ -220,13 +223,15 @@ struct ComputerUseBrowserResultReview: Equatable, Sendable, CustomStringConverti
                             let selected = Set(ids)
                             // A favorable judgment must cite at least one
                             // whole offer-scoped field. A shared ancestor or
-                            // a page-global price alone is not such evidence.
+                            // a chosen setting is not such a result fact.
+                            // Mixing in text cannot erase control provenance.
                             var hasOfferField = false
                             for (fieldIndex, field) in fields.enumerated() {
                                 let fieldIDs = Set(input.fieldTextIDs(candidate: index, field: fieldIndex))
                                 guard !selected.isDisjoint(with: fieldIDs) else { continue }
                                 guard selected.isSuperset(of: fieldIDs) else { throw ComputerUseBrowserResultReviewError.invalidProposal }
-                                if field.scope == .offer, input.fieldAddressesRequirement(candidate: index, field: fieldIndex, requirement: requirementIndex) {
+                                if field.scope == .offer, input.fieldAllowsResultSupport(candidate: index, field: fieldIndex),
+                                   input.fieldAddressesRequirement(candidate: index, field: fieldIndex, requirement: requirementIndex) {
                                     hasOfferField = true
                                 }
                             }
@@ -251,7 +256,7 @@ struct ComputerUseBrowserResultReview: Equatable, Sendable, CustomStringConverti
     /// Native candidate identity includes the entire review. The private
     /// input is separately compared exactly before attaching the review.
     var digest: String {
-        ComputerUseTaskContract.digest([input.hasControlSources ? "browser-result-review-v4" : (input.hasQuantityFields ? "browser-result-review-v3" : (hasRequirementMapping ? "browser-result-review-v2" : "browser-result-review-v1")), input.contextJSON, String(candidates.count)]
+        ComputerUseTaskContract.digest([input.hasControlSources ? "browser-result-review-v5" : (input.hasQuantityFields ? "browser-result-review-v3" : (hasRequirementMapping ? "browser-result-review-v2" : "browser-result-review-v1")), input.contextJSON, String(candidates.count)]
             + candidates.flatMap { candidate in
                 [candidate.association.rawValue, String(candidate.fields.count)] + candidate.fields.flatMap {
                     [$0.scope.rawValue, $0.price.rawValue, String($0.qualifierTextIDs.count)] + $0.qualifierTextIDs
