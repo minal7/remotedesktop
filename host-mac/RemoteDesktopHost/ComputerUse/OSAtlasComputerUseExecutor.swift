@@ -1652,7 +1652,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
                             trustedUserPrompt.utf8) {
                         executionCheckpoint?.terminalResult = result
                     }
-                case .browserClarificationRequired, .browserResearchProgress, .userInterventionRequired, .approvalRequired,
+                case .browserClarificationRequired, .browserResearchProgress, .browserResearchAnswer, .userInterventionRequired, .approvalRequired,
                         .mcpApprovalRequired:
                     break
                 }

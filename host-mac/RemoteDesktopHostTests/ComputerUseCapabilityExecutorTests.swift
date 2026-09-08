@@ -205,7 +205,8 @@ final class ComputerUseCapabilityExecutorTests: XCTestCase {
 
     func testResearchRouteRejectsMissingOwnersAndUnrelatedQuestionOrApprovalResults() async throws {
         let request = ComputerUseBrowserQuestionRequest(taskID: "foreign", inputDigest: "foreign", topic: .location, requirementIDs: [])
-        let unsupported: [ComputerUseExecutionResult] = [.browserClarificationRequired(request), .clarificationRequired("An unscoped question"),
+        let unsupported: [ComputerUseExecutionResult] = [.completed("Unsupported success without source evidence"),
+            .browserClarificationRequired(request), .clarificationRequired("An unscoped question"),
             .approvalRequired(message: "wrong route", action: .typeText("unrelated"), continuation: .init(taskID: "research", nonce: UUID()))]
         for result in unsupported {
             let fixture = researchTools(), driver = RoutingResearchFixture()
@@ -214,7 +215,7 @@ final class ComputerUseCapabilityExecutorTests: XCTestCase {
             let executor = ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in nil }, browserResearch: driver)
             do {
                 _ = try await executor.execute(taskID: "research", modelPrompt: "context", currentUserPrompt: "Find tickets.",
-                    conversation: [], tools: fixture.tools, progress: { _ in }); XCTFail("Only the current owner's typed question may leave research")
+                    conversation: [], tools: fixture.tools, progress: { _ in }); XCTFail("Research results require the current owner's typed evidence")
             } catch { XCTAssertEqual(error as? ComputerUseCapabilityExecutor.RoutingError, .missingContinuation) }
         }
         let driver = RoutingResearchFixture()

@@ -262,7 +262,9 @@
     "RemoteDesktopHostTests/ComputerUseBrowserReviewPartsTests",
     "RemoteDesktopHostTests/ComputerUseBrowserActionRecallTests",
     "RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testRuntimeBrowserActionRecallUsesSharedWorkerWithoutFormChoices",
-    "RemoteDesktopHostTests/ComputerUseBrowserQuantityReviewTests"
+    "RemoteDesktopHostTests/ComputerUseBrowserQuantityReviewTests",
+    "RemoteDesktopHostTests/ComputerUseBrowserResearchAnswerTests",
+    "RemoteDesktopHostTests/ComputerUseTests/test_managerResearchAnswerDeliversAndReplaysWholeSourceTextWithoutRepeatingWork"
   ],
   "expectedTests": [
     "RemoteDesktopHostTests/AppleFoundationMCPPlannerTests/testCountedInputExpandsBeforeEffectAndTerminalQueries",
@@ -655,6 +657,13 @@
     "RemoteDesktopHostTests/ComputerUseBrowserRequirementReviewTests/testRequirementReviewRejectsMissingReorderedInventedAndUnjustifiedJudgments",
     "RemoteDesktopHostTests/ComputerUseBrowserRequirementReviewTests/testRequirementReviewRetainsExactGoalFragmentsAndProducesOnlyCitedJudgments",
     "RemoteDesktopHostTests/ComputerUseBrowserRequirementReviewTests/testV2CompositeUsesOneExistingReviewCallAndRetainsTheCompleteMatrix",
+    "RemoteDesktopHostTests/ComputerUseBrowserResearchAnswerTests/testAnswerAdmissionKeepsUnsupportedContradictoryInsufficientAndDuplicateResultsPending",
+    "RemoteDesktopHostTests/ComputerUseBrowserResearchAnswerTests/testAnswerProposalRejectsLegacyHybridForeignAndIncorrectCountSelections",
+    "RemoteDesktopHostTests/ComputerUseBrowserResearchAnswerTests/testAnswerRenderingKeepsWholeQualifiersAndRefusesLedgerOrByteTruncation",
+    "RemoteDesktopHostTests/ComputerUseBrowserResearchAnswerTests/testAnswerWithoutFurtherLinksStillUsesTheLocalPlanner",
+    "RemoteDesktopHostTests/ComputerUseBrowserResearchAnswerTests/testDeliveredAnswerCannotBeReusedAfterReadingPageOrControlChanges",
+    "RemoteDesktopHostTests/ComputerUseBrowserResearchAnswerTests/testLocalPlannerAndNativeDriverDeliverCompleteQuotedSourceAnswer",
+    "RemoteDesktopHostTests/ComputerUseBrowserResearchAnswerTests/testStockNumberCannotCompleteAnAnswerWithUnreconciledQuantityPolicies",
     "RemoteDesktopHostTests/ComputerUseBrowserResearchDriverTests/testDriverAdmissionDeclinesOnlyBeforeOwnershipAndHonorsTheHostGate",
     "RemoteDesktopHostTests/ComputerUseBrowserResearchDriverTests/testDriverCapturesThePreparedOwnerBeforeAnAdmissionObserverFails",
     "RemoteDesktopHostTests/ComputerUseBrowserResearchDriverTests/testDriverChoosesAndExecutesAFormBeforeReadingResultsUnderTheCompleteGoal",
@@ -1025,6 +1034,7 @@
     "RemoteDesktopHostTests/ComputerUseTests/test_managerPreservesNewResearchWhenPreviousBrowserIsBusyBeforeAdmission",
     "RemoteDesktopHostTests/ComputerUseTests/test_managerRejectsEarlyPopupHandbackThenContinuesTheExactNativeGoal",
     "RemoteDesktopHostTests/ComputerUseTests/test_managerRejectsMalformedForgedSessionMismatchedAndCancelledAnswersWithoutFallback",
+    "RemoteDesktopHostTests/ComputerUseTests/test_managerResearchAnswerDeliversAndReplaysWholeSourceTextWithoutRepeatingWork",
     "RemoteDesktopHostTests/ComputerUseTests/test_managerResearchReportUsesResumableStatusAndReplaysWithoutAnotherReadOrSearch",
     "RemoteDesktopHostTests/ComputerUseTests/test_managerResearchResumesBeforeFirstPageWithoutReadmissionOrLosingGoal",
     "RemoteDesktopHostTests/ComputerUseTests/test_managerResumesClaimedAnswerWithTypedGoalAndRejectsRestartedReference",

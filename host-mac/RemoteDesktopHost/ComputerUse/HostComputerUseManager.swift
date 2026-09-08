@@ -3283,6 +3283,8 @@ enum ComputerUseExecutionResult: Equatable {
     case userInterventionRequired(String)
     /// A current reading to review while the original research remains paused.
     case browserResearchProgress(ComputerUseBrowserResearchReport)
+    /// Complete quoted source findings admitted under the retained research goal.
+    case browserResearchAnswer(ComputerUseBrowserResearchAnswer)
     case approvalRequired(
         message: String,
         action: ComputerUsePredictedAction,
@@ -6725,6 +6727,14 @@ final class HostComputerUseManager: ObservableObject {
         let envelope = context.envelope
 
         switch result {
+        case .browserResearchAnswer(let answer):
+            guard executor is any ComputerUseBrowserResearchContinuing,
+                  let owner = tools.ownedBrowserResearch(taskID: answer.rootTaskID),
+                  owner.executionTaskID == envelope.id else { throw ComputerUseBrowserClarificationTransport.Failure.invalidOwner }
+            try owner.validateAnswer(answer)
+            // Use the existing durable terminal/first-result-wins path only
+            // after the exact retained source answer has been admitted.
+            try acceptExecutionResult(.completed(answer.message), executor: executor, context: context, token: token)
         case .completed(let response):
             sendDurableTerminal(
                 response,

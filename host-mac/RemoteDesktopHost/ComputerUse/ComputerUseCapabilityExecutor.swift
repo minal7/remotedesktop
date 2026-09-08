@@ -245,6 +245,8 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
               retained.owner.executionTaskID == taskID else { throw RoutingError.missingContinuation }
         try retained.owner.validateDriverContinuation(retained.input)
         switch result {
+        case .browserResearchAnswer(let answer):
+            try retained.owner.validateAnswer(answer)
         case .browserResearchProgress(let report):
             try retained.owner.validateProgressReport(report)
         case .browserClarificationRequired(let request):
@@ -256,13 +258,15 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
             // This route has typed questions and manual handback. An unrelated
             // native/visual/MCP continuation cannot complete research work.
             throw RoutingError.missingContinuation
-        case .completed, .unableToComplete, .userInterventionRequired: break
+        case .completed: throw RoutingError.missingContinuation
+        case .unableToComplete, .userInterventionRequired: break
         }
     }
 
     private func rejectUnroutedResearchQuestion(_ result: ComputerUseExecutionResult) throws {
         if case .browserClarificationRequired = result { throw RoutingError.missingContinuation }
         if case .browserResearchProgress = result { throw RoutingError.missingContinuation }
+        if case .browserResearchAnswer = result { throw RoutingError.missingContinuation }
     }
 
     func clarification(taskID: String) throws -> ComputerUseNativeTextExecutor.Clarification? {

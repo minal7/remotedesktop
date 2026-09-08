@@ -27,7 +27,7 @@ struct ComputerUseBrowserResearchVisit: Equatable, Sendable {
 
 /// Owns the canonical goal revision and read/planning work for one browser
 /// research task, including retained result-link navigation. It does not
-/// compile the complete research action plan or terminal research answers.
+/// compile arbitrary research actions or certify independent inventory truth.
 @MainActor
 final class ComputerUseBrowserResearchTask {
     enum Failure: Error, Equatable { case busy, paused, retired, goalChanged, interpretationRequired, questionPending, browserRequired, navigationPending, navigationUnavailable, formPending, formUnavailable }
@@ -37,6 +37,9 @@ final class ComputerUseBrowserResearchTask {
         var sources: ComputerUseBrowserSourceRequirements { .init(proposal: proposal) }
     }
     struct LinkChoice: Sendable { let candidateID: String; let linkID: String }
+    enum Decision: Sendable {
+        case link(LinkChoice), answer(ComputerUseBrowserResearchAnswer.Selection), unresolved
+    }
     @MainActor
     private final class PreparedForm {
         let target: ComputerUseBrowserTextTarget
@@ -748,6 +751,33 @@ final class ComputerUseBrowserResearchTask {
         }
     }
 
+    func validateAnswer(_ answer: ComputerUseBrowserResearchAnswer) throws {
+        try requireIdle(); try checkCurrent(input)
+        guard !hasPendingForm else { throw Failure.formPending }
+        guard initialSearch?.isPending != true, !hasPendingNavigation, !hasPendingFormNavigation else { throw Failure.navigationPending }
+        guard !hasQuestion else { throw Failure.questionPending }
+        guard answer.rootTaskID == taskID, answer.goalRevision == input.digest,
+              let reading = latestCandidates, answer.readingIdentity == reading.requirementAssessmentIdentity,
+              let eligibility = reading.answerEligibility(goal: input) else { throw Failure.goalChanged }
+        try answer.validate(for: eligibility)
+        try browser.validateResearchAnswerBinding(answer, reading: reading, goal: input)
+    }
+
+    func prepareAnswer(_ selection: ComputerUseBrowserResearchAnswer.Selection) async throws -> ComputerUseBrowserResearchAnswer {
+        try requireIdle()
+        guard !hasPendingForm else { throw Failure.formPending }
+        guard initialSearch?.isPending != true, !hasPendingNavigation, !hasPendingFormNavigation else { throw Failure.navigationPending }
+        guard !hasQuestion else { throw Failure.questionPending }
+        guard let reading = latestCandidates, let policy = researchSources?.answerPolicy else { throw Failure.interpretationRequired }
+        let captured = input
+        return try await operate { [self] in
+            try checkCurrent(captured)
+            let answer = try await browser.prepareResearchAnswer(selection, reading: reading, goal: captured, policy: policy)
+            try checkCurrent(captured)
+            return answer
+        }
+    }
+
     func openCandidateLink(candidateID: String, linkID: String) async throws -> ComputerUseBrowserNavigationReceipt {
         try requireIdle()
         guard !hasPendingForm else { throw Failure.formPending }
@@ -771,6 +801,14 @@ final class ComputerUseBrowserResearchTask {
     /// take over. The selected link is still natively bound again when opened.
     func planCandidateNavigation(budget: Duration = .seconds(30), select: @escaping @MainActor @Sendable
         (ComputerUseBrowserGoalInput, ComputerUseBrowserResultCandidates) async throws -> LinkChoice?) async throws -> LinkChoice? {
+        let decision = try await planResearchDecision(budget: budget) { goal, candidates in
+            try await select(goal, candidates).map { .link($0) } ?? .unresolved
+        }
+        switch decision { case .link(let choice): return choice; case .unresolved: return nil; case .answer: throw ComputerUseBrowserLinkPlanError.invalidProposal }
+    }
+
+    func planResearchDecision(budget: Duration = .seconds(30), select: @escaping @MainActor @Sendable
+        (ComputerUseBrowserGoalInput, ComputerUseBrowserResultCandidates) async throws -> Decision) async throws -> Decision {
         try requireIdle()
         guard !hasPendingForm else { throw Failure.formPending }
         guard !hasPendingNavigation else { throw Failure.navigationPending }
@@ -782,7 +820,7 @@ final class ComputerUseBrowserResearchTask {
         latestCandidates = nil; latestForm = nil; latestAction = nil
         let result = try await operate { [self] in
             let candidates = try await readCurrentCandidates(goal: captured)
-            let choice = try await selectCandidateLink(goal: captured, candidates: candidates, budget: budget, select: select)
+            let choice = try await selectCandidateDecision(goal: captured, candidates: candidates, budget: budget, select: select)
             return (choice, candidates)
         }
         try checkCurrent(captured)
@@ -798,18 +836,32 @@ final class ComputerUseBrowserResearchTask {
     private func selectCandidateLink(goal: ComputerUseBrowserGoalInput, candidates: ComputerUseBrowserResultCandidates,
         budget: Duration, select: @escaping @MainActor @Sendable
         (ComputerUseBrowserGoalInput, ComputerUseBrowserResultCandidates) async throws -> LinkChoice?) async throws -> LinkChoice? {
+        let decision = try await selectCandidateDecision(goal: goal, candidates: candidates, budget: budget) { goal, candidates in
+            try await select(goal, candidates).map { .link($0) } ?? .unresolved
+        }
+        switch decision { case .link(let choice): return choice; case .unresolved: return nil; case .answer: throw ComputerUseBrowserLinkPlanError.invalidProposal }
+    }
+
+    private func selectCandidateDecision(goal: ComputerUseBrowserGoalInput, candidates: ComputerUseBrowserResultCandidates,
+        budget: Duration, select: @escaping @MainActor @Sendable
+        (ComputerUseBrowserGoalInput, ComputerUseBrowserResultCandidates) async throws -> Decision) async throws -> Decision {
         let deadline = ContinuousClock.now.advanced(by: min(.seconds(30), max(.zero, budget)))
         try checkCandidateLinkDecision(goal: goal, deadline: deadline)
-        return try await withThrowingTaskGroup(of: LinkChoice?.self) { group in
+        return try await withThrowingTaskGroup(of: Decision.self) { group in
             group.addTask { @MainActor [self] in
                 try checkCandidateLinkDecision(goal: goal, deadline: deadline)
                 let choice = try await select(goal, candidates)
                 try checkCandidateLinkDecision(goal: goal, deadline: deadline)
                 try await browser.validateResultCandidates(candidates, goal: goal)
                 try checkCandidateLinkDecision(goal: goal, deadline: deadline)
-                if let choice {
+                switch choice {
+                case .link(let choice):
                     guard let candidate = candidates.candidates.first(where: { $0.id == choice.candidateID }),
                           candidate.selectedLinkIDs.contains(choice.linkID) else { throw ComputerUseBrowserResultError.invalidProposal }
+                case .answer(let selection):
+                    guard let eligibility = candidates.answerEligibility(goal: goal) else { throw ComputerUseBrowserLinkPlanError.inputChanged }
+                    _ = try eligibility.answer(for: selection)
+                case .unresolved: break
                 }
                 return choice
             }

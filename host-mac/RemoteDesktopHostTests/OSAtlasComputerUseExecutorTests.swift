@@ -15744,7 +15744,7 @@ final class OSAtlasActualModelAcceptanceTests: XCTestCase {
                 return .terminal(.userInterventionRequired)
             case .unableToComplete:
                 return .terminal(.unableToComplete)
-            case .completed:
+            case .completed, .browserResearchAnswer:
                 return .terminal(.taskCompleted)
             }
         }

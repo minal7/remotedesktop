@@ -8,9 +8,15 @@ protocol ComputerUseBrowserResearchPlanning {
     func sources(for interpretation: ComputerUseBrowserResearchTask.Interpretation) throws -> ComputerUseBrowserResearchSources?
     func selectLink(goal: ComputerUseBrowserGoalInput, candidates: ComputerUseBrowserResultCandidates,
                     history: [ComputerUseBrowserResearchVisit], evidence: ComputerUseBrowserResearchEvidence?) async throws -> ComputerUseBrowserResearchTask.LinkChoice?
+    func selectDecision(goal: ComputerUseBrowserGoalInput, candidates: ComputerUseBrowserResultCandidates,
+                    history: [ComputerUseBrowserResearchVisit], evidence: ComputerUseBrowserResearchEvidence?) async throws -> ComputerUseBrowserResearchTask.Decision
 }
 
 extension ComputerUseBrowserResearchPlanning {
+    func selectDecision(goal: ComputerUseBrowserGoalInput, candidates: ComputerUseBrowserResultCandidates,
+                    history: [ComputerUseBrowserResearchVisit], evidence: ComputerUseBrowserResearchEvidence?) async throws -> ComputerUseBrowserResearchTask.Decision {
+        try await selectLink(goal: goal, candidates: candidates, history: history, evidence: evidence).map { .link($0) } ?? .unresolved
+    }
     func selectLink(goal: ComputerUseBrowserGoalInput, candidates: ComputerUseBrowserResultCandidates,
                     history: [ComputerUseBrowserResearchVisit]) async throws -> ComputerUseBrowserResearchTask.LinkChoice? {
         try await selectLink(goal: goal, candidates: candidates, history: history, evidence: nil)
@@ -19,7 +25,9 @@ extension ComputerUseBrowserResearchPlanning {
 
 /// Concrete navigation orchestration for retained research. Policy is supplied
 /// separately; supported native forms use retained edit/query stages. General
-/// widgets and verified research answers remain incomplete. A page load cannot declare research success.
+/// widgets and multi-page answer assembly remain incomplete. Current-page
+/// informational answers require a typed selection and native source validation.
+/// A page load alone cannot declare research success.
 @MainActor
 final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecuting {
     enum Failure: Error, Equatable { case busy, alreadyAdmitted, invalidContinuation, invalidProposal }
@@ -298,20 +306,26 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                 }
                 progress("Reading the page against the original request…")
                 let history = run.visits
-                let choice = try await owner.planCandidateNavigation(select: { [planning] goal, candidates in
-                    try await planning.selectLink(goal: goal, candidates: candidates, history: history, evidence: owner.researchEvidence(for: goal))
+                let decision = try await owner.planResearchDecision(select: { [planning] goal, candidates in
+                    try await planning.selectDecision(goal: goal, candidates: candidates, history: history, evidence: owner.researchEvidence(for: goal))
                 })
                 try check()
-                guard let choice else {
+                switch decision {
+                case .answer(let selection):
+                    let answer = try await owner.prepareAnswer(selection)
+                    try check()
+                    return .browserResearchAnswer(answer)
+                case .unresolved:
                     if let report = try await owner.prepareProgressReport() {
                         try check()
                         return .browserResearchProgress(report)
                     }
                     try check()
                     return selectionRequired
+                case .link(let choice):
+                    let receipt = try await owner.openCandidateLink(candidateID: choice.candidateID, linkID: choice.linkID)
+                    guard try record(.resultLink, receipt.document) else { return reconciliationRequired }
                 }
-                let receipt = try await owner.openCandidateLink(candidateID: choice.candidateID, linkID: choice.linkID)
-                guard try record(.resultLink, receipt.document) else { return reconciliationRequired }
             }
         }
         try check()
