@@ -233,6 +233,21 @@ final class ComputerUseBrowserAdmissionTests: XCTestCase {
         XCTAssertEqual(try initialSearchJournal(directory), before)
         XCTAssertEqual(server.count("/search?q=concerts"), 0)
         XCTAssertEqual(owner.initialSearchState, .pending)
+        let originalGoal = owner.input
+        let refreshed = try await owner.refreshInitialSearchStartingPage()
+        XCTAssertEqual(refreshed, .updated)
+        let rebound = try initialSearchJournal(directory)
+        XCTAssertEqual(rebound.taskID, before.taskID); XCTAssertEqual(rebound.promptDigest, before.promptDigest)
+        XCTAssertEqual(rebound.stepIDs, before.stepIDs); XCTAssertEqual(rebound.statuses, [.planned])
+        XCTAssertNotEqual(rebound.contractDigest, before.contractDigest)
+        XCTAssertEqual(server.count("/search?q=concerts"), 0, "Refresh is observation and binding replacement only")
+        let samePage = try await owner.refreshInitialSearchStartingPage()
+        XCTAssertEqual(samePage, .unchanged)
+        _ = try await owner.resumeInitialSearch()
+        XCTAssertEqual(owner.input, originalGoal)
+        XCTAssertEqual(server.count("/search?q=concerts"), 1)
+        let finished = try await owner.refreshInitialSearchStartingPage()
+        XCTAssertEqual(finished, .noPendingStage)
     }
 
     func testAdmittedInitialSearchSurvivesUnchangedHandbackAndFreshPageSnapshots() async throws {

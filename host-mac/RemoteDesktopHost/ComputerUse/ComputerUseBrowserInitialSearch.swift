@@ -75,15 +75,22 @@ struct ComputerUseBrowserInitialSearchRequest: Equatable, Sendable, CustomString
 /// validation or completion of the research task.
 @MainActor
 final class ComputerUseBrowserInitialSearch {
+    enum RefreshResult: Equatable, Sendable { case noPendingStage, requiresReconciliation, unchanged, updated }
+    private struct StartingPoint {
+        let document: ComputerUseBrowserDocument?
+        let documentID: String?
+        let identity: ComputerUseTaskJournal
+    }
     let request: ComputerUseBrowserInitialSearchRequest
     private let session: ComputerUseBrowserHandbackRequirement
-    private let startingDocument: ComputerUseBrowserDocument?
-    private let startingDocumentID: String?
+    private var startingPoint: StartingPoint
+    // A write can replace the file before its final fsync fails. Retain both
+    // known bindings until a fresh, leased read identifies the visible one.
+    private var unconfirmedReplacement: StartingPoint?
     private let browser: ComputerUseOwnedBrowser
     private let directory: URL
     private let makeStore: (URL) throws -> ComputerUseTaskJournalStore
     private let operationID: String
-    private let identity: ComputerUseTaskJournal
     private var isExecuting = false
     private var isRetired = false
     private(set) var isPending = true
@@ -100,19 +107,36 @@ final class ComputerUseBrowserInitialSearch {
             }
         }
         self.request = request; self.session = session; self.browser = browser
-        startingDocument = startingPage?.document; startingDocumentID = startingPage?.documentID
         self.directory = directory.appendingPathComponent("Initial Search", isDirectory: true); self.makeStore = makeStore
         operationID = ComputerUseTaskContract.digest(["browser-initial-search-stage-v1", request.goal.taskID])
+        startingPoint = Self.startingPoint(request: request, session: session, operationID: operationID, page: startingPage)
+    }
+
+    private static func startingPoint(request: ComputerUseBrowserInitialSearchRequest,
+        session: ComputerUseBrowserHandbackRequirement, operationID: String, page: ComputerUseBrowserPageEvidence?) -> StartingPoint {
         var binding = ["browser-initial-search-binding-v1", request.digest, session.sessionBindingDigest]
-        if let startingPage {
+        if let startingPage = page {
             binding += ["observed-starting-document-v1", startingPage.documentID,
                 startingPage.document.contextID, String(startingPage.document.generation), startingPage.document.operationID,
                 startingPage.document.committedURL.absoluteString]
         }
-        identity = .init(taskID: ComputerUseTaskContract.digest(["browser-initial-search-record-v1", request.goal.taskID]),
+        let identity = ComputerUseTaskJournal(taskID: ComputerUseTaskContract.digest(["browser-initial-search-record-v1", request.goal.taskID]),
             promptDigest: request.goal.rootDigest,
             contractDigest: ComputerUseTaskContract.digest(binding),
             stepIDs: [operationID], statuses: [.planned])
+        return .init(document: page?.document, documentID: page?.documentID, identity: identity)
+    }
+
+    private static func matches(_ saved: ComputerUseTaskJournal, _ expected: ComputerUseTaskJournal) -> Bool {
+        saved.taskID == expected.taskID && saved.promptDigest == expected.promptDigest
+            && saved.contractDigest == expected.contractDigest && saved.stepIDs == expected.stepIDs && saved.statuses.count == 1
+    }
+
+    private func point(matching saved: ComputerUseTaskJournal?) throws -> StartingPoint {
+        guard let saved else { return startingPoint }
+        if Self.matches(saved, startingPoint.identity) { return startingPoint }
+        if let replacement = unconfirmedReplacement, Self.matches(saved, replacement.identity) { return replacement }
+        throw ComputerUseTaskExecutionError.journalMismatch
     }
 
     func open(checkCurrent: () throws -> Void) async throws -> ComputerUseBrowserDocument {
@@ -128,14 +152,12 @@ final class ComputerUseBrowserInitialSearch {
         }
         try check()
         let store = try makeStore(directory)
-        var persisted = try store.load(taskID: identity.taskID)
-        if let saved = persisted {
-            guard saved.taskID == identity.taskID, saved.promptDigest == identity.promptDigest,
-                  saved.contractDigest == identity.contractDigest, saved.stepIDs == identity.stepIDs,
-                  saved.statuses.count == 1 else { throw ComputerUseTaskExecutionError.journalMismatch }
-        }
-        let lease = try store.acquireExecution(taskID: identity.taskID, expected: persisted)
+        var persisted = try store.load(taskID: startingPoint.identity.taskID)
+        let resolved = try point(matching: persisted)
+        let lease = try store.acquireExecution(taskID: resolved.identity.taskID, expected: persisted)
         defer { lease.release() }
+        startingPoint = resolved; unconfirmedReplacement = nil
+        let identity = resolved.identity, startingDocument = resolved.document, startingDocumentID = resolved.documentID
         func checkLeased() throws {
             try check()
             try lease.assertOwnership()
@@ -167,6 +189,7 @@ final class ComputerUseBrowserInitialSearch {
             isPending = false
             return result
         }
+        guard !browser.hasNavigationAttempt(operationID: operationID) else { throw ComputerUseTaskExecutionError.uncertainEffect(operationID) }
         if persisted == nil { try save(.planned) }
         do {
             try checkLeased()
@@ -199,6 +222,51 @@ final class ComputerUseBrowserInitialSearch {
             if persisted?.statuses.first == .attempted { try? save(receipt() == nil ? .uncertain : .verified) }
             throw error
         }
+    }
+
+    /// Explicitly refresh only the starting document. Query/provider/goal,
+    /// session and operation identity remain fixed, and this never navigates.
+    func refreshStartingPage(checkCurrent: () throws -> Void) async throws -> RefreshResult {
+        guard !isExecuting else { throw ComputerUseBrowserInitialSearchError.busy }
+        guard !isRetired else { throw ComputerUseBrowserInitialSearchError.retired }
+        guard isPending else { return .noPendingStage }
+        isExecuting = true
+        defer { isExecuting = false }
+        func check() throws {
+            try Task.checkCancellation()
+            guard !isRetired else { throw ComputerUseBrowserInitialSearchError.retired }
+            try checkCurrent()
+            try browser.validateWorkflowSession(session)
+        }
+        try check()
+        let store = try makeStore(directory)
+        let persisted = try store.load(taskID: startingPoint.identity.taskID)
+        let resolved = try point(matching: persisted)
+        let lease = try store.acquireExecution(taskID: resolved.identity.taskID, expected: persisted)
+        defer { lease.release() }
+        startingPoint = resolved; unconfirmedReplacement = nil
+        func checkLeased() throws { try check(); try lease.assertOwnership(); try Task.checkCancellation() }
+        try checkLeased()
+        guard persisted == nil || persisted?.statuses == [.planned],
+              !browser.hasNavigationAttempt(operationID: operationID) else { return .requiresReconciliation }
+        let document = try await browser.acquireObservedDocument(taskID: request.goal.taskID)
+        try checkLeased()
+        let page = try await browser.observePage(document: document)
+        try checkLeased()
+        guard browser.validate(page.document) else { throw ComputerUseBrowserError.pageChanged }
+        guard !browser.hasNavigationAttempt(operationID: operationID) else { return .requiresReconciliation }
+        let replacement = Self.startingPoint(request: request, session: session, operationID: operationID, page: page)
+        let unchanged = Self.matches(replacement.identity, resolved.identity)
+        if unchanged, persisted != nil { return .unchanged }
+        unconfirmedReplacement = replacement
+        if let persisted { try store.replaceUnattemptedBinding(replacement.identity, replacing: persisted) }
+        else { try store.save(replacement.identity, replacing: nil) }
+        // A committed refresh remains a fact after a late Pause. Keep its
+        // matching document before surfacing cancellation, but never revive
+        // a retired owner. Failed writes retain the two known candidates.
+        if !isRetired { startingPoint = replacement; unconfirmedReplacement = nil }
+        try checkLeased()
+        return unchanged ? .unchanged : .updated
     }
 
     func retire() { isRetired = true }

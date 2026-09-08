@@ -179,6 +179,22 @@ final class ComputerUseBrowserResearchTask {
         }
     }
 
+    /// Called after explicit handback when a real page change invalidated an
+    /// unsent first search. Refresh only its starting document, never its goal,
+    /// query/provider or operation ID. Attempted actions must reconcile first.
+    func refreshInitialSearchStartingPage() async throws -> ComputerUseBrowserInitialSearch.RefreshResult {
+        try requireIdle()
+        guard !hasQuestion else { throw Failure.questionPending }
+        guard navigation?.pendingSelection == nil else { throw Failure.navigationPending }
+        guard let initialSearch, initialSearch.isPending else { return .noPendingStage }
+        guard initialSearch.request.goal.digest == input.digest else { throw Failure.goalChanged }
+        let captured = input
+        latestCandidates = nil
+        return try await operate { [self] in
+            try await initialSearch.refreshStartingPage(checkCurrent: { try self.checkCurrent(captured) })
+        }
+    }
+
     func readCandidates() async throws -> ComputerUseBrowserResultCandidates {
         try requireIdle()
         guard !hasPendingNavigation else { throw Failure.navigationPending }

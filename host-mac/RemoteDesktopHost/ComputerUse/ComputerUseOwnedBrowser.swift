@@ -214,6 +214,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     private var locationRevision: UInt64 = 0
     private var document: ComputerUseBrowserDocument?
     private var receipts: [String: ComputerUseBrowserDocument] = [:]
+    private var navigationAttemptIDs: Set<String> = []
     private struct ObservedNavigationAttempt {
         let payloadDigest: String
         var receipt: ComputerUseBrowserNavigationReceipt?
@@ -335,6 +336,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             observedUserPage = nil
             observedActivePage = nil
             receipts.removeAll()
+            navigationAttemptIDs.removeAll()
             observedNavigationAttempts.removeAll()
         }
     }
@@ -693,7 +695,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     /// Absence of a receipt is not absence of an attempt. Keep failures before
     /// native load conservative too: the durable callback may have failed.
     func hasObservedNavigationAttempt(operationID: String) -> Bool {
-        observedNavigationAttempts[operationID] != nil
+        hasNavigationAttempt(operationID: operationID)
     }
 
     /// Open the previously bound HTTP(S) destination with the native browser
@@ -885,6 +887,12 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         return receipts[operationID]
     }
 
+    /// Independent native dispatch history. Journal refresh must not treat a
+    /// missing receipt or an earlier planned file as proof of no request.
+    func hasNavigationAttempt(operationID: String) -> Bool {
+        navigationAttemptIDs.contains(operationID) || receipts[operationID] != nil || observedNavigationAttempts[operationID] != nil
+    }
+
     func currentDocument(taskID: String) -> ComputerUseBrowserDocument? {
         guard hasOwnership(taskID: taskID), pending == nil, let document,
               document.generation == generation, browser?.isLoading == false,
@@ -903,9 +911,10 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         try Task.checkCancellation()
         guard hasOwnership(taskID: taskID) else { throw ComputerUseBrowserError.ownershipLost }
         guard pending == nil, pendingDOM == nil, observedNavigation == nil else { throw ComputerUseBrowserError.busy }
-        guard receipts[operationID] == nil, receipts.count < 64, !operationID.isEmpty else {
+        guard !navigationAttemptIDs.contains(operationID), navigationAttemptIDs.count < 64,
+              receipts[operationID] == nil, receipts.count < 64, !operationID.isEmpty else {
             // An uncertain navigation is reconciled by the step engine. This
-            // adapter never reissues a completed operation ID on its own.
+            // adapter never reissues an attempted operation ID on its own.
             throw ComputerUseBrowserError.pageChanged
         }
         guard let url = Self.validatedURL(url) else { throw ComputerUseBrowserError.invalidURL }
@@ -941,6 +950,8 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             guard hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
         }
         try checkInitialSession()
+        guard !navigationAttemptIDs.contains(operationID), navigationAttemptIDs.count < 64 else { throw ComputerUseBrowserError.pageChanged }
+        navigationAttemptIDs.insert(operationID)
         sessionHasNavigationActivity = true
         generation &+= 1
         document = nil
