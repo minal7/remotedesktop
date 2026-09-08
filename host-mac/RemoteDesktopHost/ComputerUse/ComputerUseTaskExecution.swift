@@ -165,6 +165,7 @@ final class ComputerUseTaskExecution {
     private let predicates: [String: ComputerUseTaskContract.Predicate]
     private let observe: (ComputerUseTaskContract.Predicate) async throws -> Bool
     private let perform: (ComputerUseTaskContract.Step, String) async throws -> Void
+    private let finishPendingEffect: ((ComputerUseTaskContract.Step, String) async throws -> Void)?
     private let persist: (ComputerUseTaskJournal) throws -> Void
     private let assertOwnership: () throws -> Void
     private let acquireExecutionLease: (() throws -> any ComputerUseTaskExecutionLease)?
@@ -175,6 +176,7 @@ final class ComputerUseTaskExecution {
          observe: @escaping (ComputerUseTaskContract.Predicate) async throws -> Bool,
          perform: @escaping (ComputerUseTaskContract.Step, String) async throws -> Void,
          persist: @escaping (ComputerUseTaskJournal) throws -> Void,
+         finishPendingEffect: ((ComputerUseTaskContract.Step, String) async throws -> Void)? = nil,
          acquireExecutionLease: (() throws -> any ComputerUseTaskExecutionLease)? = nil,
          assertOwnership: @escaping () throws -> Void) throws {
         self.contract = contract
@@ -200,6 +202,7 @@ final class ComputerUseTaskExecution {
         predicates = Dictionary(uniqueKeysWithValues: contract.predicates.map { ($0.id, $0) })
         self.observe = observe
         self.perform = perform
+        self.finishPendingEffect = finishPendingEffect
         self.persist = persist
         self.assertOwnership = assertOwnership
         self.acquireExecutionLease = acquireExecutionLease
@@ -229,6 +232,13 @@ final class ComputerUseTaskExecution {
                 guard try await satisfies(invariant) else { throw ComputerUseTaskExecutionError.incompleteOutcome(invariant) }
             }
             if journal.statuses[index] != .planned {
+                // A capability may complete a provably unstarted native tail
+                // of this exact attempted operation under the existing lease.
+                // This never invokes perform again or substitutes an ID.
+                if let finishPendingEffect {
+                    try await finishPendingEffect(step, contract.effectIdentity(for: step))
+                    try checkOwnership()
+                }
                 for predicate in step.postconditions {
                     guard try await satisfies(predicate) else {
                         try transition(index, to: .uncertain)

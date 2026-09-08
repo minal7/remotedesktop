@@ -176,6 +176,23 @@ final class ComputerUseTaskJournalStore {
         }
     }
 
+    /// Confirm the original attempted state before completing a native tail.
+    /// A prior rename may be visible without confirmed directory durability.
+    /// This requires the caller's active execution lease and exact saved state;
+    /// it changes no identity or status and cannot authorize an absent attempt.
+    func confirmPendingAttempt(_ expected: ComputerUseTaskJournal) throws {
+        guard Self.isValid(expected), expected.retirementDigest == nil, expected.retainedPrefixCount == nil,
+              let status = expected.statuses.first(where: { $0 != .verified }),
+              status == .attempted || status == .uncertain else { throw StoreError.invalidTransition }
+        try withJournalLock(taskID: expected.taskID, exclusive: true) {
+            let name = ComputerUseTextTaskContract.digest(expected.taskID) + ".execution.lock"
+            guard let owner = executionOwners[name]?.value, owner.isActive else { throw StoreError.busy }
+            try owner.assertOwnership()
+            guard Self.matches(try readJournal(taskID: expected.taskID), expected) else { throw StoreError.staleJournal }
+            guard fsync(descriptor) == 0 else { throw StoreError.unavailable }
+        }
+    }
+
     /// An explicit re-plan before any step was attempted. The caller must
     /// also establish that its native adapter has no attempt. Task, original
     /// request and operation IDs remain fixed; ordinary save never rebinds.

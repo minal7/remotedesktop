@@ -404,6 +404,13 @@ final class ComputerUseNativeTextExecutor {
             didDispatchInput: browserTarget.map { target in
                 { operationID in try await target.didDispatchInput(operationID: operationID) }
             },
+            finishPendingInput: browserTarget.map { target in
+                { operationID in
+                    guard let persistedJournal else { throw ComputerUseTextTaskError.journalMismatch }
+                    try store.confirmPendingAttempt(persistedJournal)
+                    _ = try await target.finishPendingChange(operationID: operationID)
+                }
+            },
             persist: { journal in
                 try store.save(journal, replacing: persistedJournal)
                 persistedJournal = journal

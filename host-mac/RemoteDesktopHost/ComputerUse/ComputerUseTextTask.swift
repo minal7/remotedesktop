@@ -268,6 +268,7 @@ final class ComputerUseTextTask {
          apply: @escaping (ComputerUseTextPlanEdit, ComputerUseTextSnapshot) async throws -> Void,
          applyWithIdentity: ((ComputerUseTextInputDispatch) async throws -> Void)? = nil,
          didDispatchInput: ((String) async throws -> Bool)? = nil,
+         finishPendingInput: ((String) async throws -> Void)? = nil,
          persist: @escaping (ComputerUseTextStepJournal) throws -> Void,
          acquireExecutionLease: (() throws -> any ComputerUseTaskExecutionLease)? = nil,
          mayAct: @escaping () -> Bool) throws {
@@ -406,6 +407,7 @@ final class ComputerUseTextTask {
                     } else { try await apply(plan, current) }
                     locallyDispatchedInputs.insert(operationID)
                 }, persist: { try persist(Self.textJournal($0, contract: contract)) },
+                finishPendingEffect: finishPendingInput.map { finish in { _, operationID in try await finish(operationID) } },
                 acquireExecutionLease: acquireExecutionLease,
                 assertOwnership: { guard mayAct() else { throw ComputerUseTextEditError.interrupted } })
         } catch ComputerUseTaskExecutionError.journalMismatch {

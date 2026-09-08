@@ -3,7 +3,7 @@ import WebKit
 
 enum ComputerUseBrowserDOMCommand: String {
     case fields, read, edit, receipt, reobserve, preflight, pageIdentity, pageSnapshot, validatePageSnapshot
-    case scrollViewport, viewportScrollReceipt, validatePageLink
+    case scrollViewport, viewportScrollReceipt, validatePageLink, finishPendingChange
     case prepareFormQuery, validateFormQuery, bindPageFields, formFields, extendFormFields, inspectFormRequirements, retireUnsentInputs
 }
 
@@ -472,7 +472,7 @@ enum ComputerUseBrowserDOM {
       const nonce = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), n => n.toString(16).padStart(2, '0')).join('');
       const pageID = nonce();
       let documentID = nonce(), inputLedgerID = nonce(), root = null, nextID = 0;
-      const bindings = new Map(), operations = new Map();
+      const bindings = new Map(), operations = new Map(), pendingChanges = new Map();
       const retiredInputs = new Set();
       let fieldScope = null;
       // Independent of form discovery, which retires text-operation bindings.
@@ -539,7 +539,7 @@ enum ComputerUseBrowserDOM {
       function synchronize() {
         retire(observer.takeRecords());
         if (root !== doc.documentElement) {
-          if (root) { documentID = nonce(); inputLedgerID = nonce(); bindings.clear(); operations.clear(); retiredInputs.clear(); fieldScope = null; viewportOperations.clear(); formQueries.clear(); lastPageSnapshot = null; }
+          if (root) { documentID = nonce(); inputLedgerID = nonce(); bindings.clear(); operations.clear(); pendingChanges.clear(); retiredInputs.clear(); fieldScope = null; viewportOperations.clear(); formQueries.clear(); lastPageSnapshot = null; }
           root = doc.documentElement;
         }
       }
@@ -749,7 +749,7 @@ enum ComputerUseBrowserDOM {
             if (!binding || !binding.valid || retained.has(binding.element)) return reply('stale');
             retained.set(binding.element, binding);
           }
-        } else { bindings.clear(); operations.clear(); retiredInputs.clear(); inputLedgerID = nonce(); fieldScope = scope; }
+        } else { bindings.clear(); operations.clear(); pendingChanges.clear(); retiredInputs.clear(); inputLedgerID = nonce(); fieldScope = scope; }
         // Retained observation must reuse the same native form and explicit
         // outside invariants. Never fall back to whole-document discovery.
         let scoped = [], scopedIndex = 0;
@@ -1168,6 +1168,35 @@ enum ComputerUseBrowserDOM {
           return true;
         });
       }
+      function finishPendingChange(operationID) {
+        synchronize();
+        const pending = pendingChanges.get(operationID);
+        if (!pending || operations.get(operationID) !== 'attempted') return 'unproven';
+        if (pending.documentID !== documentID || pending.inputLedgerID !== inputLedgerID
+            || doc !== document || doc.readyState !== 'complete' || doc.URL !== pending.url) return 'stale';
+        const status = authenticationStatus();
+        if (status) return status;
+        const current = snapshot(pending.binding);
+        if (!current || current.value !== pending.expected) return 'stale';
+        for (const required of pending.requiredValues) {
+          const binding = bindings.get(required.id), value = binding && snapshot(binding);
+          if (!value || value.value !== required.value) return 'constraint-changed';
+        }
+        if (pending.copySource) {
+          const binding = bindings.get(pending.copySource.id), value = binding && snapshot(binding);
+          if (!value || value.value !== pending.copySource.value) return 'constraint-changed';
+        }
+        // The input event already returned. Consume the exact missing tail
+        // before invoking page code; interruption can never resend it. This
+        // path does not set a value, selection, or dispatch another input.
+        pendingChanges.delete(operationID);
+        operations.set(operationID, 'change-attempted');
+        try {
+          pending.binding.element.dispatchEvent(new Event('change', {bubbles: true}));
+          operations.set(operationID, 'dispatched');
+          return 'dispatched';
+        } catch (_) { return 'uncertain'; }
+      }
       function run(command, args) {
         // Read only the identity of this loaded Document, before inspecting
         // any form metadata/value or draining target mutation records. Root
@@ -1178,6 +1207,14 @@ enum ComputerUseBrowserDOM {
         }
         synchronize();
         if (!root || doc !== document) return reply('stale');
+        if (command === 'finishPendingChange') {
+          if (args.documentID !== documentID || args.inputLedgerID !== inputLedgerID) return reply('stale');
+          if (typeof args.operationID !== 'string' || !/^[a-f0-9]{64}$/.test(args.operationID)) return reply('unsupported');
+          // A completed receipt needs no effect. Missing/uncertain evidence
+          // never becomes permission to repeat the original input operation.
+          if (operations.get(args.operationID) === 'dispatched') return reply('dispatched');
+          return reply(finishPendingChange(args.operationID));
+        }
         if (command === 'retireUnsentInputs') {
           if (args.documentID !== documentID || args.inputLedgerID !== inputLedgerID) return reply('stale');
           const status = authenticationStatus();
@@ -1404,7 +1441,11 @@ enum ComputerUseBrowserDOM {
         if (!canRepresent(binding.element, expected)) return reply('unrepresentable');
         // The dispatcher persisted its attempt before this call. This second
         // one-use boundary also prevents a lost callback from repeating input.
-        const scalar = scalarTypes.has(binding.element.type) || choice, effectURL = doc.URL;
+        const scalar = scalarTypes.has(binding.element.type) || choice;
+        const pending = scalar ? {binding, expected, url:doc.URL, documentID, inputLedgerID,
+          requiredValues:args.requiredValues.filter(required => required.id !== args.id).map(required => ({...required})),
+          copySource:args.copySourceID !== undefined && args.copySourceID !== args.id
+            ? {id:args.copySourceID, value:args.copySourceValue} : null} : null;
         operations.set(args.operationID, 'attempted');
         try {
           if (choice) {
@@ -1416,16 +1457,13 @@ enum ComputerUseBrowserDOM {
           binding.element.dispatchEvent(scalar ? new Event('input', {bubbles: true, composed: true})
             : new InputEvent('input', {bubbles: true, composed: true, inputType: 'insertText', data: args.payload}));
           if (scalar) {
-            // This is a value commit, including the change notification used
-            // by native date/number/choice forms. An input handler may replace the
-            // field, alter its constraints or reveal login before that tail.
-            synchronize();
-            if (args.documentID !== documentID || doc.URL !== effectURL) return reply('uncertain');
-            const status = authenticationStatus();
-            if (status) return reply(status);
-            const afterInput = snapshot(binding);
-            if (!afterInput || afterInput.value !== expected) return reply('uncertain');
-            binding.element.dispatchEvent(new Event('change', {bubbles: true}));
+            // Only a returned input dispatch can retain a missing change
+            // notification. The same checks apply now and after handback.
+            pendingChanges.set(args.operationID, pending);
+            const status = finishPendingChange(args.operationID);
+            if (status === 'dispatched') return reply('attempted');
+            if (status === 'stale' || status === 'unproven') return reply('uncertain');
+            return reply(status);
           }
           operations.set(args.operationID, 'dispatched');
           return reply('attempted');
@@ -1799,6 +1837,30 @@ final class ComputerUseBrowserTextTarget {
         try validate()
         guard reply.documentID == documentID else { throw ComputerUseBrowserError.pageChanged }
         return reply.status == "dispatched"
+    }
+
+    /// Complete only an original scalar/choice change notification that the
+    /// isolated dispatcher proves has not started after a returned input
+    /// event. The caller must hold and confirm the original disk attempt.
+    /// No new payload or target can enter this path, and no input is repeated.
+    func finishPendingChange(operationID: String) async throws -> Bool {
+        try validate()
+        guard let documentID, let inputLedgerID else { throw ComputerUseBrowserError.pageChanged }
+        do {
+            let reply = try await browser.callDOM(.finishPendingChange, arguments: ["documentID":documentID,
+                "inputLedgerID":inputLedgerID, "operationID":operationID], document: document)
+            try validate()
+            guard reply.documentID == documentID, reply.inputLedgerID == inputLedgerID else { throw ComputerUseBrowserError.pageChanged }
+            if reply.status == "dispatched" { return true }
+            if reply.status == "unproven" || reply.status == "uncertain" { return false }
+            if reply.status == "constraint-changed" { throw ComputerUseTextTaskError.incompleteOutcome }
+            throw ComputerUseBrowserError.pageChanged
+        } catch {
+            // The native call may outlive cancellation/timeout. Keep the
+            // enclosing task's execution lease until its completion is known.
+            await browser.joinDOMCompletion(document: document)
+            throw error
+        }
     }
 
     /// Absence is proof only in the exact ledger retained at discovery. A
