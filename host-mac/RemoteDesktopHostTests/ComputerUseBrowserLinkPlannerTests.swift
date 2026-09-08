@@ -21,8 +21,8 @@ final class ComputerUseBrowserLinkPlannerTests: XCTestCase {
         let planner = try local(LinkFixtureTransport()), requestData = try planner.makeRequest(input)
         let body = try object(XCTUnwrap(requestData.httpBody)), messages = try XCTUnwrap(body["messages"] as? [[String: String]])
         let context = try object(Data(XCTUnwrap(messages[1]["content"]).utf8))
-        XCTAssertEqual(Set(context.keys), ["version", "goal", "page", "candidates", "navigation_history", "document_answer_source_status", "requirement_assessment", "field_review"])
-        XCTAssertEqual(context["version"] as? Int, 4)
+        XCTAssertEqual(Set(context.keys), ["version", "goal", "page", "candidates", "navigation_history", "document_answer_source_status", "requirement_assessment", "field_review", "reading_catalog", "recallable_readings", "recalled_readings"])
+        XCTAssertEqual(context["version"] as? Int, 5)
         XCTAssertTrue(context["field_review"] is NSNull)
         XCTAssertEqual(context["document_answer_source_status"] as? String, "permitted")
         let goal = try XCTUnwrap(context["goal"] as? [String: Any])
@@ -46,7 +46,7 @@ final class ComputerUseBrowserLinkPlannerTests: XCTestCase {
         XCTAssertEqual(body["max_tokens"] as? Int, 1_024); XCTAssertEqual(body["cache_prompt"] as? Bool, false)
         XCTAssertNil(body["tools"]); XCTAssertEqual(messages[0]["content"], ComputerUseLocalBrowserLinkPlanner.instructions)
         let format = try XCTUnwrap(body["response_format"] as? [String: Any]), schema = try XCTUnwrap(format["json_schema"] as? [String: Any])
-        XCTAssertEqual(schema["name"] as? String, "browser_result_link_v1")
+        XCTAssertEqual(schema["name"] as? String, "browser_result_link_v2")
     }
 
     func testLinkProposalAcceptsOnlyTheExactCandidateLinkPairOrNoSelection() async throws {

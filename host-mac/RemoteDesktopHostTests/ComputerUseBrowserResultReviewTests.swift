@@ -78,7 +78,7 @@ final class ComputerUseBrowserResultReviewTests: XCTestCase {
         }
         let (_, _, input) = try F.input(snapshot: F.page(extraTexts: 12))
         XCTAssertTrue(input.permitsOfferAssertions)
-        let nine = (1...9).map { "x\($0)" }
+        let nine = (1...9).map { "t\($0 + 4)" }
         XCTAssertThrowsError(try Review.decode(content: F.content(price: "qualified", qualifiers: nine), input: input))
         let manyFields: [[String: Any]] = [F.field("offer", "notPrice")] + (1...16).map { _ in F.field("offer", "exact") }
         XCTAssertThrowsError(try Review.decode(content: F.json(["candidates":[["association":"singleOffer", "fields":manyFields]]]), input: input))
@@ -318,7 +318,7 @@ private enum ResultReviewFixture {
         .init(id: id, texts: [
             .init(id: "t1", containerID: "g1", text: "Concert Alpha"), .init(id: "t2", containerID: "g1", text: price),
             .init(id: "t3", containerID: "g1", text: "2027-01-16"), .init(id: "t4", containerID: "g0", text: "From")]
-                + (0..<extraTexts).map { .init(id: "x\($0 + 1)", containerID: "g0", text: "Surrounding condition \($0 + 1)") },
+                + (0..<extraTexts).map { .init(id: "t\($0 + 5)", containerID: "g0", text: "Surrounding condition \($0 + 1)") },
             links: [.init(id: "l1", label: "Details", destination: destination, textIDs: ["t1"], containerID: "g1")],
             controls: [.init(id: "c1", containerID: "g0", label: "Search", kind: "text", name: "private-name", disabled: false, readOnly: false,
                 required: false, multiple: false, constraints: [:], options: [], form: nil)],

@@ -460,6 +460,7 @@ final class DriverPlanningFixture: ComputerUseBrowserResearchPlanning {
     var excludedOrigins: [ComputerUseBrowserSourceOrigin] = []
     var goals: [ComputerUseBrowserGoalInput] = []
     var histories: [[ComputerUseBrowserResearchVisit]] = []
+    var evidenceSnapshots: [ComputerUseBrowserResearchEvidence?] = []
     var beforeSelection: (@MainActor () async -> Void)?
     init(provider: ComputerUseBrowserSearchProvider) { self.provider = provider }
     func sources(for interpretation: ComputerUseBrowserResearchTask.Interpretation) throws -> ComputerUseBrowserResearchSources? {
@@ -468,8 +469,8 @@ final class DriverPlanningFixture: ComputerUseBrowserResearchPlanning {
         return try .init(goal: interpretation.proposal.input, provider: provider, allowedOrigins: allowedOrigins, excludedOrigins: excludedOrigins)
     }
     func selectLink(goal: ComputerUseBrowserGoalInput, candidates: ComputerUseBrowserResultCandidates,
-                    history: [ComputerUseBrowserResearchVisit]) async throws -> ComputerUseBrowserResearchTask.LinkChoice? {
-        goals.append(goal); histories.append(history)
+                    history: [ComputerUseBrowserResearchVisit], evidence: ComputerUseBrowserResearchEvidence? = nil) async throws -> ComputerUseBrowserResearchTask.LinkChoice? {
+        goals.append(goal); histories.append(history); evidenceSnapshots.append(evidence)
         if let beforeSelection { await beforeSelection() }
         guard !choices.isEmpty, choices.removeFirst() else { return nil }
         let candidate = try XCTUnwrap(candidates.candidates.first)

@@ -150,7 +150,7 @@ struct ComputerUseRuntimeBrowserLinkPlanner: ComputerUseBrowserLinkPlanning {
     var runtime: OSAtlasLlamaRuntime = .shared
     func propose(_ input: ComputerUseBrowserLinkSelectionInput) async throws -> ComputerUseBrowserLinkProposal {
         try Task.checkCancellation()
-        if !input.hasSelectableLinks { return try .decode(content: #"{"candidate":-1,"link":""}"#, input: input) }
+        if !input.hasPlanningChoices { return try .decode(content: #"{"candidate":-1,"link":""}"#, input: input) }
         let endpoint = try await runtime.activateNativeText(inputs)
         return try await runtime.proposeBrowserLink(endpoint: endpoint, input: input)
     }

@@ -7,7 +7,14 @@ import Foundation
 protocol ComputerUseBrowserResearchPlanning {
     func sources(for interpretation: ComputerUseBrowserResearchTask.Interpretation) throws -> ComputerUseBrowserResearchSources?
     func selectLink(goal: ComputerUseBrowserGoalInput, candidates: ComputerUseBrowserResultCandidates,
-                    history: [ComputerUseBrowserResearchVisit]) async throws -> ComputerUseBrowserResearchTask.LinkChoice?
+                    history: [ComputerUseBrowserResearchVisit], evidence: ComputerUseBrowserResearchEvidence?) async throws -> ComputerUseBrowserResearchTask.LinkChoice?
+}
+
+extension ComputerUseBrowserResearchPlanning {
+    func selectLink(goal: ComputerUseBrowserGoalInput, candidates: ComputerUseBrowserResultCandidates,
+                    history: [ComputerUseBrowserResearchVisit]) async throws -> ComputerUseBrowserResearchTask.LinkChoice? {
+        try await selectLink(goal: goal, candidates: candidates, history: history, evidence: nil)
+    }
 }
 
 /// Concrete navigation orchestration for retained research. Policy is supplied
@@ -118,6 +125,12 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
         } catch is ComputerUseBrowserResultReviewError {
             try validate(run, tools: tools)
             return .userInterventionRequired("I could not determine how this page’s details belong to individual offers. The original request is still pending. Review the page, then choose Resume to continue.")
+        } catch is ComputerUseBrowserResearchEvidenceError {
+            try validate(run, tools: tools)
+            return .userInterventionRequired("The browser could not retain another reading for this research task. Earlier findings and the original request remain pending.")
+        } catch is ComputerUseBrowserLinkPlanError {
+            try validate(run, tools: tools)
+            return .userInterventionRequired("I could not choose the next step from the complete request and available readings. Earlier findings and the original task remain pending.")
         }
     }
 
@@ -172,7 +185,7 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                 progress("Checking the pending result link…")
                 let history = run.visits
                 let result = try await owner.replanPendingCandidateNavigation(select: { [planning] goal, candidates in
-                    try await planning.selectLink(goal: goal, candidates: candidates, history: history)
+                    try await planning.selectLink(goal: goal, candidates: candidates, history: history, evidence: owner.researchEvidence(for: goal))
                 })
                 try check()
                 switch result {
@@ -213,7 +226,7 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                 progress("Reading the page against the original request…")
                 let history = run.visits
                 let choice = try await owner.planCandidateNavigation(select: { [planning] goal, candidates in
-                    try await planning.selectLink(goal: goal, candidates: candidates, history: history)
+                    try await planning.selectLink(goal: goal, candidates: candidates, history: history, evidence: owner.researchEvidence(for: goal))
                 })
                 try check()
                 guard let choice else { return selectionRequired }

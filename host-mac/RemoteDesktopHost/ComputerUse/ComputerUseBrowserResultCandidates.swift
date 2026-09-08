@@ -212,11 +212,40 @@ struct ComputerUseBrowserResultCandidates: Sendable, CustomStringConvertible, Cu
 
     var requirementAssessmentIdentity: String {
         ComputerUseTaskContract.digest(["browser-reading-assessment-v1", goalRevision, evidence.document.contextID,
-            String(evidence.document.generation), evidence.documentID, evidence.page.id, answerSourcePolicy?.digest ?? "", review?.digest ?? ""] + candidates.map(\.id))
+            String(evidence.document.generation), evidence.documentID, evidence.page.id, answerSourcePolicy?.digest ?? "", review?.digest ?? "",
+            goalInterpretation?.digest ?? ""] + candidates.map(\.id))
     }
     var requirementAssessment: ComputerUseBrowserResultAssessment? {
         guard let goalInterpretation else { return nil }
         return try? .init(interpretation: goalInterpretation, reading: self)
+    }
+
+    func validateHistoricalGoal(_ goal: ComputerUseBrowserGoalInput) throws {
+        guard rootTaskID == goal.taskID, goalRevision == goal.digest,
+              goalInterpretation?.input == goal else { throw ComputerUseBrowserResearchEvidenceError.inputChanged }
+    }
+    var historicalSessionIdentity: String { evidence.document.contextID }
+
+    /// Full original bounded reading projection with its original assessment.
+    /// Native IDs/URLs remain private. Old reference IDs are local to this
+    /// observation and cannot be used as current-page actions.
+    func historicalPlannerContext() throws -> [String: Any] {
+        ["page":try JSONSerialization.jsonObject(with: Data(readingInput.contextJSON.utf8)),
+         "candidates":candidatePlannerContext,
+         "document_answer_source_status_at_reading":documentAnswerSourceStatus.rawValue,
+         "field_review":review.map { $0.plannerContext as Any } ?? NSNull(),
+         "requirement_assessment_at_reading":requirementAssessment.map { $0.plannerContext as Any } ?? NSNull()]
+    }
+
+    fileprivate var candidatePlannerContext: [[String: Any]] {
+        candidates.enumerated().map { index, candidate in
+            ["index":index, "container":candidate.containerID,
+             "fields":candidate.fields.map { ["kind":$0.kind.rawValue, "texts":$0.textIDs] as [String: Any] },
+             "links":candidate.selectedLinkIDs,
+             "unclassified_texts":candidate.unclassifiedTextIDs.filter { readingInput.textIDs.contains($0) },
+             "unprojected_text_count":candidate.unprojectedTextIDs.count,
+             "unprojected_link_count":candidate.unprojectedLinkIDs.count]
+        }
     }
 
     fileprivate init(proposal: ComputerUseBrowserResultProposal, goal: ComputerUseBrowserGoalInput,
@@ -267,44 +296,57 @@ struct ComputerUseBrowserLinkSelectionInput: Equatable, Sendable, CustomStringCo
     private struct Choice: Equatable, Sendable { let candidateID: String; let links: [String] }
     private let choices: [Choice]
     private let bindingDigest: String
+    let recallableReadingIndices: [Int]
     let contextJSON: String
     var candidateCount: Int { choices.count }
     var selectableLinkIDs: [String] { Array(Set(choices.flatMap(\.links))).sorted() }
     var hasSelectableLinks: Bool { choices.contains { !$0.links.isEmpty } }
+    var hasPlanningChoices: Bool { hasSelectableLinks || !recallableReadingIndices.isEmpty }
 
     init(goal: ComputerUseBrowserGoalInput, candidates: ComputerUseBrowserResultCandidates,
-         history: [ComputerUseBrowserResearchVisit]) throws {
+         history: [ComputerUseBrowserResearchVisit], evidence: ComputerUseBrowserResearchEvidence? = nil,
+         recalledReadings: [Int] = []) throws {
         guard candidates.goalRevision == goal.digest, candidates.rootTaskID == goal.taskID,
               history.count <= 33, history.allSatisfy({ $0.rootDigest == goal.rootDigest }),
               Set(history.map(\.operationID)).count == history.count else {
             throw ComputerUseBrowserLinkPlanError.inputChanged
         }
+        try evidence?.validate(goal: goal, current: candidates)
+        let available = evidence?.selectableIndices(current: candidates) ?? []
+        guard recalledReadings.count <= ComputerUseBrowserResearchEvidence.maximumRecalledReadings,
+              Set(recalledReadings).count == recalledReadings.count,
+              recalledReadings.allSatisfy({ available.contains($0) }) else { throw ComputerUseBrowserLinkPlanError.inputChanged }
+        recallableReadingIndices = recalledReadings.count < ComputerUseBrowserResearchEvidence.maximumRecalledReadings
+            ? available.filter { !recalledReadings.contains($0) } : []
         choices = candidates.candidates.map { .init(candidateID: $0.id, links: $0.selectedLinkIDs) }
-        let groups: [[String: Any]] = candidates.candidates.enumerated().map { index, candidate in
-            ["index":index, "container":candidate.containerID,
-             "fields":candidate.fields.map { ["kind":$0.kind.rawValue, "texts":$0.textIDs] as [String: Any] },
-             "links":candidate.selectedLinkIDs,
-             "unclassified_texts":candidate.unclassifiedTextIDs.filter { candidates.readingInput.textIDs.contains($0) },
-             "unprojected_text_count":candidate.unprojectedTextIDs.count,
-             "unprojected_link_count":candidate.unprojectedLinkIDs.count]
-        }
         let visits: [[String: Any]] = history.enumerated().map {
             ["step":$0.offset, "kind":$0.element.kind.rawValue, "current_goal_revision":$0.element.goalRevision == goal.digest]
         }
         let assessment = candidates.requirementAssessment
-        let context: [String: Any] = ["version":4, "goal":goal.plannerContext,
+        let readingCatalog: Any
+        if let evidence { readingCatalog = try evidence.catalog(goal: goal, current: candidates) }
+        else { readingCatalog = NSNull() }
+        let recalled = try recalledReadings.map { index -> [String: Any] in
+            guard let evidence else { throw ComputerUseBrowserLinkPlanError.inputChanged }
+            return try evidence.recall(index, goal: goal)
+        }
+        let context: [String: Any] = ["version":5, "goal":goal.plannerContext,
             "page":try JSONSerialization.jsonObject(with: Data(candidates.readingInput.contextJSON.utf8)),
-            "candidates":groups, "navigation_history":visits,
+            "candidates":candidates.candidatePlannerContext, "navigation_history":visits,
+            "reading_catalog":readingCatalog,
+            "recallable_readings":recallableReadingIndices,
+            "recalled_readings":recalled,
             "document_answer_source_status":candidates.documentAnswerSourceStatus.rawValue,
             "field_review":candidates.review.map { $0.plannerContext as Any } ?? NSNull(),
             "requirement_assessment":assessment.map { $0.plannerContext as Any } ?? NSNull()]
         contextJSON = String(decoding: try JSONSerialization.data(withJSONObject: context, options: [.sortedKeys]), as: UTF8.self)
-        let evidence = candidates.evidence
+        let nativeEvidence = candidates.evidence
         bindingDigest = ComputerUseTaskContract.digest(["browser-link-selection-input-v1", goal.digest,
-            evidence.document.contextID, String(evidence.document.generation), evidence.documentID, evidence.page.id, contextJSON]
+            nativeEvidence.document.contextID, String(nativeEvidence.document.generation), nativeEvidence.documentID, nativeEvidence.page.id, contextJSON]
             + choices.flatMap { [$0.candidateID, String($0.links.count)] + $0.links }
             + (candidates.answerSourcePolicy.map { ["answer-source-policy", $0.digest] } ?? [])
             + (assessment.map { ["requirement-assessment", $0.interpretationDigest] } ?? [])
+            + (evidence.map { ["research-evidence", $0.digest] } ?? [])
             + history.flatMap { [$0.operationID, $0.goalRevision, $0.kind.rawValue] })
     }
 

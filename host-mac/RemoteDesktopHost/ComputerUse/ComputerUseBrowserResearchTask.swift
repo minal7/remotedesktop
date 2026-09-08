@@ -56,6 +56,7 @@ final class ComputerUseBrowserResearchTask {
     private var sourcePolicyInstalled = false
     private var interpretation: Interpretation?
     private var latestCandidates: ComputerUseBrowserResultCandidates?
+    private var retainedEvidence: ComputerUseBrowserResearchEvidence
     private var session: ComputerUseBrowserHandbackRequirement?
     private var handback: ComputerUseBrowserHandbackRequirement?
     private var isPaused = false
@@ -67,6 +68,13 @@ final class ComputerUseBrowserResearchTask {
     private(set) var confirmedNavigationHistory: [ComputerUseBrowserResearchVisit] = []
 
     var input: ComputerUseBrowserGoalInput { clarification.input }
+    /// Available during the serialized selector operation as well as idle.
+    /// Pause/retirement still close model access to historical page content.
+    func researchEvidence(for expected: ComputerUseBrowserGoalInput) throws -> ComputerUseBrowserResearchEvidence {
+        try checkCurrent(expected)
+        try retainedEvidence.validate(goal: expected)
+        return retainedEvidence
+    }
     /// Transport correlation advances with accepted answers; browser effects,
     /// session identity and the original goal keep taskID as their root.
     var executionTaskID: String { input.clarifications.last?.answerTaskID ?? taskID }
@@ -127,6 +135,7 @@ final class ComputerUseBrowserResearchTask {
          browserAdmission: (any ComputerUseBrowserResearchAdmitting)? = nil,
          mayAct: @escaping @MainActor () -> Bool, now: @escaping () -> Date = Date.init) {
         taskID = input.taskID; self.browser = browser; self.goalPlanner = goalPlanner; self.resultPlanner = resultPlanner
+        retainedEvidence = .init(goal: input)
         self.mayAct = mayAct; clarification = .init(input: input, now: now)
         navigationDirectory = navigationJournalDirectory; self.navigationStore = navigationStore
         self.browserAdmission = browserAdmission; requiresBrowserAdmission = browserAdmission != nil
@@ -483,6 +492,7 @@ final class ComputerUseBrowserResearchTask {
     func retire() {
         isRetired = true; controlEpoch = UUID(); latestCandidates = nil; interpretation = nil
         confirmedNavigationHistory.removeAll()
+        retainedEvidence = .init(goal: input)
         clarification.retire(); navigation?.retire(); initialSearch?.retire(); hasQuestion = false; cancelOperation?()
     }
 
@@ -586,6 +596,7 @@ final class ComputerUseBrowserResearchTask {
         // Authentication observation may inspect a manually reached page,
         // but its contents cannot enter result inference outside task scope.
         guard sourcePolicy == nil || sourcePolicyInstalled else { throw Failure.navigationUnavailable }
+        try retainedEvidence.requireCapacity()
         let evidence = try await observeOwnedPage(goal: goal, enforceSources: true)
         let page = try ComputerUseBrowserResultPageInput(page: evidence.page)
         let proposal = try await resultPlanner.propose(goal: goal, page: page)
@@ -596,6 +607,7 @@ final class ComputerUseBrowserResearchTask {
         let bound = try await browser.prepareResultCandidates(proposal, goal: goal, evidence: evidence,
             answerPolicy: answerPolicy, interpretation: interpretation.proposal)
         try checkCurrent(goal)
+        try retainedEvidence.record(bound, goal: goal)
         return bound
     }
 
