@@ -113,6 +113,7 @@ final class ComputerUseNativeTextExecutor {
     private let injector: InputInjector
     private let mayAct: () -> Bool
     private let journalDirectory: URL
+    private let makeJournalStore: (URL) throws -> ComputerUseTaskJournalStore
     private let planner: any ComputerUseTextGoalPlanning
     private let planningWorker: ComputerUsePlanningWorker
     private let planningTimeout: TimeInterval
@@ -122,6 +123,8 @@ final class ComputerUseNativeTextExecutor {
     private let clarificationLifetime: TimeInterval
     private var retainedTask: ComputerUseTextTask?
     private var retainedBrowserTarget: ComputerUseBrowserTextTarget?
+    private var retainedJournalSession: JournalSession?
+    private var activeBrowserTarget: ComputerUseBrowserTextTarget?
     private var retainedTaskOriginID: String?
     private var pendingClarification: PendingClarification?
     private var preparedClarification: PreparedClarification?
@@ -136,12 +139,14 @@ final class ComputerUseNativeTextExecutor {
          now: @escaping () -> Date = Date.init, clarificationLifetime: TimeInterval = 600,
          nativeTarget: (any ComputerUseNativeTextTarget)? = nil,
          planningWorker: ComputerUsePlanningWorker = .shared,
-         planningTimeout: TimeInterval = ComputerUsePlanningWorker.maximumWait) {
+         planningTimeout: TimeInterval = ComputerUsePlanningWorker.maximumWait,
+         makeJournalStore: @escaping (URL) throws -> ComputerUseTaskJournalStore = { try .init(directory: $0) }) {
         precondition(clarificationLifetime.isFinite && clarificationLifetime > 0 && clarificationLifetime <= 600)
         self.injector = injector
         self.target = nativeTarget ?? ComputerUseAccessibilityTextTarget()
         self.mayAct = mayAct
         self.journalDirectory = journalDirectory
+        self.makeJournalStore = makeJournalStore
         self.planner = planner
         self.planningWorker = planningWorker
         self.planningTimeout = planningTimeout
@@ -158,40 +163,50 @@ final class ComputerUseNativeTextExecutor {
         -> ComputerUseExecutionResult? {
         guard !isExecuting else { throw Failure.alreadyExecuting }
         isExecuting = true
-        defer { isExecuting = false }
-        try Task.checkCancellation()
-        guard mayAct() else { throw ComputerUseTextEditError.interrupted }
-        if preparedClarification?.taskID == taskID {
-            throw ComputerUseTextTaskError.journalMismatch
-        }
-        if let retainedTask, retainedTask.contract.taskID == taskID {
-            guard retainedTaskOriginID == nil,
-                  retainedTask.contract.promptDigest == ComputerUseTextTaskContract.digest(prompt) else {
+        defer { isExecuting = false; activeBrowserTarget = nil }
+        do {
+            try Task.checkCancellation()
+            guard mayAct() else { throw ComputerUseTextEditError.interrupted }
+            if preparedClarification?.taskID == taskID {
                 throw ComputerUseTextTaskError.journalMismatch
             }
-            return try await run(retainedTask, verifiedStep: verifiedStep, progress: progress)
+            if let retainedTask, retainedTask.contract.taskID == taskID {
+                guard retainedTaskOriginID == nil,
+                      retainedTask.contract.promptDigest == ComputerUseTextTaskContract.digest(prompt) else {
+                    throw ComputerUseTextTaskError.journalMismatch
+                }
+                return try await run(retainedTask, verifiedStep: verifiedStep, progress: progress)
+            }
+            guard try !ComputerUseTextStepStore.hasJournal(taskID: taskID, directory: journalDirectory) else {
+                throw ComputerUseTextTaskError.journalMismatch
+            }
+            let goal = try ComputerUseUnresolvedTextGoal(userRequest: prompt)
+            if let pending = pendingClarification, pending.info.taskID == taskID {
+                guard pending.originatingTaskID == nil, pending.info.goal == goal else { throw Failure.invalidClarification }
+                guard try clarification(taskID: taskID) != nil else { throw Failure.invalidClarification }
+                return .clarificationRequired(pending.info.question)
+            }
+            retainedTask = nil
+            retainedBrowserTarget = nil
+            retainedJournalSession = nil
+            retainedTaskOriginID = nil
+            invalidateClarification()
+            let browserTarget = try await browserTargetProvider?(taskID)
+            activeBrowserTarget = browserTarget
+            let fields: [ComputerUseTextField]?
+            if let browserTarget { fields = try await browserTarget.fieldsIfSupported() }
+            else { fields = target.fields() }
+            try Task.checkCancellation()
+            guard mayAct() else { throw ComputerUseTextEditError.interrupted }
+            // This decline precedes planning, contract persistence and input.
+            // Never convert a later execution/continuation error into fallback.
+            guard let fields else { return try decline(taskID: taskID) }
+            return try await planAndRun(taskID: taskID, goal: goal, originatingTaskID: nil,
+                browserTarget: browserTarget, fields: fields, verifiedStep: verifiedStep, progress: progress)
+        } catch {
+            await activeBrowserTarget?.joinCompletion()
+            throw error
         }
-        let goal = try ComputerUseUnresolvedTextGoal(userRequest: prompt)
-        if let pending = pendingClarification, pending.info.taskID == taskID {
-            guard pending.originatingTaskID == nil, pending.info.goal == goal else { throw Failure.invalidClarification }
-            guard try clarification(taskID: taskID) != nil else { throw Failure.invalidClarification }
-            return .clarificationRequired(pending.info.question)
-        }
-        retainedTask = nil
-        retainedBrowserTarget = nil
-        retainedTaskOriginID = nil
-        invalidateClarification()
-        let browserTarget = try await browserTargetProvider?(taskID)
-        let fields: [ComputerUseTextField]?
-        if let browserTarget { fields = try await browserTarget.fieldsIfSupported() }
-        else { fields = target.fields() }
-        try Task.checkCancellation()
-        guard mayAct() else { throw ComputerUseTextEditError.interrupted }
-        // This decline precedes planning, contract persistence and input.
-        // Never convert a later execution/continuation error into fallback.
-        guard let fields else { return try decline(taskID: taskID) }
-        return try await planAndRun(taskID: taskID, goal: goal, originatingTaskID: nil,
-            browserTarget: browserTarget, fields: fields, verifiedStep: verifiedStep, progress: progress)
     }
 
     /// The manager may issue a controller/session-bound reference for this
@@ -239,63 +254,73 @@ final class ComputerUseNativeTextExecutor {
         -> ComputerUseExecutionResult {
         guard !isExecuting else { throw Failure.alreadyExecuting }
         isExecuting = true
-        defer { isExecuting = false }
-        try Task.checkCancellation()
-        guard mayAct() else { throw ComputerUseTextEditError.interrupted }
-        guard !taskID.isEmpty, taskID != originatingTaskID else { throw Failure.invalidClarification }
-        if let retainedTask, retainedTask.contract.taskID == taskID {
-            guard retainedTaskOriginID == originatingTaskID,
-                  retainedTask.contract.promptDigest == ComputerUseTextTaskContract.digest(goal.taskIdentityText) else {
+        defer { isExecuting = false; activeBrowserTarget = nil }
+        do {
+            try Task.checkCancellation()
+            guard mayAct() else { throw ComputerUseTextEditError.interrupted }
+            guard !taskID.isEmpty, taskID != originatingTaskID else { throw Failure.invalidClarification }
+            if let retainedTask, retainedTask.contract.taskID == taskID {
+                guard retainedTaskOriginID == originatingTaskID,
+                      retainedTask.contract.promptDigest == ComputerUseTextTaskContract.digest(goal.taskIdentityText) else {
+                    throw ComputerUseTextTaskError.journalMismatch
+                }
+                return try await run(retainedTask, verifiedStep: verifiedStep, progress: progress)
+            }
+            guard try !ComputerUseTextStepStore.hasJournal(taskID: taskID, directory: journalDirectory) else {
                 throw ComputerUseTextTaskError.journalMismatch
             }
-            return try await run(retainedTask, verifiedStep: verifiedStep, progress: progress)
-        }
-        if let pending = pendingClarification, pending.info.taskID == taskID {
-            guard pending.originatingTaskID == originatingTaskID, pending.info.goal == goal else { throw Failure.invalidClarification }
-            guard try clarification(taskID: taskID) != nil else { throw Failure.invalidClarification }
-            return .clarificationRequired(pending.info.question)
-        }
-        if preparedClarification == nil {
-            guard let pending = pendingClarification, pending.info.taskID == originatingTaskID,
-              let answer = goal.userTurns.last,
-              try pending.info.goal.answering(pending.info.question, with: answer) == goal else { throw Failure.invalidClarification }
-            guard try clarification(taskID: originatingTaskID) != nil else { throw Failure.invalidClarification }
-            // Consume and retain ownership before any suspension. Only this
-            // exact answer task may resume the observation or planning stage.
-            invalidateClarification()
-            retainedTask = nil
-            retainedBrowserTarget = nil
-            retainedTaskOriginID = nil
-            let next = try pending.form.transfer(taskID: taskID)
-            let nonce = UUID()
-            preparedClarification = PreparedClarification(taskID: taskID, originatingTaskID: originatingTaskID,
-                goal: goal, form: next, scope: pending.info.scope, expiresAt: pending.info.expiresAt, expiryNonce: nonce)
-            expireClarification(at: pending.info.expiresAt, nonce: nonce)
-        }
-        guard let prepared = preparedClarification, prepared.taskID == taskID,
-              prepared.originatingTaskID == originatingTaskID, prepared.goal == goal else { throw Failure.invalidClarification }
-        do {
-            guard now() < prepared.expiresAt,
-                  try prepared.form.scope() == prepared.scope,
-                  now() < prepared.expiresAt else { throw Failure.invalidClarification }
-            let fields = try await prepared.form.reobserve()
-            guard preparedClarification?.expiryNonce == prepared.expiryNonce,
-                  now() < prepared.expiresAt else { throw Failure.invalidClarification }
-            let result = try await planAndRun(taskID: taskID, goal: goal, originatingTaskID: originatingTaskID,
-                browserTarget: prepared.form.browserTarget, fields: fields, verifiedStep: verifiedStep, progress: progress)
-                ?? .unableToComplete("I couldn't resolve this form edit from your answer. Start a new request with the field and exact text.")
-            // A newly issued question has its own expiry and must survive.
-            if preparedClarification?.expiryNonce == prepared.expiryNonce {
-                invalidateClarification(taskID: taskID)
+            if let pending = pendingClarification, pending.info.taskID == taskID {
+                guard pending.originatingTaskID == originatingTaskID, pending.info.goal == goal else { throw Failure.invalidClarification }
+                guard try clarification(taskID: taskID) != nil else { throw Failure.invalidClarification }
+                return .clarificationRequired(pending.info.question)
             }
-            return result
+            if preparedClarification == nil {
+                guard let pending = pendingClarification, pending.info.taskID == originatingTaskID,
+                  let answer = goal.userTurns.last,
+                  try pending.info.goal.answering(pending.info.question, with: answer) == goal else { throw Failure.invalidClarification }
+                guard try clarification(taskID: originatingTaskID) != nil else { throw Failure.invalidClarification }
+                // Consume and retain ownership before any suspension. Only this
+                // exact answer task may resume the observation or planning stage.
+                invalidateClarification()
+                retainedTask = nil
+                retainedBrowserTarget = nil
+                retainedJournalSession = nil
+                retainedTaskOriginID = nil
+                let next = try pending.form.transfer(taskID: taskID)
+                let nonce = UUID()
+                preparedClarification = PreparedClarification(taskID: taskID, originatingTaskID: originatingTaskID,
+                    goal: goal, form: next, scope: pending.info.scope, expiresAt: pending.info.expiresAt, expiryNonce: nonce)
+                expireClarification(at: pending.info.expiresAt, nonce: nonce)
+            }
+            guard let prepared = preparedClarification, prepared.taskID == taskID,
+                  prepared.originatingTaskID == originatingTaskID, prepared.goal == goal else { throw Failure.invalidClarification }
+            activeBrowserTarget = prepared.form.browserTarget
+            do {
+                guard now() < prepared.expiresAt,
+                      try prepared.form.scope() == prepared.scope,
+                      now() < prepared.expiresAt else { throw Failure.invalidClarification }
+                let fields = try await prepared.form.reobserve()
+                guard preparedClarification?.expiryNonce == prepared.expiryNonce,
+                      now() < prepared.expiresAt else { throw Failure.invalidClarification }
+                let result = try await planAndRun(taskID: taskID, goal: goal, originatingTaskID: originatingTaskID,
+                    browserTarget: prepared.form.browserTarget, fields: fields, verifiedStep: verifiedStep, progress: progress)
+                    ?? .unableToComplete("I couldn't resolve this form edit from your answer. Start a new request with the field and exact text.")
+                // A newly issued question has its own expiry and must survive.
+                if preparedClarification?.expiryNonce == prepared.expiryNonce {
+                    invalidateClarification(taskID: taskID)
+                }
+                return result
+            } catch {
+                let planningFailure = error as? ComputerUsePlanningWorker.Failure
+                let mayRetryPlanning = planningFailure == .busy || planningFailure == .timedOut
+                if !(error is CancellationError) && error as? ComputerUseTextEditError != .interrupted
+                    && error as? ComputerUseBrowserError != .authenticationRequired && !mayRetryPlanning {
+                    invalidateClarification(taskID: taskID)
+                }
+                throw error
+            }
         } catch {
-            let planningFailure = error as? ComputerUsePlanningWorker.Failure
-            let mayRetryPlanning = planningFailure == .busy || planningFailure == .timedOut
-            if !(error is CancellationError) && error as? ComputerUseTextEditError != .interrupted
-                && error as? ComputerUseBrowserError != .authenticationRequired && !mayRetryPlanning {
-                invalidateClarification(taskID: taskID)
-            }
+            await activeBrowserTarget?.joinCompletion()
             throw error
         }
     }
@@ -305,7 +330,7 @@ final class ComputerUseNativeTextExecutor {
                             verifiedStep: (Int, Int) -> Void, progress: (String) -> Void) async throws
         -> ComputerUseExecutionResult? {
         let read: (String) async throws -> ComputerUseTextSnapshot? = { [target] id in
-            if let browserTarget { return try await browserTarget.read(targetID: id) }
+            if let browserTarget { return try await browserTarget.joiningCompletion { try await browserTarget.read(targetID: id) } }
             return target.snapshot(targetID: id)
         }
         guard !fields.isEmpty else { return try decline(taskID: taskID) }
@@ -390,35 +415,33 @@ final class ComputerUseNativeTextExecutor {
                   try prepared.form.scope() == prepared.scope,
                   now() < prepared.expiresAt else { throw Failure.invalidClarification }
         }
-        let store = try ComputerUseTextStepStore(directory: journalDirectory)
-        var persistedJournal = try store.load(taskID: taskID)
-        let task = try ComputerUseTextTask(contract: contract, recovered: persistedJournal,
+        let session = JournalSession(directory: journalDirectory, makeStore: makeJournalStore)
+        let task = try ComputerUseTextTask(contract: contract,
             read: read,
             apply: { _, _ in throw ComputerUseTextTaskError.invalidPlan },
             applyWithIdentity: { [weak self] dispatch in
                 guard let self else { throw CancellationError() }
-                if let browserTarget { try await browserTarget.apply(dispatch) }
+                if let browserTarget { try await browserTarget.joiningCompletion { try await browserTarget.apply(dispatch) } }
                 else if let editOverride { try await editOverride(dispatch.edit, dispatch.expected) }
                 else { try await apply(dispatch) }
             },
             didDispatchInput: browserTarget.map { target in
-                { operationID in try await target.didDispatchInput(operationID: operationID) }
+                { operationID in try await target.joiningCompletion { try await target.didDispatchInput(operationID: operationID) } }
             },
             finishPendingInput: browserTarget.map { target in
                 { operationID in
-                    guard let persistedJournal else { throw ComputerUseTextTaskError.journalMismatch }
-                    try store.confirmPendingAttempt(persistedJournal)
+                    try session.confirmPendingAttempt()
                     _ = try await target.finishPendingChange(operationID: operationID)
                 }
             },
             persist: { journal in
-                try store.save(journal, replacing: persistedJournal)
-                persistedJournal = journal
+                try session.save(journal)
             }, acquireExecutionLease: {
-                try store.acquireExecution(taskID: taskID, expected: persistedJournal)
-            }, mayAct: mayAct)
+                try session.acquire(taskID: taskID)
+            }, reloadJournal: { try session.loadedJournal() }, mayAct: mayAct)
         retainedTask = task
         retainedBrowserTarget = browserTarget
+        retainedJournalSession = session
         retainedTaskOriginID = originatingTaskID
         invalidateClarification(taskID: taskID)
         return try await run(task, verifiedStep: verifiedStep, progress: progress)
@@ -432,15 +455,21 @@ final class ComputerUseNativeTextExecutor {
         try Task.checkCancellation()
         guard mayAct() else { throw ComputerUseTextEditError.interrupted }
         guard !isExecuting else { throw Failure.alreadyExecuting }
-        guard let retainedTask, retainedTask.contract.taskID == taskID,
-              retainedTask.contract.promptDigest == promptDigest, let retainedBrowserTarget else {
-            throw ComputerUseBrowserError.formQueryUnavailable
-        }
-        let continuation = try retainedTask.verifiedContinuation()
         isExecuting = true
         defer { isExecuting = false }
-        let result = try await retainedBrowserTarget.prepareFormQuery(controlID: controlID, evidence: evidence, after: continuation)
+        guard let retainedTask, retainedTask.contract.taskID == taskID,
+              retainedTask.contract.promptDigest == promptDigest, let retainedBrowserTarget, let retainedJournalSession else {
+            throw ComputerUseBrowserError.formQueryUnavailable
+        }
+        let lease = try retainedJournalSession.acquire(taskID: taskID)
+        defer { lease.release() }
+        guard try retainedJournalSession.loadedJournal() == retainedTask.journal else { throw ComputerUseBrowserError.formQueryUnavailable }
+        let continuation = try retainedTask.verifiedContinuation()
+        let result = try await retainedBrowserTarget.joiningCompletion {
+            try await retainedBrowserTarget.prepareFormQuery(controlID: controlID, evidence: evidence, after: continuation)
+        }
         try Task.checkCancellation()
+        try lease.assertOwnership()
         guard mayAct() else { throw ComputerUseTextEditError.interrupted }
         return result
     }
@@ -459,6 +488,7 @@ final class ComputerUseNativeTextExecutor {
     private func run(_ task: ComputerUseTextTask, verifiedStep: (Int, Int) -> Void,
                      progress: (String) -> Void) async throws
         -> ComputerUseExecutionResult {
+        activeBrowserTarget = retainedBrowserTarget
         let includesChoice = task.contract.steps.contains(where: \.isChoiceSelection)
         try await task.run { complete, total in
             progress("Verified \(includesChoice ? "form change" : "text edit") \(complete) of \(total)…")
@@ -467,6 +497,71 @@ final class ComputerUseNativeTextExecutor {
         // Keep the completed task for same-ID replay within this executor; the
         // host's outer durable task ledger also retains the terminal outcome.
         return .completed("Done. I verified all \(task.contract.steps.count) requested \(includesChoice ? "form changes" : "text edits").")
+    }
+
+    /// One fresh store per run, while the immutable task and its in-memory
+    /// delivery evidence remain retained. A failed store is never reused.
+    private final class JournalSession {
+        private struct Context {
+            let token: UUID
+            let store: ComputerUseTaskJournalStore
+            var journal: ComputerUseTaskJournal?
+        }
+        private let lock = NSLock()
+        private let directory: URL
+        private let makeStore: (URL) throws -> ComputerUseTaskJournalStore
+        private var context: Context?
+        private var hasAcquired = false
+        init(directory: URL, makeStore: @escaping (URL) throws -> ComputerUseTaskJournalStore) {
+            self.directory = directory; self.makeStore = makeStore
+        }
+        func acquire(taskID: String) throws -> any ComputerUseTaskExecutionLease {
+            try lock.withLock {
+                guard context == nil else { throw ComputerUseTaskJournalStore.StoreError.busy }
+                let store = try makeStore(directory), journal = try store.load(taskID: taskID)
+                // A newly planned task cannot adopt a journal that appeared
+                // while planning. Only this retained session can recover it.
+                guard hasAcquired || journal == nil else { throw ComputerUseTextTaskError.journalMismatch }
+                let lease = try store.acquireExecution(taskID: taskID, expected: journal), token = UUID()
+                do { if let journal { try store.confirmRecoveredProgress(journal) } }
+                catch { lease.release(); throw error }
+                context = Context(token: token, store: store, journal: journal)
+                hasAcquired = true
+                return Lease(session: self, token: token, underlying: lease)
+            }
+        }
+        func loadedJournal() throws -> ComputerUseTaskJournal? {
+            try lock.withLock {
+                guard let context else { throw ComputerUseTaskJournalStore.StoreError.unavailable }
+                return context.journal
+            }
+        }
+        func save(_ journal: ComputerUseTaskJournal) throws {
+            try lock.withLock {
+                guard var context else { throw ComputerUseTaskJournalStore.StoreError.unavailable }
+                try context.store.save(journal, replacing: context.journal)
+                context.journal = journal
+                self.context = context
+            }
+        }
+        func confirmPendingAttempt() throws {
+            try lock.withLock {
+                guard let context, let journal = context.journal else { throw ComputerUseTextTaskError.journalMismatch }
+                try context.store.confirmPendingAttempt(journal)
+            }
+        }
+        private func finish(_ token: UUID) { lock.withLock { if context?.token == token { context = nil } } }
+        private final class Lease: ComputerUseTaskExecutionLease {
+            private let session: JournalSession
+            private let token: UUID
+            private let underlying: any ComputerUseTaskExecutionLease
+            init(session: JournalSession, token: UUID, underlying: any ComputerUseTaskExecutionLease) {
+                self.session = session; self.token = token; self.underlying = underlying
+            }
+            func assertOwnership() throws { try underlying.assertOwnership() }
+            func release() { underlying.release(); session.finish(token) }
+            deinit { release() }
+        }
     }
 
     private func apply(_ dispatch: ComputerUseTextInputDispatch) async throws {

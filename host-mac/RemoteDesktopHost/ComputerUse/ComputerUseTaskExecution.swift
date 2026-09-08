@@ -169,6 +169,7 @@ final class ComputerUseTaskExecution {
     private let persist: (ComputerUseTaskJournal) throws -> Void
     private let assertOwnership: () throws -> Void
     private let acquireExecutionLease: (() throws -> any ComputerUseTaskExecutionLease)?
+    private let reloadJournal: (() throws -> ComputerUseTaskJournal?)?
     private var executionLease: (any ComputerUseTaskExecutionLease)?
     private var isExecuting = false
 
@@ -178,6 +179,7 @@ final class ComputerUseTaskExecution {
          persist: @escaping (ComputerUseTaskJournal) throws -> Void,
          finishPendingEffect: ((ComputerUseTaskContract.Step, String) async throws -> Void)? = nil,
          acquireExecutionLease: (() throws -> any ComputerUseTaskExecutionLease)? = nil,
+         reloadJournal: (() throws -> ComputerUseTaskJournal?)? = nil,
          assertOwnership: @escaping () throws -> Void) throws {
         self.contract = contract
         let initial = ComputerUseTaskJournal(taskID: contract.taskID, promptDigest: contract.promptDigest,
@@ -206,6 +208,7 @@ final class ComputerUseTaskExecution {
         self.persist = persist
         self.assertOwnership = assertOwnership
         self.acquireExecutionLease = acquireExecutionLease
+        self.reloadJournal = reloadJournal
     }
 
     func run(progress: (Int, Int) -> Void = { _, _ in }) async throws {
@@ -219,6 +222,11 @@ final class ComputerUseTaskExecution {
         try checkOwnership()
         executionLease = try acquireExecutionLease?()
         try checkOwnership()
+        if let reloadJournal {
+            guard executionLease != nil else { throw ComputerUseTaskExecutionError.journalMismatch }
+            try adoptSavedProgress(reloadJournal())
+            try checkOwnership()
+        }
         for (index, step) in contract.steps.enumerated() {
             await Task.yield()
             try checkOwnership()
@@ -271,6 +279,31 @@ final class ComputerUseTaskExecution {
             guard try await satisfies(predicate) else { throw ComputerUseTaskExecutionError.incompleteOutcome(predicate) }
         }
         try checkOwnership()
+    }
+
+    /// A failed write may have advanced disk without advancing this runner.
+    /// Reload only under execution exclusion; preserve every acknowledged
+    /// state and the existing capability's native/local delivery evidence.
+    private func adoptSavedProgress(_ saved: ComputerUseTaskJournal?) throws {
+        guard let saved else {
+            guard journal.statuses.allSatisfy({ $0 == .planned }) else { throw ComputerUseTaskExecutionError.journalMismatch }
+            return
+        }
+        guard saved.retirementDigest == nil, saved.retainedPrefixCount == nil,
+              saved.taskID == journal.taskID, saved.promptDigest == journal.promptDigest,
+              saved.contractDigest == journal.contractDigest, saved.stepIDs == journal.stepIDs,
+              saved.statuses.count == journal.statuses.count else { throw ComputerUseTaskExecutionError.journalMismatch }
+        var sawUnverified = false
+        for (old, current) in zip(journal.statuses, saved.statuses) {
+            if sawUnverified && current != .planned { throw ComputerUseTaskExecutionError.journalMismatch }
+            if current != .verified { sawUnverified = true }
+            switch (old, current) {
+            case (.planned, _), (.attempted, .attempted), (.attempted, .uncertain), (.attempted, .verified),
+                 (.uncertain, .uncertain), (.uncertain, .verified), (.verified, .verified): break
+            default: throw ComputerUseTaskExecutionError.journalMismatch
+            }
+        }
+        journal = saved
     }
 
     private func checkOwnership() throws {

@@ -184,6 +184,16 @@ final class ComputerUseTaskJournalStore {
         guard Self.isValid(expected), expected.retirementDigest == nil, expected.retainedPrefixCount == nil,
               let status = expected.statuses.first(where: { $0 != .verified }),
               status == .attempted || status == .uncertain else { throw StoreError.invalidTransition }
+        try confirmRecoveredProgress(expected)
+    }
+
+    /// Reopening a visible replacement does not establish that its directory
+    /// entry was committed. Confirm exact unretired progress under this store's
+    /// execution lease before using it for recovery or reporting completion.
+    func confirmRecoveredProgress(_ expected: ComputerUseTaskJournal) throws {
+        guard Self.isValid(expected), expected.retirementDigest == nil, expected.retainedPrefixCount == nil else {
+            throw StoreError.invalidTransition
+        }
         try withJournalLock(taskID: expected.taskID, exclusive: true) {
             let name = ComputerUseTextTaskContract.digest(expected.taskID) + ".execution.lock"
             guard let owner = executionOwners[name]?.value, owner.isActive else { throw StoreError.busy }

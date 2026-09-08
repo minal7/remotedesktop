@@ -81,6 +81,7 @@
 		593B28FCDBB1AF3DF17C8F38 /* ComputerUseBrowserNoInputRecoveryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA37F8562E65CE03FA524DD0 /* ComputerUseBrowserNoInputRecoveryTests.swift */; };
 		806AACC5D72183F4ED6289B1 /* ComputerUseBrowserFormPrefixTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 67697AB5AF759DED764EA9E9 /* ComputerUseBrowserFormPrefixTests.swift */; };
 		E23E38809E36519336A0FB52 /* ComputerUseBrowserPendingChangeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 85BE5859A5AF434A21B36F30 /* ComputerUseBrowserPendingChangeTests.swift */; };
+		E6166DDEA28C626F08C98E43 /* ComputerUseNativeTextRecoveryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE534B30D55E59C766C9DE67 /* ComputerUseNativeTextRecoveryTests.swift */; };
 		629A0396CD7885D9AE9BEB37 /* ComputerUseBrowserClarificationTransportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E121F3A554A2033351C7109C /* ComputerUseBrowserClarificationTransportTests.swift */; };
 		07B63BDC0027C619C0000758 /* ComputerUseBrowserResearchTaskTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5556658314C3928FFF104419 /* ComputerUseBrowserResearchTaskTests.swift */; };
 		55919820E18778F26517C0F0 /* ComputerUseBrowserResultPlannerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61CBA82F086AB02B6DC09665 /* ComputerUseBrowserResultPlannerTests.swift */; };
@@ -423,6 +424,7 @@
 		FA37F8562E65CE03FA524DD0 /* ComputerUseBrowserNoInputRecoveryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseBrowserNoInputRecoveryTests.swift; sourceTree = "<group>"; };
 		67697AB5AF759DED764EA9E9 /* ComputerUseBrowserFormPrefixTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseBrowserFormPrefixTests.swift; sourceTree = "<group>"; };
 		85BE5859A5AF434A21B36F30 /* ComputerUseBrowserPendingChangeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseBrowserPendingChangeTests.swift; sourceTree = "<group>"; };
+		DE534B30D55E59C766C9DE67 /* ComputerUseNativeTextRecoveryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseNativeTextRecoveryTests.swift; sourceTree = "<group>"; };
 		E121F3A554A2033351C7109C /* ComputerUseBrowserClarificationTransportTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseBrowserClarificationTransportTests.swift; sourceTree = "<group>"; };
 		5556658314C3928FFF104419 /* ComputerUseBrowserResearchTaskTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseBrowserResearchTaskTests.swift; sourceTree = "<group>"; };
 		61CBA82F086AB02B6DC09665 /* ComputerUseBrowserResultPlannerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseBrowserResultPlannerTests.swift; sourceTree = "<group>"; };
@@ -591,6 +593,7 @@
 				FA37F8562E65CE03FA524DD0 /* ComputerUseBrowserNoInputRecoveryTests.swift */,
 				67697AB5AF759DED764EA9E9 /* ComputerUseBrowserFormPrefixTests.swift */,
 				85BE5859A5AF434A21B36F30 /* ComputerUseBrowserPendingChangeTests.swift */,
+				DE534B30D55E59C766C9DE67 /* ComputerUseNativeTextRecoveryTests.swift */,
 				E121F3A554A2033351C7109C /* ComputerUseBrowserClarificationTransportTests.swift */,
 				5556658314C3928FFF104419 /* ComputerUseBrowserResearchTaskTests.swift */,
 				61CBA82F086AB02B6DC09665 /* ComputerUseBrowserResultPlannerTests.swift */,
@@ -980,6 +983,7 @@
 				593B28FCDBB1AF3DF17C8F38 /* ComputerUseBrowserNoInputRecoveryTests.swift in Sources */,
 				806AACC5D72183F4ED6289B1 /* ComputerUseBrowserFormPrefixTests.swift in Sources */,
 				E23E38809E36519336A0FB52 /* ComputerUseBrowserPendingChangeTests.swift in Sources */,
+				E6166DDEA28C626F08C98E43 /* ComputerUseNativeTextRecoveryTests.swift in Sources */,
 				629A0396CD7885D9AE9BEB37 /* ComputerUseBrowserClarificationTransportTests.swift in Sources */,
 				07B63BDC0027C619C0000758 /* ComputerUseBrowserResearchTaskTests.swift in Sources */,
 				55919820E18778F26517C0F0 /* ComputerUseBrowserResultPlannerTests.swift in Sources */,

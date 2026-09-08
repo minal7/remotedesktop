@@ -1839,6 +1839,18 @@ final class ComputerUseBrowserTextTarget {
         return reply.status == "dispatched"
     }
 
+    /// Keep a caller's exclusion until an already-dispatched DOM call has
+    /// completed, even when its Swift await returns cancellation or timeout.
+    func joiningCompletion<Value>(_ operation: () async throws -> Value) async throws -> Value {
+        do { return try await operation() }
+        catch {
+            await joinCompletion()
+            throw error
+        }
+    }
+
+    func joinCompletion() async { await browser.joinDOMCompletion(document: document) }
+
     /// Complete only an original scalar/choice change notification that the
     /// isolated dispatcher proves has not started after a returned input
     /// event. The caller must hold and confirm the original disk attempt.

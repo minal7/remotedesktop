@@ -6,6 +6,129 @@ import XCTest
 final class ComputerUseBrowserPendingChangeTests: XCTestCase {
     private let prompt = "Find concerts in Paris. Leave Reference unchanged. Do not buy."
 
+    func testCurrentFormReopensFailedTailVerificationAndPreparesQueryOnlyFromReconciledHistory() async throws {
+        let fixture = try await make()
+        defer { fixture.close() }
+        let directory = fixture.directory.appendingPathComponent("Native Recovery"), planner = PendingChangeTextPlanner()
+        let taskID = ResearchDriverFixture.root
+        var writes = 0, stores = 0
+        let executor = ComputerUseNativeTextExecutor(injector: InputInjector(), mayAct: { true }, journalDirectory: directory,
+            planner: planner, browserTargetProvider: { taskID in
+                ComputerUseBrowserTextTarget(browser: fixture.browser,
+                    document: try fixture.browser.acquireCurrentDocument(taskID: taskID), requiresFrontmost: false)
+            }, makeJournalStore: { directory in
+                stores += 1
+                return try ComputerUseTaskJournalStore(directory: directory, afterReplacement: {
+                    try MainActor.assumeIsolated {
+                        writes += 1
+                        if writes == 3 { throw ComputerUseTaskJournalStore.StoreError.unavailable }
+                    }
+                })
+            })
+        do { _ = try await executor.execute(taskID: taskID, prompt: prompt, progress: { _ in }); XCTFail("Login interrupts input") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .authenticationRequired) }
+        try await wait { fixture.server.count("/signal") == 1 }
+        let before = try XCTUnwrap(ComputerUseTaskJournalStore(directory: directory).load(taskID: taskID))
+        try await clearLogin(fixture)
+        do { _ = try await executor.execute(taskID: taskID, prompt: prompt, progress: { _ in }); XCTFail("Tail verification commit failed") }
+        catch { XCTAssertEqual(error as? ComputerUseTaskJournalStore.StoreError, .unavailable) }
+        let document = try fixture.browser.acquireCurrentDocument(taskID: taskID)
+        let page = try await fixture.browser.observePage(document: document)
+        let button = try XCTUnwrap(page.page.controls.first { $0.label == "Search" })
+        do { _ = try await executor.prepareFormQuery(taskID: taskID, promptDigest: before.promptDigest, controlID: button.id, evidence: page)
+            XCTFail("Unreconciled progress cannot prepare a query") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .formQueryUnavailable) }
+        let result = try await executor.execute(taskID: taskID, prompt: prompt, progress: { _ in })
+        guard case .completed? = result else { return XCTFail("Original task must continue after fresh storage recovery") }
+        try await wait { fixture.server.count("/category-change") == 1 && fixture.server.count("/city-input") == 1 }
+        let after = try XCTUnwrap(ComputerUseTaskJournalStore(directory: directory).load(taskID: taskID))
+        XCTAssertEqual(after.stepIDs, before.stepIDs); XCTAssertEqual(after.statuses, [.verified, .verified])
+        let freshPage = try await fixture.browser.observePage(document: document)
+        let freshButton = try XCTUnwrap(freshPage.page.controls.first { $0.label == "Search" })
+        var excluded = false
+        fixture.state.onCommand = { command in
+            guard command == .prepareFormQuery else { return }
+            fixture.state.onCommand = nil
+            let other = try? ComputerUseTaskJournalStore(directory: directory)
+            do { let lease = try other?.acquireExecution(taskID: taskID, expected: after)
+                lease?.release(); XCTFail("Query preparation must retain the current journal lease") }
+            catch { excluded = error as? ComputerUseTaskJournalStore.StoreError == .busy }
+        }
+        _ = try await executor.prepareFormQuery(taskID: taskID, promptDigest: after.promptDigest, controlID: freshButton.id, evidence: freshPage)
+        XCTAssertTrue(excluded); XCTAssertEqual(stores, 5); XCTAssertEqual(planner.calls, 1)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 2)
+        XCTAssertEqual(fixture.server.count("/category-input"), 1); XCTAssertEqual(fixture.server.count("/category-change"), 1)
+        XCTAssertEqual(fixture.server.count("/filtered?category=concerts&city=Paris"), 0)
+    }
+
+    func testCurrentFormCancellationJoinsNativeObservationInputReceiptAndQueryBeforeReturning() async throws {
+        for boundary in ["fields", "preflight", "read", "edit", "receipt", "prepareFormQuery"] {
+            let fixture = try await make(login: false)
+            defer { fixture.close() }
+            let taskID = ResearchDriverFixture.root, directory = fixture.directory.appendingPathComponent("Native Cancellation")
+            let planner = PendingChangeTextPlanner()
+            let executor = ComputerUseNativeTextExecutor(injector: InputInjector(), mayAct: { true }, journalDirectory: directory,
+                planner: planner, browserTargetProvider: { taskID in
+                    ComputerUseBrowserTextTarget(browser: fixture.browser,
+                        document: try fixture.browser.acquireCurrentDocument(taskID: taskID), requiresFrontmost: false)
+                })
+            var cancel: (() -> Void)?, interrupted = false, excluded = false
+            fixture.state.onCommand = { command in
+                guard command.rawValue == boundary else { return }
+                if boundary == "read", (try? ComputerUseTextStepStore.hasJournal(taskID: taskID, directory: directory)) != true { return }
+                interrupted = true; fixture.state.onCommand = nil
+                if ["read", "edit", "receipt", "prepareFormQuery"].contains(boundary) {
+                    do {
+                        let other = try ComputerUseTaskJournalStore(directory: directory)
+                        let saved = try other.load(taskID: taskID), lease = try other.acquireExecution(taskID: taskID, expected: saved)
+                        lease.release(); XCTFail("The dispatch callback must still own its journal")
+                    } catch { excluded = error as? ComputerUseTaskJournalStore.StoreError == .busy }
+                }
+                cancel?()
+            }
+            if boundary == "prepareFormQuery" {
+                _ = try await executor.execute(taskID: taskID, prompt: prompt, progress: { _ in })
+                let document = try fixture.browser.acquireCurrentDocument(taskID: taskID)
+                let page = try await fixture.browser.observePage(document: document)
+                let button = try XCTUnwrap(page.page.controls.first { $0.label == "Search" })
+                let running = Task { try await executor.prepareFormQuery(taskID: taskID,
+                    promptDigest: ComputerUseTextTaskContract.digest(self.prompt), controlID: button.id, evidence: page) }
+                cancel = { running.cancel() }
+                do { _ = try await running.value; XCTFail("Cancelled preparation cannot return authority") }
+                catch { XCTAssertTrue(error is CancellationError) }
+            } else {
+                let running = Task { try await executor.execute(taskID: taskID, prompt: self.prompt, progress: { _ in }) }
+                cancel = { running.cancel() }
+                do { _ = try await running.value; XCTFail("Cancelled execution cannot report completion") }
+                catch { XCTAssertTrue(error is CancellationError) }
+            }
+            cancel = nil
+            XCTAssertTrue(interrupted, boundary)
+            if ["read", "edit", "receipt", "prepareFormQuery"].contains(boundary) { XCTAssertTrue(excluded, boundary) }
+            // Acquiring the document refuses while any native DOM call is
+            // pending. The cancelled public call must join that callback first.
+            _ = try fixture.browser.acquireCurrentDocument(taskID: taskID)
+            let other = try ComputerUseTaskJournalStore(directory: directory), saved = try other.load(taskID: taskID)
+            let lease = try other.acquireExecution(taskID: taskID, expected: saved); lease.release()
+            if boundary == "read" {
+                // This read follows the durable attempt but precedes input.
+                // The general current-form runner cannot retire that attempt
+                // from native absence yet, so Resume must withhold replay.
+                do { _ = try await executor.execute(taskID: taskID, prompt: prompt, progress: { _ in }); XCTFail("No receipt for this attempt") }
+                catch { XCTAssertEqual(error as? ComputerUseTextTaskError, .uncertainEffect) }
+                XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 0)
+                XCTAssertEqual(planner.calls, 1)
+                continue
+            }
+            _ = try await executor.execute(taskID: taskID, prompt: prompt, progress: { _ in })
+            try await wait { fixture.server.count("/category-input") == 1 && fixture.server.count("/city-input") == 1
+                && fixture.server.count("/category-change") == 1 }
+            XCTAssertEqual(fixture.server.count("/category-change"), 1)
+            XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 2)
+            XCTAssertEqual(planner.calls, boundary == "preflight" ? 2 : 1)
+        }
+    }
+
     func testResearchDriverCompletesOnlyTheMissingChangeEventAfterExplicitLoginHandback() async throws {
         let fixture = try await pending()
         defer { fixture.close() }

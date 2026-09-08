@@ -271,6 +271,7 @@ final class ComputerUseTextTask {
          finishPendingInput: ((String) async throws -> Void)? = nil,
          persist: @escaping (ComputerUseTextStepJournal) throws -> Void,
          acquireExecutionLease: (() throws -> any ComputerUseTaskExecutionLease)? = nil,
+         reloadJournal: (() throws -> ComputerUseTextStepJournal?)? = nil,
          mayAct: @escaping () -> Bool) throws {
         self.contract = contract
         var predicates: [ComputerUseTaskContract.Predicate] = []
@@ -339,13 +340,7 @@ final class ComputerUseTextTask {
         self.retainedPredicateIDs = retained
         var recoveredExecution: ComputerUseTaskJournal?
         if let recovered {
-            guard recovered.retirementDigest == nil, recovered.retainedPrefixCount == nil,
-                  recovered.taskID == contract.taskID, recovered.promptDigest == contract.promptDigest,
-                  recovered.contractDigest == contract.contractDigest, recovered.stepIDs == contract.steps.map(\.id) else {
-                throw ComputerUseTextTaskError.journalMismatch
-            }
-            recoveredExecution = ComputerUseTaskJournal(taskID: recovered.taskID, promptDigest: recovered.promptDigest,
-                contractDigest: compiled.contractDigest, stepIDs: recovered.stepIDs, statuses: recovered.statuses)
+            recoveredExecution = try Self.executionJournal(recovered, contract: contract, compiled: compiled)
         }
         let compiledChecks = checks
         let edits = Dictionary(uniqueKeysWithValues: contract.steps.map { ($0.id, $0) })
@@ -409,6 +404,9 @@ final class ComputerUseTextTask {
                 }, persist: { try persist(Self.textJournal($0, contract: contract)) },
                 finishPendingEffect: finishPendingInput.map { finish in { _, operationID in try await finish(operationID) } },
                 acquireExecutionLease: acquireExecutionLease,
+                reloadJournal: reloadJournal.map { reload in
+                    { try reload().map { try Self.executionJournal($0, contract: contract, compiled: compiled) } }
+                },
                 assertOwnership: { guard mayAct() else { throw ComputerUseTextEditError.interrupted } })
         } catch ComputerUseTaskExecutionError.journalMismatch {
             throw ComputerUseTextTaskError.journalMismatch
@@ -451,6 +449,17 @@ final class ComputerUseTextTask {
         guard count > 0, count < contract.steps.count else { return nil }
         guard !journal.statuses.dropFirst(count).contains(.verified) else { throw ComputerUseTextTaskError.journalMismatch }
         return .init(contract: contract, inputOperationIDs: Array(inputOperationIDs.prefix(count)), completedStepCount: count)
+    }
+
+    private static func executionJournal(_ journal: ComputerUseTextStepJournal, contract: ComputerUseTextTaskContract,
+                                         compiled: ComputerUseTaskContract) throws -> ComputerUseTaskJournal {
+        guard journal.retirementDigest == nil, journal.retainedPrefixCount == nil,
+              journal.taskID == contract.taskID, journal.promptDigest == contract.promptDigest,
+              journal.contractDigest == contract.contractDigest, journal.stepIDs == contract.steps.map(\.id) else {
+            throw ComputerUseTextTaskError.journalMismatch
+        }
+        return .init(taskID: journal.taskID, promptDigest: journal.promptDigest,
+            contractDigest: compiled.contractDigest, stepIDs: journal.stepIDs, statuses: journal.statuses)
     }
 
     private static func textJournal(_ journal: ComputerUseTaskJournal,

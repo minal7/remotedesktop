@@ -3,6 +3,38 @@ import XCTest
 
 @MainActor
 final class ComputerUseTaskExecutionTests: XCTestCase {
+    func testReloadRejectsMissingRewoundNoncanonicalOrForeignProgressBeforeObservation() async throws {
+        let fixture = try SearchTransactionFixture(), contract = fixture.contract
+        let original = ComputerUseTaskJournal(taskID: contract.taskID, promptDigest: contract.promptDigest,
+            contractDigest: contract.contractDigest, stepIDs: contract.steps.map(\.id), statuses: [.verified, .attempted, .planned, .planned])
+        for mutation in ["missing", "rewound", "sparse", "multiple-attempts", "prompt", "contract", "steps", "count", "retired", "no-lease"] {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let store = try ComputerUseTaskJournalStore(directory: directory)
+            var states = original.statuses
+            if mutation == "rewound" { states[1] = .planned }
+            if mutation == "sparse" { states = [.verified, .planned, .verified, .planned] }
+            if mutation == "multiple-attempts" { states[2] = .attempted }
+            if mutation == "count" { states.removeLast() }
+            let saved = ComputerUseTaskJournal(taskID: original.taskID,
+                promptDigest: mutation == "prompt" ? String(repeating: "a", count: 64) : original.promptDigest,
+                contractDigest: mutation == "contract" ? String(repeating: "b", count: 64) : original.contractDigest,
+                stepIDs: mutation == "steps" ? Array(original.stepIDs.reversed()) : original.stepIDs, statuses: states,
+                retirementDigest: mutation == "retired" ? String(repeating: "c", count: 64) : nil)
+            var observations = 0, effects = 0, reloads = 0
+            let acquire: (() throws -> any ComputerUseTaskExecutionLease)? = mutation == "no-lease" ? nil
+                : { try store.acquireExecution(taskID: contract.taskID, expected: nil) }
+            let execution = try ComputerUseTaskExecution(contract: contract, recovered: original,
+                observe: { _ in observations += 1; return true }, perform: { _, _ in effects += 1 }, persist: { _ in XCTFail("Rejected before persistence") },
+                acquireExecutionLease: acquire, reloadJournal: { reloads += 1; return mutation == "missing" ? nil : saved }, assertOwnership: {})
+            do { try await execution.run(); XCTFail("Invalid recovered history: " + mutation) }
+            catch { XCTAssertEqual(error as? ComputerUseTaskExecutionError, .journalMismatch, mutation) }
+            XCTAssertEqual(observations, 0); XCTAssertEqual(effects, 0)
+            XCTAssertEqual(reloads, mutation == "no-lease" ? 0 : 1)
+            let released = try store.acquireExecution(taskID: contract.taskID, expected: nil); released.release()
+        }
+    }
+
     func testChangedExecutionLeaseCannotAuthorizeInputOrCompletionAfterAnAdapterReturns() async throws {
         for stage in ["observation", "effect", "outcome"] {
             let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
