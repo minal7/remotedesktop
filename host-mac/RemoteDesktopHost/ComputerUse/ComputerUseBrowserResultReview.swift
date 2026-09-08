@@ -13,6 +13,7 @@ struct ComputerUseBrowserResultReviewInput: Equatable, Sendable, CustomStringCon
     let textIDs: [String]
     private let candidateTextIDs: [Set<String>]
     let permitsOfferAssertions: Bool
+    let hasControlSources: Bool
     var candidateCount: Int { selections.count }
     var fieldCounts: [Int] { selections.map { $0.fields.count } }
     var requirementCount: Int { interpretation?.requirements.count ?? 0 }
@@ -22,7 +23,8 @@ struct ComputerUseBrowserResultReviewInput: Equatable, Sendable, CustomStringCon
         ["type":"string", "enum":ComputerUseBrowserResultReview.QuantityMeaning.allCases
             .filter { permitsOfferAssertions || $0 != .availableQuantity }.map(\.rawValue)]
     }
-    func fieldTextIDs(candidate: Int, field: Int) -> [String] { selections[candidate].fields[field].textIDs }
+    func fieldTextIDs(candidate: Int, field: Int) -> [String] { selections[candidate].fields[field].textIDs + selections[candidate].fields[field].controlIDs }
+    func fieldUsesControlState(candidate: Int, field: Int) -> Bool { !selections[candidate].fields[field].controlIDs.isEmpty }
     func fieldAddressesRequirement(candidate: Int, field: Int, requirement: Int) -> Bool {
         guard let interpretation, interpretation.requirements.indices.contains(requirement),
               let kind = fieldKind(candidate: candidate, field: field) else { return false }
@@ -61,21 +63,23 @@ struct ComputerUseBrowserResultReviewInput: Equatable, Sendable, CustomStringCon
         try proposal.validateReviewInput(page: page, goal: goal)
         guard interpretation == nil || interpretation?.input == goal else { throw ComputerUseBrowserResultReviewError.inputChanged }
         self.interpretation = interpretation
+        hasControlSources = !page.controlIDs.isEmpty
         self.goal = goal; self.page = page; selections = proposal.selections
-        candidateTextIDs = selections.map { page.projectedTextIDs(in: $0.containerID) }
+        candidateTextIDs = selections.map { page.projectedSourceIDs(in: $0.containerID) }
         guard let projection = try JSONSerialization.jsonObject(with: Data(page.contextJSON.utf8)) as? [String: Any],
               let records = projection["records"] as? [[String: Any]] else { throw ComputerUseBrowserResultReviewError.invalidInput }
-        textIDs = records.filter { $0["kind"] as? String == "text" }.compactMap { $0["id"] as? String }.sorted()
+        textIDs = records.filter { $0["kind"] as? String == "text" || ($0["id"] as? String).map { page.controlIDs.contains($0) } == true }
+            .compactMap { $0["id"] as? String }.sorted()
         permitsOfferAssertions = ["source_truncated", "omitted_embedded_content", "omitted_structure", "projection_omitted_records", "budget_omitted_records"]
             .allSatisfy { projection[$0] as? Bool == false }
         let candidates: [[String: Any]] = selections.enumerated().map { index, selection in
             ["index":index, "container":selection.containerID,
              "fields":selection.fields.enumerated().map {
-                 ["index":$0.offset, "kind":$0.element.kind.rawValue, "texts":$0.element.textIDs] as [String: Any]
+                 ["index":$0.offset, "kind":$0.element.kind.rawValue, "texts":$0.element.textIDs, "controls":$0.element.controlIDs] as [String: Any]
              }, "links":selection.linkIDs]
         }
         let quantityReview = selections.contains { $0.fields.contains { $0.kind == .quantity } }
-        var context: [String: Any] = ["version":quantityReview ? 3 : (interpretation == nil ? 1 : 2), "goal":goal.plannerContext, "page":projection,
+        var context: [String: Any] = ["version":hasControlSources ? 4 : (quantityReview ? 3 : (interpretation == nil ? 1 : 2)), "goal":goal.plannerContext, "page":projection,
             "candidates":candidates, "offer_assertions_allowed":permitsOfferAssertions]
         if quantityReview { context["quantity_meaning_required"] = true }
         if let interpretation {
@@ -171,6 +175,7 @@ struct ComputerUseBrowserResultReview: Equatable, Sendable, CustomStringConverti
                         }
                         if meaning == .availableQuantity {
                             guard association == .singleOffer, scope == .offer, input.permitsOfferAssertions,
+                                  !input.fieldUsesControlState(candidate: index, field: fieldIndex),
                                   !qualifiers.isEmpty, qualifiers.allSatisfy({ input.permitsReference($0, for: index) }) else {
                                 throw ComputerUseBrowserResultReviewError.invalidProposal
                             }
@@ -246,7 +251,7 @@ struct ComputerUseBrowserResultReview: Equatable, Sendable, CustomStringConverti
     /// Native candidate identity includes the entire review. The private
     /// input is separately compared exactly before attaching the review.
     var digest: String {
-        ComputerUseTaskContract.digest([input.hasQuantityFields ? "browser-result-review-v3" : (hasRequirementMapping ? "browser-result-review-v2" : "browser-result-review-v1"), input.contextJSON, String(candidates.count)]
+        ComputerUseTaskContract.digest([input.hasControlSources ? "browser-result-review-v4" : (input.hasQuantityFields ? "browser-result-review-v3" : (hasRequirementMapping ? "browser-result-review-v2" : "browser-result-review-v1")), input.contextJSON, String(candidates.count)]
             + candidates.flatMap { candidate in
                 [candidate.association.rawValue, String(candidate.fields.count)] + candidate.fields.flatMap {
                     [$0.scope.rawValue, $0.price.rawValue, String($0.qualifierTextIDs.count)] + $0.qualifierTextIDs

@@ -5,41 +5,50 @@ enum ComputerUseBrowserResultError: Error, Equatable {
 }
 
 /// Exact host snapshot plus the bounded projection offered for interpretation.
-/// Controls are intentionally omitted from this reading-specific projection.
-/// No destination, current form value or document authority enters its JSON.
+/// Research-only native control states remain separate from quoted page text.
+/// No destination, submission value or document authority enters its JSON.
 struct ComputerUseBrowserResultPageInput: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     fileprivate let page: ComputerUseBrowserPageSnapshot
     let contextJSON: String
     fileprivate let textIDs: Set<String>
     fileprivate let linkIDs: Set<String>
     fileprivate let containerIDs: Set<String>
+    let controlIDs: Set<String>
+    fileprivate let projectedControlIDs: Set<String>
     let projectionOmittedRecords: Bool
 
     init(page: ComputerUseBrowserPageSnapshot) throws {
         guard page.isWellFormed else { throw ComputerUseBrowserResultError.invalidPage }
         self.page = page
         let reading = ComputerUseBrowserPageSnapshot(id: page.id, texts: page.texts, links: page.links,
+            controls: page.controlStateObserved ? page.controls : [],
             truncated: page.truncated, omittedEmbeddedContent: page.omittedEmbeddedContent,
-            omittedControls: page.omittedControls || !page.controls.isEmpty, viewport: page.viewport,
-            containers: page.containers, omittedStructure: page.omittedStructure)
-        let context = try ComputerUseBrowserPlanningContext(page: reading).serialized()
+            omittedControls: page.omittedControls || (page.controlStateObserved ? page.controlStates.contains { $0.kind == .unavailable } : !page.controls.isEmpty),
+            viewport: page.viewport, containers: page.containers, omittedStructure: page.omittedStructure,
+            controlStates: page.controlStates, controlStateObserved: page.controlStateObserved)
+        let context = try ComputerUseBrowserPlanningContext(page: reading, includingControlState: page.controlStateObserved).serialized()
         contextJSON = context
         var parser = StrictSemanticJSONParser(context, maximumValueCount: 2_048)
         guard case .object(let root) = try parser.parse(), case .array(let rows)? = root["records"],
               case .bool(let omitted)? = root["projection_omitted_records"] else { throw ComputerUseBrowserResultError.invalidPage }
-        var texts: Set<String> = [], links: Set<String> = [], containers: Set<String> = []
+        var texts: Set<String> = [], links: Set<String> = [], containers: Set<String> = [], controls: Set<String> = []
         for row in rows {
             guard case .object(let item) = row, case .string(let kind)? = item["kind"], case .string(let id)? = item["id"] else {
                 throw ComputerUseBrowserResultError.invalidPage
             }
             switch kind { case "text": texts.insert(id); case "link": links.insert(id); case "container": containers.insert(id)
+            case "control": controls.insert(id)
             default: throw ComputerUseBrowserResultError.invalidPage }
         }
         textIDs = texts; linkIDs = links; containerIDs = containers; projectionOmittedRecords = omitted
+        projectedControlIDs = controls
+        controlIDs = Set(page.controls.filter { control in controls.contains(control.id)
+            && page.controlStates.first(where: { $0.controlID == control.id })?.fieldSource(for: control) != nil }.map(\.id))
     }
-    func projectedTextIDs(in container: String) -> Set<String> {
+    func projectedSourceIDs(in container: String) -> Set<String> {
         let tree = ComputerUseBrowserResultProposal.Tree(page)
         return Set(page.texts.filter { textIDs.contains($0.id) && tree.contains($0.containerID, in: container) }.map(\.id))
+            .union(page.controls.filter { controlIDs.contains($0.id) && tree.contains($0.containerID, in: container) }.map(\.id))
     }
     var description: String { "BrowserResultPageInput(texts: \(textIDs.count), links: \(linkIDs.count))" }
     var debugDescription: String { description }
@@ -54,6 +63,8 @@ struct ComputerUseBrowserResultProposal: Equatable, Sendable, CustomStringConver
     struct Field: Equatable, Sendable {
         let kind: Kind
         let textIDs: [String]
+        let controlIDs: [String]
+        init(kind: Kind, textIDs: [String], controlIDs: [String] = []) { self.kind = kind; self.textIDs = textIDs; self.controlIDs = controlIDs }
     }
     struct Selection: Equatable, Sendable {
         let containerID: String
@@ -94,6 +105,7 @@ struct ComputerUseBrowserResultProposal: Equatable, Sendable, CustomStringConver
         let textIndices = Dictionary(uniqueKeysWithValues: page.texts.enumerated().map { ($0.element.id, $0.offset) })
         let texts = Dictionary(uniqueKeysWithValues: page.texts.map { ($0.id, $0) })
         let links = Dictionary(uniqueKeysWithValues: page.links.map { ($0.id, $0) })
+        let controls = Dictionary(uniqueKeysWithValues: page.controls.map { ($0.id, $0) })
         var selections: [Selection] = [], references = 0
         for row in rows {
             guard case .object(let candidate) = row, Set(candidate.keys) == ["container", "fields", "links"],
@@ -103,11 +115,12 @@ struct ComputerUseBrowserResultProposal: Equatable, Sendable, CustomStringConver
                   !selections.contains(where: { tree.contains($0.containerID, in: container) || tree.contains(container, in: $0.containerID) }),
                   case .array(let rows)? = candidate["fields"], (1...16).contains(rows.count),
                   case .array(let linkValues)? = candidate["links"], linkValues.count <= 16 else { throw ComputerUseBrowserResultError.invalidProposal }
-            var fields: [Field] = [], usedTextIDs: Set<String> = []
+            var fields: [Field] = [], usedTextIDs: Set<String> = [], usedControlIDs: Set<String> = []
             for row in rows {
-                guard case .object(let field) = row, Set(field.keys) == ["kind", "texts"],
+                guard case .object(let field) = row,
+                      Set(field.keys) == ["kind", "texts"] || (page.controlStateObserved && Set(field.keys) == ["kind", "texts", "controls"]),
                       case .string(let kindValue)? = field["kind"], let kind = Kind(rawValue: kindValue),
-                      case .array(let values)? = field["texts"], (1...16).contains(values.count) else { throw ComputerUseBrowserResultError.invalidProposal }
+                      case .array(let values)? = field["texts"], values.count <= 16 else { throw ComputerUseBrowserResultError.invalidProposal }
                 var ids: [String] = [], previousIndex = -1
                 for value in values {
                     guard case .string(let id) = value, input.textIDs.contains(id), let text = texts[id],
@@ -115,7 +128,20 @@ struct ComputerUseBrowserResultProposal: Equatable, Sendable, CustomStringConver
                           usedTextIDs.insert(id).inserted else { throw ComputerUseBrowserResultError.invalidProposal }
                     ids.append(id); previousIndex = index; references += 1
                 }
-                fields.append(.init(kind: kind, textIDs: ids))
+                let controlValues: [MCPJSONValue]
+                if let value = field["controls"] {
+                    guard case .array(let entries) = value, entries.count <= 16 else { throw ComputerUseBrowserResultError.invalidProposal }
+                    controlValues = entries
+                } else { controlValues = [] }
+                var controlIDs: [String] = []
+                for value in controlValues {
+                    guard case .string(let id) = value, input.controlIDs.contains(id), let control = controls[id],
+                          tree.contains(control.containerID, in: container), usedControlIDs.insert(id).inserted else { throw ComputerUseBrowserResultError.invalidProposal }
+                    controlIDs.append(id); references += 1
+                }
+                guard page.controls.filter({ controlIDs.contains($0.id) }).map(\.id) == controlIDs else { throw ComputerUseBrowserResultError.invalidProposal }
+                guard !ids.isEmpty || !controlIDs.isEmpty, kind != .title || (!ids.isEmpty && controlIDs.isEmpty) else { throw ComputerUseBrowserResultError.invalidProposal }
+                fields.append(.init(kind: kind, textIDs: ids, controlIDs: controlIDs))
             }
             guard fields.filter({ $0.kind == .title }).count == 1 else { throw ComputerUseBrowserResultError.invalidProposal }
             var selectedLinks: [String] = []
@@ -189,11 +215,25 @@ struct ComputerUseBrowserResultCandidates: Sendable, CustomStringConvertible, Cu
         let fields: [ComputerUseBrowserResultProposal.Field]
         let texts: [Text]
         let links: [Link]
+        let controls: [ControlObservation]
         let selectedLinkIDs: [String]
         let unclassifiedTextIDs: [String]
         let unprojectedTextIDs: [String]
         let unprojectedLinkIDs: [String]
+        let unprojectedControlIDs: [String]
+        func source(for field: ComputerUseBrowserResultProposal.Field) -> String {
+            (field.textIDs.compactMap { id in texts.first { $0.id == id }?.text }
+                + field.controlIDs.compactMap { id in controls.first { $0.control.id == id }?.fieldSource }).joined(separator: "\n")
+        }
         var description: String { "BrowserResultCandidate(fields: \(fields.count), texts: \(texts.count), links: \(links.count))" }
+        var debugDescription: String { description }
+    }
+    struct ControlObservation: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+        let control: ComputerUseBrowserPageSnapshot.Control
+        let state: ComputerUseBrowserControlState?
+        var fieldSource: String? { state?.fieldSource(for: control) }
+        var renderedObservation: String { state?.renderedObservation(for: control) ?? "Control state was not observed." }
+        var description: String { "BrowserResultControl(kind: \(control.kind))" }
         var debugDescription: String { description }
     }
     enum DocumentAnswerSourceStatus: String, Sendable { case unconfigured, permitted, excluded }
@@ -210,6 +250,7 @@ struct ComputerUseBrowserResultCandidates: Sendable, CustomStringConvertible, Cu
     let containers: [ComputerUseBrowserPageSnapshot.Container]
     let surroundingTexts: [Text]
     let surroundingLinks: [Link]
+    let surroundingControls: [ControlObservation]
     let sourceTruncated: Bool
     let omittedStructure: Bool
     let omittedEmbeddedContent: Bool
@@ -266,11 +307,12 @@ struct ComputerUseBrowserResultCandidates: Sendable, CustomStringConvertible, Cu
     fileprivate var candidatePlannerContext: [[String: Any]] {
         candidates.enumerated().map { index, candidate in
             ["index":index, "container":candidate.containerID,
-             "fields":candidate.fields.map { ["kind":$0.kind.rawValue, "texts":$0.textIDs] as [String: Any] },
+             "fields":candidate.fields.map { ["kind":$0.kind.rawValue, "texts":$0.textIDs, "controls":$0.controlIDs] as [String: Any] },
              "links":candidate.selectedLinkIDs,
              "unclassified_texts":candidate.unclassifiedTextIDs.filter { readingInput.textIDs.contains($0) },
              "unprojected_text_count":candidate.unprojectedTextIDs.count,
-             "unprojected_link_count":candidate.unprojectedLinkIDs.count]
+             "unprojected_link_count":candidate.unprojectedLinkIDs.count,
+             "unprojected_control_count":candidate.unprojectedControlIDs.count]
         }
     }
 
@@ -288,30 +330,37 @@ struct ComputerUseBrowserResultCandidates: Sendable, CustomStringConvertible, Cu
         containers = page.containers
         sourceTruncated = page.truncated; omittedStructure = page.omittedStructure
         omittedEmbeddedContent = page.omittedEmbeddedContent
-        omittedControls = page.omittedControls || !page.controls.isEmpty
+        omittedControls = page.omittedControls || (page.controlStateObserved ? page.controlStates.contains { $0.kind == .unavailable } : !page.controls.isEmpty)
         projectionOmittedRecords = proposal.input.projectionOmittedRecords
         func text(_ item: ComputerUseBrowserPageSnapshot.Text) -> Text { .init(id: item.id, containerID: item.containerID, text: item.text) }
         func link(_ item: ComputerUseBrowserPageSnapshot.Link) -> Link { .init(id: item.id, containerID: item.containerID, label: item.label, textIDs: item.textIDs) }
-        var includedTexts: Set<String> = [], includedLinks: Set<String> = []
+        func control(_ item: ComputerUseBrowserPageSnapshot.Control) -> ControlObservation {
+            .init(control: item, state: page.controlStates.first { $0.controlID == item.id })
+        }
+        var includedTexts: Set<String> = [], includedLinks: Set<String> = [], includedControls: Set<String> = []
         candidates = proposal.selections.map { selection in
             let texts = page.texts.filter { tree.contains($0.containerID, in: selection.containerID) }
             let links = page.links.filter { tree.contains($0, in: selection.containerID) }
+            let controls = page.controls.filter { tree.contains($0.containerID, in: selection.containerID) }
             includedTexts.formUnion(texts.map(\.id)); includedLinks.formUnion(links.map(\.id))
+            includedControls.formUnion(controls.map(\.id))
             let assigned = Set(selection.fields.flatMap(\.textIDs))
-            let identity = ["browser-result-candidate-v1", goal.digest, evidence.document.contextID,
+            let identity = ["browser-result-candidate-v2", goal.digest, evidence.document.contextID,
                 String(evidence.document.generation), evidence.documentID, page.id, selection.containerID]
-                + selection.fields.flatMap { [$0.kind.rawValue, String($0.textIDs.count)] + $0.textIDs }
+                + selection.fields.flatMap { [$0.kind.rawValue, String($0.textIDs.count)] + $0.textIDs + [String($0.controlIDs.count)] + $0.controlIDs }
                 + [String(selection.linkIDs.count)] + selection.linkIDs
                 + (answerPolicy.map { ["answer-source-policy", $0.digest] } ?? [])
                 + (proposal.review.map { ["semantic-review", $0.digest] } ?? [])
             return Candidate(id: ComputerUseTaskContract.digest(identity), containerID: selection.containerID, fields: selection.fields,
-                texts: texts.map(text), links: links.map(link), selectedLinkIDs: selection.linkIDs,
+                texts: texts.map(text), links: links.map(link), controls: controls.map(control), selectedLinkIDs: selection.linkIDs,
                 unclassifiedTextIDs: texts.filter { !assigned.contains($0.id) }.map(\.id),
                 unprojectedTextIDs: texts.filter { !proposal.input.textIDs.contains($0.id) }.map(\.id),
-                unprojectedLinkIDs: links.filter { !proposal.input.linkIDs.contains($0.id) }.map(\.id))
+                unprojectedLinkIDs: links.filter { !proposal.input.linkIDs.contains($0.id) }.map(\.id),
+                unprojectedControlIDs: controls.filter { !proposal.input.projectedControlIDs.contains($0.id) }.map(\.id))
         }
         surroundingTexts = page.texts.filter { !includedTexts.contains($0.id) }.map(text)
         surroundingLinks = page.links.filter { !includedLinks.contains($0.id) }.map(link)
+        surroundingControls = page.controls.filter { !includedControls.contains($0.id) }.map(control)
     }
     var description: String { "BrowserResultCandidates(candidates: \(candidates.count), truncated: \(sourceTruncated))" }
     var debugDescription: String { description }
@@ -481,7 +530,7 @@ extension ComputerUseOwnedBrowser {
                 sourceLink: ComputerUseBrowserResearchReport.reportableURL(batch.evidence.document.committedURL),
                 passages: passages, surroundingText: batch.surroundingTexts.map(\.text).joined(separator: "\n"),
                 requirements: requirements, incompleteReading: batch.sourceTruncated || batch.omittedStructure
-                    || batch.omittedEmbeddedContent || batch.omittedControls || batch.projectionOmittedRecords
+                    || batch.omittedEmbeddedContent || batch.omittedControls || batch.projectionOmittedRecords || !batch.evidence.page.controls.isEmpty
                     || batch.candidates.contains { !$0.unprojectedTextIDs.isEmpty || !$0.unprojectedLinkIDs.isEmpty })
             try await validateResultAnswerSource(batch, goal: goal, policy: policy)
             try Task.checkCancellation()

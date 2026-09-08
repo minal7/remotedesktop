@@ -674,12 +674,12 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         try await callDOM(command, arguments: arguments, document: expected, validateContext: { self.validate(expected) })
     }
 
-    func observePage(document expected: ComputerUseBrowserDocument) async throws -> ComputerUseBrowserPageEvidence {
+    func observePage(document expected: ComputerUseBrowserDocument, includingControlState: Bool = false) async throws -> ComputerUseBrowserPageEvidence {
         guard hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
-        let result = try await callDOM(.pageSnapshot, arguments: [:], document: expected)
+        let result = try await callDOM(.pageSnapshot, arguments: includingControlState ? ["includeControlState":true] : [:], document: expected)
         guard hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
         guard result.status == "page-snapshot", result.fields == nil,
-              let page = result.page, page.isWellFormed else { throw ComputerUseBrowserError.pageEvidenceUnavailable }
+              let page = result.page, page.isWellFormed, page.controlStateObserved == includingControlState else { throw ComputerUseBrowserError.pageEvidenceUnavailable }
         if historyReceipts[expected.operationID]?.document == expected { historyReceipts[expected.operationID]?.wasObserved = true }
         return ComputerUseBrowserPageEvidence(document: expected, documentID: result.documentID, page: page)
     }

@@ -16,7 +16,9 @@ struct ComputerUseBrowserResearchAnswer: Equatable, Sendable, CustomStringConver
         fileprivate let observedAtMilliseconds: Int64
         fileprivate let requirements: [String]
         fileprivate let passages: [Int: String]
+        fileprivate let controlText: [Int: String]
         fileprivate let surroundingText: String
+        fileprivate let surroundingControlText: String
         fileprivate let resultCounts: [ComputerUseBrowserScalarRequirements.Condition]
         let candidateIndices: [Int]
 
@@ -34,6 +36,7 @@ struct ComputerUseBrowserResearchAnswer: Equatable, Sendable, CustomStringConver
             requirements = interpretation.requirements.compactMap { interpretation.source(of: $0) }
             guard requirements.count == interpretation.requirements.count else { return nil }
             surroundingText = reading.surroundingTexts.map(\.text).joined(separator: "\n")
+            surroundingControlText = reading.surroundingControls.map(\.renderedObservation).joined(separator: "\n\n")
             let scalars = ComputerUseBrowserScalarRequirements(proposal: interpretation)
             let counts = scalars.entries.compactMap { entry -> ComputerUseBrowserScalarRequirements.Condition? in
                 if case .bound(let condition) = entry.resolution, case .quantity(_, _, let unit) = condition.predicate,
@@ -41,10 +44,11 @@ struct ComputerUseBrowserResearchAnswer: Equatable, Sendable, CustomStringConver
                 return nil
             }
             resultCounts = counts
-            var passages: [Int: String] = [:]
+            var passages: [Int: String] = [:], controls: [Int: String] = [:]
             for (index, candidate) in reading.candidates.enumerated() {
                 guard review.candidates[index].association == .singleOffer,
-                      candidate.unprojectedTextIDs.isEmpty, candidate.unprojectedLinkIDs.isEmpty else { continue }
+                      candidate.unprojectedTextIDs.isEmpty, candidate.unprojectedLinkIDs.isEmpty,
+                      candidate.unprojectedControlIDs.isEmpty else { continue }
                 let evaluations = assessment.candidates[index].requirements
                 guard evaluations.count == interpretation.requirements.count else { continue }
                 let covered = interpretation.requirements.enumerated().allSatisfy { offset, requirement in
@@ -71,8 +75,10 @@ struct ComputerUseBrowserResearchAnswer: Equatable, Sendable, CustomStringConver
                 }
                 guard covered else { continue }
                 passages[index] = candidate.texts.map(\.text).joined(separator: "\n")
+                controls[index] = candidate.controls.map(\.renderedObservation).joined(separator: "\n\n")
             }
             self.passages = passages
+            controlText = controls
             candidateIndices = passages.keys.sorted()
         }
     }
@@ -84,6 +90,7 @@ struct ComputerUseBrowserResearchAnswer: Equatable, Sendable, CustomStringConver
             let candidate: Int
             let page: Page
             let text: String
+            let controls: String
         }
         private let goal: ComputerUseBrowserGoalInput
         private let currentIdentity: String
@@ -97,7 +104,8 @@ struct ComputerUseBrowserResearchAnswer: Equatable, Sendable, CustomStringConver
             ComputerUseTaskContract.digest(["browser-answer-eligibility-v2", goal.digest, currentIdentity, archiveDigest ?? ""]
                 + recalledReadings.map(String.init) + requirements
                 + options.flatMap { [String($0.index), $0.reading.map(String.init) ?? "current", String($0.candidate),
-                    $0.page.readingIdentity, $0.page.source, String($0.page.observedAtMilliseconds), $0.page.surroundingText, $0.text] }
+                    $0.page.readingIdentity, $0.page.source, String($0.page.observedAtMilliseconds), $0.page.surroundingText,
+                    $0.page.surroundingControlText, $0.text, $0.controls] }
                 + selectionCounts.map(String.init))
         }
         var plannerOptions: [[String: Any]] {
@@ -112,14 +120,14 @@ struct ComputerUseBrowserResearchAnswer: Equatable, Sendable, CustomStringConver
             self.goal = goal; currentIdentity = current.requirementAssessmentIdentity
             archiveDigest = evidence?.digest; self.recalledReadings = recalledReadings; requirements = page.requirements
             var options: [Option] = page.candidateIndices.compactMap { index in
-                page.passages[index].map { .init(index: index, reading: nil, candidate: index, page: page, text: $0) }
+                page.passages[index].map { .init(index: index, reading: nil, candidate: index, page: page, text: $0, controls: page.controlText[index] ?? "") }
             }
             var nextIndex = current.candidates.count
             for (reading, value) in historical {
                 guard let retained = value.answerPage(goal: goal), retained.requirements == requirements else { continue }
                 for candidate in retained.candidateIndices {
                     guard let text = retained.passages[candidate] else { continue }
-                    options.append(.init(index: nextIndex, reading: reading, candidate: candidate, page: retained, text: text))
+                    options.append(.init(index: nextIndex, reading: reading, candidate: candidate, page: retained, text: text, controls: retained.controlText[candidate] ?? ""))
                     nextIndex += 1
                 }
             }
@@ -135,7 +143,8 @@ struct ComputerUseBrowserResearchAnswer: Equatable, Sendable, CustomStringConver
             guard selectionCounts.contains(indices.count), Set(indices).count == indices.count,
                   indices.allSatisfy({ candidateIndices.contains($0) }) else { throw ComputerUseBrowserLinkPlanError.invalidProposal }
             let signatures = indices.map { index in
-                (options.first { $0.index == index }?.text ?? "").split(whereSeparator: \.isWhitespace).joined(separator: " ").lowercased()
+                let option = options.first { $0.index == index }
+                return ((option?.text ?? "") + "\n" + (option?.controls ?? "")).split(whereSeparator: \.isWhitespace).joined(separator: " ").lowercased()
             }
             // Exact duplicate passages cannot count twice. Other semantic
             // duplicates remain the selector's responsibility across sources.
@@ -147,7 +156,8 @@ struct ComputerUseBrowserResearchAnswer: Equatable, Sendable, CustomStringConver
             let passages = try selection.indices.map { index -> Passage in
                 guard let option = options.first(where: { $0.index == index }), !option.text.isEmpty else { throw ComputerUseBrowserLinkPlanError.inputChanged }
                 return .init(source: option.page.source, observedAtMilliseconds: option.page.observedAtMilliseconds,
-                    text: option.text, surroundingText: option.page.surroundingText, readingIdentity: option.page.readingIdentity)
+                    text: option.text, controls: option.controls, surroundingText: option.page.surroundingText,
+                    surroundingControls: option.page.surroundingControlText, readingIdentity: option.page.readingIdentity)
             }
             let message = try ComputerUseBrowserResearchAnswer.render(passages: passages, requirements: requirements)
             return .init(rootTaskID: goal.taskID, goalRevision: goal.digest, readingIdentity: currentIdentity, selection: selection, message: message)
@@ -171,13 +181,15 @@ struct ComputerUseBrowserResearchAnswer: Equatable, Sendable, CustomStringConver
         let source: String
         let observedAtMilliseconds: Int64
         let text: String
+        let controls: String
         let surroundingText: String
+        let surroundingControls: String
         let readingIdentity: String
     }
     /// Display formatting alone cannot create a typed, admitted answer.
     static func render(source: String, passages: [String], surroundingText: String, requirements: [String]) throws -> String {
         try render(passages: passages.map { .init(source: source, observedAtMilliseconds: 0, text: $0,
-            surroundingText: surroundingText, readingIdentity: "display") }, requirements: requirements)
+            controls: "", surroundingText: surroundingText, surroundingControls: "", readingIdentity: "display") }, requirements: requirements)
     }
     private static func render(passages: [Passage], requirements: [String]) throws -> String {
         func quote(_ text: String) -> String { text.components(separatedBy: "\n").map { "│ " + $0 }.joined(separator: "\n") }
@@ -189,10 +201,12 @@ struct ComputerUseBrowserResearchAnswer: Equatable, Sendable, CustomStringConver
             let observed = formatter.string(from: Date(timeIntervalSince1970: Double(passage.observedAtMilliseconds) / 1_000))
             message += "\nOption \(offset + 1) — page details (quoted):\nSource page: " + passage.source
                 + "\nObserved: " + observed + "\n" + quote(passage.text) + "\n"
+            if !passage.controls.isEmpty { message += "\nNative control observations for this option:\n" + passage.controls + "\n" }
         }
         var included: Set<String> = []
-        for passage in passages where included.insert(passage.readingIdentity).inserted && !passage.surroundingText.isEmpty {
-            message += "\nOther observed page text from " + passage.source + " (quoted):\n" + quote(passage.surroundingText) + "\n"
+        for passage in passages where included.insert(passage.readingIdentity).inserted {
+            if !passage.surroundingText.isEmpty { message += "\nOther observed page text from " + passage.source + " (quoted):\n" + quote(passage.surroundingText) + "\n" }
+            if !passage.surroundingControls.isEmpty { message += "\nOther native control observations from " + passage.source + ":\n" + passage.surroundingControls + "\n" }
         }
         message += "\nRequest and constraints used:\n" + requirements.map(quote).joined(separator: "\n")
         message += "\n\nThese are source-reported details, not a booking confirmation. Availability can change after each observation."

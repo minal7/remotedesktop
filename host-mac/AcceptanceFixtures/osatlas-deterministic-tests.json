@@ -265,7 +265,8 @@
     "RemoteDesktopHostTests/ComputerUseBrowserQuantityReviewTests",
     "RemoteDesktopHostTests/ComputerUseBrowserResearchAnswerTests",
     "RemoteDesktopHostTests/ComputerUseTests/test_managerResearchAnswerDeliversAndReplaysWholeSourceTextWithoutRepeatingWork",
-    "RemoteDesktopHostTests/ComputerUseBrowserResearchHistoryTests"
+    "RemoteDesktopHostTests/ComputerUseBrowserResearchHistoryTests",
+    "RemoteDesktopHostTests/ComputerUseBrowserControlStateTests"
   ],
   "expectedTests": [
     "RemoteDesktopHostTests/AppleFoundationMCPPlannerTests/testCountedInputExpandsBeforeEffectAndTerminalQueries",
@@ -344,6 +345,13 @@
     "RemoteDesktopHostTests/ComputerUseBrowserClarificationTransportTests/testBrowserReferenceRejectsForeignControllerOwnerRevisionAndInvalidAnswerWithoutConsumingQuestion",
     "RemoteDesktopHostTests/ComputerUseBrowserClarificationTransportTests/testBrowserReferenceUsesExistingWireAndRetainsRootClockAndExactAnswers",
     "RemoteDesktopHostTests/ComputerUseBrowserClarificationTransportTests/testExpiredPausedRetiredOrInvalidatedBrowserQuestionCannotBeRevivedByWireReplay",
+    "RemoteDesktopHostTests/ComputerUseBrowserControlStateTests/testAuthenticationAndUnscopedValuesRemainOutsideResearchState",
+    "RemoteDesktopHostTests/ComputerUseBrowserControlStateTests/testDriverUsesTheSelectedDateAndReportsControlObservationsSeparatelyFromQuotes",
+    "RemoteDesktopHostTests/ComputerUseBrowserControlStateTests/testOversizedCompleteControlObservationsCannotBeTruncatedIntoAnAnswer",
+    "RemoteDesktopHostTests/ComputerUseBrowserControlStateTests/testPropertyOnlyChangesInvalidateResearchStateWithoutChangingMetadataSnapshots",
+    "RemoteDesktopHostTests/ComputerUseBrowserControlStateTests/testResearchReadsActualNativeSelectionsWithoutSubmissionOrTextEntryValues",
+    "RemoteDesktopHostTests/ComputerUseBrowserControlStateTests/testResultControlReferencesAreNativeScopedAndCannotBecomeAvailableInventory",
+    "RemoteDesktopHostTests/ComputerUseBrowserControlStateTests/testSelectedQuantityDoesNotResolveARequestedInventoryCount",
     "RemoteDesktopHostTests/ComputerUseBrowserDOMTests/testAuthenticationAfterInputRetainsReceiptAndResumesRemainingNativeStepsOnce",
     "RemoteDesktopHostTests/ComputerUseBrowserDOMTests/testAuthenticationAppearingAfterDiscoveryBlocksReadsAndDispatchWithoutConsumingReceipt",
     "RemoteDesktopHostTests/ComputerUseBrowserDOMTests/testAuthenticationDuringClarificationKeepsExactAnswerForExplicitResume",

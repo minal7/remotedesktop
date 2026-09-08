@@ -77,10 +77,10 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
         candidates = reading.candidates.enumerated().map { candidateIndex, candidate in
             let review = reading.review?.candidates[candidateIndex]
             let quotes = candidate.fields.enumerated().filter { [.price, .date, .quantity].contains($0.element.kind) }.map { fieldIndex, field -> Quote in
-                let source = field.textIDs.compactMap { id in candidate.texts.first { $0.id == id }?.text }.joined(separator: "\n")
-                return Quote(fieldIndex: fieldIndex, kind: field.kind, textIDs: field.textIDs, source: source, literal: Self.parse(source, kind: field.kind))
+                let source = candidate.source(for: field)
+                return Quote(fieldIndex: fieldIndex, kind: field.kind, textIDs: field.textIDs + field.controlIDs, source: source, literal: Self.parse(source, kind: field.kind))
             }
-            let incomplete = pageIncomplete || !candidate.unprojectedTextIDs.isEmpty || !candidate.unprojectedLinkIDs.isEmpty
+            let incomplete = pageIncomplete || !candidate.unprojectedTextIDs.isEmpty || !candidate.unprojectedLinkIDs.isEmpty || !candidate.unprojectedControlIDs.isEmpty
             let evaluations = interpretation.requirements.enumerated().map { requirementIndex, requirement -> Evaluation in
                 func result(_ status: Status, quotes: [Int] = []) -> Evaluation {
                     .init(requirementID: requirement.id, status: status, quoteIndices: quotes)

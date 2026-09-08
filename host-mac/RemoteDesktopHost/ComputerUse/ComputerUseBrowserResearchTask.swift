@@ -1143,13 +1143,14 @@ final class ComputerUseBrowserResearchTask {
         }
     }
 
-    private func observeOwnedPage(goal: ComputerUseBrowserGoalInput, enforceSources: Bool = false) async throws -> ComputerUseBrowserPageEvidence {
+    private func observeOwnedPage(goal: ComputerUseBrowserGoalInput, enforceSources: Bool = false,
+                                  includingControlState: Bool = false) async throws -> ComputerUseBrowserPageEvidence {
         try checkCurrent(goal); try captureSession()
         let document = try await browser.acquireObservedDocument(taskID: taskID)
         do {
             try checkCurrent(goal)
             if enforceSources { try browser.validateSourceDocument(document) }
-            let evidence = try await browser.observePage(document: document)
+            let evidence = try await browser.observePage(document: document, includingControlState: includingControlState)
             try checkCurrent(goal)
             if enforceSources { try browser.validateSourceDocument(document) }
             return evidence
@@ -1221,7 +1222,7 @@ final class ComputerUseBrowserResearchTask {
         guard sourcePolicy == nil || sourcePolicyInstalled else { throw Failure.navigationUnavailable }
         guard let interpretation, interpretation.proposal.input == goal else { throw Failure.interpretationRequired }
         try retainedEvidence.requireCapacity()
-        let evidence = try await observeOwnedPage(goal: goal, enforceSources: true)
+        let evidence = try await observeOwnedPage(goal: goal, enforceSources: true, includingControlState: true)
         let page = try ComputerUseBrowserResultPageInput(page: evidence.page)
         let proposal = try await resultPlanner.propose(interpretation: interpretation.proposal, page: page)
         try checkCurrent(goal)

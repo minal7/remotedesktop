@@ -287,7 +287,7 @@ struct ResearchAnswerFixture {
                      extra: (String, String, String)? = nil, omitDetailLinks: Bool = false,
                      inventory: Int? = nil, quantityPolicy: ComputerUseBrowserResultReview.QuantityMeaning? = nil,
                      includeControls: Bool = false, multiPage: Bool = false, repeatedPage: Bool = false,
-                     historyRoute: Bool = false) async throws -> Self {
+                     historyRoute: Bool = false, controlHTML: String = "") async throws -> Self {
         let transport = ResearchAnswerTransport(followCount: multiPage ? 2 : 1, recall: multiPage ? 1 : nil, historyRoute: historyRoute)
         let local = try ComputerUseLocalBrowserLinkPlanner(connection: .init(baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:54321")),
             bearerToken: "fixture-token", modelAlias: "fixture-model"), transport: transport)
@@ -302,7 +302,7 @@ struct ResearchAnswerFixture {
         let request = rows.compactMap { $0["source"] as? String }.joined()
         let additional = (1..<count).map { index in
             "<article><h2>Concert \(duplicate ? "Alpha" : (index == 1 ? "Beta" : "Gamma"))</h2><a href='/offers'>\(duplicate ? "Alpha" : "Other") details</a><p>\(price)</p></article>"
-        }.joined() + "<p>Read the conditions</p>" + (includeControls ? "<label>Ticket type<select><option>Restricted ticket</option></select></label>" : "")
+        }.joined() + "<p>Read the conditions</p>" + (includeControls ? "<label>Ticket notes<input value='Unscoped private text'></label>" : "")
         let inventoryHTML = inventory.map { "<p>\($0) tickets</p>" + (quantityPolicy == nil ? "" : "<p>2 tickets</p>")
             + "<p>Available for this concert</p>" } ?? ""
         let second = repeatedPage ? "<article><h2>Concert Alpha</h2><a href='/more'>Alpha details</a><p>USD 40</p></article>"
@@ -310,7 +310,7 @@ struct ResearchAnswerFixture {
         let alpha = "<article><h2>Concert Alpha</h2><a href='/details'>Alpha details</a><p>USD 40</p></article>"
         let beta = "<article><h2>Concert Beta</h2><a href='/beta'>Beta details</a><p>USD 45</p></article>"
         let source = try await ResearchDriverFixture.make(linkPlanner: planner, resultPlanner: reviewed,
-            additionalCardHTML: additional, candidateBodyHTML: "<p>\(price)</p>" + inventoryHTML, request: request,
+            additionalCardHTML: additional, candidateBodyHTML: "<p>\(price)</p>" + inventoryHTML + controlHTML, request: request,
             offersBodyHTML: multiPage ? second + "<p>Beta conditions apply</p>" : nil,
             searchBodyHTML: historyRoute ? alpha + beta : nil,
             detailsBodyHTML: historyRoute ? alpha + "<p>Alpha conditions apply</p>" : nil,
@@ -362,6 +362,11 @@ private final class ResearchAnswerReader: ComputerUseBrowserResultPlanning {
             if let available = contained.first(where: { $0["text"] as? String == "Available for this concert" })?["id"] as? String {
                 fields.append(["kind":"availability", "texts":[available]])
             }
+            for record in contained where record["kind"] as? String == "control" {
+                guard let control = record["id"] as? String, page.controlIDs.contains(control) else { continue }
+                let kind = record["control_kind"] as? String
+                fields.append(["kind":kind == "date" ? "date" : (kind == "number" ? "quantity" : "other"), "texts":[], "controls":[control]])
+            }
             return ["container":id, "fields":fields,
                 "links":omitDetailLinks && calls > 1 ? [] : contained.filter { $0["kind"] as? String == "link" }.compactMap { $0["id"] as? String }]
         }
@@ -375,14 +380,17 @@ private struct ResearchAnswerReviewer: ComputerUseBrowserResultReviewPlanning {
         let candidates: [[String: Any]] = (0..<input.candidateCount).map { candidate in
             ["association":"singleOffer", "fields":(0..<input.fieldCounts[candidate]).map { index in
                 let kind = input.fieldKind(candidate: candidate, field: index)
-                let available = kind == .quantity && index == 2
+                let fromControl = input.fieldUsesControlState(candidate: candidate, field: index)
+                let available = kind == .quantity && index == 2 && !fromControl
                 let qualifiers = available ? (0..<input.fieldCounts[candidate]).filter { input.fieldKind(candidate: candidate, field: $0) == .availability }
                     .flatMap { input.fieldTextIDs(candidate: candidate, field: $0) } : []
                 var field: [String: Any] = ["scope":"offer", "price":kind == .price ? "exact" : "notPrice", "qualifiers":qualifiers]
-                if input.hasQuantityFields { field["quantity"] = kind == .quantity ? (available ? "availableQuantity" : (quantityPolicy?.rawValue ?? "unknown")) : "notQuantity" }
+                if input.hasQuantityFields { field["quantity"] = kind == .quantity ? (fromControl ? "selectedQuantity" : (available ? "availableQuantity" : (quantityPolicy?.rawValue ?? "unknown"))) : "notQuantity" }
                 return field
             }, "requirements":(input.interpretation?.requirements ?? []).enumerated().map { index, requirement in
-                let field = requirement.role != .prohibition ? (requirement.field == .category ? 0 : (requirement.field == .price ? 1 : nil)) : nil
+                let field = requirement.role != .prohibition ? (0..<input.fieldCounts[candidate]).first {
+                    input.fieldAddressesRequirement(candidate: candidate, field: $0, requirement: index)
+                } : nil
                 return ["requirement":index, "judgment":field == nil ? "unknown" : "supports",
                     "texts":field.map { input.fieldTextIDs(candidate: candidate, field: $0) } ?? []] as [String: Any]
             }]

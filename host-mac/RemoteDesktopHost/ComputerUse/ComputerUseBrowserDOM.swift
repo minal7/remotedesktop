@@ -170,6 +170,8 @@ struct ComputerUseBrowserPageSnapshot: Decodable, Equatable, Sendable, CustomStr
     let texts: [Text]
     let links: [Link]
     let controls: [Control]
+    let controlStates: [ComputerUseBrowserControlState]
+    let controlStateObserved: Bool
     let containers: [Container]
     let omittedStructure: Bool
     let truncated: Bool
@@ -179,14 +181,16 @@ struct ComputerUseBrowserPageSnapshot: Decodable, Equatable, Sendable, CustomStr
 
     init(id: String, texts: [Text], links: [Link], controls: [Control] = [],
          truncated: Bool, omittedEmbeddedContent: Bool, omittedControls: Bool = false,
-         viewport: ComputerUseBrowserViewport? = nil, containers: [Container] = [], omittedStructure: Bool = true) {
+         viewport: ComputerUseBrowserViewport? = nil, containers: [Container] = [], omittedStructure: Bool = true,
+         controlStates: [ComputerUseBrowserControlState] = [], controlStateObserved: Bool = false) {
         self.id = id; self.texts = texts; self.links = links; self.controls = controls
+        self.controlStates = controlStates; self.controlStateObserved = controlStateObserved
         self.truncated = truncated; self.omittedEmbeddedContent = omittedEmbeddedContent; self.omittedControls = omittedControls
         self.viewport = viewport
         self.containers = containers; self.omittedStructure = omittedStructure
     }
 
-    private enum CodingKeys: String, CodingKey { case id, texts, links, controls, containers, omittedStructure, truncated, omittedEmbeddedContent, omittedControls, viewport }
+    private enum CodingKeys: String, CodingKey { case id, texts, links, controls, controlStates, controlStateObserved, containers, omittedStructure, truncated, omittedEmbeddedContent, omittedControls, viewport }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         let controls: [Control]
@@ -198,12 +202,17 @@ struct ComputerUseBrowserPageSnapshot: Decodable, Equatable, Sendable, CustomStr
         guard values.contains(.containers) == values.contains(.omittedStructure) else {
             throw DecodingError.dataCorruptedError(forKey: .containers, in: values, debugDescription: "Incomplete browser structure metadata")
         }
+        guard values.contains(.controlStates) == values.contains(.controlStateObserved) else {
+            throw DecodingError.dataCorruptedError(forKey: .controlStates, in: values, debugDescription: "Incomplete control observation metadata")
+        }
         self.init(id: try values.decode(String.self, forKey: .id), texts: try values.decode([Text].self, forKey: .texts),
             links: try values.decode([Link].self, forKey: .links), controls: controls,
             truncated: try values.decode(Bool.self, forKey: .truncated), omittedEmbeddedContent: try values.decode(Bool.self, forKey: .omittedEmbeddedContent),
             omittedControls: omittedControls, viewport: try values.decodeIfPresent(ComputerUseBrowserViewport.self, forKey: .viewport),
             containers: values.contains(.containers) ? try values.decode([Container].self, forKey: .containers) : [],
-            omittedStructure: values.contains(.omittedStructure) ? try values.decode(Bool.self, forKey: .omittedStructure) : true)
+            omittedStructure: values.contains(.omittedStructure) ? try values.decode(Bool.self, forKey: .omittedStructure) : true,
+            controlStates: values.contains(.controlStates) ? try values.decode([ComputerUseBrowserControlState].self, forKey: .controlStates) : [],
+            controlStateObserved: values.contains(.controlStateObserved) ? try values.decode(Bool.self, forKey: .controlStateObserved) : false)
     }
 
     var description: String {
@@ -231,6 +240,10 @@ struct ComputerUseBrowserPageSnapshot: Decodable, Equatable, Sendable, CustomStr
     }
 
     var isWellFormed: Bool {
+        if controlStateObserved {
+            guard controlStates.count == controls.count,
+                  zip(controlStates, controls).allSatisfy({ pair in pair.0.isValid(for: pair.1) }) else { return false }
+        } else if !controlStates.isEmpty { return false }
         func identifier(_ value: String, prefix: String) -> Bool {
             value.hasPrefix(prefix) && value.utf8.count <= 32
                 && !value.dropFirst(prefix.count).isEmpty
@@ -289,6 +302,7 @@ struct ComputerUseBrowserPageSnapshot: Decodable, Equatable, Sendable, CustomStr
         return texts.reduce(0) { $0 + $1.text.utf8.count }
             + links.reduce(0) { $0 + $1.label.utf8.count + $1.destination.utf8.count }
             + controls.reduce(0) { $0 + $1.valueByteCount }
+            + controlStates.reduce(0) { $0 + $1.byteCount }
             + containers.reduce(0) { $0 + $1.id.utf8.count + ($1.parentID?.utf8.count ?? 0) + $1.kind.utf8.count } <= 65_536
     }
 }
@@ -306,13 +320,15 @@ struct ComputerUseBrowserPlanningContext: Equatable, Sendable, CustomStringConve
     private let omittedControls: Bool
     private let omittedStructure: Bool
     private let projectionOmittedRecords: Bool
+    private let includesControlState: Bool
 
     var recordCount: Int { records.count }
     var description: String { "ComputerUseBrowserPlanningContext(records: \(records.count))" }
     var debugDescription: String { description }
 
-    init(page: ComputerUseBrowserPageSnapshot) throws {
+    init(page: ComputerUseBrowserPageSnapshot, includingControlState: Bool = false) throws {
         guard page.isWellFormed else { throw ComputerUseBrowserError.pageEvidenceUnavailable }
+        includesControlState = includingControlState
         let quote = AppleFoundationVisualActionRouter.foundationJSONString
         var projected: [String] = []
         var bytes = 0
@@ -375,7 +391,13 @@ struct ComputerUseBrowserPlanningContext: Equatable, Sendable, CustomStringConve
             }.joined(separator: ",")
             let formID = control.form.map { quote($0.id) } ?? "null"
             let method = control.form.map { quote($0.method) } ?? "null"
-            _ = append("{\"kind\":\"control\",\"id\":\(quote(control.id)),\"group\":\(quote(control.containerID)),\"label\":\(quote(control.label)),\"control_kind\":\(quote(control.kind)),\"disabled\":\(control.disabled),\"read_only\":\(control.readOnly),\"required\":\(control.required),\"multiple\":\(control.multiple),\"form_id\":\(formID),\"form_method\":\(method),\"constraints\":{\(constraints)},\"options\":[\(options)]}")
+            var state = ""
+            if includingControlState {
+                let value: Any = page.controlStates.first { $0.controlID == control.id }.map { $0.plannerContext as Any } ?? NSNull()
+                let encoded = String(decoding: try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .fragmentsAllowed]), as: UTF8.self)
+                state = ",\"observed_state\":" + encoded
+            }
+            _ = append("{\"kind\":\"control\",\"id\":\(quote(control.id)),\"group\":\(quote(control.containerID)),\"label\":\(quote(control.label)),\"control_kind\":\(quote(control.kind)),\"disabled\":\(control.disabled),\"read_only\":\(control.readOnly),\"required\":\(control.required),\"multiple\":\(control.multiple),\"form_id\":\(formID),\"form_method\":\(method),\"constraints\":{\(constraints)},\"options\":[\(options)]\(state)}")
         }
         for (index, text) in page.texts.enumerated() {
             if appendContainers(for: text.containerID),
@@ -399,7 +421,7 @@ struct ComputerUseBrowserPlanningContext: Equatable, Sendable, CustomStringConve
     /// and a document whose evidence did not fit the local planner's budget.
     func serialized(maximumRecords: Int? = nil) -> String {
         let count = max(0, min(maximumRecords ?? records.count, records.count))
-        return "{\"version\":\(Self.version),\"source_truncated\":\(sourceTruncated),\"omitted_embedded_content\":\(omittedEmbeddedContent),\"omitted_controls\":\(omittedControls),\"omitted_structure\":\(omittedStructure),\"projection_omitted_records\":\(projectionOmittedRecords),\"budget_omitted_records\":\(count < records.count),\"records\":[\(records.prefix(count).joined(separator: ","))]}"
+        return "{\"version\":\(includesControlState ? 4 : Self.version),\"source_truncated\":\(sourceTruncated),\"omitted_embedded_content\":\(omittedEmbeddedContent),\"omitted_controls\":\(omittedControls),\"omitted_structure\":\(omittedStructure),\"projection_omitted_records\":\(projectionOmittedRecords),\"budget_omitted_records\":\(count < records.count),\"records\":[\(records.prefix(count).joined(separator: ","))]}"
     }
 
     func promptSection(maximumRecords: Int? = nil) -> String {
@@ -491,6 +513,9 @@ enum ComputerUseBrowserDOM {
       const valueGetters = [HTMLInputElement, HTMLTextAreaElement].map(c => Object.getOwnPropertyDescriptor(c.prototype, 'value').get);
       const valueSetters = [HTMLInputElement, HTMLTextAreaElement].map(c => Object.getOwnPropertyDescriptor(c.prototype, 'value').set);
       const choiceIndex = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'selectedIndex');
+      const optionSelected = Object.getOwnPropertyDescriptor(HTMLOptionElement.prototype, 'selected').get;
+      const inputChecked = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'checked').get;
+      const inputIndeterminate = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'indeterminate').get;
       const formGetters = Object.fromEntries(['action','method','target','enctype','noValidate'].map(key =>
         [key, Object.getOwnPropertyDescriptor(HTMLFormElement.prototype, key).get]));
       const formElements = Object.getOwnPropertyDescriptor(HTMLFormElement.prototype, 'elements').get;
@@ -841,12 +866,12 @@ enum ComputerUseBrowserDOM {
         }
         return reply('ok', found);
       }
-      function pageContent(linkBindings, controlBindings, containerBindings) {
-        // Read rendered text nodes, never form values, innerHTML, scripts or
-        // frame documents. Omitted surfaces and bounds remain explicit; this
-        // is not a claim to have read every result on a website.
+      function pageContent(linkBindings, controlBindings, containerBindings, includeControlState = false) {
+        // The text pass reads rendered text nodes, never form values,
+        // innerHTML, scripts or frame documents. A separate opt-in pass below
+        // observes native control state. Omitted surfaces remain explicit.
         const excluded = 'script,style,noscript,template,input,textarea,select,option,[contenteditable]:not([contenteditable="false"]),[role="textbox"],[hidden],[inert],[aria-hidden="true"]';
-        const texts = [], links = [], controls = [], structure = [], anchors = new Map(), buttons = new Map(), containers = new Map();
+        const texts = [], links = [], controls = [], controlStates = [], structure = [], anchors = new Map(), buttons = new Map(), containers = new Map();
         const textRange = doc.createRange();
         const pageParent = node => node.assignedSlot || parent(node);
         let count = 0, bytes = 0, truncated = false, omittedEmbeddedContent = false, omittedControls = false, omittedStructure = false;
@@ -908,7 +933,7 @@ enum ComputerUseBrowserDOM {
             return NodeFilter.FILTER_ACCEPT;
           }
         };
-        if (filter.acceptNode(root) === NodeFilter.FILTER_REJECT) return {texts, links, controls, containers:structure, omittedStructure, truncated, omittedEmbeddedContent, omittedControls, viewport: readViewport()};
+        if (filter.acceptNode(root) === NodeFilter.FILTER_REJECT) return {texts, links, controls, controlStates, controlStateObserved:includeControlState, containers:structure, omittedStructure, truncated, omittedEmbeddedContent, omittedControls, viewport: readViewport()};
         // display:contents has no own rectangle but its descendants can render.
         const walkers = [doc.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, filter)];
         while (walkers.length) {
@@ -980,7 +1005,8 @@ enum ComputerUseBrowserDOM {
         }
         // Observe supported native control metadata in a separate bounded
         // pass: the text walker deliberately excludes inputs and options.
-        // No current input value, checked state or selected option is read.
+        // Current native state is opt-in for research readings. General page
+        // and form planning continue to use metadata without current values.
         const controlKinds = new Set(['text','search','url','tel','email','textarea','date','datetime-local','month','week','time','number','checkbox','radio','select','button','submit','reset','image']);
         const constraintNames = ['min','max','step','pattern','minlength','maxlength'];
         const small = (value, limit) => typeof value === 'string' && value.length <= limit && encoder.encode(value).length <= limit;
@@ -1010,6 +1036,25 @@ enum ComputerUseBrowserDOM {
             noValidate: !!(formGetters.noValidate.call(form) || (submitter && element.formNoValidate))};
           return small(result.action, 8192) && small(result.target, 256) && small(result.encoding, 128)
             && ['get','post','dialog'].includes(result.method) ? result : undefined;
+        }
+        function researchControlState(element, control) {
+          const base = {controlID:control.id}, unavailable = {...base, kind:'unavailable'};
+          const autocomplete = (element.getAttribute('autocomplete') || '').toLowerCase().split(/\s+/);
+          if (autocomplete.some(t => t === 'one-time-code' || t === 'username' || t.includes('password'))
+              || [control.label, element.id || '', control.name].some(credentialLabel)) return unavailable;
+          if (['button','submit','reset','image'].includes(control.kind)) return {...base, kind:'stateless'};
+          if (control.disabled || control.readOnly) return unavailable;
+          if (scalarTypes.has(control.kind)) {
+            // Keep saved/read-only values and all text-entry values outside
+            // this general research observation. They need a scoped reader.
+            const value = valueGetters[0].call(element);
+            return small(value, 2048) ? {...base, kind:'scalar', value} : unavailable;
+          }
+          if (control.kind === 'select') return {...base, kind:'selection',
+            selectedOptionIDs:Array.from(element.options).filter(option => optionSelected.call(option)).map(option => pageOptionIDs.get(option))};
+          if (['checkbox','radio'].includes(control.kind)) return {...base, kind:'checked',
+            checked:inputChecked.call(element), indeterminate:control.kind === 'checkbox' && inputIndeterminate.call(element)};
+          return unavailable;
         }
         const controlFilter = {acceptNode(node) {
           return node.matches('script,style,noscript,template,option,optgroup,iframe,frame,object,embed,canvas,svg,[hidden],[inert],[aria-hidden="true"]')
@@ -1064,12 +1109,14 @@ enum ComputerUseBrowserDOM {
           const control = {id: pageControlIDs.get(element), containerID, label, kind, name,
             disabled: element.matches(':disabled') || element.getAttribute('aria-disabled') === 'true',
             readOnly: !!element.readOnly, required: !!element.required, multiple: !!element.multiple, constraints, options, form};
-          const size = encoder.encode(JSON.stringify(control)).length;
+          const state = includeControlState ? researchControlState(element, control) : null;
+          const size = encoder.encode(JSON.stringify(control)).length + (state ? encoder.encode(JSON.stringify(state)).length : 0);
           if (bytes + size > 65536) { truncated = true; omittedControls = true; continue; }
           bytes += size; controls.push(control);
+          if (state) controlStates.push(state);
           controlBindings.set(control.id, {element, form: element.form, metadata: control});
         }
-        return {texts, links, controls, containers:structure, omittedStructure, truncated, omittedEmbeddedContent, omittedControls, viewport: readViewport()};
+        return {texts, links, controls, controlStates, controlStateObserved:includeControlState, containers:structure, omittedStructure, truncated, omittedEmbeddedContent, omittedControls, viewport: readViewport()};
       }
       function readFormQuery(binding) {
         if (!binding || binding.metadata.kind !== 'submit' || binding.metadata.disabled || !binding.form) return {status:'unsupported'};
@@ -1247,7 +1294,9 @@ enum ComputerUseBrowserDOM {
           if (status) { lastPageSnapshot = null; return reply(status); }
           if (doc.readyState !== 'complete') return reply('stale');
           const links = new Map(), controls = new Map(), containers = new Map();
-          const content = pageContent(links, controls, containers), serialized = JSON.stringify(content);
+          if (command === 'pageSnapshot' && args.includeControlState !== undefined && typeof args.includeControlState !== 'boolean') return reply('unsupported');
+          const includeControlState = command === 'pageSnapshot' ? args.includeControlState === true : lastPageSnapshot?.includeControlState === true;
+          const content = pageContent(links, controls, containers, includeControlState), serialized = JSON.stringify(content);
           if (command !== 'pageSnapshot') {
             // Re-read the projection, including rendering and resolved URLs.
             // Mutation records alone miss CSSOM/value-property changes.
@@ -1368,7 +1417,7 @@ enum ComputerUseBrowserDOM {
           }
           const id = nonce();
           formQueries.clear();
-          lastPageSnapshot = {id, documentID, serialized, url: doc.URL, scroller: doc.scrollingElement, links, controls, containers};
+          lastPageSnapshot = {id, documentID, serialized, includeControlState, url: doc.URL, scroller: doc.scrollingElement, links, controls, containers};
           return {status: 'page-snapshot', documentID, page: {id, ...content}};
         }
         if (command !== 'fields' && args.documentID !== documentID) return reply('stale');
