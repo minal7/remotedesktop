@@ -13,7 +13,7 @@ final class ComputerUseBrowserResearchPopupTests: XCTestCase {
         let owner = try fixture.owner(), action = try await owner.planNextAction(using: fixture.actions)
         let input = action.input, id = try XCTUnwrap(input.popupControlIDs.first)
         XCTAssertEqual(input.popupControlIDs.count, 1); XCTAssertTrue(input.needsPlanningDecision)
-        XCTAssertEqual(try object(input.contextJSON)["version"] as? Int, 12)
+        XCTAssertEqual(try object(input.contextJSON)["version"] as? Int, 13)
         XCTAssertFalse(input.contextJSON.contains(fixture.base.absoluteString))
         XCTAssertFalse(input.contextJSON.contains("General admission"), "Candidate discovery reads no option values")
         let proposal = try ComputerUseBrowserActionProposal.decode(content: opening(id), input: input)
@@ -30,7 +30,7 @@ final class ComputerUseBrowserResearchPopupTests: XCTestCase {
             bearerToken: "fixture", modelAlias: "fixture-model"), transport: ControlStateUnusedTransport())
         let body = try ResearchAnswerFixture.object(XCTUnwrap(local.makeRequest(input).httpBody))
         let format = try XCTUnwrap(body["response_format"] as? [String: Any])
-        XCTAssertEqual((format["json_schema"] as? [String: Any])?["name"] as? String, "browser_research_action_v12")
+        XCTAssertEqual((format["json_schema"] as? [String: Any])?["name"] as? String, "browser_research_action_v13")
         XCTAssertEqual(fixture.server.count("/opened"), 0)
         let unoffered = try ComputerUseBrowserActionInput(interpretation: input.interpretation, evidence: input.evidence,
             navigationHistory: owner.confirmedNavigationHistory, formHistory: [], latestForm: nil, changedFormTargetIDs: [])

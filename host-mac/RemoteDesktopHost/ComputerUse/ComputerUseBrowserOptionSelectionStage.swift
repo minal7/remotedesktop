@@ -216,3 +216,62 @@ final class ComputerUseBrowserOptionSelectionStage {
         return replacement
     }
 }
+
+/// Original task meaning and observed baseline stay available after an
+/// option-selection decision. These records never become current result facts.
+struct ComputerUseBrowserResearchOptionSelectionRecord: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    enum Outcome: String, Sendable { case selected, retiredUnsent }
+    let index: Int
+    let operationID: String
+    let intent: ComputerUseBrowserOptionSelectionIntent
+    let outcome: Outcome
+    let didDispatch: Bool?
+    let digest: String
+
+    @MainActor init(stage: ComputerUseBrowserOptionSelectionStage, receipt: ComputerUseBrowserOptionSelectionReceipt?, digest: String) throws {
+        if let receipt {
+            guard stage.observedReceipt == receipt, receipt.validates(stage.target, operationID: stage.operationID) else {
+                throw ComputerUseBrowserOptionSelectionError.uncertain
+            }
+            outcome = .selected; didDispatch = receipt.didDispatch
+        } else {
+            guard stage.retirementDigest == digest else { throw ComputerUseBrowserOptionSelectionError.retirementPending }
+            outcome = .retiredUnsent; didDispatch = nil
+        }
+        index = stage.sequence; operationID = stage.operationID; intent = stage.target.intent; self.digest = digest
+    }
+
+    func context(goal: ComputerUseBrowserGoalInput, evidence: ComputerUseBrowserPageEvidence, projected: Set<String>) throws -> [String: Any] {
+        let previous = intent.interpretation, requirement = previous.requirements[intent.requirementIndex]
+        guard goal.continues(previous.input), let source = previous.source(of: requirement),
+              let control = intent.evidence.page.controls.first(where: { $0.id == intent.controlID }),
+              let value = intent.evidence.page.controlStates.first(where: { $0.controlID == intent.controlID })?.value,
+              let reading = ComputerUseBrowserOptionSelectionState.read(value, control: control),
+              let option = reading.options.first(where: { $0["id"] as? String == intent.optionID }),
+              let optionLabel = option["label"] as? String, let groups = option["groups"] as? [[String: Any]] else {
+            throw ComputerUseBrowserActionPlanError.invalidInput
+        }
+        let sameDocument = intent.evidence.document == evidence.document && intent.evidence.documentID == evidence.documentID
+        let preserved: [[String: Any]] = try intent.observedPreservedControlIDs.map { id in
+            guard let control = intent.evidence.page.controls.first(where: { $0.id == id }),
+                  let state = intent.evidence.page.controlStates.first(where: { $0.controlID == id }) else {
+                throw ComputerUseBrowserActionPlanError.invalidInput
+            }
+            return ["label":control.label,"kind":control.kind,"read_only":control.readOnly,"disabled":control.disabled,
+                "required":control.required,"multiple":control.multiple,"constraints":control.constraints,
+                "current_control":sameDocument && projected.contains(id) ? id as Any : NSNull(),
+                "historical_state":state.plannerContext,
+                "native_option_labels":control.options.map { ["id":$0.id,"label":$0.label,"group_label":$0.groupLabel,"disabled":$0.disabled,"hidden":$0.hidden] as [String: Any] }]
+        }
+        return ["stage":index,"outcome":outcome.rawValue,"did_dispatch":didDispatch.map { $0 as Any } ?? NSNull(),
+            "source":source,"turn":requirement.sourceTurnIndex,"sourceByteOffset":requirement.sourceByteOffset,
+            "sourceByteCount":requirement.sourceByteCount,"current_goal_revision":previous.input == goal,
+            "control_label":control.label,"current_control":sameDocument && projected.contains(intent.controlID) ? intent.controlID as Any : NSNull(),
+            "option_label":optionLabel,"option_groups":groups,
+            "list_label":reading.object["list_label"] as? String ?? "", "selection_convention":reading.mode,
+            "option_qualifications":option.filter { ["label","groups","disabled","hidden","position","size"].contains($0.key) },
+            "original_observed_criteria":preserved]
+    }
+    var description: String { "BrowserOptionSelectionRecord(\(index), \(outcome.rawValue))" }
+    var debugDescription: String { description }
+}

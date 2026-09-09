@@ -135,6 +135,23 @@ struct ComputerUseBrowserOptionSelectionBinding: Decodable, Equatable, Sendable 
             && controlID == intent.controlID && optionID == intent.optionID && needsDispatch == intent.needsDispatch
     }
 }
+/// Eligible native IDs under one already-scoped whole option graph. Candidate
+/// discovery allocates no executable binding and dispatches no events.
+struct ComputerUseBrowserOptionSelectionChoice: Decodable, Equatable, Sendable {
+    let controlID: String
+    let optionIDs: [String]
+    func isValid(in evidence: ComputerUseBrowserPageEvidence) -> Bool {
+        guard evidence.page.controlStateObserved, evidence.page.scopedControlIDs.contains(controlID),
+              let control = evidence.page.controls.first(where: { $0.id == controlID }), !control.disabled, !control.readOnly,
+              let value = evidence.page.controlStates.first(where: { $0.controlID == controlID && $0.kind == .composite })?.value,
+              let state = ComputerUseBrowserOptionSelectionState.read(value, control: control),
+              ComputerUseBrowserOptionSelectionState.isReady(state), state.object["list_hidden"] as? Bool == false,
+              control.compositeRole != "combobox" || (state.object["attributes"] as? [String: String])?["aria-expanded"] == "true",
+              !optionIDs.isEmpty, optionIDs.count <= 64, Set(optionIDs).count == optionIDs.count else { return false }
+        return optionIDs.allSatisfy { id in state.options.contains { $0["id"] as? String == id
+            && $0["disabled"] as? Bool == false && $0["hidden"] as? Bool == false } }
+    }
+}
 struct ComputerUseBrowserOptionSelectionTarget: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     let intent: ComputerUseBrowserOptionSelectionIntent
     let binding: ComputerUseBrowserOptionSelectionBinding
@@ -176,6 +193,20 @@ struct ComputerUseBrowserOptionSelectionReceipt: Decodable, Equatable, Sendable,
 }
 
 extension ComputerUseOwnedBrowser {
+    func optionSelectionChoices(in evidence: ComputerUseBrowserPageEvidence) async throws -> [ComputerUseBrowserOptionSelectionChoice] {
+        try requireSelectionContext(evidence.document)
+        guard evidence.page.isWellFormed, evidence.page.controlStateObserved else { throw ComputerUseBrowserOptionSelectionError.invalidIntent }
+        let result = try await callDOM(.optionSelectionCandidates, arguments: ["documentID":evidence.documentID,
+            "snapshotID":evidence.page.id], document: evidence.document)
+        try requireSelectionContext(evidence.document)
+        guard result.status == "selection-candidates", result.documentID == evidence.documentID,
+              let choices = result.optionSelectionCandidates, choices.count <= 16,
+              Set(choices.map(\.controlID)).count == choices.count,
+              choices.reduce(0, { $0 + $1.optionIDs.count }) <= 128 else { throw ComputerUseBrowserOptionSelectionError.unavailable }
+        guard choices.allSatisfy({ $0.isValid(in: evidence) }) else { throw ComputerUseBrowserOptionSelectionError.unavailable }
+        return choices
+    }
+
     func prepareOptionSelection(_ intent: ComputerUseBrowserOptionSelectionIntent) async throws -> ComputerUseBrowserOptionSelectionTarget {
         try requireSelectionContext(intent.evidence.document)
         let result = try await callDOM(.prepareOptionSelection, arguments: ["documentID":intent.evidence.documentID,

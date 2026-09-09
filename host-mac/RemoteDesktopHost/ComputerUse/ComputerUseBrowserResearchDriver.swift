@@ -130,6 +130,15 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
         } catch is ComputerUseTaskJournalStore.StoreError {
             try validate(run, tools: tools)
             return .userInterventionRequired("The browser could not safely save or recover this action. The original request remains pending; check the Mac before continuing.")
+        } catch ComputerUseBrowserResearchTask.Failure.optionSelectionCriteriaChanged {
+            try validate(run, tools: tools)
+            return .userInterventionRequired("A criterion observed before the interrupted choice has changed or cannot be checked. Review it on the Mac before continuing; the original request remains pending.")
+        } catch ComputerUseBrowserResearchTask.Failure.optionSelectionLimit {
+            try validate(run, tools: tools)
+            return .userInterventionRequired("The browser reached this task's option-selection limit. Earlier findings and the original request remain pending.")
+        } catch is ComputerUseBrowserOptionSelectionError {
+            try validate(run, tools: tools)
+            return .userInterventionRequired("The selected option could not be prepared or verified. Review the page on the Mac before continuing; the original request remains pending.")
         } catch ComputerUseBrowserResearchTask.Failure.popupLimit {
             try validate(run, tools: tools)
             return .userInterventionRequired("The browser reached this task's dropdown-action limit. Earlier findings and the original request remain pending.")
@@ -208,6 +217,13 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
         try synchronizeHistory()
         while run.visits.count < navigationLimit {
             try check()
+            if owner.hasPendingOptionSelection {
+                progress("Checking the pending dropdown choice…")
+                do { _ = try await owner.resumeOptionSelection() }
+                catch { guard try await retireProvenUnsentOptionSelection(owner, after: error) else { throw error } }
+                try check()
+                continue
+            }
             if owner.hasPendingPopup {
                 progress("Checking the pending dropdown opening…")
                 do { _ = try await owner.resumePopup() }
@@ -300,7 +316,13 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                 let action = try await owner.planNextAction(using: actionPlanner)
                 try check()
                 switch action.step {
-                case .recall: throw Failure.invalidProposal // Resolved inside the owner, never an executable action.
+                case .recall, .inspectOptions: throw Failure.invalidProposal // Resolved inside the owner, never an executable action.
+                case .selectOption:
+                    progress("Selecting the requested option…")
+                    do { _ = try await owner.selectOption(for: action) }
+                    catch { guard try await retireProvenUnsentOptionSelection(owner, after: error) else { throw error } }
+                    try check()
+                    continue // Selection needs fresh application/result evidence.
                 case .openPopup:
                     progress("Opening the requested dropdown…")
                     do { _ = try await owner.openPopup(for: action) }
@@ -385,6 +407,15 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
     private var selectionRequired: ComputerUseExecutionResult {
         .userInterventionRequired("I could not select another result link that advances the complete request. More page interaction or result verification is needed; the original task is still pending.")
     }
+    private func retireProvenUnsentOptionSelection(_ owner: ComputerUseBrowserResearchTask, after error: Error) async throws -> Bool {
+        guard owner.hasPendingOptionSelection,
+              error as? ComputerUseBrowserOptionSelectionError == .unavailable || error as? ComputerUseBrowserOptionSelectionError == .uncertain
+                || error as? ComputerUseBrowserOptionSelectionError == .retirementPending || error as? ComputerUseBrowserOptionSelectionError == .retired
+                || error as? ComputerUseTaskExecutionError == .preconditionFailed("prepared")
+                || error as? ComputerUseBrowserError == .pageChanged else { return false }
+        return try await owner.retirePendingUnsentOptionSelection() != nil
+    }
+
     private func retireProvenUnsentPopup(_ owner: ComputerUseBrowserResearchTask, after error: Error) async throws -> Bool {
         guard owner.hasPendingPopup,
               error as? ComputerUseBrowserPopupError == .unavailable || error as? ComputerUseBrowserPopupError == .uncertain

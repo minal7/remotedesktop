@@ -30,7 +30,7 @@ struct ComputerUseBrowserResearchVisit: Equatable, Sendable {
 /// compile arbitrary research actions or certify independent inventory truth.
 @MainActor
 final class ComputerUseBrowserResearchTask {
-    enum Failure: Error, Equatable { case busy, paused, retired, goalChanged, interpretationRequired, questionPending, browserRequired, navigationPending, navigationUnavailable, formPending, formUnavailable, popupPending, popupLimit }
+    enum Failure: Error, Equatable { case busy, paused, retired, goalChanged, interpretationRequired, questionPending, browserRequired, navigationPending, navigationUnavailable, formPending, formUnavailable, popupPending, popupLimit, optionSelectionPending, optionSelectionLimit, optionSelectionCriteriaChanged }
     struct Interpretation: Sendable {
         let proposal: ComputerUseBrowserGoalProposal
         let scalars: ComputerUseBrowserScalarRequirements
@@ -78,6 +78,9 @@ final class ComputerUseBrowserResearchTask {
     private var popupStage: ComputerUseBrowserPopupStage?
     private var popupSequence = 0
     private var popupNeedsReopen = false
+    private var optionSelectionStage: ComputerUseBrowserOptionSelectionStage?
+    private var optionSelectionSequence = 0
+    private var optionSelectionNeedsReopen = false
     private var retainedEvidence: ComputerUseBrowserResearchEvidence
     private var session: ComputerUseBrowserHandbackRequirement?
     private var handback: ComputerUseBrowserHandbackRequirement?
@@ -92,6 +95,7 @@ final class ComputerUseBrowserResearchTask {
     private(set) var retiredFormHistory: [ComputerUseBrowserResearchFormStage.Retirement] = []
     private(set) var retiredHistoryNavigations: [ComputerUseBrowserResearchHistoryNavigation.Retirement] = []
     private(set) var popupHistory: [ComputerUseBrowserResearchPopupRecord] = []
+    private(set) var optionSelectionHistory: [ComputerUseBrowserResearchOptionSelectionRecord] = []
 
     var input: ComputerUseBrowserGoalInput { clarification.input }
     /// Available during the serialized selector operation as well as idle.
@@ -106,6 +110,7 @@ final class ComputerUseBrowserResearchTask {
     var executionTaskID: String { input.clarifications.last?.answerTaskID ?? taskID }
     var isOperating: Bool { operationID != nil }
     var hasPendingPopup: Bool { popupStage != nil }
+    var hasPendingOptionSelection: Bool { optionSelectionStage != nil }
     var hasPendingNavigation: Bool { initialSearch?.isPending == true || navigation?.pendingSelection != nil || hasPendingFormNavigation || hasPendingHistoryNavigation }
     var hasPendingHistoryNavigation: Bool {
         guard let historyNavigation else { return false }
@@ -131,7 +136,7 @@ final class ComputerUseBrowserResearchTask {
     /// around delegation. Individual owner operations still validate the actual
     /// browser session, page and effect evidence at their own boundaries.
     func validateDriverContinuation(_ expected: ComputerUseBrowserGoalInput) throws {
-        try requireIdle(allowPendingPopup: true)
+        try requireIdle(allowPendingPopup: true, allowPendingOptionSelection: true)
         guard !hasQuestion else { throw Failure.questionPending }
         guard input == expected else { throw Failure.goalChanged }
     }
@@ -354,29 +359,32 @@ final class ComputerUseBrowserResearchTask {
             guard ContinuousClock.now < deadline else { throw ComputerUseBrowserActionPlanError.deadlineExceeded }
         }
         try check()
-        let page = try await observeOwnedPage(goal: captured, enforceSources: true)
+        var page = try await observeOwnedPage(goal: captured, enforceSources: true)
         do {
-            var changed: Set<String> = []
-            if let stage = formStage, let receipt = stage.nativeReceipt, confirmedFormHistory.last == receipt,
-               captured.continues(stage.input.interpretation.input), stage.input.evidence.page.document == page.document,
-               stage.input.evidence.page.documentID == page.documentID {
-                changed = try await stage.inspectChangedCriteria(page: page, checkCurrent: { try self.checkCurrent(captured) })
-            }
-            try check()
             let archive = try researchEvidence(for: captured)
-            let historyOptions = try browser.historyOptions(goal: captured, visits: confirmedNavigationHistory, evidence: page)
-            let popupControls = popupSequence < 32 && navigationDirectory != nil && page.page.controls.contains(where: {
-                $0.compositeRole == "combobox" && !$0.disabled && ComputerUseBrowserControlRead.allows($0)
-            }) ? try await browser.popupControlIDs(in: page) : []
-            try check()
-            var recalled: [Int] = []
+            var recalled: [Int] = [], optionReads: [ComputerUseBrowserControlRead] = []
             while true {
+                var changed: Set<String> = []
+                if let stage = formStage, let receipt = stage.nativeReceipt, confirmedFormHistory.last == receipt,
+                   captured.continues(stage.input.interpretation.input), stage.input.evidence.page.document == page.document,
+                   stage.input.evidence.page.documentID == page.documentID {
+                    changed = try await stage.inspectChangedCriteria(page: page, checkCurrent: { try self.checkCurrent(captured) })
+                }
+                try check()
+                let historyOptions = try browser.historyOptions(goal: captured, visits: confirmedNavigationHistory, evidence: page)
+                let popupControls = popupSequence < 32 && navigationDirectory != nil && page.page.controls.contains(where: {
+                    $0.compositeRole == "combobox" && !$0.disabled && ComputerUseBrowserControlRead.allows($0)
+                }) ? try await browser.popupControlIDs(in: page) : []
+                let optionChoices = optionSelectionSequence < 32 && navigationDirectory != nil && !optionReads.isEmpty
+                    ? try await browser.optionSelectionChoices(in: page) : []
                 try check()
                 guard retainedEvidence.digest == archive.digest else { throw ComputerUseBrowserResearchEvidenceError.inputChanged }
                 let context = try ComputerUseBrowserActionInput(interpretation: interpretation, evidence: page,
                     navigationHistory: confirmedNavigationHistory, formHistory: confirmedFormHistory, latestForm: formStage,
                     changedFormTargetIDs: changed, researchEvidence: archive, recalledReadings: recalled, historyOptions: historyOptions,
-                    popupControlIDs: popupControls, popupHistory: popupHistory)
+                    popupControlIDs: popupControls, popupHistory: popupHistory,
+                    allowOptionInspection: optionSelectionSequence < 32 && navigationDirectory != nil && optionReads.isEmpty,
+                    optionReadControls: optionReads, optionChoices: optionChoices, optionSelectionHistory: optionSelectionHistory)
                 let proposal = try await planner.propose(context)
                 try check()
                 try proposal.validate(for: context)
@@ -385,6 +393,12 @@ final class ComputerUseBrowserResearchTask {
                 try await browser.validatePageEvidence(page)
                 try check(); try browser.validateSourceDocument(page.document)
                 if case .recall(let index) = proposal.step { recalled.append(index); continue }
+                if case .inspectOptions = proposal.step {
+                    page = try await browser.observeResearchControls(for: proposal)
+                    optionReads = proposal.readControls
+                    try check()
+                    continue
+                }
                 return proposal
             }
         } catch {
@@ -487,6 +501,108 @@ final class ComputerUseBrowserResearchTask {
         popupHistory.append(.init(stage: stage, outcome: outcome, digest: digest))
         popupStage = nil; popupNeedsReopen = false; stage.retire()
         latestAction = nil; latestCandidates = nil; latestForm = nil
+    }
+
+    func selectOption(for action: ComputerUseBrowserActionProposal) async throws -> ComputerUseBrowserOptionSelectionReceipt {
+        try validateAction(action)
+        guard case .selectOption(let controlID, let optionID, let requirement) = action.step,
+              action.input.optionChoices.contains(where: { $0.controlID == controlID && $0.optionIDs.contains(optionID) }), let navigationDirectory else { throw ComputerUseBrowserActionPlanError.invalidProposal }
+        guard optionSelectionSequence < 32 else { throw Failure.optionSelectionLimit }
+        let captured = input
+        let intent = try ComputerUseBrowserOptionSelectionIntent(interpretation: action.input.interpretation,
+            evidence: action.input.evidence, controlID: controlID, optionID: optionID, requirementIndex: requirement)
+        latestAction = nil; latestCandidates = nil; latestForm = nil
+        try requireOriginalOptionSelectionCriteria(intent)
+        try await operate { [self] in
+            do {
+                let target = try await browser.prepareOptionSelection(intent)
+                try checkCurrent(captured)
+                let next = try ComputerUseBrowserOptionSelectionStage(target: target, sequence: optionSelectionSequence, browser: browser,
+                    journalDirectory: navigationDirectory.appendingPathComponent("OptionSelections"), makeStore: navigationStore)
+                optionSelectionStage = next; optionSelectionSequence += 1; optionSelectionNeedsReopen = false
+            } catch {
+                await browser.joinDOMCompletion(document: intent.evidence.document)
+                throw error
+            }
+        }
+        return try await resumeOptionSelection()
+    }
+
+    func resumeOptionSelection() async throws -> ComputerUseBrowserOptionSelectionReceipt {
+        try requireIdle(allowPendingOptionSelection: true)
+        guard !hasPendingForm, !hasPendingNavigation, !hasQuestion, optionSelectionStage != nil else { throw Failure.optionSelectionPending }
+        let captured = input
+        return try await operate(allowPendingOptionSelection: true) { [self] in
+            let stage = try currentOptionSelectionStage()
+            guard stage.target.intent.interpretation.input == captured else { throw Failure.goalChanged }
+            do {
+                let receipt = try await stage.run(checkCurrent: { try self.checkCurrent(captured) })
+                let digest = ComputerUseTaskContract.digest(["browser-research-option-selection-selected-v1",stage.contract.contractDigest,
+                    receipt.operationID,receipt.bindingID,receipt.controlID,receipt.optionID,receipt.documentID,
+                    String(receipt.didDispatch),receipt.afterValue])
+                try recordOptionSelection(stage, receipt: receipt, digest: digest)
+                return receipt
+            } catch {
+                if error is ComputerUseTaskJournalStore.StoreError, optionSelectionStage === stage { optionSelectionNeedsReopen = true }
+                throw error
+            }
+        }
+    }
+
+    func retirePendingUnsentOptionSelection() async throws -> ComputerUseBrowserResearchOptionSelectionRecord? {
+        try requireIdle(allowPendingOptionSelection: true)
+        guard !hasPendingForm, !hasPendingNavigation, !hasQuestion else { throw Failure.optionSelectionPending }
+        guard optionSelectionStage != nil else { return nil }
+        let captured = input
+        return try await operate(allowPendingOptionSelection: true) { [self] in
+            let stage = try currentOptionSelectionStage()
+            guard stage.target.intent.interpretation.input == captured else { throw Failure.goalChanged }
+            do {
+                guard let digest = try await stage.retireUnsent(checkCurrent: { try self.checkCurrent(captured) }) else { return nil }
+                try recordOptionSelection(stage, receipt: nil, digest: digest)
+                return optionSelectionHistory.last
+            } catch {
+                if error is ComputerUseTaskJournalStore.StoreError, optionSelectionStage === stage { optionSelectionNeedsReopen = true }
+                throw error
+            }
+        }
+    }
+
+    private func currentOptionSelectionStage() throws -> ComputerUseBrowserOptionSelectionStage {
+        guard let stage = optionSelectionStage else { throw Failure.optionSelectionPending }
+        if !optionSelectionNeedsReopen { return stage }
+        let replacement = try stage.reopened(makeStore: navigationStore)
+        stage.retire(); optionSelectionStage = replacement; optionSelectionNeedsReopen = false
+        return replacement
+    }
+
+    private func recordOptionSelection(_ stage: ComputerUseBrowserOptionSelectionStage, receipt: ComputerUseBrowserOptionSelectionReceipt?, digest: String) throws {
+        guard !isRetired else { return }
+        guard optionSelectionStage === stage, stage.sequence == optionSelectionHistory.count,
+              stage.target.intent.interpretation.input == input else { throw Failure.goalChanged }
+        optionSelectionHistory.append(try .init(stage: stage, receipt: receipt, digest: digest))
+        optionSelectionStage = nil; optionSelectionNeedsReopen = false; stage.retire()
+        latestAction = nil; latestCandidates = nil; latestForm = nil
+    }
+
+    /// A proven-unsent retirement releases the old native target, not its
+    /// original observed baseline. A replacement selection must still observe
+    /// those criteria before it can prepare an executable binding.
+    private func requireOriginalOptionSelectionCriteria(_ intent: ComputerUseBrowserOptionSelectionIntent) throws {
+        for record in optionSelectionHistory.reversed() {
+            if record.outcome == .selected { break }
+            let original = record.intent
+            let ids = original.observedPreservedControlIDs
+            if ids.isEmpty { continue }
+            guard intent.interpretation.input.continues(original.interpretation.input),
+                  intent.evidence.document == original.evidence.document,
+                  intent.evidence.documentID == original.evidence.documentID else { throw Failure.optionSelectionCriteriaChanged }
+            do {
+                let before = try ComputerUseBrowserOptionSelectionState.baselineDigest(controlIDs: ids, page: original.evidence.page)
+                let current = try ComputerUseBrowserOptionSelectionState.baselineDigest(controlIDs: ids, page: intent.evidence.page)
+                guard before == current else { throw Failure.optionSelectionCriteriaChanged }
+            } catch { throw Failure.optionSelectionCriteriaChanged }
+        }
     }
 
     func revisit(for action: ComputerUseBrowserActionProposal) async throws -> ComputerUseBrowserNavigationReceipt {
@@ -1209,6 +1325,7 @@ final class ComputerUseBrowserResearchTask {
         historyNavigation?.retire(); historyNavigation = nil
         retiredHistoryNavigations.removeAll()
         popupStage?.retire(); popupStage = nil; popupNeedsReopen = false; popupHistory.removeAll()
+        optionSelectionStage?.retire(); optionSelectionStage = nil; optionSelectionNeedsReopen = false; optionSelectionHistory.removeAll()
         retainedEvidence = .init(goal: input)
         clarification.retire(); navigation?.retire(); initialSearch?.retire(); hasQuestion = false; cancelOperation?()
     }
@@ -1332,6 +1449,17 @@ final class ComputerUseBrowserResearchTask {
                 await browser.joinDOMCompletion(document: action.input.evidence.document)
                 throw error
             }
+        } else if let action, !action.input.optionReadControls.isEmpty {
+            try checkCurrent(goal); try captureSession()
+            guard action.input.interpretation == interpretation.proposal else { throw ComputerUseBrowserActionPlanError.inputChanged }
+            do {
+                try await browser.validatePageEvidence(action.input.evidence)
+                try checkCurrent(goal); try browser.validateSourceDocument(action.input.evidence.document)
+                evidence = action.input.evidence
+            } catch {
+                await browser.joinDOMCompletion(document: action.input.evidence.document)
+                throw error
+            }
         } else {
             evidence = try await observeOwnedPage(goal: goal, enforceSources: true, includingControlState: true)
         }
@@ -1349,13 +1477,14 @@ final class ComputerUseBrowserResearchTask {
         return bound
     }
 
-    private func requireIdle(allowPendingPopup: Bool = false) throws {
+    private func requireIdle(allowPendingPopup: Bool = false, allowPendingOptionSelection: Bool = false) throws {
         try Task.checkCancellation()
         guard !isRetired else { throw Failure.retired }
         guard !isPaused else { throw Failure.paused }
         guard mayAct() else { throw ComputerUseBrowserError.ownershipLost }
         guard operationID == nil else { throw Failure.busy }
         guard allowPendingPopup || !hasPendingPopup else { throw Failure.popupPending }
+        guard allowPendingOptionSelection || !hasPendingOptionSelection else { throw Failure.optionSelectionPending }
     }
 
     private func checkCurrent(_ goal: ComputerUseBrowserGoalInput) throws {
@@ -1370,8 +1499,8 @@ final class ComputerUseBrowserResearchTask {
         }
     }
 
-    private func operate<Value: Sendable>(allowPendingPopup: Bool = false, _ body: @escaping @MainActor @Sendable () async throws -> Value) async throws -> Value {
-        try requireIdle(allowPendingPopup: allowPendingPopup)
+    private func operate<Value: Sendable>(allowPendingPopup: Bool = false, allowPendingOptionSelection: Bool = false, _ body: @escaping @MainActor @Sendable () async throws -> Value) async throws -> Value {
+        try requireIdle(allowPendingPopup: allowPendingPopup, allowPendingOptionSelection: allowPendingOptionSelection)
         let id = UUID(), epoch = controlEpoch, captured = input
         operationID = id
         let child = Task { @MainActor in try await body() }

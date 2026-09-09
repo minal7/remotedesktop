@@ -1032,9 +1032,10 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
               result.popupControls == nil || command == .popupCandidates else { throw ComputerUseBrowserError.unsupportedDocument }
         guard result.optionSelectionBinding == nil || command == .prepareOptionSelection,
               result.optionSelectionReceipt == nil || command == .optionSelectionReceipt,
+              result.optionSelectionCandidates == nil || command == .optionSelectionCandidates,
               result.selectionPreservedControls == nil || command == .prepareOptionSelection else { throw ComputerUseBrowserError.unsupportedDocument }
         if [.popupCandidates, .preparePopup, .validatePopup, .openPopup, .popupReceipt, .retireUnsentPopup,
-            .prepareOptionSelection, .validateOptionSelection, .selectOption, .optionSelectionReceipt, .retireUnsentOptionSelection].contains(command) {
+            .optionSelectionCandidates, .prepareOptionSelection, .validateOptionSelection, .selectOption, .optionSelectionReceipt, .retireUnsentOptionSelection].contains(command) {
             guard result.fields == nil, result.page == nil, result.scroll == nil, result.formQuery == nil,
                   result.formBindings == nil, result.changedFieldIDs == nil else { throw ComputerUseBrowserError.unsupportedDocument }
         }
@@ -1046,7 +1047,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             guard result.fields == nil, result.page == nil, result.scroll == nil, result.formQuery == nil,
                   result.formBindings == nil, result.changedFieldIDs == nil, result.popupBinding == nil, result.popupReceipt == nil,
                   result.popupControls == nil, result.optionSelectionBinding == nil, result.optionSelectionReceipt == nil,
-                  result.selectionPreservedControls == nil else { throw ComputerUseBrowserError.unsupportedDocument }
+                  result.selectionPreservedControls == nil, result.optionSelectionCandidates == nil else { throw ComputerUseBrowserError.unsupportedDocument }
             throw ComputerUseBrowserError.authenticationRequired
         }
         return result

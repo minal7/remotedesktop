@@ -6,7 +6,7 @@ enum ComputerUseBrowserDOMCommand: String {
     case scrollViewport, viewportScrollReceipt, validatePageLink, finishPendingChange, continueUnsentInput
     case prepareFormQuery, validateFormQuery, bindPageFields, formFields, extendFormFields, inspectFormRequirements, retireUnsentInputs
     case popupCandidates, preparePopup, validatePopup, openPopup, popupReceipt, retireUnsentPopup
-    case prepareOptionSelection, validateOptionSelection, selectOption, optionSelectionReceipt, retireUnsentOptionSelection
+    case optionSelectionCandidates, prepareOptionSelection, validateOptionSelection, selectOption, optionSelectionReceipt, retireUnsentOptionSelection
 }
 
 /// Private adapter output. A GET query can contain server state or user input;
@@ -534,6 +534,7 @@ struct ComputerUseBrowserDOMReply: Decodable {
     let optionSelectionBinding: ComputerUseBrowserOptionSelectionBinding?
     let optionSelectionReceipt: ComputerUseBrowserOptionSelectionReceipt?
     let selectionPreservedControls: [String]?
+    let optionSelectionCandidates: [ComputerUseBrowserOptionSelectionChoice]?
 }
 
 /// Fixed host code in a separate WebKit script world. Page text, model output
@@ -1451,7 +1452,7 @@ enum ComputerUseBrowserDOM {
               || JSON.stringify(readViewport()) !== JSON.stringify(operation.receipt.after)) return reply('uncertain');
           return {...reply('viewport-scroll-confirmed'), scroll: operation.receipt};
         }
-        if (['pageSnapshot', 'observeResearchControls', 'validatePageSnapshot', 'scrollViewport', 'validatePageLink', 'prepareFormQuery', 'validateFormQuery', 'bindPageFields', 'formFields', 'extendFormFields', 'inspectFormRequirements', 'popupCandidates', 'preparePopup', 'validatePopup', 'openPopup', 'prepareOptionSelection', 'validateOptionSelection', 'selectOption'].includes(command)) {
+        if (['pageSnapshot', 'observeResearchControls', 'validatePageSnapshot', 'scrollViewport', 'validatePageLink', 'prepareFormQuery', 'validateFormQuery', 'bindPageFields', 'formFields', 'extendFormFields', 'inspectFormRequirements', 'popupCandidates', 'preparePopup', 'validatePopup', 'openPopup', 'optionSelectionCandidates', 'prepareOptionSelection', 'validateOptionSelection', 'selectOption'].includes(command)) {
           const status = authenticationStatus();
           if (status) { lastPageSnapshot = null; return reply(status); }
           if (doc.readyState !== 'complete') return reply('stale');

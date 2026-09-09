@@ -69,15 +69,12 @@ enum ComputerUseBrowserOptionSelectionScript {
         }
         return Array.from(references);
       }
-      function selectionCandidate(args, controls) {
+      function selectionControlCandidate(args, controls) {
         const binding = controls.get(args.controlID), state = selectionGraph(binding);
         if (!state || binding.metadata.disabled || binding.metadata.readOnly || !selectionReady(state)
             || state.graph.list_hidden || !lastPageSnapshot.scopedControlIDs.includes(args.controlID)
             || state.graph.role === 'combobox' && state.graph.attributes['aria-expanded'] !== 'true') return null;
-        const index = state.graph.options.findIndex(option => option.id === args.optionID), composite = binding.composite;
-        if (index < 0 || state.graph.options[index].disabled || state.graph.options[index].hidden) return null;
-        const option = composite.optionElements[index];
-        if (!option || !selectionClickable(option)) return null;
+        const composite = binding.composite;
         const preserved = [], references = selectionReferences(binding);
         if (!references) return null;
         const required = new Set(references);
@@ -99,8 +96,16 @@ enum ComputerUseBrowserOptionSelectionScript {
           for (const node of refs) { required.add(node); if (required.size > 4096) return null; }
           preserved.push({id,binding:other,metadata:selectionMetadata(other),state:JSON.stringify(other.state),references:refs,form:other.element.form || null});
         }
-        return {binding,state,option,list:composite.list,preserved,references,required,
+        return {binding,state,list:composite.list,preserved,references,required,
           owner:popupOwnerIdentity(binding.element),form:binding.element.form || null};
+      }
+      function selectionCandidate(args, controls) {
+        const candidate = selectionControlCandidate(args,controls);
+        if (!candidate) return null;
+        const index = candidate.state.graph.options.findIndex(option => option.id === args.optionID);
+        if (index < 0 || candidate.state.graph.options[index].disabled || candidate.state.graph.options[index].hidden) return null;
+        const option = candidate.binding.composite.optionElements[index];
+        return option && selectionClickable(option) ? {...candidate,option} : null;
       }
       function selectionPlanMatches(args, plan) {
         return plan && plan.controlID === args.controlID && plan.optionID === args.optionID && plan.snapshotID === args.snapshotID && plan.url === doc.URL;
@@ -170,6 +175,19 @@ enum ComputerUseBrowserOptionSelectionScript {
         return null;
       }
       function selectionCurrentCommand(command,args,controls) {
+        if (command === 'optionSelectionCandidates') {
+          const choices = []; let count = 0;
+          for (const [controlID,binding] of controls) {
+            if (!binding.composite) continue;
+            const candidate = selectionControlCandidate({controlID},controls);
+            if (!candidate?.owner) continue;
+            const optionIDs = candidate.state.graph.options.filter((option,index) => !option.disabled && !option.hidden
+              && selectionClickable(binding.composite.optionElements[index])).map(option => option.id);
+            if (!optionIDs.length || count + optionIDs.length > 128) continue;
+            choices.push({controlID,optionIDs}); count += optionIDs.length;
+          }
+          return {...reply('selection-candidates'),optionSelectionCandidates:choices};
+        }
         if (!['prepareOptionSelection','validateOptionSelection','selectOption'].includes(command)) return null;
         if (command === 'prepareOptionSelection') {
           const candidate = selectionCandidate(args,controls);

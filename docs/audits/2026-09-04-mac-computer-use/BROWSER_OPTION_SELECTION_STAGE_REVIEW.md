@@ -2,6 +2,8 @@
 
 Source checkpoint following `2a1d262`. [The native selection foundation](BROWSER_OPTION_SELECTION_REVIEW.md) now has a journaled stage that retains its exact choice and observed criteria through interruption and failed writes. The ordinary action planner, research owner and driver do not yet expose this stage. The source remains uncompiled and unexecuted; there is no new model, provider or complete-task qualification.
 
+Follow-up: [the option-selection driver review](BROWSER_OPTION_SELECTION_DRIVER_REVIEW.md) records subsequent source integration of scoped inspection, planner choices, owner exclusion, history and recovery. The statements and counts below describe this earlier stage checkpoint; execution and the broader remaining criteria/provider work are still pending.
+
 ## First-principles repair
 
 A selection effect needs an identity before it starts. A timeout does not establish that the click failed, a visible file replacement does not establish durable storage, and an already-selected option does not need another click. Recovery must reconcile the original operation rather than construct an equivalent-looking replacement.
