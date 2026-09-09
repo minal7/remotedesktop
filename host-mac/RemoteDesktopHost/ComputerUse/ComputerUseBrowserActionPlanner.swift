@@ -2,6 +2,35 @@ import Foundation
 
 enum ComputerUseBrowserActionPlanError: Error, Equatable { case invalidInput, invalidProposal, inputChanged, contextLimit, retainedFormRequiresExtension, deadlineExceeded }
 
+/// An observed sign-in entry can motivate a request for the person's help.
+/// It never supplies a click, navigation, credential or authentication proof.
+struct ComputerUseBrowserLoginHandoffTarget: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    enum Kind: String, Sendable { case control, link }
+    let id: String
+    let kind: Kind
+    let reference: String
+    var context: [String: Any] { ["id":id, "kind":kind.rawValue, "reference":reference] }
+    static func recognizes(_ label: String) -> Bool {
+        guard label.utf8.count <= 256 else { return false }
+        let normalized = label.lowercased().split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        return normalized.range(of: #"^(?:(?:sign ?in|log ?in)(?: to continue| to your account| with (?:apple|google|microsoft|facebook))?|continue with (?:apple|google|microsoft|facebook))$"#,
+            options: .regularExpression) != nil
+    }
+    static func collect(page: ComputerUseBrowserPageSnapshot, controls: Set<String>, links: Set<String>) -> [Self] {
+        var result: [Self] = []
+        for control in page.controls where controls.contains(control.id) && ["button", "submit"].contains(control.kind)
+            && !control.disabled && !control.readOnly && recognizes(control.label) {
+            result.append(.init(id: "login\(result.count + 1)", kind: .control, reference: control.id))
+        }
+        for link in page.links where links.contains(link.id) && recognizes(link.label) {
+            result.append(.init(id: "login\(result.count + 1)", kind: .link, reference: link.id))
+        }
+        return result
+    }
+    var description: String { "BrowserLoginHandoffTarget" }
+    var debugDescription: String { description }
+}
+
 /// The complete goal and one current page decide which capability to prepare.
 /// Scoped values enter only after an explicit inspection proposal. Private
 /// URLs, native bindings and operation identities stay with the host.
@@ -48,6 +77,7 @@ struct ComputerUseBrowserActionInput: Equatable, Sendable, CustomStringConvertib
     let queryControlIDs: [String]
     let queryReceipt: ComputerUseBrowserResearchFormReceipt?
     let usesFormPartyHistoryContext: Bool
+    let loginHandoffTargets: [ComputerUseBrowserLoginHandoffTarget]
     let recallableReadingIndices: [Int]
     let recalledReadingIndices: [Int]
     let historyOptions: [ComputerUseBrowserHistoryOption]
@@ -56,7 +86,7 @@ struct ComputerUseBrowserActionInput: Equatable, Sendable, CustomStringConvertib
     private let archiveDigest: String?
     let contextJSON: String
     var needsFormDecision: Bool { !formIDs.isEmpty || !queryControlIDs.isEmpty }
-    var needsPlanningDecision: Bool { usesEffectScopeContext || needsFormDecision || usesFormPartyHistoryContext || usesPopupContext || usesOptionSelectionContext || !readableControlIDs.isEmpty || !recallableReadingIndices.isEmpty || !recalledReadingIndices.isEmpty || !historyOptions.isEmpty }
+    var needsPlanningDecision: Bool { usesEffectScopeContext || needsFormDecision || usesFormPartyHistoryContext || !loginHandoffTargets.isEmpty || usesPopupContext || usesOptionSelectionContext || !readableControlIDs.isEmpty || !recallableReadingIndices.isEmpty || !recalledReadingIndices.isEmpty || !historyOptions.isEmpty }
 
     @MainActor
     init(interpretation: ComputerUseBrowserGoalProposal, evidence: ComputerUseBrowserPageEvidence,
@@ -128,6 +158,9 @@ struct ComputerUseBrowserActionInput: Equatable, Sendable, CustomStringConvertib
         guard let page = try JSONSerialization.jsonObject(with: Data(serialized.utf8)) as? [String: Any],
               let records = page["records"] as? [[String: Any]] else { throw ComputerUseBrowserActionPlanError.invalidInput }
         let projected = Set(records.filter { $0["kind"] as? String == "control" }.compactMap { $0["id"] as? String })
+        let projectedLinks = Set(records.filter { $0["kind"] as? String == "link" }.compactMap { $0["id"] as? String })
+        loginHandoffTargets = preparationReview == nil && formEffectScope == nil
+            ? ComputerUseBrowserLoginHandoffTarget.collect(page: evidence.page, controls: projected, links: projectedLinks) : []
         readableRequirementIndices = interpretation.requirements.indices.filter { ComputerUseBrowserControlRead.accepts(interpretation.requirements[$0]) }
         readableControlIDs = readableRequirementIndices.isEmpty ? [] : evidence.page.controls.filter {
             projected.contains($0.id) && ComputerUseBrowserControlRead.allows($0)
@@ -434,6 +467,10 @@ struct ComputerUseBrowserActionInput: Equatable, Sendable, CustomStringConvertib
                 return row
             }
         }
+        if !loginHandoffTargets.isEmpty {
+            context["version"] = 26
+            context["login_handoffs"] = loginHandoffTargets.map(\.context)
+        }
         contextJSON = String(decoding: try JSONSerialization.data(withJSONObject: context, options: [.sortedKeys]), as: UTF8.self)
         usesFormStateContext = formHistory.contains { $0.verifiedWithoutInputCount > 0 }
         usesFormRecoveryContext = formHistory.contains { $0.requiresRepairAtPublication }
@@ -456,6 +493,7 @@ struct ComputerUseBrowserActionProposal: Equatable, Sendable, CustomStringConver
         case inspectOptions, extendInspection, preserveControls, reviewControls(ComputerUseBrowserEffectControlReview), selectOption(String, String, Int)
         case planFields([ComputerUseBrowserFormEffectScope.FieldIntent])
         case question(ComputerUseBrowserClarificationTopic, [String]), unavailable
+        case loginHandoff(String)
     }
     let input: ComputerUseBrowserActionInput
     let step: Step
@@ -562,6 +600,9 @@ struct ComputerUseBrowserActionProposal: Equatable, Sendable, CustomStringConver
                input.readableRequirementIndices.contains(index) { step = .openPopup(id, index) }
             else if case .bool(true)? = root["read_results"] { step = .readResults }
             else if case .bool(true)? = root["unavailable"] { step = .unavailable }
+            else if case .string(let id)? = root["login_handoff"], input.loginHandoffTargets.contains(where: { $0.id == id }) {
+                step = .loginHandoff(id)
+            }
             else if case .number(let number)? = root["reading"], let index = Int(exactly: number), input.recallableReadingIndices.contains(index) {
                 step = .recall(index)
             }
@@ -635,6 +676,7 @@ struct ComputerUseLocalBrowserActionPlanner: ComputerUseBrowserActionPlanning {
             choices.append(object(["reading":["type":"integer", "enum":input.recallableReadingIndices]]))
         }
         if !input.historyVisitIndices.isEmpty { choices.append(object(["revisit":["type":"integer", "enum":input.historyVisitIndices]])) }
+        if !input.loginHandoffTargets.isEmpty { choices.append(object(["login_handoff":["type":"string", "enum":input.loginHandoffTargets.map(\.id)]])) }
         if !input.popupControlIDs.isEmpty {
             choices.append(object(["open_popup":object(["control":["type":"string", "enum":input.popupControlIDs],
                 "requirement":["type":"integer", "enum":input.readableRequirementIndices]])]))
@@ -681,7 +723,7 @@ struct ComputerUseLocalBrowserActionPlanner: ComputerUseBrowserActionPlanning {
         let body: [String: Any] = ["model":connection.modelAlias,
             "messages":[["role":"system", "content":Self.instructions(for: input)], ["role":"user", "content":input.contextJSON]],
             "temperature":0, "top_p":1, "top_k":0, "max_tokens":ComputerUseLocalBrowserGoalPlanner.outputTokens, "cache_prompt":false,
-            "response_format":["type":"json_schema", "json_schema":["name":input.usesFormRetentionContext ? "browser_research_action_v22" : input.usesFormRecoveryContext ? "browser_research_action_v21" : input.usesFormStateContext ? "browser_research_action_v20" : input.preparationReview != nil ? "browser_research_action_v19" : input.formEffectScope != nil ? "browser_research_action_v18" : input.usesEffectScopeContext ? "browser_research_action_v15" : (input.usesPopupContext ? "browser_research_action_v14" : (input.usesOptionSelectionContext ? "browser_research_action_v13" : (!input.readableControlIDs.isEmpty ? "browser_research_action_v11" : (input.allowsHistory ? "browser_research_action_v7" : "browser_research_action_v6")))), "strict":true, "schema":["oneOf":choices]]]]
+            "response_format":["type":"json_schema", "json_schema":["name":!input.loginHandoffTargets.isEmpty ? "browser_research_action_v26" : input.usesFormRetentionContext ? "browser_research_action_v22" : input.usesFormRecoveryContext ? "browser_research_action_v21" : input.usesFormStateContext ? "browser_research_action_v20" : input.preparationReview != nil ? "browser_research_action_v19" : input.formEffectScope != nil ? "browser_research_action_v18" : input.usesEffectScopeContext ? "browser_research_action_v15" : (input.usesPopupContext ? "browser_research_action_v14" : (input.usesOptionSelectionContext ? "browser_research_action_v13" : (!input.readableControlIDs.isEmpty ? "browser_research_action_v11" : (input.allowsHistory ? "browser_research_action_v7" : "browser_research_action_v6")))), "strict":true, "schema":["oneOf":choices]]]]
         var request = URLRequest(url: connection.baseURL.appendingPathComponent("v1/chat/completions"))
         request.httpMethod = "POST"; request.timeoutInterval = 30
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -698,6 +740,7 @@ struct ComputerUseLocalBrowserActionPlanner: ComputerUseBrowserActionPlanning {
         if !input.recalledReadingIndices.isEmpty { parts += [recalledInstructions, capacityInstructions] }
         if !input.recalledReadingIndices.isEmpty || input.interpretation.requirements.contains(where: { $0.field == .quantity }) { parts.append(quantityInstructions) }
         if !input.formIDs.isEmpty { parts.append(formInstructions) }
+        if !input.loginHandoffTargets.isEmpty { parts.append(loginHandoffInstructions) }
         if !input.formIDs.isEmpty || input.usesFormRecoveryContext || input.usesFormRetentionContext || input.usesFormPartyHistoryContext { parts.append(formHistoryInstructions) }
         if input.queryReceipt != nil { parts.append(verifiedFormInstructions) }
         if !input.readableControlIDs.isEmpty { parts.append(readingInstructions) }
@@ -736,8 +779,11 @@ struct ComputerUseLocalBrowserActionPlanner: ComputerUseBrowserActionPlanning {
     Historical field_review can distinguish availableQuantity from selectedQuantity, purchaseLimit, packageSize and unknown. Only the first even proposes a capacity meaning, with whole cited qualifiers. quotedCapacitySufficient/quotedCapacityInsufficient compare an observed matching-unit count against a requested exact/minimum count under that proposal; they do not certify current stock, a selected booking quantity, applicable dates/types or the complete request. Other quantity meanings and ambiguous/unparsed counts still need appropriate page/form evidence. Do not repeat or skip an input merely because a historical capacity comparison passes.
     """
     private static let formInstructions = """
-    Return {"form":"ID","preserve":[]} to select a scope for review for an offered editable_forms ID when entering or explicitly retaining search criteria in that form is the next necessary step. A separate planner will propose exact source-bound field values or confirm a fully reviewed retain-only stage. Retain-only requires earlier native verification, no pending edits, and no changed criteria; it cannot turn a captured invariant into a verified criterion. For every field the USER explicitly requires to remain unchanged, include {"control":"ID","requirement":index} in preserve, using a preservable_controls reference and its motivating outcome/condition/prohibition requirement. Include those fields even outside the selected form. At most sixteen unique controls; never invent preservation for every unedited field. After per-field scope review completes, discovery reads only declared edit/retained targets and these explicit preservation targets. Carried preservation cannot be dropped by the later form planner. If a required field is missing or unsupported, do not silently omit it; use a justified question or unavailable. Distinguish search controls from unrelated newsletter/account/checkout forms. Do not choose login, password, MFA, payment or booking actions. Do not edit the same form again merely because its current values are hidden. Consider verified_form_stage and form_history before requesting another edit.
+    Return {"form":"ID","preserve":[]} to select a scope for review for an offered editable_forms ID when entering or explicitly retaining search criteria in that form is the next necessary step. A separate planner will propose exact source-bound field values or confirm a fully reviewed retain-only stage. Retain-only requires earlier native verification, no pending edits, and no changed criteria; it cannot turn a captured invariant into a verified criterion. For every field the USER explicitly requires to remain unchanged, include {"control":"ID","requirement":index} in preserve, using a preservable_controls reference and its motivating outcome/condition/prohibition requirement. Include those fields even outside the selected form. At most sixteen unique controls; never invent preservation for every unedited field. After per-field scope review completes, discovery reads only declared edit/retained targets and these explicit preservation targets. Carried preservation cannot be dropped by the later form planner. If a required field is missing or unsupported, do not silently omit it; use a justified question or unavailable. Distinguish search controls from unrelated newsletter/account/checkout forms. Do not use form edits for login, passwords, MFA, payment or booking. Do not edit the same form again merely because its current values are hidden. Consider verified_form_stage and form_history before requesting another edit.
     Supported readonly/native settings can also appear in preservable_controls. Explicit preservation binds their original state privately through edits and queries; it supplies neither an editable alias nor permission to read their values into research context. Keep every user preservation clause attached to its control, including an in-form readonly setting.
+    """
+    private static let loginHandoffInstructions = """
+    Version 26 login_handoffs lists observed sign-in entry buttons or links. If the COMPLETE task actually needs account access here and public browsing cannot make the needed progress, return {"login_handoff":"ID"} using one offered ID. An optional sign-in link alone does not mean login is necessary; continue public research when possible. This requests the person's help and pauses the original task. It never clicks the entry, follows its URL, opens a provider, types credentials or proves authentication. The person handles sign-in, MFA, passkeys, CAPTCHA and account permissions in the AI browser, then explicitly returns control. Resume permits a fresh page check; it does not establish account identity or task completion. Preserve all remaining requirements and historical effects. Do not ask for passwords/codes in a task question, copy account values, invent a handoff reference, or use form/query/popup actions to perform login. The offered public reference identifies the observed entry on this page only and supplies no action authority. Unsupported or ambiguous sign-in entry formats still need ordinary user intervention.
     """
     private static let formHistoryInstructions = """
     Version 22 retained_criteria counts earlier verified criteria explicitly retained under the current review. Such a stage has zero new input and zero new desired-value proof origins; its original input receipts or observation proofs still govern each criterion. A recovered retention review can have required_repair_when_recorded=true and complete_stage=false: its earlier origins and desired values remain obligations, while current native values need repair. The retained count never proves those values currently match. A complete read-only retention stage is not a query, a task result, or proof that every user requirement is satisfied. The next action must still advance the complete request. Do not repeat retention merely to produce another history entry.

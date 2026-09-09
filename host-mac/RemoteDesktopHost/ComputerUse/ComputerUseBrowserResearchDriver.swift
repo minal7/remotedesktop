@@ -421,6 +421,8 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                 case .question:
                     guard let question = action.questionRequest else { throw Failure.invalidProposal }
                     return .browserClarificationRequired(question)
+                case .loginHandoff:
+                    return .userInterventionRequired(try await owner.requestLoginHandoff(for: action))
                 case .unavailable:
                     return .userInterventionRequired("I could not choose a supported next step for the complete request on this page. The original task remains pending.")
                 case .readResults: break

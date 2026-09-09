@@ -4,6 +4,83 @@ import XCTest
 
 @MainActor
 final class ComputerUseBrowserActionPlannerTests: XCTestCase {
+    func testLoginHandoffLabelsRequireAnExplicitSignInEntry() {
+        for label in ["Sign in", " Log In \n", "LOGIN", "Sign in to continue", "Sign in to your account", "Sign in with Google", "Continue with Apple"] {
+            XCTAssertTrue(ComputerUseBrowserLoginHandoffTarget.recognizes(label), label)
+        }
+        for label in ["", "Continue", "Create account", "Sign out", "Login help", "Sign in policy", "Do not sign in", "Sign in and buy", "Continue with payment", "Account", String(repeating: "Sign in ", count: 40)] {
+            XCTAssertFalse(ComputerUseBrowserLoginHandoffTarget.recognizes(label), label)
+        }
+    }
+
+    func testObservedLoginEntriesOfferOnlyAReferenceBoundManualHandoff() async throws {
+        let fixture = try await ResearchDriverFixture.make(searchBodyHTML: """
+            <p>Account access is optional.</p><button type='button'>Continue with Apple</button>
+            <a href='/account?private=handoff-secret'>Sign in</a>
+            <button disabled>Log in</button><button hidden>Sign in</button><button>Login help</button>
+            <article><h2>Concert Alpha</h2><a href='/details'>Alpha details</a></article>
+            """)
+        defer { fixture.close() }
+        fixture.policy.choices = [false]
+        _ = try await fixture.start()
+        let owner = try fixture.owner(), action = try await owner.planNextAction(using: fixture.actions), input = action.input
+        XCTAssertEqual(input.loginHandoffTargets.map(\.kind), [.control, .link])
+        XCTAssertTrue(input.needsPlanningDecision)
+        let context = try object(input.contextJSON)
+        XCTAssertEqual(context["version"] as? Int, 26)
+        XCTAssertEqual((context["login_handoffs"] as? [[String: Any]])?.compactMap { $0["id"] as? String }, ["login1", "login2"])
+        XCTAssertFalse(input.contextJSON.contains("handoff-secret")); XCTAssertFalse(input.contextJSON.contains(input.evidence.documentID))
+        let chosen = try ComputerUseBrowserActionProposal.decode(content: json(["login_handoff":"login2"]), input: input)
+        XCTAssertEqual(chosen.step, .loginHandoff("login2")); XCTAssertNil(chosen.questionRequest)
+        XCTAssertTrue(chosen.preservedControls.isEmpty); XCTAssertTrue(chosen.readControls.isEmpty)
+        for content in [#"{"login_handoff":"missing"}"#, #"{"login_handoff":true}"#,
+                        #"{"login_handoff":"login2","read_results":true}"#, #"{"login_handoff":{"url":"https://example.com"}}"#,
+                        #"{"login_handoff":"login2","password":"secret"}"#] {
+            XCTAssertThrowsError(try ComputerUseBrowserActionProposal.decode(content: content, input: input))
+        }
+        let request = try local(ActionPlannerTransport()).makeRequest(input), body = try object(String(decoding: XCTUnwrap(request.httpBody), as: UTF8.self))
+        let format = try XCTUnwrap(body["response_format"] as? [String: Any]), schema = try XCTUnwrap(format["json_schema"] as? [String: Any])
+        XCTAssertEqual(schema["name"] as? String, "browser_research_action_v26")
+        XCTAssertTrue(ComputerUseLocalBrowserActionPlanner.instructions(for: input).contains("optional sign-in link alone"))
+        XCTAssertEqual(fixture.server.count("/account?private=handoff-secret"), 0)
+        XCTAssertFalse(fixture.state.commands.contains(.edit)); XCTAssertFalse(fixture.state.commands.contains(.openPopup))
+        // Merely offering the option leaves normal planning available.
+        let next = try await owner.planNextAction(using: fixture.actions)
+        XCTAssertEqual(next.input.interpretation.input, owner.input)
+    }
+
+    func testLoginHandoffRejectsAChangedPageAndJoinsCancellationBeforeReturningControl() async throws {
+        for cancel in [false, true] {
+            let fixture = try await ResearchDriverFixture.make(searchBodyHTML: "<a href='/account'>Sign in</a><article><h2>Concert Alpha</h2><a href='/details'>Alpha details</a></article>")
+            defer { fixture.close() }
+            fixture.policy.choices = [false]
+            _ = try await fixture.start()
+            let owner = try fixture.owner()
+            fixture.actions.select = { input in try self.json(["login_handoff":XCTUnwrap(input.loginHandoffTargets.first?.id)]) }
+            let action = try await owner.planNextAction(using: fixture.actions)
+            if cancel {
+                fixture.state.onCommand = { command in
+                    guard command == .validatePageSnapshot else { return }
+                    fixture.state.onCommand = nil; owner.pause()
+                }
+            } else {
+                _ = try await fixture.browser.navigate(taskID: owner.taskID, operationID: "fixture-page-change", to: fixture.base.appendingPathComponent("account-ready"))
+            }
+            do { _ = try await owner.requestLoginHandoff(for: action); XCTFail("A stale or cancelled observation cannot publish the handoff") }
+            catch {
+                if cancel { XCTAssertTrue(error is CancellationError || error as? ComputerUseBrowserResearchTask.Failure == .paused) }
+                else { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+            }
+            XCTAssertFalse(owner.isOperating)
+            XCTAssertEqual(fixture.server.count("/account"), 0)
+            XCTAssertFalse(fixture.state.commands.contains(.edit))
+            if cancel {
+                do { _ = try await owner.planNextAction(using: fixture.actions); XCTFail("Cancellation still requires explicit handback") }
+                catch { XCTAssertEqual(error as? ComputerUseBrowserResearchTask.Failure, .paused) }
+            }
+        }
+    }
+
     func testActionContextRetainsTheWholeGoalAndObservedFormsWithoutPrivateValuesOrTargets() async throws {
         let fixture = try await ResearchDriverFixture.make(searchForm: true)
         defer { fixture.close() }
@@ -35,7 +112,7 @@ final class ComputerUseBrowserActionPlannerTests: XCTestCase {
         XCTAssertEqual(accepted.step, .editForm(form))
         XCTAssertThrowsError(try accepted.validate(for: foreign)) { XCTAssertEqual($0 as? ComputerUseBrowserActionPlanError, .inputChanged) }
         let control = try XCTUnwrap(input.evidence.page.controls.first { $0.kind == "submit" })
-        for content in [#"{}"#, #"{"read_results":false}"#, #"{"unavailable":1}"#,
+        for content in [#"{}"#, #"{"read_results":false}"#, #"{"unavailable":1}"#, #"{"login_handoff":"login1"}"#,
             #"{"read_results":true,"unavailable":true}"#, #"{"read_results":true,"read_results":true}"#,
             #"{"form":"not-observed","preserve":[]}"#, try json(["form":form]),
             try json(["form":form,"preserve":[["control":"missing","requirement":0]]]),

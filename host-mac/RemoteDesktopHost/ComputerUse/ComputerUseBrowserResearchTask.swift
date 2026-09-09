@@ -552,6 +552,23 @@ final class ComputerUseBrowserResearchTask {
               action.input.interpretation == interpretation?.proposal else { throw ComputerUseBrowserActionPlanError.inputChanged }
     }
 
+    /// Request manual account work without dispatching an action to the entry
+    /// point. Revalidate the observation before yielding the original task.
+    func requestLoginHandoff(for action: ComputerUseBrowserActionProposal) async throws -> String {
+        try validateAction(action)
+        guard case .loginHandoff(let id) = action.step,
+              action.input.loginHandoffTargets.contains(where: { $0.id == id }) else { throw ComputerUseBrowserActionPlanError.invalidProposal }
+        let captured = input
+        try await operate { [self] in
+            try await browser.validatePageEvidence(action.input.evidence)
+            try checkCurrent(captured)
+            guard latestAction == action else { throw ComputerUseBrowserActionPlanError.inputChanged }
+        }
+        try Task.checkCancellation(); try checkCurrent(captured)
+        pause()
+        return "Use the AI browser to sign in, then choose Let AI continue. Your original request is still pending."
+    }
+
     func openFormQuery(for action: ComputerUseBrowserActionProposal) async throws -> ComputerUseBrowserNavigationReceipt {
         try validateAction(action)
         guard case .openQuery(let controlID, let receipt) = action.step else { throw ComputerUseBrowserActionPlanError.invalidProposal }
