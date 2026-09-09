@@ -94,7 +94,7 @@ struct ComputerUseBrowserOptionSelectionIntent: Equatable, Sendable, CustomStrin
             }
             preserved.append(state.controlID)
         }
-        guard scopeReview == nil || scopeReview?.matches(interpretation: interpretation, evidence: evidence) == true else { throw ComputerUseBrowserOptionSelectionError.invalidIntent }
+        guard scopeReview == nil || (scopeReview?.formScope == nil && scopeReview?.matches(interpretation: interpretation, evidence: evidence) == true) else { throw ComputerUseBrowserOptionSelectionError.invalidIntent }
         self.scopeReview = scopeReview
         self.interpretation = interpretation; self.evidence = evidence; self.controlID = controlID; self.optionID = optionID
         self.requirementIndex = requirementIndex; observedPreservedControlIDs = preserved

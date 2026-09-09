@@ -2,6 +2,8 @@
 
 Source checkpoint following `379fe8d`. [Popup criterion preservation](BROWSER_POPUP_CRITERIA_REVIEW.md) protected criteria once observed, but an owner-only initial scope could omit a required date altogether. Normal research dropdown opening and option selection now require complete reported metadata plus explicit review of every remaining unread control. This is structural enforcement of a semantic review, not proof that a model interprets the task correctly. No build, typecheck or test execution has qualified this source.
 
+Follow-up: [form/query scope review](BROWSER_FORM_EFFECT_SCOPE_REVIEW.md) now connects outside preservation and unconstrained query criteria to the normal research owner. Internal editable-form scope and universal effect/criterion enforcement remain open.
+
 ## First-principles failure
 
 Preserving an observed baseline cannot protect a criterion that was never observed. Conversely, reading every field would collect unrelated private values without establishing relevance. The missing step is an explicit account of unread controls against the complete request: which could matter, which are unrelated based on visible metadata, and which remain unresolved.

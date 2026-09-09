@@ -9,6 +9,17 @@ struct ComputerUseBrowserActionInput: Equatable, Sendable, CustomStringConvertib
     let interpretation: ComputerUseBrowserGoalProposal
     let evidence: ComputerUseBrowserPageEvidence
     let formIDs: [String]
+    struct CarriedFormPreservation: Equatable, Sendable {
+        let formID: String
+        let control: ComputerUseBrowserControlPreservation
+    }
+    let carriedFormPreservation: [CarriedFormPreservation]
+    let queryBoundControlIDs: [String]
+    let formEffectScope: ComputerUseBrowserFormEffectScope?
+    let effectReviewScopeDigest: String
+    let effectReviewRequirementIndices: [Int]
+    let effectQueryValueControlIDs: [String]
+    let effectAdditionalPreservationControlIDs: [String]
     let preservableControlIDs: [String]
     let readableControlIDs: [String]
     let readableRequirementIndices: [Int]
@@ -26,7 +37,7 @@ struct ComputerUseBrowserActionInput: Equatable, Sendable, CustomStringConvertib
     let effectReviewMetadataComplete: Bool
     let effectAdditionalReadControlIDs: [String]
     let effectScopeAllowsActions: Bool
-    var usesEffectScopeContext: Bool { !optionReadControls.isEmpty }
+    var usesEffectScopeContext: Bool { formEffectScope != nil || !optionReadControls.isEmpty }
     var usesOptionSelectionContext: Bool { !optionInspectionControlIDs.isEmpty || !optionReadControls.isEmpty || !optionSelectionHistory.isEmpty }
     let queryControlIDs: [String]
     let queryReceipt: ComputerUseBrowserResearchFormReceipt?
@@ -38,7 +49,7 @@ struct ComputerUseBrowserActionInput: Equatable, Sendable, CustomStringConvertib
     private let archiveDigest: String?
     let contextJSON: String
     var needsFormDecision: Bool { !formIDs.isEmpty || !queryControlIDs.isEmpty }
-    var needsPlanningDecision: Bool { needsFormDecision || usesPopupContext || usesOptionSelectionContext || !readableControlIDs.isEmpty || !recallableReadingIndices.isEmpty || !recalledReadingIndices.isEmpty || !historyOptions.isEmpty }
+    var needsPlanningDecision: Bool { usesEffectScopeContext || needsFormDecision || usesPopupContext || usesOptionSelectionContext || !readableControlIDs.isEmpty || !recallableReadingIndices.isEmpty || !recalledReadingIndices.isEmpty || !historyOptions.isEmpty }
 
     @MainActor
     init(interpretation: ComputerUseBrowserGoalProposal, evidence: ComputerUseBrowserPageEvidence,
@@ -50,7 +61,8 @@ struct ComputerUseBrowserActionInput: Equatable, Sendable, CustomStringConvertib
          allowOptionInspection: Bool = false, optionReadControls: [ComputerUseBrowserControlRead] = [],
          optionChoices: [ComputerUseBrowserOptionSelectionChoice] = [],
          optionSelectionHistory: [ComputerUseBrowserResearchOptionSelectionRecord] = [],
-         effectControlReviews: [ComputerUseBrowserEffectControlReview] = []) throws {
+         effectControlReviews: [ComputerUseBrowserEffectControlReview] = [],
+         formEffectScope: ComputerUseBrowserFormEffectScope? = nil) throws {
         let goal = interpretation.input
         guard interpretation.disposition == .research, evidence.document.taskID == goal.taskID,
               navigationHistory.count <= 64, formHistory.count <= 32,
@@ -99,32 +111,9 @@ struct ComputerUseBrowserActionInput: Equatable, Sendable, CustomStringConvertib
                 && goal.continues($0.element.intent.interpretation.input) }),
               Set(popupHistory.map(\.operationID)).count == popupHistory.count else { throw ComputerUseBrowserActionPlanError.invalidInput }
         let readableIDs = Set(readableControlIDs)
-        let inspecting = !optionReadControls.isEmpty, scopedIDs = Set(optionReadControls.map(\.controlID))
-        effectReviewControlIDs = inspecting ? evidence.page.controlStates.filter {
-            $0.kind == .unavailable && !scopedIDs.contains($0.controlID) && projected.contains($0.controlID)
-        }.map(\.controlID) : []
-        effectReviewEvidenceIDs = inspecting ? records.filter { $0["kind"] as? String == "text" }.compactMap { $0["id"] as? String } + effectReviewControlIDs : []
-        effectReviewMetadataComplete = inspecting && !evidence.page.omittedControlMetadata
-            && projected == Set(evidence.page.controls.map(\.id))
-            && ["source_truncated","omitted_embedded_content","omitted_structure","projection_omitted_records","budget_omitted_records"]
-                .allSatisfy { page[$0] as? Bool == false }
-        self.effectControlReviews = effectControlReviews
-        let reviewed = try ComputerUseBrowserEffectControlReview.retainedEntries(effectControlReviews, interpretation: interpretation,
-            evidence: evidence, controlIDs: effectReviewControlIDs, evidenceIDs: effectReviewEvidenceIDs,
-            requirementIndices: readableRequirementIndices, metadataComplete: effectReviewMetadataComplete)
-        effectReviewNextControlIDs = try ComputerUseBrowserEffectControlReview.nextControls(Array(effectReviewControlIDs.dropFirst(reviewed.count)),
-            evidenceIDs: effectReviewEvidenceIDs, requirementIndices: readableRequirementIndices)
-        effectAdditionalReadControlIDs = optionReadControls.count < 16 ? reviewed.filter {
-            $0.relationship != .unrelated && readableIDs.contains($0.controlID)
-        }.map(\.controlID) : []
-        let scopeAllowsActions = effectReviewMetadataComplete && reviewed.count == effectReviewControlIDs.count
-            && reviewed.allSatisfy { $0.relationship == .unrelated }
-        effectScopeAllowsActions = scopeAllowsActions
-        self.popupControlIDs = popupControlIDs.filter { id in scopeAllowsActions && readableIDs.contains(id) && projected.contains(id)
-            && optionReadControls.contains(where: { $0.controlID == id }) }
         self.popupHistory = popupHistory
         self.optionReadControls = optionReadControls
-        optionInspectionControlIDs = allowOptionInspection && optionReadControls.isEmpty ? evidence.page.controls.filter {
+        optionInspectionControlIDs = allowOptionInspection && formEffectScope == nil && optionReadControls.isEmpty ? evidence.page.controls.filter {
             readableIDs.contains($0.id) && $0.compositeRole != nil
         }.map(\.id) : []
         guard optionChoices.count <= 16, Set(optionChoices.map(\.controlID)).count == optionChoices.count,
@@ -138,20 +127,28 @@ struct ComputerUseBrowserActionInput: Equatable, Sendable, CustomStringConvertib
                 throw ComputerUseBrowserActionPlanError.invalidInput
             }
         }
-        self.optionChoices = optionChoices.filter { scopeAllowsActions && projected.contains($0.controlID) }
         self.optionSelectionHistory = optionSelectionHistory
         let editableKinds: Set<String> = ["text", "search", "url", "tel", "email", "textarea", "date", "datetime-local", "month", "week", "time", "number", "select"]
         let editableControls = evidence.page.controls.filter {
             projected.contains($0.id) && editableKinds.contains($0.kind) && !$0.disabled && !$0.readOnly && !$0.multiple
         }
-        formIDs = Array(Set(editableControls.compactMap { $0.form?.id })).sorted()
-        preservableControlIDs = editableControls.map(\.id)
+        let availableFormIDs = Array(Set(editableControls.compactMap { $0.form?.id })).sorted()
+        let preservableIDs = editableControls.map(\.id)
+        preservableControlIDs = preservableIDs
         var verified: Any = NSNull(), queryControls: [String] = [], queryReceipt: ComputerUseBrowserResearchFormReceipt?
+        var carried: [CarriedFormPreservation] = [], queryBound: [String] = []
         if let stage = latestForm, let receipt = stage.nativeReceipt, formHistory.last == receipt,
            interpretation.input.continues(stage.input.interpretation.input), stage.input.evidence.page.document == evidence.document,
            stage.input.evidence.page.documentID == evidence.documentID {
             guard let continuation = stage.nativeContinuation, changedFormTargetIDs.isSubset(of: continuation.repairableTargetIDs) else {
                 throw ComputerUseBrowserActionPlanError.invalidInput
+            }
+            queryBound = stage.input.evidence.fields.filter { continuation.finalValues[$0.editable.snapshot.targetID] != nil }.map { $0.control.id }
+            if let formID = continuation.formID {
+                carried = try continuation.preservedControls.map { item in
+                    guard let index = try item.source.indices(in: interpretation).first else { throw ComputerUseBrowserActionPlanError.invalidInput }
+                    return .init(formID: formID, control: .init(controlID: item.controlID, requirementIndex: index))
+                }
             }
             let fields = stage.input.evidence.fields.filter { continuation.editedTargetIDs.contains($0.editable.snapshot.targetID) }
             guard fields.count == continuation.editedTargetIDs.count else { throw ComputerUseBrowserActionPlanError.invalidInput }
@@ -176,6 +173,62 @@ struct ComputerUseBrowserActionInput: Equatable, Sendable, CustomStringConvertib
                 "current_goal_revision":receipt.goalRevision == goal.digest]
             queryReceipt = receipt
         } else if !changedFormTargetIDs.isEmpty { throw ComputerUseBrowserActionPlanError.invalidInput }
+        carriedFormPreservation = carried; queryBoundControlIDs = queryBound
+        self.formEffectScope = formEffectScope
+        if let scope = formEffectScope {
+            guard scope.matches(interpretation: interpretation, evidence: evidence, forms: availableFormIDs,
+                queries: queryControls, receipt: queryReceipt), scope.preservedControls.allSatisfy({ preservableIDs.contains($0.controlID) }) else {
+                throw ComputerUseBrowserActionPlanError.inputChanged
+            }
+        }
+        let inspecting = formEffectScope != nil || !optionReadControls.isEmpty
+        let scopedIDs = Set(optionReadControls.map(\.controlID))
+        let covered = formEffectScope?.coveredControlIDs(in: evidence.page, discoverableControls: preservableIDs, queryBoundControls: queryBound + optionReadControls.map(\.controlID))
+        effectReviewControlIDs = inspecting ? (covered.map { covered in
+            evidence.page.controls.filter { !covered.contains($0.id) && projected.contains($0.id) }.map(\.id)
+        } ?? evidence.page.controlStates.filter {
+            $0.kind == .unavailable && !scopedIDs.contains($0.controlID) && projected.contains($0.controlID)
+        }.map(\.controlID)) : []
+        let queryFormID = formEffectScope?.queryControlID.flatMap { id in evidence.page.controls.first { $0.id == id }?.form?.id }
+        let reviewControlIDs = Set(effectReviewControlIDs)
+        effectQueryValueControlIDs = queryFormID.map { form in evidence.page.controls.filter {
+            $0.form?.id == form && !$0.disabled && !$0.name.isEmpty && !["submit","button","reset","image"].contains($0.kind)
+                && reviewControlIDs.contains($0.id)
+        }.map(\.id) } ?? []
+        effectReviewScopeDigest = ComputerUseTaskContract.digest(["browser-effect-review-scope-v1",formEffectScope?.digest ?? "dropdown",String(covered?.count ?? 0)] + (covered?.sorted() ?? [])
+            + optionReadControls.flatMap { [$0.controlID,String($0.requirementIndex)] })
+        effectReviewRequirementIndices = formEffectScope == nil ? readableRequirementIndices : interpretation.requirements.indices.filter {
+            [.outcome,.condition,.prohibition].contains(interpretation.requirements[$0].role)
+        }
+        effectReviewEvidenceIDs = inspecting ? records.filter { $0["kind"] as? String == "text" }.compactMap { $0["id"] as? String } + effectReviewControlIDs : []
+        effectReviewMetadataComplete = inspecting && !evidence.page.omittedControlMetadata
+            && projected == Set(evidence.page.controls.map(\.id))
+            && ["source_truncated","omitted_embedded_content","omitted_structure","projection_omitted_records","budget_omitted_records"]
+                .allSatisfy { page[$0] as? Bool == false }
+        self.effectControlReviews = effectControlReviews
+        let reviewed = try ComputerUseBrowserEffectControlReview.retainedEntries(effectControlReviews, interpretation: interpretation,
+            evidence: evidence, scopeDigest: effectReviewScopeDigest, controlIDs: effectReviewControlIDs, evidenceIDs: effectReviewEvidenceIDs,
+            requirementIndices: effectReviewRequirementIndices, metadataComplete: effectReviewMetadataComplete, requiredValueControls: effectQueryValueControlIDs)
+        effectReviewNextControlIDs = try ComputerUseBrowserEffectControlReview.nextControls(Array(effectReviewControlIDs.dropFirst(reviewed.count)),
+            evidenceIDs: effectReviewEvidenceIDs, requirementIndices: effectReviewRequirementIndices)
+        effectAdditionalReadControlIDs = formEffectScope?.formID == nil && optionReadControls.count < 16 ? reviewed.filter {
+            $0.relationship != .unrelated && readableIDs.contains($0.controlID)
+        }.map(\.controlID) : []
+        effectAdditionalPreservationControlIDs = formEffectScope?.formID != nil && (formEffectScope?.preservedControls.count ?? 0) < 16 ? reviewed.filter {
+            $0.relationship != .unrelated && preservableIDs.contains($0.controlID)
+        }.map(\.controlID) : []
+        let queryReadingsAvailable = formEffectScope?.queryControlID == nil || optionReadControls.allSatisfy { read in
+            evidence.page.controlStates.contains { $0.controlID == read.controlID && ![.unavailable,.stateless].contains($0.kind) }
+        }
+        let scopeAllowsActions = queryReadingsAvailable && effectReviewMetadataComplete && reviewed.count == effectReviewControlIDs.count
+            && reviewed.allSatisfy { $0.relationship == .unrelated }
+        effectScopeAllowsActions = scopeAllowsActions
+        self.popupControlIDs = popupControlIDs.filter { id in formEffectScope == nil && scopeAllowsActions && readableIDs.contains(id) && projected.contains(id)
+            && optionReadControls.contains(where: { $0.controlID == id }) }
+        self.optionChoices = optionChoices.filter { formEffectScope == nil && scopeAllowsActions && projected.contains($0.controlID) }
+        formIDs = availableFormIDs // Selecting a form starts/changes review; the owner alone releases a completed selection.
+        if let scope = formEffectScope { queryControls = scopeAllowsActions ? scope.queryControlID.map { [$0] } ?? [] : [] }
+        if var summary = verified as? [String: Any] { summary["candidate_query_controls"] = queryControls; verified = summary }
         let requirements: [[String: Any]] = try interpretation.requirements.enumerated().map { index, requirement in
             guard let source = interpretation.source(of: requirement) else { throw ComputerUseBrowserActionPlanError.invalidInput }
             return ["index":index, "turn":requirement.sourceTurnIndex, "source":source,
@@ -228,10 +281,13 @@ struct ComputerUseBrowserActionInput: Equatable, Sendable, CustomStringConvertib
         }
         if !self.popupControlIDs.isEmpty || !popupHistory.isEmpty { context["version"] = 14 }
         if inspecting {
-            context["version"] = 15
+            context["version"] = formEffectScope == nil ? 15 : 16
             context["effect_scope"] = ["metadata_complete":effectReviewMetadataComplete,"unread_controls":effectReviewControlIDs,
                 "review_controls":effectReviewNextControlIDs,"review_evidence":effectReviewEvidenceIDs,
                 "reviews":reviewed.map(\.context),"additional_read_controls":effectAdditionalReadControlIDs,
+                "form_selection":formEffectScope.map { $0.context as Any } ?? NSNull(),
+                "review_requirements":effectReviewRequirementIndices,"additional_preservation_controls":effectAdditionalPreservationControlIDs,
+                "query_value_controls":effectQueryValueControlIDs,
                 "actions_allowed":effectScopeAllowsActions]
         }
         contextJSON = String(decoding: try JSONSerialization.data(withJSONObject: context, options: [.sortedKeys]), as: UTF8.self)
@@ -247,7 +303,7 @@ struct ComputerUseBrowserActionProposal: Equatable, Sendable, CustomStringConver
         case readResults, editForm(String), openQuery(String, ComputerUseBrowserResearchFormReceipt)
         case recall(Int), revisit(Int)
         case openPopup(String, Int)
-        case inspectOptions, extendInspection, reviewControls(ComputerUseBrowserEffectControlReview), selectOption(String, String, Int)
+        case inspectOptions, extendInspection, preserveControls, reviewControls(ComputerUseBrowserEffectControlReview), selectOption(String, String, Int)
         case question(ComputerUseBrowserClarificationTopic, [String]), unavailable
     }
     let input: ComputerUseBrowserActionInput
@@ -267,6 +323,21 @@ struct ComputerUseBrowserActionProposal: Equatable, Sendable, CustomStringConver
             guard case .object(let root) = try parser.parse() else { throw invalid }
             if Set(root.keys) == ["review_controls"] {
                 return .init(input: input, step: .reviewControls(try ComputerUseBrowserEffectControlReview.decode(root["review_controls"], input: input)))
+            }
+            if Set(root.keys) == ["preserve_controls"] {
+                guard let scope = input.formEffectScope, scope.formID != nil, case .array(let rows)? = root["preserve_controls"],
+                      !rows.isEmpty, rows.count + scope.preservedControls.count <= 16 else { throw invalid }
+                let reviewed = input.effectControlReviews.flatMap(\.entries)
+                let controls: [ComputerUseBrowserControlPreservation] = try rows.map { value in
+                    guard case .object(let row) = value, Set(row.keys) == ["control","requirement"],
+                          case .string(let id)? = row["control"], input.effectAdditionalPreservationControlIDs.contains(id),
+                          case .number(let number)? = row["requirement"], let index = Int(exactly: number),
+                          input.effectReviewRequirementIndices.contains(index),
+                          reviewed.contains(where: { $0.controlID == id && ($0.requirementIndices.isEmpty || $0.requirementIndices.contains(index)) }) else { throw invalid }
+                    return .init(controlID: id, requirementIndex: index)
+                }
+                guard Set(controls.map(\.controlID)).count == controls.count else { throw invalid }
+                return .init(input: input, step: .preserveControls, preservedControls: controls)
             }
             let inspecting = Set(root.keys) == ["inspect_options"], extending = Set(root.keys) == ["extend_inspection"]
             if inspecting || extending || Set(root.keys) == ["read_results", "read_controls"] {
@@ -404,6 +475,11 @@ struct ComputerUseLocalBrowserActionPlanner: ComputerUseBrowserActionPlanning {
         if !input.effectReviewNextControlIDs.isEmpty {
             choices.append(object(["review_controls":ComputerUseBrowserEffectControlReview.schema(input)]))
         }
+        if !input.effectAdditionalPreservationControlIDs.isEmpty {
+            choices.append(object(["preserve_controls":["type":"array","minItems":1,"maxItems":16 - (input.formEffectScope?.preservedControls.count ?? 0),
+                "items":object(["control":["type":"string","enum":input.effectAdditionalPreservationControlIDs],
+                    "requirement":["type":"integer","enum":input.effectReviewRequirementIndices]])]]))
+        }
         if !input.effectAdditionalReadControlIDs.isEmpty {
             choices.append(object(["extend_inspection":["type":"array","minItems":1,"maxItems":16 - input.optionReadControls.count,
                 "items":object(["control":["type":"string","enum":input.effectAdditionalReadControlIDs],
@@ -425,7 +501,7 @@ struct ComputerUseLocalBrowserActionPlanner: ComputerUseBrowserActionPlanning {
         let body: [String: Any] = ["model":connection.modelAlias,
             "messages":[["role":"system", "content":Self.instructions(for: input)], ["role":"user", "content":input.contextJSON]],
             "temperature":0, "top_p":1, "top_k":0, "max_tokens":ComputerUseLocalBrowserGoalPlanner.outputTokens, "cache_prompt":false,
-            "response_format":["type":"json_schema", "json_schema":["name":input.usesEffectScopeContext ? "browser_research_action_v15" : (input.usesPopupContext ? "browser_research_action_v14" : (input.usesOptionSelectionContext ? "browser_research_action_v13" : (!input.readableControlIDs.isEmpty ? "browser_research_action_v11" : (input.allowsHistory ? "browser_research_action_v7" : "browser_research_action_v6")))), "strict":true, "schema":["oneOf":choices]]]]
+            "response_format":["type":"json_schema", "json_schema":["name":input.formEffectScope != nil ? "browser_research_action_v16" : input.usesEffectScopeContext ? "browser_research_action_v15" : (input.usesPopupContext ? "browser_research_action_v14" : (input.usesOptionSelectionContext ? "browser_research_action_v13" : (!input.readableControlIDs.isEmpty ? "browser_research_action_v11" : (input.allowsHistory ? "browser_research_action_v7" : "browser_research_action_v6")))), "strict":true, "schema":["oneOf":choices]]]]
         var request = URLRequest(url: connection.baseURL.appendingPathComponent("v1/chat/completions"))
         request.httpMethod = "POST"; request.timeoutInterval = 30
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -446,6 +522,7 @@ struct ComputerUseLocalBrowserActionPlanner: ComputerUseBrowserActionPlanning {
         if !input.readableControlIDs.isEmpty { parts.append(readingInstructions) }
         if !input.optionInspectionControlIDs.isEmpty { parts.append(inspectionInstructions) }
         if input.usesEffectScopeContext { parts.append(scopeReviewInstructions) }
+        if input.formEffectScope != nil { parts.append(formScopeInstructions) }
         if input.usesPopupContext || !input.optionInspectionControlIDs.isEmpty { parts.append(popupInstructions) }
         if !input.optionChoices.isEmpty { parts.append(selectionInstructions) }
         if !input.optionSelectionHistory.isEmpty { parts.append(selectionHistoryInstructions) }
@@ -477,7 +554,7 @@ struct ComputerUseLocalBrowserActionPlanner: ComputerUseBrowserActionPlanning {
     Historical field_review can distinguish availableQuantity from selectedQuantity, purchaseLimit, packageSize and unknown. Only the first even proposes a capacity meaning, with whole cited qualifiers. quotedCapacitySufficient/quotedCapacityInsufficient compare an observed matching-unit count against a requested exact/minimum count under that proposal; they do not certify current stock, a selected booking quantity, applicable dates/types or the complete request. Other quantity meanings and ambiguous/unparsed counts still need appropriate page/form evidence. Do not repeat or skip an input merely because a historical capacity comparison passes.
     """
     private static let formInstructions = """
-    Return {"form":"ID","preserve":[]} for an offered editable_forms ID when entering search criteria in that form is the next necessary step. A separate planner will propose exact source-bound field values. For every field the USER explicitly requires to remain unchanged, include {"control":"ID","requirement":index} in preserve, using a preservable_controls reference and its motivating outcome/condition/prohibition requirement. Include those fields even outside the selected form. At most sixteen unique controls; never invent preservation for every unedited field. Discovery reads only the selected form and these explicitly requested fields. Carried preservation cannot be dropped by the later form planner. If a required field is missing or unsupported, do not silently omit it; use a justified question or unavailable. Distinguish search controls from unrelated newsletter/account/checkout forms. Do not choose login, password, MFA, payment or booking actions. Do not edit the same form again merely because its current values are hidden. Consider verified_form_stage and form_history before requesting another edit.
+    Return {"form":"ID","preserve":[]} to select a scope for review for an offered editable_forms ID when entering search criteria in that form is the next necessary step. A separate planner will propose exact source-bound field values. For every field the USER explicitly requires to remain unchanged, include {"control":"ID","requirement":index} in preserve, using a preservable_controls reference and its motivating outcome/condition/prohibition requirement. Include those fields even outside the selected form. At most sixteen unique controls; never invent preservation for every unedited field. After scope review completes, discovery reads only the selected form and these explicitly requested fields. Carried preservation cannot be dropped by the later form planner. If a required field is missing or unsupported, do not silently omit it; use a justified question or unavailable. Distinguish search controls from unrelated newsletter/account/checkout forms. Do not choose login, password, MFA, payment or booking actions. Do not edit the same form again merely because its current values are hidden. Consider verified_form_stage and form_history before requesting another edit.
     """
     private static let formHistoryInstructions = """
     form_history distinguishes verified edits from planned_edits. complete_stage=false means only a prefix was verified; unfinished_edits retains the unsent remainder with historical labels/types and original user sources. Those old labels are not current native references. Select the retained form to replan every unfinished entry; its planner must explicitly map all pending work to current edits. Query controls remain withheld until those obligations and any changed criteria are resolved. Never count a partial receipt as completion of the original stage or the research goal.
@@ -509,8 +586,12 @@ struct ComputerUseLocalBrowserActionPlanner: ComputerUseBrowserActionPlanning {
     private static let selectionHistoryInstructions = """
     option_selection_history retains historical choices, no-event observations and proven-unsent retirements with the original requirement source and observed criteria. Those values are historical settings, not current page facts or provider results. Preserve the original baseline when recovering a retired selection; do not adopt an overwritten date as a new starting point. After a confirmed selection, read fresh evidence of accepted application values and updated results. Neither a selected flag nor a history record completes a research requirement or verifies price, stock, fees or availability.
     """
+    private static let formScopeInstructions = """
+    effect_scope.form_selection retains a proposed form or query before private discovery or navigation. Form selection delegates its supported native editable members to the separate form planner, which must still interpret every preservation/edit requirement. Every other reported control needs review, including unsupported/read-only members and controls outside the form. No values have been read merely by selecting a form. For a relevant/unknown control offered in additional_preservation_controls, return {"preserve_controls":[{"control":"ID","requirement":0}]} only when the USER requires that field to remain unchanged. This adds explicit preservation without dropping an earlier obligation. It authorizes the existing private native preservation read after the full review completes, including a user's negative preservation clause; it is not permission to read other secrets or to preserve every unedited field. The scope changes and all remaining controls need fresh review. An outside criterion that needs a different edit is not automatically a preservation requirement: select the appropriate offered form or return a justified question/unavailable. Selecting another form cannot discard already retained preservation.
+    A query scope covers only its chosen submitter and fields constrained by the retained verified edit/preservation chain. Other reported controls, including unedited members of that form, require review. query_value_controls identifies visible members whose value could be sent by this query; unrelated is forbidden for these references. They need a justified value reading or a retained verified field obligation. Do not read or preserve unrelated private values just to make submission pass; if this query would transmit information without a task reason, choose another justified path or unavailable. A relevant or unknown unconstrained criterion must not be declared unrelated merely to submit. If it is offered in additional_read_controls, extend_inspection can read it under a readable outcome/condition. After the new snapshot and remaining review, examine its complete observed value against the whole goal and explicitly choose query only if those current criteria justify it. Reading is not proof of suitability. If a change is needed, choose the appropriate form to establish its goal-backed edit or explicit preservation first, then reconsider querying. The host releases the retained form or a query without new value readings after complete review; a query with new readings requires a final explicit query decision; do not repeat the selection to avoid review. Missing metadata, unsupported required preservation and unresolved meaning leave the effect blocked. Reviews do not prove that all selected-form reads were needed, that a source semantically matches a control, that hidden server fields are appropriate, or that provider results satisfy the task.
+    """
     private static let scopeReviewInstructions = """
-    effect_scope accounts for unread controls before dropdown opening or option selection. For exactly the next review_controls IDs in order, return {"review_controls":[{"control":"ID","relationship":"unrelated|relevant|unknown","requirements":[],"evidence":["ID"]}]}. Review each control against the COMPLETE original request and all accepted answers, including preservation and prohibitions. A relevant unknown value could affect an intended action, criterion, eligibility, price or result: cite one to eight motivating readable requirement indices. Unrelated requires affirmative complete metadata/surrounding-text evidence that the control cannot affect this task, with an empty requirements list; its absence from the read scope or a label such as Email/Account is insufficient. Unknown keeps the dependency unresolved. Cite the control itself for relevant/unrelated and up to eight offered review_evidence IDs; never borrow another unread control's citation or invent a value. metadata_complete=false forbids unrelated; reviewing visible controls cannot erase omitted metadata. Reviews grant no reading or effect authority themselves.
-    The host withholds dropdown actions until all unread controls are explicitly reviewed as unrelated and metadata is complete. For a relevant/unknown control offered in additional_read_controls, use {"extend_inspection":[{"control":"ID","requirement":0}]} with its motivating original requirement. This adds only new needed controls to the existing scope; it cannot drop or rewrite an earlier read. There are at most sixteen scoped controls and one shared decision deadline. The new snapshot requires fresh unread-control review. Do not read unrelated private values to make this gate pass. If a needed control is unsupported, metadata is incomplete or meaning remains unresolved, use a justified question, reading or unavailable; do not choose another effect to bypass the unresolved criterion. These semantic judgments can be wrong and do not certify accepted provider values or complete the task.
+    effect_scope accounts for controls outside the selected read or form scope before an effect. For exactly the next review_controls IDs in order, return {"review_controls":[{"control":"ID","relationship":"unrelated|relevant|unknown","requirements":[],"evidence":["ID"]}]}. Review each control against the COMPLETE original request and all accepted answers, including preservation and prohibitions. A relevant unknown value could affect an intended action, criterion, eligibility, price or result: cite one to eight motivating review_requirements indices. Unrelated requires affirmative complete metadata/surrounding-text evidence that the control cannot affect this task, with an empty requirements list; its absence from the read scope or a label such as Email/Account is insufficient. Unknown keeps the dependency unresolved. Cite the control itself for relevant/unrelated and up to eight offered review_evidence IDs; never borrow another unread control's citation or invent a value. metadata_complete=false forbids unrelated; reviewing visible controls cannot erase omitted metadata. Reviews grant no reading or effect authority themselves.
+    The host withholds the reviewed effect until all remaining controls are explicitly reviewed as unrelated and metadata is complete. For a relevant/unknown control offered in additional_read_controls, use {"extend_inspection":[{"control":"ID","requirement":0}]} with its motivating original requirement. This adds only new needed controls to the existing scope; it cannot drop or rewrite an earlier read. There are at most sixteen scoped controls and one shared decision deadline. The new snapshot requires fresh unread-control review. Do not read unrelated private values to make this gate pass. If a needed control is unsupported, metadata is incomplete or meaning remains unresolved, use a justified question, reading or unavailable; do not choose another effect to bypass the unresolved criterion. These semantic judgments can be wrong and do not certify accepted provider values or complete the task.
     """
 }

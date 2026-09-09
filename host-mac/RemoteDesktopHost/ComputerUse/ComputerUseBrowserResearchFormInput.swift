@@ -76,6 +76,7 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
     let fieldAliases: [String]
     let editableFieldAliases: [String]
     let selectedFormID: String?
+    let scopeReview: ComputerUseBrowserEffectScopeReview?
     let requiredPreservation: [ComputerUseBrowserFormProposal.Preservation]
     let requiredRepairFieldAliases: [String]
     let pendingEditAliases: [String]
@@ -117,11 +118,18 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
     }
 
     init(interpretation: ComputerUseBrowserGoalProposal, evidence: ComputerUseBrowserFormEvidence, selectedFormID: String? = nil,
-         preservedControls: [ComputerUseBrowserControlPreservation] = [], previous: ComputerUseBrowserResearchFormContinuation? = nil) throws {
+         preservedControls: [ComputerUseBrowserControlPreservation] = [], previous: ComputerUseBrowserResearchFormContinuation? = nil,
+         scopeReview: ComputerUseBrowserEffectScopeReview? = nil) throws {
         guard interpretation.disposition == .research,
               interpretation.input.taskID.utf8.elementsEqual(evidence.page.document.taskID.utf8),
               (1...16).contains(evidence.fields.count), preservedControls.count <= 16,
               Set(preservedControls.map(\.controlID)).count == preservedControls.count else { throw ComputerUseBrowserResearchFormError.invalidInput }
+        if let scopeReview {
+            guard scopeReview.matches(interpretation: interpretation, evidence: evidence.page),
+                  let scope = scopeReview.formScope, let selectedFormID, scope.formID == selectedFormID,
+                  scope.preservedControls == preservedControls else { throw ComputerUseBrowserResearchFormError.inputChanged }
+        }
+        self.scopeReview = scopeReview
         if let previous {
             guard previous.taskID == interpretation.input.taskID, previous.rootDigest == interpretation.input.rootDigest,
                   interpretation.input.continues(previous.goal), previous.formID == selectedFormID,
@@ -195,7 +203,7 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
             row["id"] = alias
             return row
         }
-        let context: [String: Any] = ["version":9, "goal":interpretation.input.plannerContext,
+        var context: [String: Any] = ["version":scopeReview == nil ? 9 : 10, "goal":interpretation.input.plannerContext,
             "selected_form":selectedFormID.map { $0 as Any } ?? NSNull(),
             "required_preservation":try preserved.map { ["field":$0.field, "source":try $0.source.context(in: interpretation)] as [String: Any] },
             "previous_edits":priorEdits,
@@ -205,6 +213,7 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
             "requirements":requirements, "page":page, "field_bindings":bindings,
             "normalized_values":normalized.map { ["id":$0.id, "requirement":$0.requirementIndex,
                 "kind":$0.kind.rawValue, "value":$0.value, "unit":$0.unit] as [String: Any] }]
+        if scopeReview != nil { context["scope_reviewed"] = true }
         contextJSON = String(decoding: try JSONSerialization.data(withJSONObject: context, options: [.sortedKeys]), as: UTF8.self)
         self.interpretation = interpretation; self.evidence = evidence; fieldAliases = aliases
         normalizations = normalized; editableFieldAliases = editable; self.selectedFormID = selectedFormID

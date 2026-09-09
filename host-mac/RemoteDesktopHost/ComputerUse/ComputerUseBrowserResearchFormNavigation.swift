@@ -12,6 +12,7 @@ final class ComputerUseBrowserResearchFormNavigation {
     let evidence: ComputerUseBrowserPageEvidence
     let goal: ComputerUseBrowserGoalInput
     let operationID: String
+    let scopeReview: ComputerUseBrowserEffectScopeReview?
     private let stage: ComputerUseBrowserResearchFormStage
     private let browser: ComputerUseOwnedBrowser
     private let navigation: ComputerUseBrowserNavigationTask
@@ -24,7 +25,7 @@ final class ComputerUseBrowserResearchFormNavigation {
 
     init(form: ComputerUseBrowserResearchFormReceipt, controlID: String, evidence: ComputerUseBrowserPageEvidence,
          stage: ComputerUseBrowserResearchFormStage, browser: ComputerUseOwnedBrowser, journalDirectory: URL,
-         currentGoal: ComputerUseBrowserGoalInput? = nil,
+         currentGoal: ComputerUseBrowserGoalInput? = nil, scopeReview: ComputerUseBrowserEffectScopeReview? = nil,
          makeStore: @escaping (URL) throws -> ComputerUseTaskJournalStore = { try .init(directory: $0) }) throws {
         let original = stage.input.interpretation.input, goal = currentGoal ?? original
         guard goal.continues(original), form.stageID == stage.id, form.taskID == goal.taskID, form.rootDigest == goal.rootDigest,
@@ -34,9 +35,13 @@ final class ComputerUseBrowserResearchFormNavigation {
               evidence.page.controls.contains(where: { $0.id == controlID && $0.kind == "submit" && !$0.disabled }) else {
             throw Failure.invalidIntent
         }
+        if let scopeReview {
+            guard scopeReview.matches(goal: goal, evidence: evidence), scopeReview.formScope?.kind == .query(controlID, form) else { throw Failure.invalidIntent }
+        }
+        self.scopeReview = scopeReview
         self.form = form; self.controlID = controlID; self.evidence = evidence; self.goal = goal
         self.stage = stage; self.browser = browser
-        operationID = ComputerUseTaskContract.digest(["browser-research-form-query-stage-v2", goal.taskID, goal.rootDigest, stage.id, goal.digest])
+        operationID = ComputerUseTaskContract.digest([scopeReview == nil ? "browser-research-form-query-stage-v2" : "browser-research-form-query-stage-v3", goal.taskID, goal.rootDigest, stage.id, goal.digest] + (scopeReview.map { [$0.digest] } ?? []))
         navigation = .init(browser: browser, journalDirectory: journalDirectory, observedNavigationStore: makeStore)
     }
 
@@ -114,16 +119,25 @@ final class ComputerUseBrowserResearchFormNavigation {
         let current: ComputerUseBrowserPageEvidence
         if refresh {
             try browser.validateSourceDocument(evidence.document)
-            current = try await browser.observePage(document: evidence.document)
+            let metadata = try await browser.observePage(document: evidence.document)
+            if let scopeReview, !scopeReview.readControls.isEmpty {
+                current = try await browser.observeResearchControls(for: scopeReview.queryReadProposal(for: metadata))
+            } else { current = metadata }
             try checkCurrent()
             let page = current.page, before = evidence.page
             let comparable = ComputerUseBrowserPageSnapshot(id: before.id, texts: page.texts, links: page.links, controls: page.controls,
                 truncated: page.truncated, omittedEmbeddedContent: page.omittedEmbeddedContent, omittedControls: page.omittedControls,
-                viewport: before.viewport, containers: page.containers, omittedStructure: page.omittedStructure)
+                viewport: before.viewport, containers: page.containers, omittedStructure: page.omittedStructure,
+                controlStates: page.controlStates, controlStateObserved: page.controlStateObserved, scopedControlIDs: page.scopedControlIDs,
+                omittedControlMetadata: page.omittedControlMetadata)
             guard current.document == evidence.document, current.documentID == evidence.documentID, comparable == before else {
                 throw ComputerUseBrowserError.pageChanged
             }
         } else { current = evidence }
+        if let scopeReview {
+            try ComputerUseBrowserObservedCriteria.requireUnchanged(controlIDs: scopeReview.readControls.map(\.controlID),
+                original: evidence, current: current)
+        }
         return try await stage.prepareQuery(controlID: controlID, evidence: current, checkCurrent: checkCurrent)
     }
 

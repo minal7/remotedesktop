@@ -29,7 +29,7 @@ struct ComputerUseBrowserPopupIntent: Equatable, Sendable, CustomStringConvertib
         }.map(\.controlID)
         observedPreservedControlIDs = preserved
         baselineDigest = try ComputerUseBrowserObservedCriteria.digest(controlIDs: [controlID] + preserved, page: evidence.page)
-        guard scopeReview == nil || scopeReview?.matches(interpretation: interpretation, evidence: evidence) == true else { throw ComputerUseBrowserPopupError.invalidIntent }
+        guard scopeReview == nil || (scopeReview?.formScope == nil && scopeReview?.matches(interpretation: interpretation, evidence: evidence) == true) else { throw ComputerUseBrowserPopupError.invalidIntent }
         self.scopeReview = scopeReview
         self.interpretation = interpretation; self.evidence = evidence
         self.controlID = controlID; self.requirementIndex = requirementIndex

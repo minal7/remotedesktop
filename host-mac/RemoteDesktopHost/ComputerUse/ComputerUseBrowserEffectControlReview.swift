@@ -12,24 +12,25 @@ struct ComputerUseBrowserEffectControlReview: Equatable, Sendable, CustomStringC
             ["control":controlID,"relationship":relationship.rawValue,"requirements":requirementIndices,"evidence":evidenceIDs]
         }
         func isValid(controlIDs: [String], evidenceIDs allowedEvidence: [String], requirementIndices allowedRequirements: [Int],
-                     metadataComplete: Bool) -> Bool {
+                     metadataComplete: Bool, requiredValueControls: [String] = []) -> Bool {
             controlIDs.contains(controlID) && requirementIndices.count <= 8 && Set(requirementIndices).count == requirementIndices.count
                 && requirementIndices.allSatisfy(allowedRequirements.contains)
                 && evidenceIDs.count <= 8 && Set(evidenceIDs).count == evidenceIDs.count
                 && evidenceIDs.allSatisfy { allowedEvidence.contains($0) && ($0 == controlID || !controlIDs.contains($0)) }
                 && (relationship == .unknown || evidenceIDs.contains(controlID))
                 && (relationship != .relevant || !requirementIndices.isEmpty)
-                && (relationship != .unrelated || (metadataComplete && requirementIndices.isEmpty))
+                && (relationship != .unrelated || (metadataComplete && requirementIndices.isEmpty && !requiredValueControls.contains(controlID)))
         }
     }
     private let interpretation: ComputerUseBrowserGoalProposal
     private let evidence: ComputerUseBrowserPageEvidence
+    private let scopeDigest: String
     let entries: [Entry]
     var description: String { "BrowserEffectControlReview(controls: \(entries.count))" }
     var debugDescription: String { description }
 
     private init(input: ComputerUseBrowserActionInput, entries: [Entry]) {
-        interpretation = input.interpretation; evidence = input.evidence; self.entries = entries
+        interpretation = input.interpretation; evidence = input.evidence; scopeDigest = input.effectReviewScopeDigest; self.entries = entries
     }
 
     static func decode(_ value: MCPJSONValue?, input: ComputerUseBrowserActionInput) throws -> Self {
@@ -50,21 +51,21 @@ struct ComputerUseBrowserEffectControlReview: Equatable, Sendable, CustomStringC
             }
             let entry = Entry(controlID: id, relationship: relationship, requirementIndices: indices, evidenceIDs: references)
             guard entry.isValid(controlIDs: input.effectReviewControlIDs, evidenceIDs: input.effectReviewEvidenceIDs,
-                requirementIndices: input.readableRequirementIndices, metadataComplete: input.effectReviewMetadataComplete) else { throw invalid }
+                requirementIndices: input.effectReviewRequirementIndices, metadataComplete: input.effectReviewMetadataComplete, requiredValueControls: input.effectQueryValueControlIDs) else { throw invalid }
             return entry
         }
         return .init(input: input, entries: entries)
     }
 
     static func retainedEntries(_ reviews: [Self], interpretation: ComputerUseBrowserGoalProposal, evidence: ComputerUseBrowserPageEvidence,
-                                controlIDs: [String], evidenceIDs: [String], requirementIndices: [Int], metadataComplete: Bool) throws -> [Entry] {
+                                scopeDigest: String, controlIDs: [String], evidenceIDs: [String], requirementIndices: [Int], metadataComplete: Bool, requiredValueControls: [String] = []) throws -> [Entry] {
         guard reviews.count <= 64 else { throw ComputerUseBrowserActionPlanError.invalidInput }
         var result: [Entry] = []
         for review in reviews {
-            guard review.interpretation == interpretation, review.evidence == evidence, !review.entries.isEmpty,
+            guard review.interpretation == interpretation, review.evidence == evidence, review.scopeDigest == scopeDigest, !review.entries.isEmpty,
                   review.entries.count <= 4, review.entries.map(\.controlID) == Array(controlIDs.dropFirst(result.count).prefix(review.entries.count)),
                   review.entries.allSatisfy({ $0.isValid(controlIDs: controlIDs, evidenceIDs: evidenceIDs,
-                    requirementIndices: requirementIndices, metadataComplete: metadataComplete) }) else { throw ComputerUseBrowserActionPlanError.inputChanged }
+                    requirementIndices: requirementIndices, metadataComplete: metadataComplete, requiredValueControls: requiredValueControls) }) else { throw ComputerUseBrowserActionPlanError.inputChanged }
             result += review.entries
         }
         return result
@@ -87,10 +88,11 @@ struct ComputerUseBrowserEffectControlReview: Equatable, Sendable, CustomStringC
     }
 
     static func schema(_ input: ComputerUseBrowserActionInput) -> [String: Any] {
-        let relationships = input.effectReviewMetadataComplete ? ["unrelated","relevant","unknown"] : ["relevant","unknown"]
+        let allowsUnrelated = input.effectReviewMetadataComplete && input.effectReviewNextControlIDs.contains { !input.effectQueryValueControlIDs.contains($0) }
+        let relationships = allowsUnrelated ? ["unrelated","relevant","unknown"] : ["relevant","unknown"]
         let properties: [String: Any] = ["control":["type":"string","enum":input.effectReviewNextControlIDs],
             "relationship":["type":"string","enum":relationships],
-            "requirements":["type":"array","maxItems":8,"items":["type":"integer","enum":input.readableRequirementIndices]],
+            "requirements":["type":"array","maxItems":8,"items":["type":"integer","enum":input.effectReviewRequirementIndices]],
             "evidence":["type":"array","maxItems":8,"items":["type":"string","enum":input.effectReviewEvidenceIDs]]]
         return ["type":"array","minItems":input.effectReviewNextControlIDs.count,"maxItems":input.effectReviewNextControlIDs.count,
             "items":["type":"object","additionalProperties":false,"properties":properties,"required":properties.keys.sorted()]]
@@ -103,6 +105,7 @@ struct ComputerUseBrowserEffectScopeReview: Equatable, Sendable, CustomStringCon
     private let interpretation: ComputerUseBrowserGoalProposal
     private let evidence: ComputerUseBrowserPageEvidence
     let readControls: [ComputerUseBrowserControlRead]
+    let formScope: ComputerUseBrowserFormEffectScope?
     let reviews: [ComputerUseBrowserEffectControlReview]
     let digest: String
     var description: String { "BrowserEffectScopeReview" }
@@ -111,8 +114,22 @@ struct ComputerUseBrowserEffectScopeReview: Equatable, Sendable, CustomStringCon
     init(input: ComputerUseBrowserActionInput) throws {
         guard input.usesEffectScopeContext, input.effectScopeAllowsActions else { throw ComputerUseBrowserActionPlanError.invalidProposal }
         interpretation = input.interpretation; evidence = input.evidence
-        readControls = input.optionReadControls; reviews = input.effectControlReviews
+        readControls = input.optionReadControls; reviews = input.effectControlReviews; formScope = input.formEffectScope
         digest = ComputerUseTaskContract.digest(["browser-effect-scope-review-v1",input.contextJSON])
+    }
+    @MainActor
+    func queryReadProposal(for evidence: ComputerUseBrowserPageEvidence) throws -> ComputerUseBrowserActionProposal {
+        guard formScope?.queryControlID != nil, !readControls.isEmpty,
+              evidence.document == self.evidence.document, evidence.documentID == self.evidence.documentID else {
+            throw ComputerUseBrowserActionPlanError.inputChanged
+        }
+        let input = try ComputerUseBrowserActionInput(interpretation: interpretation, evidence: evidence,
+            navigationHistory: [], formHistory: [], latestForm: nil, changedFormTargetIDs: [])
+        let body: [String: Any] = ["read_results":true,"read_controls":readControls.map { ["control":$0.controlID,"requirement":$0.requirementIndex] as [String: Any] }]
+        return try .decode(content: String(decoding: JSONSerialization.data(withJSONObject: body, options: [.sortedKeys]), as: UTF8.self), input: input)
+    }
+    func matches(goal: ComputerUseBrowserGoalInput, evidence: ComputerUseBrowserPageEvidence) -> Bool {
+        interpretation.input == goal && self.evidence == evidence
     }
     func matches(interpretation: ComputerUseBrowserGoalProposal, evidence: ComputerUseBrowserPageEvidence) -> Bool {
         self.interpretation == interpretation && self.evidence == evidence

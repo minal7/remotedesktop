@@ -77,7 +77,10 @@ final class ComputerUseBrowserFormClarificationTests: XCTestCase {
         let owner = try fixture.owner()
         try await answer(fixture, topic: .fees, text: "Include fees.", taskID: "fee-answer")
         try await sources(fixture)
-        fixture.actions.select = { input in try self.json(["query":try XCTUnwrap(input.queryControlIDs.first)]) }
+        fixture.actions.select = { input in
+            if let review = try FormEffectScopeFixture.response(input, relevant: ["City":0]) { return review }
+            return try self.json(["query":try XCTUnwrap(input.queryControlIDs.first)])
+        }
         let action = try await owner.planNextAction(using: fixture.actions)
         XCTAssertEqual(action.input.queryReceipt, prepared.receipt)
         let context = try object(action.input.contextJSON), verified = try XCTUnwrap(context["verified_form_stage"] as? [String: Any])
@@ -129,7 +132,10 @@ final class ComputerUseBrowserFormClarificationTests: XCTestCase {
         XCTAssertEqual(next.requiredPreservation.first?.source.source, prompt)
         XCTAssertEqual(next.previous?.inputOperationIDs.count, 2)
         XCTAssertEqual(next.previous?.goalRevision, cityRevision.digest)
-        fixture.actions.select = { input in try self.json(["query":try XCTUnwrap(input.queryControlIDs.first)]) }
+        fixture.actions.select = { input in
+            if let review = try FormEffectScopeFixture.response(input, relevant: ["City":0]) { return review }
+            return try self.json(["query":try XCTUnwrap(input.queryControlIDs.first)])
+        }
         let query = try await owner.planNextAction(using: fixture.actions)
         _ = try await owner.openFormQuery(for: query)
         XCTAssertEqual(owner.confirmedFormHistory, [prepared.receipt, receipt])

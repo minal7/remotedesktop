@@ -95,6 +95,7 @@ final class ComputerUseBrowserActionPlannerTests: XCTestCase {
         _ = try await fixture.start()
         let owner = try fixture.owner()
         fixture.actions.select = { input in
+            if let review = try self.formReview(input) { return review }
             let control = try XCTUnwrap(input.evidence.page.controls.first { $0.label == "Query" })
             let preserved = try XCTUnwrap(input.evidence.page.controls.first { $0.label == "Newsletter email" })
             return try self.json(["form":XCTUnwrap(control.form?.id),"preserve":[["control":preserved.id,"requirement":0]]])
@@ -131,6 +132,7 @@ final class ComputerUseBrowserActionPlannerTests: XCTestCase {
         _ = try await fixture.start()
         let owner = try fixture.owner()
         fixture.actions.select = { input in
+            if let review = try self.formReview(input) { return review }
             let form = try XCTUnwrap(input.evidence.page.controls.first { $0.label == "Query" }?.form?.id)
             return try self.json(["form":form,"preserve":[]])
         }
@@ -139,15 +141,25 @@ final class ComputerUseBrowserActionPlannerTests: XCTestCase {
         let receipt = try await owner.executeForm(plan, input: input)
         let fieldsBefore = fixture.state.commands.filter { ($0 == .fields || $0 == .formFields || $0 == .extendFormFields) }.count
         fixture.actions.select = { input in
+            if input.formEffectScope != nil {
+                if !input.effectReviewNextControlIDs.isEmpty {
+                    return try self.json(["review_controls":FormEffectScopeFixture.rows(input, relevant: ["Query":0], unrelated: ["Search"])])
+                }
+                return #"{"unavailable":true}"# // Query still matters; no user source permits inventing preservation just to enter this other form.
+            }
             let form = try XCTUnwrap(input.evidence.page.controls.first { $0.label == "Newsletter" }?.form?.id)
             return try self.json(["form":form,"preserve":[]])
         }
         let second = try await owner.planNextAction(using: fixture.actions)
-        XCTAssertEqual(second.input.queryReceipt, receipt); XCTAssertEqual(second.input.queryControlIDs.count, 1)
-        do { _ = try await owner.prepareFormInput(for: second); XCTFail("New discovery must not erase earlier input receipts") }
-        catch { XCTAssertEqual(error as? ComputerUseBrowserActionPlanError, .retainedFormRequiresExtension) }
+        XCTAssertEqual(second.input.queryReceipt, receipt); XCTAssertTrue(second.input.queryControlIDs.isEmpty)
+        XCTAssertEqual(second.step, .unavailable)
+        do { _ = try await owner.prepareFormInput(for: second); XCTFail("Unresolved scope cannot erase earlier input receipts") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserActionPlanError, .invalidProposal) }
         XCTAssertEqual(fixture.state.commands.filter { ($0 == .fields || $0 == .formFields || $0 == .extendFormFields) }.count, fieldsBefore)
-        fixture.actions.select = { try self.json(["query":XCTUnwrap($0.queryControlIDs.first)]) }
+        fixture.actions.select = { input in
+            if let review = try self.formReview(input) { return review }
+            return try self.json(["query":XCTUnwrap(input.queryControlIDs.first)])
+        }
         let query = try await owner.planNextAction(using: fixture.actions)
         _ = try await owner.openFormQuery(for: query)
         XCTAssertEqual(fixture.server.count("/filtered?q=concerts"), 1)
@@ -156,12 +168,13 @@ final class ComputerUseBrowserActionPlannerTests: XCTestCase {
     }
 
     func testAutomaticFormPreparationExcludesUnrelatedUnlabelledFieldsAndTheirPrivateValues() async throws {
-        let outside = (0..<20).map { "<input value='private-unrelated-\($0)'>" }.joined()
+        let outside = "<section><h2>Newsletter preferences</h2>" + (0..<20).map { "<input value='private-unrelated-\($0)'>" }.joined() + "</section>"
         let fixture = try await ResearchDriverFixture.make(additionalCardHTML: outside, searchForm: true)
         defer { fixture.close() }
         _ = try await fixture.start()
         let owner = try fixture.owner()
         fixture.actions.select = { input in
+            if let review = try self.formReview(input) { return review }
             let control = try XCTUnwrap(input.evidence.page.controls.first { $0.label == "Query" })
             return try self.json(["form":XCTUnwrap(control.form?.id),"preserve":[]])
         }
@@ -231,6 +244,12 @@ final class ComputerUseBrowserActionPlannerTests: XCTestCase {
     }
 
     private func json(_ object: [String: Any]) throws -> String { String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self) }
+    private func formReview(_ input: ComputerUseBrowserActionInput) throws -> String? {
+        let heading = input.evidence.page.texts.first { $0.text == "Newsletter preferences" }?.id
+        var unrelated: Set<String> = ["Newsletter", "Subscribe"]
+        if heading != nil { unrelated.insert("") }
+        return try FormEffectScopeFixture.response(input, unrelated: unrelated, extraEvidence: heading.map { [$0] } ?? [])
+    }
     private func object(_ text: String) throws -> [String: Any] { try XCTUnwrap(JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any]) }
     private func local(_ transport: ActionPlannerTransport) throws -> ComputerUseLocalBrowserActionPlanner {
         try .init(connection: .init(baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:54321")), bearerToken: "fixture-token-value",

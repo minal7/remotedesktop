@@ -192,8 +192,14 @@ struct ComputerUseBrowserFormProposal: Equatable, Sendable, CustomStringConverti
         let explicit = try preserved.map { try input.field(for: $0.field).editable.snapshot.targetID }
         let inherited = Set(input.previous?.finalValues.keys.map { $0 } ?? []).subtracting(edited)
         let unchanged = Set(explicit).union(inherited).sorted()
-        let identity = stageID.map { ComputerUseTaskContract.digest(["browser-research-form-contract-v2", $0, input.contextJSON,
-            input.previous?.digest ?? ""]) } ?? input.contextJSON
+        let identity: String
+        if let review = input.scopeReview {
+            identity = ComputerUseTaskContract.digest(["browser-research-form-contract-v3",stageID ?? "",input.contextJSON,
+                input.previous?.digest ?? "",review.digest])
+        } else {
+            identity = stageID.map { ComputerUseTaskContract.digest(["browser-research-form-contract-v2", $0, input.contextJSON,
+                input.previous?.digest ?? ""]) } ?? input.contextJSON
+        }
         return try .init(taskID: input.interpretation.input.taskID, prompt: identity, fields: fields, operations: operations,
             unchangedTargetIDs: unchanged)
     }

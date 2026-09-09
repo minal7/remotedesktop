@@ -364,6 +364,8 @@ final class ComputerUseBrowserResearchTask {
             let archive = try researchEvidence(for: captured)
             var recalled: [Int] = [], optionReads: [ComputerUseBrowserControlRead] = []
             var effectReviews: [ComputerUseBrowserEffectControlReview] = []
+            var formScope: ComputerUseBrowserFormEffectScope?
+            var selectedFormScopes: Set<String> = []
             while true {
                 var changed: Set<String> = []
                 if let stage = formStage, let receipt = stage.nativeReceipt, confirmedFormHistory.last == receipt,
@@ -373,10 +375,10 @@ final class ComputerUseBrowserResearchTask {
                 }
                 try check()
                 let historyOptions = try browser.historyOptions(goal: captured, visits: confirmedNavigationHistory, evidence: page)
-                let popupControls = popupSequence < 32 && navigationDirectory != nil && page.page.controls.contains(where: {
+                let popupControls = formScope == nil && popupSequence < 32 && navigationDirectory != nil && page.page.controls.contains(where: {
                     $0.compositeRole == "combobox" && !$0.disabled && ComputerUseBrowserControlRead.allows($0)
                 }) ? try await browser.popupControlIDs(in: page) : []
-                let optionChoices = optionSelectionSequence < 32 && navigationDirectory != nil && !optionReads.isEmpty
+                let optionChoices = formScope == nil && optionSelectionSequence < 32 && navigationDirectory != nil && !optionReads.isEmpty
                     ? try await browser.optionSelectionChoices(in: page) : []
                 try check()
                 guard retainedEvidence.digest == archive.digest else { throw ComputerUseBrowserResearchEvidenceError.inputChanged }
@@ -386,20 +388,42 @@ final class ComputerUseBrowserResearchTask {
                     popupControlIDs: popupControls, popupHistory: popupHistory,
                     allowOptionInspection: optionSelectionSequence < 32 && navigationDirectory != nil && optionReads.isEmpty,
                     optionReadControls: optionReads, optionChoices: optionChoices, optionSelectionHistory: optionSelectionHistory,
-                    effectControlReviews: effectReviews)
-                let proposal = try await planner.propose(context)
+                    effectControlReviews: effectReviews, formEffectScope: formScope)
+                // Retain the selected form/query through metadata review. Newly
+                // read query criteria still require an explicit model decision.
+                let readyScope = context.effectScopeAllowsActions ? formScope : nil
+                let releasedScope = readyScope?.queryControlID != nil && !optionReads.isEmpty ? nil : readyScope
+                let proposal: ComputerUseBrowserActionProposal
+                if let releasedScope { proposal = try .decode(content: releasedScope.actionContent, input: context) }
+                else { proposal = try await planner.propose(context) }
                 try check()
                 try proposal.validate(for: context)
                 // Recall never refreshes or replaces native authority. A
                 // changed page invalidates even a no-effect recall decision.
                 try await browser.validatePageEvidence(page)
                 try check(); try browser.validateSourceDocument(page.document)
+                if releasedScope == nil {
+                    switch proposal.step {
+                    case .openQuery(let id, let receipt) where readyScope?.kind == .query(id, receipt):
+                        break // The model has now assessed the newly read query criteria.
+                    case .editForm, .openQuery:
+                        let next = try ComputerUseBrowserFormEffectScope(action: proposal)
+                        guard next != formScope, selectedFormScopes.count < 64,
+                              selectedFormScopes.insert(next.digest).inserted else { throw ComputerUseBrowserActionPlanError.invalidProposal }
+                        formScope = next; effectReviews = []; continue
+                    case .preserveControls:
+                        guard let scope = formScope else { throw ComputerUseBrowserActionPlanError.invalidProposal }
+                        formScope = try scope.extending(proposal.preservedControls); effectReviews = []; continue
+                    default: break
+                    }
+                }
                 if case .recall(let index) = proposal.step { recalled.append(index); continue }
                 if case .reviewControls(let review) = proposal.step { effectReviews.append(review); continue }
                 if proposal.step == .inspectOptions || proposal.step == .extendInspection {
                     page = try await browser.observeResearchControls(for: proposal)
                     optionReads = proposal.readControls
                     effectReviews = [] // A new scoped snapshot requires a fresh metadata review.
+                    formScope = try formScope?.continuingQuery(with: page)
                     try check()
                     continue
                 }
@@ -424,7 +448,9 @@ final class ComputerUseBrowserResearchTask {
         try validateAction(action)
         guard case .openQuery(let controlID, let receipt) = action.step else { throw ComputerUseBrowserActionPlanError.invalidProposal }
         latestAction = nil
-        return try await openFormQuery(after: receipt, controlID: controlID, evidence: action.input.evidence)
+        let review = try ComputerUseBrowserEffectScopeReview(input: action.input)
+        guard review.formScope?.kind == .query(controlID, receipt) else { throw ComputerUseBrowserActionPlanError.invalidProposal }
+        return try await openFormQuery(after: receipt, controlID: controlID, evidence: action.input.evidence, scopeReview: review)
     }
 
     func openPopup(for action: ComputerUseBrowserActionProposal) async throws -> ComputerUseBrowserPopupReceipt {
@@ -692,7 +718,11 @@ final class ComputerUseBrowserResearchTask {
 
     func prepareFormInput(for action: ComputerUseBrowserActionProposal) async throws -> ComputerUseBrowserResearchFormInput {
         try validateAction(action)
-        guard case .editForm = action.step else { throw ComputerUseBrowserActionPlanError.invalidProposal }
+        guard case .editForm(let formID) = action.step else { throw ComputerUseBrowserActionPlanError.invalidProposal }
+        let review = try ComputerUseBrowserEffectScopeReview(input: action.input)
+        guard review.formScope?.formID == formID, review.formScope?.preservedControls == action.preservedControls else {
+            throw ComputerUseBrowserActionPlanError.invalidProposal
+        }
         return try await prepareFormInput(action: action)
     }
 
@@ -726,7 +756,8 @@ final class ComputerUseBrowserResearchTask {
                formStage.input.evidence.page.document == page.document {
                 guard let selectedFormID else { throw ComputerUseBrowserActionPlanError.retainedFormRequiresExtension }
                 let next = try await formStage.prepareNextFormInput(interpretation: interpretation.proposal, formID: selectedFormID,
-                    page: page, preserving: action?.preservedControls ?? [], checkCurrent: { try self.checkCurrent(captured) })
+                    page: page, preserving: action?.preservedControls ?? [],
+                    scopeReview: try action.map { try ComputerUseBrowserEffectScopeReview(input: $0.input) }, checkCurrent: { try self.checkCurrent(captured) })
                 try checkCurrent(captured)
                 guard browser.hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
                 return PreparedForm(target: next.target, input: next.input)
@@ -742,7 +773,8 @@ final class ComputerUseBrowserResearchTask {
             try checkCurrent(captured)
             guard browser.hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
             return PreparedForm(target: target, input: try .init(interpretation: interpretation.proposal, evidence: evidence,
-                selectedFormID: selectedFormID, preservedControls: preservedControls))
+                selectedFormID: selectedFormID, preservedControls: preservedControls,
+                scopeReview: try action.map { try ComputerUseBrowserEffectScopeReview(input: $0.input) }))
         }
         latestForm = prepared
         return prepared.input
@@ -932,20 +964,20 @@ final class ComputerUseBrowserResearchTask {
     /// Accept a query intent only from this owner's latest verified edit stage.
     /// Retain the intent before preparation; its child journals native loading.
     func openFormQuery(after receipt: ComputerUseBrowserResearchFormReceipt, controlID: String,
-                       evidence: ComputerUseBrowserPageEvidence) async throws -> ComputerUseBrowserNavigationReceipt {
+                       evidence: ComputerUseBrowserPageEvidence, scopeReview: ComputerUseBrowserEffectScopeReview? = nil) async throws -> ComputerUseBrowserNavigationReceipt {
         try requireIdle()
         guard initialSearch?.isPending != true, navigation?.pendingSelection == nil else { throw Failure.navigationPending }
         guard !hasPendingForm else { throw Failure.formPending }
         guard !hasQuestion else { throw Failure.questionPending }
         let query: ComputerUseBrowserResearchFormNavigation
         if let retained = formNavigation, retained.form == receipt {
-            guard retained.controlID == controlID, retained.evidence == evidence else { throw Failure.formUnavailable }
+            guard retained.controlID == controlID, retained.evidence == evidence, retained.scopeReview == scopeReview else { throw Failure.formUnavailable }
             query = retained
         } else {
             try requireCompletedForm(receipt)
             guard let formStage, let directory = navigationDirectory else { throw Failure.formUnavailable }
             query = try .init(form: receipt, controlID: controlID, evidence: evidence, stage: formStage,
-                browser: browser, journalDirectory: directory, currentGoal: input, makeStore: navigationStore)
+                browser: browser, journalDirectory: directory, currentGoal: input, scopeReview: scopeReview, makeStore: navigationStore)
             formNavigation = query
         }
         guard query.goal == input else { throw Failure.goalChanged }

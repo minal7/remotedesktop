@@ -360,7 +360,7 @@ final class ComputerUseBrowserResearchFormStage {
     /// retry reuses its objects and the original required receipts.
     func prepareNextFormInput(interpretation: ComputerUseBrowserGoalProposal, formID: String,
                               page: ComputerUseBrowserPageEvidence, preserving: [ComputerUseBrowserControlPreservation],
-                              checkCurrent: @escaping @MainActor () throws -> Void) async throws
+                              scopeReview: ComputerUseBrowserEffectScopeReview? = nil, checkCurrent: @escaping @MainActor () throws -> Void) async throws
         -> (target: ComputerUseBrowserTextTarget, input: ComputerUseBrowserResearchFormInput) {
         guard !isExecuting else { throw Failure.busy }
         guard !isRetired else { throw Failure.retired }
@@ -383,7 +383,7 @@ final class ComputerUseBrowserResearchFormStage {
             let evidence = try await target.bindFields(fields, to: page)
             try check()
             let next = try ComputerUseBrowserResearchFormInput(interpretation: interpretation, evidence: evidence,
-                selectedFormID: formID, preservedControls: preserving, previous: continuation)
+                selectedFormID: formID, preservedControls: preserving, previous: continuation, scopeReview: scopeReview)
             return (target, next)
         } catch {
             await browser.joinDOMCompletion(document: page.document)
@@ -407,7 +407,8 @@ final class ComputerUseBrowserResearchFormStage {
         // observation nonce and viewport; all captured page content stays fixed.
         let comparable = ComputerUseBrowserPageSnapshot(id: before.id, texts: page.texts, links: page.links, controls: page.controls,
             truncated: page.truncated, omittedEmbeddedContent: page.omittedEmbeddedContent, omittedControls: page.omittedControls,
-            viewport: before.viewport, containers: page.containers, omittedStructure: page.omittedStructure)
+            viewport: before.viewport, containers: page.containers, omittedStructure: page.omittedStructure,
+            omittedControlMetadata: page.omittedControlMetadata)
         guard current.documentID == original.documentID, comparable == before, fields.fields == input.evidence.fields else {
             throw ComputerUseBrowserResearchFormError.inputChanged
         }
