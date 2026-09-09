@@ -11,7 +11,7 @@ final class ComputerUseBrowserDOMReadCapture: CustomStringConvertible {
     private(set) var didStart = false
 
     init(command: ComputerUseBrowserDOMCommand, document: ComputerUseBrowserDocument) throws {
-        guard [.formFields, .extendFormFields, .bindPageFields, .prepareFormPreservation].contains(command) else {
+        guard [.formFields, .extendFormFields, .reviseFormFields, .bindPageFields, .prepareFormPreservation].contains(command) else {
             throw ComputerUseBrowserError.unsupportedDocument
         }
         self.command = command; self.document = document
