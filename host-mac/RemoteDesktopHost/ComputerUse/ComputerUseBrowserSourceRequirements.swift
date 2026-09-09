@@ -67,6 +67,37 @@ struct ComputerUseBrowserSourceRequirements: Sendable {
             if includes { scope.include(Set(origins)) } else { scope.excluded.formUnion(origins) }
             if requirement.field == .navigationSource { navigation = scope } else { answers = scope }
         }
+        // A new interpretation still covers all bytes, but it can relabel an
+        // earlier source clause or drop a domain hint. Keep concrete policies
+        // from the complete interpretation sealed when each question was
+        // issued, including restrictions outside that question's scope.
+        // Explicit scope/intent replacement requires separate reconciliation.
+        for answer in proposal.input.clarifications {
+            for requirement in answer.priorRequirements {
+                guard [.navigationSource, .answerSource].contains(requirement.field),
+                      let source = Self.historicalSource(requirement, in: proposal.input) else { continue }
+                let includes = (requirement.role == .condition || requirement.role == .outcome)
+                    && (requirement.relation == .include || requirement.relation == .equal)
+                let excludes = (requirement.role == .condition || requirement.role == .prohibition)
+                    && (requirement.relation == .exclude || requirement.relation == .notEqual)
+                let origins = requirement.values.compactMap { try? Self.origin(from: $0) }
+                guard includes || excludes, !origins.isEmpty, origins.count == requirement.values.count,
+                      requirement.values.allSatisfy({ Self.isStandaloneReference($0, in: source) }) else { continue }
+                let currentIDs = proposal.requirements.filter {
+                    $0.sourceTurnIndex == requirement.sourceTurnIndex
+                        && $0.sourceByteOffset < requirement.sourceByteOffset + requirement.sourceByteCount
+                        && requirement.sourceByteOffset < $0.sourceByteOffset + $0.sourceByteCount
+                }.map(\.id)
+                // Host-bound price parameters remain parameters even if an
+                // old model assigned their literal answer a website field.
+                guard !currentIDs.isEmpty, !currentIDs.allSatisfy(parameterAnswers.contains) else { continue }
+                var scope = requirement.field == .navigationSource ? navigation : answers
+                let additionalIDs = currentIDs.filter { !scope.requirementIDs.contains($0) }
+                scope.requirementIDs.append(contentsOf: additionalIDs)
+                if includes { scope.include(Set(origins)) } else { scope.excluded.formUnion(origins) }
+                if requirement.field == .navigationSource { navigation = scope } else { answers = scope }
+            }
+        }
         for scope in [navigation, answers] where scope.isContradictory {
             unresolved += scope.requirementIDs.map { .init(requirementID: $0, reason: .contradictorySources) }
         }
@@ -100,6 +131,15 @@ struct ComputerUseBrowserSourceRequirements: Sendable {
               parts.percentEncodedPath.isEmpty || parts.percentEncodedPath == "/",
               let url = parts.url else { throw ComputerUseBrowserError.sourceNotAllowed }
         return try ComputerUseBrowserSourceOrigin(url)
+    }
+
+    private static func historicalSource(_ requirement: ComputerUseBrowserGoalProposal.Requirement,
+                                         in input: ComputerUseBrowserGoalInput) -> String? {
+        guard input.userTurns.indices.contains(requirement.sourceTurnIndex) else { return nil }
+        let bytes = Array(input.userTurns[requirement.sourceTurnIndex].utf8)
+        let start = requirement.sourceByteOffset, count = requirement.sourceByteCount
+        guard start >= 0, count > 0, start <= bytes.count, count <= bytes.count - start else { return nil }
+        return String(bytes: bytes[start..<(start + count)], encoding: .utf8)
     }
 
     /// Copying a host substring out of an email, longer host or path-restricted

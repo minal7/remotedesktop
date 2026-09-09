@@ -114,6 +114,82 @@ final class ComputerUseBrowserSourceRequirementsTests: XCTestCase {
         XCTAssertEqual(question.text, ComputerUseBrowserClarificationTopic.source.question)
     }
 
+    func testUnrelatedAnswerCannotEraseAnEarlierSourceExclusionByRelabelingIt() throws {
+        for field in ["navigationSource","answerSource"] {
+            let initial = try proposal([row("Find café e\u{301} tickets. "),
+                row("Do not use blocked.test.", role: "prohibition", field: field, relation: "exclude", values: ["blocked.test"])])
+            let continued = try answered(initial, with: "Tomorrow.")
+            let turn = try XCTUnwrap(continued.clarifications.last)
+            XCTAssertEqual(turn.priorInterpretationDigest, initial.digest)
+            XCTAssertEqual(turn.priorRequirements, initial.requirements)
+            XCTAssertEqual(turn.scope.map(\.requirementID), [initial.requirements[0].id])
+            let latest = try proposal([row(initial.input.prompt), row("Tomorrow.", field: "date", relation: "equal", values: ["Tomorrow"], turn: 1)], input: continued)
+            let compiled = ComputerUseBrowserSourceRequirements(proposal: latest)
+            let sources = try XCTUnwrap(compiled.selectSources(from: [provider("https://search.test/search")]))
+            XCTAssertTrue(compiled.unresolved.isEmpty)
+            if field == "navigationSource" { XCTAssertFalse(sources.policy.permits(url("https://blocked.test/login"))) }
+            else { XCTAssertFalse(sources.answerPolicy.permitsEvidenceFrom(url("https://blocked.test/offers"))) }
+            XCTAssertTrue(sources.policy.permits(url("https://search.test/search")))
+            XCTAssertFalse(String(reflecting: turn).contains("blocked.test"))
+        }
+    }
+
+    func testEarlierSourceAllowListsSurviveCompleteResegmentationAfterAnAnswer() throws {
+        for field in ["navigationSource","answerSource"] {
+            let initial = try proposal([row("Find tickets. "), row("Only use tickets.test.", field: field, values: ["tickets.test"])])
+            let continued = try answered(initial, with: "Tomorrow.")
+            let latest = try proposal([row(initial.input.prompt), row("Tomorrow.", field: "date", relation: "equal", values: ["Tomorrow"], turn: 1)], input: continued)
+            let search = try provider("https://search.test/search"), ticketSearch = try provider("https://tickets.test/search")
+            let compiled = ComputerUseBrowserSourceRequirements(proposal: latest)
+            let sources = try XCTUnwrap(compiled.selectSources(from: [search,ticketSearch]))
+            XCTAssertEqual(sources.provider, field == "navigationSource" ? ticketSearch : search)
+            if field == "navigationSource" { XCTAssertFalse(sources.policy.permits(url("https://other.test"))) }
+            else {
+                XCTAssertFalse(sources.answerPolicy.permitsEvidenceFrom(url("https://other.test")))
+                XCTAssertTrue(sources.answerPolicy.permitsEvidenceFrom(url("https://tickets.test")))
+            }
+        }
+    }
+
+    func testSourceScopeAnswerDoesNotSilentlyReplaceAnEarlierConcreteRestriction() throws {
+        let initial = try proposal([row("Find tickets. "), row("Only report from tickets.test.", field: "answerSource", values: ["tickets.test"])])
+        let text = "Only report from other.test."
+        let continued = try answered(initial, with: text, topic: .source, requirementIndex: 1)
+        let latest = try proposal([row(initial.input.prompt), row(text, field: "answerSource", values: ["other.test"], turn: 1)], input: continued)
+        let compiled = ComputerUseBrowserSourceRequirements(proposal: latest)
+        XCTAssertEqual(Set(compiled.unresolved.map(\.reason)), [.contradictorySources])
+        XCTAssertTrue(Set(compiled.unresolved.map(\.requirementID)).isSubset(of: Set(latest.requirements.map(\.id))))
+        XCTAssertNil(try compiled.selectSources(from: [provider("https://search.test/search")]))
+        XCTAssertEqual(continued.userTurns, [initial.input.prompt,text])
+    }
+
+    func testAReinterpretedClauseCannotDropOneOfItsEarlierExcludedDomains() throws {
+        let source = "Do not visit a.test or b.test."
+        let initial = try proposal([row("Find tickets. "), row(source, role: "prohibition", field: "navigationSource", relation: "exclude", values: ["a.test","b.test"])])
+        let continued = try answered(initial, with: "Tomorrow.")
+        let latest = try proposal([row("Find tickets. "), row(source, role: "prohibition", field: "navigationSource", relation: "exclude", values: ["a.test"]),
+            row("Tomorrow.", field: "date", relation: "equal", values: ["Tomorrow"], turn: 1)], input: continued)
+        let sources = try XCTUnwrap(ComputerUseBrowserSourceRequirements(proposal: latest).selectSources(from: [provider("https://search.test/search")]))
+        XCTAssertFalse(sources.policy.permits(url("https://a.test"))); XCTAssertFalse(sources.policy.permits(url("https://b.test")))
+        XCTAssertTrue(sources.policy.permits(url("https://search.test")))
+    }
+
+    func testEveryAcceptedAnswerKeepsEarlierSourceHistoryAcrossMultipleInterpretations() throws {
+        let initial = try proposal([row("Find tickets. "), row("Never visit blocked.test.", role: "prohibition", field: "navigationSource", relation: "exclude", values: ["blocked.test"])])
+        let first = try answered(initial, with: "Tomorrow.")
+        let rows = [row(initial.input.prompt), row("Tomorrow.", field: "date", relation: "equal", values: ["Tomorrow"], turn: 1)]
+        let middle = try proposal(rows, input: first)
+        let second = try answered(middle, with: "Evening.", topic: .time, answerID: "answer-2")
+        let latest = try proposal(rows + [row("Evening.", field: "time", relation: "equal", values: ["Evening"], turn: 2)], input: second)
+        XCTAssertTrue(second.continues(first)); XCTAssertTrue(second.continues(initial.input))
+        XCTAssertEqual(second.clarifications.map(\.priorInterpretationDigest), [initial.digest,middle.digest])
+        XCTAssertEqual(second.clarifications[0].priorRequirements, initial.requirements)
+        XCTAssertEqual(second.clarifications[1].priorRequirements, middle.requirements)
+        let sources = try XCTUnwrap(ComputerUseBrowserSourceRequirements(proposal: latest).selectSources(from: [provider("https://search.test/search")]))
+        XCTAssertFalse(sources.policy.permits(url("https://blocked.test")))
+        XCTAssertEqual(sources.policy.goalRevision, second.digest)
+    }
+
     func testNativeCandidateEvidenceUsesItsCommittedOriginNotAllowedSiteNamesInPageText() async throws {
         let fixture = try await ResearchDriverFixture.make(additionalCardHTML: "<p>Official offers from allowed.test</p>")
         defer { fixture.close() }
@@ -195,6 +271,18 @@ final class ComputerUseBrowserSourceRequirementsTests: XCTestCase {
         let candidates = try await retained.readCandidates()
         XCTAssertEqual(candidates.documentAnswerSourceStatus, .excluded)
         retained.retire(); owner = nil
+    }
+
+    private func answered(_ proposal: ComputerUseBrowserGoalProposal, with answer: String,
+                          topic: ComputerUseBrowserClarificationTopic = .date, requirementIndex: Int = 0,
+                          answerID: String = "answer-1") throws -> ComputerUseBrowserGoalInput {
+        let state = ComputerUseBrowserGoalClarification(input: proposal.input)
+        let context = try ComputerUseBrowserGoalClarification.Context(controllerID: "phone", controllerSessionID: "session", browserSessionDigest: nil)
+        let question = try state.issue(proposal: proposal, topic: topic,
+            requirementIDs: [proposal.requirements[requirementIndex].id], context: context)
+        XCTAssertEqual(question.requirements, proposal.requirements)
+        XCTAssertEqual(question.interpretationDigest, proposal.digest)
+        return try state.consume(questionID: question.id, answerTaskID: answerID, answer: answer, context: context)
     }
 
     private func url(_ value: String) -> URL { URL(string: value)! }

@@ -59,13 +59,19 @@ struct ComputerUseBrowserGoalClarificationTurn: Equatable, Sendable, CustomStrin
     let questionID: String
     let topic: ComputerUseBrowserClarificationTopic
     let scope: [Scope]
+    /// Historical classification of every clause, including clauses outside
+    /// the question's scope. A later answer cannot erase this provenance.
+    let priorInterpretationDigest: String
+    let priorRequirements: [ComputerUseBrowserGoalProposal.Requirement]
     let answerTaskID: String
     let answer: String
     let digest: String
     fileprivate init(question: ComputerUseBrowserGoalClarification.Question, answerTaskID: String, answer: String) {
         inputDigest = question.inputDigest; questionID = question.id; topic = question.topic; scope = question.scope
+        priorInterpretationDigest = question.interpretationDigest; priorRequirements = question.requirements
         self.answerTaskID = answerTaskID; self.answer = answer
-        digest = ComputerUseTaskContract.digest(["browser-goal-answer-v1", inputDigest, questionID, answerTaskID, answer])
+        digest = ComputerUseTaskContract.digest(["browser-goal-answer-v2", inputDigest, questionID,
+            priorInterpretationDigest, answerTaskID, answer])
     }
     var description: String { "BrowserClarificationTurn(topic: \(topic.rawValue), bytes: \(answer.utf8.count))" }
     var debugDescription: String { description }
@@ -102,14 +108,18 @@ final class ComputerUseBrowserGoalClarification {
         let inputDigest: String
         let topic: ComputerUseBrowserClarificationTopic
         let scope: [ComputerUseBrowserGoalClarificationTurn.Scope]
+        let interpretationDigest: String
+        let requirements: [ComputerUseBrowserGoalProposal.Requirement]
         let expiresAt: Date
         let context: Context
         var text: String { topic.question }
-        fileprivate init(input: ComputerUseBrowserGoalInput, topic: ComputerUseBrowserClarificationTopic,
+        fileprivate init(proposal: ComputerUseBrowserGoalProposal, topic: ComputerUseBrowserClarificationTopic,
                          scope: [ComputerUseBrowserGoalClarificationTurn.Scope], expiresAt: Date, context: Context) {
+            let input = proposal.input
             taskID = input.taskID; inputDigest = input.digest; self.topic = topic; self.scope = scope
+            interpretationDigest = proposal.digest; requirements = proposal.requirements
             self.expiresAt = expiresAt; self.context = context
-            id = ComputerUseTaskContract.digest(["browser-goal-question-v1", UUID().uuidString, input.digest,
+            id = ComputerUseTaskContract.digest(["browser-goal-question-v2", UUID().uuidString, input.digest, proposal.digest,
                 topic.rawValue, context.identity, String(expiresAt.timeIntervalSince1970)] + scope.map(\.requirementID))
         }
         var description: String { "BrowserGoalQuestion(topic: \(topic.rawValue))" }
@@ -143,7 +153,7 @@ final class ComputerUseBrowserGoalClarification {
         }
         let expiry = current.addingTimeInterval(600)
         guard expiry.timeIntervalSince1970.isFinite, expiry > current else { throw Failure.inputLimit }
-        let question = Question(input: input, topic: topic, scope: scope, expiresAt: expiry, context: context)
+        let question = Question(proposal: proposal, topic: topic, scope: scope, expiresAt: expiry, context: context)
         pending = question
         return question
     }

@@ -47,6 +47,6 @@ Five changed Swift files passed `swiftc -frontend -parse`. The assembled DOM, fi
 ## Remaining repair order
 
 - Partial native catalogue failures, missing/invalid native history and an original callback still running cannot be reconciled as a completed capture. Any broader recovery must retain the actual observations and task obligations; unsupported fields need honest handling.
-- Continue explicit goal supersession and conflicting-answer resolution, including justified changes to earlier invariant, preservation and read duties.
+- Continue explicit goal supersession and conflicting-answer resolution, including justified changes to earlier invariant, preservation and read duties. The subsequent [clarification-policy checkpoint](BROWSER_CLARIFICATION_POLICY_HISTORY_REVIEW.md) retains the missing prior interpretation and protects concrete source restrictions; actual replacement remains open.
 - Complete login document transitions, process/account recovery, required-object replacement and dependent-control reconciliation without rewriting prior effects.
 - Continue independent result verification and the full [repair checklist](../../../TODO.md). Real travel/concert/movie tasks, alternate-model comparisons, desktop adaptation and the 8 GB resource target remain unqualified. No assertions, app/browser execution, inference, SSH retry, push or installed-app replacement occurred here.
