@@ -21,6 +21,19 @@ final class ComputerUseBrowserDOMReadCapture: CustomStringConvertible {
         return error as? ComputerUseBrowserError == .authenticationRequired
     }
 
+    /// The first discovery creates a fresh native field ledger. Retain only
+    /// its identity here; this read is not desired-value verification and does
+    /// not certify that later input or proof dispatches never happened.
+    var completedInitialFieldRead: (documentID: String, ledgerID: String)? {
+        guard command == .formFields, didStart, recoveredReply == nil,
+              case .success(let reply)? = completion, reply.status == "ok",
+              let ledgerID = reply.inputLedgerID,
+              let fields = reply.fields, !fields.isEmpty else { return nil }
+        return (reply.documentID, ledgerID)
+    }
+
+    var hasPendingRead: Bool { didStart && completion == nil }
+
     init(command: ComputerUseBrowserDOMCommand, document: ComputerUseBrowserDocument) throws {
         guard [.formFields, .extendFormFields, .reviseFormFields, .verifyFormState, .bindPageFields, .prepareFormPreservation].contains(command) else {
             throw ComputerUseBrowserError.unsupportedDocument

@@ -121,7 +121,7 @@ final class ComputerUseBrowserResearchTask {
     private(set) var confirmedFormHistory: [ComputerUseBrowserResearchFormReceipt] = []
     private(set) var formPartyHistory: [ComputerUseBrowserFormPartyHistory] = []
     private(set) var loginHandoffHistory: [ComputerUseBrowserLoginHandoffRecord] = []
-    private(set) var unobservedFormIntentHistory: [ComputerUseBrowserUnobservedFormIntent] = []
+    private(set) var unusedFormIntentHistory: [ComputerUseBrowserUnusedFormIntent] = []
     private(set) var retiredFormHistory: [ComputerUseBrowserResearchFormStage.Retirement] = []
     private(set) var retiredHistoryNavigations: [ComputerUseBrowserResearchHistoryNavigation.Retirement] = []
     private(set) var popupHistory: [ComputerUseBrowserResearchPopupRecord] = []
@@ -502,7 +502,7 @@ final class ComputerUseBrowserResearchTask {
                     optionReadControls: optionReads, optionChoices: optionChoices, optionSelectionHistory: optionSelectionHistory,
                     effectControlReviews: effectReviews, formEffectScope: formScope, preparationReview: preparation?.reviewContext,
                     formPartyHistory: formPartyHistory, loginHandoffHistory: loginHandoffHistory,
-                    unobservedFormIntentHistory: unobservedFormIntentHistory)
+                    unusedFormIntentHistory: unusedFormIntentHistory)
                 // Retain the selected form/query through metadata review. Newly
                 // read query criteria still require an explicit model decision.
                 let readyScope = context.effectScopeAllowsActions ? formScope : nil
@@ -969,11 +969,11 @@ final class ComputerUseBrowserResearchTask {
                 try self.checkCurrent(captured)
                 guard self.formPreparation === preparation else { throw Failure.formUnavailable }
             }
-            // No value/effect recovery is needed for this narrowly proven
-            // absence. Only the document actually checked during explicit
-            // handback may replace the old, never-observed initial intent.
-            if preparation.canRetireUnobservedInitialIntent,
-               unobservedFormIntentHistory.count < ComputerUseBrowserUnobservedFormIntent.maximumCount,
+            // This initial intent carries no user value duties or effect
+            // authority. An unused default is not a verified criterion.
+            // Replace it only on the document checked during handback.
+            if preparation.unusedInitialIntentObservation != nil,
+               unusedFormIntentHistory.count < ComputerUseBrowserUnusedFormIntent.maximumCount,
                let returned = lastHandbackDocument, captured.continues(returned.goal),
                returned.document.contextID == preparation.page.document.contextID,
                returned.documentID != preparation.page.documentID {
@@ -984,8 +984,8 @@ final class ComputerUseBrowserResearchTask {
                 guard page.document == returned.document, page.documentID == returned.documentID else {
                     throw ComputerUseBrowserError.pageChanged
                 }
-                let record = try ComputerUseBrowserUnobservedFormIntent(preparation: preparation,
-                    index: unobservedFormIntentHistory.count, goal: captured, page: page)
+                let record = try ComputerUseBrowserUnusedFormIntent(preparation: preparation,
+                    index: unusedFormIntentHistory.count, goal: captured, page: page)
                 do { try await browser.validatePageEvidence(page) }
                 catch {
                     await browser.joinDOMCompletion(document: page.document)
@@ -997,7 +997,8 @@ final class ComputerUseBrowserResearchTask {
                 guard !isRetired, !isPaused, input == captured, formPreparation === preparation,
                       lastHandbackDocument?.document == returned.document,
                       lastHandbackDocument?.documentID == returned.documentID else { throw Failure.paused }
-                unobservedFormIntentHistory.append(record); formPreparation = nil
+                try preparation.retireUnusedInitialIntent(observation: record.observation)
+                unusedFormIntentHistory.append(record); formPreparation = nil
                 return true
             }
             guard preparation.permitsCriteriaRecovery else { return false }
@@ -1713,7 +1714,7 @@ final class ComputerUseBrowserResearchTask {
         confirmedNavigationHistory.removeAll()
         formStage?.retire(); formStage = nil; lastVerifiedFormStage?.retire(); lastVerifiedFormStage = nil
         confirmedFormHistory.removeAll(); formPartyHistory.removeAll(); loginHandoffHistory.removeAll(); retiredFormHistory.removeAll()
-        unobservedFormIntentHistory.removeAll()
+        unusedFormIntentHistory.removeAll()
         formNavigation?.retire(); formNavigation = nil
         historyNavigation?.retire(); historyNavigation = nil
         retiredHistoryNavigations.removeAll()

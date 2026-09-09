@@ -2,8 +2,9 @@ import Foundation
 
 /// Unused historical purposes, never a field binding, baseline or receipt.
 /// Old public labels are page data and cannot identify controls on a new page.
-struct ComputerUseBrowserUnobservedFormIntent: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+struct ComputerUseBrowserUnusedFormIntent: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     static let maximumCount = 32
+    enum Observation: String, Sendable { case none; case initialEditPreconditions = "initial_edit_preconditions" }
     struct Purpose: Equatable, Sendable {
         let label: String
         let kind: String
@@ -11,6 +12,7 @@ struct ComputerUseBrowserUnobservedFormIntent: Equatable, Sendable, CustomString
         let sources: [ComputerUseBrowserFormSource]
     }
     let index: Int
+    let observation: Observation
     private let goal: ComputerUseBrowserGoalInput
     private let retiredAtGoal: ComputerUseBrowserGoalInput
     private let sessionIdentity: String
@@ -19,11 +21,11 @@ struct ComputerUseBrowserUnobservedFormIntent: Equatable, Sendable, CustomString
     @MainActor
     init(preparation: ComputerUseBrowserResearchFormPreparation, index: Int,
          goal: ComputerUseBrowserGoalInput, page: ComputerUseBrowserPageEvidence) throws {
-        guard (0..<Self.maximumCount).contains(index), preparation.canRetireUnobservedInitialIntent,
+        guard (0..<Self.maximumCount).contains(index), let observation = preparation.unusedInitialIntentObservation,
               goal.continues(preparation.interpretation.input), page.document.taskID == goal.taskID,
               page.document.contextID == preparation.page.document.contextID,
               page.documentID != preparation.page.documentID else { throw ComputerUseBrowserActionPlanError.inputChanged }
-        self.index = index; self.goal = preparation.interpretation.input; retiredAtGoal = goal
+        self.index = index; self.observation = observation; self.goal = preparation.interpretation.input; retiredAtGoal = goal
         sessionIdentity = page.document.contextID
         purposes = try preparation.reviewContext.fieldPurposes.map { purpose in
             guard let control = preparation.page.page.controls.first(where: { $0.id == purpose.controlID }) else {
@@ -36,7 +38,8 @@ struct ComputerUseBrowserUnobservedFormIntent: Equatable, Sendable, CustomString
     func context(interpretation: ComputerUseBrowserGoalProposal, evidence: ComputerUseBrowserPageEvidence) throws -> [String: Any] {
         guard interpretation.input.continues(goal), interpretation.input.continues(retiredAtGoal),
               evidence.document.contextID == sessionIdentity else { throw ComputerUseBrowserActionPlanError.invalidInput }
-        return ["intent":index, "retired_after_handback":true, "values_observed":false, "input_dispatched":false,
+        return ["intent":index, "retired_after_handback":true, "values_observed":observation != .none,
+            "observation":observation.rawValue, "input_dispatched":false, "old_adapter_retired":true,
             "current_field_verification":false, "purposes":try purposes.map { purpose -> [String: Any] in
                 ["historical_label":purpose.label, "historical_kind":purpose.kind, "disposition":purpose.disposition.rawValue,
                  "sources":try purpose.sources.map { source -> [String: Any] in
@@ -46,7 +49,7 @@ struct ComputerUseBrowserUnobservedFormIntent: Equatable, Sendable, CustomString
                  }]
             }]
     }
-    var description: String { "BrowserUnobservedFormIntent(index: \(index))" }
+    var description: String { "BrowserUnusedFormIntent(index: \(index))" }
     var debugDescription: String { description }
 }
 
@@ -428,6 +431,7 @@ final class ComputerUseBrowserResearchFormPreparation {
     private(set) var preparedInput: ComputerUseBrowserResearchFormInput?
     private(set) var criteriaRepair: ComputerUseBrowserFormPreparationRepair?
     private var criteriaRepairCount = 0
+    private var retiredUnusedIntent = false
     private var isReadOnlyRetention: Bool {
         previous.map { review.permitsReadOnlyRetention(after: $0, on: page) } ?? false
     }
@@ -452,19 +456,34 @@ final class ComputerUseBrowserResearchFormPreparation {
         originalPreparation != nil || previous != nil || !reviewContext.preservedSources.isEmpty || !reviewContext.readSources.isEmpty
     }
 
-    /// This is absence of observation/effect, not recovery of a captured
-    /// baseline. The owner must separately prove explicit handback to a new
-    /// document and retain the unused purposes before releasing this frame.
-    var canRetireUnobservedInitialIntent: Bool {
-        parent == nil && previous == nil && originalPreparation == nil && revisionDepth == 0
+    /// Initial edit defaults are preconditions, not retained criteria. They
+    /// may be released only without user preservation/read duties, earlier
+    /// stages or any exported/attempted effect or verification authority.
+    /// Unknown initial reads and pending callbacks stay with this frame.
+    var unusedInitialIntentObservation: ComputerUseBrowserUnusedFormIntent.Observation? {
+        guard parent == nil && previous == nil && originalPreparation == nil && revisionDepth == 0
             && baseline == nil && baselineOrigin == nil && inheritedCriteriaOrigin == nil
             && criteriaRepair == nil && revisedAction == nil && criteriaRepairCount == 0
             && reviewContext == preparedReviewContext && !hasPreservationObligations
             && !reviewContext.fieldPurposes.contains(where: { $0.disposition == .retain })
-            && fields == nil && evidence == nil && preservation == nil && !preservationFinished && preparedInput == nil
-            && fieldsCapture.initialFieldsWereNotObserved && !bindingCapture.didStart && !preservationCapture.didStart
-            && target.hasNoCapturedFields && !page.page.controlStateObserved
-            && page.page.controlStates.isEmpty && page.page.scopedControlIDs.isEmpty
+            && preservation == nil && !preservationCapture.didStart && !bindingCapture.hasPendingRead
+            && target.canRetireUnusedPreparation && !page.page.controlStateObserved
+            && page.page.controlStates.isEmpty && page.page.scopedControlIDs.isEmpty else { return nil }
+        if fieldsCapture.initialFieldsWereNotObserved {
+            guard fields == nil, evidence == nil, !preservationFinished, preparedInput == nil,
+                  !bindingCapture.didStart, target.hasNoCapturedFields else { return nil }
+            return ComputerUseBrowserUnusedFormIntent.Observation.none
+        }
+        guard let read = fieldsCapture.completedInitialFieldRead, read.documentID == page.documentID,
+              target.matchesInitialRead(documentID: read.documentID, ledgerID: read.ledgerID),
+              !bindingCapture.didStart || fields != nil else { return nil }
+        return .initialEditPreconditions
+    }
+
+    func retireUnusedInitialIntent(observation: ComputerUseBrowserUnusedFormIntent.Observation) throws {
+        guard unusedInitialIntentObservation == observation else { throw ComputerUseBrowserError.pageChanged }
+        try target.retireUnusedPreparation()
+        retiredUnusedIntent = true
     }
 
     init(action: ComputerUseBrowserActionProposal, browser: ComputerUseOwnedBrowser, parent: (any ComputerUseBrowserFormStage)? = nil,
@@ -476,7 +495,7 @@ final class ComputerUseBrowserResearchFormPreparation {
         }
         interpretation = action.input.interpretation; page = action.input.evidence; self.formID = formID; self.review = review
         if let original {
-            guard parent == nil, original.revisedAction == action, action.input.preparationReview == original.reviewContext,
+            guard !original.retiredUnusedIntent, parent == nil, original.revisedAction == action, action.input.preparationReview == original.reviewContext,
                   original.revisionDepth < 32, interpretation.input.continues(original.interpretation.input),
                   formID == original.formID else { throw ComputerUseBrowserActionPlanError.invalidProposal }
             self.parent = original.parent; previous = original.previous; target = original.target
@@ -498,8 +517,10 @@ final class ComputerUseBrowserResearchFormPreparation {
 
     func restoreForReview(browser: ComputerUseOwnedBrowser, checkCurrent: () throws -> Void) async throws -> ComputerUseBrowserPageEvidence {
         func check() throws {
+            guard !retiredUnusedIntent else { throw ComputerUseBrowserError.pageChanged }
             try checkCurrent()
             if let parent, let previous { try parent.validatePreparationContinuation(previous) }
+            guard !retiredUnusedIntent else { throw ComputerUseBrowserError.pageChanged }
         }
         do {
             return try await ComputerUseBrowserResearchFormStage.restoreOriginalPage(page, review: review, browser: browser, checkCurrent: check)
@@ -510,7 +531,7 @@ final class ComputerUseBrowserResearchFormPreparation {
     }
 
     func retainRevisedAction(_ action: ComputerUseBrowserActionProposal) throws {
-        guard action.input.preparationReview == reviewContext,
+        guard !retiredUnusedIntent, action.input.preparationReview == reviewContext,
               case .editForm(let id) = action.step, id == formID else { throw ComputerUseBrowserActionPlanError.invalidProposal }
         try reviewContext.validate(interpretation: action.input.interpretation, evidence: action.input.evidence)
         let fresh = try ComputerUseBrowserEffectScopeReview(input: action.input)
@@ -524,6 +545,7 @@ final class ComputerUseBrowserResearchFormPreparation {
     }
 
     func retainReviewObligations(from action: ComputerUseBrowserActionProposal) throws {
+        guard !retiredUnusedIntent else { throw ComputerUseBrowserError.pageChanged }
         let retained = try reviewContext.retainingPreservation(from: action)
         if retained != reviewContext {
             reviewContext = retained
@@ -534,6 +556,7 @@ final class ComputerUseBrowserResearchFormPreparation {
     /// Finish the original private capture without manufacturing a planner
     /// input or preceding stage, then request fresh review of changed fields.
     func recoverCriteriaForReview(browser: ComputerUseOwnedBrowser, checkCurrent: () throws -> Void) async throws -> Bool {
+        guard !retiredUnusedIntent else { throw ComputerUseBrowserError.pageChanged }
         guard criteriaRepairCount < 8, permitsCriteriaRecovery else { return false }
         // Keep every started callback. An explicit native pre-capture
         // rejection can inherit the earlier capture without retrying its ID.
@@ -589,8 +612,10 @@ final class ComputerUseBrowserResearchFormPreparation {
 
     func prepare(browser: ComputerUseOwnedBrowser, checkCurrent: () throws -> Void) async throws -> ComputerUseBrowserResearchFormInput {
         func check() throws {
+            guard !retiredUnusedIntent else { throw ComputerUseBrowserError.pageChanged }
             try checkCurrent()
             if let parent, let previous { try parent.validatePreparationContinuation(previous) }
+            guard !retiredUnusedIntent else { throw ComputerUseBrowserError.pageChanged }
         }
         do {
             try check()

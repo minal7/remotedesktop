@@ -2286,9 +2286,28 @@ final class ComputerUseBrowserTextTarget {
     private(set) var formPreservation: ComputerUseBrowserFormPreservation?
     private var targets: [String: String] = [:]
     private let adapterID = UUID()
+    private var hasIssuedFormAuthority = false
+    private var retiredUnusedPreparation = false
 
     var hasNoCapturedFields: Bool {
         documentID == nil && inputLedgerID == nil && targets.isEmpty && formPreservation == nil
+    }
+
+    /// Irreversible adapter-local accounting. Mark before dispatch or export,
+    /// including attempts whose outcome is not known. Cancellation cannot
+    /// turn a used adapter back into an unused preparation.
+    var canRetireUnusedPreparation: Bool {
+        !hasIssuedFormAuthority && !retiredUnusedPreparation && formPreservation == nil
+    }
+
+    func matchesInitialRead(documentID: String, ledgerID: String) -> Bool {
+        hasNoCapturedFields || (self.documentID == documentID && inputLedgerID == ledgerID && !targets.isEmpty)
+    }
+
+    func retireUnusedPreparation() throws {
+        try Task.checkCancellation()
+        guard canRetireUnusedPreparation else { throw ComputerUseBrowserError.pageChanged }
+        retiredUnusedPreparation = true
     }
 
     init(browser: ComputerUseOwnedBrowser, document: ComputerUseBrowserDocument, requiresFrontmost: Bool = true) {
@@ -2338,7 +2357,7 @@ final class ComputerUseBrowserTextTarget {
     /// into their parent contract before effects.
     func prepareFormPreservation(controlIDs: [String], page evidence: ComputerUseBrowserPageEvidence,
                                  scopeDigest: String, retaining capture: ComputerUseBrowserDOMReadCapture? = nil) async throws -> ComputerUseBrowserFormPreservation {
-        try validate()
+        try validate(); hasIssuedFormAuthority = true
         guard let documentID, let inputLedgerID, evidence.document == document, evidence.documentID == documentID,
               (1...16).contains(controlIDs.count), Set(controlIDs).count == controlIDs.count,
               scopeDigest.utf8.count == 64, scopeDigest.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }),
@@ -2408,7 +2427,7 @@ final class ComputerUseBrowserTextTarget {
                       selecting selectedControlIDs: [String]? = nil,
                       after continuation: ComputerUseBrowserResearchFormContinuation,
                       retaining capture: ComputerUseBrowserDOMReadCapture? = nil) async throws -> [ComputerUseTextField] {
-        try validate()
+        try validate(); hasIssuedFormAuthority = true
         guard let documentID, evidence.document == document, evidence.documentID == documentID,
               continuation.formID == formID, controlIDs.count <= 16, Set(controlIDs).count == controlIDs.count,
               Set(controlIDs).isSubset(of: Set(evidence.page.controls.map(\.id))) else { throw ComputerUseBrowserError.pageChanged }
@@ -2464,6 +2483,7 @@ final class ComputerUseBrowserTextTarget {
     /// a completed stage or grants query authority. Capture reuse is historical.
     func verifyFormState(_ plan: ComputerUseBrowserFormStatePlan, input: ComputerUseBrowserResearchFormInput,
                          page: ComputerUseBrowserPageEvidence, retaining capture: ComputerUseBrowserDOMReadCapture) async throws -> ComputerUseBrowserFormStateProof? {
+        try validate(); hasIssuedFormAuthority = true
         let requirements = try formStateRequirements(plan, input: input, page: page)
         guard let documentID, let inputLedgerID, let formID = input.selectedFormID else { throw ComputerUseBrowserError.pageChanged }
         let expected: [[String: String]] = try plan.expectedValues.keys.sorted().map { targetID in
@@ -2528,6 +2548,7 @@ final class ComputerUseBrowserTextTarget {
                       preserving controlIDs: [String], selecting selectedControlIDs: [String], scopeDigest: String,
                       from original: ComputerUseBrowserFormPreparationCapture, retaining capture: ComputerUseBrowserDOMReadCapture,
                       repairing repair: ComputerUseBrowserFormPreparationRepair? = nil) async throws -> [ComputerUseTextField] {
+        try validate(); hasIssuedFormAuthority = true
         try validate()
         guard let documentID, let inputLedgerID, evidence.document == document, evidence.documentID == documentID,
               original.evidence.adapterID == adapterID, original.evidence.page.document == document,
@@ -2648,7 +2669,7 @@ final class ComputerUseBrowserTextTarget {
                                     review: ComputerUseBrowserEffectScopeReview, after previous: ComputerUseBrowserResearchFormContinuation?,
                                     retaining capture: ComputerUseBrowserDOMReadCapture? = nil) async throws
         -> (evidence: ComputerUseBrowserFormEvidence, changedTargetIDs: Set<String>, refreshedTargetIDs: Set<String>) {
-        try Task.checkCancellation()
+        try validate(); hasIssuedFormAuthority = true
         guard review.permitsPreparationRecovery(after: previous, on: evidence) else { throw ComputerUseBrowserError.pageChanged }
         return try await joiningCompletion {
             let current = try await inspectPreparationHistory(page: evidence, after: previous)
@@ -2756,7 +2777,7 @@ final class ComputerUseBrowserTextTarget {
     /// discovery would clear those receipts and cannot reconnect this task.
     func prepareFormQuery(controlID: String, evidence: ComputerUseBrowserPageEvidence,
                           after continuation: ComputerUseTextTaskContinuation) async throws -> ComputerUseBrowserNavigationTarget {
-        try validate()
+        try validate(); hasIssuedFormAuthority = true
         guard evidence.document == document, let documentID, evidence.documentID == documentID else {
             throw ComputerUseBrowserError.pageChanged
         }
@@ -2769,7 +2790,7 @@ final class ComputerUseBrowserTextTarget {
 
     func prepareFormQuery(controlID: String, evidence: ComputerUseBrowserPageEvidence,
                           after continuation: ComputerUseBrowserResearchFormContinuation) async throws -> ComputerUseBrowserNavigationTarget {
-        try validate()
+        try validate(); hasIssuedFormAuthority = true
         guard continuation.pendingEdits.isEmpty else { throw ComputerUseBrowserError.formQueryUnavailable }
         guard evidence.document == document, let documentID, evidence.documentID == documentID else { throw ComputerUseBrowserError.pageChanged }
         let requirements = try ComputerUseBrowserFormQueryRequirements(document: document, documentID: documentID,
@@ -2846,7 +2867,7 @@ final class ComputerUseBrowserTextTarget {
     /// Transfer synchronously so the executor can retain the new owner before
     /// cancellation can interrupt its first asynchronous observation.
     func transferForClarification(taskID: String) throws -> ComputerUseBrowserTextTarget {
-        try validate()
+        try validate(); hasIssuedFormAuthority = true
         // A new parent must explicitly carry the original predicate and its
         // durable contract. Until that integration exists, never transfer
         // editable fields while silently discarding readonly obligations.
@@ -2858,6 +2879,7 @@ final class ComputerUseBrowserTextTarget {
         next.documentID = documentID
         next.inputLedgerID = inputLedgerID
         next.targets = targets
+        next.hasIssuedFormAuthority = true
         return next
     }
 
@@ -2917,7 +2939,7 @@ final class ComputerUseBrowserTextTarget {
     /// event. The caller must hold and confirm the original disk attempt.
     /// No new payload or target can enter this path, and no input is repeated.
     func finishPendingChange(operationID: String) async throws -> Bool {
-        try validate()
+        try validate(); hasIssuedFormAuthority = true
         guard let documentID, let inputLedgerID else { throw ComputerUseBrowserError.pageChanged }
         do {
             let reply = try await browser.callDOM(.finishPendingChange, arguments: ["documentID":documentID,
@@ -2940,7 +2962,7 @@ final class ComputerUseBrowserTextTarget {
     /// reset ledger cannot prove that old input was never sent. Revocation is
     /// idempotent for the same unattempted IDs and prevents their later use.
     func retireUnsentInputs(operationIDs: [String], after continuation: ComputerUseBrowserResearchFormContinuation? = nil) async throws -> Bool {
-        try validate()
+        try validate(); hasIssuedFormAuthority = true
         guard let documentID, let inputLedgerID, (1...8).contains(operationIDs.count),
               Set(operationIDs).count == operationIDs.count else { throw ComputerUseBrowserError.pageChanged }
         var arguments: [String: Any] = ["documentID":documentID, "inputLedgerID":inputLedgerID, "operationIDs":operationIDs]
@@ -3013,7 +3035,7 @@ final class ComputerUseBrowserTextTarget {
     private func sendInput(_ edit: ComputerUseTextPlanEdit, expected: ComputerUseTextSnapshot, operationID: String,
                            copySource: ComputerUseTextSnapshot?, requiredValues: [String: String],
                            continuingUnsent: Bool, compiledAfter: String? = nil) async throws -> Bool {
-        try validate()
+        try validate(); hasIssuedFormAuthority = true
         guard edit.targetID == expected.targetID, let documentID, let id = targets[edit.targetID],
               edit.text.utf8.count <= ComputerUseTextEditor.maximumPayloadBytes else { throw ComputerUseTextTaskError.staleTarget }
         let range: NSRange
@@ -3071,9 +3093,11 @@ final class ComputerUseBrowserTextTarget {
 
     private func validate() throws {
         try Task.checkCancellation()
+        guard !retiredUnusedPreparation else { throw ComputerUseBrowserError.pageChanged }
         guard browser.validate(document), !requiresFrontmost || browser.isFrontmostWindow else {
             throw ComputerUseBrowserError.pageChanged
         }
+        guard !retiredUnusedPreparation else { throw ComputerUseBrowserError.pageChanged }
     }
 
     private func snapshot(_ field: ComputerUseBrowserDOMReply.Field, targetID: String) throws -> ComputerUseTextSnapshot {

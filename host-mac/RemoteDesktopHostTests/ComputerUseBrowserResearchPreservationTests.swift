@@ -5,6 +5,157 @@ import XCTest
 /// Authored decisions and native fixture coverage, prepared but not executed.
 @MainActor
 final class ComputerUseBrowserResearchPreservationTests: XCTestCase {
+    func testCompletedUnusedPreparationReplansFreshDefaultsAfterHandbackWithoutReplayingTheOldProposal() async throws {
+        let fixture = try await unusedIntentFixture()
+        defer { fixture.close() }
+        _ = try await fixture.start(); configureUnusedIntent(fixture)
+        let owner = try fixture.owner(), original = owner.input
+        let action = try await owner.planNextAction(using: fixture.actions)
+        let input = try await owner.prepareFormInput(for: action)
+        let oldProposal = try ComputerUseBrowserFormProposal.decode(content: plan(input), input: input)
+        XCTAssertTrue(owner.hasPendingFormPreparation); XCTAssertTrue(owner.confirmedFormHistory.isEmpty)
+        owner.pause()
+        _ = try await fixture.browser.navigate(taskID: owner.taskID, operationID: "fixture-captured-handoff", to: fixture.base.appendingPathComponent("details"))
+        try await owner.resumeAfterUserControl()
+        let recovered = try await owner.recoverPendingFormPreparationCriteria()
+        XCTAssertTrue(recovered); XCTAssertFalse(owner.hasPendingFormPreparation)
+        XCTAssertEqual(owner.unusedFormIntentHistory.first?.observation, .initialEditPreconditions)
+        await expectFailure { _ = try await owner.executeForm(oldProposal, input: input) }
+        XCTAssertFalse(fixture.state.commands.contains(.edit)); XCTAssertTrue(owner.confirmedFormHistory.isEmpty)
+        fixture.forms.select = { fresh in
+            XCTAssertNotEqual(fresh.evidence.page.documentID, input.evidence.page.documentID)
+            XCTAssertEqual(fresh.evidence.fields.first?.editable.snapshot.value, "fresh-private-default")
+            XCTAssertNotEqual(fresh.evidence.fields.first?.editable.snapshot.targetID, input.evidence.fields.first?.editable.snapshot.targetID)
+            return try self.plan(fresh)
+        }
+        configureUnusedIntent(fixture, stopAfterStage: true)
+        _ = try await fixture.resume()
+        XCTAssertEqual(owner.input, original); XCTAssertEqual(fixture.search.inputs.count, 1)
+        XCTAssertEqual(owner.confirmedFormHistory.map(\.index), [0])
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .formFields }.count, 2)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 1)
+        let contextInput = try XCTUnwrap(fixture.actions.inputs.last { $0.usesUnusedFormIntentHistoryContext })
+        let context = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contextInput.contextJSON.utf8)) as? [String: Any])
+        let history = try XCTUnwrap(context["unused_form_intent_history"] as? [[String: Any]])
+        XCTAssertEqual(context["version"] as? Int, 29)
+        XCTAssertEqual(history.first?["values_observed"] as? Bool, true)
+        XCTAssertEqual(history.first?["observation"] as? String, "initial_edit_preconditions")
+        XCTAssertEqual(history.first?["old_adapter_retired"] as? Bool, true)
+        XCTAssertEqual(history.first?["input_dispatched"] as? Bool, false)
+        XCTAssertEqual(history.first?["current_field_verification"] as? Bool, false)
+        XCTAssertFalse(contextInput.contextJSON.contains("fresh-private-default"))
+    }
+
+    func testPendingBindingReadBlocksUnusedRetirementUntilItsCancelledWaiterJoins() async throws {
+        let fixture = try await unusedIntentFixture()
+        defer { fixture.close() }
+        _ = try await fixture.start(); configureUnusedIntent(fixture)
+        let action = try await fixture.owner().planNextAction(using: fixture.actions)
+        let frame = try ComputerUseBrowserResearchFormPreparation(action: action, browser: fixture.browser)
+        var operation: Task<ComputerUseBrowserResearchFormInput, Error>?
+        var interrupted = false
+        fixture.state.onCommand = { command in
+            guard command == .bindPageFields else { return }
+            fixture.state.onCommand = nil; interrupted = true
+            XCTAssertNil(frame.unusedInitialIntentObservation, "A dispatched binding read still owns its callback")
+            XCTAssertThrowsError(try frame.retireUnusedInitialIntent(observation: .initialEditPreconditions))
+            operation?.cancel()
+        }
+        operation = Task { @MainActor in try await frame.prepare(browser: fixture.browser, checkCurrent: { try Task.checkCancellation() }) }
+        let running = try XCTUnwrap(operation)
+        await expectFailure { _ = try await running.value }
+        XCTAssertTrue(interrupted)
+        XCTAssertEqual(frame.unusedInitialIntentObservation, .initialEditPreconditions)
+        XCTAssertTrue(frame.target.canRetireUnusedPreparation)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .formFields }.count, 1)
+        XCTAssertFalse(fixture.state.commands.contains(.edit))
+    }
+
+    func testRetiredUnusedAdapterRejectsReadsInputVerificationAndTransferOnItsStillCurrentDocument() async throws {
+        let fixture = try await unusedIntentFixture()
+        defer { fixture.close() }
+        let (frame, input) = try await completedUnusedFrame(fixture)
+        let snapshot = try XCTUnwrap(input.evidence.fields.first?.editable.snapshot)
+        let statePlan = try ComputerUseBrowserFormStatePlan(input: input, proposal: .decode(content: plan(input), input: input))
+        let capture = try ComputerUseBrowserDOMReadCapture(command: .verifyFormState, document: input.evidence.page.document)
+        XCTAssertEqual(frame.unusedInitialIntentObservation, .initialEditPreconditions)
+        let beforeRetirement = fixture.state.commands.count
+        await expectFailure {
+            _ = try await frame.restoreForReview(browser: fixture.browser, checkCurrent: {
+                try frame.retireUnusedInitialIntent(observation: .initialEditPreconditions)
+            })
+        }
+        XCTAssertEqual(fixture.state.commands.count, beforeRetirement, "Reentrant retirement blocks the pending review before observation")
+        XCTAssertNil(frame.unusedInitialIntentObservation); XCTAssertFalse(frame.target.canRetireUnusedPreparation)
+        let commands = fixture.state.commands.count
+        await expectFailure { _ = try await frame.target.read(targetID: snapshot.targetID) }
+        await expectFailure { try await frame.target.apply(.init(targetID: snapshot.targetID, mode: .replaceAll, text: "concerts"),
+            expected: snapshot, operationID: "retired-initial-input") }
+        await expectFailure { _ = try await frame.target.verifyFormState(statePlan, input: input, page: input.evidence.page, retaining: capture) }
+        await expectFailure { _ = try await frame.prepare(browser: fixture.browser, checkCurrent: {}) }
+        XCTAssertThrowsError(try frame.target.transferForClarification(taskID: "replacement-task"))
+        XCTAssertThrowsError(try frame.target.retireUnusedPreparation())
+        XCTAssertEqual(fixture.state.commands.count, commands, "Retirement blocks access before native dispatch even on the original page")
+        XCTAssertFalse(capture.didStart)
+    }
+
+    func testCancelledInputAttemptCannotBecomeAnUnusedPreparationAgain() async throws {
+        let fixture = try await unusedIntentFixture()
+        defer { fixture.close() }
+        let (frame, input) = try await completedUnusedFrame(fixture)
+        let snapshot = try XCTUnwrap(input.evidence.fields.first?.editable.snapshot)
+        var operation: Task<Void, Error>?
+        var interrupted = false
+        fixture.state.onCommand = { command in
+            guard command == .edit else { return }
+            fixture.state.onCommand = nil; interrupted = true
+            XCTAssertFalse(frame.target.canRetireUnusedPreparation)
+            XCTAssertNil(frame.unusedInitialIntentObservation)
+            XCTAssertThrowsError(try frame.target.retireUnusedPreparation())
+            operation?.cancel()
+        }
+        operation = Task { @MainActor in try await frame.target.apply(
+            .init(targetID: snapshot.targetID, mode: .replaceAll, text: "concerts"), expected: snapshot, operationID: "initial-attempt") }
+        let running = try XCTUnwrap(operation)
+        await expectFailure { try await running.value }
+        await frame.target.joinCompletion()
+        XCTAssertTrue(interrupted); XCTAssertFalse(frame.target.canRetireUnusedPreparation)
+        XCTAssertNil(frame.unusedInitialIntentObservation)
+        XCTAssertThrowsError(try frame.retireUnusedInitialIntent(observation: .initialEditPreconditions))
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 1)
+    }
+
+    func testDesiredValueVerificationAndFailedTransferRetainTheirIssuedAuthority() async throws {
+        for verification in [false, true] {
+            let fixture = try await unusedIntentFixture()
+            defer { fixture.close() }
+            let (frame, input) = try await completedUnusedFrame(fixture)
+            XCTAssertEqual(frame.unusedInitialIntentObservation, .initialEditPreconditions)
+            if verification {
+                let plan = try ComputerUseBrowserFormStatePlan(input: input, proposal: .decode(content: self.plan(input), input: input))
+                let capture = try ComputerUseBrowserDOMReadCapture(command: .verifyFormState, document: input.evidence.page.document)
+                let current = try await frame.restoreForReview(browser: fixture.browser, checkCurrent: {})
+                _ = try await frame.target.verifyFormState(plan, input: input, page: current, retaining: capture)
+                XCTAssertTrue(capture.didStart)
+            } else {
+                XCTAssertThrowsError(try frame.target.transferForClarification(taskID: input.interpretation.input.taskID))
+            }
+            XCTAssertFalse(frame.target.canRetireUnusedPreparation)
+            XCTAssertNil(frame.unusedInitialIntentObservation)
+            XCTAssertThrowsError(try frame.target.retireUnusedPreparation())
+            XCTAssertFalse(fixture.state.commands.contains(.edit))
+        }
+    }
+
+    private func completedUnusedFrame(_ fixture: ResearchDriverFixture) async throws
+        -> (ComputerUseBrowserResearchFormPreparation, ComputerUseBrowserResearchFormInput) {
+        _ = try await fixture.start(); configureUnusedIntent(fixture)
+        let action = try await fixture.owner().planNextAction(using: fixture.actions)
+        let frame = try ComputerUseBrowserResearchFormPreparation(action: action, browser: fixture.browser)
+        let input = try await frame.prepare(browser: fixture.browser, checkCurrent: {})
+        return (frame, input)
+    }
+
     func testInitialReadAbsenceDoesNotTreatPendingOrOrdinaryFailuresAsUnobserved() async throws {
         let fixture = try await ControlStateFixture(body: "<p>Metadata only</p>")
         defer { fixture.close() }
@@ -13,8 +164,10 @@ final class ComputerUseBrowserResearchPreservationTests: XCTestCase {
             XCTAssertTrue(capture.initialFieldsWereNotObserved)
             try capture.begin(command: .formFields, arguments: [:], document: fixture.document)
             XCTAssertFalse(capture.initialFieldsWereNotObserved, "A pending native read is not absence")
+            XCTAssertNil(capture.completedInitialFieldRead); XCTAssertTrue(capture.hasPendingRead)
             capture.finish(.failure(failure))
             XCTAssertEqual(capture.initialFieldsWereNotObserved, failure == .authenticationRequired)
+            XCTAssertNil(capture.completedInitialFieldRead); XCTAssertFalse(capture.hasPendingRead)
             XCTAssertTrue(capture.didStart, "Inspecting absence must not erase the original callback")
         }
         let cancelled = try ComputerUseBrowserDOMReadCapture(command: .formFields, document: fixture.document)
@@ -30,6 +183,8 @@ final class ComputerUseBrowserResearchPreservationTests: XCTestCase {
             "fields":[["id":"e1", "label":"Query", "value":"old", "selectionStart":3, "selectionEnd":3]]]), command: .formFields)
         completed.finish(.success(reply))
         XCTAssertFalse(completed.initialFieldsWereNotObserved)
+        XCTAssertEqual(completed.completedInitialFieldRead?.documentID, String(repeating: "a", count: 32))
+        XCTAssertEqual(completed.completedInitialFieldRead?.ledgerID, String(repeating: "b", count: 32))
     }
 
     func testUnobservedInitialIntentRetiresAfterHandbackAndFreshFieldsStartTheFirstStage() async throws {
@@ -41,15 +196,15 @@ final class ComputerUseBrowserResearchPreservationTests: XCTestCase {
         try await owner.resumeAfterUserControl()
         let recovered = try await owner.recoverPendingFormPreparationCriteria()
         XCTAssertTrue(recovered); XCTAssertFalse(owner.hasPendingFormPreparation)
-        XCTAssertEqual(owner.unobservedFormIntentHistory.count, 1)
+        XCTAssertEqual(owner.unusedFormIntentHistory.count, 1)
         XCTAssertTrue(owner.confirmedFormHistory.isEmpty); XCTAssertTrue(owner.retiredFormHistory.isEmpty)
         XCTAssertFalse(fixture.state.commands.contains(.formFields)); XCTAssertFalse(fixture.state.commands.contains(.edit))
         let fresh = try await owner.planNextAction(using: fixture.actions)
         XCTAssertNotEqual(fresh.input.evidence.documentID, action.input.evidence.documentID)
         XCTAssertEqual(fresh.input.interpretation.input, original)
         let context = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(fresh.input.contextJSON.utf8)) as? [String: Any])
-        let history = try XCTUnwrap(context["unobserved_form_intent_history"] as? [[String: Any]])
-        XCTAssertEqual(context["version"] as? Int, 28)
+        let history = try XCTUnwrap(context["unused_form_intent_history"] as? [[String: Any]])
+        XCTAssertEqual(context["version"] as? Int, 29)
         XCTAssertEqual(history.first?["values_observed"] as? Bool, false)
         XCTAssertEqual(history.first?["input_dispatched"] as? Bool, false)
         let purposes = try XCTUnwrap(history.first?["purposes"] as? [[String: Any]])
@@ -61,7 +216,7 @@ final class ComputerUseBrowserResearchPreservationTests: XCTestCase {
         XCTAssertThrowsError(try ComputerUseBrowserActionInput(interpretation: fresh.input.interpretation,
             evidence: fresh.input.evidence, navigationHistory: owner.confirmedNavigationHistory,
             formHistory: [], latestForm: nil, changedFormTargetIDs: [],
-            unobservedFormIntentHistory: owner.unobservedFormIntentHistory + owner.unobservedFormIntentHistory))
+            unusedFormIntentHistory: owner.unusedFormIntentHistory + owner.unusedFormIntentHistory))
         let input = try await owner.prepareFormInput(for: fresh)
         _ = try await owner.executeForm(.decode(content: plan(input), input: input), input: input)
         XCTAssertEqual(owner.confirmedFormHistory.map(\.index), [0])
@@ -76,7 +231,7 @@ final class ComputerUseBrowserResearchPreservationTests: XCTestCase {
         let action = try await pauseUnusedIntent(fixture), owner = try fixture.owner()
         try await owner.resumeAfterUserControl()
         _ = try await owner.recoverPendingFormPreparationCriteria()
-        XCTAssertTrue(owner.hasPendingFormPreparation); XCTAssertTrue(owner.unobservedFormIntentHistory.isEmpty)
+        XCTAssertTrue(owner.hasPendingFormPreparation); XCTAssertTrue(owner.unusedFormIntentHistory.isEmpty)
         let input = try await owner.resumeFormPreparation()
         XCTAssertEqual(input.evidence.page.documentID, action.input.evidence.documentID)
         XCTAssertEqual(fixture.state.commands.filter { $0 == .formFields }.count, 1)
@@ -92,29 +247,37 @@ final class ComputerUseBrowserResearchPreservationTests: XCTestCase {
         _ = try await fixture.browser.navigate(taskID: owner.taskID, operationID: "fixture-later-page", to: fixture.base.appendingPathComponent("beta"))
         do { _ = try await owner.recoverPendingFormPreparationCriteria(); XCTFail("Only the explicit handback document is eligible") }
         catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
-        XCTAssertTrue(owner.hasPendingFormPreparation); XCTAssertTrue(owner.unobservedFormIntentHistory.isEmpty)
+        XCTAssertTrue(owner.hasPendingFormPreparation); XCTAssertTrue(owner.unusedFormIntentHistory.isEmpty)
         XCTAssertFalse(fixture.state.commands.contains(.formFields)); XCTAssertFalse(fixture.state.commands.contains(.edit))
     }
 
     func testPauseDuringFreshRetirementValidationKeepsTheOriginalIntentUntilAnotherHandback() async throws {
-        let fixture = try await unusedIntentFixture()
-        defer { fixture.close() }
-        _ = try await pauseUnusedIntent(fixture)
-        let owner = try fixture.owner()
-        _ = try await fixture.browser.navigate(taskID: owner.taskID, operationID: "fixture-new-form", to: fixture.base.appendingPathComponent("details"))
-        try await owner.resumeAfterUserControl()
-        var interrupted = false
-        fixture.state.onCommand = { command in
-            guard command == .validatePageSnapshot else { return }
-            fixture.state.onCommand = nil; interrupted = true; owner.pause()
+        for captured in [false, true] {
+            let fixture = try await unusedIntentFixture()
+            defer { fixture.close() }
+            if captured {
+                _ = try await fixture.start(); configureUnusedIntent(fixture)
+                let owner = try fixture.owner(), action = try await owner.planNextAction(using: fixture.actions)
+                _ = try await owner.prepareFormInput(for: action)
+                owner.pause()
+            } else { _ = try await pauseUnusedIntent(fixture) }
+            let owner = try fixture.owner()
+            _ = try await fixture.browser.navigate(taskID: owner.taskID, operationID: "fixture-new-form", to: fixture.base.appendingPathComponent("details"))
+            try await owner.resumeAfterUserControl()
+            var interrupted = false
+            fixture.state.onCommand = { command in
+                guard command == .validatePageSnapshot else { return }
+                fixture.state.onCommand = nil; interrupted = true; owner.pause()
+            }
+            await expectFailure { _ = try await owner.recoverPendingFormPreparationCriteria() }
+            XCTAssertTrue(interrupted); XCTAssertFalse(owner.isOperating)
+            XCTAssertTrue(owner.hasPendingFormPreparation); XCTAssertTrue(owner.unusedFormIntentHistory.isEmpty)
+            try await owner.resumeAfterUserControl()
+            let recovered = try await owner.recoverPendingFormPreparationCriteria()
+            XCTAssertTrue(recovered); XCTAssertEqual(owner.unusedFormIntentHistory.count, 1)
+            XCTAssertEqual(fixture.state.commands.filter { $0 == .formFields }.count, captured ? 1 : 0)
+            XCTAssertFalse(fixture.state.commands.contains(.edit))
         }
-        await expectFailure { _ = try await owner.recoverPendingFormPreparationCriteria() }
-        XCTAssertTrue(interrupted); XCTAssertFalse(owner.isOperating)
-        XCTAssertTrue(owner.hasPendingFormPreparation); XCTAssertTrue(owner.unobservedFormIntentHistory.isEmpty)
-        try await owner.resumeAfterUserControl()
-        let recovered = try await owner.recoverPendingFormPreparationCriteria()
-        XCTAssertTrue(recovered); XCTAssertEqual(owner.unobservedFormIntentHistory.count, 1)
-        XCTAssertFalse(fixture.state.commands.contains(.formFields)); XCTAssertFalse(fixture.state.commands.contains(.edit))
     }
 
     func testCapturedFieldsOrPreservationDutiesCannotUseUnobservedIntentRetirement() async throws {
@@ -147,8 +310,15 @@ final class ComputerUseBrowserResearchPreservationTests: XCTestCase {
             }
             _ = try await fixture.browser.navigate(taskID: owner.taskID, operationID: "fixture-held-obligation", to: fixture.base.appendingPathComponent("details"))
             try await owner.resumeAfterUserControl()
-            await expectFailure { _ = try await owner.recoverPendingFormPreparationCriteria() }
-            XCTAssertTrue(owner.hasPendingFormPreparation); XCTAssertTrue(owner.unobservedFormIntentHistory.isEmpty)
+            if preservationDuty {
+                await expectFailure { _ = try await owner.recoverPendingFormPreparationCriteria() }
+                XCTAssertTrue(owner.hasPendingFormPreparation); XCTAssertTrue(owner.unusedFormIntentHistory.isEmpty)
+            } else {
+                let recovered = try await owner.recoverPendingFormPreparationCriteria()
+                XCTAssertTrue(recovered); XCTAssertFalse(owner.hasPendingFormPreparation)
+                XCTAssertEqual(owner.unusedFormIntentHistory.first?.observation, .initialEditPreconditions,
+                    "A captured default must never be reported as unobserved")
+            }
             XCTAssertTrue(owner.confirmedFormHistory.isEmpty); XCTAssertFalse(fixture.state.commands.contains(.edit))
         }
     }
@@ -163,12 +333,12 @@ final class ComputerUseBrowserResearchPreservationTests: XCTestCase {
         configureUnusedIntent(fixture, stopAfterStage: true)
         try await owner.resumeAfterUserControl()
         _ = try await fixture.resume()
-        XCTAssertFalse(owner.hasPendingFormPreparation); XCTAssertEqual(owner.unobservedFormIntentHistory.count, 1)
+        XCTAssertFalse(owner.hasPendingFormPreparation); XCTAssertEqual(owner.unusedFormIntentHistory.count, 1)
         XCTAssertEqual(owner.confirmedFormHistory.map(\.index), [0])
         XCTAssertEqual(fixture.state.commands.filter { $0 == .formFields }.count, 1)
         XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 1)
         XCTAssertEqual(fixture.search.inputs.count, 1); XCTAssertEqual(owner.input, original)
-        XCTAssertTrue(fixture.actions.inputs.contains { $0.usesUnobservedFormIntentHistoryContext })
+        XCTAssertTrue(fixture.actions.inputs.contains { $0.usesUnusedFormIntentHistoryContext })
         XCTAssertTrue(fixture.forms.inputs.allSatisfy { $0.interpretation.input == original })
     }
 

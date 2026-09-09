@@ -2,6 +2,8 @@
 
 Source repair; execution pending. This follows the [manual login request history repair](BROWSER_LOGIN_REQUEST_HISTORY_REVIEW.md). No build, typecheck, assertion, app, browser, model or account-login execution occurred.
 
+Follow-up: the [unused precondition repair](BROWSER_UNUSED_PRECONDITION_HANDOFF_REVIEW.md) extends this rule to captured initial edit defaults under irreversible adapter-use accounting and retirement. That review documents the current version 29 context and the remaining value-duty restrictions.
+
 ## First-principles defect
 
 A form preparation is published before its first private read so cancellation cannot erase a dispatched capture. That ownership rule is necessary. However, a preparation that never reached any private observation could remain tied to an old document after manual sign-in. Both ordinary preparation and criterion recovery restore the original native page. After a redirect, both can fail against the same stale document, leaving an unused initial plan with no way to return to fresh planning.
