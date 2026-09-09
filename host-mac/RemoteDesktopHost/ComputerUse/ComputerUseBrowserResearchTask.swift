@@ -746,32 +746,23 @@ final class ComputerUseBrowserResearchTask {
         latestCandidates = nil; latestForm = nil; latestAction = nil
         let prepared = try await operate { [self] in
             let page: ComputerUseBrowserPageEvidence
-            let selectedFormID: String?
-            if let action, case .editForm(let formID) = action.step {
+            if let action, case .editForm = action.step {
                 try checkCurrent(captured)
                 try await browser.validatePageEvidence(action.input.evidence)
                 try browser.validateSourceDocument(action.input.evidence.document)
-                page = action.input.evidence; selectedFormID = formID
+                page = action.input.evidence
             } else {
                 page = try await observeOwnedPage(goal: captured, enforceSources: true)
-                selectedFormID = nil
             }
             try requireOriginalPopupCriteria(in: page)
             guard browser.hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
-            // Same-form dependent work reuses the original adapter and its
-            // receipts. It cannot fall back to discovery on extension failure.
-            if action != nil, let formStage, formStage.nativeReceipt != nil,
-               formStage.input.evidence.page.document == page.document {
-                guard let selectedFormID else { throw ComputerUseBrowserActionPlanError.retainedFormRequiresExtension }
-                let next = try await formStage.prepareNextFormInput(interpretation: interpretation.proposal, formID: selectedFormID,
-                    page: page, preserving: action?.preservedControls ?? [],
-                    scopeReview: try action.map { try ComputerUseBrowserEffectScopeReview(input: $0.input) }, checkCurrent: { try self.checkCurrent(captured) })
-                try checkCurrent(captured)
-                guard browser.hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
-                return PreparedForm(target: next.target, input: next.input)
-            }
             if let action {
-                let preparation = try ComputerUseBrowserResearchFormPreparation(action: action, browser: browser)
+                // Keep a verified form's original adapter and receipts. A
+                // failed extension cannot fall back to fresh discovery.
+                let parent = formStage.flatMap { stage in
+                    stage.nativeReceipt != nil && stage.input.evidence.page.document == page.document ? stage : nil
+                }
+                let preparation = try ComputerUseBrowserResearchFormPreparation(action: action, browser: browser, parent: parent)
                 formPreparation = preparation // Publish intent before the first private read.
                 let prepared = try await preparation.prepare(browser: browser, checkCurrent: { try self.checkCurrent(captured) })
                 try checkCurrent(captured)
@@ -884,6 +875,9 @@ final class ComputerUseBrowserResearchTask {
         try requireIdle()
         guard !hasPendingNavigation else { throw Failure.navigationPending }
         guard !hasQuestion else { throw Failure.questionPending }
+        // A repeated request for the verified predecessor must not consume
+        // preparation for a later stage that borrows its adapter and receipts.
+        if let formPreparation, formPreparation.preparedInput != expected { throw Failure.formPending }
         guard expected.interpretation.input == input, interpretation?.proposal == expected.interpretation else { throw Failure.goalChanged }
         try proposal.validate(for: expected)
         let stage: ComputerUseBrowserResearchFormStage
@@ -903,6 +897,7 @@ final class ComputerUseBrowserResearchTask {
 
     func resumeForm() async throws -> ComputerUseBrowserResearchFormReceipt? {
         try requireIdle()
+        guard !hasPendingFormPreparation else { throw Failure.formPending }
         guard !hasPendingNavigation else { throw Failure.navigationPending }
         guard !hasQuestion else { throw Failure.questionPending }
         guard let formStage else { return nil }
@@ -917,9 +912,10 @@ final class ComputerUseBrowserResearchTask {
     /// the latest completed form's adapter and history for the new proposal.
     func retirePendingUnsentForm() async throws -> ComputerUseBrowserResearchFormStage.Retirement? {
         try requireIdle()
+        guard !hasPendingFormPreparation else { throw Failure.formPending }
         guard !hasPendingNavigation else { throw Failure.navigationPending }
         guard !hasQuestion else { throw Failure.questionPending }
-        guard hasPendingForm, let stage = formStage else { return nil }
+        guard hasPendingFormExecution, let stage = formStage else { return nil }
         guard stage.input.interpretation.input == input else { throw Failure.goalChanged }
         let captured = input
         latestForm = nil; latestAction = nil; latestCandidates = nil
@@ -939,9 +935,10 @@ final class ComputerUseBrowserResearchTask {
     /// authority; this does not publish whole-stage or research completion.
     func retainPendingFormPrefix() async throws -> ComputerUseBrowserResearchFormReceipt? {
         try requireIdle()
+        guard !hasPendingFormPreparation else { throw Failure.formPending }
         guard !hasPendingNavigation else { throw Failure.navigationPending }
         guard !hasQuestion else { throw Failure.questionPending }
-        guard hasPendingForm, let stage = formStage else { return nil }
+        guard hasPendingFormExecution, let stage = formStage else { return nil }
         guard stage.input.interpretation.input == input else { throw Failure.goalChanged }
         let captured = input
         latestForm = nil; latestAction = nil; latestCandidates = nil
@@ -1331,7 +1328,8 @@ final class ComputerUseBrowserResearchTask {
             throw ComputerUseBrowserGoalClarification.Failure.expired
         }
         // A new user answer can replace an unstarted plan with no retained
-        // preservation/read obligations. Preserve all other original frames
+        // preservation/read obligations or previously verified criteria. Keep
+        // all other original frames
         // until goal-revision reconciliation can explicitly carry them.
         if formPreparation?.hasPreservationObligations == false { formPreparation = nil }
         interpretation = nil; latestCandidates = nil; latestForm = nil; latestAction = nil; hasQuestion = false

@@ -219,11 +219,7 @@ final class ComputerUseBrowserResearchPreservationTests: XCTestCase {
         XCTAssertEqual(next.nativePreservation?.controlIDs, first.nativePreservation?.controlIDs)
         XCTAssertNotEqual(next.nativePreservation?.id, first.nativePreservation?.id)
         XCTAssertEqual(next.previous?.inputOperationIDs.count, 1)
-        let alias = try XCTUnwrap(next.editableFieldAliases.first)
-        XCTAssertEqual(try next.field(for: alias).control.label, "Category")
-        let choice = try XCTUnwrap(try next.field(for: alias).control.options.first { $0.label == "Concerts" })
-        let content = try ResearchAnswerFixture.json(["edits":[["field":alias,"choice":choice.id,"requirement":0]],"preserve":[]])
-        _ = try await owner.executeForm(.decode(content: content, input: next), input: next)
+        _ = try await owner.executeForm(.decode(content: categoryPlan(next), input: next), input: next)
         XCTAssertEqual(owner.confirmedFormHistory.count, 2)
         XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 2)
     }
@@ -432,6 +428,27 @@ final class ComputerUseBrowserResearchPreservationTests: XCTestCase {
         XCTAssertThrowsError(try capture.begin(command: .formFields, arguments: [:], document: fixture.document))
     }
 
+    func testCapturedExtensionCannotChangeItsEarlierRequirementsOrRepairableObjects() async throws {
+        let fixture = try await ControlStateFixture(body: "<p>Metadata only</p>")
+        defer { fixture.close() }
+        let capture = try ComputerUseBrowserDOMReadCapture(command: .extendFormFields, document: fixture.document)
+        let original: [String: Any] = ["snapshotID":"first", "selectedControlIDs":["c2"],
+            "requirements":["digest":"original-requirements", "preservationID":"original-preservation"], "repairableFieldIDs":["f1"]]
+        try capture.begin(command: .extendFormFields, arguments: original, document: fixture.document)
+        capture.finish(.success(try ComputerUseOwnedBrowser.decodeDOMReply(
+            #"{"status":"ok","documentID":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#, command: .extendFormFields)))
+        var refreshed = original; refreshed["snapshotID"] = "new-observation"
+        XCTAssertNotNil(try capture.retainedReply(command: .extendFormFields, arguments: refreshed, document: fixture.document))
+        for replacement: [String: Any] in [
+            ["requirements":["digest":"different-requirements", "preservationID":"original-preservation"]],
+            ["requirements":["digest":"original-requirements", "preservationID":"different-preservation"]],
+            ["repairableFieldIDs":["f2"]], ["selectedControlIDs":["c3"]]
+        ] {
+            let changed = refreshed.merging(replacement) { _, new in new }
+            XCTAssertThrowsError(try capture.retainedReply(command: .extendFormFields, arguments: changed, document: fixture.document))
+        }
+    }
+
     func testOnlyAnEmptyAuthenticationReplyCanReleaseAnUnobservedCapture() async throws {
         let fixture = try await ControlStateFixture(body: "<p>Metadata only</p>")
         defer { fixture.close() }
@@ -449,6 +466,209 @@ final class ComputerUseBrowserResearchPreservationTests: XCTestCase {
                 XCTAssertEqual(error as? ComputerUseBrowserError, .unsupportedDocument)
             }
         }
+    }
+
+    func testLaterPreparationResumesEachCapturedReadWithItsOriginalParent() async throws {
+        for interrupted in [ComputerUseBrowserDOMCommand.extendFormFields, .bindPageFields, .prepareFormPreservation, .validateFormPreservation] {
+            let fixture = try await make(category: true)
+            defer { fixture.close() }
+            let (first, action) = try await prepareLaterAction(fixture), owner = try fixture.owner()
+            let history = owner.confirmedFormHistory, decisions = fixture.actions.inputs.count
+            fixture.state.onCommand = { command in
+                guard command == interrupted else { return }; fixture.state.onCommand = nil; owner.pause()
+            }
+            await expectFailure { _ = try await owner.prepareFormInput(for: action) }
+            XCTAssertTrue(owner.hasPendingFormPreparation); XCTAssertFalse(owner.isOperating)
+            await expectFailure { _ = try await owner.resumeFormPreparation() }
+            try await owner.resumeAfterUserControl()
+            let next = try await owner.resumeFormPreparation()
+            XCTAssertEqual(next.interpretation.input, first.interpretation.input)
+            XCTAssertEqual(next.evidence.adapterID, first.evidence.adapterID)
+            XCTAssertEqual(next.previous?.nativePreservation, first.nativePreservation)
+            XCTAssertEqual(next.nativePreservedSources, first.nativePreservedSources)
+            XCTAssertEqual(next.previous?.inputOperationIDs.count, 1)
+            XCTAssertEqual(owner.confirmedFormHistory, history)
+            XCTAssertEqual(fixture.actions.inputs.count, decisions)
+            XCTAssertEqual(fixture.state.commands.filter { $0 == .formFields }.count, 1)
+            XCTAssertEqual(fixture.state.commands.filter { $0 == .extendFormFields }.count, 1)
+            XCTAssertEqual(fixture.state.commands.filter { $0 == .prepareFormPreservation }.count, 2)
+            _ = try await owner.executeForm(.decode(content: categoryPlan(next), input: next), input: next)
+            XCTAssertFalse(owner.hasPendingFormPreparation)
+            XCTAssertEqual(owner.confirmedFormHistory.count, 2)
+            XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 2)
+        }
+    }
+
+    func testLaterPreparationRejectsChangedNewOrEarlierCriterionWithoutAnotherExtension() async throws {
+        for mutation in ["document.querySelector('select').value='concerts';", "document.getElementById('query').value='changed-during-pause';"] {
+            let fixture = try await make(category: true, mutation: mutation)
+            defer { fixture.close() }
+            let (_, action) = try await prepareLaterAction(fixture), owner = try fixture.owner()
+            let history = owner.confirmedFormHistory
+            fixture.state.onCommand = { command in
+                guard command == .extendFormFields else { return }; fixture.state.onCommand = nil; owner.pause()
+            }
+            await expectFailure { _ = try await owner.prepareFormInput(for: action) }
+            try await release(fixture); try await owner.resumeAfterUserControl()
+            await expectFailure { _ = try await owner.resumeFormPreparation() }
+            XCTAssertTrue(owner.hasPendingFormPreparation)
+            XCTAssertEqual(owner.confirmedFormHistory, history)
+            XCTAssertEqual(fixture.state.commands.filter { $0 == .extendFormFields }.count, 1)
+            XCTAssertEqual(fixture.state.commands.filter { $0 == .formFields || $0 == .edit }.count, 2)
+        }
+    }
+
+    func testLaterPreparationRejectsChangedReadonlyBaselineAfterNativeScopeExtension() async throws {
+        let fixture = try await make(category: true, mutation: "document.getElementById('reference').value='changed-during-pause';")
+        defer { fixture.close() }
+        let (_, action) = try await prepareLaterAction(fixture), owner = try fixture.owner()
+        let history = owner.confirmedFormHistory
+        fixture.state.onCommand = { command in
+            guard command == .prepareFormPreservation else { return }; fixture.state.onCommand = nil; owner.pause()
+        }
+        await expectFailure { _ = try await owner.prepareFormInput(for: action) }
+        try await release(fixture); try await owner.resumeAfterUserControl()
+        await expectFailure { _ = try await owner.resumeFormPreparation() }
+        XCTAssertTrue(owner.hasPendingFormPreparation)
+        XCTAssertEqual(owner.confirmedFormHistory, history)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .extendFormFields }.count, 1)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .prepareFormPreservation }.count, 2)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 1)
+    }
+
+    func testLaterPreparationRejectsReplacedNewAndPreviouslyEditedObjects() async throws {
+        for mutation in ["const c=document.querySelector('select'); c.replaceWith(c.cloneNode(true));", "const q=document.getElementById('query'); q.replaceWith(q.cloneNode(true));"] {
+            let fixture = try await make(category: true, mutation: mutation)
+            defer { fixture.close() }
+            let (_, action) = try await prepareLaterAction(fixture), owner = try fixture.owner()
+            let history = owner.confirmedFormHistory
+            fixture.state.onCommand = { command in
+                guard command == .extendFormFields else { return }; fixture.state.onCommand = nil; owner.pause()
+            }
+            await expectFailure { _ = try await owner.prepareFormInput(for: action) }
+            try await release(fixture); try await owner.resumeAfterUserControl()
+            await expectFailure { _ = try await owner.resumeFormPreparation() }
+            XCTAssertEqual(owner.confirmedFormHistory, history)
+            XCTAssertEqual(fixture.state.commands.filter { $0 == .extendFormFields }.count, 1)
+            XCTAssertEqual(fixture.state.commands.filter { $0 == .formFields || $0 == .edit }.count, 2)
+        }
+    }
+
+    func testDriverResumesLaterPreparationBeforeSelectingAnotherAction() async throws {
+        let fixture = try await make(category: true)
+        defer { fixture.close() }
+        let (_, action) = try await prepareLaterAction(fixture), owner = try fixture.owner()
+        fixture.state.onCommand = { command in
+            guard command == .extendFormFields else { return }; fixture.state.onCommand = nil; owner.pause()
+        }
+        await expectFailure { _ = try await owner.prepareFormInput(for: action) }
+        fixture.forms.select = { try self.categoryPlan($0) }
+        fixture.actions.select = { _ in
+            XCTAssertEqual(owner.confirmedFormHistory.count, 2, "Finish the retained later stage before choosing more work")
+            return #"{"unavailable":true}"#
+        }
+        try await owner.resumeAfterUserControl(); _ = try await fixture.resume()
+        XCTAssertFalse(owner.hasPendingFormPreparation)
+        XCTAssertEqual(owner.confirmedFormHistory.count, 2)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .formFields || $0 == .extendFormFields }.count, 2)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 2)
+    }
+
+    func testPriorStageRequestsCannotConsumeOrRetireLaterPreparation() async throws {
+        for interrupted in [false, true] {
+            let fixture = try await make(category: true)
+            defer { fixture.close() }
+            let (first, action) = try await prepareLaterAction(fixture), owner = try fixture.owner()
+            let previousProposal = try ComputerUseBrowserFormProposal.decode(content: plan(first), input: first)
+            if interrupted {
+                fixture.state.onCommand = { command in
+                    guard command == .extendFormFields else { return }; fixture.state.onCommand = nil; owner.pause()
+                }
+                await expectFailure { _ = try await owner.prepareFormInput(for: action) }
+                try await owner.resumeAfterUserControl()
+            } else { _ = try await owner.prepareFormInput(for: action) }
+            let history = owner.confirmedFormHistory, commands = fixture.state.commands
+            await expectFailure { _ = try await owner.executeForm(previousProposal, input: first) }
+            await expectFailure { _ = try await owner.resumeForm() }
+            await expectFailure { _ = try await owner.retirePendingUnsentForm() }
+            await expectFailure { _ = try await owner.retainPendingFormPrefix() }
+            XCTAssertTrue(owner.hasPendingFormPreparation)
+            XCTAssertEqual(owner.confirmedFormHistory, history)
+            XCTAssertEqual(fixture.state.commands, commands, "Reject competing predecessor requests before any native work")
+            let next = try await owner.resumeFormPreparation()
+            _ = try await owner.executeForm(.decode(content: categoryPlan(next), input: next), input: next)
+            XCTAssertFalse(owner.hasPendingFormPreparation)
+            XCTAssertEqual(owner.confirmedFormHistory.count, 2)
+            XCTAssertEqual(fixture.state.commands.filter { $0 == .extendFormFields }.count, 1)
+            XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 2)
+        }
+    }
+
+    func testRetirementDuringLaterPreparationCannotPublishOrEditANewStage() async throws {
+        let fixture = try await make(category: true)
+        defer { fixture.close() }
+        let (_, action) = try await prepareLaterAction(fixture), owner = try fixture.owner()
+        fixture.state.onCommand = { command in
+            guard command == .extendFormFields else { return }; fixture.state.onCommand = nil; owner.retire()
+        }
+        await expectFailure { _ = try await owner.prepareFormInput(for: action) }
+        XCTAssertFalse(owner.hasPendingFormPreparation)
+        await expectFailure { _ = try await owner.resumeFormPreparation() }
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .extendFormFields }.count, 1)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 1)
+    }
+
+    func testClarificationKeepsLaterPreparationEvenWithoutExplicitReadonlyPreservation() async throws {
+        let body = "<form action='/filtered'><label>Query<input name=q></label><label>Category<select name=category><option value=all>All</option><option value=concerts>Concerts</option></select></label><button>Search</button></form>"
+        let fixture = try await ResearchDriverFixture.make(request: "Find concerts.", searchFormHTML: body)
+        defer { fixture.close() }
+        fixture.goal.select = { _ in #"{"disposition":"research","requirements":[{"turn":0,"source":"Find concerts.","role":"outcome","field":"category","relation":"unspecified","values":[]}],"question":{"topic":"none","requirements":[]}}"# }
+        fixture.policy.choices = [false]
+        _ = try await fixture.start()
+        let owner = try fixture.owner()
+        func configureStage(revising: Bool) {
+            fixture.actions.select = { input in
+                if let review = try FormEffectScopeFixture.response(input, editing: revising ? ["Category":[0]] : ["Query":[0]],
+                    retaining: revising ? ["Query":[0]] : [:], deferring: revising ? [:] : ["Category":[0]], preserving: [:]) { return review }
+                if input.formEffectScope != nil && !input.effectScopeAllowsActions { return #"{"unavailable":true}"# }
+                let form = try XCTUnwrap(input.evidence.page.controls.first { $0.label == "Query" }?.form?.id)
+                return try ResearchAnswerFixture.json(["form":form,"preserve":[]])
+            }
+        }
+        configureStage(revising: false)
+        let firstAction = try await owner.planNextAction(using: fixture.actions)
+        let first = try await owner.prepareFormInput(for: firstAction)
+        _ = try await owner.executeForm(.decode(content: plan(first), input: first), input: first)
+        configureStage(revising: true)
+        let action = try await owner.planNextAction(using: fixture.actions)
+        let next = try await owner.prepareFormInput(for: action), history = owner.confirmedFormHistory
+        XCTAssertNil(next.nativePreservation); XCTAssertTrue(next.scopeReview?.readControls.isEmpty == true)
+        XCTAssertEqual(next.previous?.inputOperationIDs.count, 1)
+        let question = try owner.issueQuestion(topic: .date, requirementIDs: [first.interpretation.requirements[0].id],
+            controllerID: "phone", controllerSessionID: "session")
+        _ = try owner.answerQuestion(questionID: question.id, answerTaskID: "later-answer", answer: "Tomorrow.",
+            controllerID: "phone", controllerSessionID: "session")
+        XCTAssertTrue(owner.hasPendingFormPreparation)
+        XCTAssertEqual(owner.input.rootDigest, first.interpretation.input.rootDigest)
+        await expectFailure { _ = try await owner.resumeFormPreparation() }
+        XCTAssertEqual(owner.confirmedFormHistory, history)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .formFields || $0 == .extendFormFields }.count, 2)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 1)
+    }
+
+    private func prepareLaterAction(_ fixture: ResearchDriverFixture) async throws
+        -> (ComputerUseBrowserResearchFormInput, ComputerUseBrowserActionProposal) {
+        let (first, proposal) = try await prepare(fixture, category: true), owner = try fixture.owner()
+        _ = try await owner.executeForm(proposal, input: first)
+        configure(fixture, category: true, revising: true)
+        return (first, try await owner.planNextAction(using: fixture.actions))
+    }
+
+    private func categoryPlan(_ input: ComputerUseBrowserResearchFormInput) throws -> String {
+        let alias = try XCTUnwrap(input.editableFieldAliases.first), field = try input.field(for: alias)
+        XCTAssertEqual(field.control.label, "Category")
+        let choice = try XCTUnwrap(field.control.options.first { $0.label == "Concerts" })
+        return try ResearchAnswerFixture.json(["edits":[["field":alias,"choice":choice.id,"requirement":0]],"preserve":[]])
     }
 
     private func make(inside: Bool = false, notes: Bool = false, category: Bool = false, prohibition: Bool = false,

@@ -2019,7 +2019,8 @@ final class ComputerUseBrowserTextTarget {
     /// be explicitly repaired; preservation and required object identity hold.
     func extendFields(in formID: String, page evidence: ComputerUseBrowserPageEvidence, preserving controlIDs: [String],
                       selecting selectedControlIDs: [String]? = nil,
-                      after continuation: ComputerUseBrowserResearchFormContinuation) async throws -> [ComputerUseTextField] {
+                      after continuation: ComputerUseBrowserResearchFormContinuation,
+                      retaining capture: ComputerUseBrowserDOMReadCapture? = nil) async throws -> [ComputerUseTextField] {
         try validate()
         guard let documentID, evidence.document == document, evidence.documentID == documentID,
               continuation.formID == formID, controlIDs.count <= 16, Set(controlIDs).count == controlIDs.count,
@@ -2031,7 +2032,7 @@ final class ComputerUseBrowserTextTarget {
             "requirements":requirements.domArguments,
             "repairableFieldIDs":try repairableNativeIDs(after: continuation)]
         if let selectedControlIDs { arguments["selectedControlIDs"] = selectedControlIDs }
-        let reply = try await browser.callDOM(.extendFormFields, arguments: arguments, document: document)
+        let reply = try await browser.callDOM(.extendFormFields, arguments: arguments, document: document, retaining: capture)
         try validate()
         guard reply.documentID == documentID else { throw ComputerUseBrowserError.pageChanged }
         let previous = targets

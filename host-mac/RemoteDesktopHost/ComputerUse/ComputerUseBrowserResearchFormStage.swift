@@ -363,44 +363,26 @@ final class ComputerUseBrowserResearchFormStage {
         }
     }
 
-    /// Extend a verified stage's native field catalogue without rediscovery.
-    /// Cancellation may leave a read-only extension committed in WebKit; a
-    /// retry reuses its objects and the original required receipts.
-    func prepareNextFormInput(interpretation: ComputerUseBrowserGoalProposal, formID: String,
-                              page: ComputerUseBrowserPageEvidence, preserving: [ComputerUseBrowserControlPreservation],
-                              scopeReview: ComputerUseBrowserEffectScopeReview? = nil, checkCurrent: @escaping @MainActor () throws -> Void) async throws
-        -> (target: ComputerUseBrowserTextTarget, input: ComputerUseBrowserResearchFormInput) {
-        guard !isExecuting else { throw Failure.busy }
-        guard !isRetired else { throw Failure.retired }
-        guard completed != nil, let continuation else { throw Failure.notVerified }
-        guard interpretation.disposition == .research, interpretation.input.continues(input.interpretation.input), formID == input.selectedFormID,
-              page.document == input.evidence.page.document, page.documentID == input.evidence.page.documentID else {
+    /// Lend the retained adapter and exact continuation to a preparation
+    /// frame before that frame starts any cancellable native work.
+    func preparationContext(for action: ComputerUseBrowserActionProposal) throws
+        -> (target: ComputerUseBrowserTextTarget, continuation: ComputerUseBrowserResearchFormContinuation) {
+        guard let continuation else { throw Failure.notVerified }
+        try validatePreparationContinuation(continuation)
+        guard case .editForm(let formID) = action.step, formID == input.selectedFormID,
+              action.input.interpretation.disposition == .research,
+              action.input.interpretation.input.continues(input.interpretation.input),
+              action.input.evidence.document == input.evidence.page.document,
+              action.input.evidence.documentID == input.evidence.page.documentID else {
             throw ComputerUseBrowserActionPlanError.retainedFormRequiresExtension
         }
-        isExecuting = true
-        defer { isExecuting = false }
-        func check() throws {
-            try Task.checkCancellation(); try checkCurrent()
-            guard !isRetired else { throw Failure.retired }
-            try browser.validateSourceDocument(page.document)
-        }
-        do {
-            try check()
-            let fields = try await target.extendFields(in: formID, page: page,
-                preserving: scopeReview?.formScope?.editablePreservedControlIDs ?? preserving.map(\.controlID),
-                selecting: scopeReview?.formScope?.selectedControlIDs, after: continuation)
-            try check()
-            let evidence = try await target.bindFields(fields, to: page)
-            let nativePreservation = try await target.prepareFormPreservation(scope: scopeReview?.formScope, page: page)
-            try check()
-            let next = try ComputerUseBrowserResearchFormInput(interpretation: interpretation, evidence: evidence,
-                selectedFormID: formID, preservedControls: preserving, previous: continuation, scopeReview: scopeReview,
-                nativePreservation: nativePreservation)
-            return (target, next)
-        } catch {
-            await browser.joinDOMCompletion(document: page.document)
-            throw error
-        }
+        return (target, continuation)
+    }
+
+    func validatePreparationContinuation(_ expected: ComputerUseBrowserResearchFormContinuation) throws {
+        guard !isExecuting else { throw Failure.busy }
+        guard !isRetired else { throw Failure.retired }
+        guard completed != nil, continuation == expected else { throw Failure.notVerified }
     }
 
     /// Explicit handback may replace the observation nonce without changing

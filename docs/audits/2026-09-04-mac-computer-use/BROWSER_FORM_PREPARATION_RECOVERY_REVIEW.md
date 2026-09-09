@@ -2,6 +2,8 @@
 
 Status: source repair; native/runtime/model execution and broader parent recovery remain unqualified.
 
+Follow-up: [later-stage preparation recovery](BROWSER_LATER_PREPARATION_RECOVERY_REVIEW.md) now extends this retained path to verified predecessor stages. Counts and path descriptions below document this initial checkpoint.
+
 ## Failure and repair
 
 The owner previously held the first form preparation only in a cancellable local call. WebKit can finish a dispatched script after Pause has cancelled its waiter. Its private field/readonly results were then discarded before `PreparedForm` existed. Rediscovery would either fail against an active native guard or replace an earlier value baseline. A native callback completing and a caller successfully returning are separate events.
@@ -37,7 +39,7 @@ These methods have not executed. Source parsing does not prove Swift type correc
 
 ## Remaining repair order
 
-1. Apply retained preparation to **later-stage extension** and reconcile original preservation/read obligations across clarification and goal reinterpretation. The initial reviewed preparation now survives same-goal interruption; an invariant-bearing frame cannot yet continue under a changed goal. Do not discard it or reset its native guard to hide the gap.
+1. Later-stage extension now uses the [retained preparation path](BROWSER_LATER_PREPARATION_RECOVERY_REVIEW.md) in source. Reconcile original preservation/read obligations and earlier verified criteria across clarification and goal reinterpretation. An invariant-bearing frame cannot yet continue under a changed goal. Do not discard it or reset its native guard to hide the gap.
 2. Complete durable parent/browser/account-session recovery across process restart and explicit owner transfer. This checkpoint retains preparation and callbacks in memory. A contract hash and a callback capture do not recreate an old native document after a crash or prove an unknown callback failure succeeded. Visible login takeover and explicit handback remain required; real account qualification remains deferred.
 3. Complete composite/custom predicates and criterion lifetimes across popup/selection effects, navigation and document replacement. Original-page restoration remains conservative about unrelated page changes. Distinguish meaningful criterion changes from changing decorative content without weakening original value/identity obligations. Native frontend predicates cannot prove transient unobserved property changes or backend behavior.
 4. Verify independent travel/concert/movie results against the full request, then qualify actual lightweight-model judgments and supported website workflows after explicit execution permission. Whole-app 8 GB memory and thermal qualification remains deferred. Alternate models and the authorized RTX 3080 are available for later measured model work; no substitution, pruning or distillation is established by this checkpoint. Continue the [repair TODO](../../../TODO.md).
