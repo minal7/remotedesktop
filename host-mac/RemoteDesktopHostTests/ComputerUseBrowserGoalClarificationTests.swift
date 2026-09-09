@@ -7,6 +7,100 @@ final class ComputerUseBrowserGoalClarificationTests: XCTestCase {
     private typealias Clarification = ComputerUseBrowserGoalClarification
     private typealias Scalars = ComputerUseBrowserScalarRequirements
 
+    func testWholePartyQuestionAppliesAtomicallyAfterItsSourceRowsSplit() throws {
+        for answer in ["2 adults", "3 adults"] {
+            let original = try input("Find concerts. 2 adults and 1 child."), state = Clarification(input: original)
+            let initial = try proposal(original, rows: [row("Find concerts. "), row("2 adults and 1 child.", role: "condition", field: "quantity")])
+            let question = try state.issue(proposal: initial, topic: .quantity, requirementIDs: [initial.requirements[1].id], context: context())
+            let updated = try state.consume(questionID: question.id, answerTaskID: "adults", answer: answer, context: context())
+            let parts = ["2", " adults and ", "1", " child."]
+            let ledger = Scalars(proposal: try proposal(updated, rows: [row("Find concerts. ")]
+                + parts.map { row($0, role: "condition", field: "quantity") }
+                + [row(answer, turn: 1, role: "condition", field: "source")], disposition: "research"))
+            let ids = Array(ledger.entries[1...4].map(\.requirementID))
+            for index in 1...4 {
+                if answer == "2 adults" {
+                    guard case .bound(let party) = ledger.entries[index].resolution else { return XCTFail("Every grouped row must retain the whole party") }
+                    XCTAssertEqual(party.sourceRequirementIDs, ids)
+                    XCTAssertEqual(party.predicate, .party(try XCTUnwrap(Scalars.PartyComposition(adults: 2, children: 1))))
+                } else { XCTAssertEqual(ledger.entries[index].resolution, .unresolved(.contradictoryClarification)) }
+            }
+            if answer == "2 adults" {
+                guard case .clarification(let binding) = ledger.entries[5].resolution else { return XCTFail("Expected one binding to the complete source group") }
+                XCTAssertEqual(binding.targetRequirementIDs, ids)
+            } else { XCTAssertEqual(ledger.entries[5].resolution, .unresolved(.contradictoryClarification)) }
+        }
+    }
+
+    func testHistoricalPartySurvivesSplittingAndMergingWithoutLosingEitherCount() throws {
+        for splitFirst in [false, true] {
+            let original = try input("Find concerts. 2 adults and 1 child."), state = Clarification(input: original)
+            let split = ["2", " adults and ", "1", " child."]
+            let originalParts = splitFirst ? split : ["2 adults and 1 child."]
+            let currentParts = splitFirst ? ["2 adults and 1 child."] : split
+            let initial = try proposal(original, rows: [row("Find concerts. ")] + originalParts.map { row($0, role: "condition", field: "quantity") })
+            let question = try state.issue(proposal: initial, topic: .location, requirementIDs: [initial.requirements[0].id], context: context())
+            let updated = try state.consume(questionID: question.id, answerTaskID: "location", answer: "Paris", context: context())
+            let current = try proposal(updated, rows: [row("Find concerts. ")] + currentParts.map { row($0, role: "prohibition", field: "navigationSource") }
+                + [row("Paris", turn: 1, role: "condition", field: "location")], disposition: "research")
+            let ledger = Scalars(proposal: current), ids = Array(current.requirements[1...currentParts.count].map(\.id))
+            for index in 1...currentParts.count {
+                guard case .bound(let party) = ledger.entries[index].resolution else { return XCTFail("All rows must retain the complete historical party") }
+                XCTAssertEqual(party.predicate, .party(try XCTUnwrap(Scalars.PartyComposition(adults: 2, children: 1))))
+                XCTAssertEqual(party.sourceRequirementIDs, ids)
+                XCTAssertEqual(party.historicalRequirementIDs, Array(initial.requirements.dropFirst().map(\.id)))
+            }
+            let sources = ComputerUseBrowserSourceRequirements(proposal: current)
+            XCTAssertTrue(sources.unresolved.isEmpty); XCTAssertFalse(sources.requiresNavigationHistory)
+            XCTAssertEqual(ComputerUseBrowserResearchFormInput.normalizations(for: current).map(\.value), ["2", "1"])
+            XCTAssertEqual(updated.rootDigest, original.rootDigest)
+        }
+        for modifier in ["at most ", "not "] {
+            let original = try input("Find concerts. " + modifier + "2 adults and 1 child."), state = Clarification(input: original)
+            let rows = [row("Find concerts. "), row(modifier, role: "condition", field: "other"), row("2 adults and 1 child.", role: "condition", field: "quantity")]
+            let initial = try proposal(original, rows: rows)
+            let question = try state.issue(proposal: initial, topic: .location, requirementIDs: [initial.requirements[0].id], context: context())
+            let updated = try state.consume(questionID: question.id, answerTaskID: "location", answer: "Paris", context: context())
+            let ledger = Scalars(proposal: try proposal(updated, rows: rows + [row("Paris", turn: 1, role: "condition", field: "location")], disposition: "research"))
+            XCTAssertEqual(ledger.entries[2].resolution, .unresolved(.ambiguousPartyScope), "An old per-row literal cannot erase a known surrounding modifier")
+        }
+    }
+
+    func testQuestionAboutOnePartyComponentCanConfirmItAfterTheRowsMerge() throws {
+        let original = try input("Find concerts. 2 adults and 1 child."), state = Clarification(input: original)
+        let initial = try proposal(original, rows: [row("Find concerts. "), row("2 adults ", role: "condition", field: "quantity"),
+            row("and 1 child.", role: "condition", field: "quantity")])
+        let question = try state.issue(proposal: initial, topic: .quantity, requirementIDs: [initial.requirements[1].id], context: context())
+        let updated = try state.consume(questionID: question.id, answerTaskID: "adults", answer: "2 adults", context: context())
+        let ledger = Scalars(proposal: try proposal(updated, rows: [row("Find concerts. "),
+            row("2 adults and 1 child.", role: "prohibition", field: "source"), row("2 adults", turn: 1, role: "condition", field: "source")], disposition: "research"))
+        guard case .bound(let party) = ledger.entries[1].resolution, case .clarification(let binding) = ledger.entries[2].resolution else {
+            return XCTFail("The selected adult component must not replace the merged party")
+        }
+        XCTAssertEqual(party.predicate, .party(try XCTUnwrap(Scalars.PartyComposition(adults: 2, children: 1))))
+        XCTAssertEqual(binding.targetRequirementIDs, [party.requirementID])
+        XCTAssertEqual(party.historicalRequirementIDs, Array(initial.requirements.dropFirst().map(\.id)))
+    }
+
+    func testNewMixedAnswerMaySpanMultipleRowsWithoutBecomingSeveralIndependentCounts() throws {
+        let original = try input("Find concerts."), state = Clarification(input: original)
+        let initial = try proposal(original, rows: [row(original.prompt)])
+        let question = try state.issue(proposal: initial, topic: .quantity, requirementIDs: [initial.requirements[0].id], context: context())
+        let updated = try state.consume(questionID: question.id, answerTaskID: "party", answer: "2 adults and 1 child", context: context())
+        let parts = ["2", " adults and ", "1", " child"]
+        let current = try proposal(updated, rows: [row(original.prompt)] + parts.map { row($0, turn: 1, role: "prohibition", field: "navigationSource") }, disposition: "research")
+        let ledger = Scalars(proposal: current), ids = Array(current.requirements.dropFirst().map(\.id))
+        XCTAssertEqual(ledger.entries[0].resolution, .unresolved(.notScalar))
+        for entry in ledger.entries.dropFirst() {
+            guard case .bound(let condition) = entry.resolution else { return XCTFail("Every answer row must remain part of one native party condition") }
+            XCTAssertEqual(condition.sourceRequirementIDs, ids)
+            XCTAssertEqual(condition.predicate, .party(try XCTUnwrap(Scalars.PartyComposition(adults: 2, children: 1))))
+            XCTAssertFalse(condition.hasHistoricalSource)
+        }
+        XCTAssertTrue(ComputerUseBrowserSourceRequirements(proposal: current).unresolved.isEmpty)
+        XCTAssertEqual(ComputerUseBrowserResearchFormInput.normalizations(for: current).map(\.requirementIndices), [[1, 2], [3, 4]])
+    }
+
     func testMixedPartyAnswersRefineCompatibleTotalsOrComponentsWithoutDiscardingTheirCounts() throws {
         let party = try XCTUnwrap(Scalars.PartyComposition(adults: 2, children: 1))
         for source in ["3", "3 people", "2 adults", "1 child", "1 child and 2 adults"] {

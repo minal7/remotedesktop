@@ -4,6 +4,29 @@ import XCTest
 
 @MainActor
 final class ComputerUseBrowserResearchAnswerTests: XCTestCase {
+    func testSplitPartyRowsShareWholePartyEligibilityInsteadOfPassingIndependently() async throws {
+        for capacity in ["2 adults and 1 child", "1 adult and 2 children"] {
+            let fixture = try await ResearchAnswerFixture.make(extra: ("2 adults and 1 child. ", "condition", "quantity"), partyCapacity: capacity)
+            defer { fixture.source.close() }
+            let pieces: [(String, String, String)] = [("Find concerts. ", "outcome", "category"), ("Under USD 50. ", "condition", "price")]
+                + ["2", " adults and ", "1", " child. "].map { ($0, "condition", "quantity") } + [("Do not buy.", "prohibition", "other")]
+            let rows: [[String: Any]] = pieces.map { ["turn":0, "source":$0.0, "role":$0.1, "field":$0.2, "relation":"unspecified", "values":[String]()] }
+            fixture.source.goal.select = { _ in try ResearchAnswerFixture.json([
+                "disposition":"research", "requirements":rows, "question":["topic":"none", "requirements":[]]]) }
+            let result = try await fixture.source.start()
+            if capacity == "2 adults and 1 child" {
+                guard case .browserResearchAnswer? = result else { return XCTFail("The split source must preserve answer eligibility") }
+            } else if case .browserResearchAnswer? = result { return XCTFail("A partial category match cannot complete the grouped party") }
+            let owner = try fixture.source.owner(), goal = try await owner.interpretGoal(), reading = try await owner.readCandidates()
+            let assessment = try XCTUnwrap(reading.requirementAssessment)
+            for index in 2...5 {
+                XCTAssertEqual(assessment.candidates[0].requirements[index].status,
+                    capacity == "2 adults and 1 child" ? .quotedCapacitySufficient : .quotedCapacityInsufficient)
+            }
+            XCTAssertEqual(try XCTUnwrap(reading.answerPage(goal: goal.proposal.input)).candidateIndices, capacity == "2 adults and 1 child" ? [0] : [])
+            XCTAssertEqual(fixture.source.server.count("/search?q=concerts"), 1)
+        }
+    }
     func testMixedPartyAnswerEligibilityRequiresCapacityForEachRequestedCategory() async throws {
         for capacity in ["2 adults and 1 child", "1 adult and 2 children"] {
             let fixture = try await ResearchAnswerFixture.make(extra: ("2 adults and 1 child. ", "condition", "quantity"), partyCapacity: capacity)

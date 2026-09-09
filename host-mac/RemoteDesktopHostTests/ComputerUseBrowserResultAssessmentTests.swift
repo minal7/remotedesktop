@@ -7,6 +7,23 @@ final class ComputerUseBrowserResultAssessmentTests: XCTestCase {
     private typealias Status = ComputerUseBrowserResultAssessment.Status
     private typealias Spec = AssessmentResultFixture.Spec
 
+    func testPartyCapacityAndItsTotalCeilingAreIndependentOfSourceRowPartitioning() async throws {
+        for total in [2, 3] {
+            for parts in [["2 adults and 1 child."], ["2 adults ", "and 1 child."], ["2", " adults and ", "1", " child."]] {
+                let rows = [row("Find concerts. ")] + parts.map { row($0, field: "quantity") }
+                let result = try await reading(rows, fields: [.init(.quantity, ["2 adults"]), .init(.quantity, ["1 child"]), .init(.quantity, ["\(total) people"])],
+                    extraHTML: "<p>Available for this offer</p>", reviewer: AssessmentInventoryReview(meanings: [.availableQuantity, .availableQuantity, .availableQuantity]))
+                defer { result.fixture.close() }
+                let assessment = try XCTUnwrap(result.batch.requirementAssessment)
+                XCTAssertEqual(Array(assessment.requirements.dropFirst().map(\.quantityScope)), Array(repeating: .party, count: parts.count))
+                let evaluations = assessment.candidates[0].requirements.dropFirst()
+                XCTAssertEqual(Array(evaluations.map(\.status)), Array(repeating: total == 2 ? .quotedCapacityInsufficient : .quotedCapacitySufficient, count: parts.count))
+                XCTAssertTrue(evaluations.allSatisfy { $0.quoteIndices == [0, 1, 2] })
+                XCTAssertNil(try result.owner.proposedQuestionRequest(), "Native grouping must resolve split count/unit rows before a missing-unit question")
+            }
+        }
+    }
+
     func testMixedPartyQuotesCannotHideConflictingSingleCategoryCapacityQuotes() async throws {
         let cases: [(String, [String], Status)] = [
             ("2 adults", ["2 adults and 1 child"], .quotedCapacitySufficient),

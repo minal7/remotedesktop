@@ -4,6 +4,52 @@ import XCTest
 
 @MainActor
 final class ComputerUseBrowserFormPlannerTests: XCTestCase {
+    func testSplitPartyNormalizationsIdentifyEveryCountAndUnitSourceRow() throws {
+        let goal = try proposal(rows: [row("Find concerts. ", role: "outcome", field: "category")]
+            + ["2", " adults and ", "1", " child."].map { row($0, field: "quantity") })
+        let values = ComputerUseBrowserResearchFormInput.normalizations(for: goal)
+        XCTAssertEqual(values.map(\.id), ["value2-adults", "value2-children"])
+        XCTAssertEqual(values.map(\.requirementIndex), [1, 3])
+        XCTAssertEqual(values.map(\.requirementIndices), [[1, 2], [3, 4]])
+        XCTAssertEqual(values.map(\.value), ["2", "1"])
+        XCTAssertEqual(values.map(\.unit), ["adults", "children"])
+    }
+
+    func testSplitPartySourcesReachNativeFormProvenanceAndOneQuery() async throws {
+        let goal = try proposal(rows: [row("Find concerts. ", role: "outcome", field: "category")]
+            + ["2", " adults and ", "1", " child."].map { row($0, field: "quantity") })
+        let body = """
+        <form action='/results'><label>Adults<input type='number' name='adults' min='1' max='8' value='1'></label>
+        <label>Children<input type='number' name='children' min='0' max='8' value='0'></label><button>Search</button></form>
+        """
+        var edits = 0
+        let fixture = try await FormPlannerFixture(goal: goal, body: body,
+            additionalRoutes: ["/results?adults=2&children=1":.init(body: "<p>Search received</p>")],
+            domScriptDidDispatch: { if $0 == .edit { edits += 1 } })
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { fixture.close(); try? FileManager.default.removeItem(at: directory) }
+        let owner = fixture.owner(journalDirectory: directory)
+        defer { owner.retire() }
+        _ = try await owner.interpretGoal()
+        let input = try await owner.prepareFormInput()
+        let content = try plan([["field":"field1", "normalized":"value2-adults"], ["field":"field2", "normalized":"value2-children"]])
+        let proposed = try await owner.planForm(input, using: local(FormPlannerTransport(content: content)))
+        let context = try object(Data(input.contextJSON.utf8))
+        XCTAssertEqual(context["version"] as? Int, 18)
+        let normalized = try XCTUnwrap(context["normalized_values"] as? [[String: Any]])
+        XCTAssertEqual(normalized.map { $0["requirements"] as? [Int] }, [[1, 2], [3, 4]])
+        for (index, expected) in [[1, 2], [3, 4]].enumerated() {
+            let sources = try proposed.sources(for: proposed.edits[index])
+            XCTAssertEqual(try sources.flatMap { try $0.indices(in: goal) }, expected)
+            XCTAssertEqual(sources.map(\.source), expected.compactMap { goal.source(of: goal.requirements[$0]) })
+        }
+        XCTAssertEqual(edits, 0)
+        let receipt = try await owner.executeForm(proposed, input: input)
+        let page = try await owner.observeFormResultPage(after: receipt), control = try XCTUnwrap(page.page.controls.first { $0.kind == "submit" }).id
+        _ = try await owner.openFormQuery(after: receipt, controlID: control, evidence: page)
+        XCTAssertEqual(edits, 2); XCTAssertEqual(fixture.server.count("/results?adults=2&children=1"), 1)
+        XCTAssertEqual(owner.input, goal.input)
+    }
     func testMixedPartyNormalizationsHaveSeparateStableUnitsUnderOneRequirement() throws {
         for source in ["2 adults and 1 child. ", "1 child and 2 adults. "] {
             let goal = try proposal(rows: [row("Find concerts. ", role: "outcome", field: "category"),

@@ -101,7 +101,7 @@ struct ComputerUseBrowserFormProposal: Equatable, Sendable, CustomStringConverti
                         guard let index = input.interpretation.requirements.firstIndex(where: { $0.id == term.requirementID }) else { throw invalid }
                         return index
                     }
-                    case .normalized(let value): indices = [value.requirementIndex]
+                    case .normalized(let value): indices = value.requirementIndices
                     case .choice(_, let index): indices = [index]
                     }
                     guard Set(indices) == Set(expected) else { throw invalid }
@@ -163,7 +163,7 @@ struct ComputerUseBrowserFormProposal: Equatable, Sendable, CustomStringConverti
                 }
                 return index
             }
-        case .normalized(let value): indices = [value.requirementIndex]
+        case .normalized(let value): indices = value.requirementIndices
         case .choice(_, let index): indices = [index]
         }
         var sources: [ComputerUseBrowserFormSource] = []

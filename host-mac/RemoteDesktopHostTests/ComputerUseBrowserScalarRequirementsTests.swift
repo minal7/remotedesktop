@@ -5,6 +5,44 @@ import XCTest
 final class ComputerUseBrowserScalarRequirementsTests: XCTestCase {
     private typealias Scalar = ComputerUseBrowserScalarRequirements
 
+    func testPartyMeaningAndComponentSourcesSurviveEverySupportedRowBoundary() throws {
+        let partitions: [([String], [[Int]])] = [(["2 adults and 1 child."], [[1], [1]]),
+            (["2 adults ", "and ", "1 child."], [[1], [3]]), (["2", " adults and ", "1", " child."], [[1, 2], [3, 4]]),
+            (["2 ad", "ults and 1 ch", "ild."], [[1, 2], [2, 3]])]
+        for (parts, expectedSources) in partitions {
+            let rows = [row("Find concerts in Montréal. ", role: "outcome")] + parts.map { row($0, field: ["and ", " adults and ", " child."].contains($0) ? "other" : "quantity") }
+            let ledger = Scalar(proposal: try proposal(rows)), ids = Array(ledger.entries.dropFirst().map(\.requirementID))
+            for index in 1..<ledger.entries.count {
+                let bound = try condition(ledger, at: index)
+                XCTAssertEqual(bound.predicate, .party(try XCTUnwrap(Scalar.PartyComposition(adults: 2, children: 1))))
+                XCTAssertEqual(bound.sourceRequirementIDs, ids)
+                XCTAssertTrue(ledger.nativeScalarSourceIDs.contains(bound.requirementID))
+            }
+            let normalized = ComputerUseBrowserResearchFormInput.normalizations(for: ledger.proposal)
+            XCTAssertEqual(normalized.map(\.value), ["2", "1"])
+            XCTAssertEqual(normalized.map(\.unit), ["adults", "children"])
+            XCTAssertEqual(normalized.map(\.requirementIndices), expectedSources)
+        }
+    }
+
+    func testPartyGroupingDoesNotChooseOverlappingGroupsOrEraseProhibitionsAndBounds() throws {
+        let rows = [row("Find concerts. ", role: "outcome"), row("2 adults ", field: "quantity"), row("and "),
+            row("1 child ", field: "quantity"), row("and "), row("3 adults.", field: "quantity")]
+        let ledger = Scalar(proposal: try proposal(rows))
+        for entry in ledger.entries.dropFirst() { XCTAssertEqual(entry.resolution, .unresolved(.ambiguousPartyScope)) }
+        XCTAssertTrue(ComputerUseBrowserResearchFormInput.normalizations(for: ledger.proposal).isEmpty)
+        for first in [row("2 adults ", role: "prohibition", field: "quantity"), row("at least 2 adults ", field: "quantity")] {
+            let held = Scalar(proposal: try proposal([row("Find concerts. ", role: "outcome"), first, row("and 1 child.", field: "quantity")]))
+            XCTAssertFalse(held.entries.contains { if case .bound(let condition) = $0.resolution, case .party = condition.predicate { return true }; return false })
+        }
+        for modifier in ["at least ", "at most ", "not ", "without "] {
+            let held = Scalar(proposal: try proposal([row("Find concerts. ", role: "outcome"), row(modifier),
+                row("2 adults ", field: "quantity"), row("and 1 child.", field: "quantity")]))
+            for entry in held.entries.dropFirst(2) { XCTAssertEqual(entry.resolution, .unresolved(.ambiguousPartyScope)) }
+            XCTAssertTrue(ComputerUseBrowserResearchFormInput.normalizations(for: held.proposal).isEmpty)
+        }
+    }
+
     func testMixedPartyGrammarKeepsBothCategoriesAndCanonicalizesTheirOrder() throws {
         let party = try XCTUnwrap(Scalar.PartyComposition(adults: 2, children: 1))
         for source in ["2 adults and 1 child", "1 child, 2 adults", "for two adults & one child.",

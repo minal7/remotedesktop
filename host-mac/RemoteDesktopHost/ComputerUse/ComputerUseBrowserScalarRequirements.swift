@@ -11,6 +11,7 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
         case ambiguousClarification, clarificationScope, contradictoryClarification
         case historicalScalarScope
         case missingQuantityUnit
+        case ambiguousPartyScope
     }
     enum Resolution: Equatable, Sendable {
         case bound(Condition), clarification(ClarificationBinding), unresolved(UnresolvedReason)
@@ -213,12 +214,17 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
         let requirementID: String
         let predicate: Predicate
         let historicalRequirementIDs: [String]
+        /// Current source rows jointly expressing one native scalar clause.
+        let sourceRequirementIDs: [String]
         var hasHistoricalSource: Bool { !historicalRequirementIDs.isEmpty }
-        fileprivate init(inputDigest: String, requirementID: String, predicate: Predicate, historicalRequirementIDs: [String] = []) {
+        fileprivate init(inputDigest: String, requirementID: String, predicate: Predicate, historicalRequirementIDs: [String] = [], sourceRequirementIDs: [String]? = nil) {
             self.requirementID = requirementID; self.predicate = predicate
             self.historicalRequirementIDs = historicalRequirementIDs
-            id = ComputerUseTaskContract.digest([historicalRequirementIDs.isEmpty ? "browser-scalar-condition-v1" : "browser-historical-scalar-condition-v1",
-                inputDigest, requirementID] + predicate.identity + historicalRequirementIDs)
+            self.sourceRequirementIDs = sourceRequirementIDs ?? [requirementID]
+            let grouped = self.sourceRequirementIDs.count > 1
+            id = ComputerUseTaskContract.digest([grouped ? "browser-grouped-scalar-condition-v1"
+                : (historicalRequirementIDs.isEmpty ? "browser-scalar-condition-v1" : "browser-historical-scalar-condition-v1"),
+                inputDigest, requirementID] + predicate.identity + historicalRequirementIDs + (grouped ? self.sourceRequirementIDs : []))
         }
         /// This is an arithmetic/civil-date comparison, never whole-result or
         /// task completion. Different units, currencies or incomplete prices
@@ -287,6 +293,18 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
 
     let proposal: ComputerUseBrowserGoalProposal
     let entries: [Entry]
+    private let partyGroups: [PartyGroup]
+    func partyRequirementIndices(for condition: Condition, unit: QuantityUnit) -> [Int] {
+        guard let group = partyGroups.first(where: { $0.requirementIDs == condition.sourceRequirementIDs }),
+              let span = group.components[unit] else {
+            return proposal.requirements.indices.filter { condition.sourceRequirementIDs.contains(proposal.requirements[$0].id) }
+        }
+        return proposal.requirements.indices.filter {
+            let row = proposal.requirements[$0]
+            return group.requirementIDs.contains(row.id) && row.sourceByteOffset < span.end
+                && span.start < row.sourceByteOffset + row.sourceByteCount
+        }
+    }
     /// Native source meaning is independent of whether a parameter answer
     /// was compatible or its target could be resolved. A failed date answer
     /// must not become an unrelated website instruction after relabeling.
@@ -334,7 +352,11 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
             }
             return Self.baseEntry(requirement, input: proposal.input)
         }
-        let retained = Self.retainingHistoricalScalars(proposal, entries: baseEntries)
+        let grouping = Self.partyGrouping(proposal)
+        partyGroups = grouping.groups
+        let grouped = Self.applyingPartyGroups(grouping, proposal: proposal, entries: baseEntries)
+        let retained = Self.reconcilingPartyGroups(grouping.groups, entries: Self.retainingHistoricalScalars(proposal,
+            protectedHistory: Set(grouping.groups.flatMap(\.historicalIDs)), entries: grouped))
         var nativeSources = Set(retained.compactMap { entry -> String? in
             switch entry.resolution {
             case .bound(let condition) where condition.hasHistoricalSource: return entry.requirementID
@@ -342,6 +364,8 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
             default: return nil
             }
         })
+        nativeSources.formUnion(grouping.groups.flatMap(\.requirementIDs))
+        nativeSources.formUnion(grouping.ambiguousIDs)
         if proposal.disposition == .research {
             for (index, answer) in proposal.input.clarifications.enumerated() {
                 let literal: Bool
@@ -356,8 +380,9 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
             }
         }
         nativeScalarSourceIDs = nativeSources
-        entries = Self.reconcilingClarificationTargets(Self.applyingQuantityClarifications(proposal,
-            to: Self.applyingDateClarifications(proposal, to: Self.applyingPriceClarifications(proposal, to: retained))))
+        entries = Self.reconcilingClarificationTargets(Self.reconcilingPartyGroups(grouping.groups,
+            entries: Self.applyingQuantityClarifications(proposal,
+                to: Self.applyingDateClarifications(proposal, to: Self.applyingPriceClarifications(proposal, to: retained)))))
     }
 
     private static func baseEntry(_ requirement: ComputerUseBrowserGoalProposal.Requirement, input: ComputerUseBrowserGoalInput) -> Entry {
@@ -391,11 +416,12 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
     /// An answer does not authorize dropping a parsed constraint or a known
     /// weekday ambiguity. Retain only an exact native clause occurrence;
     /// merged/split meanings need complete obligation reconciliation.
-    private static func retainingHistoricalScalars(_ proposal: ComputerUseBrowserGoalProposal, entries original: [Entry]) -> [Entry] {
+    private static func retainingHistoricalScalars(_ proposal: ComputerUseBrowserGoalProposal, protectedHistory: Set<String>, entries original: [Entry]) -> [Entry] {
         guard proposal.disposition == .research else { return original }
         var entries = original
         for answer in proposal.input.clarifications {
             for historical in answer.priorRequirements {
+                if protectedHistory.contains(historical.id) { continue }
                 let previous = Self.baseEntry(historical, input: proposal.input).resolution
                 let retainedWeekday: Bool
                 if previous == .unresolved(.ambiguousDate), [.unspecified, .equal].contains(historical.relation),
@@ -418,7 +444,7 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
                     for index in overlaps { entries[index] = .init(requirementID: entries[index].requirementID, resolution: .unresolved(.historicalScalarScope)) }
                     continue
                 }
-                if entries[target].resolution == .unresolved(.historicalScalarScope) { continue }
+                if [.unresolved(.historicalScalarScope), .unresolved(.ambiguousPartyScope)].contains(entries[target].resolution) { continue }
                 let ids: [String]
                 switch entries[target].resolution {
                 case .bound(let current): ids = current.historicalRequirementIDs
@@ -443,7 +469,134 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
         return entries
     }
 
-    private struct ScalarSpan: Equatable { let turn: Int; let start: Int; let end: Int }
+    private struct ScalarSpan: Hashable, Sendable { let turn: Int; let start: Int; let end: Int }
+    private struct PartyGroup: Sendable {
+        let span: ScalarSpan
+        let party: PartyComposition
+        let requirementIDs: [String]
+        let historicalIDs: [String]
+        let components: [QuantityUnit: ScalarSpan]
+    }
+    private struct PartyClause {
+        let span: ScalarSpan
+        let party: PartyComposition
+        let ids: [String]
+        let eligible: Bool
+        let continued: Bool
+        let components: [QuantityUnit: ScalarSpan]
+    }
+    private struct PartyGrouping { let groups: [PartyGroup]; let ambiguousIDs: Set<String> }
+
+    /// Recognize the same exact source clause regardless of row boundaries.
+    /// Candidate windows never cross turns or consume unrelated source text.
+    private static func partyClauses(_ rows: [ComputerUseBrowserGoalProposal.Requirement], input: ComputerUseBrowserGoalInput) -> [PartyClause] {
+        var clauses: [PartyClause] = []
+        for start in rows.indices {
+            var source = "", ids: [String] = [], eligible = true, hasQuantity = false
+            let turn = rows[start].sourceTurnIndex, offset = rows[start].sourceByteOffset
+            for end in start..<rows.count {
+                let row = rows[end]
+                guard row.sourceTurnIndex == turn, row.sourceByteOffset == offset + source.utf8.count,
+                      let part = input.source(of: row), source.utf8.count + part.utf8.count <= 2048 else { break }
+                source += part; ids.append(row.id)
+                let boundary = ["", "and", ",", "&", ".", ";"].contains(part.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
+                hasQuantity = hasQuantity || row.field == .quantity
+                eligible = eligible && row.role == .condition && (boundary || [.quantity, .other].contains(row.field))
+                    && [.unspecified, .equal].contains(row.relation)
+                let core = conditionSource(source)
+                guard let party = partyLiteral(core), let range = source.range(of: core, options: .literal),
+                      let componentRanges = partyComponentRanges(core) else { continue }
+                let coreOffset = offset + source[..<range.lowerBound].utf8.count
+                let span = ScalarSpan(turn: turn, start: coreOffset, end: coreOffset + core.utf8.count)
+                let bytes = Array(input.userTurns[turn].utf8)
+                let before = String(decoding: bytes[..<span.start], as: UTF8.self)
+                let after = String(decoding: bytes[span.end...], as: UTF8.self)
+                let separator = #"(?:\s*,?\s+and\s+|\s*,\s*|\s*&\s*|\s+)"#
+                let continued = before.range(of: Self.partyComponentPattern + separator + "$", options: [.regularExpression, .caseInsensitive]) != nil
+                    || after.range(of: "^" + separator + Self.partyComponentPattern, options: [.regularExpression, .caseInsensitive]) != nil
+                    || before.range(of: #"(?:\bat least|\bat most|\bmore than|\bfewer than|\bnot|\bexcept|\bexcluding|\bwithout)\s+$"#,
+                        options: [.regularExpression, .caseInsensitive]) != nil
+                let components = componentRanges.mapValues { ScalarSpan(turn: turn, start: coreOffset + $0.lowerBound, end: coreOffset + $0.upperBound) }
+                clauses.append(.init(span: span, party: party, ids: ids, eligible: eligible && hasQuantity, continued: continued, components: components))
+            }
+        }
+        return clauses
+    }
+
+    private static func partyGrouping(_ proposal: ComputerUseBrowserGoalProposal) -> PartyGrouping {
+        guard proposal.disposition == .research else { return .init(groups: [], ambiguousIDs: []) }
+        let current = partyClauses(proposal.requirements, input: proposal.input)
+        let historical = proposal.input.clarifications.flatMap { partyClauses($0.priorRequirements, input: proposal.input) }
+            .filter { $0.eligible && !$0.continued }
+        let answerSpans = proposal.input.clarifications.enumerated().compactMap { index, turn -> ScalarSpan? in
+            guard turn.topic == .quantity, partyLiteral(conditionSource(turn.answer)) != nil else { return nil }
+            return answerSpan(turn.answer, turn: index + 1)
+        }
+        var grouped: [ScalarSpan: [PartyClause]] = [:], ambiguous: Set<String> = []
+        for clause in current {
+            guard clause.eligible || historical.contains(where: { $0.span == clause.span && $0.party == clause.party })
+                || answerSpans.contains(clause.span) else { continue }
+            if clause.continued { ambiguous.formUnion(clause.ids); continue }
+            grouped[clause.span, default: []].append(clause)
+        }
+        var groups: [PartyGroup] = []
+        for span in grouped.keys.sorted(by: { ($0.turn, $0.start, $0.end) < ($1.turn, $1.start, $1.end) }) {
+            guard let clauses = grouped[span], let first = clauses.first else { continue }
+            let ids = Set(clauses.flatMap(\.ids))
+            let currentIDs = proposal.requirements.filter { ids.contains($0.id) }.map(\.id)
+            var history: [String] = []
+            for old in historical where old.span == span && old.party == first.party {
+                for id in old.ids where !history.contains(id) { history.append(id) }
+            }
+            groups.append(.init(span: span, party: first.party, requirementIDs: currentIDs, historicalIDs: history, components: first.components))
+        }
+        for first in groups.indices {
+            for second in groups.indices where second > first {
+                if !Set(groups[first].requirementIDs).isDisjoint(with: groups[second].requirementIDs) {
+                    ambiguous.formUnion(groups[first].requirementIDs); ambiguous.formUnion(groups[second].requirementIDs)
+                }
+            }
+        }
+        return .init(groups: groups.filter { Set($0.requirementIDs).isDisjoint(with: ambiguous) }, ambiguousIDs: ambiguous)
+    }
+
+    private static func applyingPartyGroups(_ grouping: PartyGrouping, proposal: ComputerUseBrowserGoalProposal, entries original: [Entry]) -> [Entry] {
+        var entries = original
+        for group in grouping.groups {
+            for index in entries.indices where group.requirementIDs.contains(entries[index].requirementID) {
+                entries[index] = .init(requirementID: entries[index].requirementID, resolution: .bound(.init(inputDigest: proposal.input.digest,
+                    requirementID: entries[index].requirementID, predicate: .party(group.party), historicalRequirementIDs: group.historicalIDs,
+                    sourceRequirementIDs: group.requirementIDs)))
+            }
+        }
+        for index in entries.indices where grouping.ambiguousIDs.contains(entries[index].requirementID) {
+            entries[index] = .init(requirementID: entries[index].requirementID, resolution: .unresolved(.ambiguousPartyScope))
+        }
+        return entries
+    }
+
+    private static func reconcilingPartyGroups(_ groups: [PartyGroup], entries original: [Entry]) -> [Entry] {
+        var entries = original
+        for group in groups {
+            let indices = entries.indices.filter { group.requirementIDs.contains(entries[$0].requirementID) }
+            let bound = indices.allSatisfy {
+                if case .bound(let condition) = entries[$0].resolution {
+                    return condition.predicate == .party(group.party) && condition.sourceRequirementIDs == group.requirementIDs
+                }
+                return false
+            }
+            if bound { continue }
+            if let first = indices.first, case .clarification = entries[first].resolution,
+               indices.allSatisfy({ entries[$0].resolution == entries[first].resolution }) { continue }
+            let failures = indices.compactMap { index -> UnresolvedReason? in
+                if case .unresolved(let reason) = entries[index].resolution { return reason }; return nil
+            }
+            let reason: UnresolvedReason = failures.contains(.historicalScalarScope) ? .historicalScalarScope : (failures.first ?? .contradictoryClarification)
+            for index in indices { entries[index] = .init(requirementID: entries[index].requirementID, resolution: .unresolved(reason)) }
+        }
+        return entries
+    }
+
     private static func scalarSpan(_ requirement: ComputerUseBrowserGoalProposal.Requirement, input: ComputerUseBrowserGoalInput) -> ScalarSpan? {
         guard let source = input.source(of: requirement) else { return nil }
         let clause = conditionSource(source)
@@ -633,9 +786,21 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
             var targets: Set<Int> = [], possibleTargets: Set<Int> = [], invalidScope = false, missingDetail = false
             for scope in answer.scope {
                 guard scope.turn < turn else { invalidScope = true; continue }
-                let matching = quantityIndices.filter { Self.contains(scope, requirement: proposal.requirements[$0], proposal: proposal) }
-                possibleTargets.formUnion(matching)
-                if matching.count == 1 { targets.insert(matching[0]) }
+                let matching = quantityIndices.filter {
+                    let row = proposal.requirements[$0]
+                    if Self.contains(scope, requirement: row, proposal: proposal) { return true }
+                    guard case .bound(let condition) = original[$0].resolution, case .party = condition.predicate else { return false }
+                    return row.sourceTurnIndex == scope.turn && row.sourceByteOffset < scope.sourceByteOffset + scope.source.utf8.count
+                        && scope.sourceByteOffset < row.sourceByteOffset + row.sourceByteCount
+                }
+                let matchingGroups = Set(matching.map { index -> [String] in
+                    if case .bound(let condition) = original[index].resolution { return condition.sourceRequirementIDs }
+                    return [original[index].requirementID]
+                })
+                let expandedIDs = Set(matchingGroups.flatMap { $0 })
+                let expanded = quantityIndices.filter { expandedIDs.contains(original[$0].requirementID) }
+                possibleTargets.formUnion(expanded)
+                if matchingGroups.count == 1 { targets.formUnion(expanded) }
                 else if matching.isEmpty, scope.turn > 0, let previous = previousTargets[scope.turn],
                         Self.quantityScope(scope.source, within: proposal.input.userTurns[scope.turn]) {
                     targets.formUnion(previous); possibleTargets.formUnion(previous)
@@ -658,7 +823,16 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
                 // its predicate to the earlier, broader outcome requirement.
                 guard let span = Self.answerSpan(answer.answer, turn: turn) else { unresolved(.clarificationScope); continue }
                 let matches = answerIndices.filter { Self.scalarSpan(proposal.requirements[$0], input: proposal.input) == span }
-                guard matches.count == 1, let primary = matches.first else { unresolved(.clarificationScope); continue }
+                let groupedMatches = answerIndices.filter {
+                    guard case .bound(let condition) = entries[$0].resolution, case .party = condition.predicate,
+                          condition.sourceRequirementIDs.count > 1 else { return false }
+                    return Set(condition.sourceRequirementIDs).isSubset(of: Set(answerIndices.map { entries[$0].requirementID }))
+                }
+                guard let primary = matches.count == 1 ? matches.first : groupedMatches.first else { unresolved(.clarificationScope); continue }
+                let primaries: [Int]
+                if case .bound(let condition) = entries[primary].resolution, condition.sourceRequirementIDs.count > 1 {
+                    primaries = answerIndices.filter { condition.sourceRequirementIDs.contains(entries[$0].requirementID) }
+                } else { primaries = [primary] }
                 let ids = history(entries[primary].resolution)
                 let resolution: Resolution
                 let predicate: Predicate?
@@ -671,10 +845,18 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
                     resolution = .bound(.init(inputDigest: proposal.input.digest, requirementID: entries[primary].requirementID,
                         predicate: predicate, historicalRequirementIDs: ids))
                 } else { resolution = ids.isEmpty ? .unresolved(.missingQuantityUnit) : .historicalQuantityUnit(ids) }
-                entries[primary] = .init(requirementID: entries[primary].requirementID, resolution: resolution)
-                let binding = ClarificationBinding(input: proposal.input, turn: turn, parameter: parameter, targets: [entries[primary].requirementID])
-                for row in answerIndices where row != primary { entries[row] = .init(requirementID: entries[row].requirementID, resolution: .clarification(binding)) }
-                previousTargets[turn] = [primary]
+                let sourceIDs = primaries.map { entries[$0].requirementID }
+                for row in primaries {
+                    let value: Resolution
+                    if case .bound(let condition) = resolution {
+                        value = .bound(.init(inputDigest: proposal.input.digest, requirementID: entries[row].requirementID,
+                            predicate: condition.predicate, historicalRequirementIDs: ids, sourceRequirementIDs: sourceIDs))
+                    } else { value = resolution }
+                    entries[row] = .init(requirementID: entries[row].requirementID, resolution: value)
+                }
+                let binding = ClarificationBinding(input: proposal.input, turn: turn, parameter: parameter, targets: sourceIDs)
+                for row in answerIndices where !primaries.contains(row) { entries[row] = .init(requirementID: entries[row].requirementID, resolution: .clarification(binding)) }
+                previousTargets[turn] = primaries
                 continue
             }
             guard !targets.isEmpty else { unresolved(.clarificationScope); continue }
@@ -683,6 +865,7 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
                 let requirement = proposal.requirements[target]
                 guard let source = proposal.source(of: requirement) else { continue }
                 let changedScope = answer.scope.contains { scope in
+                    if case .bound(let condition) = entries[target].resolution, case .party = condition.predicate { return false }
                     guard Self.contains(scope, requirement: requirement, proposal: proposal),
                           let prior = answer.priorRequirements.first(where: { $0.id == scope.requirementID }),
                           prior.role == .condition, prior.field == .quantity else { return false }
@@ -690,6 +873,9 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
                 }
                 guard !changedScope else { continue }
                 let ids = history(entries[target].resolution)
+                let sourceIDs: [String]
+                if case .bound(let condition) = entries[target].resolution { sourceIDs = condition.sourceRequirementIDs }
+                else { sourceIDs = [requirement.id] }
                 if case .party(let party) = parameter {
                     let compatible: Bool
                     switch entries[target].resolution {
@@ -706,7 +892,7 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
                     }
                     guard compatible else { continue }
                     replacements.append((target, .bound(.init(inputDigest: proposal.input.digest, requirementID: requirement.id,
-                        predicate: .party(party), historicalRequirementIDs: ids))))
+                        predicate: .party(party), historicalRequirementIDs: ids, sourceRequirementIDs: sourceIDs))))
                     continue
                 }
                 guard case .quantity(let statedComparison, let statedCount, let statedUnit) = parameter else { continue }
@@ -926,11 +1112,25 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
         return (comparison == nil || comparison == expectedComparison)
             && (count == nil || count == expectedCount) && (unit == nil || unit == expectedUnit)
     }
-    static func partyLiteral(_ source: String) -> PartyComposition? {
-        let number = #"[0-9]{1,3}|one|two|three|four|five|six|seven|eight|nine|ten"#
-        let component = "(" + number + #")\s+(adults?|children|child)"#
+    private static let partyComponentPattern = #"([0-9]{1,3}|one|two|three|four|five|six|seven|eight|nine|ten)\s+(adults?|children|child)"#
+    private static var partyPattern: String {
         let separator = #"(?:\s*,?\s+and\s+|\s*,\s*|\s*&\s*|\s+)"#
-        guard let parts = groups(#"^(?:for\s+)?(?:exactly\s+)?"# + component + separator + component + "$", source),
+        return #"^(?:for\s+)?(?:exactly\s+)?"# + partyComponentPattern + separator + partyComponentPattern + "$"
+    }
+    private static func partyComponentRanges(_ source: String) -> [QuantityUnit: Range<Int>]? {
+        guard let expression = try? NSRegularExpression(pattern: partyPattern, options: [.caseInsensitive]),
+              let match = expression.firstMatch(in: source, range: NSRange(source.startIndex..., in: source)),
+              match.range == NSRange(source.startIndex..., in: source) else { return nil }
+        var ranges: [QuantityUnit: Range<Int>] = [:]
+        for index in [1, 3] {
+            guard let number = Range(match.range(at: index), in: source), let label = Range(match.range(at: index + 1), in: source),
+                  let unit = QuantityUnit.literal(String(source[label])) else { return nil }
+            ranges[unit] = source[..<number.lowerBound].utf8.count..<source[..<label.upperBound].utf8.count
+        }
+        return ranges
+    }
+    static func partyLiteral(_ source: String) -> PartyComposition? {
+        guard let parts = groups(partyPattern, source),
               let firstUnit = QuantityUnit.literal(parts[1]), let secondUnit = QuantityUnit.literal(parts[3]), firstUnit != secondUnit else { return nil }
         let words: [String: Int64] = ["one":1, "two":2, "three":3, "four":4, "five":5, "six":6, "seven":7, "eight":8, "nine":9, "ten":10]
         guard let first = Int64(parts[0]) ?? words[parts[0].lowercased()], let second = Int64(parts[2]) ?? words[parts[2].lowercased()] else { return nil }

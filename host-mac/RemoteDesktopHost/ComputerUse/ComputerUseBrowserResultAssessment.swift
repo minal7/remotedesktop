@@ -667,7 +667,7 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
                 guard interpretation.disposition == .research else { return result(.uncompiledRequirement) }
                 if case .clarification? = conditions[requirement.id] { return result(.clarificationApplied) }
                 if case .unresolved(let reason)? = conditions[requirement.id],
-                   [.ambiguousClarification, .clarificationScope, .contradictoryClarification, .missingQuantityUnit].contains(reason) {
+                   [.ambiguousClarification, .clarificationScope, .contradictoryClarification, .missingQuantityUnit, .ambiguousPartyScope].contains(reason) {
                     return result(.uncompiledRequirement)
                 }
                 let retainedScalar: Bool

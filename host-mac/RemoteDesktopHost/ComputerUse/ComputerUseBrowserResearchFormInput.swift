@@ -93,9 +93,14 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
         enum Kind: String, Sendable { case date, partySize, ticketCount }
         let id: String
         let requirementIndex: Int
+        let requirementIndices: [Int]
         let kind: Kind
         let value: String
         let unit: String
+        init(id: String, requirementIndex: Int, kind: Kind, value: String, unit: String, requirementIndices: [Int]? = nil) {
+            self.id = id; self.requirementIndex = requirementIndex; self.kind = kind; self.value = value; self.unit = unit
+            self.requirementIndices = requirementIndices ?? [requirementIndex]
+        }
         var description: String { "BrowserFormNormalization(kind: \(kind.rawValue))" }
         var debugDescription: String { description }
     }
@@ -106,6 +111,7 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
     /// of desired results cannot silently become an exact day or booking size.
     static func normalizations(for interpretation: ComputerUseBrowserGoalProposal) -> [Normalization] {
         let ledger = ComputerUseBrowserScalarRequirements(proposal: interpretation)
+        var parties: Set<[String]> = []
         return ledger.entries.enumerated().flatMap { index, entry -> [Normalization] in
             guard case .bound(let condition) = entry.resolution else { return [] }
             switch condition.predicate {
@@ -113,8 +119,12 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
                 guard let day = range.lower, range.upper == day, range.lowerInclusive, range.upperInclusive else { return [] }
                 return [.init(id: "value\(index + 1)", requirementIndex: index, kind: .date, value: day.iso8601, unit: "civilDay")]
             case .party(let party):
-                return [("adults", party.adults), ("children", party.children)].map { unit, count in
-                    .init(id: "value\(index + 1)-\(unit)", requirementIndex: index, kind: .partySize, value: String(count), unit: unit)
+                guard parties.insert(condition.sourceRequirementIDs).inserted else { return [] }
+                return [(ComputerUseBrowserScalarRequirements.QuantityUnit.adults, party.adults), (.children, party.children)].compactMap { unit, count in
+                    let indices = ledger.partyRequirementIndices(for: condition, unit: unit)
+                    guard let primary = indices.first else { return nil }
+                    return .init(id: "value\(index + 1)-\(unit.rawValue)", requirementIndex: primary, kind: .partySize, value: String(count), unit: unit.rawValue,
+                        requirementIndices: indices)
                 }
             case .quantity(.equal, let count, let unit):
                 let kind: Normalization.Kind
@@ -277,8 +287,12 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
             "unfinished_edits":pendingContext,
             "current_goal_revision_at_previous_stage":previous.map { $0.goalRevision == interpretation.input.digest } ?? true,
             "requirements":requirements, "page":page, "field_bindings":bindings,
-            "normalized_values":normalized.map { ["id":$0.id, "requirement":$0.requirementIndex,
-                "kind":$0.kind.rawValue, "value":$0.value, "unit":$0.unit] as [String: Any] }]
+            "normalized_values":normalized.map { value -> [String: Any] in
+                var row: [String: Any] = ["id":value.id, "requirement":value.requirementIndex,
+                    "kind":value.kind.rawValue, "value":value.value, "unit":value.unit]
+                if value.requirementIndices.count > 1 { row["requirements"] = value.requirementIndices }
+                return row
+            }]
         if scopeReview != nil {
             context["required_native_preservation"] = try nativeSources.map {
                 ["control":$0.controlID,"source":try $0.source.context(in: interpretation)] as [String: Any]
@@ -315,6 +329,7 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
             preparationBaseline?.refreshedTargetIDs.contains(field.editable.snapshot.targetID) == true ? alias : nil
         }
         if !refreshedAliases.isEmpty { context["version"] = 17; context["refreshed_edit_fields"] = refreshedAliases }
+        if normalized.contains(where: { $0.requirementIndices.count > 1 }) { context["version"] = 18 }
         contextJSON = String(decoding: try JSONSerialization.data(withJSONObject: context, options: [.sortedKeys]), as: UTF8.self)
         self.interpretation = interpretation; self.evidence = evidence; fieldAliases = aliases
         normalizations = normalized; editableFieldAliases = editable; self.selectedFormID = selectedFormID
