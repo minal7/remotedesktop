@@ -25,7 +25,8 @@ final class ComputerUseBrowserResearchFormNavigation {
 
     init(form: ComputerUseBrowserResearchFormReceipt, controlID: String, evidence: ComputerUseBrowserPageEvidence,
          stage: any ComputerUseBrowserFormStage, browser: ComputerUseOwnedBrowser, journalDirectory: URL,
-         currentGoal: ComputerUseBrowserGoalInput? = nil, scopeReview: ComputerUseBrowserEffectScopeReview? = nil,
+         currentGoal: ComputerUseBrowserGoalInput? = nil, currentInterpretation: ComputerUseBrowserGoalProposal? = nil,
+         scopeReview: ComputerUseBrowserEffectScopeReview? = nil,
          makeStore: @escaping (URL) throws -> ComputerUseTaskJournalStore = { try .init(directory: $0) }) throws {
         let original = stage.input.interpretation.input, goal = currentGoal ?? original
         guard goal.continues(original), form.stageID == stage.id, form.taskID == goal.taskID, form.rootDigest == goal.rootDigest,
@@ -37,6 +38,11 @@ final class ComputerUseBrowserResearchFormNavigation {
         }
         if let scopeReview {
             guard scopeReview.matches(goal: goal, evidence: evidence), scopeReview.formScope?.kind == .query(controlID, form) else { throw Failure.invalidIntent }
+        }
+        if goal.clarifications.contains(where: { $0.topic == .replaceDate }) {
+            let interpretation = currentInterpretation ?? (goal == original ? stage.input.interpretation : nil)
+            guard let interpretation, interpretation.input == goal, let continuation = stage.nativeContinuation,
+                  try continuation.supersededDateTargetIDs(in: interpretation).isEmpty else { throw Failure.invalidIntent }
         }
         self.scopeReview = scopeReview
         self.form = form; self.controlID = controlID; self.evidence = evidence; self.goal = goal

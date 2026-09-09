@@ -92,6 +92,7 @@ struct ComputerUseBrowserFormEffectScope: Equatable, Sendable, CustomStringConve
                   (1...8).contains(intent.requirementIndices.count)
                     && Set(intent.requirementIndices).count == intent.requirementIndices.count
                     && intent.requirementIndices.allSatisfy { index in interpretation.requirements.indices.contains(index)
+                        && interpretation.permitsTaskPurpose(interpretation.requirements[index])
                         && [.outcome, .condition].contains(interpretation.requirements[index].role) }
               }),
               preservedControls.allSatisfy({ interpretation.requirements.indices.contains($0.requirementIndex)

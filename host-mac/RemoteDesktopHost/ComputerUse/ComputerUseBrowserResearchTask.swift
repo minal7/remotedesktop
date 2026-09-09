@@ -880,7 +880,7 @@ final class ComputerUseBrowserResearchTask {
         guard !hasPendingNavigation else { throw Failure.navigationPending }
         guard !hasQuestion else { throw Failure.questionPending }
         guard let interpretation, interpretation.proposal.input == input,
-              interpretation.proposal.disposition == .research else { throw Failure.interpretationRequired }
+              interpretation.proposal.disposition == .research, !interpretation.proposal.hasUncompiledDateReplacements else { throw Failure.interpretationRequired }
         guard sourcePolicy == nil || (sourcePolicyInstalled && sourcePolicy?.goalRevision == input.digest) else { throw Failure.navigationUnavailable }
         let captured = input
         latestCandidates = nil; latestForm = nil; latestAction = nil
@@ -1247,6 +1247,7 @@ final class ComputerUseBrowserResearchTask {
         try requireIdle()
         try requireCompletedForm(receipt)
         guard let formStage else { throw Failure.formUnavailable }
+        try requireCurrentFormPurposes(formStage)
         let captured = input
         return try await operate { [self] in
             try await formStage.prepareQuery(controlID: controlID, evidence: evidence, checkCurrent: { try self.checkCurrent(captured) })
@@ -1268,13 +1269,23 @@ final class ComputerUseBrowserResearchTask {
         } else {
             try requireCompletedForm(receipt)
             guard let formStage, let directory = navigationDirectory else { throw Failure.formUnavailable }
+            try requireCurrentFormPurposes(formStage)
             query = try .init(form: receipt, controlID: controlID, evidence: evidence, stage: formStage,
-                browser: browser, journalDirectory: directory, currentGoal: input, scopeReview: scopeReview, makeStore: navigationStore)
+                browser: browser, journalDirectory: directory, currentGoal: input, currentInterpretation: interpretation?.proposal,
+                scopeReview: scopeReview, makeStore: navigationStore)
             formNavigation = query
         }
         guard query.goal == input else { throw Failure.goalChanged }
         latestForm = nil; latestAction = nil; latestCandidates = nil
         return try await runFormNavigation(query)
+    }
+
+    private func requireCurrentFormPurposes(_ stage: any ComputerUseBrowserFormStage) throws {
+        guard input.clarifications.contains(where: { $0.topic == .replaceDate }) else { return }
+        guard let interpretation, interpretation.proposal.input == input, let continuation = stage.nativeContinuation,
+              try continuation.supersededDateTargetIDs(in: interpretation.proposal).isEmpty else {
+            throw ComputerUseBrowserResearchFormError.inputChanged
+        }
     }
 
     func resumeFormNavigation() async throws -> ComputerUseBrowserNavigationReceipt? {

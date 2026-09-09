@@ -71,6 +71,7 @@ struct ComputerUseBrowserOptionSelectionIntent: Equatable, Sendable, CustomStrin
         let invalid = ComputerUseBrowserOptionSelectionError.invalidIntent
         guard interpretation.input.taskID == evidence.document.taskID, interpretation.disposition == .research,
               interpretation.requirements.indices.contains(requirementIndex),
+              interpretation.permitsTaskPurpose(interpretation.requirements[requirementIndex]),
               ComputerUseBrowserControlRead.accepts(interpretation.requirements[requirementIndex]),
               evidence.page.isWellFormed, evidence.page.controlStateObserved, evidence.page.scopedControlIDs.contains(controlID),
               ComputerUseBrowserObservedCriteria.hasAvailableScopedCriteria(in: evidence.page, excluding: controlID),

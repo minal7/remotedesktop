@@ -3,13 +3,15 @@ import Foundation
 /// Host-authored task questions only. Account authentication continues to use
 /// visible manual takeover, not this answer channel or model-authored text.
 enum ComputerUseBrowserClarificationTopic: String, CaseIterable, Sendable {
-    case origin, destination, location, date, time, quantity, currency, priceBasis, fees, source
+    case origin, destination, location, date, replaceDate, time, quantity, currency, priceBasis, fees, source
+    var isDateTopic: Bool { self == .date || self == .replaceDate }
     var question: String {
         switch self {
         case .origin: return "Where will you be traveling from?"
         case .destination: return "Which destination should I use?"
         case .location: return "Which city or area should I search?"
         case .date: return "Which date or date range do you mean? You can use YYYY-MM-DD."
+        case .replaceDate: return "What date or date range should replace the selected date requirement? This replaces that whole date requirement, including its weekday or before/after limit. Other requirements stay in place. You can use YYYY-MM-DD."
         case .time: return "What local time or time range should I use?"
         case .quantity: return "How many results, tickets or people do you mean? Please specify which, and adult/child counts when relevant."
         case .currency: return "Which currency do you mean? Please give its three-letter code."
@@ -19,6 +21,7 @@ enum ComputerUseBrowserClarificationTopic: String, CaseIterable, Sendable {
         }
     }
     func accepts(_ requirement: ComputerUseBrowserGoalProposal.Requirement) -> Bool {
+        if self == .replaceDate { return false } // Native source lineage, not model labels, admits replacements.
         if self == .source, scopeFields.contains(requirement.field),
            requirement.role == .prohibition || requirement.role == .order { return true }
         if requirement.role == .outcome { return true } // A missing detail may have no separate source clause.
@@ -30,7 +33,7 @@ enum ComputerUseBrowserClarificationTopic: String, CaseIterable, Sendable {
         case .origin: return [.origin]
         case .destination: return [.destination]
         case .location: return [.location]
-        case .date: return [.date]
+        case .date, .replaceDate: return [.date]
         case .time: return [.time]
         case .quantity: return [.quantity]
         case .currency, .priceBasis: return [.price]
@@ -200,9 +203,17 @@ final class ComputerUseBrowserGoalClarification {
               input.userTurns.reduce(0, { $0 + $1.utf8.count }) < ComputerUseBrowserGoalInput.maximumUserBytes else { throw Failure.inputLimit }
         guard proposal.input.digest == input.digest, proposal.disposition != .unsupported,
               (1...8).contains(requirementIDs.count), Set(requirementIDs).count == requirementIDs.count else { throw Failure.invalidProposal }
-        let requirements = proposal.requirements.filter { requirementIDs.contains($0.id) }
-        guard requirements.count == requirementIDs.count,
-              proposal.permitsQuestion(topic: topic, requirements: requirements) else { throw Failure.invalidProposal }
+        let selected = proposal.requirements.filter { requirementIDs.contains($0.id) }
+        guard selected.count == requirementIDs.count,
+              proposal.permitsQuestion(topic: topic, requirements: selected) else { throw Failure.invalidProposal }
+        let requirements: [ComputerUseBrowserGoalProposal.Requirement]
+        if topic == .replaceDate {
+            // A confirmation/conflict answer can point at an earlier date.
+            // Display and bind the actual origin being replaced, not just the
+            // later literal the model happened to select.
+            guard let origins = proposal.dateReplacementTargets(for: selected) else { throw Failure.invalidProposal }
+            requirements = origins
+        } else { requirements = selected }
         let scope = try requirements.map { requirement -> ComputerUseBrowserGoalClarificationTurn.Scope in
             guard let source = proposal.source(of: requirement) else { throw Failure.invalidProposal }
             return .init(requirement: requirement, source: source)

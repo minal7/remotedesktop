@@ -52,7 +52,7 @@ struct ComputerUseBrowserResearchAnswer: Equatable, Sendable, CustomStringConver
             resultCounts = counts
             let nativeScalarSources = Set(scalars.entries.compactMap { entry -> String? in
                 guard scalars.nativeScalarSourceIDs.contains(entry.requirementID) else { return nil }
-                switch entry.resolution { case .bound, .clarification: return entry.requirementID; default: return nil }
+                switch entry.resolution { case .bound, .clarification, .superseded: return entry.requirementID; default: return nil }
             })
             var passages: [Int: String] = [:], controls: [Int: String] = [:]
             for (index, candidate) in reading.candidates.enumerated() {
@@ -68,6 +68,10 @@ struct ComputerUseBrowserResearchAnswer: Equatable, Sendable, CustomStringConver
                 let covered = interpretation.requirements.enumerated().allSatisfy { offset, requirement in
                     let status = evaluations[offset].status
                     let retainedScalar = nativeScalarSources.contains(requirement.id)
+                    if status == .dateRequirementSuperseded {
+                        guard retainedScalar, case .superseded = scalars.entries[offset].resolution else { return false }
+                        return true // The replacement rows still require their own current evidence below.
+                    }
                     // A host-bound literal scalar parameter keeps its typed
                     // meaning even if the model labeled it as a source clause.
                     if status == .clarificationApplied { return retainedScalar || [.outcome, .condition].contains(requirement.role) }

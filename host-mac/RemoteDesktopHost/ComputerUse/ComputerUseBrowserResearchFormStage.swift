@@ -30,6 +30,17 @@ struct ComputerUseBrowserResearchFormContinuation: Equatable, Sendable, CustomSt
         ComputerUseBrowserFormPartyCoverage.collect(normalizations: ComputerUseBrowserResearchFormInput.normalizations(for: interpretation), records: partyCriteria,
             values: finalValues, changedTargets: changedTargets)
     }
+    /// A receipt still proves what was entered. It does not make an obsolete
+    /// date source a current criterion, even when the field value is unchanged.
+    func supersededDateTargetIDs(in interpretation: ComputerUseBrowserGoalProposal) throws -> Set<String> {
+        guard interpretation.input.continues(goal), !interpretation.hasUncompiledDateReplacements else { throw ComputerUseBrowserResearchFormError.inputChanged }
+        let retired = interpretation.retiredTaskPurposeRequirementIDs
+        guard !retired.isEmpty else { return [] }
+        return Set(try verifiedSources.compactMap { target, sources in
+            let ids = try sources.flatMap { try $0.indices(in: interpretation) }.map { interpretation.requirements[$0].id }
+            return retired.isDisjoint(with: ids) ? nil : target
+        })
+    }
     private static func partyIdentity(_ values: [ComputerUseBrowserResearchFormInput.Normalization],
                                       records: [String: ComputerUseBrowserFormPartyCriterion]) -> [String] {
         guard !values.isEmpty || !records.isEmpty else { return [] }
@@ -791,6 +802,7 @@ final class ComputerUseBrowserResearchFormStage: ComputerUseBrowserFormStage {
         guard !isExecuting else { throw Failure.busy }
         guard !isRetired else { throw Failure.retired }
         guard completed != nil, let continuation else { throw Failure.notVerified }
+        guard try continuation.supersededDateTargetIDs(in: input.interpretation).isEmpty else { throw ComputerUseBrowserResearchFormError.inputChanged }
         isExecuting = true
         defer { isExecuting = false }
         try Task.checkCancellation(); try checkCurrent()
@@ -950,7 +962,10 @@ final class ComputerUseBrowserRetainedFormStage: ComputerUseBrowserFormStage {
 
     func prepareQuery(controlID: String, evidence: ComputerUseBrowserPageEvidence,
                       checkCurrent: @escaping @MainActor () throws -> Void) async throws -> ComputerUseBrowserNavigationTarget {
-        try await read(checkCurrent) { try await self.target.prepareFormQuery(controlID: controlID, evidence: evidence, after: $0) }
+        try await read(checkCurrent) { continuation in
+            guard try continuation.supersededDateTargetIDs(in: self.input.interpretation).isEmpty else { throw ComputerUseBrowserResearchFormError.inputChanged }
+            return try await self.target.prepareFormQuery(controlID: controlID, evidence: evidence, after: continuation)
+        }
     }
 
     func preparationContext(for action: ComputerUseBrowserActionProposal) throws

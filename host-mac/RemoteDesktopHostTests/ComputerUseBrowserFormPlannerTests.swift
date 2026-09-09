@@ -11,8 +11,9 @@ final class ComputerUseBrowserFormPlannerTests: XCTestCase {
             defer { fixture.close() }
             let actionInput = try ComputerUseBrowserActionInput(interpretation: goal, evidence: fixture.input.evidence.page,
                 navigationHistory: [], formHistory: [], latestForm: nil, changedFormTargetIDs: [])
-            for indices in [[1], [2], [1, 2]] {
-                let question: [String: Any] = ["topic":"date", "requirements":indices]
+            for topic in ["date", "replaceDate"] {
+              for indices in [[1], [2], [1, 2]] {
+                let question: [String: Any] = ["topic":topic, "requirements":indices]
                 let content = try ResearchAnswerFixture.json(["question":question])
                 let goalContent = try ResearchAnswerFixture.json(["disposition":"clarification", "requirements":rows, "question":question])
                 if indices.count == 1 {
@@ -25,8 +26,70 @@ final class ComputerUseBrowserFormPlannerTests: XCTestCase {
                     XCTAssertEqual(try ComputerUseBrowserActionProposal.decode(content: content, input: actionInput).questionRequest?.requirementIDs, ids)
                     XCTAssertEqual(try ComputerUseBrowserFormProposal.decode(content: content, input: fixture.input).question?.requirementIDs, ids)
                 }
+              }
             }
         }
+    }
+
+    func testExplicitDateReplacementRequiresFreshFormCriteriaBeforeQuerying() async throws {
+        var rows = [row("Find flights. ", role: "outcome", field: "category"), row("2026-10-16. ", field: "date"), row("Leave Reference unchanged.")]
+        let initial = try proposal(rows: rows), goals = DateReplacementGoalFixture(value: initial)
+        var edits = 0, queryPreparations = 0
+        let fixture = try await FormPlannerFixture(goal: initial,
+            body: "<form action='/results'><label>Departure<input name='departure' type='date'></label><label>Reference<input value='private-reference'></label><button>Search</button></form>",
+            additionalRoutes: ["/results?departure=2026-10-17":.init(body: "<p>Updated date received</p>")],
+            domScriptDidDispatch: { if $0 == .edit { edits += 1 }; if $0 == .prepareFormQuery { queryPreparations += 1 } })
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { fixture.close(); try? FileManager.default.removeItem(at: directory) }
+        let owner = ComputerUseBrowserResearchTask(input: initial.input, browser: fixture.browser, goalPlanner: goals,
+            resultPlanner: BrowserResearchResultFixture(), navigationJournalDirectory: directory, mayAct: { true })
+        defer { owner.retire() }
+        _ = try await owner.interpretGoal()
+        let firstAction = try await owner.planNextAction(using: IntroducedDateActionFixture(indices: [1], preservationIndex: 2))
+        let first = try await owner.prepareFormInput(for: firstAction)
+        let oldPlan = try ComputerUseBrowserFormProposal.decode(content: plan([["field":"field1", "normalized":"value2"]],
+            preserve: [["field":"field2", "requirement":2]]), input: first)
+        let oldReceipt = try await owner.executeForm(oldPlan, input: first)
+        XCTAssertEqual(edits, 1)
+        let question = try owner.issueQuestion(topic: .replaceDate, requirementIDs: [initial.requirements[1].id],
+            controllerID: "phone", controllerSessionID: "session")
+        let updated = try owner.answerQuestion(questionID: question.id, answerTaskID: "new-date", answer: "2026-10-17",
+            controllerID: "phone", controllerSessionID: "session")
+        var answer = row("2026-10-17", field: "date"); answer["turn"] = 1; rows.append(answer)
+        let current = try decodeGoal(rows, input: updated); goals.value = current
+        _ = try await owner.interpretGoal()
+        let oldPage = try await owner.observeFormResultPage(after: oldReceipt)
+        let control = try XCTUnwrap(oldPage.page.controls.first { $0.kind == "submit" }).id
+        do { _ = try await owner.prepareFormQuery(after: oldReceipt, controlID: control, evidence: oldPage); XCTFail("The old date is no longer a current criterion") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserResearchFormError, .inputChanged) }
+        do { _ = try await owner.openFormQuery(after: oldReceipt, controlID: control, evidence: oldPage); XCTFail("A native receipt cannot authorize the superseded date") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserResearchFormError, .inputChanged) }
+        XCTAssertEqual(queryPreparations, 0); XCTAssertEqual(edits, 1)
+        XCTAssertEqual(owner.confirmedFormHistory, [oldReceipt])
+        let action = try await owner.planNextAction(using: IntroducedDateActionFixture(indices: [3], preservationIndex: 2))
+        XCTAssertTrue(action.input.queryControlIDs.isEmpty)
+        XCTAssertFalse(action.input.readableRequirementIndices.contains(1))
+        XCTAssertFalse(action.input.effectFieldRequirementIndices.contains(1))
+        let actionContext = try object(Data(action.input.contextJSON.utf8))
+        XCTAssertEqual(actionContext["version"] as? Int, 30)
+        XCTAssertEqual(actionContext["retired_task_purpose_requirements"] as? [Int], [1])
+        let prepared = try await owner.prepareFormInput(for: action)
+        XCTAssertEqual(prepared.requiredRepairFieldAliases, ["field1"])
+        XCTAssertEqual(prepared.requiredPreservation.count, 1)
+        XCTAssertEqual(prepared.normalizations.map(\.value), ["2026-10-17"])
+        XCTAssertEqual(try object(Data(prepared.contextJSON.utf8))["version"] as? Int, 20)
+        XCTAssertThrowsError(try ComputerUseBrowserFormProposal.decode(content: plan([["field":"field1", "normalized":"value2"]],
+            preserve: [["field":"field2", "requirement":2]]), input: prepared))
+        let newPlan = try ComputerUseBrowserFormProposal.decode(content: plan([["field":"field1", "normalized":"value4"]],
+            preserve: [["field":"field2", "requirement":2]]), input: prepared)
+        let newReceipt = try await owner.executeForm(newPlan, input: prepared)
+        XCTAssertEqual(edits, 2); XCTAssertEqual(owner.confirmedFormHistory, [oldReceipt, newReceipt])
+        let page = try await owner.observeFormResultPage(after: newReceipt)
+        let query = try XCTUnwrap(page.page.controls.first { $0.kind == "submit" }).id
+        _ = try await owner.openFormQuery(after: newReceipt, controlID: query, evidence: page)
+        XCTAssertEqual(fixture.server.count("/results?departure=2026-10-16"), 0)
+        XCTAssertEqual(fixture.server.count("/results?departure=2026-10-17"), 1)
+        XCTAssertEqual(owner.input.userTurns, [initial.input.prompt, "2026-10-17"])
     }
 
     func testSharedQuestionAdmissionRetainsNativeMissingQuantityUnitsAfterRelabeling() async throws {
@@ -1483,12 +1546,24 @@ private struct PartyCoverageActionFixture: ComputerUseBrowserActionPlanning {
 
 private struct IntroducedDateActionFixture: ComputerUseBrowserActionPlanning {
     let indices: [Int]
+    var preservationIndex: Int? = nil
     func propose(_ input: ComputerUseBrowserActionInput) async throws -> ComputerUseBrowserActionProposal {
-        if let review = try FormEffectScopeFixture.response(input, editing: ["Departure":indices]) {
+        if let review = try FormEffectScopeFixture.response(input, editing: ["Departure":indices],
+            preserving: preservationIndex.map { ["Reference":$0] } ?? [:]) {
             return try .decode(content: review, input: input)
         }
         let form = try XCTUnwrap(input.formIDs.first)
         return try .decode(content: ResearchAnswerFixture.json(["form":form, "preserve":[]]), input: input)
+    }
+}
+
+@MainActor
+private final class DateReplacementGoalFixture: ComputerUseBrowserGoalPlanning {
+    var value: ComputerUseBrowserGoalProposal
+    init(value: ComputerUseBrowserGoalProposal) { self.value = value }
+    func propose(_ input: ComputerUseBrowserGoalInput) async throws -> ComputerUseBrowserGoalProposal {
+        guard value.input == input else { throw ComputerUseBrowserGoalPlanError.invalidInput }
+        return value
     }
 }
 

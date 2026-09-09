@@ -161,6 +161,9 @@ struct ComputerUseBrowserActionInput: Equatable, Sendable, CustomStringConvertib
          loginHandoffHistory: [ComputerUseBrowserLoginHandoffRecord] = [],
          unusedFormIntentHistory: [ComputerUseBrowserUnusedFormIntent] = []) throws {
         let goal = interpretation.input
+        let retiredPurposes = interpretation.retiredTaskPurposeRequirementIDs
+        let dateReplacementsCompiled = !interpretation.hasUncompiledDateReplacements
+        var changedFormTargetIDs = changedFormTargetIDs
         self.preparationReview = preparationReview
         if let preparationReview {
             try preparationReview.validate(interpretation: interpretation, evidence: evidence)
@@ -232,7 +235,9 @@ struct ComputerUseBrowserActionInput: Equatable, Sendable, CustomStringConvertib
         loginHandoffTargets = preparationReview == nil && formEffectScope == nil && !loginHandoffLimitReached
             && loginHandoffHistory.last?.controlReturned != false
             ? ComputerUseBrowserLoginHandoffTarget.collect(page: evidence.page, controls: projected, links: projectedLinks) : []
-        readableRequirementIndices = interpretation.requirements.indices.filter { ComputerUseBrowserControlRead.accepts(interpretation.requirements[$0]) }
+        readableRequirementIndices = interpretation.requirements.indices.filter {
+            dateReplacementsCompiled && !retiredPurposes.contains(interpretation.requirements[$0].id) && ComputerUseBrowserControlRead.accepts(interpretation.requirements[$0])
+        }
         readableControlIDs = readableRequirementIndices.isEmpty ? [] : evidence.page.controls.filter {
             projected.contains($0.id) && ComputerUseBrowserControlRead.allows($0)
         }.map(\.id)
@@ -274,7 +279,9 @@ struct ComputerUseBrowserActionInput: Equatable, Sendable, CustomStringConvertib
         if let stage = latestForm, let receipt = stage.nativeReceipt, formHistory.last == receipt,
            interpretation.input.continues(stage.input.interpretation.input), stage.input.evidence.page.document == evidence.document,
            stage.input.evidence.page.documentID == evidence.documentID {
-            guard let continuation = stage.nativeContinuation, changedFormTargetIDs.isSubset(of: continuation.repairableTargetIDs) else {
+            guard let continuation = stage.nativeContinuation else { throw ComputerUseBrowserActionPlanError.invalidInput }
+            changedFormTargetIDs.formUnion(try continuation.supersededDateTargetIDs(in: interpretation))
+            guard changedFormTargetIDs.isSubset(of: continuation.repairableTargetIDs) else {
                 throw ComputerUseBrowserActionPlanError.invalidInput
             }
             queryBound = stage.input.evidence.fields.filter { continuation.finalValues[$0.editable.snapshot.targetID] != nil }.map { $0.control.id }
@@ -376,12 +383,14 @@ struct ComputerUseBrowserActionInput: Equatable, Sendable, CustomStringConvertib
         let priorReadControls = preparationReview?.readSources.map(\.controlID).filter { reviewControlIDs.contains($0) } ?? []
         effectRequiredControlIDs = effectQueryValueControlIDs + retainedFormControls
             + priorReadControls.filter { !effectQueryValueControlIDs.contains($0) && !retainedFormControls.contains($0) }
-        effectFieldRequirementIndices = interpretation.requirements.indices.filter { [.outcome,.condition].contains(interpretation.requirements[$0].role) }
+        effectFieldRequirementIndices = interpretation.requirements.indices.filter {
+            dateReplacementsCompiled && !retiredPurposes.contains(interpretation.requirements[$0].id) && [.outcome,.condition].contains(interpretation.requirements[$0].role)
+        }
         effectReviewScopeDigest = ComputerUseTaskContract.digest(["browser-effect-review-scope-v1",formEffectScope?.digest ?? "dropdown",String(covered?.count ?? 0)] + (covered?.sorted() ?? [])
             + optionReadControls.flatMap { [$0.controlID,String($0.requirementIndex)] }
             + (preparationReview.map { ["preparation",$0.digest] } ?? []))
         effectReviewRequirementIndices = formEffectScope == nil ? readableRequirementIndices : interpretation.requirements.indices.filter {
-            [.outcome,.condition,.prohibition].contains(interpretation.requirements[$0].role)
+            dateReplacementsCompiled && !retiredPurposes.contains(interpretation.requirements[$0].id) && [.outcome,.condition,.prohibition].contains(interpretation.requirements[$0].role)
         }
         effectReviewEvidenceIDs = inspecting ? records.filter { $0["kind"] as? String == "text" }.compactMap { $0["id"] as? String } + effectReviewControlIDs : []
         effectReviewMetadataComplete = inspecting && !evidence.page.omittedControlMetadata
@@ -551,6 +560,13 @@ struct ComputerUseBrowserActionInput: Equatable, Sendable, CustomStringConvertib
             context["version"] = 29
             context["unused_form_intent_history"] = unusedIntentContext
         }
+        let dateReplacements = interpretation.dateReplacementContexts
+        if !dateReplacements.isEmpty || !dateReplacementsCompiled {
+            context["version"] = 30
+            context["date_replacements"] = dateReplacements.map(\.context)
+            context["date_replacements_compiled"] = dateReplacementsCompiled
+            context["retired_task_purpose_requirements"] = interpretation.requirements.indices.filter { retiredPurposes.contains(interpretation.requirements[$0].id) }
+        }
         contextJSON = String(decoding: try JSONSerialization.data(withJSONObject: context, options: [.sortedKeys]), as: UTF8.self)
         usesFormStateContext = formHistory.contains { $0.verifiedWithoutInputCount > 0 }
         usesFormRecoveryContext = formHistory.contains { $0.requiresRepairAtPublication }
@@ -661,7 +677,8 @@ struct ComputerUseBrowserActionProposal: Equatable, Sendable, CustomStringConver
                           case .string(let control)? = item["control"], input.preservableControlIDs.contains(control),
                           case .number(let number)? = item["requirement"], let index = Int(exactly: number),
                           input.interpretation.requirements.indices.contains(index),
-                          [.outcome, .condition, .prohibition].contains(input.interpretation.requirements[index].role) else { throw invalid }
+                          [.outcome, .condition, .prohibition].contains(input.interpretation.requirements[index].role),
+                          input.interpretation.permitsTaskPurpose(input.interpretation.requirements[index]) else { throw invalid }
                     return .init(controlID: control, requirementIndex: index)
                 }
                 guard Set(preserved.map(\.controlID)).count == preserved.count else { throw invalid }
@@ -893,6 +910,7 @@ struct ComputerUseLocalBrowserActionPlanner: ComputerUseBrowserActionPlanning {
     private static let questionInstructions = """
     Return a typed question with one to eight motivating requirement indices only for a missing, ambiguous or conflicting task detail. Respect prior scoped answers. Account access uses visible user handoff and explicit return of control, never this question channel. If no justified supported next step exists, return {"unavailable":true}; the original task remains pending. Do not claim no results exist, an answer is verified or the request is complete.
     Scope a missing date to one outcome. A question about an accepted native date answer must cover that whole answer, even when it spans several requirement rows; retain both range endpoints and any modifier. A concrete answer may confirm a date or disambiguate a bare weekday, but cannot silently replace a conflicting date. A resolved date does not need another question merely because the model split or relabeled its source.
+    replaceDate asks the user to replace one complete known date requirement explicitly, including its weekday or before/after limit. Use it for a requested correction or conflicting user dates, never to fit website results. An accepted replacement retains all old source text and unrelated obligations. date_replacements links retired clauses to their replacement requirements; remaining_requirements preserves any unaffected part of an earlier shared answer. Follow replacement links through later replacements. retired_task_purpose_requirements cannot justify new input, selection or private reads. Earlier entered dates remain historical values; requires_repair must be resolved through a fresh plan, even when the browser field has not changed. No replacement settles pending native input or relaxes preservation duties.
     """
     private static let outputInstructions = """
     Return no URL, field value, free-form question, credentials, executable instruction, confidence, explanation or completion flag.

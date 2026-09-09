@@ -17,6 +17,7 @@ struct ComputerUseBrowserPopupIntent: Equatable, Sendable, CustomStringConvertib
          controlID: String, requirementIndex: Int, scopeReview: ComputerUseBrowserEffectScopeReview? = nil) throws {
         guard interpretation.input.taskID == evidence.document.taskID, interpretation.disposition == .research,
               interpretation.requirements.indices.contains(requirementIndex),
+              interpretation.permitsTaskPurpose(interpretation.requirements[requirementIndex]),
               ComputerUseBrowserControlRead.accepts(interpretation.requirements[requirementIndex]),
               evidence.page.isWellFormed, evidence.page.controlStateObserved, evidence.page.scopedControlIDs.contains(controlID),
               let control = evidence.page.controls.first(where: { $0.id == controlID }),

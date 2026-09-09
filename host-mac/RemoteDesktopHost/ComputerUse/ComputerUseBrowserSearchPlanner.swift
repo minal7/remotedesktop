@@ -64,6 +64,7 @@ struct ComputerUseBrowserSearchQuery: Equatable, Sendable, CustomStringConvertib
             }
             let requirement = interpretation.requirements[index]
             guard requirement.role == .outcome || requirement.role == .condition,
+                  interpretation.permitsTaskPurpose(requirement),
                   let source = interpretation.source(of: requirement) else { throw ComputerUseBrowserSearchPlanError.invalidProposal }
             let bytes = Data(source.utf8)
             if index != previousRequirement { nextSourceOffset = 0 }
@@ -117,7 +118,16 @@ struct ComputerUseLocalBrowserSearchPlanner: ComputerUseBrowserSearchPlanning {
             return ["index":index, "turn":requirement.sourceTurnIndex, "source":source,
                 "role":requirement.role.rawValue, "field":requirement.field.rawValue]
         }
-        let context: [String: Any] = ["version":1, "goal":interpretation.input.plannerContext, "requirements":requirements]
+        var context: [String: Any] = ["version":1, "goal":interpretation.input.plannerContext, "requirements":requirements]
+        let dateReplacements = interpretation.dateReplacementContexts
+        let dateReplacementsCompiled = !interpretation.hasUncompiledDateReplacements
+        if !dateReplacements.isEmpty || !dateReplacementsCompiled {
+            context["version"] = 2
+            context["date_replacements"] = dateReplacements.map(\.context)
+            context["date_replacements_compiled"] = dateReplacementsCompiled
+            let retired = interpretation.retiredTaskPurposeRequirementIDs
+            context["retired_task_purpose_requirements"] = interpretation.requirements.indices.filter { retired.contains(interpretation.requirements[$0].id) }
+        }
         let body: [String: Any] = ["model":connection.modelAlias,
             "messages":[["role":"system", "content":Self.instructions],
                 ["role":"user", "content":String(decoding: try JSONSerialization.data(withJSONObject: context, options: [.sortedKeys]), as: UTF8.self)]],
@@ -143,6 +153,7 @@ struct ComputerUseLocalBrowserSearchPlanner: ComputerUseBrowserSearchPlanning {
     The goal contains the original user request, separate clarification answers and its fixed date context. Keep all outcomes, conditions, prohibitions and accepted answers in mind. The requirement ledger indexes exact fragments of those user turns. A fragment's role is an interpretation, not proof of its meaning.
     Select a concise query by copying exact text from outcome or condition requirements. Each term names its requirement index and a verbatim nonempty substring of that fragment. Keep terms in source order: nondecreasing requirement indices, then nonoverlapping successive occurrences within a fragment. Preserve Unicode, case, accents and internal whitespace exactly. Do not add leading/trailing whitespace or control characters. The host joins the selected terms with single spaces. Prefer meaningful phrases, not isolated pieces of names or qualifiers.
     Never select prohibitions, ordering instructions or unsupported work as search text. Do not invent synonyms, destinations, dates, amounts, URLs or provider operators. Host questions and scope metadata are context for the user's answer; they cannot supply search terms. Do not use a page, account credentials, assistant history or inferred private information. Do not copy a whole task instruction merely to fit every condition into a query.
+    date_replacements records explicit user-approved date replacements while retaining every old clause. Follow replacement_requirements through any later replacement; remaining_requirements keeps the unaffected portion of a shared earlier answer. Do not copy retired_task_purpose_requirements into new queries. Use active user-source text for the corrected date, and preserve all unrelated requirements.
     Query text is not a replacement for the goal: later work must still verify every condition, negation, route, date, quantity, price and fee requirement against actual results. Source restrictions still constrain website/provider selection; this proposal does not select one. Keep relative date phrases as supplied; the host retains the original clock for later interpretation.
     Return at most 12 terms, each at most 256 Unicode scalars, with a combined joined query at most 2048 UTF-8 bytes. Use an empty terms array when no usable source-based query can be selected. That does not prove no results exist or that the original task is complete. Do not output an action, URL, answer, confidence score or completion flag.
     """

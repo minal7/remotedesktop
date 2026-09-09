@@ -213,7 +213,7 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
          preservedControls: [ComputerUseBrowserControlPreservation] = [], previous: ComputerUseBrowserResearchFormContinuation? = nil,
          scopeReview: ComputerUseBrowserEffectScopeReview? = nil, nativePreservation: ComputerUseBrowserFormPreservation? = nil,
          preparationBaseline: ComputerUseBrowserFormPreparationBaseline? = nil) throws {
-        guard interpretation.disposition == .research,
+        guard interpretation.disposition == .research, !interpretation.hasUncompiledDateReplacements,
               interpretation.input.taskID.utf8.elementsEqual(evidence.page.document.taskID.utf8),
               (1...16).contains(evidence.fields.count), preservedControls.count <= 16,
               Set(preservedControls.map(\.controlID)).count == preservedControls.count else { throw ComputerUseBrowserResearchFormError.invalidInput }
@@ -301,10 +301,12 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
             return (alias, intent.requirementIndices)
         })
         fieldIntentRequirements = intentRequirements
+        let supersededTargets = try previous?.supersededDateTargetIDs(in: interpretation) ?? []
         var retainedSources: [String: [ComputerUseBrowserFormSource]] = [:]
         for intent in scopeReview?.formScope?.fieldIntents ?? [] where intent.disposition == .retain {
             guard let index = evidence.fields.firstIndex(where: { $0.control.id == intent.controlID }),
                   let previous, previous.verifiedTargetIDs.contains(evidence.fields[index].editable.snapshot.targetID),
+                  !supersededTargets.contains(evidence.fields[index].editable.snapshot.targetID),
                   var sources = previous.verifiedSources[evidence.fields[index].editable.snapshot.targetID], !sources.isEmpty,
                   let expected = previous.finalValues[evidence.fields[index].editable.snapshot.targetID],
                   expected.utf8.elementsEqual(evidence.fields[index].editable.snapshot.value.utf8) else {
@@ -321,6 +323,7 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
             throw ComputerUseBrowserResearchFormError.invalidInput
         }
         let repairs = zip(aliases, evidence.fields).compactMap { alias, field -> String? in
+            if supersededTargets.contains(field.editable.snapshot.targetID) { return alias }
             if preparationBaseline?.refreshedTargetIDs.contains(field.editable.snapshot.targetID) == true { return alias }
             guard let value = previous?.finalValues[field.editable.snapshot.targetID],
                   !field.editable.snapshot.value.utf8.elementsEqual(value.utf8) else { return nil }
@@ -411,6 +414,13 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
         if !partyCoverage.isEmpty || previous?.partyCriteria.isEmpty == false {
             context["version"] = 19
             context["party_criteria"] = partyCoverage.map { $0.context(partyAlias: partyAliases[$0.partySourceID]!) }
+        }
+        let dateReplacements = interpretation.dateReplacementContexts
+        if !dateReplacements.isEmpty {
+            context["version"] = 20
+            context["date_replacements"] = dateReplacements.map(\.context)
+            let retired = interpretation.retiredTaskPurposeRequirementIDs
+            context["retired_task_purpose_requirements"] = interpretation.requirements.indices.filter { retired.contains(interpretation.requirements[$0].id) }
         }
         contextJSON = String(decoding: try JSONSerialization.data(withJSONObject: context, options: [.sortedKeys]), as: UTF8.self)
         self.interpretation = interpretation; self.evidence = evidence; fieldAliases = aliases

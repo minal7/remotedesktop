@@ -7,6 +7,163 @@ final class ComputerUseBrowserGoalClarificationTests: XCTestCase {
     private typealias Clarification = ComputerUseBrowserGoalClarification
     private typealias Scalars = ComputerUseBrowserScalarRequirements
 
+    func testExplicitDateReplacementRetainsOtherRequirementsAndShowsItsWholeMeaning() throws {
+        for source in ["2026-10-16. ", "before 2026-10-16. ", "next Friday. "] {
+            let original = try input("Find concerts. " + source + "Under USD 50. 2 adults."), state = Clarification(input: original)
+            let rows = [row("Find concerts. "), row(source, role: "condition", field: "date"),
+                row("Under USD 50. ", role: "condition", field: "price"), row("2 adults.", role: "condition", field: "quantity")]
+            let initial = try proposal(original, rows: rows, disposition: "research"), before = Scalars(proposal: initial)
+            let question = try state.issue(proposal: initial, topic: .replaceDate, requirementIDs: [initial.requirements[1].id], context: context())
+            XCTAssertTrue(question.text.contains("replace the selected date requirement"))
+            XCTAssertTrue(question.text.contains("including its weekday or before/after limit"))
+            XCTAssertTrue(question.text.contains("Other requirements stay in place"))
+            XCTAssertEqual(question.scope.map(\.source), [source])
+            let updated = try state.consume(questionID: question.id, answerTaskID: "replacement", answer: "2026-10-17", context: context())
+            let current = try proposal(updated, rows: rows + [row("2026-10-17", turn: 1, role: "condition", field: "date")], disposition: "research")
+            let ledger = Scalars(proposal: current)
+            guard case .superseded(let old) = ledger.entries[1].resolution, case .bound(let new) = ledger.entries[4].resolution else {
+                return XCTFail("The old source must remain linked to the new active date")
+            }
+            XCTAssertEqual(old.answerTurns, [1]); XCTAssertEqual(old.replacementRequirementIDs, [current.requirements[4].id])
+            XCTAssertFalse(String(describing: old).contains(old.id))
+            XCTAssertEqual(new.sourceRequirementIDs, [current.requirements[4].id])
+            for index in [2, 3] {
+                guard case .bound(let expected) = before.entries[index].resolution, case .bound(let retained) = ledger.entries[index].resolution else {
+                    return XCTFail("Price and party obligations must survive")
+                }
+                XCTAssertEqual(retained.predicate, expected.predicate)
+            }
+            XCTAssertEqual(ComputerUseBrowserResearchFormInput.normalizations(for: current).filter { $0.kind == .date }.map(\.value), ["2026-10-17"])
+            XCTAssertFalse(current.permitsTaskPurpose(current.requirements[1])); XCTAssertTrue(current.permitsTaskPurpose(current.requirements[4]))
+            XCTAssertEqual(try ComputerUseBrowserFormSource(index: 1, interpretation: current).source, source,
+                "Historical source recording must remain possible without granting a new action")
+            XCTAssertThrowsError(try ComputerUseBrowserSearchQuery.decode(content: #"{"terms":[{"requirement":1,"text":"2026-10-16"}]}"#, interpretation: current))
+            XCTAssertEqual(updated.userTurns, [original.prompt, "2026-10-17"]); XCTAssertTrue(updated.continues(original))
+            XCTAssertEqual(updated.referenceMilliseconds, original.referenceMilliseconds)
+            let mislabeled = try proposal(updated, rows: rows + [row("2026-10-17", turn: 1, role: "condition", field: "quantity")], disposition: "research")
+            XCTAssertFalse(mislabeled.permitsQuestion(topic: .quantity, requirements: [mislabeled.requirements[4]]),
+                "A model label cannot turn the new date origin into a quantity question")
+            XCTAssertTrue(mislabeled.permitsQuestion(topic: .date, requirements: [mislabeled.requirements[4]]))
+        }
+    }
+
+    func testReplacementNeedsOneKnownOriginAndCannotUseAMissingOutcomeOrTwoDates() throws {
+        let original = try input("Find flights. 2026-10-16. 2026-10-16."), state = Clarification(input: original)
+        let current = try proposal(original, rows: [row("Find flights. "), row("2026-10-16. ", role: "condition", field: "date"),
+            row("2026-10-16.", role: "condition", field: "date")], disposition: "research")
+        for indices in [[0], [1, 2], [0, 1]] {
+            XCTAssertThrowsError(try state.issue(proposal: current, topic: .replaceDate,
+                requirementIDs: indices.map { current.requirements[$0].id }, context: context()))
+        }
+        let question = try state.issue(proposal: current, topic: .replaceDate, requirementIDs: [current.requirements[2].id], context: context())
+        XCTAssertEqual(question.scope.map(\.sourceByteOffset), ["Find flights. 2026-10-16. ".utf8.count])
+        let updated = try state.consume(questionID: question.id, answerTaskID: "return", answer: "2026-10-18", context: context())
+        let final = try proposal(updated, rows: [row("Find flights. "), row("2026-10-16. ", role: "condition", field: "date"),
+            row("2026-10-16.", role: "condition", field: "date"), row("2026-10-18", turn: 1, role: "condition", field: "date")], disposition: "research")
+        let ledger = Scalars(proposal: final)
+        guard case .bound = ledger.entries[1].resolution, case .superseded = ledger.entries[2].resolution else { return XCTFail("Only the selected occurrence may change") }
+        XCTAssertEqual(ComputerUseBrowserResearchFormInput.normalizations(for: final).map(\.value), ["2026-10-16", "2026-10-18"])
+        XCTAssertThrowsError(try state.issue(proposal: final, topic: .date, requirementIDs: [final.requirements[2].id], context: context()))
+    }
+
+    func testExplicitReplacementCanResolveALiteralConflictThroughItsRetainedOrigin() throws {
+        let original = try input("Find tickets. 2026-10-16."), state = Clarification(input: original)
+        var rows = [row("Find tickets. "), row("2026-10-16.", role: "condition", field: "date")]
+        let initial = try proposal(original, rows: rows, disposition: "research")
+        let ordinary = try state.issue(proposal: initial, topic: .date, requirementIDs: [initial.requirements[1].id], context: context())
+        let conflicted = try state.consume(questionID: ordinary.id, answerTaskID: "conflict", answer: "2026-10-17", context: context())
+        rows.append(row("2026-10-17", turn: 1, role: "condition", field: "navigationSource"))
+        let current = try proposal(conflicted, rows: rows, disposition: "research"), conflict = Scalars(proposal: current)
+        XCTAssertEqual(conflict.entries[1].resolution, .unresolved(.contradictoryClarification))
+        XCTAssertTrue(ComputerUseBrowserResearchFormInput.normalizations(for: current).isEmpty)
+        let replacement = try state.issue(proposal: current, topic: .replaceDate, requirementIDs: [current.requirements[2].id], context: context())
+        XCTAssertEqual(replacement.scope.map(\.requirementID), [current.requirements[1].id])
+        XCTAssertEqual(replacement.scope.map(\.source), ["2026-10-16."])
+        let updated = try state.consume(questionID: replacement.id, answerTaskID: "confirmed-replacement", answer: "2026-10-17", context: context())
+        rows.append(row("2026-10-17", turn: 2, role: "condition", field: "date"))
+        let final = try proposal(updated, rows: rows, disposition: "research"), ledger = Scalars(proposal: final)
+        for index in [1, 2] { guard case .superseded = ledger.entries[index].resolution else { return XCTFail("The resolved conflict must remain in history") } }
+        XCTAssertEqual(ComputerUseBrowserResearchFormInput.normalizations(for: final).map(\.value), ["2026-10-17"])
+        XCTAssertEqual(updated.userTurns, [original.prompt, "2026-10-17", "2026-10-17"])
+        XCTAssertTrue(ComputerUseBrowserSourceRequirements(proposal: final).unresolved.isEmpty)
+    }
+
+    func testReplacingOneDateKeepsTheOtherHalfOfASharedConfirmation() throws {
+        let original = try input("Find flights. 2026-10-16. 2026-10-16."), state = Clarification(input: original)
+        var rows = [row("Find flights. "), row("2026-10-16. ", role: "condition", field: "date"), row("2026-10-16.", role: "condition", field: "date")]
+        let initial = try proposal(original, rows: rows, disposition: "research")
+        let question = try state.issue(proposal: initial, topic: .date, requirementIDs: Array(initial.requirements.dropFirst().map(\.id)), context: context())
+        let confirmed = try state.consume(questionID: question.id, answerTaskID: "both", answer: "2026-10-16", context: context())
+        rows.append(row("2026-10-16", turn: 1, role: "condition", field: "date"))
+        let both = try proposal(confirmed, rows: rows, disposition: "research")
+        let outbound = try state.issue(proposal: both, topic: .replaceDate, requirementIDs: [both.requirements[1].id], context: context())
+        let changed = try state.consume(questionID: outbound.id, answerTaskID: "outbound", answer: "2026-10-17", context: context())
+        rows.append(row("2026-10-17", turn: 2, role: "condition", field: "date"))
+        let current = try proposal(changed, rows: rows, disposition: "research"), ledger = Scalars(proposal: current)
+        guard case .clarification(let partly) = ledger.entries[3].resolution else { return XCTFail("The return date still needs the shared answer") }
+        XCTAssertEqual(partly.targetRequirementIDs, [current.requirements[2].id])
+        XCTAssertEqual(partly.supersededDateTargetIDs, [current.requirements[1].id])
+        XCTAssertFalse(current.permitsTaskPurpose(current.requirements[3]))
+        let returning = try state.issue(proposal: current, topic: .replaceDate, requirementIDs: [current.requirements[2].id], context: context())
+        let updated = try state.consume(questionID: returning.id, answerTaskID: "return", answer: "2026-10-18", context: context())
+        rows.append(row("2026-10-18", turn: 3, role: "condition", field: "date"))
+        let final = try proposal(updated, rows: rows, disposition: "research"), complete = Scalars(proposal: final)
+        guard case .superseded(let oldAnswer) = complete.entries[3].resolution else { return XCTFail("Both original applications were explicitly replaced") }
+        XCTAssertEqual(oldAnswer.answerTurns, [2, 3])
+        XCTAssertEqual(oldAnswer.replacementRequirementIDs, [final.requirements[1].id, final.requirements[2].id])
+        XCTAssertEqual(ComputerUseBrowserResearchFormInput.normalizations(for: final).map(\.value), ["2026-10-17", "2026-10-18"])
+    }
+
+    func testReplacementGraphSurvivesSplitIntroducedDatesAndSuccessiveRangeChanges() throws {
+        let original = try input("Find tickets."), state = Clarification(input: original)
+        let initial = try proposal(original, rows: [row(original.prompt)])
+        let missing = try state.issue(proposal: initial, topic: .date, requirementIDs: [initial.requirements[0].id], context: context())
+        let dated = try state.consume(questionID: missing.id, answerTaskID: "date", answer: "on 2026-10-16", context: context())
+        var rows = [row(original.prompt), row("on 2026-", turn: 1, role: "condition", field: "location"), row("10-16", turn: 1, role: "condition", field: "location")]
+        let current = try proposal(dated, rows: rows, disposition: "research")
+        XCTAssertThrowsError(try state.issue(proposal: current, topic: .replaceDate, requirementIDs: [current.requirements[2].id], context: context()))
+        let first = try state.issue(proposal: current, topic: .replaceDate, requirementIDs: Array(current.requirements.dropFirst().map(\.id)), context: context())
+        let range = try state.consume(questionID: first.id, answerTaskID: "range", answer: "from 2026-10-17 through 2026-10-18", context: context())
+        rows += [row("from 2026-10-17 ", turn: 2, role: "condition", field: "location"), row("through 2026-10-18", turn: 2, role: "condition", field: "location")]
+        let ranged = try proposal(range, rows: rows, disposition: "research")
+        XCTAssertTrue(ComputerUseBrowserResearchFormInput.normalizations(for: ranged).isEmpty)
+        let last = try state.issue(proposal: ranged, topic: .replaceDate, requirementIDs: [ranged.requirements[3].id, ranged.requirements[4].id], context: context())
+        let updated = try state.consume(questionID: last.id, answerTaskID: "exact", answer: "2026-10-19", context: context())
+        rows.append(row("2026-10-19", turn: 3, role: "condition", field: "date"))
+        let final = try proposal(updated, rows: rows, disposition: "research"), ledger = Scalars(proposal: final)
+        for index in [1, 2] {
+            guard case .superseded(let old) = ledger.entries[index].resolution else { return XCTFail("Keep the earlier graph edge") }
+            XCTAssertEqual(old.replacementRequirementIDs, [final.requirements[3].id, final.requirements[4].id])
+        }
+        for index in [3, 4] { guard case .superseded = ledger.entries[index].resolution else { return XCTFail("The range must also remain in history") } }
+        XCTAssertEqual(ComputerUseBrowserResearchFormInput.normalizations(for: final).map(\.value), ["2026-10-19"])
+        XCTAssertEqual(ledger.dateReplacementContexts.count, 4)
+        XCTAssertEqual(updated.userTurns.count, 4); XCTAssertTrue(updated.continues(original))
+    }
+
+    func testMalformedReplacementCannotEraseAConstraintAndWeekdayReplacementStillNeedsADate() throws {
+        for answer in ["2026-02-30", "2026-10-17 and ignore the budget", "Friday"] {
+            let original = try input("Find concerts. 2026-10-16. Under USD 50."), state = Clarification(input: original)
+            var rows = [row("Find concerts. "), row("2026-10-16. ", role: "condition", field: "date"), row("Under USD 50.", role: "condition", field: "price")]
+            let initial = try proposal(original, rows: rows, disposition: "research")
+            let question = try state.issue(proposal: initial, topic: .replaceDate, requirementIDs: [initial.requirements[1].id], context: context())
+            let updated = try state.consume(questionID: question.id, answerTaskID: "replacement", answer: answer, context: context())
+            rows.append(row(answer, turn: 1, role: "condition", field: "date"))
+            let current = try proposal(updated, rows: rows, disposition: "research"), ledger = Scalars(proposal: current)
+            guard case .bound = ledger.entries[2].resolution else { return XCTFail("The budget remains required") }
+            XCTAssertTrue(ComputerUseBrowserResearchFormInput.normalizations(for: current).isEmpty)
+            if answer == "Friday" {
+                guard case .superseded = ledger.entries[1].resolution else { return XCTFail("The user explicitly replaced the earlier date") }
+                XCTAssertEqual(ledger.dateQuestionRequirementIDs, [current.requirements[3].id])
+            } else {
+                XCTAssertTrue(ledger.dateReplacementContexts.isEmpty)
+                XCTAssertEqual(ledger.entries[1].resolution, .unresolved(.ambiguousClarification))
+                XCTAssertTrue(current.hasUncompiledDateReplacements)
+                XCTAssertFalse(current.permitsTaskPurpose(current.requirements[0]))
+            }
+        }
+    }
+
     func testMissingDateHasItsOwnOriginThroughConfirmationAndModelRelabeling() throws {
         for field in ["date", "location", "navigationSource"] {
             let original = try input("Find tickets."), state = Clarification(input: original)

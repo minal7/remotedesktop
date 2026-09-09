@@ -4,6 +4,64 @@ import XCTest
 
 @MainActor
 final class ComputerUseBrowserResearchAnswerTests: XCTestCase {
+    func testDriverRequiresExplicitDateReplacementThenChecksTheNewDateAndOriginalBudget() async throws {
+        for (resultDate, price) in [("2026-10-17", "USD 40"), ("2026-10-16", "USD 40"), ("2026-10-17", "USD 60")] {
+            let fixture = try await ResearchAnswerFixture.make(price: price, extra: ("2026-10-16. ", "condition", "date"), resultDate: resultDate)
+            defer { fixture.source.close() }
+            var rows: [[String: Any]] = [
+                ["turn":0, "source":"Find concerts. ", "role":"outcome", "field":"category", "relation":"unspecified", "values":[String]()],
+                ["turn":0, "source":"Under USD 50. ", "role":"condition", "field":"price", "relation":"unspecified", "values":[String]()],
+                ["turn":0, "source":"2026-10-16. ", "role":"condition", "field":"date", "relation":"unspecified", "values":[String]()],
+                ["turn":0, "source":"Do not buy.", "role":"prohibition", "field":"other", "relation":"unspecified", "values":[String]()]]
+            let originalRows = rows
+            fixture.source.goal.select = { _ in try ResearchAnswerFixture.json([
+                "disposition":"clarification", "requirements":originalRows, "question":["topic":"date", "requirements":[2]]]) }
+            let first = try await fixture.source.start()
+            guard case .browserClarificationRequired(let request)? = first else { return XCTFail("Expected the original date question") }
+            let owner = try fixture.source.owner(), original = owner.input
+            let question = try owner.issueQuestion(topic: request.topic, requirementIDs: request.requirementIDs,
+                controllerID: "phone", controllerSessionID: "session")
+            _ = try owner.answerQuestion(questionID: question.id, answerTaskID: "conflicting-date", answer: "2026-10-17",
+                controllerID: "phone", controllerSessionID: "session")
+            rows.append(["turn":1, "source":"2026-10-17", "role":"condition", "field":"navigationSource", "relation":"unspecified", "values":[String]()])
+            let conflictingRows = rows
+            fixture.source.goal.select = { _ in try ResearchAnswerFixture.json([
+                "disposition":"clarification", "requirements":conflictingRows, "question":["topic":"replaceDate", "requirements":[4]]]) }
+            let next = try await fixture.source.driver.continueBrowserResearch(taskID: "conflicting-date", research: owner, tools: fixture.source.tools, progress: { _ in })
+            guard case .browserClarificationRequired(let replacement) = next else { return XCTFail("An ordinary conflict must not silently replace the date") }
+            XCTAssertEqual(replacement.topic, .replaceDate)
+            XCTAssertFalse(fixture.source.browser.hasSession); XCTAssertEqual(fixture.source.server.requestCount, 0)
+            let permission = try owner.issueQuestion(topic: replacement.topic, requirementIDs: replacement.requirementIDs,
+                controllerID: "phone", controllerSessionID: "session")
+            XCTAssertTrue(permission.text.contains("replace the selected date requirement"))
+            XCTAssertEqual(permission.scope.map(\.source), ["2026-10-16. "])
+            let updated = try owner.answerQuestion(questionID: permission.id, answerTaskID: "explicit-replacement", answer: "2026-10-17",
+                controllerID: "phone", controllerSessionID: "session")
+            rows.append(["turn":2, "source":"2026-10-17", "role":"condition", "field":"date", "relation":"unspecified", "values":[String]()])
+            let finalRows = rows
+            fixture.source.goal.select = { _ in try ResearchAnswerFixture.json([
+                "disposition":"research", "requirements":finalRows, "question":["topic":"none", "requirements":[]]]) }
+            let result = try await fixture.source.driver.continueBrowserResearch(taskID: "explicit-replacement", research: owner, tools: fixture.source.tools, progress: { _ in })
+            let qualifies = resultDate == "2026-10-17" && price == "USD 40"
+            if qualifies { guard case .browserResearchAnswer = result else { return XCTFail("The corrected date and unchanged budget should reach answer selection") } }
+            else if case .browserResearchAnswer = result { return XCTFail("Replacement cannot excuse the wrong current date or an excessive price") }
+            let decision = try XCTUnwrap(fixture.inputs.first)
+            XCTAssertEqual(decision.answerCandidateIndices, qualifies ? [0] : [])
+            let context = try ResearchAnswerFixture.object(Data(decision.contextJSON.utf8))
+            let assessment = try XCTUnwrap(context["requirement_assessment"] as? [String: Any])
+            XCTAssertEqual(assessment["version"] as? Int, 13)
+            let candidates = try XCTUnwrap(assessment["candidates"] as? [[String: Any]])
+            let statuses = try XCTUnwrap(candidates.first?["requirements"] as? [String])
+            XCTAssertEqual(statuses[2], "dateRequirementSuperseded"); XCTAssertEqual(statuses[4], "dateRequirementSuperseded")
+            XCTAssertEqual(statuses[5], resultDate == "2026-10-17" ? "quotedValueMatches" : "quotedValueConflicts")
+            XCTAssertEqual(statuses[1], price == "USD 40" ? "quotedValueMatches" : "quotedValueConflicts")
+            if !qualifies { XCTAssertThrowsError(try ComputerUseBrowserLinkProposal.decode(content: #"{"answer":[0]}"#, input: decision)) }
+            XCTAssertTrue(updated.continues(original)); XCTAssertEqual(owner.input, updated)
+            XCTAssertEqual(updated.userTurns, [original.prompt, "2026-10-17", "2026-10-17"])
+            XCTAssertEqual(fixture.source.server.count("/search?q=concerts"), 1)
+        }
+    }
+
     func testSplitPartyRowsShareWholePartyEligibilityInsteadOfPassingIndependently() async throws {
         for capacity in ["2 adults and 1 child", "1 adult and 2 children"] {
             let fixture = try await ResearchAnswerFixture.make(extra: ("2 adults and 1 child. ", "condition", "quantity"), partyCapacity: capacity)

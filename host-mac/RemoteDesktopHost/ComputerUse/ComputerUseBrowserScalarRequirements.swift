@@ -15,11 +15,37 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
     }
     enum Resolution: Equatable, Sendable {
         case bound(Condition), clarification(ClarificationBinding), unresolved(UnresolvedReason)
+        case superseded(DateSupersession)
         /// A complete weekday clause retained from a prior interpretation.
         /// These native source IDs preserve the uncertainty, not a date value.
         case historicalDateAmbiguity([String])
         /// A retained count/comparator still needs a unit before evaluation.
         case historicalQuantityUnit([String])
+    }
+    /// The original source remains in the goal. Only an answer to the explicit
+    /// native replacement question can retire its active date obligation.
+    struct DateSupersession: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+        let id: String
+        let answerTurns: [Int]
+        let replacementRequirementIDs: [String]
+        fileprivate init(input: ComputerUseBrowserGoalInput, requirementID: String, answerTurns: [Int], replacements: [String]) {
+            self.answerTurns = answerTurns; replacementRequirementIDs = replacements
+            id = ComputerUseTaskContract.digest(["browser-date-supersession-v1", input.digest, requirementID]
+                + answerTurns.map(String.init) + replacements)
+        }
+        var description: String { "BrowserDateSupersession(turns: \(answerTurns.count), replacements: \(replacementRequirementIDs.count))" }
+        var debugDescription: String { description }
+    }
+    struct DateReplacementContext: Equatable, Sendable {
+        let requirement: Int
+        let replacements: [Int]
+        let remaining: [Int]
+        let superseded: [Int]
+        let answerTurns: [Int]
+        var context: [String: Any] {
+            ["requirement":requirement, "replacement_requirements":replacements, "remaining_requirements":remaining,
+             "superseded_requirements":superseded, "answer_turns":answerTurns]
+        }
     }
     struct ClarificationBinding: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
         enum Parameter: Equatable, Sendable {
@@ -40,10 +66,15 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
         let answerTurn: Int
         let parameter: Parameter
         let targetRequirementIDs: [String]
-        fileprivate init(input: ComputerUseBrowserGoalInput, turn: Int, parameter: Parameter, targets: [String]) {
+        let supersededDateTargetIDs: [String]
+        let supersedingDateAnswerTurns: [Int]
+        fileprivate init(input: ComputerUseBrowserGoalInput, turn: Int, parameter: Parameter, targets: [String],
+                         supersededDateTargets: [String] = [], supersedingDateTurns: [Int] = []) {
             answerTurn = turn; self.parameter = parameter; targetRequirementIDs = targets
-            id = ComputerUseTaskContract.digest(["browser-scalar-clarification-v2", input.digest,
-                input.clarifications[turn - 1].digest, String(turn)] + parameter.identity + targets)
+            supersededDateTargetIDs = supersededDateTargets; supersedingDateAnswerTurns = supersedingDateTurns
+            id = ComputerUseTaskContract.digest([supersededDateTargets.isEmpty ? "browser-scalar-clarification-v2" : "browser-partly-superseded-date-answer-v1", input.digest,
+                input.clarifications[turn - 1].digest, String(turn)] + parameter.identity + targets
+                + supersededDateTargets + supersedingDateTurns.map(String.init))
         }
         var description: String { "BrowserScalarClarification(turn: \(answerTurn), targets: \(targetRequirementIDs.count))" }
         var debugDescription: String { description }
@@ -293,6 +324,26 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
 
     let proposal: ComputerUseBrowserGoalProposal
     let entries: [Entry]
+    private let dateOrigins: [String: [String]]
+    func hasDateOrigin(_ requirement: ComputerUseBrowserGoalProposal.Requirement) -> Bool { dateOrigins[requirement.id] != nil }
+    var dateReplacementContexts: [DateReplacementContext] {
+        let indices = Dictionary(uniqueKeysWithValues: proposal.requirements.enumerated().map { ($0.element.id, $0.offset) })
+        return entries.enumerated().compactMap { index, entry in
+            switch entry.resolution {
+            case .superseded(let record):
+                return .init(requirement: index, replacements: record.replacementRequirementIDs.compactMap { indices[$0] },
+                    remaining: [], superseded: [], answerTurns: record.answerTurns)
+            case .clarification(let binding) where !binding.supersededDateTargetIDs.isEmpty:
+                return .init(requirement: index, replacements: [], remaining: binding.targetRequirementIDs.compactMap { indices[$0] },
+                    superseded: binding.supersededDateTargetIDs.compactMap { indices[$0] }, answerTurns: binding.supersedingDateAnswerTurns)
+            default: return nil
+            }
+        }
+    }
+    var hasUncompiledDateReplacements: Bool {
+        let applied = Set(dateReplacementContexts.flatMap(\.answerTurns))
+        return proposal.input.clarifications.enumerated().contains { $0.element.topic == .replaceDate && !applied.contains($0.offset + 1) }
+    }
     private let partyGroups: [PartyGroup]
     func partySourceIdentity(for condition: Condition) -> String {
         let span = partyGroups.first(where: { $0.requirementIDs == condition.sourceRequirementIDs })?.span
@@ -336,7 +387,7 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
     var dateQuestionRequirementIDs: [String]? {
         guard let requirement = proposal.requirements.first(where: needsDateDisambiguation) else { return nil }
         if requirement.sourceTurnIndex > 0,
-           proposal.input.clarifications[requirement.sourceTurnIndex - 1].topic == .date {
+           proposal.input.clarifications[requirement.sourceTurnIndex - 1].topic.isDateTopic {
             let selected = proposal.requirements.filter { $0.sourceTurnIndex == requirement.sourceTurnIndex }
             guard selected.count <= 8, permitsDateQuestionScope(selected) else { return nil }
             return selected.map(\.id)
@@ -350,7 +401,7 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
         if needsDateDisambiguation(requirement) { return true }
         guard let index = proposal.requirements.firstIndex(of: requirement), requirement.sourceTurnIndex > 0,
               proposal.input.clarifications.indices.contains(requirement.sourceTurnIndex - 1),
-              proposal.input.clarifications[requirement.sourceTurnIndex - 1].topic == .date,
+              proposal.input.clarifications[requirement.sourceTurnIndex - 1].topic.isDateTopic,
               nativeScalarSourceIDs.contains(requirement.id) else { return false }
         switch entries[index].resolution {
         case .bound(let condition): if case .day = condition.predicate { return true }
@@ -361,6 +412,11 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
     }
 
     func permitsDateQuestionScope(_ selected: [ComputerUseBrowserGoalProposal.Requirement]) -> Bool {
+        guard !selected.contains(where: { requirement in
+            guard let index = proposal.requirements.firstIndex(of: requirement) else { return true }
+            if case .superseded = entries[index].resolution { return true }
+            return false
+        }) else { return false }
         let missing = selected.contains { requirement in
             guard requirement.role == .outcome, let index = proposal.requirements.firstIndex(of: requirement) else { return false }
             switch entries[index].resolution {
@@ -376,7 +432,7 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
         for turn in turns {
             guard proposal.input.clarifications.indices.contains(turn - 1) else { return false }
             let answer = proposal.input.clarifications[turn - 1]
-            guard answer.topic == .date, Self.isNativeDateAnswer(answer.answer, input: proposal.input) else { continue }
+            guard answer.topic.isDateTopic, Self.isNativeDateAnswer(answer.answer, input: proposal.input) else { continue }
             let ranges = selected.filter { $0.sourceTurnIndex == turn }.map {
                 $0.sourceByteOffset..<($0.sourceByteOffset + $0.sourceByteCount)
             }
@@ -385,12 +441,35 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
         return true
     }
 
+    /// Replacement is a separate, visible user decision about one known date
+    /// origin. An outcome, two trip legs or an arbitrary date-labelled fragment
+    /// cannot acquire replacement authority from a model classification.
+    func permitsDateReplacementScope(_ selected: [ComputerUseBrowserGoalProposal.Requirement]) -> Bool {
+        dateReplacementTargets(for: selected) != nil
+    }
+    func dateReplacementTargets(for selected: [ComputerUseBrowserGoalProposal.Requirement]) -> [ComputerUseBrowserGoalProposal.Requirement]? {
+        guard !selected.isEmpty, permitsDateQuestionScope(selected) else { return nil }
+        let groups = selected.compactMap { dateOrigins[$0.id] }
+        guard groups.count == selected.count, Set(groups).count == 1, let targets = groups.first, (1...8).contains(targets.count) else { return nil }
+        let eligible = targets.allSatisfy { id in
+            guard let entry = entries.first(where: { $0.requirementID == id }) else { return false }
+            switch entry.resolution {
+            case .bound(let condition): if case .day = condition.predicate { return true }; return false
+            case .historicalDateAmbiguity, .unresolved(.ambiguousDate), .unresolved(.ambiguousClarification), .unresolved(.contradictoryClarification): return true
+            default: return false
+            }
+        }
+        let requirements = proposal.requirements.filter { targets.contains($0.id) }
+        guard eligible, requirements.count == targets.count, permitsDateQuestionScope(requirements) else { return nil }
+        return requirements
+    }
+
     private func needsDateDisambiguation(_ requirement: ComputerUseBrowserGoalProposal.Requirement) -> Bool {
         guard let index = proposal.requirements.firstIndex(of: requirement),
               let ownSource = proposal.source(of: requirement) else { return false }
         let source: String
         if requirement.sourceTurnIndex > 0, nativeScalarSourceIDs.contains(requirement.id),
-           proposal.input.clarifications[requirement.sourceTurnIndex - 1].topic == .date {
+           proposal.input.clarifications[requirement.sourceTurnIndex - 1].topic.isDateTopic {
             source = proposal.input.userTurns[requirement.sourceTurnIndex]
         } else { source = ownSource }
         guard Self.unqualifiedWeekday(Self.conditionSource(source)) != nil else { return false }
@@ -439,7 +518,7 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
             for (index, answer) in proposal.input.clarifications.enumerated() {
                 let literal: Bool
                 switch answer.topic {
-                case .date: literal = Self.isNativeDateAnswer(answer.answer, input: proposal.input)
+                case .date, .replaceDate: literal = Self.isNativeDateAnswer(answer.answer, input: proposal.input)
                 case .quantity: literal = Self.quantityAnswer(answer.answer) != nil
                 default: literal = Self.parameter(answer.answer, topic: answer.topic) != nil
                 }
@@ -449,9 +528,10 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
             }
         }
         nativeScalarSourceIDs = nativeSources
+        let dates = Self.applyingDateClarifications(proposal, to: Self.applyingPriceClarifications(proposal, to: retained))
+        dateOrigins = dates.origins
         entries = Self.reconcilingClarificationTargets(Self.reconcilingPartyGroups(grouping.groups,
-            entries: Self.applyingQuantityClarifications(proposal,
-                to: Self.applyingDateClarifications(proposal, to: Self.applyingPriceClarifications(proposal, to: retained)))))
+            entries: Self.applyingQuantityClarifications(proposal, to: dates.entries)))
     }
 
     private static func baseEntry(_ requirement: ComputerUseBrowserGoalProposal.Requirement, input: ComputerUseBrowserGoalInput) -> Entry {
@@ -738,10 +818,10 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
     /// already concrete date/range. It cannot replace a different concrete
     /// value, choose between several dates in one broad scope, or discard a
     /// relative-week modifier whose meaning has not been compiled.
-    private static func applyingDateClarifications(_ proposal: ComputerUseBrowserGoalProposal, to original: [Entry]) -> [Entry] {
-        guard proposal.disposition == .research else { return original }
+    private static func applyingDateClarifications(_ proposal: ComputerUseBrowserGoalProposal, to original: [Entry]) -> (entries: [Entry], origins: [String: [String]]) {
+        guard proposal.disposition == .research else { return (original, [:]) }
         var entries = original
-        let answerTurns = Set(proposal.input.clarifications.enumerated().compactMap { $0.element.topic == .date ? $0.offset + 1 : nil })
+        let answerTurns = Set(proposal.input.clarifications.enumerated().compactMap { $0.element.topic.isDateTopic ? $0.offset + 1 : nil })
         let dateIndices = proposal.requirements.indices.filter {
             let requirement = proposal.requirements[$0]
             guard !answerTurns.contains(requirement.sourceTurnIndex) else { return false }
@@ -752,7 +832,20 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
         var previousTargets: [Int: [Int]] = [:]
         var originTurns: [Int: Int] = [:]
         var originGroups: [Int: [Int]] = [:]
-        for (index, answer) in proposal.input.clarifications.enumerated() where answer.topic == .date {
+        for index in dateIndices {
+            let known: Bool
+            switch original[index].resolution {
+            case .bound(let condition): if case .day = condition.predicate { known = true } else { known = false }
+            case .historicalDateAmbiguity: known = true
+            case .unresolved(.ambiguousDate):
+                let requirement = proposal.requirements[index]
+                known = [.unspecified, .equal].contains(requirement.relation)
+                    && proposal.source(of: requirement).map { Self.weekdayClause(Self.conditionSource($0)) } == true
+            default: known = false
+            }
+            if known { originGroups[index] = [index] }
+        }
+        for (index, answer) in proposal.input.clarifications.enumerated() where answer.topic.isDateTopic {
             let turn = index + 1
             let answerIndices = proposal.requirements.indices.filter { proposal.requirements[$0].sourceTurnIndex == turn }
             var targets: Set<Int> = [], possibleTargets: Set<Int> = [], invalidScope = false
@@ -783,6 +876,60 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
             guard !invalidScope, !(hasMissingDetailScope && !targets.isEmpty) else { unresolved(.clarificationScope); continue }
             let range = Self.answeredDate(answer.answer, input: proposal.input)
             guard Self.isNativeDateAnswer(answer.answer, input: proposal.input) else { unresolved(.ambiguousClarification); continue }
+            let ordered = targets.sorted()
+            // Keep the selected origin even after a literal conflict. An
+            // explicit replacement can then address that same unit; malformed
+            // scopes and compound answers do not gain this lineage.
+            if !ordered.isEmpty, ordered.allSatisfy({ originGroups[$0] != nil }) { previousTargets[turn] = ordered }
+            if answer.topic == .replaceDate {
+                let groups = ordered.compactMap { originGroups[$0] }
+                guard groups.count == ordered.count, Set(groups).count == 1, let group = groups.first,
+                      group == ordered, !hasMissingDetailScope, !answerIndices.isEmpty,
+                      !ordered.contains(where: { if case .superseded = entries[$0].resolution { return true }; return false }),
+                      Self.coversDateAnswer(answerIndices.map {
+                    let row = proposal.requirements[$0]; return row.sourceByteOffset..<(row.sourceByteOffset + row.sourceByteCount)
+                }, turn: turn, input: proposal.input) else { unresolved(.clarificationScope); continue }
+                let targetIDs = Set(ordered.map { original[$0].requirementID })
+                let replacements = answerIndices.map { original[$0].requirementID }
+                let priorTurns = Set(previousTargets.filter { $0.key < turn && Set($0.value) == Set(ordered) }.map(\.key))
+                for row in entries.indices where proposal.requirements[row].sourceTurnIndex < turn {
+                    // One earlier confirmation may have covered two separate
+                    // dates. Replacing one must retain its application to the
+                    // other. Superseded references form a retained graph;
+                    // later replacements do not flatten away another branch.
+                    if case .clarification(let binding) = entries[row].resolution, case .date = binding.parameter,
+                       !targetIDs.isDisjoint(with: binding.targetRequirementIDs) {
+                        let removed = binding.targetRequirementIDs.filter(targetIDs.contains)
+                        let remaining = binding.targetRequirementIDs.filter { !targetIDs.contains($0) }
+                        let superseded = binding.supersededDateTargetIDs + removed
+                        let turns = binding.supersedingDateAnswerTurns + [turn]
+                        let resolution: Resolution
+                        if remaining.isEmpty {
+                            resolution = .superseded(.init(input: proposal.input, requirementID: original[row].requirementID,
+                                answerTurns: turns, replacements: superseded))
+                        } else {
+                            resolution = .clarification(.init(input: proposal.input, turn: binding.answerTurn, parameter: binding.parameter,
+                                targets: remaining, supersededDateTargets: superseded, supersedingDateTurns: turns))
+                        }
+                        entries[row] = .init(requirementID: original[row].requirementID, resolution: resolution)
+                        continue
+                    }
+                    if case .superseded = entries[row].resolution { continue }
+                    guard targets.contains(row) || priorTurns.contains(proposal.requirements[row].sourceTurnIndex) else { continue }
+                    entries[row] = .init(requirementID: original[row].requirementID,
+                        resolution: .superseded(.init(input: proposal.input, requirementID: original[row].requirementID,
+                            answerTurns: [turn], replacements: replacements)))
+                }
+                for row in answerIndices {
+                    let resolution: Resolution = range.map { value -> Resolution in .bound(.init(inputDigest: proposal.input.digest,
+                        requirementID: original[row].requirementID, predicate: .day(value), sourceRequirementIDs: replacements)) }
+                        ?? .historicalDateAmbiguity([])
+                    entries[row] = .init(requirementID: original[row].requirementID, resolution: resolution)
+                    originTurns[row] = turn; originGroups[row] = answerIndices
+                }
+                previousTargets[turn] = answerIndices
+                continue
+            }
             if targets.isEmpty && onlyMissingDetailScopes {
                 // The authenticated, whole date answer supplies its own
                 // origin. It must not become a property of a broad outcome,
@@ -814,7 +961,6 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
             }
             guard !targets.isEmpty else { unresolved(.clarificationScope); continue }
             guard let range else { unresolved(.ambiguousClarification); continue }
-            let ordered = targets.sorted()
             let compatible = ordered.allSatisfy { target in
                 let requirement = proposal.requirements[target]
                 guard let ownSource = proposal.source(of: requirement) else { return false }
@@ -855,7 +1001,15 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
             for row in answerIndices { entries[row] = .init(requirementID: original[row].requirementID, resolution: .clarification(binding)) }
             previousTargets[turn] = ordered
         }
-        return entries
+        var origins = Dictionary(uniqueKeysWithValues: originGroups.map { index, group in
+            (original[index].requirementID, group.map { original[$0].requirementID })
+        })
+        for (turn, targets) in previousTargets where !targets.isEmpty && targets.allSatisfy({ originGroups[$0] != nil }) {
+            for row in proposal.requirements.indices where proposal.requirements[row].sourceTurnIndex == turn {
+                origins[original[row].requirementID] = targets.map { original[$0].requirementID }
+            }
+        }
+        return (entries, origins)
     }
 
     /// A scoped quantity answer fills missing units, confirms a known count,

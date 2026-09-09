@@ -91,7 +91,8 @@ struct ComputerUseBrowserFormProposal: Equatable, Sendable, CustomStringConverti
                           field.control.options.contains(where: { $0.id == id && !$0.disabled && !$0.hidden }),
                           let reference = item["requirement"] else { throw invalid }
                     let index = try requirementIndex(reference, input: input), requirement = input.interpretation.requirements[index]
-                    guard requirement.role == .outcome || requirement.role == .condition else { throw invalid }
+                    guard requirement.role == .outcome || requirement.role == .condition,
+                          input.interpretation.permitsTaskPurpose(requirement) else { throw invalid }
                     payload = .choice(id: id, requirementIndex: index)
                 } else { throw invalid }
                 if let expected = input.fieldIntentRequirements[alias] {
@@ -134,7 +135,8 @@ struct ComputerUseBrowserFormProposal: Equatable, Sendable, CustomStringConverti
                       let reference = value["requirement"] else { throw invalid }
                 _ = try input.field(for: alias)
                 let index = try requirementIndex(reference, input: input)
-                guard [.outcome, .condition, .prohibition].contains(input.interpretation.requirements[index].role) else { throw invalid }
+                guard [.outcome, .condition, .prohibition].contains(input.interpretation.requirements[index].role),
+                      input.interpretation.permitsTaskPurpose(input.interpretation.requirements[index]) else { throw invalid }
                 if let required = preserved.first(where: { $0.field == alias }) {
                     guard try required.source.indices(in: input.interpretation).contains(index) else { throw invalid }
                 } else { preserved.append(.init(field: alias, source: try .init(index: index, interpretation: input.interpretation))) }
