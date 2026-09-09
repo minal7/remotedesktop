@@ -900,8 +900,8 @@ enum ComputerUseBrowserDOM {
         return Object.values(value).every(n => Number.isFinite(n) && Math.abs(n) <= 10000000)
           && value.width > 0 && value.height > 0 && value.contentWidth >= 0 && value.contentHeight >= 0 ? value : null;
       }
-      function extendFields(scope, requirements, repairableIDs, preparation = false) {
-        if (!fieldScope || fieldScope.form !== scope.form || !formRequirementsCurrent(requirements, repairableIDs, null, preparation)) return reply('stale');
+      function extendFields(scope, requirements, repairableIDs, preparation = false, checkingSelection = true) {
+        if (!fieldScope || fieldScope.form !== scope.form || !formRequirementsCurrent(requirements, repairableIDs, null, preparation, checkingSelection)) return reply('stale');
         const requiredIDs = new Set(requirements.fields.map(field => field.id));
         // Earlier explicit preservation may be outside the submitted form.
         // Keep its actual object even when the new proposal omits the control.
@@ -945,14 +945,15 @@ enum ComputerUseBrowserDOM {
         return reply('ok', found);
       }
       function revisePreparedFields(scope, args) {
-        const requirements = args.requirements;
+        const requirements = args.requirements, retainedPreparation = args.retainedPreparation === true;
+        if (args.retainedPreparation !== undefined && !retainedPreparation) return reply('unsupported');
         if (typeof args.revisionID !== 'string' || !/^[a-f0-9]{64}$/.test(args.revisionID)
             || typeof args.scopeDigest !== 'string' || !/^[a-f0-9]{64}$/.test(args.scopeDigest)
             || !Array.isArray(scope.selected) || args.repairableFieldIDs !== undefined
-            || !formRequirementsCurrent(requirements, [], null, true)) return reply('stale');
+            || !formRequirementsCurrent(requirements, [], null, true, !retainedPreparation)) return reply('stale');
         const shape = JSON.stringify([args.formID,args.scopeDigest,args.preservedControlIDs,args.selectedControlIDs,
           requirements.digest,requirements.inputLedgerID,requirements.preservationID ?? null,requirements.inputOperationIDs,
-          requirements.fields.map(field => [field.id,field.value,field.mustSubmit,field.label,field.selectionStart,field.selectionEnd,field.choices])]);
+          requirements.fields.map(field => [field.id,field.value,field.mustSubmit,field.label,field.selectionStart,field.selectionEnd,field.choices])].concat(retainedPreparation ? ['retained-preparation-v1'] : []));
         const existing = preparedFieldRevisions.get(args.revisionID);
         if (existing) {
           if (existing.shape !== shape) return reply('stale');
@@ -967,7 +968,7 @@ enum ComputerUseBrowserDOM {
         // be read. Reusing its ID cannot silently take another baseline.
         const record = {shape,result:reply('stale'),fields:null,snapshots:null,bindings:null};
         preparedFieldRevisions.set(args.revisionID, record);
-        const result = extendFields(scope, requirements, [], true);
+        const result = extendFields(scope, requirements, [], true, !retainedPreparation);
         record.result = result;
         if (result.status === 'ok') {
           record.fields = result.fields; record.snapshots = result.fields.map(field => JSON.stringify(field));
@@ -2138,9 +2139,22 @@ struct ComputerUseBrowserFormEvidence: Equatable, Sendable, CustomStringConverti
     }
     /// Historical correspondence only. Current-page validity still requires
     /// fresh native binding; matching labels cannot bridge different adapters.
-    func retainsCapturedFields(from original: Self) -> Bool {
+    func retainsCapturedFields(from original: Self, ignoringCaret: Bool = false) -> Bool {
         adapterID == original.adapterID && page.document == original.page.document && page.documentID == original.page.documentID
-            && original.fields.allSatisfy { old in fields.contains { $0.control.id == old.control.id && $0.editable == old.editable } }
+            && original.fields.allSatisfy { old in fields.contains { $0.control.id == old.control.id
+                && Self.matchesCapturedField($0.editable, old.editable, ignoringCaret: ignoringCaret) } }
+    }
+    fileprivate static func matchesSnapshot(_ current: ComputerUseTextSnapshot, _ original: ComputerUseTextSnapshot,
+                                           ignoringCaret: Bool) -> Bool {
+        guard ignoringCaret else { return current == original }
+        return current.targetID == original.targetID && current.value.utf8.elementsEqual(original.value.utf8)
+            && current.isEditable == original.isEditable && current.isSecure == original.isSecure
+    }
+    fileprivate static func matchesCapturedField(_ current: ComputerUseTextField, _ original: ComputerUseTextField,
+                                                ignoringCaret: Bool) -> Bool {
+        guard ignoringCaret else { return current == original }
+        return current.label.utf8.elementsEqual(original.label.utf8) && current.choices == original.choices
+            && matchesSnapshot(current.snapshot, original.snapshot, ignoringCaret: ignoringCaret)
     }
     var description: String { "BrowserFormEvidence(fields: \(fields.count))" }
     var debugDescription: String { description }
@@ -2406,17 +2420,20 @@ final class ComputerUseBrowserTextTarget {
             throw ComputerUseBrowserError.pageChanged
         }
         let requirements = try preparedFormRequirements(from: original)
-        let revisionID = ComputerUseTaskContract.digest(["browser-prepared-field-revision-v1", requirements.digest, scopeDigest])
+        let revisionID = ComputerUseTaskContract.digest([original.isRetainOnly ? "browser-prepared-field-revision-v2" : "browser-prepared-field-revision-v1", requirements.digest, scopeDigest])
         do {
-            let reply = try await browser.callDOM(.reviseFormFields, arguments: ["documentID":documentID,"snapshotID":evidence.page.id,
+            var arguments: [String: Any] = ["documentID":documentID,"snapshotID":evidence.page.id,
                 "formID":formID,"preservedControlIDs":controlIDs,"selectedControlIDs":selectedControlIDs,
-                "scopeDigest":scopeDigest,"revisionID":revisionID,"requirements":requirements.domArguments], document: document, retaining: capture)
+                "scopeDigest":scopeDigest,"revisionID":revisionID,"requirements":requirements.domArguments]
+            if original.isRetainOnly { arguments["retainedPreparation"] = true }
+            let reply = try await browser.callDOM(.reviseFormFields, arguments: arguments, document: document, retaining: capture)
             try validate()
             guard reply.documentID == documentID, reply.inputLedgerID == inputLedgerID,
                   let fields = try decodeDiscoveredFields(reply) else { throw ComputerUseBrowserError.pageChanged }
             let previous = targets, replacement = Dictionary(uniqueKeysWithValues: fields.map { ($0.field.snapshot.targetID,$0.nativeID) })
             guard original.evidence.fields.allSatisfy({ old in fields.contains {
-                $0.field == old.editable && previous[$0.field.snapshot.targetID] == $0.nativeID
+                ComputerUseBrowserFormEvidence.matchesCapturedField($0.field, old.editable, ignoringCaret: original.isRetainOnly)
+                    && previous[$0.field.snapshot.targetID] == $0.nativeID
             } }) else { throw ComputerUseBrowserError.pageChanged }
             targets = replacement
             return fields.map { $0.field }
@@ -2431,6 +2448,34 @@ final class ComputerUseBrowserTextTarget {
     /// objects, clear input receipts, focus, edit or submit a control.
     func bindFields(_ fields: [ComputerUseTextField], to evidence: ComputerUseBrowserPageEvidence,
                     retaining capture: ComputerUseBrowserDOMReadCapture? = nil) async throws -> ComputerUseBrowserFormEvidence {
+        try await bindFields(fields, to: evidence, retaining: capture, ignoringCaret: false)
+    }
+
+    /// Only a sealed retain-only review can omit incidental caret equality.
+    /// Keep the original captured fields; fresh native inspection still checks
+    /// their earlier criteria origins and current values before returning.
+    func bindRetainedFields(_ fields: [ComputerUseTextField], to evidence: ComputerUseBrowserPageEvidence,
+                            review: ComputerUseBrowserEffectScopeReview, after previous: ComputerUseBrowserResearchFormContinuation,
+                            retaining capture: ComputerUseBrowserDOMReadCapture? = nil) async throws -> ComputerUseBrowserFormEvidence {
+        try Task.checkCancellation()
+        guard review.permitsReadOnlyRetention(after: previous, on: evidence) else { throw ComputerUseBrowserError.pageChanged }
+        return try await joiningCompletion {
+            let bound = try await bindFields(fields, to: evidence, retaining: capture, ignoringCaret: true)
+            try Task.checkCancellation()
+            guard let scope = review.formScope, scope.fieldIntents.filter({ $0.disposition == .retain }).allSatisfy({ intent in
+                bound.fields.contains { field in field.control.id == intent.controlID
+                    && previous.verifiedTargetIDs.contains(field.editable.snapshot.targetID)
+                    && previous.finalValues[field.editable.snapshot.targetID]?.utf8.elementsEqual(field.editable.snapshot.value.utf8) == true }
+            }) else { throw ComputerUseBrowserError.pageChanged }
+            let changed = try await inspectChangedCriteria(page: evidence, after: previous)
+            try Task.checkCancellation()
+            guard changed.isEmpty else { throw ComputerUseBrowserResearchFormError.inputChanged }
+            return bound
+        }
+    }
+
+    private func bindFields(_ fields: [ComputerUseTextField], to evidence: ComputerUseBrowserPageEvidence,
+                            retaining capture: ComputerUseBrowserDOMReadCapture?, ignoringCaret: Bool) async throws -> ComputerUseBrowserFormEvidence {
         try validate()
         guard evidence.document == document, let documentID, evidence.documentID == documentID,
               (1...16).contains(fields.count), fields.count == targets.count,
@@ -2455,7 +2500,8 @@ final class ComputerUseBrowserTextTarget {
                   ["text", "search", "url", "tel", "email", "textarea", "date", "datetime-local", "month", "week", "time", "number", "select"].contains(control.kind),
                   control.label.utf8.elementsEqual(expected.label.utf8),
                   observed.label.utf8.elementsEqual(expected.label.utf8), observed.choices == expected.choices,
-                  try snapshot(observed, targetID: targetID) == expected.snapshot else { throw ComputerUseBrowserError.pageChanged }
+                  try ComputerUseBrowserFormEvidence.matchesSnapshot(snapshot(observed, targetID: targetID), expected.snapshot,
+                      ignoringCaret: ignoringCaret) else { throw ComputerUseBrowserError.pageChanged }
             if control.kind == "select" {
                 let choices = control.options.map { ComputerUseTextField.Choice(id: $0.id, label: $0.label, disabled: $0.disabled, hidden: $0.hidden) }
                 guard expected.choices == choices else {

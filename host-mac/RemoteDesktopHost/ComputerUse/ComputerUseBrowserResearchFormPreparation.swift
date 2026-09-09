@@ -156,6 +156,7 @@ struct ComputerUseBrowserFormPreparationBaseline: Equatable, Sendable, CustomStr
     private let previous: ComputerUseBrowserResearchFormContinuation?
     let reviewContext: ComputerUseBrowserFormPreparationReviewContext
     private let obligationsContext: ComputerUseBrowserFormPreparationReviewContext
+    private let ignoresCapturedCaret: Bool
     var preservedSources: [ComputerUseBrowserFormPreservationSource] { obligationsContext.preservedSources }
     let digest: String
     var capturedControlIDs: Set<String> { Set(evidence.fields.map { $0.control.id }) }
@@ -172,13 +173,13 @@ struct ComputerUseBrowserFormPreparationBaseline: Equatable, Sendable, CustomStr
         guard interpretation.input.continues(input.interpretation.input) else { throw ComputerUseBrowserResearchFormError.inputChanged }
         let requirements = try target.preparedFormRequirements(from: input)
         evidence = input.evidence; goal = input.interpretation.input; previous = input.previous; self.reviewContext = reviewContext
-        obligationsContext = obligations
-        digest = ComputerUseTaskContract.digest(["browser-form-preparation-baseline-v2", requirements.digest, reviewContext.digest, obligations.digest])
+        obligationsContext = obligations; ignoresCapturedCaret = input.isRetainOnly
+        digest = ComputerUseTaskContract.digest([input.isRetainOnly ? "browser-form-preparation-baseline-v3" : "browser-form-preparation-baseline-v2", requirements.digest, reviewContext.digest, obligations.digest])
     }
 
     func validate(interpretation: ComputerUseBrowserGoalProposal, evidence: ComputerUseBrowserFormEvidence,
                   formID: String?, review: ComputerUseBrowserEffectScopeReview?, previous: ComputerUseBrowserResearchFormContinuation?) throws {
-        guard interpretation.input.continues(goal), evidence.retainsCapturedFields(from: self.evidence),
+        guard interpretation.input.continues(goal), evidence.retainsCapturedFields(from: self.evidence, ignoringCaret: ignoresCapturedCaret),
               formID == reviewContext.formID, previous == self.previous, let review,
               review.matches(interpretation: interpretation, evidence: evidence.page) else { throw ComputerUseBrowserResearchFormError.inputChanged }
         try reviewContext.validate(interpretation: interpretation, evidence: evidence.page)
@@ -320,7 +321,10 @@ final class ComputerUseBrowserResearchFormPreparation {
             }
             guard let fields else { throw ComputerUseBrowserResearchFormError.invalidInput }
             if evidence == nil {
-                let bound = try await target.bindFields(fields, to: current, retaining: bindingCapture)
+                let bound: ComputerUseBrowserFormEvidence
+                if let previous, review.permitsReadOnlyRetention(after: previous, on: current) {
+                    bound = try await target.bindRetainedFields(fields, to: current, review: review, after: previous, retaining: bindingCapture)
+                } else { bound = try await target.bindFields(fields, to: current, retaining: bindingCapture) }
                 guard bound.fields.count == fields.count, fields.allSatisfy({ field in
                     bound.fields.contains { $0.editable == field }
                 }) else { throw ComputerUseBrowserResearchFormError.inputChanged }

@@ -135,6 +135,20 @@ struct ComputerUseBrowserEffectScopeReview: Equatable, Sendable, CustomStringCon
         let body: [String: Any] = ["read_results":true,"read_controls":readControls.map { ["control":$0.controlID,"requirement":$0.requirementIndex] as [String: Any] }]
         return try .decode(content: String(decoding: JSONSerialization.data(withJSONObject: body, options: [.sortedKeys]), as: UTF8.self), input: input)
     }
+    /// This sealed review can bind earlier criteria without making caret
+    /// position an input precondition. It grants no edit or new value origin.
+    func permitsReadOnlyRetention(after previous: ComputerUseBrowserResearchFormContinuation,
+                                  on current: ComputerUseBrowserPageEvidence) -> Bool {
+        guard let scope = formScope, let formID = scope.formID,
+              scope.fieldIntents.contains(where: { $0.disposition == .retain }),
+              !scope.fieldIntents.contains(where: { $0.disposition == .edit }),
+              previous.pendingEdits.isEmpty, previous.formID == formID,
+              interpretation.input.continues(previous.goal),
+              previous.document == evidence.document, previous.documentID == evidence.documentID,
+              current.document == evidence.document, current.documentID == evidence.documentID else { return false }
+        return current.page.matchesFormObservation(evidence.page)
+    }
+
     func matches(goal: ComputerUseBrowserGoalInput, evidence: ComputerUseBrowserPageEvidence) -> Bool {
         interpretation.input == goal && self.evidence == evidence
     }

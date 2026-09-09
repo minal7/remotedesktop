@@ -668,7 +668,10 @@ final class ComputerUseBrowserResearchFormStage: ComputerUseBrowserFormStage {
         if let binding = input.nativePreservation { try await target.validateFormPreservation(binding); try checkCurrent() }
         let original = input.evidence.page
         let current = try await restoreOriginalPage(original, review: input.scopeReview, browser: browser, checkCurrent: checkCurrent)
-        let fields = try await target.bindFields(input.evidence.fields.map(\.editable), to: current)
+        let fields: ComputerUseBrowserFormEvidence
+        if input.isRetainOnly, let review = input.scopeReview, let previous = input.previous {
+            fields = try await target.bindRetainedFields(input.evidence.fields.map(\.editable), to: current, review: review, after: previous)
+        } else { fields = try await target.bindFields(input.evidence.fields.map(\.editable), to: current) }
         try checkCurrent()
         guard fields.fields == input.evidence.fields else { throw ComputerUseBrowserResearchFormError.inputChanged }
         try browser.validateSourceDocument(original.document)
