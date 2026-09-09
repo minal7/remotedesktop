@@ -246,7 +246,7 @@ enum ComputerUseBrowserCompositeState {
               list_disabled:disabled(list), list_hidden:hidden(list), input_value:inputValue,
               display_text:displayText, active_option:active(element), list_active_option:active(list), options});
             if (!small(value,8192)) throw 0;
-            return {state:{controlID:control.id, kind:'composite', value}, references, members:seen};
+            return {state:{controlID:control.id, kind:'composite', value}, references, members:seen, list, optionElements};
           } catch (_) { return {state:{controlID:control.id, kind:'unavailable'}, references:[], members:[]}; }
         }
     """#

@@ -1030,7 +1030,11 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         guard result.popupBinding == nil || command == .preparePopup,
               result.popupReceipt == nil || command == .popupReceipt,
               result.popupControls == nil || command == .popupCandidates else { throw ComputerUseBrowserError.unsupportedDocument }
-        if [.popupCandidates, .preparePopup, .validatePopup, .openPopup, .popupReceipt, .retireUnsentPopup].contains(command) {
+        guard result.optionSelectionBinding == nil || command == .prepareOptionSelection,
+              result.optionSelectionReceipt == nil || command == .optionSelectionReceipt,
+              result.selectionPreservedControls == nil || command == .prepareOptionSelection else { throw ComputerUseBrowserError.unsupportedDocument }
+        if [.popupCandidates, .preparePopup, .validatePopup, .openPopup, .popupReceipt, .retireUnsentPopup,
+            .prepareOptionSelection, .validateOptionSelection, .selectOption, .optionSelectionReceipt, .retireUnsentOptionSelection].contains(command) {
             guard result.fields == nil, result.page == nil, result.scroll == nil, result.formQuery == nil,
                   result.formBindings == nil, result.changedFieldIDs == nil else { throw ComputerUseBrowserError.unsupportedDocument }
         }
@@ -1041,7 +1045,8 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         if result.status == "authentication-required" {
             guard result.fields == nil, result.page == nil, result.scroll == nil, result.formQuery == nil,
                   result.formBindings == nil, result.changedFieldIDs == nil, result.popupBinding == nil, result.popupReceipt == nil,
-                  result.popupControls == nil else { throw ComputerUseBrowserError.unsupportedDocument }
+                  result.popupControls == nil, result.optionSelectionBinding == nil, result.optionSelectionReceipt == nil,
+                  result.selectionPreservedControls == nil else { throw ComputerUseBrowserError.unsupportedDocument }
             throw ComputerUseBrowserError.authenticationRequired
         }
         return result

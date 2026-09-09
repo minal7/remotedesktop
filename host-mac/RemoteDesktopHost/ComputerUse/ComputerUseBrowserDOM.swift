@@ -6,6 +6,7 @@ enum ComputerUseBrowserDOMCommand: String {
     case scrollViewport, viewportScrollReceipt, validatePageLink, finishPendingChange, continueUnsentInput
     case prepareFormQuery, validateFormQuery, bindPageFields, formFields, extendFormFields, inspectFormRequirements, retireUnsentInputs
     case popupCandidates, preparePopup, validatePopup, openPopup, popupReceipt, retireUnsentPopup
+    case prepareOptionSelection, validateOptionSelection, selectOption, optionSelectionReceipt, retireUnsentOptionSelection
 }
 
 /// Private adapter output. A GET query can contain server state or user input;
@@ -530,6 +531,9 @@ struct ComputerUseBrowserDOMReply: Decodable {
     let popupBinding: ComputerUseBrowserPopupBinding?
     let popupReceipt: ComputerUseBrowserPopupReceipt?
     let popupControls: [String]?
+    let optionSelectionBinding: ComputerUseBrowserOptionSelectionBinding?
+    let optionSelectionReceipt: ComputerUseBrowserOptionSelectionReceipt?
+    let selectionPreservedControls: [String]?
 }
 
 /// Fixed host code in a separate WebKit script world. Page text, model output
@@ -580,6 +584,7 @@ enum ComputerUseBrowserDOM {
         return false;
       };
       function retire(records) {
+        retireSelectionRecords(records);
         if (records.length > 10000) { for (const binding of bindings.values()) binding.valid = false; lastPageSnapshot = null; formQueries.clear(); return; }
         for (const record of records) {
           for (const [id, query] of formQueries) {
@@ -615,7 +620,7 @@ enum ComputerUseBrowserDOM {
       function synchronize() {
         retire(observer.takeRecords());
         if (root !== doc.documentElement) {
-          if (root) { documentID = nonce(); inputLedgerID = nonce(); bindings.clear(); operations.clear(); pendingChanges.clear(); retiredInputs.clear(); fieldScope = null; viewportOperations.clear(); formQueries.clear(); popupPlans.clear(); popupOperations.clear(); popupRetirements.clear(); lastPageSnapshot = null; }
+          if (root) { documentID = nonce(); inputLedgerID = nonce(); bindings.clear(); operations.clear(); pendingChanges.clear(); retiredInputs.clear(); fieldScope = null; viewportOperations.clear(); formQueries.clear(); popupPlans.clear(); popupOperations.clear(); popupRetirements.clear(); selectionPlans.clear(); selectionOperations.clear(); selectionRetirements.clear(); selectionPins = new WeakMap(); lastPageSnapshot = null; }
           root = doc.documentElement;
         }
       }
@@ -1118,6 +1123,7 @@ enum ComputerUseBrowserDOM {
             if (!scoped) return unavailable;
             const result = compositeState(element, control);
             details.references = result.references;
+            details.composite = result.state.kind === 'composite' ? result : null;
             if (result.state.kind === 'composite') for (const member of result.members) compositeMembers.add(member);
             else omittedControls = true;
             return result.state;
@@ -1240,7 +1246,8 @@ enum ComputerUseBrowserDOM {
           if (compositeRole === 'listbox') representedLists.add(element);
           const signature = declaredRole || compositeRole ? JSON.stringify(['role','name','autocomplete','aria-label','aria-labelledby','aria-describedby','aria-controls','aria-owns',
             'aria-details','aria-haspopup','aria-expanded','aria-orientation','aria-roledescription','aria-invalid','aria-busy'].map(key => [key, element.getAttribute(key)])) : null;
-          controlBindings.set(control.id, {element, form: declaredRole ? null : element.form, metadata: control, signature, references:details.references});
+          controlBindings.set(control.id, {element, form: declaredRole ? null : element.form, metadata: control, signature,
+            references:details.references,state,composite:details.composite || null});
         }
         for (const option of pendingOptions) {
           if (compositeMembers.has(option)) continue;
@@ -1379,6 +1386,7 @@ enum ComputerUseBrowserDOM {
         } catch (_) { return 'uncertain'; }
       }
       \#(ComputerUseBrowserPopupScript.source)
+      \#(ComputerUseBrowserOptionSelectionScript.source)
       function run(command, args) {
         // Read only the identity of this loaded Document, before inspecting
         // any form metadata/value or draining target mutation records. Root
@@ -1389,6 +1397,8 @@ enum ComputerUseBrowserDOM {
         }
         synchronize();
         if (!root || doc !== document) return reply('stale');
+        const selectionHistory = selectionHistoricalCommand(command,args);
+        if (selectionHistory) return selectionHistory;
         if (command === 'popupReceipt') return popupHistorical(args);
         if (command === 'retireUnsentPopup') {
           if (args.documentID !== documentID || typeof args.operationID !== 'string' || !/^[a-f0-9]{64}$/.test(args.operationID)) return reply('stale');
@@ -1441,7 +1451,7 @@ enum ComputerUseBrowserDOM {
               || JSON.stringify(readViewport()) !== JSON.stringify(operation.receipt.after)) return reply('uncertain');
           return {...reply('viewport-scroll-confirmed'), scroll: operation.receipt};
         }
-        if (['pageSnapshot', 'observeResearchControls', 'validatePageSnapshot', 'scrollViewport', 'validatePageLink', 'prepareFormQuery', 'validateFormQuery', 'bindPageFields', 'formFields', 'extendFormFields', 'inspectFormRequirements', 'popupCandidates', 'preparePopup', 'validatePopup', 'openPopup'].includes(command)) {
+        if (['pageSnapshot', 'observeResearchControls', 'validatePageSnapshot', 'scrollViewport', 'validatePageLink', 'prepareFormQuery', 'validateFormQuery', 'bindPageFields', 'formFields', 'extendFormFields', 'inspectFormRequirements', 'popupCandidates', 'preparePopup', 'validatePopup', 'openPopup', 'prepareOptionSelection', 'validateOptionSelection', 'selectOption'].includes(command)) {
           const status = authenticationStatus();
           if (status) { lastPageSnapshot = null; return reply(status); }
           if (doc.readyState !== 'complete') return reply('stale');
@@ -1473,6 +1483,8 @@ enum ComputerUseBrowserDOM {
                     || previous.signature !== binding.signature;
                 })) return reply('stale');
             if (command === 'validatePageSnapshot') return reply('page-current');
+            const selectionCurrent = selectionCurrentCommand(command,args,controls);
+            if (selectionCurrent) return selectionCurrent;
             if (command === 'popupCandidates') return {...reply('popup-candidates'),
               popupControls:Array.from(controls).filter(([id,binding]) => popupOpening(binding.element,binding.metadata)).map(([id]) => id)};
             if (command === 'preparePopup') {
