@@ -168,15 +168,21 @@ struct ComputerUseBrowserFormProposal: Equatable, Sendable, CustomStringConverti
         return sources
     }
 
-    func pendingEdit(for edit: Edit) throws -> ComputerUseBrowserFormPendingEdit {
-        let field = try input.field(for: edit.field)
+    /// Completion keeps the pending entry's original purposes alongside the
+    /// current payload's sources, whether it required input or observation.
+    func resolvedSources(for edit: Edit) throws -> [ComputerUseBrowserFormSource] {
         var sources = try self.sources(for: edit)
         if let resumption = resumptions.first(where: { $0.field == edit.field }),
            let index = input.pendingEditAliases.firstIndex(of: resumption.pending),
            let previous = input.previous {
             for source in previous.pendingEdits[index].sources where !sources.contains(source) { sources.append(source) }
         }
-        return .init(label: field.control.label, kind: field.control.kind, sources: sources)
+        return sources
+    }
+
+    func pendingEdit(for edit: Edit) throws -> ComputerUseBrowserFormPendingEdit {
+        let field = try input.field(for: edit.field)
+        return .init(label: field.control.label, kind: field.control.kind, sources: try resolvedSources(for: edit))
     }
 
     /// An exact edit contract for native representability/preflight and later
@@ -240,7 +246,6 @@ struct ComputerUseBrowserFormStatePlan: Equatable, Sendable, CustomStringConvert
     init(input: ComputerUseBrowserResearchFormInput, proposal: ComputerUseBrowserFormProposal, verifyingTargetIDs: Set<String>? = nil) throws {
         try proposal.validate(for: input)
         guard input.scopeReview?.formScope != nil, input.selectedFormID != nil,
-              input.previous?.pendingEdits.isEmpty != false, proposal.resumptions.isEmpty,
               let contract = try proposal.textContract(for: input), (1...8).contains(contract.steps.count) else {
             throw ComputerUseBrowserResearchFormError.invalidInput
         }
@@ -283,7 +288,11 @@ struct ComputerUseBrowserFormExecutionPlan: Sendable {
         guard let original = try proposal.textContract(for: input, stageID: stageID) else {
             throw ComputerUseBrowserResearchFormError.invalidProposal
         }
-        let eligible = input.scopeReview != nil && input.previous?.pendingEdits.isEmpty != false && proposal.resumptions.isEmpty
+        // A published pending suffix has already been proven unsent and
+        // revoked under its original ledger. decode() requires every pending
+        // entry to map to a fresh source-bound criterion. That criterion can
+        // be verified without manufacturing a new input receipt.
+        let eligible = input.scopeReview != nil
         let count = eligible ? original.steps.prefix { $0.before.utf8.elementsEqual($0.after.utf8) }.count : 0
         observedEdits = Array(proposal.edits.prefix(count))
         verificationOnly = count == proposal.edits.count

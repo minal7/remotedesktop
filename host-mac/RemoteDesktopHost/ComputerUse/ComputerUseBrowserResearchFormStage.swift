@@ -97,7 +97,7 @@ struct ComputerUseBrowserResearchFormContinuation: Equatable, Sendable, CustomSt
         var proofs = previous?.stateProofsByTarget ?? [:]
         for edit in verifiedEdits {
             let targetID = try input.field(for: edit.field).editable.snapshot.targetID
-            sources[targetID] = try stage.proposal.sources(for: edit)
+            sources[targetID] = try stage.proposal.resolvedSources(for: edit)
             if actualEdits.contains(targetID) { editedSources[targetID] = sources[targetID]; proofs.removeValue(forKey: targetID) }
             else if let proof { proofs[targetID] = proof }
             else { throw ComputerUseBrowserResearchFormStage.Failure.invalidStage }
@@ -145,7 +145,7 @@ struct ComputerUseBrowserResearchFormReceipt: Equatable, Sendable, CustomStringC
 /// journal alone and remains an explicit recovery limitation.
 @MainActor
 final class ComputerUseBrowserResearchFormStage {
-    enum Failure: Error, Equatable { case invalidStage, busy, retired, notVerified, retirementPending }
+    enum Failure: Error, Equatable { case invalidStage, busy, retired, notVerified, retirementPending, valueCheckpointRequired }
     struct Retirement: Equatable, Sendable {
         let stageID: String
         let index: Int
@@ -233,6 +233,15 @@ final class ComputerUseBrowserResearchFormStage {
             }, apply: { _, _ in throw ComputerUseTextTaskError.invalidPlan },
             applyWithIdentity: { [self] dispatch in
                 try check(); try browser.validateSourceDocument(input.evidence.page.document)
+                if input.scopeReview != nil, dispatch.edit.mode == .replaceAll,
+                   let index = contract.steps.firstIndex(where: { $0.targetID == dispatch.edit.targetID }), index > 0,
+                   dispatch.expected.value.utf8.elementsEqual(dispatch.edit.text.utf8) {
+                    // This is a fresh read at the field's ordered position,
+                    // after earlier input was verified. Do not dispatch a
+                    // redundant event. The driver must prove/revoke the unsent
+                    // suffix and reprepare it; this signal is not a receipt.
+                    throw Failure.valueCheckpointRequired
+                }
                 try await target.apply(dispatch)
                 try check(); try browser.validateSourceDocument(input.evidence.page.document)
             }, didDispatchInput: { [self] operationID in

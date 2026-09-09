@@ -32,6 +32,8 @@ No build, typecheck, assertion execution, app/browser/computer-use launch, infer
 
 ## Remaining repair sequence
 
+The subsequent [ordered-checkpoint source repair](BROWSER_ORDERED_VALUE_CHECKPOINT_REVIEW.md) implements later matching decisions through native prefix revocation and fresh pending preparation. The account below remains the historical boundary of this leading-prefix checkpoint; execution is still pending.
+
 1. Continue mixed stages with fresh decisions at later field positions. Do not classify a future field from its initial value. Retain the original target, desired source-bound value, completed criteria, exact current observation, selected input/observation branch and corresponding journal identity before any effect. Recover the same branch after cancellation; never replace an uncertain input with a later value observation. Preserve prefix recovery when an earlier edit changes a later field.
 2. Handle prefixes consisting only of observations when later input becomes uncertain, retain-only scopes, and work explicitly superseded by later instructions. Preserve earlier purposes and uncertainty; do not fabricate an input to fit a receipt interface.
 3. Continue preservation timing, dependent-control and document/process recovery, login/account handoff and independent whole-task/result verification in the full [repair TODO](../../../TODO.md).

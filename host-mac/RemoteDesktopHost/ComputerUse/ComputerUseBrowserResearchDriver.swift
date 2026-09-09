@@ -480,7 +480,8 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                 || error as? ComputerUseTextTaskError == .uncertainEffect
                 || error as? ComputerUseTextTaskError == .incompleteOutcome
                 || error as? ComputerUseTextEditError == .deliveryUncertain
-                || error as? ComputerUseBrowserResearchFormStage.Failure == .retirementPending else { return false }
+                || error as? ComputerUseBrowserResearchFormStage.Failure == .retirementPending
+                || error as? ComputerUseBrowserResearchFormStage.Failure == .valueCheckpointRequired else { return false }
         if try await owner.retainPendingFormPrefix() != nil { return true }
         return try await owner.retirePendingUnsentForm() != nil
     }
