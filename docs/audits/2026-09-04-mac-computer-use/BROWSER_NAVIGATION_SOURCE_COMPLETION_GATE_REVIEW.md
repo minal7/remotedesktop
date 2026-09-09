@@ -2,6 +2,8 @@
 
 Source checkpoint: 2026-09-09. Parent: `a7b1f93`. Source repair and authored regressions only. Compilation, assertions, inference, app/browser execution and live qualification remain paused.
 
+Follow-up: the [native dispatch-history foundation](BROWSER_NAVIGATION_DISPATCH_HISTORY_REVIEW.md) retains per-attempt policy, origins and terminal outcomes, including across same-task Stop/reclaim. It does not yet qualify complete routes or replace this completion gate. The counts below describe this earlier checkpoint.
+
 ## First-principles finding
 
 “Report results from these sites” constrains evidence. “Visit only these sites” constrains actions over time. Their proofs differ. A permitted final document, the latest installed source policy and a model's description of earlier visits cannot establish the actual route taken by the automation.

@@ -183,6 +183,82 @@ struct ComputerUseBrowserNavigationReceipt: Equatable, Sendable, CustomStringCon
     var debugDescription: String { description }
 }
 
+/// Native dispatch history, not a complete route or a source-compliance proof.
+/// Only the owning browser can construct or update it. Origins omit paths,
+/// queries, fragments and credentials; this value never enters planner JSON.
+struct ComputerUseBrowserNavigationDispatchHistory: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    enum Outcome: String, Sendable { case pending, documentCommitted, failed, sourceBlocked, ownershipLost, timedOut }
+    struct Attempt: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+        let id: UUID
+        let operationID: String
+        let sessionID: UUID
+        let ownershipEpoch: UUID
+        let generation: UInt64
+        let policy: ComputerUseBrowserSourcePolicy?
+        let requestedOrigin: ComputerUseBrowserSourceOrigin?
+        let historySourceOperationID: String?
+        fileprivate(set) var committedOrigin: ComputerUseBrowserSourceOrigin?
+        fileprivate(set) var outcome: Outcome
+
+        fileprivate init(operationID: String, sessionID: UUID, ownershipEpoch: UUID, generation: UInt64,
+                         policy: ComputerUseBrowserSourcePolicy?, requestedURL: URL, historySourceOperationID: String?) {
+            id = UUID(); self.operationID = operationID; self.sessionID = sessionID; self.ownershipEpoch = ownershipEpoch
+            self.generation = generation; self.policy = policy; self.historySourceOperationID = historySourceOperationID
+            requestedOrigin = try? .init(requestedURL); committedOrigin = nil; outcome = .pending
+        }
+        var description: String { "BrowserNavigationDispatch(outcome: \(outcome.rawValue))" }
+        var debugDescription: String { description }
+    }
+
+    let taskID: String
+    let contextID: String
+    /// A different claim's history was discarded before this ledger began.
+    /// Its absence must not be interpreted as a pristine browser/task history.
+    let beganAfterAnotherClaim: Bool
+    /// Stop/reclaim boundary only; absence does not prove that no manual
+    /// pause, handback, scripted navigation or other transition occurred.
+    fileprivate(set) var hasClaimBoundary = false
+    fileprivate(set) var overflowed = false
+    fileprivate(set) var attempts: [Attempt] = []
+    private let ledgerID = UUID()
+    private var revision = UUID()
+
+    fileprivate init(taskID: String, contextID: String, beganAfterAnotherClaim: Bool) {
+        self.taskID = taskID; self.contextID = contextID; self.beganAfterAnotherClaim = beganAfterAnotherClaim
+    }
+    var identity: String {
+        ComputerUseTaskContract.digest(["browser-navigation-dispatch-history-v1", taskID, contextID,
+            ledgerID.uuidString, revision.uuidString])
+    }
+    fileprivate mutating func recordClaimBoundary() {
+        hasClaimBoundary = true
+        advanceRevision()
+    }
+    fileprivate mutating func begin(operationID: String, sessionID: UUID, ownershipEpoch: UUID, generation: UInt64,
+                                    policy: ComputerUseBrowserSourcePolicy?, requestedURL: URL,
+                                    historySourceOperationID: String?) -> UUID? {
+        advanceRevision()
+        // The same task may be claimed again after Stop. Preserve its earlier
+        // attempts without allowing repeated claims to grow this log forever.
+        guard attempts.count < 64 else { overflowed = true; return nil }
+        let attempt = Attempt(operationID: operationID, sessionID: sessionID, ownershipEpoch: ownershipEpoch,
+            generation: generation, policy: policy, requestedURL: requestedURL, historySourceOperationID: historySourceOperationID)
+        attempts.append(attempt)
+        return attempt.id
+    }
+    fileprivate mutating func finish(_ id: UUID?, outcome: Outcome, committedURL: URL? = nil) {
+        guard let id, let index = attempts.firstIndex(where: { $0.id == id }), attempts[index].outcome == .pending else { return }
+        advanceRevision()
+        attempts[index].outcome = outcome
+        attempts[index].committedOrigin = committedURL.flatMap { try? .init($0) }
+    }
+    private mutating func advanceRevision() {
+        revision = UUID()
+    }
+    var description: String { "BrowserNavigationDispatchHistory(attempts: \(attempts.count), overflowed: \(overflowed))" }
+    var debugDescription: String { description }
+}
+
 enum ComputerUseBrowserError: Error, LocalizedError, Equatable {
     case observedNavigationRetired
     case invalidURL, busy, ownershipLost, pageChanged, navigationFailed, deadlineExceeded, closed, unsupportedDocument, pageEvidenceUnavailable, documentUnresponsive, windowNotActive, authenticationRequired, signInWindowOpen, handbackContextLost, viewportScrollUnavailable, viewportScrollUncertain, linkNavigationUnavailable, observedNavigationUnavailable, observedNavigationUncertain, formQueryUnavailable, formQueryInvalid, sourceNotAllowed
@@ -246,6 +322,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     }
     private var historyReceipts: [String: HistoryReceipt] = [:]
     private var navigationAttemptIDs: Set<String> = []
+    private var navigationDispatchLog: ComputerUseBrowserNavigationDispatchHistory?
     private var retiredNavigationOperations: [String: String] = [:]
     private struct ObservedNavigationAttempt {
         let payloadDigest: String
@@ -303,6 +380,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         let generation: UInt64
         let operationID: String
         let requestedURL: URL
+        let sourceAttemptID: UUID?
         let continuation: CheckedContinuation<ComputerUseBrowserDocument, Error>
         var navigation: WKNavigation?
         var receivedSuccessfulResponse = false
@@ -368,6 +446,12 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         guard pending == nil, pendingDOM == nil, observedNavigation == nil else { throw ComputerUseBrowserError.busy }
         guard mayAct(), !taskID.isEmpty else { throw ComputerUseBrowserError.ownershipLost }
         if self.taskID != taskID {
+            if navigationDispatchLog?.taskID == taskID {
+                navigationDispatchLog?.recordClaimBoundary()
+            } else {
+                navigationDispatchLog = .init(taskID: taskID, contextID: contextID,
+                    beganAfterAnotherClaim: navigationDispatchLog != nil)
+            }
             ownershipEpoch = UUID()
             self.taskID = taskID
             sourcePolicy = nil
@@ -1157,6 +1241,16 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         navigationAttemptIDs.contains(operationID) || receipts[operationID] != nil || observedNavigationAttempts[operationID] != nil
     }
 
+    /// Read a value snapshot under current ownership. A missing configured
+    /// policy, failed attempt or claim boundary remains explicit. This API
+    /// certifies neither redirect coverage nor absence of other navigation.
+    func navigationDispatchHistory(taskID: String) throws -> ComputerUseBrowserNavigationDispatchHistory {
+        guard hasOwnership(taskID: taskID), let navigationDispatchLog, navigationDispatchLog.taskID == taskID else {
+            throw ComputerUseBrowserError.ownershipLost
+        }
+        return navigationDispatchLog
+    }
+
     func currentDocument(taskID: String) -> ComputerUseBrowserDocument? {
         guard hasOwnership(taskID: taskID), pending == nil, let document,
               document.generation == generation, browser?.isLoading == false,
@@ -1242,6 +1336,12 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         navigationAttemptIDs.insert(operationID)
         sessionHasNavigationActivity = true
         generation &+= 1
+        let historySourceOperationID: String?
+        if let historyTarget, case .history(let operationID) = historyTarget.source { historySourceOperationID = operationID }
+        else { historySourceOperationID = nil }
+        let sourceAttemptID = navigationDispatchLog?.begin(operationID: operationID, sessionID: browserSessionID,
+            ownershipEpoch: ownershipEpoch, generation: generation, policy: capturedPolicy,
+            requestedURL: url, historySourceOperationID: historySourceOperationID)
         document = nil
         loadedPageIdentity = nil
         observedActivePage = nil
@@ -1253,8 +1353,8 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             do {
                 let result: ComputerUseBrowserDocument = try await withCheckedThrowingContinuation { continuation in
                     pending = PendingNavigation(id: id, taskID: taskID, generation: generation,
-                        operationID: operationID, requestedURL: url, continuation: continuation)
-                    if let historyTarget, case .history(let sourceOperation) = historyTarget.source { pending?.historyOperationID = sourceOperation }
+                        operationID: operationID, requestedURL: url, sourceAttemptID: sourceAttemptID, continuation: continuation)
+                    pending?.historyOperationID = historySourceOperationID
                     pending?.timeout = Task { [weak self, navigationTimeout] in
                         do { try await Task.sleep(for: navigationTimeout) } catch { return }
                         self?.failPending(id: id, error: .deadlineExceeded)
@@ -1307,6 +1407,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         closeSignInWindow(restoreParent: false)
         if let pending { failPending(id: pending.id, error: .ownershipLost) }
         if let pendingDOM { interruptDOM(id: pendingDOM.id, error: ComputerUseBrowserError.ownershipLost) }
+        if taskID != nil { navigationDispatchLog?.recordClaimBoundary() }
         taskID = nil
         sourcePolicy = nil
         ownershipEpoch = UUID()
@@ -1555,6 +1656,14 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
 
     private func failPending(id: UUID, error: ComputerUseBrowserError) {
         guard let pending, pending.id == id else { return }
+        let outcome: ComputerUseBrowserNavigationDispatchHistory.Outcome
+        switch error {
+        case .sourceNotAllowed: outcome = .sourceBlocked
+        case .ownershipLost: outcome = .ownershipLost
+        case .deadlineExceeded: outcome = .timedOut
+        default: outcome = .failed
+        }
+        navigationDispatchLog?.finish(pending.sourceAttemptID, outcome: outcome)
         self.pending = nil
         pending.timeout?.cancel()
         pending.restoration?.cancel()
@@ -1752,6 +1861,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
 
     private func finishPendingNavigation(_ pending: PendingNavigation, url: URL) {
         guard self.pending?.id == pending.id else { return }
+        navigationDispatchLog?.finish(pending.sourceAttemptID, outcome: .documentCommitted, committedURL: url)
         let receipt = ComputerUseBrowserDocument(contextID: contextID, taskID: pending.taskID,
             generation: generation, operationID: pending.operationID, requestedURL: pending.requestedURL, committedURL: url)
         self.pending = nil

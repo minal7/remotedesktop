@@ -15,14 +15,21 @@ final class ComputerUseBrowserResearchHistoryTests: XCTestCase {
         XCTAssertEqual(back.mode, .back)
         let returned = try await owner.revisitAfterReading(back)
         XCTAssertEqual(returned.document.committedURL, fixture.base.appendingPathComponent("search").appending(queryItems: [.init(name: "q", value: "concerts")]))
+        let afterBack = try fixture.browser.navigationDispatchHistory(taskID: owner.taskID)
+        XCTAssertEqual(afterBack.attempts.last?.historySourceOperationID, back.operationID)
+        XCTAssertEqual(afterBack.attempts.last?.outcome, .documentCommitted)
         let search = try await owner.readCandidates(), forward = try XCTUnwrap(search.historyOptions.first { $0.visit == 1 })
         XCTAssertEqual(forward.mode, .forward, "A real history traversal preserves the forward entry")
         let resumed = try await owner.revisitAfterReading(forward)
         XCTAssertEqual(resumed.document.committedURL, fixture.base.appendingPathComponent("details"))
+        let afterForward = try fixture.browser.navigationDispatchHistory(taskID: owner.taskID)
+        XCTAssertEqual(afterForward.attempts.last?.historySourceOperationID, forward.operationID)
         let calls = fixture.server.count("/details")
         let replay = try await owner.resumeHistoryNavigation()
         XCTAssertEqual(replay, resumed)
         XCTAssertEqual(fixture.server.count("/details"), calls)
+        XCTAssertEqual(try fixture.browser.navigationDispatchHistory(taskID: owner.taskID), afterForward,
+            "Replaying a confirmed history result cannot create another native dispatch")
         let reread = try await owner.readCandidates(), toSearch = try XCTUnwrap(reread.historyOptions.first { $0.mode == .back })
         _ = try await owner.revisitAfterReading(toSearch)
         let again = try await owner.readCandidates(), oldForward = try XCTUnwrap(again.historyOptions.first { $0.mode == .forward })
@@ -37,6 +44,11 @@ final class ComputerUseBrowserResearchHistoryTests: XCTestCase {
         XCTAssertEqual(fixture.server.count("/details"), before + 1)
         XCTAssertEqual(owner.input, original)
         XCTAssertEqual(owner.confirmedNavigationHistory.map(\.kind), [.search, .resultLink, .revisit, .revisit, .revisit, .revisit])
+        let native = try fixture.browser.navigationDispatchHistory(taskID: owner.taskID)
+        XCTAssertEqual(native.attempts.count, owner.confirmedNavigationHistory.count + 1,
+            "The direct native branch must remain visible even though it has no owner-confirmed visit")
+        XCTAssertTrue(native.attempts.contains { $0.operationID == "branch-to-beta" && $0.historySourceOperationID == nil })
+        XCTAssertNil(native.attempts.last?.historySourceOperationID, "An evicted-page GET is not a native Back/Forward restoration")
     }
 
     func testActionAndResultContractsBindOfferedVisitsAndCountTheWholeRequest() async throws {
