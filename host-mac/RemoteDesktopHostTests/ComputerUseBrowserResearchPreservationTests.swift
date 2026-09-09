@@ -532,6 +532,78 @@ final class ComputerUseBrowserResearchPreservationTests: XCTestCase {
         }
     }
 
+    func testRevisionHistoryReplyRequiresExactIdentityAndHistoricalFields() throws {
+        let body: [String: Any] = ["status":"ok", "documentID":String(repeating: "a", count: 32),
+            "inputLedgerID":String(repeating: "b", count: 32), "recoveredRevisionID":String(repeating: "c", count: 64),
+            "fields":[["id":"e1", "label":"Query", "value":"old", "selectionStart":3, "selectionEnd":3]]]
+        let source = try ResearchAnswerFixture.json(body)
+        XCTAssertEqual(try ComputerUseOwnedBrowser.decodeDOMReply(source, command: .inspectPreparedRevision).fields?.first?.value, "old")
+        for command in [ComputerUseBrowserDOMCommand.reviseFormFields, .formFields, .extendFormFields, .inspectFormRequirements, .edit] {
+            XCTAssertThrowsError(try ComputerUseOwnedBrowser.decodeDOMReply(source, command: command))
+        }
+        for replacement: [String: Any] in [["recoveredRevisionID":NSNull()], ["recoveredRevisionID":"bad"],
+            ["inputLedgerID":NSNull()], ["inputLedgerID":"bad"], ["fields":[]], ["fields":NSNull()],
+            ["status":"stale"], ["status":"authentication-required"], ["changedFieldIDs":[]], ["formBindings":[]],
+            ["popupControls":[]], ["selectionPreservedControls":[]], ["uncapturedRevisionID":String(repeating: "c", count: 64)]] {
+            XCTAssertThrowsError(try ComputerUseOwnedBrowser.decodeDOMReply(ResearchAnswerFixture.json(
+                body.merging(replacement) { _, new in new }), command: .inspectPreparedRevision))
+        }
+        let absent = body.merging(["status":"revision-not-captured", "fields":NSNull(),
+            "uncapturedRevisionID":String(repeating: "c", count: 64)]) { _, new in new }
+        XCTAssertEqual(try ComputerUseOwnedBrowser.decodeDOMReply(ResearchAnswerFixture.json(absent), command: .inspectPreparedRevision).status, "revision-not-captured")
+        XCTAssertThrowsError(try ComputerUseOwnedBrowser.decodeDOMReply(ResearchAnswerFixture.json(
+            absent.merging(["uncapturedRevisionID":String(repeating: "d", count: 64)]) { _, new in new }), command: .inspectPreparedRevision))
+    }
+
+    func testFailedRevisionKeepsItsOriginalAttemptWhenHistoryIsReconciled() async throws {
+        let fixture = try await ControlStateFixture(body: "<p>Metadata only</p>")
+        defer { fixture.close() }
+        let documentID = String(repeating: "a", count: 32), ledger = String(repeating: "b", count: 32), revision = String(repeating: "c", count: 64)
+        let arguments: [String: Any] = ["revisionID":revision, "snapshotID":"first", "selectedControlIDs":["c1"]]
+        let capture = try ComputerUseBrowserDOMReadCapture(command: .reviseFormFields, document: fixture.document)
+        try capture.begin(command: .reviseFormFields, arguments: arguments, document: fixture.document)
+        capture.finish(.failure(ComputerUseBrowserError.pageChanged))
+        XCTAssertTrue(try capture.requiresRevisionReconciliation(arguments: arguments, document: fixture.document))
+        let changed = arguments.merging(["selectedControlIDs":["c2"]]) { _, new in new }
+        XCTAssertThrowsError(try capture.requiresRevisionReconciliation(arguments: changed, document: fixture.document))
+        let reply = try ComputerUseOwnedBrowser.decodeDOMReply(ResearchAnswerFixture.json([
+            "status":"ok", "documentID":documentID, "inputLedgerID":ledger, "recoveredRevisionID":revision,
+            "fields":[["id":"e1", "label":"Query", "value":"old", "selectionStart":3, "selectionEnd":3]]]), command: .inspectPreparedRevision)
+        XCTAssertThrowsError(try capture.reconcileRevision(reply, arguments: changed, document: fixture.document, documentID: documentID, inputLedgerID: ledger))
+        XCTAssertThrowsError(try capture.reconcileRevision(reply, arguments: arguments, document: fixture.document, documentID: documentID, inputLedgerID: documentID))
+        try capture.reconcileRevision(reply, arguments: arguments, document: fixture.document, documentID: documentID, inputLedgerID: ledger)
+        XCTAssertFalse(capture.needsRevisionReconciliation); XCTAssertTrue(capture.didStart)
+        capture.finish(.failure(ComputerUseBrowserError.closed))
+        let retained = try capture.retainedReply(command: .reviseFormFields,
+            arguments: arguments.merging(["snapshotID":"fresh"]) { _, new in new }, document: fixture.document)
+        XCTAssertEqual(retained?.fields?.first?.value, "old")
+        XCTAssertFalse(capture.revisionWasNotCaptured(document: fixture.document, documentID: documentID, inputLedgerID: ledger))
+        XCTAssertThrowsError(try capture.reconcileRevision(reply, arguments: arguments, document: fixture.document, documentID: documentID, inputLedgerID: ledger))
+        XCTAssertThrowsError(try capture.begin(command: .reviseFormFields, arguments: arguments, document: fixture.document))
+    }
+
+    func testRevisionHistoryCannotOverwritePendingSuccessfulOrAuthenticationCaptures() async throws {
+        let fixture = try await ControlStateFixture(body: "<p>Metadata only</p>")
+        defer { fixture.close() }
+        let documentID = String(repeating: "a", count: 32), ledger = String(repeating: "b", count: 32), revision = String(repeating: "c", count: 64)
+        let arguments: [String: Any] = ["revisionID":revision]
+        let reply = try ComputerUseOwnedBrowser.decodeDOMReply(ResearchAnswerFixture.json([
+            "status":"revision-not-captured", "documentID":documentID, "inputLedgerID":ledger,
+            "uncapturedRevisionID":revision, "recoveredRevisionID":revision]), command: .inspectPreparedRevision)
+        for state in ["unstarted","pending","stale","completed","authentication"] {
+            let capture = try ComputerUseBrowserDOMReadCapture(command: .reviseFormFields, document: fixture.document)
+            if state != "unstarted" { try capture.begin(command: .reviseFormFields, arguments: arguments, document: fixture.document) }
+            if state == "stale" { capture.finish(.success(try ComputerUseOwnedBrowser.decodeDOMReply(
+                ResearchAnswerFixture.json(["status":"stale", "documentID":documentID]), command: .reviseFormFields))) }
+            if state == "completed" { capture.finish(.success(try ComputerUseOwnedBrowser.decodeDOMReply(
+                ResearchAnswerFixture.json(["status":"ok", "documentID":documentID, "inputLedgerID":ledger,
+                    "fields":[["id":"e1", "label":"Query", "value":"old", "selectionStart":3, "selectionEnd":3]]]), command: .reviseFormFields))) }
+            if state == "authentication" { capture.finish(.failure(ComputerUseBrowserError.authenticationRequired)) }
+            XCTAssertFalse(capture.needsRevisionReconciliation)
+            XCTAssertThrowsError(try capture.reconcileRevision(reply, arguments: arguments, document: fixture.document, documentID: documentID, inputLedgerID: ledger))
+        }
+    }
+
     func testLaterPreparationResumesEachCapturedReadWithItsOriginalParent() async throws {
         for interrupted in [ComputerUseBrowserDOMCommand.extendFormFields, .bindPageFields, .prepareFormPreservation, .validateFormPreservation] {
             let fixture = try await make(category: true)
@@ -1132,6 +1204,125 @@ final class ComputerUseBrowserResearchPreservationTests: XCTestCase {
         XCTAssertFalse(frame.target.revisionWasNotCaptured(completed))
         XCTAssertFalse(frame.target.revisionWasNotCaptured(later))
         XCTAssertEqual(fixture.state.commands.filter { $0 == .reviseFormFields }.count, 2)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 0)
+    }
+
+    func testReconciledRevisionReturnsItsOriginalFieldsWithoutRecapture() async throws {
+        for changed in [false, true] {
+            let fixture = try await make(category: true, mutation: "document.querySelector('select').value='concerts';")
+            defer { fixture.close() }
+            let (_, frame, input) = try await standalonePreparation(fixture)
+            let (capture, _, reply) = try await lostRevisionCallback(fixture, frame: frame, input: input)
+            XCTAssertEqual(reply?.status, "ok")
+            if changed { try await release(fixture) }
+            let fields = try await revise(fixture, frame: frame, input: input, capture: capture)
+            let category = try XCTUnwrap(fields.first { $0.label == "Category" })
+            XCTAssertEqual(category.choices?.first { $0.id == category.snapshot.value }?.label, "All")
+            XCTAssertFalse(capture.needsRevisionReconciliation); XCTAssertTrue(capture.didStart)
+            let retained = try await revise(fixture, frame: frame, input: input, capture: capture)
+            XCTAssertEqual(retained, fields)
+            let page = try await frame.restoreForReview(browser: fixture.browser, checkCurrent: {})
+            if changed { await expectFailure { _ = try await frame.target.bindFields(fields, to: page) } }
+            else { _ = try await frame.target.bindFields(fields, to: page) }
+            XCTAssertEqual(fixture.state.commands.filter { $0 == .reviseFormFields }.count, 1)
+            XCTAssertEqual(fixture.state.commands.filter { $0 == .inspectPreparedRevision }.count, 1)
+            XCTAssertEqual(fixture.state.commands.filter { $0 == .formFields }.count, 1)
+            XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 0)
+        }
+    }
+
+    func testRevisionHistoryReconcilesAnExplicitPreCaptureRejection() async throws {
+        let fixture = try await make(category: true, mutation: "document.getElementById('query').value='changed';")
+        defer { fixture.close() }
+        let (_, frame, input) = try await standalonePreparation(fixture)
+        try await release(fixture)
+        let (capture, _, reply) = try await lostRevisionCallback(fixture, frame: frame, input: input)
+        XCTAssertEqual(reply?.status, "revision-not-captured")
+        XCTAssertFalse(frame.target.revisionWasNotCaptured(capture))
+        await expectFailure { _ = try await revise(fixture, frame: frame, input: input, capture: capture) }
+        XCTAssertTrue(frame.target.revisionWasNotCaptured(capture)); XCTAssertFalse(capture.needsRevisionReconciliation)
+        await expectFailure { _ = try await revise(fixture, frame: frame, input: input, capture: capture) }
+        XCTAssertEqual(frame.preparedInput, input)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .reviseFormFields }.count, 1)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .inspectPreparedRevision }.count, 1)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 0)
+    }
+
+    func testRevisionHistoryCannotReconstructMissingSupersededOrUnpreservedCaptures() async throws {
+        for state in ["missing","superseded","preservation"] {
+            let fixture = try await make(category: true, mutation: "document.getElementById('reference').value='changed';")
+            defer { fixture.close() }
+            let (_, frame, input) = try await standalonePreparation(fixture)
+            let (capture, _, _) = try await lostRevisionCallback(fixture, frame: frame, input: input, dispatching: state != "missing")
+            if state == "superseded" { _ = try await revise(fixture, frame: frame, input: input, purpose: "later-reviewed-capture") }
+            if state == "preservation" { try await release(fixture) }
+            let attempts = fixture.state.commands.filter { $0 == .reviseFormFields }.count
+            await expectFailure { _ = try await revise(fixture, frame: frame, input: input, capture: capture) }
+            XCTAssertTrue(capture.needsRevisionReconciliation)
+            XCTAssertFalse(frame.target.revisionWasNotCaptured(capture))
+            XCTAssertEqual(frame.preparedInput, input)
+            XCTAssertEqual(fixture.state.commands.filter { $0 == .reviseFormFields }.count, attempts)
+            XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 0)
+        }
+    }
+
+    func testRevisionHistoryRequiresTheEntireOriginalRequest() async throws {
+        let fixture = try await make(category: true)
+        defer { fixture.close() }
+        let (_, frame, input) = try await standalonePreparation(fixture)
+        let (capture, arguments, _) = try await lostRevisionCallback(fixture, frame: frame, input: input)
+        let page = try await frame.restoreForReview(browser: fixture.browser, checkCurrent: {})
+        var current = arguments; current["snapshotID"] = page.page.id
+        for replacement: [String: Any] in [["scopeDigest":String(repeating: "d", count: 64)], ["selectedControlIDs":[]],
+            ["requirements":["digest":"changed-private-requirements"]], ["unexpected":true]] {
+            let changed = current.merging(replacement) { _, new in new }
+            let rejected = try await fixture.browser.callDOM(.inspectPreparedRevision, arguments: changed, document: page.document)
+            XCTAssertEqual(rejected.status, "stale"); XCTAssertNil(rejected.fields); XCTAssertNil(rejected.recoveredRevisionID)
+        }
+        let fields = try await revise(fixture, frame: frame, input: input, capture: capture)
+        XCTAssertEqual(Set(fields.map(\.label)), ["Query","Category"])
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .reviseFormFields }.count, 1)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 0)
+    }
+
+    func testPartialNativeRevisionFailureCannotRecaptureAFieldAfterItBecomesReadable() async throws {
+        let mutation = "document.getElementById('city').value='x'.repeat(1048577);fetch('/signal').then(()=>{document.getElementById('city').value='';fetch('/restored');});"
+        let fixture = try await make(category: true, city: true, mutation: mutation)
+        defer { fixture.close() }
+        _ = try await fixture.start()
+        configureMixed(fixture, editing: ["Query"], deferring: ["Category","City"])
+        let action = try await fixture.owner().planNextAction(using: fixture.actions)
+        let frame = try ComputerUseBrowserResearchFormPreparation(action: action, browser: fixture.browser)
+        let input = try await frame.prepare(browser: fixture.browser, checkCurrent: {})
+        try await release(fixture)
+        let (capture, _, reply) = try await lostRevisionCallback(fixture, frame: frame, input: input, selecting: ["City"])
+        XCTAssertEqual(reply?.status, "limit")
+        try await releaseSecondSignal(fixture)
+        await expectFailure { _ = try await revise(fixture, frame: frame, input: input, capture: capture, selecting: ["City"]) }
+        XCTAssertTrue(capture.needsRevisionReconciliation); XCTAssertFalse(frame.target.revisionWasNotCaptured(capture))
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .reviseFormFields }.count, 1)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .inspectPreparedRevision }.count, 1)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .formFields }.count, 1)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 0)
+    }
+
+    func testCancelledHistoricalRevisionReadDoesNotReleaseItsFailedCapture() async throws {
+        let fixture = try await make(category: true)
+        defer { fixture.close() }
+        let (_, frame, input) = try await standalonePreparation(fixture)
+        let (capture, _, _) = try await lostRevisionCallback(fixture, frame: frame, input: input)
+        var operation: Task<[ComputerUseTextField], Error>?
+        fixture.state.onCommand = { command in
+            guard command == .inspectPreparedRevision else { return }; fixture.state.onCommand = nil; operation?.cancel()
+        }
+        operation = Task { @MainActor in try await self.revise(fixture, frame: frame, input: input, capture: capture) }
+        let pending = try XCTUnwrap(operation)
+        await expectFailure { _ = try await pending.value }
+        XCTAssertTrue(capture.didStart); XCTAssertTrue(capture.needsRevisionReconciliation)
+        let fields = try await revise(fixture, frame: frame, input: input, capture: capture)
+        XCTAssertEqual(Set(fields.map(\.label)), ["Query","Category"])
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .reviseFormFields }.count, 1)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .inspectPreparedRevision }.count, 2)
         XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 0)
     }
 
@@ -5509,6 +5700,30 @@ final class ComputerUseBrowserResearchPreservationTests: XCTestCase {
         let retained = try capture ?? .init(command: .reviseFormFields, document: page.document)
         return try await frame.target.reviseFields(in: frame.formID, page: page, preserving: scope.editablePreservedControlIDs,
             selecting: selected, scopeDigest: ComputerUseTaskContract.digest([purpose]), from: input, retaining: retained)
+    }
+
+    /// Execute the actual native initial revision, then inject a terminal
+    /// callback failure into its host capture instead of delivering the result.
+    /// The request mirrors the v1 physical preparation fixture, with no repair.
+    private func lostRevisionCallback(_ fixture: ResearchDriverFixture, frame: ComputerUseBrowserResearchFormPreparation,
+                                      input: ComputerUseBrowserResearchFormInput, dispatching: Bool = true, selecting labels: [String] = ["Category"]) async throws
+        -> (ComputerUseBrowserDOMReadCapture, [String: Any], ComputerUseBrowserDOMReply?) {
+        let page = try await frame.restoreForReview(browser: fixture.browser, checkCurrent: {})
+        let scope = try XCTUnwrap(input.scopeReview?.formScope)
+        let requirements = try frame.target.preparedFormRequirements(from: input)
+        let scopeDigest = ComputerUseTaskContract.digest(["first-reviewed-scope"])
+        let revisionID = ComputerUseTaskContract.digest(["browser-prepared-field-revision-v1",requirements.digest,scopeDigest])
+        let selected = try labels.map { label in try XCTUnwrap(page.page.controls.first { $0.label == label }?.id) }
+        let arguments: [String: Any] = ["documentID":page.documentID,"snapshotID":page.page.id,"formID":frame.formID,
+            "preservedControlIDs":scope.editablePreservedControlIDs,"selectedControlIDs":selected,
+            "scopeDigest":scopeDigest,"revisionID":revisionID,"requirements":requirements.domArguments]
+        let capture = try ComputerUseBrowserDOMReadCapture(command: .reviseFormFields, document: page.document)
+        try capture.begin(command: .reviseFormFields, arguments: arguments, document: page.document)
+        let reply: ComputerUseBrowserDOMReply?
+        if dispatching { reply = try await fixture.browser.callDOM(.reviseFormFields, arguments: arguments, document: page.document) }
+        else { reply = nil }
+        capture.finish(.failure(ComputerUseBrowserError.pageChanged))
+        return (capture, arguments, reply)
     }
 
     private func beginPreparationReview(_ fixture: ResearchDriverFixture, input: ComputerUseBrowserResearchFormInput) async throws -> ComputerUseBrowserGoalProposal {

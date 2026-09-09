@@ -9,6 +9,7 @@ final class ComputerUseBrowserDOMReadCapture: CustomStringConvertible {
     private var argumentDigest: String?
     private var revisionID: String?
     private var completion: Result<ComputerUseBrowserDOMReply, Error>?
+    private var recoveredReply: ComputerUseBrowserDOMReply?
     private(set) var didStart = false
 
     init(command: ComputerUseBrowserDOMCommand, document: ComputerUseBrowserDocument) throws {
@@ -23,6 +24,7 @@ final class ComputerUseBrowserDOMReadCapture: CustomStringConvertible {
         try validate(command: command, arguments: arguments, document: document)
         guard didStart else { return nil }
         guard let completion else { throw ComputerUseBrowserError.busy }
+        if let recoveredReply { return recoveredReply }
         // These commands check authentication before any private observation.
         // A verified empty auth reply captured no baseline. A caller still
         // needs current ownership and original-page validation before retrying.
@@ -46,12 +48,39 @@ final class ComputerUseBrowserDOMReadCapture: CustomStringConvertible {
         self.completion = completion
     }
 
+    var needsRevisionReconciliation: Bool {
+        guard command == .reviseFormFields, didStart, recoveredReply == nil,
+              case .failure(let error)? = completion else { return false }
+        return error as? ComputerUseBrowserError != .authenticationRequired
+    }
+
+    func requiresRevisionReconciliation(arguments: [String: Any], document: ComputerUseBrowserDocument) throws -> Bool {
+        try validate(command: .reviseFormFields, arguments: arguments, document: document)
+        return needsRevisionReconciliation
+    }
+
+    /// A second, read-only native result can reconcile a terminal callback
+    /// error. Keep that error, the attempt ID and the original arguments.
+    func reconcileRevision(_ reply: ComputerUseBrowserDOMReply, arguments: [String: Any],
+                           document: ComputerUseBrowserDocument, documentID: String, inputLedgerID: String) throws {
+        try validate(command: .reviseFormFields, arguments: arguments, document: document)
+        guard needsRevisionReconciliation, let revisionID, reply.recoveredRevisionID == revisionID,
+              reply.documentID == documentID, reply.inputLedgerID == inputLedgerID,
+              reply.status == "ok" || (reply.status == "revision-not-captured" && reply.uncapturedRevisionID == revisionID) else {
+            throw ComputerUseBrowserError.pageChanged
+        }
+        recoveredReply = reply
+    }
+
     /// Preserve the dispatched callback and its exact arguments forever.
     /// Only the adapter's explicit pre-capture rejection permits the owner
     /// to recover an earlier frame; ordinary failures and pending callbacks do not.
     func revisionWasNotCaptured(document: ComputerUseBrowserDocument, documentID: String, inputLedgerID: String) -> Bool {
-        guard command == .reviseFormFields, self.document == document, didStart,
-              let revisionID, case .success(let reply)? = completion else { return false }
+        guard command == .reviseFormFields, self.document == document, didStart, let revisionID else { return false }
+        let reply: ComputerUseBrowserDOMReply
+        if let recoveredReply { reply = recoveredReply }
+        else if case .success(let original)? = completion { reply = original }
+        else { return false }
         return reply.status == "revision-not-captured" && reply.uncapturedRevisionID == revisionID
             && reply.documentID == documentID && reply.inputLedgerID == inputLedgerID
     }

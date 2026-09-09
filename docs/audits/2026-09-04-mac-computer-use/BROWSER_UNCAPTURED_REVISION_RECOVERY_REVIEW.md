@@ -45,7 +45,7 @@ Five changed Swift files passed `swiftc -frontend -parse`. The assembled DOM, fi
 
 ## Remaining repair order
 
-- Failures after revised catalogue capture starts, unclassified early failures, lost callbacks and lost native history remain held. Any broader recovery needs authoritative reconciliation that preserves every observation already made.
+- Failures after revised catalogue capture starts, unclassified early failures, lost callbacks and lost native history remain held. Any broader recovery needs authoritative reconciliation that preserves every observation already made. The subsequent [revision-history checkpoint](BROWSER_REVISION_HISTORY_RECONCILIATION_REVIEW.md) reconciles terminal callback errors only when the exact complete or pre-capture-rejected native record survives; partial and missing records remain held.
 - Continue explicit goal supersession, conflicting answers and justified changes to earlier invariant, preservation and read obligations. A rejected capture does not make the current reviewed task disposable.
 - Complete login document transitions, process/account recovery, required-object replacement and dependent-control reconciliation without rewriting task or effect history.
 - Continue result verification and the full [repair checklist](../../../TODO.md). Real travel/concert/movie tasks, alternate-model comparisons, desktop model adaptation and the 8 GB resource target remain unqualified. No assertions, app/browser execution, inference, SSH retry, push or installed-app replacement occurred here.

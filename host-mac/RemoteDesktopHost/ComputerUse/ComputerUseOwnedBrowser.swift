@@ -1034,8 +1034,32 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
 
     static func decodeDOMReply(_ source: String, command: ComputerUseBrowserDOMCommand) throws -> ComputerUseBrowserDOMReply {
         let result = try JSONDecoder().decode(ComputerUseBrowserDOMReply.self, from: Data(source.utf8))
+        if command == .inspectPreparedRevision || result.recoveredRevisionID != nil {
+            guard command == .inspectPreparedRevision,
+                  result.page == nil, result.scroll == nil, result.formQuery == nil, result.formStateProof == nil,
+                  result.formBindings == nil, result.formPreservation == nil, result.changedFieldIDs == nil,
+                  result.popupBinding == nil, result.popupReceipt == nil, result.popupControls == nil,
+                  result.popupPreservedControls == nil, result.optionSelectionBinding == nil, result.optionSelectionReceipt == nil,
+                  result.selectionPreservedControls == nil, result.optionSelectionCandidates == nil else {
+                throw ComputerUseBrowserError.unsupportedDocument
+            }
+            if result.status == "ok" || result.status == "revision-not-captured" {
+                guard let id = result.recoveredRevisionID, id.utf8.count == 64,
+                      id.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }),
+                      let ledger = result.inputLedgerID, ledger.utf8.count == 32,
+                      ledger.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }),
+                      result.status == "ok" ? result.fields?.isEmpty == false && result.uncapturedRevisionID == nil
+                        : result.fields == nil && result.uncapturedRevisionID == id else {
+                    throw ComputerUseBrowserError.unsupportedDocument
+                }
+            } else {
+                guard result.recoveredRevisionID == nil, result.fields == nil, result.uncapturedRevisionID == nil else {
+                    throw ComputerUseBrowserError.unsupportedDocument
+                }
+            }
+        }
         if result.status == "revision-not-captured" || result.uncapturedRevisionID != nil {
-            guard command == .reviseFormFields, result.status == "revision-not-captured",
+            guard command == .reviseFormFields || command == .inspectPreparedRevision, result.status == "revision-not-captured",
                   let revisionID = result.uncapturedRevisionID, revisionID.utf8.count == 64,
                   revisionID.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }),
                   let ledger = result.inputLedgerID, ledger.utf8.count == 32,

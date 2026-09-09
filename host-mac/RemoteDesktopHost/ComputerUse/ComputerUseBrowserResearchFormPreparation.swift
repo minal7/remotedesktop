@@ -513,6 +513,11 @@ final class ComputerUseBrowserResearchFormPreparation {
             return true
         } catch {
             await browser.joinDOMCompletion(document: page.document)
+            // Native history may have reconciled a failed callback as an
+            // explicit pre-capture rejection during captureFields above.
+            if hasUncapturedRevision {
+                return try await recoverInheritedCriteria(browser: browser, checkCurrent: checkCurrent)
+            }
             throw error
         }
     }

@@ -4,7 +4,7 @@ import WebKit
 enum ComputerUseBrowserDOMCommand: String {
     case fields, read, edit, receipt, reobserve, preflight, pageIdentity, pageSnapshot, validatePageSnapshot, observeResearchControls
     case scrollViewport, viewportScrollReceipt, validatePageLink, finishPendingChange, continueUnsentInput
-    case prepareFormQuery, validateFormQuery, bindPageFields, formFields, extendFormFields, reviseFormFields, inspectFormRequirements, retireUnsentInputs
+    case prepareFormQuery, validateFormQuery, bindPageFields, formFields, extendFormFields, reviseFormFields, inspectPreparedRevision, inspectFormRequirements, retireUnsentInputs
     case prepareFormPreservation, validateFormPreservation, verifyFormState, validateFormState
     case popupCandidates, preparePopup, validatePopup, openPopup, popupReceipt, retireUnsentPopup
     case optionSelectionCandidates, prepareOptionSelection, validateOptionSelection, selectOption, optionSelectionReceipt, retireUnsentOptionSelection
@@ -535,6 +535,7 @@ struct ComputerUseBrowserDOMReply: Decodable {
     let formBindings: [FormBinding]?
     let changedFieldIDs: [String]?
     let uncapturedRevisionID: String?
+    let recoveredRevisionID: String?
     let inputLedgerID: String?
     let formPreservation: ComputerUseBrowserFormPreservation.Reply?
     let popupBinding: ComputerUseBrowserPopupBinding?
@@ -945,6 +946,25 @@ enum ComputerUseBrowserDOM {
         }
         return reply('ok', found);
       }
+      function preparedRevisionRequest(args) {
+        const stable = value => Array.isArray(value) ? value.map(stable)
+          : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map(key => [key,stable(value[key])])) : value;
+        // An equivalent current observation can have a new snapshot nonce.
+        // Every other argument, including all private requirements, stays exact.
+        return JSON.stringify(stable(Object.fromEntries(Object.entries(args).filter(([key]) => key !== 'snapshotID'))));
+      }
+      function inspectPreparedRevision(args) {
+        const record = preparedFieldRevisions.get(args.revisionID);
+        if (!record || record.request !== preparedRevisionRequest(args)
+            || !['ok','revision-not-captured'].includes(record.result.status)
+            || record.result.documentID !== documentID || record.result.inputLedgerID !== inputLedgerID
+            || record.scope !== fieldScope || !record.bindings || bindings.size !== record.bindings.size
+            || Array.from(record.bindings).some(([id,binding]) => bindings.get(id) !== binding)
+            || !fieldPreservationCurrent(args.requirements?.preservationID, true)) return reply('stale');
+        // Return only the already retained outcome. No snapshot(), catalogue
+        // extension, input, proof or replacement of native IDs occurs here.
+        return {...record.result,recoveredRevisionID:args.revisionID};
+      }
       function revisePreparedFields(scope, args) {
         const requirements = args.requirements, retainedPreparation = args.retainedPreparation === true;
         const initialRefresh = requirements?.kind === 'refreshable-initial-form-v1';
@@ -962,6 +982,7 @@ enum ComputerUseBrowserDOM {
             || (repairing ? (!retainedPreparation && !plannedRepair) || (retainedPreparation && plannedRepair)
               || !repairOrigins || !Array.isArray(repairableIDs) || (!repairableIDs.length && !refreshing) : args.repairableFieldIDs !== undefined)) return reply('stale');
         const existing = preparedFieldRevisions.get(args.revisionID);
+        const request = preparedRevisionRequest(args);
         if (!formRequirementsCurrent(requirements, repairableIDs, null, true, !retainedPreparation, repairOrigins, refreshedIDs)
             || refreshedIDs.some(id => !scope.selected.includes(bindings.get(id)?.element))) {
           // This path has inspected only the earlier catalogue. Seal this
@@ -969,8 +990,9 @@ enum ComputerUseBrowserDOM {
           // A completed, uncertain or previously rejected ID cannot acquire
           // an absence result, even if its current preconditions now fail.
           if (existing || preparedFieldRevisions.size >= 32) return reply('stale');
-          preparedFieldRevisions.set(args.revisionID, {shape:null,result:reply('stale')});
-          return {...reply('revision-not-captured'),uncapturedRevisionID:args.revisionID};
+          const result = {...reply('revision-not-captured'),uncapturedRevisionID:args.revisionID};
+          preparedFieldRevisions.set(args.revisionID, {request,shape:null,result,scope:fieldScope,bindings:new Map(bindings)});
+          return result;
         }
         const shape = JSON.stringify([args.formID,args.scopeDigest,args.preservedControlIDs,args.selectedControlIDs,
           requirements.digest,requirements.inputLedgerID,requirements.preservationID ?? null,requirements.inputOperationIDs,
@@ -980,7 +1002,7 @@ enum ComputerUseBrowserDOM {
           .concat(initialRefresh ? ['initial-preparation-refresh-v1'] : [])
           .concat(refreshing ? [refreshedIDs] : []));
         if (existing) {
-          if (existing.shape !== shape) return reply('stale');
+          if (existing.request !== request || existing.shape !== shape) return reply('stale');
           if (existing.result.status !== 'ok') return existing.result;
           if (fieldScope?.preparedRevisionID !== args.revisionID || bindings.size !== existing.fields.length
               || existing.fields.some((field,index) => bindings.get(field.id) !== existing.bindings.get(field.id)
@@ -990,13 +1012,13 @@ enum ComputerUseBrowserDOM {
         if (preparedFieldRevisions.size >= 32) return reply('limit');
         // Retain an unknown/failed attempt before another private field can
         // be read. Reusing its ID cannot silently take another baseline.
-        const record = {shape,result:reply('stale'),fields:null,snapshots:null,bindings:null};
+        const record = {request,shape,result:reply('stale'),fields:null,snapshots:null,bindings:null,scope:null};
         preparedFieldRevisions.set(args.revisionID, record);
         const result = extendFields(scope, requirements, repairableIDs, true, !retainedPreparation, repairOrigins, refreshedIDs);
         record.result = result;
         if (result.status === 'ok') {
           record.fields = result.fields; record.snapshots = result.fields.map(field => JSON.stringify(field));
-          record.bindings = new Map(bindings); fieldScope.preparedRevisionID = args.revisionID;
+          record.bindings = new Map(bindings); fieldScope.preparedRevisionID = args.revisionID; record.scope = fieldScope;
         }
         return result;
       }
@@ -1673,7 +1695,7 @@ enum ComputerUseBrowserDOM {
               || JSON.stringify(readViewport()) !== JSON.stringify(operation.receipt.after)) return reply('uncertain');
           return {...reply('viewport-scroll-confirmed'), scroll: operation.receipt};
         }
-        if (['pageSnapshot', 'observeResearchControls', 'validatePageSnapshot', 'scrollViewport', 'validatePageLink', 'prepareFormQuery', 'validateFormQuery', 'bindPageFields', 'formFields', 'extendFormFields', 'reviseFormFields', 'verifyFormState', 'validateFormState', 'inspectFormRequirements', 'prepareFormPreservation', 'popupCandidates', 'preparePopup', 'validatePopup', 'openPopup', 'optionSelectionCandidates', 'prepareOptionSelection', 'validateOptionSelection', 'selectOption'].includes(command)) {
+        if (['pageSnapshot', 'observeResearchControls', 'validatePageSnapshot', 'scrollViewport', 'validatePageLink', 'prepareFormQuery', 'validateFormQuery', 'bindPageFields', 'formFields', 'extendFormFields', 'reviseFormFields', 'inspectPreparedRevision', 'verifyFormState', 'validateFormState', 'inspectFormRequirements', 'prepareFormPreservation', 'popupCandidates', 'preparePopup', 'validatePopup', 'openPopup', 'optionSelectionCandidates', 'prepareOptionSelection', 'validateOptionSelection', 'selectOption'].includes(command)) {
           const status = authenticationStatus();
           if (status) { lastPageSnapshot = null; return reply(status); }
           if (doc.readyState !== 'complete') return reply('stale');
@@ -1748,6 +1770,7 @@ enum ComputerUseBrowserDOM {
               }
               catch (_) { operation.failed = true; return reply('popup-uncertain'); }
             }
+            if (command === 'inspectPreparedRevision') return inspectPreparedRevision(args);
             if (command === 'inspectFormRequirements') {
               if (args.requirements?.kind === 'empty-preparation-history-v1') {
                 const history = args.requirements;
@@ -2551,6 +2574,12 @@ final class ComputerUseBrowserTextTarget {
                         return nativeID
                     }
                 }
+            }
+            if try capture.requiresRevisionReconciliation(arguments: arguments, document: document) {
+                let historical = try await browser.callDOM(.inspectPreparedRevision, arguments: arguments, document: document)
+                try validate()
+                try capture.reconcileRevision(historical, arguments: arguments, document: document,
+                    documentID: documentID, inputLedgerID: inputLedgerID)
             }
             let reply = try await browser.callDOM(.reviseFormFields, arguments: arguments, document: document, retaining: capture)
             try validate()
