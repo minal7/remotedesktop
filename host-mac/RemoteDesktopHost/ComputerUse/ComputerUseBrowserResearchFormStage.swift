@@ -195,11 +195,11 @@ struct ComputerUseBrowserResearchFormReceipt: Equatable, Sendable, CustomStringC
         self.verifiedWithoutInputCount = verifiedWithoutInputCount
         self.requiresRepairAtPublication = requiresRepairAtPublication; retainedCriterionCount = 0
     }
-    @MainActor fileprivate init(retaining stage: ComputerUseBrowserRetainedFormStage) {
+    @MainActor fileprivate init(retaining stage: ComputerUseBrowserRetainedFormStage, requiresRepairAtPublication: Bool = false) {
         taskID = stage.input.interpretation.input.taskID; rootDigest = stage.input.interpretation.input.rootDigest
         goalRevision = stage.input.interpretation.input.digest; stageID = stage.id; index = stage.index
         contractDigest = stage.stageDigest; plannedEditCount = 0; editCount = 0; verifiedWithoutInputCount = 0
-        requiresRepairAtPublication = false; retainedCriterionCount = stage.input.retainedFieldSources.count
+        self.requiresRepairAtPublication = requiresRepairAtPublication; retainedCriterionCount = stage.input.retainedFieldSources.count
     }
     var description: String { "BrowserResearchFormReceipt(edits: \(editCount), verifiedWithoutInput: \(verifiedWithoutInputCount))" }
     var debugDescription: String { description }
@@ -793,6 +793,40 @@ final class ComputerUseBrowserRetainedFormStage: ComputerUseBrowserFormStage {
             // Publish together only after the fresh native check and ownership
             // check. No cached read callback can complete a cancelled review.
             let receipt = ComputerUseBrowserResearchFormReceipt(retaining: self)
+            continuation = candidate; completed = receipt
+            return receipt
+        } catch {
+            await browser.joinDOMCompletion(document: input.evidence.page.document)
+            throw error
+        }
+    }
+
+    /// Keep the current review's desired criteria when a native value changed
+    /// before publication. Original origins, objects and preservation must
+    /// still hold. This publishes incomplete obligations, not current success.
+    func recoverCriteriaForRepair(checkCurrent: @escaping @MainActor () throws -> Void) async throws -> ComputerUseBrowserResearchFormReceipt? {
+        guard !isExecuting else { throw Failure.busy }
+        try check(checkCurrent)
+        if let completed { return completed }
+        isExecuting = true
+        defer { isExecuting = false }
+        func current() throws {
+            try check(checkCurrent)
+            guard input.nativePreservation == target.formPreservation else { throw ComputerUseBrowserResearchFormError.inputChanged }
+            try browser.validateSourceDocument(input.evidence.page.document)
+        }
+        do {
+            try current()
+            let candidate = try ComputerUseBrowserResearchFormContinuation(retaining: self)
+            // Restore only the reviewed observation. Do not rebind field values
+            // or replace the original captured baseline with the changed state.
+            let page = try await ComputerUseBrowserResearchFormStage.restoreOriginalPage(input.evidence.page,
+                review: input.scopeReview, browser: browser, checkCurrent: current)
+            try current()
+            let changed = try await target.inspectChangedCriteria(page: page, after: candidate)
+            try current()
+            guard !changed.isEmpty else { return nil } // Unchanged reviews use normal full validation.
+            let receipt = ComputerUseBrowserResearchFormReceipt(retaining: self, requiresRepairAtPublication: true)
             continuation = candidate; completed = receipt
             return receipt
         } catch {

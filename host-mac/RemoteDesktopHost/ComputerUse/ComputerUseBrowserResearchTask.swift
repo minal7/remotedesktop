@@ -1060,6 +1060,25 @@ final class ComputerUseBrowserResearchTask {
         }
     }
 
+    /// A pending read-only review can retain historical criteria as incomplete
+    /// repair obligations. It cannot resolve or retire any physical input.
+    func recoverPendingRetainedCriteria() async throws -> ComputerUseBrowserResearchFormReceipt? {
+        try requireIdle()
+        guard !hasPendingFormPreparation else { throw Failure.formPending }
+        guard !hasPendingNavigation else { throw Failure.navigationPending }
+        guard !hasQuestion else { throw Failure.questionPending }
+        guard hasPendingFormExecution, let stage = formStage as? ComputerUseBrowserRetainedFormStage else { return nil }
+        guard stage.input.interpretation.input == input else { throw Failure.goalChanged }
+        let captured = input
+        latestForm = nil; latestAction = nil; latestCandidates = nil
+        return try await operate { [self] in
+            guard let receipt = try await stage.recoverCriteriaForRepair(checkCurrent: { try self.checkCurrent(captured) }) else { return nil }
+            try recordForm(receipt, stage: stage, goal: captured)
+            try checkCurrent(captured)
+            return receipt
+        }
+    }
+
     private func recordForm(_ receipt: ComputerUseBrowserResearchFormReceipt, stage: any ComputerUseBrowserFormStage,
                             goal: ComputerUseBrowserGoalInput) throws {
         guard !isRetired else { return }

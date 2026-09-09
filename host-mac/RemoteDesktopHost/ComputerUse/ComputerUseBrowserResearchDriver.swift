@@ -482,6 +482,7 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                 || error as? ComputerUseTextEditError == .deliveryUncertain
                 || error as? ComputerUseBrowserResearchFormStage.Failure == .retirementPending
                 || error as? ComputerUseBrowserResearchFormStage.Failure == .valueCheckpointRequired else { return false }
+        if try await owner.recoverPendingRetainedCriteria() != nil { return true }
         if try await owner.retainCompletedFormHistory() != nil { return true }
         if try await owner.retainPendingFormPrefix() != nil { return true }
         return try await owner.retirePendingUnsentForm() != nil

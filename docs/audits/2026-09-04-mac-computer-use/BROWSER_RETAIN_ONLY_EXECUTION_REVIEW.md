@@ -52,6 +52,8 @@ No build, typecheck, assertion execution, inference, app/browser/computer-use la
 
 ## Remaining sequence
 
+The subsequent [pending-retention recovery repair](BROWSER_PENDING_RETENTION_RECOVERY_REVIEW.md) adds incomplete-history recovery after an accepted retain-only execution encounters changed criteria. The sequence below records this checkpoint's earlier boundary. Preparation-time changes and explicit goal supersession remain open.
+
 1. Add explicit supersession/replanning of pending reviews and changed goals while retaining source purposes, original preservation and every uncertainty obligation. In particular, a changed criterion before retain-only publication cannot yet become a new reviewed repair stage automatically.
 2. Continue uncertain native input tails, document/process recovery, dependent controls, preservation timing and semantic pending-field mapping. Do not reinterpret a matching value or retention receipt as original operation evidence.
 3. Finish account/login handoff and independent whole-task/result verification in the [repair TODO](../../../TODO.md).
