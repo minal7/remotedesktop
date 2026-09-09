@@ -32,6 +32,15 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
         do { _ = try await browser.acquireObservedDocument(taskID: "root"); XCTFail("Empty handback is not page evidence") }
         catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
         XCTAssertTrue(commands.isEmpty, "Handback must not read an invented document")
+        let history = try browser.navigationDispatchHistory(taskID: "root")
+        XCTAssertEqual(history.controlEvents.map(\.phase), [.nativeReacquisitionStarted, .nativeReacquisitionFailed,
+            .nativeReacquisitionStarted, .nativeReacquisitionFinished, .nativeReacquisitionStarted, .nativeReacquisitionFinished])
+        XCTAssertTrue(history.controlEvents.allSatisfy { $0.handbackBinding == session.sessionBindingDigest && $0.workflowOperationID == nil })
+        for index in stride(from: 0, to: 6, by: 2) {
+            XCTAssertNotNil(history.controlEvents[index].nativeOperationID)
+            XCTAssertEqual(history.controlEvents[index].nativeOperationID, history.controlEvents[index + 1].nativeOperationID)
+        }
+        XCTAssertEqual(Set(history.controlEvents.compactMap(\.nativeOperationID)).count, 3)
     }
 
     func testUnnavigatedSessionCannotSurviveOwnershipOrBrowserReplacement() async throws {
@@ -762,6 +771,12 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
         browser.closeSignInWindow()
         XCTAssertNil(browser.currentDocument(taskID: "incomplete-login"))
         allowed = true
+        let closedHistory = try browser.navigationDispatchHistory(taskID: "incomplete-login")
+        let opened = try XCTUnwrap(closedHistory.controlEvents.first { $0.phase == .signInWindowOpened })
+        let closed = try XCTUnwrap(closedHistory.controlEvents.first { $0.phase == .signInWindowClosed })
+        XCTAssertNotNil(opened.signInWindowID); XCTAssertEqual(opened.signInWindowID, closed.signInWindowID)
+        XCTAssertLessThan(opened.order, closed.order)
+        XCTAssertFalse(closedHistory.controlEvents.contains { [.nativeReacquisitionFinished, .workflowResumed].contains($0.phase) })
         try await browser.reacquireAfterUserControl(taskID: "incomplete-login", requirement: requirement)
         XCTAssertEqual(browser.currentDocument(taskID: "incomplete-login"), original)
         let target = ComputerUseBrowserTextTarget(browser: browser, document: original, requiresFrontmost: false)
@@ -852,6 +867,10 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
             XCTAssertEqual(current.source, .userControlObservation)
             let history = try browser.navigationDispatchHistory(taskID: "popup-login")
             let signInObservations = history.observations.filter { $0.surface == .signInWindow }
+            let opened = try XCTUnwrap(history.controlEvents.first { $0.phase == .signInWindowOpened })
+            let closed = try XCTUnwrap(history.controlEvents.first { $0.phase == .signInWindowClosed })
+            XCTAssertNotNil(opened.signInWindowID); XCTAssertEqual(opened.signInWindowID, closed.signInWindowID)
+            XCTAssertTrue(signInObservations.allSatisfy { $0.signInWindowID == opened.signInWindowID && $0.order > opened.order && $0.order < closed.order })
             XCTAssertFalse(signInObservations.isEmpty)
             XCTAssertTrue(signInObservations.contains { $0.phase == .response && $0.decision == .allowed && $0.control == .userControl })
             XCTAssertTrue(signInObservations.allSatisfy {

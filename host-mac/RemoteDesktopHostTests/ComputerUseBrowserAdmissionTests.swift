@@ -117,6 +117,13 @@ final class ComputerUseBrowserAdmissionTests: XCTestCase {
         try await browser.waitForDOMCompletion(document: previous)
         try await owner.resumeAfterUserControl()
         XCTAssertEqual(browser.taskID, owner.taskID)
+        let history = try browser.navigationDispatchHistory(taskID: owner.taskID)
+        let admitted = try XCTUnwrap(history.controlEvents.first { $0.phase == .workflowContextAdmitted })
+        let resumed = try XCTUnwrap(history.controlEvents.first { $0.phase == .workflowResumed })
+        XCTAssertNotNil(admitted.workflowOperationID); XCTAssertEqual(admitted.workflowOperationID, resumed.workflowOperationID)
+        XCTAssertEqual(admitted.handback, resumed.handback); XCTAssertLessThan(admitted.order, resumed.order)
+        XCTAssertFalse(history.controlEvents.contains { $0.phase == .nativeReacquisitionStarted },
+            "Admission of a new research root is not a fabricated reacquisition of the previous task")
         _ = try await owner.interpretGoal()
         XCTAssertEqual(planner.inputs, [owner.input])
         XCTAssertEqual(server.count("/page"), 1)

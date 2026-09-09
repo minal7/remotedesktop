@@ -1507,6 +1507,7 @@ final class ComputerUseBrowserResearchTask {
         if handback == nil {
             handback = session ?? (browser.taskID == taskID ? browser.handbackRequirement(taskID: taskID, required: true) : nil)
         }
+        if let handback { browser.recordWorkflowControl(.workflowPaused, requirement: handback) }
         latestCandidates = nil
         // Retain private invariants through an idle Pause too. This is not
         // permission to act: explicit handback and original-input validation
@@ -1527,9 +1528,10 @@ final class ComputerUseBrowserResearchTask {
         let epoch = controlEpoch, id = UUID(), captured = input
         let expected = handback
         operationID = id
+        if let expected { browser.recordWorkflowControl(.workflowResumeStarted, requirement: expected, operationID: id) }
         let child = Task<ComputerUseBrowserHandbackRequirement?, Error> { @MainActor [self] in
             if let expected {
-                try await browser.reacquireAfterUserControl(taskID: taskID, requirement: expected)
+                try await browser.reacquireAfterUserControl(taskID: taskID, requirement: expected, workflowOperationID: id)
                 try Task.checkCancellation()
                 if try !browser.isUnnavigatedSession(expected) {
                     let document = try await browser.acquireObservedDocument(taskID: taskID)
@@ -1548,7 +1550,10 @@ final class ComputerUseBrowserResearchTask {
                 })
                 // Admission is now a native fact. Retain its seal before a
                 // page/authentication check can require another handback.
-                if !isRetired, controlEpoch == epoch, operationID == id { session = prepared; handback = prepared }
+                if !isRetired, controlEpoch == epoch, operationID == id {
+                    session = prepared; handback = prepared
+                    browser.recordWorkflowControl(.workflowContextAdmitted, requirement: prepared, operationID: id)
+                }
                 try Task.checkCancellation()
                 if try !browser.isUnnavigatedSession(prepared) {
                     let document = try await browser.acquireObservedDocument(taskID: taskID)
@@ -1561,11 +1566,19 @@ final class ComputerUseBrowserResearchTask {
             return nil
         }
         cancelOperation = { child.cancel() }
-        defer { if operationID == id { operationID = nil; cancelOperation = nil } }
+        var resumedSuccessfully = false
+        defer {
+            if !resumedSuccessfully, let requirement = expected ?? session {
+                browser.recordWorkflowControl(.workflowResumeFailed, requirement: requirement, operationID: id)
+            }
+            if operationID == id { operationID = nil; cancelOperation = nil }
+        }
         let resumed = try await withTaskCancellationHandler { try await child.value } onCancel: { child.cancel() }
         try Task.checkCancellation()
         guard !isRetired, isPaused, epoch == controlEpoch, operationID == id, input.digest == captured.digest, mayAct() else { throw Failure.paused }
         session = resumed; self.handback = nil; isPaused = false
+        resumedSuccessfully = true
+        if let resumed { browser.recordWorkflowControl(.workflowResumed, requirement: resumed, operationID: id) }
     }
 
     func retire() {

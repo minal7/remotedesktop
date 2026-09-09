@@ -2,6 +2,8 @@
 
 Source checkpoint: 2026-09-09. Parent: `0eae9e1`. Native observation foundation and authored regressions only. Compilation, assertions, inference, app/browser execution and live qualification remain paused.
 
+Follow-up: the [control-history foundation](BROWSER_CONTROL_HISTORY_REVIEW.md) adds ordered research Pause/resume and native reacquisition events, full session requirements, and per-window sign-in lifetime identities. It preserves native success separately from accepted workflow resume; full route qualification remains open. The counts below describe this earlier checkpoint.
+
 ## First-principles finding
 
 The [dispatch log](BROWSER_NAVIGATION_DISPATCH_HISTORY_REVIEW.md) identifies requested operations, their original policies and terminal outcomes. It cannot reconstruct intermediate navigation from requested and final origins. A separate event record is needed, and each record must preserve the strength of its native attribution.

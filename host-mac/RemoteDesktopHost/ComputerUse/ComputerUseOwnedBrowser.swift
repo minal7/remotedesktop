@@ -201,7 +201,36 @@ struct ComputerUseBrowserNavigationDispatchHistory: Equatable, Sendable, CustomS
     enum Control: String, Sendable { case unknown, automationAllowed, userControl }
     enum Surface: String, Sendable { case mainDocument, signInWindow }
     enum PolicyCheck: String, Sendable { case notChecked, unconfigured, permitted, blocked }
+    enum ControlPhase: String, Sendable {
+        case workflowPaused, workflowResumeStarted, workflowContextAdmitted, workflowResumed, workflowResumeFailed
+        case nativeReacquisitionStarted, nativeReacquisitionFinished, nativeReacquisitionFailed
+        case signInWindowOpened, signInWindowClosed
+    }
+    struct ControlEvent: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+        let order: Int
+        let phase: ControlPhase
+        let parentSessionID: UUID
+        let ownershipEpoch: UUID
+        let generation: UInt64
+        let origin: ComputerUseBrowserSourceOrigin?
+        let handback: ComputerUseBrowserHandbackRequirement?
+        var handbackBinding: String? { handback?.sessionBindingDigest }
+        let workflowOperationID: UUID?
+        let nativeOperationID: UUID?
+        let signInWindowID: UUID?
+
+        fileprivate init(order: Int, phase: ControlPhase, parentSessionID: UUID, ownershipEpoch: UUID, generation: UInt64,
+                         url: URL?, handback: ComputerUseBrowserHandbackRequirement?, workflowOperationID: UUID?, nativeOperationID: UUID?, signInWindowID: UUID?) {
+            self.order = order; self.phase = phase; self.parentSessionID = parentSessionID
+            self.ownershipEpoch = ownershipEpoch; self.generation = generation; origin = url.flatMap { try? .init($0) }
+            self.handback = handback; self.workflowOperationID = workflowOperationID
+            self.nativeOperationID = nativeOperationID; self.signInWindowID = signInWindowID
+        }
+        var description: String { "BrowserControlEvent(phase: \(phase.rawValue))" }
+        var debugDescription: String { description }
+    }
     struct Observation: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+        let order: Int
         let phase: Phase
         let decision: Decision
         let binding: Binding
@@ -215,11 +244,13 @@ struct ComputerUseBrowserNavigationDispatchHistory: Equatable, Sendable, CustomS
         let parentSessionID: UUID
         let ownershipEpoch: UUID
         let generation: UInt64
+        let signInWindowID: UUID?
 
-        fileprivate init(phase: Phase, decision: Decision, binding: Binding, control: Control, surface: Surface,
+        fileprivate init(order: Int, phase: Phase, decision: Decision, binding: Binding, control: Control, surface: Surface,
                          policyCheck: PolicyCheck, configuredPolicy: ComputerUseBrowserSourcePolicy?, url: URL?,
                          attemptID: UUID?, navigationCorrelationID: UUID?, parentSessionID: UUID,
-                         ownershipEpoch: UUID, generation: UInt64) {
+                         ownershipEpoch: UUID, generation: UInt64, signInWindowID: UUID?) {
+            self.order = order; self.signInWindowID = signInWindowID
             self.phase = phase; self.decision = decision; self.binding = binding; self.control = control
             self.surface = surface; self.policyCheck = policyCheck; self.configuredPolicy = configuredPolicy
             origin = url.flatMap { try? .init($0) }; self.attemptID = attemptID
@@ -230,6 +261,7 @@ struct ComputerUseBrowserNavigationDispatchHistory: Equatable, Sendable, CustomS
         var debugDescription: String { description }
     }
     struct Attempt: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+        let order: Int
         let id: UUID
         let operationID: String
         let sessionID: UUID
@@ -240,9 +272,11 @@ struct ComputerUseBrowserNavigationDispatchHistory: Equatable, Sendable, CustomS
         let historySourceOperationID: String?
         fileprivate(set) var committedOrigin: ComputerUseBrowserSourceOrigin?
         fileprivate(set) var outcome: Outcome
+        fileprivate(set) var terminalOrder: Int?
 
-        fileprivate init(operationID: String, sessionID: UUID, ownershipEpoch: UUID, generation: UInt64,
+        fileprivate init(order: Int, operationID: String, sessionID: UUID, ownershipEpoch: UUID, generation: UInt64,
                          policy: ComputerUseBrowserSourcePolicy?, requestedURL: URL, historySourceOperationID: String?) {
+            self.order = order; terminalOrder = nil
             id = UUID(); self.operationID = operationID; self.sessionID = sessionID; self.ownershipEpoch = ownershipEpoch
             self.generation = generation; self.policy = policy; self.historySourceOperationID = historySourceOperationID
             requestedOrigin = try? .init(requestedURL); committedOrigin = nil; outcome = .pending
@@ -263,14 +297,20 @@ struct ComputerUseBrowserNavigationDispatchHistory: Equatable, Sendable, CustomS
     fileprivate(set) var attempts: [Attempt] = []
     fileprivate(set) var observations: [Observation] = []
     fileprivate(set) var observationsOverflowed = false
+    fileprivate(set) var controlEvents: [ControlEvent] = []
+    fileprivate(set) var controlEventsOverflowed = false
     private let ledgerID = UUID()
     private var revision = UUID()
+    /// Ordinals cover retained records only. With 64 attempts, 64 terminal
+    /// outcomes, 512 observations and 128 control events this cannot overflow.
+    /// Omitted activity is represented by the separate overflow markers.
+    private var nextOrder = 0
 
     fileprivate init(taskID: String, contextID: String, beganAfterAnotherClaim: Bool) {
         self.taskID = taskID; self.contextID = contextID; self.beganAfterAnotherClaim = beganAfterAnotherClaim
     }
     var identity: String {
-        ComputerUseTaskContract.digest(["browser-navigation-dispatch-history-v2", taskID, contextID,
+        ComputerUseTaskContract.digest(["browser-navigation-dispatch-history-v3", taskID, contextID,
             ledgerID.uuidString, revision.uuidString])
     }
     fileprivate mutating func recordClaimBoundary() {
@@ -284,21 +324,25 @@ struct ComputerUseBrowserNavigationDispatchHistory: Equatable, Sendable, CustomS
         // The same task may be claimed again after Stop. Preserve its earlier
         // attempts without allowing repeated claims to grow this log forever.
         guard attempts.count < 64 else { overflowed = true; return nil }
-        let attempt = Attempt(operationID: operationID, sessionID: sessionID, ownershipEpoch: ownershipEpoch,
+        let order = takeOrder()
+        let attempt = Attempt(order: order, operationID: operationID, sessionID: sessionID, ownershipEpoch: ownershipEpoch,
             generation: generation, policy: policy, requestedURL: requestedURL, historySourceOperationID: historySourceOperationID)
         attempts.append(attempt)
         return attempt.id
     }
     fileprivate mutating func finish(_ id: UUID?, outcome: Outcome, committedURL: URL? = nil) {
-        guard let id, let index = attempts.firstIndex(where: { $0.id == id }), attempts[index].outcome == .pending else { return }
+        guard outcome != .pending, let id, let index = attempts.firstIndex(where: { $0.id == id }),
+              attempts[index].outcome == .pending else { return }
         advanceRevision()
+        let terminalOrder = takeOrder()
         attempts[index].outcome = outcome
+        attempts[index].terminalOrder = terminalOrder
         attempts[index].committedOrigin = committedURL.flatMap { try? .init($0) }
     }
     fileprivate mutating func observe(phase: Phase, decision: Decision, binding: Binding, control: Control, surface: Surface,
                                       policyCheck: PolicyCheck, configuredPolicy: ComputerUseBrowserSourcePolicy?, url: URL?,
                                       attemptID: UUID?, navigationCorrelationID: UUID?, parentSessionID: UUID,
-                                      ownershipEpoch: UUID, generation: UInt64) {
+                                      ownershipEpoch: UUID, generation: UInt64, signInWindowID: UUID?) {
         // Retain the first bounded observations and an explicit gap. Once
         // saturated, callbacks do no further allocation or origin parsing.
         guard observations.count < 512 else {
@@ -306,10 +350,28 @@ struct ComputerUseBrowserNavigationDispatchHistory: Equatable, Sendable, CustomS
             return
         }
         advanceRevision()
-        observations.append(.init(phase: phase, decision: decision, binding: binding, control: control, surface: surface,
+        let order = takeOrder()
+        observations.append(.init(order: order, phase: phase, decision: decision, binding: binding, control: control, surface: surface,
             policyCheck: policyCheck, configuredPolicy: configuredPolicy, url: url, attemptID: attemptID,
             navigationCorrelationID: navigationCorrelationID, parentSessionID: parentSessionID,
-            ownershipEpoch: ownershipEpoch, generation: generation))
+            ownershipEpoch: ownershipEpoch, generation: generation, signInWindowID: signInWindowID))
+    }
+    fileprivate mutating func recordControl(phase: ControlPhase, parentSessionID: UUID, ownershipEpoch: UUID,
+                                            generation: UInt64, url: URL?, handback: ComputerUseBrowserHandbackRequirement?,
+                                            workflowOperationID: UUID?, nativeOperationID: UUID?, signInWindowID: UUID?) {
+        guard controlEvents.count < 128 else {
+            if !controlEventsOverflowed { controlEventsOverflowed = true; advanceRevision() }
+            return
+        }
+        advanceRevision()
+        let order = takeOrder()
+        controlEvents.append(.init(order: order, phase: phase, parentSessionID: parentSessionID,
+            ownershipEpoch: ownershipEpoch, generation: generation, url: url, handback: handback,
+            workflowOperationID: workflowOperationID, nativeOperationID: nativeOperationID, signInWindowID: signInWindowID))
+    }
+    private mutating func takeOrder() -> Int {
+        defer { nextOrder += 1 }
+        return nextOrder
     }
     private mutating func advanceRevision() {
         revision = UUID()
@@ -404,6 +466,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     private var observedActivePage: ObservedPage?
     private var loadedPageIdentity: String?
     private var signInBrowser: WKWebView?
+    private var signInInstanceID: UUID?
     private var signInWindow: NSWindow?
     private var signInURLObservation: NSKeyValueObservation?
     private var signInScope: (taskID: String, ownerID: UUID)?
@@ -733,9 +796,42 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         return hasUnnavigatedContents
     }
 
-    func reacquireAfterUserControl(taskID: String, requirement: ComputerUseBrowserHandbackRequirement) async throws {
+    /// Called by a workflow after its state transition, not by page content.
+    /// Recording is observational and does not query or reopen the action gate.
+    func recordWorkflowControl(_ phase: ComputerUseBrowserNavigationDispatchHistory.ControlPhase,
+                               requirement: ComputerUseBrowserHandbackRequirement, operationID: UUID? = nil) {
+        guard [.workflowPaused, .workflowResumeStarted, .workflowContextAdmitted, .workflowResumed, .workflowResumeFailed].contains(phase) else { return }
+        recordBoundControl(phase, requirement: requirement, workflowOperationID: operationID)
+    }
+
+    private func recordBoundControl(_ phase: NavigationHistory.ControlPhase, requirement: ComputerUseBrowserHandbackRequirement,
+                                    workflowOperationID: UUID? = nil, nativeOperationID: UUID? = nil) {
+        do { try validateSessionIdentity(requirement, taskID: requirement.taskID) } catch { return }
+        navigationDispatchLog?.recordControl(phase: phase, parentSessionID: browserSessionID,
+            ownershipEpoch: ownershipEpoch, generation: generation, url: browser?.url,
+            handback: requirement, workflowOperationID: workflowOperationID,
+            nativeOperationID: nativeOperationID, signInWindowID: signInInstanceID)
+    }
+
+    func reacquireAfterUserControl(taskID: String, requirement: ComputerUseBrowserHandbackRequirement,
+                                  workflowOperationID: UUID? = nil) async throws {
         try Task.checkCancellation()
         try validateSessionIdentity(requirement, taskID: taskID)
+        let id = UUID()
+        recordBoundControl(.nativeReacquisitionStarted, requirement: requirement,
+            workflowOperationID: workflowOperationID, nativeOperationID: id)
+        do {
+            try await performNativeHandback(taskID: taskID, requirement: requirement)
+            recordBoundControl(.nativeReacquisitionFinished, requirement: requirement,
+                workflowOperationID: workflowOperationID, nativeOperationID: id)
+        } catch {
+            recordBoundControl(.nativeReacquisitionFailed, requirement: requirement,
+                workflowOperationID: workflowOperationID, nativeOperationID: id)
+            throw error
+        }
+    }
+
+    private func performNativeHandback(taskID: String, requirement: ComputerUseBrowserHandbackRequirement) async throws {
         if hasUnnavigatedContents, let browser {
             guard mayAct() else { throw ComputerUseBrowserError.ownershipLost }
             try Task.checkCancellation()
@@ -1636,6 +1732,10 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         child.uiDelegate = self
         signInScope = (controls.taskID, controls.ownerID)
         signInBrowser = child
+        signInInstanceID = UUID()
+        navigationDispatchLog?.recordControl(phase: .signInWindowOpened, parentSessionID: browserSessionID,
+            ownershipEpoch: ownershipEpoch, generation: generation, url: navigationAction.request.url,
+            handback: nil, workflowOperationID: nil, nativeOperationID: nil, signInWindowID: signInInstanceID)
         signInSite = ComputerUseBrowserSite.displayName(for: navigationAction.request.url)
         signInDetail = "You control this window. AI is paused."
         signInURLObservation = child.observe(\.url, options: [.new]) { [weak self] child, _ in
@@ -1677,9 +1777,13 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     private func closeSignInWindow(restoreParent: Bool) {
         guard let child = signInBrowser else { return }
         let wasKey = signInWindow?.isKeyWindow == true
+        navigationDispatchLog?.recordControl(phase: .signInWindowClosed, parentSessionID: browserSessionID,
+            ownershipEpoch: ownershipEpoch, generation: generation, url: child.url,
+            handback: nil, workflowOperationID: nil, nativeOperationID: nil, signInWindowID: signInInstanceID)
         // Retire delegate identity before stopping/closing: late child callbacks
         // can neither close a replacement nor change the main page's evidence.
         signInBrowser = nil
+        signInInstanceID = nil
         signInScope = nil
         signInURLObservation = nil
         child.navigationDelegate = nil
@@ -1745,7 +1849,8 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         navigationDispatchLog?.observe(phase: phase, decision: decision, binding: binding, control: control, surface: surface,
             policyCheck: policyCheck, configuredPolicy: surface == .mainDocument ? sourcePolicy : nil,
             url: url, attemptID: attemptID, navigationCorrelationID: navigationCorrelationID,
-            parentSessionID: browserSessionID, ownershipEpoch: ownershipEpoch, generation: generation)
+            parentSessionID: browserSessionID, ownershipEpoch: ownershipEpoch, generation: generation,
+            signInWindowID: surface == .signInWindow ? signInInstanceID : nil)
     }
 
     /// Legacy policy/URL callbacks do not supply a WKNavigation. Being in the

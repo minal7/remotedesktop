@@ -4,6 +4,104 @@ import XCTest
 
 @MainActor
 final class ComputerUseBrowserSourcePolicyTests: XCTestCase {
+    func testWorkflowResumeHistoryLinksNativeReacquisitionToTheAcceptedParentOperation() async throws {
+        let fixture = try await ResearchDriverFixture.make()
+        defer { fixture.close() }
+        _ = try await fixture.start()
+        let owner = try fixture.owner(), before = try fixture.browser.navigationDispatchHistory(taskID: owner.taskID)
+        owner.pause()
+        let paused = try fixture.browser.navigationDispatchHistory(taskID: owner.taskID)
+        let pause = try XCTUnwrap(paused.controlEvents.last)
+        XCTAssertEqual(pause.phase, .workflowPaused)
+        try await owner.resumeAfterUserControl()
+        let resumed = try fixture.browser.navigationDispatchHistory(taskID: owner.taskID)
+        let workflowStart = try XCTUnwrap(resumed.controlEvents.first { $0.phase == .workflowResumeStarted })
+        let nativeStart = try XCTUnwrap(resumed.controlEvents.first { $0.phase == .nativeReacquisitionStarted })
+        let nativeFinish = try XCTUnwrap(resumed.controlEvents.first { $0.phase == .nativeReacquisitionFinished })
+        let workflowFinish = try XCTUnwrap(resumed.controlEvents.first { $0.phase == .workflowResumed })
+        XCTAssertNotNil(workflowStart.workflowOperationID)
+        XCTAssertNotNil(nativeStart.nativeOperationID)
+        XCTAssertEqual(nativeStart.nativeOperationID, nativeFinish.nativeOperationID)
+        for event in [workflowStart, nativeStart, nativeFinish, workflowFinish] {
+            XCTAssertEqual(event.workflowOperationID, workflowStart.workflowOperationID)
+            XCTAssertEqual(event.handbackBinding, pause.handbackBinding)
+            XCTAssertEqual(event.handback, pause.handback)
+            XCTAssertEqual(event.parentSessionID, pause.parentSessionID)
+            XCTAssertEqual(event.ownershipEpoch, pause.ownershipEpoch)
+        }
+        let orders = [pause.order, workflowStart.order, nativeStart.order, nativeFinish.order, workflowFinish.order]
+        XCTAssertEqual(orders, orders.sorted()); XCTAssertEqual(Set(orders).count, orders.count)
+        XCTAssertFalse(resumed.controlEvents.contains { [.workflowResumeFailed, .nativeReacquisitionFailed].contains($0.phase) })
+        XCTAssertEqual(resumed.attempts, before.attempts)
+        _ = try owner.researchEvidence(for: owner.input)
+        XCTAssertEqual(fixture.server.count("/search?q=concerts"), 1)
+    }
+
+    func testNativeHandbackFinishCannotMasqueradeAsWorkflowResumeAfterAuthenticationAppears() async throws {
+        let script = "fetch('/signal').then(() => { const field = document.createElement('input'); field.type = 'password'; field.value = 'private-login-value'; document.body.append(field); fetch('/locked'); });"
+        let fixture = try await ResearchDriverFixture.make(additionalCardHTML: "<script>\(script)</script>", heldSignal: true)
+        defer { fixture.close() }
+        _ = try await fixture.start()
+        let owner = try fixture.owner(), before = try fixture.browser.navigationDispatchHistory(taskID: owner.taskID)
+        try await waitUntil { fixture.server.count("/signal") == 1 }
+        owner.pause(); fixture.state.allowed = false
+        fixture.server.releaseHeldResponses()
+        try await waitUntil { fixture.server.count("/locked") == 1 }
+        fixture.state.allowed = true
+        do { try await owner.resumeAfterUserControl(); XCTFail("The new authentication control requires continued user intervention") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .authenticationRequired) }
+        let after = try fixture.browser.navigationDispatchHistory(taskID: owner.taskID)
+        let nativeFinish = try XCTUnwrap(after.controlEvents.first { $0.phase == .nativeReacquisitionFinished })
+        let workflowFailure = try XCTUnwrap(after.controlEvents.first { $0.phase == .workflowResumeFailed })
+        XCTAssertNotNil(nativeFinish.workflowOperationID)
+        XCTAssertEqual(nativeFinish.workflowOperationID, workflowFailure.workflowOperationID)
+        XCTAssertLessThan(nativeFinish.order, workflowFailure.order)
+        XCTAssertFalse(after.controlEvents.contains { $0.phase == .workflowResumed })
+        XCTAssertEqual(after.attempts, before.attempts)
+        XCTAssertThrowsError(try owner.researchEvidence(for: owner.input)) {
+            XCTAssertEqual($0 as? ComputerUseBrowserResearchTask.Failure, .paused)
+        }
+        XCTAssertEqual(fixture.server.count("/search?q=concerts"), 1)
+        for event in after.controlEvents { XCTAssertFalse(String(reflecting: event).contains("private-login-value")) }
+    }
+
+    func testControlHistoryRejectsForeignSessionBindingsAndForgedNativePhases() async throws {
+        let first = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+        let second = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+        defer { first.close(); second.close() }
+        let input = try goal(), current = try first.prepareWorkflowSession(taskID: input.taskID)
+        let foreign = try second.prepareWorkflowSession(taskID: input.taskID)
+        let before = try first.navigationDispatchHistory(taskID: input.taskID)
+        first.recordWorkflowControl(.workflowPaused, requirement: foreign)
+        first.recordWorkflowControl(.nativeReacquisitionFinished, requirement: current, operationID: UUID())
+        do { try await first.reacquireAfterUserControl(taskID: input.taskID, requirement: foreign); XCTFail("Foreign native context") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .handbackContextLost) }
+        XCTAssertEqual(try first.navigationDispatchHistory(taskID: input.taskID).controlEvents, before.controlEvents)
+        first.stop()
+        _ = try first.prepareWorkflowSession(taskID: input.taskID)
+        let reclaimed = try first.navigationDispatchHistory(taskID: input.taskID)
+        first.recordWorkflowControl(.workflowResumed, requirement: current, operationID: UUID())
+        do { try await first.reacquireAfterUserControl(taskID: input.taskID, requirement: current); XCTFail("Retired ownership epoch") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .handbackContextLost) }
+        XCTAssertEqual(try first.navigationDispatchHistory(taskID: input.taskID).controlEvents, reclaimed.controlEvents)
+    }
+
+    func testRepeatedBlankHandbackBoundsControlRecordsAndRetainsTheOverflowGap() async throws {
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+        defer { browser.close() }
+        let input = try goal(), session = try browser.prepareWorkflowSession(taskID: input.taskID)
+        for _ in 0..<64 { try await browser.reacquireAfterUserControl(taskID: input.taskID, requirement: session) }
+        let full = try browser.navigationDispatchHistory(taskID: input.taskID)
+        XCTAssertEqual(full.controlEvents.count, 128); XCTAssertFalse(full.controlEventsOverflowed)
+        try await browser.reacquireAfterUserControl(taskID: input.taskID, requirement: session)
+        let overflowed = try browser.navigationDispatchHistory(taskID: input.taskID)
+        XCTAssertTrue(overflowed.controlEventsOverflowed)
+        XCTAssertEqual(overflowed.controlEvents, full.controlEvents)
+        XCTAssertNotEqual(overflowed.identity, full.identity)
+        XCTAssertTrue(overflowed.attempts.isEmpty)
+        XCTAssertTrue(try browser.isUnnavigatedSession(session))
+    }
+
     func testNativePolicyObservationsKeepSlotCorrelationSeparateFromExactNavigationCallbacks() async throws {
         let server = try OwnedBrowserHTTPFixture(), base = try await server.start()
         defer { server.stop() }
@@ -42,6 +140,11 @@ final class ComputerUseBrowserSourcePolicyTests: XCTestCase {
         XCTAssertNotNil(start.navigationCorrelationID)
         XCTAssertTrue(history.observations.contains { $0.phase == .locationChanged })
         XCTAssertFalse(history.observationsOverflowed)
+        let terminalOrder = try XCTUnwrap(attempt.terminalOrder)
+        XCTAssertLessThan(attempt.order, start.order)
+        XCTAssertLessThan(finish.order, terminalOrder)
+        let orders = [attempt.order, terminalOrder] + history.observations.map(\.order) + history.controlEvents.map(\.order)
+        XCTAssertEqual(orders.sorted(), Array(0..<orders.count), "Retained native records share one ordered sequence")
     }
 
     func testRedirectCallbacksRemainObservationsRatherThanInventedRequestDecisions() async throws {
