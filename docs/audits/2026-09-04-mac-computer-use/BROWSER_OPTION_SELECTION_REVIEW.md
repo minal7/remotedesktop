@@ -2,6 +2,8 @@
 
 Source checkpoint following `7077073`. This adds a private native adapter for a freshly observed, bounded combobox/listbox choice. It does **not** yet expose selection through the ordinary action planner, retained research owner or a journaled selection stage. The source is uncompiled and the prepared assertions have not run. No natural-language, provider, account or ticket workflow is qualified by this checkpoint.
 
+Follow-up: the [journaled stage and original-baseline recovery](BROWSER_OPTION_SELECTION_STAGE_REVIEW.md) now exist in source. Normal task integration and execution qualification remain pending.
+
 ## First-principles distinctions
 
 An option is more than a caption: its group, qualifiers, order, availability, owning control and actual native objects determine what a click means. A focused option can differ from the selected option. The control's input or displayed text can differ from the application's accepted value. Even a correctly declared selection cannot establish that a provider accepted a code, refreshed results or returned matching inventory.

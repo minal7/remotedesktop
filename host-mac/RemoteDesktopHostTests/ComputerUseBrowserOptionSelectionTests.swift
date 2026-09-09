@@ -9,9 +9,9 @@ final class ComputerUseBrowserOptionSelectionTests: XCTestCase {
     private let operation = String(repeating: "a", count: 64)
 
     func testPreparationRequiresScopedOptionsAndPreservesOnlyAlreadyObservedCriteria() async throws {
-        let fixture = try await ControlStateFixture(body: page())
+        let fixture = try await ControlStateFixture(body: OptionSelectionFixture.page())
         defer { fixture.close() }
-        let intent = try await intent(fixture), first = try await fixture.browser.prepareOptionSelection(intent)
+        let intent = try await OptionSelectionFixture.intent(fixture), first = try await fixture.browser.prepareOptionSelection(intent)
         let repeated = try await fixture.browser.prepareOptionSelection(intent)
         XCTAssertEqual(first, repeated); XCTAssertTrue(first.binding.needsDispatch)
         try await fixture.browser.validateOptionSelection(first)
@@ -34,9 +34,9 @@ final class ComputerUseBrowserOptionSelectionTests: XCTestCase {
     }
 
     func testReceiptKeepsChoiceMeaningAndSeparateDisplayValueWithoutRepeatingTheClick() async throws {
-        let fixture = try await ControlStateFixture(body: page())
+        let fixture = try await ControlStateFixture(body: OptionSelectionFixture.page())
         defer { fixture.close() }
-        let target = try await fixture.browser.prepareOptionSelection(intent(fixture))
+        let target = try await fixture.browser.prepareOptionSelection(OptionSelectionFixture.intent(fixture))
         var boundaries = 0
         try await fixture.browser.dispatchOptionSelection(target, operationID: operation, willBeginEffect: {
             boundaries += 1; XCTAssertEqual(fixture.server.count("/chosen"), 0)
@@ -74,9 +74,9 @@ final class ComputerUseBrowserOptionSelectionTests: XCTestCase {
     }
 
     func testAlreadySelectedOptionProducesAnObservationWithoutAnyClick() async throws {
-        let fixture = try await ControlStateFixture(body: page())
+        let fixture = try await ControlStateFixture(body: OptionSelectionFixture.page())
         defer { fixture.close() }
-        let target = try await fixture.browser.prepareOptionSelection(intent(fixture, first: true))
+        let target = try await fixture.browser.prepareOptionSelection(OptionSelectionFixture.intent(fixture, first: true))
         XCTAssertFalse(target.intent.needsDispatch); XCTAssertFalse(target.binding.needsDispatch)
         try await fixture.browser.dispatchOptionSelection(target, operationID: operation, willBeginEffect: {})
         let result = try await fixture.browser.optionSelectionReceipt(target, operationID: operation)
@@ -93,9 +93,9 @@ final class ComputerUseBrowserOptionSelectionTests: XCTestCase {
             "document.getElementById('date').value='2026-09-21';",
             "document.getElementById('combo').setAttribute('aria-controls','other');"]
         for change in changes {
-            let fixture = try await ControlStateFixture(body: page() + signal(change), heldSignal: true)
+            let fixture = try await ControlStateFixture(body: OptionSelectionFixture.page() + OptionSelectionFixture.signal(change), heldSignal: true)
             defer { fixture.close() }
-            let target = try await fixture.browser.prepareOptionSelection(intent(fixture))
+            let target = try await fixture.browser.prepareOptionSelection(OptionSelectionFixture.intent(fixture))
             try await fixture.wait { fixture.server.count("/signal") == 1 }
             fixture.server.releaseHeldResponses()
             try await fixture.wait { fixture.server.count("/changed") == 1 }
@@ -123,10 +123,10 @@ final class ComputerUseBrowserOptionSelectionTests: XCTestCase {
             "document.getElementById('group').setAttribute('aria-label','Different conditions');",
             "document.getElementById('first').setAttribute('aria-selected','true');"]
         for (index, change) in changes.enumerated() {
-            let restore = index == 0 ? signal("document.getElementById('date').value='2026-09-20';") : ""
-            let fixture = try await ControlStateFixture(body: page(extra: change) + restore, heldSignal: index == 0)
+            let restore = index == 0 ? OptionSelectionFixture.signal("document.getElementById('date').value='2026-09-20';") : ""
+            let fixture = try await ControlStateFixture(body: OptionSelectionFixture.page(extra: change) + restore, heldSignal: index == 0)
             defer { fixture.close() }
-            let target = try await fixture.browser.prepareOptionSelection(intent(fixture))
+            let target = try await fixture.browser.prepareOptionSelection(OptionSelectionFixture.intent(fixture))
             try await fixture.browser.dispatchOptionSelection(target, operationID: operation, willBeginEffect: {})
             do { _ = try await fixture.browser.optionSelectionReceipt(target, operationID: operation); XCTFail("An overwritten criterion or changed choice is not success") }
             catch { XCTAssertEqual(error as? ComputerUseBrowserOptionSelectionError, .uncertain) }
@@ -145,12 +145,12 @@ final class ComputerUseBrowserOptionSelectionTests: XCTestCase {
     }
 
     func testFocusOrDisplayTextAloneCannotProveSelectionOrRestartConfirmationTime() async throws {
-        let fixture = try await ControlStateFixture(body: page(handler: """
+        let fixture = try await ControlStateFixture(body: OptionSelectionFixture.page(handler: """
             document.getElementById('combo').setAttribute('aria-activedescendant','second');
             document.getElementById('display').textContent='General'; fetch('/chosen');
             """))
         defer { fixture.close() }
-        let target = try await fixture.browser.prepareOptionSelection(intent(fixture))
+        let target = try await fixture.browser.prepareOptionSelection(OptionSelectionFixture.intent(fixture))
         try await fixture.browser.dispatchOptionSelection(target, operationID: operation, willBeginEffect: {})
         let pending = try await fixture.browser.optionSelectionReceipt(target, operationID: operation)
         XCTAssertNil(pending)
@@ -167,12 +167,12 @@ final class ComputerUseBrowserOptionSelectionTests: XCTestCase {
             "const form=document.getElementById('booking'); form.replaceWith(form.cloneNode(true));",
             "const label=document.getElementById('terms'); label.remove(); document.body.prepend(label);"]
         for change in externalChanges {
-            let body = "<form id=booking></form><span id=terms>Admission conditions</span>" + page(extra: change)
+            let body = "<form id=booking></form><span id=terms>Admission conditions</span>" + OptionSelectionFixture.page(extra: change)
                 .replacingOccurrences(of: "id=combo ", with: "id=combo form=booking ")
                 .replacingOccurrences(of: "id=group role=group aria-label='Admission conditions'", with: "id=group role=group aria-labelledby=terms")
             let fixture = try await ControlStateFixture(body: body)
             defer { fixture.close() }
-            let target = try await fixture.browser.prepareOptionSelection(intent(fixture))
+            let target = try await fixture.browser.prepareOptionSelection(OptionSelectionFixture.intent(fixture))
             try await fixture.browser.dispatchOptionSelection(target, operationID: operation, willBeginEffect: {})
             do { _ = try await fixture.browser.optionSelectionReceipt(target, operationID: operation); XCTFail("Required external objects cannot be replaced or reinserted") }
             catch { XCTAssertEqual(error as? ComputerUseBrowserOptionSelectionError, .uncertain) }
@@ -184,14 +184,14 @@ final class ComputerUseBrowserOptionSelectionTests: XCTestCase {
     }
 
     func testCheckedConventionIsDistinctAndAmbiguousMultipleHiddenOrDisabledChoicesAreRejected() async throws {
-        let checked = try await ControlStateFixture(body: page().replacingOccurrences(of: "aria-selected", with: "aria-checked"))
+        let checked = try await ControlStateFixture(body: OptionSelectionFixture.page().replacingOccurrences(of: "aria-selected", with: "aria-checked"))
         defer { checked.close() }
-        let target = try await checked.browser.prepareOptionSelection(intent(checked))
+        let target = try await checked.browser.prepareOptionSelection(OptionSelectionFixture.intent(checked))
         XCTAssertEqual(target.intent.selectionMode, "checked")
         try await checked.browser.dispatchOptionSelection(target, operationID: operation, willBeginEffect: {})
         let receipt = try await checked.browser.optionSelectionReceipt(target, operationID: operation)
         XCTAssertNotNil(receipt)
-        let ordinary = page()
+        let ordinary = OptionSelectionFixture.page()
         for body in [
             ordinary.replacingOccurrences(of: "aria-selected=", with: "aria-checked=false aria-selected="),
             ordinary.replacingOccurrences(of: "aria-selected=false", with: "aria-checked=mixed"),
@@ -201,16 +201,16 @@ final class ComputerUseBrowserOptionSelectionTests: XCTestCase {
             ordinary.replacingOccurrences(of: "Admission conditions", with: "Account password")] {
             let fixture = try await ControlStateFixture(body: body)
             defer { fixture.close() }
-            do { _ = try await fixture.browser.prepareOptionSelection(intent(fixture)); XCTFail("Unsupported state must never authorize a choice click") }
+            do { _ = try await fixture.browser.prepareOptionSelection(OptionSelectionFixture.intent(fixture)); XCTFail("Unsupported state must never authorize a choice click") }
             catch { XCTAssertTrue(error is ComputerUseBrowserOptionSelectionError || error as? ComputerUseBrowserError == .authenticationRequired) }
             XCTAssertEqual(fixture.server.count("/chosen"), 0)
         }
     }
 
     func testDispatchBoundaryFailureDoesNothingAndAuthenticationWithholdsTheReceipt() async throws {
-        let fixture = try await ControlStateFixture(body: page(extra: "document.body.insertAdjacentHTML('beforeend','<label>Password<input type=password></label>');"))
+        let fixture = try await ControlStateFixture(body: OptionSelectionFixture.page(extra: "document.body.insertAdjacentHTML('beforeend','<label>Password<input type=password></label>');"))
         defer { fixture.close() }
-        let target = try await fixture.browser.prepareOptionSelection(intent(fixture))
+        let target = try await fixture.browser.prepareOptionSelection(OptionSelectionFixture.intent(fixture))
         do {
             try await fixture.browser.dispatchOptionSelection(target, operationID: operation, willBeginEffect: { throw SelectionBoundaryFailure.interrupted })
             XCTFail("A rejected durable boundary cannot reach the DOM")
@@ -223,7 +223,11 @@ final class ComputerUseBrowserOptionSelectionTests: XCTestCase {
         try await fixture.wait { fixture.server.count("/chosen") == 1 }
     }
 
-    private func intent(_ fixture: ControlStateFixture, first: Bool = false) async throws -> ComputerUseBrowserOptionSelectionIntent {
+}
+
+@MainActor
+enum OptionSelectionFixture {
+    static func intent(_ fixture: ControlStateFixture, first: Bool = false) async throws -> ComputerUseBrowserOptionSelectionIntent {
         let metadata = try await fixture.browser.observePage(document: fixture.document)
         let requirement = first ? "Use VIP tickets. " : "Use general admission. "
         let goal = try ComputerUseBrowserGoalInput(taskID: fixture.document.taskID,
@@ -249,7 +253,7 @@ final class ComputerUseBrowserOptionSelectionTests: XCTestCase {
               let option = options[first ? 0 : 1]["id"] as? String else { throw ComputerUseBrowserOptionSelectionError.invalidIntent }
         return try .init(interpretation: interpretation, evidence: evidence, controlID: control.id, optionID: option, requirementIndex: 1)
     }
-    private func page(handler: String? = nil, extra: String = "") -> String {
+    static func page(handler: String? = nil, extra: String = "") -> String {
         let normal = """
             document.getElementById('first').setAttribute('aria-selected','false'); this.setAttribute('aria-selected','true');
             document.getElementById('display').textContent='General'; document.getElementById('combo').setAttribute('aria-expanded','false');
@@ -264,7 +268,7 @@ final class ComputerUseBrowserOptionSelectionTests: XCTestCase {
         <div id=second role=option aria-selected=false onclick="\(handler)">General admission USD 40 total</div></div></div></article>
         """
     }
-    private func signal(_ change: String) -> String { "<script>fetch('/signal').then(() => { " + change + " fetch('/changed'); });</script>" }
+    static func signal(_ change: String) -> String { "<script>fetch('/signal').then(() => { " + change + " fetch('/changed'); });</script>" }
 }
 
 private enum SelectionBoundaryFailure: Error { case interrupted }

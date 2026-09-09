@@ -333,9 +333,9 @@ final class ControlStateFixture {
     let server: OwnedBrowserHTTPFixture
     let browser: ComputerUseOwnedBrowser
     let document: ComputerUseBrowserDocument
-    init(body: String, heldSignal: Bool = false) async throws {
+    init(body: String, heldSignal: Bool = false, domScriptDidDispatch: ((ComputerUseBrowserDOMCommand) -> Void)? = nil) async throws {
         server = try .init(routes: ["/page":.init(body: "<!doctype html><meta charset=utf-8>" + body), "/signal":.init(held: heldSignal)])
-        browser = .init(presentsWindow: false)
+        browser = .init(presentsWindow: false, domScriptDidDispatch: domScriptDidDispatch, mayAct: { true })
         do {
             let base = try await server.start()
             try browser.claim(taskID: "control-fixture")

@@ -1,6 +1,8 @@
 import Foundation
 
-enum ComputerUseBrowserOptionSelectionError: Error, Equatable { case invalidIntent, unavailable, uncertain }
+enum ComputerUseBrowserOptionSelectionError: Error, Equatable {
+    case invalidIntent, unavailable, uncertain, retired, retirementPending, busy
+}
 
 /// Whole scoped choice state, with an explicit single-selection convention.
 /// Neither focus nor the owner's typed/displayed text substitutes for it.
@@ -47,6 +49,34 @@ enum ComputerUseBrowserOptionSelectionState {
               let list = reading.object["list_attributes"] as? [String: String] else { return false }
         return [attributes, list].allSatisfy { $0["aria-busy"] != "true" && $0["aria-readonly"] != "true" && $0["aria-disabled"] != "true" }
     }
+
+    /// Freeze the complete observed baseline in the contract without writing
+    /// its private values to the journal. Presence/count fields keep optional
+    /// values and variable-length lists distinct under length-prefixed hashing.
+    static func baselineDigest(controlIDs: [String], page: ComputerUseBrowserPageSnapshot) throws -> String {
+        var parts = ["browser-option-selection-baseline-v1", String(controlIDs.count)]
+        for id in controlIDs {
+            guard let control = page.controls.first(where: { $0.id == id }),
+                  let state = page.controlStates.first(where: { $0.controlID == id }), state.isValid(for: control) else {
+                throw ComputerUseBrowserOptionSelectionError.invalidIntent
+            }
+            parts += [control.id, control.containerID, control.label, control.kind, control.name,
+                String(control.disabled), String(control.readOnly), String(control.required), String(control.multiple),
+                String(control.researchReadable), control.compositeRole ?? "", String(control.constraints.count)]
+            for (key, value) in control.constraints.sorted(by: { $0.key < $1.key }) { parts += [key, value] }
+            parts.append(String(control.options.count))
+            for option in control.options {
+                parts += [option.id, option.label, option.value, option.groupLabel, String(option.disabled), String(option.hidden)]
+            }
+            parts.append(String(control.form != nil))
+            if let form = control.form { parts += [form.id, form.method, form.action, form.target, form.encoding, String(form.noValidate)] }
+            parts += [state.kind.rawValue, String(state.value != nil), state.value ?? "",
+                String(state.selectedOptionIDs != nil), String(state.selectedOptionIDs?.count ?? 0)]
+            parts += state.selectedOptionIDs ?? []
+            parts += [state.checked.map { String($0) } ?? "absent", state.indeterminate.map { String($0) } ?? "absent"]
+        }
+        return ComputerUseTaskContract.digest(parts)
+    }
 }
 
 struct ComputerUseBrowserOptionSelectionIntent: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
@@ -58,6 +88,7 @@ struct ComputerUseBrowserOptionSelectionIntent: Equatable, Sendable, CustomStrin
     let observedPreservedControlIDs: [String]
     let selectionMode: String
     let needsDispatch: Bool
+    let baselineDigest: String
     init(interpretation: ComputerUseBrowserGoalProposal, evidence: ComputerUseBrowserPageEvidence,
          controlID: String, optionID: String, requirementIndex: Int) throws {
         let invalid = ComputerUseBrowserOptionSelectionError.invalidIntent
@@ -88,6 +119,7 @@ struct ComputerUseBrowserOptionSelectionIntent: Equatable, Sendable, CustomStrin
         self.interpretation = interpretation; self.evidence = evidence; self.controlID = controlID; self.optionID = optionID
         self.requirementIndex = requirementIndex; observedPreservedControlIDs = preserved
         selectionMode = reading.mode; needsDispatch = reading.selectedID != optionID
+        baselineDigest = try ComputerUseBrowserOptionSelectionState.baselineDigest(controlIDs: [controlID] + preserved, page: evidence.page)
     }
     var description: String { "BrowserOptionSelectionIntent" }
     var debugDescription: String { description }
@@ -98,14 +130,19 @@ struct ComputerUseBrowserOptionSelectionBinding: Decodable, Equatable, Sendable 
     let controlID: String
     let optionID: String
     let needsDispatch: Bool
+    func matches(_ intent: ComputerUseBrowserOptionSelectionIntent) -> Bool {
+        id.utf8.count == 32 && id.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
+            && controlID == intent.controlID && optionID == intent.optionID && needsDispatch == intent.needsDispatch
+    }
 }
 struct ComputerUseBrowserOptionSelectionTarget: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     let intent: ComputerUseBrowserOptionSelectionIntent
     let binding: ComputerUseBrowserOptionSelectionBinding
     var payloadDigest: String {
-        ComputerUseTaskContract.digest(["browser-option-selection-v1",intent.interpretation.input.digest,
+        ComputerUseTaskContract.digest(["browser-option-selection-v2",intent.interpretation.input.digest,
             intent.evidence.document.contextID,intent.evidence.documentID,intent.evidence.page.id,binding.id,
-            intent.controlID,intent.optionID,String(intent.requirementIndex),intent.selectionMode]
+            intent.controlID,intent.optionID,String(intent.requirementIndex),intent.selectionMode,
+            String(intent.needsDispatch),intent.baselineDigest]
             + intent.observedPreservedControlIDs)
     }
     var description: String { "BrowserOptionSelectionTarget" }
@@ -124,7 +161,7 @@ struct ComputerUseBrowserOptionSelectionReceipt: Decodable, Equatable, Sendable,
     let preservedControlIDs: [String]
     func validates(_ target: ComputerUseBrowserOptionSelectionTarget, operationID: String) -> Bool {
         let intent = target.intent
-        guard self.operationID == operationID, bindingID == target.binding.id, controlID == intent.controlID,
+        guard target.binding.matches(intent), self.operationID == operationID, bindingID == target.binding.id, controlID == intent.controlID,
               optionID == intent.optionID, documentID == intent.evidence.documentID, didDispatch == intent.needsDispatch,
               preservedControlIDs == intent.observedPreservedControlIDs,
               let control = intent.evidence.page.controls.first(where: { $0.id == controlID }),
@@ -145,8 +182,7 @@ extension ComputerUseOwnedBrowser {
             "snapshotID":intent.evidence.page.id,"controlID":intent.controlID,"optionID":intent.optionID], document: intent.evidence.document)
         try requireSelectionContext(intent.evidence.document)
         guard result.status == "selection-prepared", result.documentID == intent.evidence.documentID, let binding = result.optionSelectionBinding,
-              binding.id.utf8.count == 32, binding.id.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }),
-              binding.controlID == intent.controlID, binding.optionID == intent.optionID, binding.needsDispatch == intent.needsDispatch,
+              binding.matches(intent),
               result.selectionPreservedControls == intent.observedPreservedControlIDs else { throw ComputerUseBrowserOptionSelectionError.unavailable }
         return .init(intent: intent, binding: binding)
     }
