@@ -260,6 +260,9 @@ final class ComputerUseBrowserResearchTask {
         if let dateID = interpretation.scalars.dateQuestionRequirementID {
             return .init(taskID: taskID, inputDigest: input.digest, topic: .date, requirementIDs: [dateID])
         }
+        if let quantityID = interpretation.scalars.quantityQuestionRequirementID {
+            return .init(taskID: taskID, inputDigest: input.digest, topic: .quantity, requirementIDs: [quantityID])
+        }
         return nil
     }
 

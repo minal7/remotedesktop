@@ -4,6 +4,60 @@ import XCTest
 
 @MainActor
 final class ComputerUseBrowserResearchAnswerTests: XCTestCase {
+    func testNewScopedResultCountControlsAnswerSelectionDespiteNavigationAndProhibitionLabels() async throws {
+        let fixture = try await ResearchAnswerFixture.make(count: 2)
+        defer { fixture.source.close() }
+        let originalRows: [[String: Any]] = [
+            ["turn":0, "source":"Find concerts. ", "role":"outcome", "field":"category", "relation":"unspecified", "values":[String]()],
+            ["turn":0, "source":"Under USD 50. ", "role":"condition", "field":"price", "relation":"unspecified", "values":[String]()],
+            ["turn":0, "source":"Do not buy.", "role":"prohibition", "field":"other", "relation":"unspecified", "values":[String]()]]
+        fixture.source.goal.select = { _ in try ResearchAnswerFixture.json([
+            "disposition":"clarification", "requirements":originalRows, "question":["topic":"quantity", "requirements":[0]]]) }
+        let first = try await fixture.source.start()
+        guard case .browserClarificationRequired(let request)? = first else { return XCTFail("Expected the scoped missing-count question") }
+        XCTAssertFalse(fixture.source.browser.hasSession); XCTAssertEqual(fixture.source.server.requestCount, 0)
+        let owner = try fixture.source.owner(), original = try await owner.interpretGoal()
+        let question = try owner.issueQuestion(topic: request.topic, requirementIDs: request.requirementIDs,
+            controllerID: "phone", controllerSessionID: "session")
+        let withCount = try owner.answerQuestion(questionID: question.id, answerTaskID: "quantity", answer: "2",
+            controllerID: "phone", controllerSessionID: "session")
+        let rows = originalRows + [["turn":1, "source":"2", "role":"prohibition", "field":"navigationSource", "relation":"unspecified", "values":[String]()]]
+        fixture.source.goal.select = { _ in try ResearchAnswerFixture.json([
+            "disposition":"research", "requirements":rows, "question":["topic":"none", "requirements":[]]]) }
+        let partial = try await fixture.source.driver.continueBrowserResearch(taskID: "quantity", research: owner, tools: fixture.source.tools, progress: { _ in })
+        guard case .browserClarificationRequired(let unitRequest) = partial else { return XCTFail("A count alone must ask for its unit") }
+        XCTAssertEqual(unitRequest.topic, .quantity)
+        XCTAssertFalse(fixture.source.browser.hasSession); XCTAssertEqual(fixture.source.server.requestCount, 0)
+        let unitQuestion = try owner.issueQuestion(topic: unitRequest.topic, requirementIDs: unitRequest.requirementIDs,
+            controllerID: "phone", controllerSessionID: "session")
+        let updated = try owner.answerQuestion(questionID: unitQuestion.id, answerTaskID: "quantity-unit", answer: "options",
+            controllerID: "phone", controllerSessionID: "session")
+        let finalRows = rows + [["turn":2, "source":"options", "role":"prohibition", "field":"navigationSource", "relation":"unspecified", "values":[String]()]]
+        fixture.source.goal.select = { _ in try ResearchAnswerFixture.json([
+            "disposition":"research", "requirements":finalRows, "question":["topic":"none", "requirements":[]]]) }
+        let continued = try await fixture.source.driver.continueBrowserResearch(taskID: "quantity-unit", research: owner, tools: fixture.source.tools, progress: { _ in })
+        guard case .browserResearchAnswer = continued else { return XCTFail("Two qualifying offers must satisfy the new scoped count") }
+        let interpreted = try await owner.interpretGoal()
+        XCTAssertTrue(interpreted.sources.unresolved.isEmpty); XCTAssertFalse(interpreted.sources.requiresNavigationHistory)
+        guard case .bound(let count) = interpreted.scalars.entries[3].resolution else { return XCTFail("The answer must retain its own count condition") }
+        XCTAssertEqual(count.predicate, .quantity(.equal, 2, .options))
+        XCTAssertFalse(count.hasHistoricalSource)
+        let current = try await owner.readCandidates(), assessment = try XCTUnwrap(current.requirementAssessment)
+        XCTAssertEqual(assessment.candidates[0].requirements[3].status, .needsResultSet)
+        XCTAssertEqual(assessment.candidates[0].requirements[4].status, .clarificationApplied)
+        XCTAssertEqual(assessment.requirements[3].quantityScope, .resultSet)
+        XCTAssertEqual(try XCTUnwrap(current.answerPage(goal: updated)).candidateIndices, [0, 1])
+        let eligibility = try XCTUnwrap(current.answerEligibility(goal: updated))
+        XCTAssertEqual(eligibility.selectionCounts, [2])
+        XCTAssertThrowsError(try eligibility.selection([0]))
+        _ = try eligibility.selection([0, 1])
+        XCTAssertEqual(updated.rootDigest, original.proposal.input.rootDigest)
+        XCTAssertEqual(updated.referenceMilliseconds, original.proposal.input.referenceMilliseconds)
+        XCTAssertEqual(withCount.userTurns, [original.proposal.input.prompt, "2"])
+        XCTAssertEqual(updated.userTurns, [original.proposal.input.prompt, "2", "options"])
+        XCTAssertEqual(fixture.source.server.count("/search?q=concerts"), 1)
+    }
+
     func testRetainedBudgetAndResultCountStillGovernAnswerEligibilityAfterRelabeling() async throws {
         for price in ["USD 40", "USD 60"] {
             let fixture = try await ResearchAnswerFixture.make(requested: 2, price: price, resultLocation: "Paris")

@@ -5,6 +5,22 @@ import XCTest
 final class ComputerUseBrowserScalarRequirementsTests: XCTestCase {
     private typealias Scalar = ComputerUseBrowserScalarRequirements
 
+    func testSingularQuantitiesKeepTheirUnitsAndBareCountsRequireAUnit() throws {
+        let aliases: [(String, Scalar.QuantityUnit)] = [("result", .results), ("option", .options), ("flight", .flights),
+            ("concert", .concerts), ("movie", .movies), ("ticket", .tickets), ("person", .people),
+            ("persons", .people), ("adult", .adults), ("child", .children)]
+        for (literal, unit) in aliases {
+            XCTAssertEqual(try compile("1 " + literal, field: "quantity").predicate, .quantity(.equal, 1, unit))
+        }
+        for source in ["2", "three", "at least 2", "for exactly 1."] {
+            XCTAssertEqual(try resolution(source, field: "quantity"), .unresolved(.missingQuantityUnit))
+        }
+        XCTAssertEqual(try resolution("at least 2", field: "quantity", relation: "below"), .unresolved(.contradictoryProposal))
+        for source in ["1000 tickets", "-1 ticket", "1.5 adults", "2 adults and 1 child", "2 infants", "tickets"] {
+            XCTAssertEqual(try resolution(source, field: "quantity"), .unresolved(.unrecognizedSource))
+        }
+    }
+
     func testScalarLedgerRetainsEveryRequirementAndUnresolvedDisposition() throws {
         let rows = [row("Find flights ", role: "outcome", field: "category"),
             row("from San Francisco ", field: "origin"), row("to Los Angeles ", field: "destination"),

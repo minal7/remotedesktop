@@ -10,21 +10,27 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
         case unresolvedDisposition, notScalar, unrecognizedSource, invalidValue, contradictoryProposal, ambiguousDate
         case ambiguousClarification, clarificationScope, contradictoryClarification
         case historicalScalarScope
+        case missingQuantityUnit
     }
     enum Resolution: Equatable, Sendable {
         case bound(Condition), clarification(ClarificationBinding), unresolved(UnresolvedReason)
         /// A complete weekday clause retained from a prior interpretation.
         /// These native source IDs preserve the uncertainty, not a date value.
         case historicalDateAmbiguity([String])
+        /// A retained count/comparator still needs a unit before evaluation.
+        case historicalQuantityUnit([String])
     }
     struct ClarificationBinding: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
         enum Parameter: Equatable, Sendable {
             case currency(Currency), priceBasis(PriceBasis), fees(Fees), date(DayRange)
+            case quantity(Comparison?, Int64?, QuantityUnit?)
             fileprivate var identity: [String] {
                 switch self { case .currency(let value): return ["currency", value.rawValue]
                 case .priceBasis(let value): return ["priceBasis", value.rawValue]
                 case .fees(let value): return ["fees", value.rawValue]
-                case .date(let value): return Predicate.day(value).identity }
+                case .date(let value): return Predicate.day(value).identity
+                case .quantity(let comparison, let count, let unit):
+                    return ["quantity", comparison?.rawValue ?? "unchanged", count.map(String.init) ?? "unchanged", unit?.rawValue ?? "unchanged"] }
             }
         }
         let id: String
@@ -67,6 +73,21 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
     enum QuantityScope: String, Sendable { case resultSet, ticketInventory, party }
     enum QuantityUnit: String, Sendable {
         case results, options, flights, concerts, movies, tickets, people, adults, children
+        static let literalPattern = #"results?|options?|flights?|concerts?|movies?|tickets?|people|persons?|adults?|children|child"#
+        static func literal(_ text: String) -> Self? {
+            switch text.lowercased() {
+            case "result", "results": return .results
+            case "option", "options": return .options
+            case "flight", "flights": return .flights
+            case "concert", "concerts": return .concerts
+            case "movie", "movies": return .movies
+            case "ticket", "tickets": return .tickets
+            case "person", "persons", "people": return .people
+            case "adult", "adults": return .adults
+            case "child", "children": return .children
+            default: return nil
+            }
+        }
         var scope: QuantityScope {
             switch self {
             case .results, .options, .flights, .concerts, .movies: return .resultSet
@@ -236,7 +257,7 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
     let nativeScalarSourceIDs: Set<String>
     var unresolvedRequirementIDs: [String] {
         entries.compactMap {
-            switch $0.resolution { case .unresolved, .historicalDateAmbiguity: return $0.requirementID; default: return nil }
+            switch $0.resolution { case .unresolved, .historicalDateAmbiguity, .historicalQuantityUnit: return $0.requirementID; default: return nil }
         }
     }
     /// Ask about one resolvable weekday occurrence at a time. Separate trip
@@ -256,6 +277,16 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
         default: return false
         }
     }
+    var quantityQuestionRequirementID: String? { proposal.requirements.first(where: permitsQuantityQuestion)?.id }
+    func permitsQuantityQuestion(_ requirement: ComputerUseBrowserGoalProposal.Requirement) -> Bool {
+        guard let index = proposal.requirements.firstIndex(of: requirement),
+              let source = proposal.source(of: requirement),
+              let parts = Self.quantityParts(Self.conditionSource(source)), parts.unit == nil else { return false }
+        switch entries[index].resolution {
+        case .historicalQuantityUnit, .unresolved(.missingQuantityUnit): return true
+        default: return false
+        }
+    }
     var description: String { "BrowserScalarRequirements(entries: \(entries.count), unresolved: \(unresolvedRequirementIDs.count))" }
     var debugDescription: String { description }
 
@@ -271,22 +302,26 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
         var nativeSources = Set(retained.compactMap { entry -> String? in
             switch entry.resolution {
             case .bound(let condition) where condition.hasHistoricalSource: return entry.requirementID
-            case .historicalDateAmbiguity: return entry.requirementID
+            case .historicalDateAmbiguity, .historicalQuantityUnit: return entry.requirementID
             default: return nil
             }
         })
         if proposal.disposition == .research {
             for (index, answer) in proposal.input.clarifications.enumerated() {
-                let literal = answer.topic == .date ? Self.answeredDate(answer.answer, input: proposal.input) != nil
-                    : Self.parameter(answer.answer, topic: answer.topic) != nil
+                let literal: Bool
+                switch answer.topic {
+                case .date: literal = Self.answeredDate(answer.answer, input: proposal.input) != nil
+                case .quantity: literal = Self.quantityAnswer(answer.answer) != nil
+                default: literal = Self.parameter(answer.answer, topic: answer.topic) != nil
+                }
                 if literal {
                     nativeSources.formUnion(proposal.requirements.filter { $0.sourceTurnIndex == index + 1 }.map(\.id))
                 }
             }
         }
         nativeScalarSourceIDs = nativeSources
-        entries = Self.reconcilingClarificationTargets(Self.applyingDateClarifications(proposal,
-            to: Self.applyingPriceClarifications(proposal, to: retained)))
+        entries = Self.reconcilingClarificationTargets(Self.applyingQuantityClarifications(proposal,
+            to: Self.applyingDateClarifications(proposal, to: Self.applyingPriceClarifications(proposal, to: retained))))
     }
 
     private static func baseEntry(_ requirement: ComputerUseBrowserGoalProposal.Requirement, input: ComputerUseBrowserGoalInput) -> Entry {
@@ -295,6 +330,10 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
             return Entry(requirementID: requirement.id, resolution: .unresolved(.notScalar))
         }
         let source = Self.conditionSource(original)
+        if requirement.field == .quantity, let parts = Self.quantityParts(source), parts.unit == nil,
+           requirement.relation != .unspecified && requirement.relation != parts.comparison.relation {
+            return Entry(requirementID: requirement.id, resolution: .unresolved(.contradictoryProposal))
+        }
         let parsed: Result<(Predicate, ComputerUseBrowserGoalProposal.Relation), BindingFailure>
         switch requirement.field {
         case .quantity: parsed = Self.quantity(source)
@@ -327,7 +366,8 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
                    let source = proposal.input.source(of: historical) {
                     retainedWeekday = Self.weekdayClause(Self.conditionSource(source))
                 } else { retainedWeekday = false }
-                if !retainedWeekday { guard case .bound = previous else { continue } }
+                let retainedQuantity = previous == .unresolved(.missingQuantityUnit)
+                if !retainedWeekday && !retainedQuantity { guard case .bound = previous else { continue } }
                 guard let oldSpan = Self.scalarSpan(historical, input: proposal.input) else { continue }
                 let overlaps = proposal.requirements.indices.filter {
                     let current = proposal.requirements[$0]
@@ -346,12 +386,16 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
                 let ids: [String]
                 switch entries[target].resolution {
                 case .bound(let current): ids = current.historicalRequirementIDs
-                case .historicalDateAmbiguity(let retained): ids = retained
+                case .historicalDateAmbiguity(let retained), .historicalQuantityUnit(let retained): ids = retained
                 default: ids = []
                 }
                 let retained = ids.contains(historical.id) ? ids : ids + [historical.id]
                 if retainedWeekday {
                     entries[target] = .init(requirementID: entries[target].requirementID, resolution: .historicalDateAmbiguity(retained))
+                    continue
+                }
+                if retainedQuantity {
+                    entries[target] = .init(requirementID: entries[target].requirementID, resolution: .historicalQuantityUnit(retained))
                     continue
                 }
                 guard case .bound(let condition) = previous else { continue }
@@ -521,6 +565,123 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
         return entries
     }
 
+    /// A scoped quantity answer fills missing units, confirms a known count,
+    /// or refines an all-people party to adults/children. It cannot replace a
+    /// different count/comparator or cross inventory, party and result scopes.
+    private static func applyingQuantityClarifications(_ proposal: ComputerUseBrowserGoalProposal, to original: [Entry]) -> [Entry] {
+        guard proposal.disposition == .research else { return original }
+        var entries = original
+        let answerTurns = Set(proposal.input.clarifications.enumerated().compactMap { $0.element.topic == .quantity ? $0.offset + 1 : nil })
+        let quantityIndices = proposal.requirements.indices.filter {
+            let requirement = proposal.requirements[$0]
+            guard !answerTurns.contains(requirement.sourceTurnIndex) else { return false }
+            switch original[$0].resolution {
+            case .bound(let condition): if case .quantity = condition.predicate { return true }
+            case .historicalQuantityUnit, .unresolved(.missingQuantityUnit): return true
+            default: break
+            }
+            return requirement.role == .condition && requirement.field == .quantity
+        }
+        var previousTargets: [Int: [Int]] = [:]
+        func history(_ resolution: Resolution) -> [String] {
+            switch resolution {
+            case .bound(let condition): return condition.historicalRequirementIDs
+            case .historicalQuantityUnit(let ids): return ids
+            default: return []
+            }
+        }
+        for (index, answer) in proposal.input.clarifications.enumerated() where answer.topic == .quantity {
+            let turn = index + 1
+            let answerIndices = proposal.requirements.indices.filter { proposal.requirements[$0].sourceTurnIndex == turn }
+            var targets: Set<Int> = [], possibleTargets: Set<Int> = [], invalidScope = false, missingDetail = false
+            for scope in answer.scope {
+                guard scope.turn < turn else { invalidScope = true; continue }
+                let matching = quantityIndices.filter { Self.contains(scope, requirement: proposal.requirements[$0], proposal: proposal) }
+                possibleTargets.formUnion(matching)
+                if matching.count == 1 { targets.insert(matching[0]) }
+                else if matching.isEmpty, scope.turn > 0, let previous = previousTargets[scope.turn],
+                        Self.quantityScope(scope.source, within: proposal.input.userTurns[scope.turn]) {
+                    targets.formUnion(previous); possibleTargets.formUnion(previous)
+                } else if matching.isEmpty,
+                          answer.priorRequirements.first(where: { $0.id == scope.requirementID })?.role == .outcome {
+                    missingDetail = true
+                } else { invalidScope = true }
+            }
+            func unresolved(_ reason: UnresolvedReason) {
+                for row in possibleTargets.union(targets).union(answerIndices) {
+                    entries[row] = .init(requirementID: original[row].requirementID, resolution: .unresolved(reason))
+                }
+            }
+            guard !invalidScope, !(missingDetail && !targets.isEmpty) else { unresolved(.clarificationScope); continue }
+            guard let parameter = Self.quantityAnswer(answer.answer), case .quantity(let statedComparison, let statedCount, let statedUnit) = parameter else {
+                unresolved(.ambiguousClarification); continue
+            }
+            if targets.isEmpty && missingDetail {
+                // The entire answer is a new quantity clause. Do not attach
+                // its predicate to the earlier, broader outcome requirement.
+                guard let count = statedCount, let span = Self.answerSpan(answer.answer, turn: turn) else { unresolved(.clarificationScope); continue }
+                let matches = answerIndices.filter { Self.scalarSpan(proposal.requirements[$0], input: proposal.input) == span }
+                guard matches.count == 1, let primary = matches.first else { unresolved(.clarificationScope); continue }
+                let ids = history(entries[primary].resolution)
+                let resolution: Resolution
+                if let unit = statedUnit {
+                    resolution = .bound(.init(inputDigest: proposal.input.digest, requirementID: entries[primary].requirementID,
+                        predicate: .quantity(statedComparison ?? .equal, count, unit), historicalRequirementIDs: ids))
+                } else { resolution = ids.isEmpty ? .unresolved(.missingQuantityUnit) : .historicalQuantityUnit(ids) }
+                entries[primary] = .init(requirementID: entries[primary].requirementID, resolution: resolution)
+                let binding = ClarificationBinding(input: proposal.input, turn: turn, parameter: parameter, targets: [entries[primary].requirementID])
+                for row in answerIndices where row != primary { entries[row] = .init(requirementID: entries[row].requirementID, resolution: .clarification(binding)) }
+                previousTargets[turn] = [primary]
+                continue
+            }
+            guard !targets.isEmpty else { unresolved(.clarificationScope); continue }
+            var replacements: [(Int, Resolution)] = []
+            for target in targets.sorted() {
+                let requirement = proposal.requirements[target]
+                guard let source = proposal.source(of: requirement) else { continue }
+                let changedScope = answer.scope.contains { scope in
+                    guard Self.contains(scope, requirement: requirement, proposal: proposal),
+                          let prior = answer.priorRequirements.first(where: { $0.id == scope.requirementID }),
+                          prior.role == .condition, prior.field == .quantity else { return false }
+                    return Self.conditionSource(scope.source) != Self.conditionSource(source)
+                }
+                guard !changedScope else { continue }
+                let comparison: Comparison, count: Int64, unit: QuantityUnit?
+                switch entries[target].resolution {
+                case .bound(let condition):
+                    guard case .quantity(let originalComparison, let originalCount, let originalUnit) = condition.predicate else { continue }
+                    comparison = originalComparison; count = originalCount; unit = originalUnit
+                case .historicalQuantityUnit, .unresolved(.missingQuantityUnit):
+                    guard let parts = Self.quantityParts(Self.conditionSource(source)), parts.unit == nil else { continue }
+                    comparison = parts.comparison; count = parts.count; unit = nil
+                default: continue
+                }
+                guard statedComparison == nil || statedComparison == comparison, statedCount == nil || statedCount == count else { continue }
+                if let unit, let statedUnit, unit != statedUnit,
+                   !(unit == .people && [.adults, .children].contains(statedUnit)) { continue }
+                let ids = history(entries[target].resolution)
+                if let finalUnit = statedUnit ?? unit {
+                    replacements.append((target, .bound(.init(inputDigest: proposal.input.digest, requirementID: requirement.id,
+                        predicate: .quantity(comparison, count, finalUnit), historicalRequirementIDs: ids))))
+                } else { replacements.append((target, ids.isEmpty ? .unresolved(.missingQuantityUnit) : .historicalQuantityUnit(ids))) }
+            }
+            guard replacements.count == targets.count else { unresolved(.contradictoryClarification); continue }
+            for (target, resolution) in replacements { entries[target] = .init(requirementID: entries[target].requirementID, resolution: resolution) }
+            let ordered = targets.sorted()
+            let binding = ClarificationBinding(input: proposal.input, turn: turn, parameter: parameter, targets: ordered.map { entries[$0].requirementID })
+            for row in answerIndices { entries[row] = .init(requirementID: entries[row].requirementID, resolution: .clarification(binding)) }
+            previousTargets[turn] = ordered
+        }
+        return entries
+    }
+
+    private static func answerSpan(_ answer: String, turn: Int) -> ScalarSpan? {
+        let source = conditionSource(answer)
+        guard !source.isEmpty, let range = answer.range(of: source, options: .literal) else { return nil }
+        let start = answer[..<range.lowerBound].utf8.count
+        return .init(turn: turn, start: start, end: start + source.utf8.count)
+    }
+
     private static func answeredDate(_ source: String, input: ComputerUseBrowserGoalInput) -> DayRange? {
         guard case .success((.day(let range), _)) = date(conditionSource(source), input: input) else { return nil }
         return range
@@ -550,7 +711,14 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
         for index in entries.indices {
             guard case .clarification(let binding) = entries[index].resolution else { continue }
             if !binding.targetRequirementIDs.allSatisfy({ if case .bound? = current[$0] { return true }; return false }) {
-                entries[index] = .init(requirementID: entries[index].requirementID, resolution: .unresolved(.contradictoryClarification))
+                let waitingForUnit: Bool
+                if case .quantity = binding.parameter {
+                    waitingForUnit = binding.targetRequirementIDs.allSatisfy {
+                        switch current[$0] { case .bound?, .historicalQuantityUnit?, .unresolved(.missingQuantityUnit)?: return true; default: return false }
+                    }
+                } else { waitingForUnit = false }
+                entries[index] = .init(requirementID: entries[index].requirementID,
+                    resolution: .unresolved(waitingForUnit ? .missingQuantityUnit : .contradictoryClarification))
             }
         }
         return entries
@@ -617,7 +785,7 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
             guard basis == .unspecified || basis == value else { return nil }; basis = value
         case .fees(let value):
             guard fees == .unspecified || fees == value else { return nil }; fees = value
-        case .date: return nil
+        case .date, .quantity: return nil
         }
         guard let amount = Amount(hundredths: original.hundredths, currency: currency) else { return nil }
         return .price(comparison, amount, basis, fees)
@@ -650,13 +818,34 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
         }
     }
     private static func quantity(_ source: String) -> Result<(Predicate, ComputerUseBrowserGoalProposal.Relation), BindingFailure> {
-        guard let values = groups(#"^(?:for\s+)?(?:(at least|at most|more than|fewer than|exactly)\s+)?([0-9]{1,3}|one|two|three|four|five|six|seven|eight|nine|ten)\s+(results|options|flights|concerts|movies|tickets|people|adults|children)$"#, source),
-              let comparison = comparison(values[0]), let unit = QuantityUnit(rawValue: values[2].lowercased()) else {
-            return .failure(.init(reason: .unrecognizedSource))
-        }
+        guard let parts = quantityParts(source) else { return .failure(.init(reason: .unrecognizedSource)) }
+        guard let unit = parts.unit else { return .failure(.init(reason: .missingQuantityUnit)) }
+        return .success((.quantity(parts.comparison, parts.count, unit), parts.comparison.relation))
+    }
+    private struct QuantityParts: Equatable {
+        let comparison: Comparison
+        let count: Int64
+        let unit: QuantityUnit?
+        let explicitComparison: Bool
+    }
+    private static func quantityParts(_ source: String) -> QuantityParts? {
+        let pattern = #"^(?:for\s+)?(?:(at least|at most|more than|fewer than|exactly)\s+)?([0-9]{1,3}|one|two|three|four|five|six|seven|eight|nine|ten)(?:\s+("# + QuantityUnit.literalPattern + #"))?$"#
+        guard let values = groups(pattern, source), let comparison = comparison(values[0]) else { return nil }
         let words: [String: Int64] = ["one":1, "two":2, "three":3, "four":4, "five":5, "six":6, "seven":7, "eight":8, "nine":9, "ten":10]
-        guard let count = Int64(values[1]) ?? words[values[1].lowercased()] else { return .failure(.init(reason: .invalidValue)) }
-        return .success((.quantity(comparison, count, unit), comparison.relation))
+        guard let count = Int64(values[1]) ?? words[values[1].lowercased()] else { return nil }
+        return .init(comparison: comparison, count: count, unit: values[2].isEmpty ? nil : QuantityUnit.literal(values[2]), explicitComparison: !values[0].isEmpty)
+    }
+    private static func quantityAnswer(_ answer: String) -> ClarificationBinding.Parameter? {
+        let source = conditionSource(answer)
+        if let unit = QuantityUnit.literal(source) { return .quantity(nil, nil, unit) }
+        guard let parts = quantityParts(source) else { return nil }
+        return .quantity(parts.explicitComparison ? parts.comparison : nil, parts.count, parts.unit)
+    }
+    private static func quantityScope(_ scope: String, within answer: String) -> Bool {
+        guard case .quantity(let comparison, let count, let unit)? = quantityAnswer(scope),
+              case .quantity(let expectedComparison, let expectedCount, let expectedUnit)? = quantityAnswer(answer) else { return false }
+        return (comparison == nil || comparison == expectedComparison)
+            && (count == nil || count == expectedCount) && (unit == nil || unit == expectedUnit)
     }
     private static func price(_ source: String) -> Result<(Predicate, ComputerUseBrowserGoalProposal.Relation), BindingFailure> {
         let pattern = #"^(under|below|less than|at most|no more than|over|above|more than|at least|exactly)\s+((?:USD|EUR|GBP|CAD|AUD|JPY)|[$€£¥])\s*((?:[0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)(?:\.[0-9]{1,2})?)(?:\s+(total|per person|per ticket))?(?:\s+(including fees|excluding fees))?$"#

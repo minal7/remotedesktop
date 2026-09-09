@@ -7,6 +7,49 @@ final class ComputerUseBrowserResultAssessmentTests: XCTestCase {
     private typealias Status = ComputerUseBrowserResultAssessment.Status
     private typealias Spec = AssessmentResultFixture.Spec
 
+    func testNativeQuantityQuestionPrecedesSearchAndItsAnswerReachesCapacityAssessment() async throws {
+        for (answer, quote) in [("adults", "3 adults"), ("tickets", "1 ticket")] {
+            let fixture = try await ResearchDriverFixture.make(candidateBodyHTML: "<p>\(quote)</p><p>Available for this offer</p>")
+            defer { fixture.close() }
+            let original = try ComputerUseBrowserGoalInput(taskID: ResearchDriverFixture.root, prompt: "Find concerts. 2",
+                referenceDate: ResearchDriverFixture.date, timeZoneIdentifier: "America/Los_Angeles")
+            let initial = try proposal([row("Find concerts. "), row("2", field: "quantity")], input: original)
+            let goals = AssessmentGoalFixture(value: initial)
+            let driver = ComputerUseBrowserResearchDriver(goalPlanner: goals,
+                resultPlanner: ComputerUseReviewedBrowserResultPlanner(reader: AssessmentResultFixture(fields: [.init(.quantity, [quote])], empty: false),
+                    reviewer: AssessmentInventoryReview(meanings: [.availableQuantity])),
+                searchPlanner: fixture.search, actionPlanner: BrowserResearchActionFixture(), formPlanner: BrowserResearchFormFixture(),
+                planning: ComputerUseModelBrowserResearchPlanning(providers: [fixture.policy.provider], linkPlanner: AssessmentLinkFixture()),
+                now: { ResearchDriverFixture.date }, timeZoneIdentifier: { "America/Los_Angeles" })
+            let first = try await driver.executeBrowserResearch(taskID: original.taskID, prompt: original.prompt, tools: fixture.tools, progress: { _ in })
+            guard case .browserClarificationRequired(let request)? = first else { return XCTFail("A count without a unit must ask before searching") }
+            XCTAssertEqual(request.topic, .quantity)
+            XCTAssertEqual(request.requirementIDs, [initial.requirements[1].id])
+            XCTAssertFalse(fixture.browser.hasSession); XCTAssertEqual(fixture.server.requestCount, 0)
+            XCTAssertTrue(fixture.search.inputs.isEmpty)
+            let owner = try fixture.owner()
+            let question = try owner.issueQuestion(topic: request.topic, requirementIDs: request.requirementIDs,
+                controllerID: "phone", controllerSessionID: "session")
+            let updated = try owner.answerQuestion(questionID: question.id, answerTaskID: "quantity", answer: answer,
+                controllerID: "phone", controllerSessionID: "session")
+            var answerRow = row(answer, field: "source"); answerRow["turn"] = 1
+            goals.value = try proposal([row("Find concerts. "), row("2", field: "source"), answerRow], input: updated)
+            let continued = try await driver.continueBrowserResearch(taskID: "quantity", research: owner, tools: fixture.tools, progress: { _ in })
+            guard case .browserResearchProgress = continued else { return XCTFail("The quantity answer must continue under the existing research owner") }
+            XCTAssertNil(try owner.proposedQuestionRequest())
+            let reading = try await owner.readCandidates(), assessment = try XCTUnwrap(reading.requirementAssessment)
+            XCTAssertEqual(assessment.candidates[0].requirements[1].status, answer == "adults" ? .quotedCapacitySufficient : .quotedCapacityInsufficient)
+            XCTAssertEqual(assessment.candidates[0].requirements[2].status, .clarificationApplied)
+            XCTAssertEqual(assessment.requirements[1].quantityScope, answer == "adults" ? .party : .ticketInventory)
+            XCTAssertEqual(updated.rootDigest, original.rootDigest)
+            XCTAssertEqual(updated.referenceMilliseconds, original.referenceMilliseconds)
+            XCTAssertEqual(updated.userTurns, [original.prompt, answer])
+            XCTAssertEqual(fixture.search.inputs.map(\.input), [updated])
+            XCTAssertEqual(fixture.server.count("/search?q=concerts"), 1)
+            try await fixture.browser.validateResultAssessment(assessment, reading: reading, interpretation: goals.value)
+        }
+    }
+
     func testDriverRecoversARelabeledWeekdayAfterAnUnrelatedAnswerWithoutAskingForWebsites() async throws {
         for dateAnswer in ["2026-10-16", "2026-10-15"] {
             let fixture = try await ResearchDriverFixture.make(candidateBodyHTML: "<p>2026-10-16</p><p>Paris</p>")

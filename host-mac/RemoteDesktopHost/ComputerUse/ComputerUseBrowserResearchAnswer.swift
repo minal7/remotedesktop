@@ -50,9 +50,9 @@ struct ComputerUseBrowserResearchAnswer: Equatable, Sendable, CustomStringConver
                 return nil
             }
             resultCounts = counts
-            let historicalScalars = Set(scalars.entries.compactMap { entry -> String? in
-                if case .bound(let condition) = entry.resolution, condition.hasHistoricalSource { return entry.requirementID }
-                return nil
+            let nativeScalarSources = Set(scalars.entries.compactMap { entry -> String? in
+                guard scalars.nativeScalarSourceIDs.contains(entry.requirementID) else { return nil }
+                switch entry.resolution { case .bound, .clarification: return entry.requirementID; default: return nil }
             })
             var passages: [Int: String] = [:], controls: [Int: String] = [:]
             for (index, candidate) in reading.candidates.enumerated() {
@@ -67,10 +67,10 @@ struct ComputerUseBrowserResearchAnswer: Equatable, Sendable, CustomStringConver
                 guard evaluations.count == interpretation.requirements.count else { continue }
                 let covered = interpretation.requirements.enumerated().allSatisfy { offset, requirement in
                     let status = evaluations[offset].status
-                    let retainedScalar = historicalScalars.contains(requirement.id)
+                    let retainedScalar = nativeScalarSources.contains(requirement.id)
                     // A host-bound literal scalar parameter keeps its typed
                     // meaning even if the model labeled it as a source clause.
-                    if status == .clarificationApplied { return [.outcome, .condition].contains(requirement.role) }
+                    if status == .clarificationApplied { return retainedScalar || [.outcome, .condition].contains(requirement.role) }
                     // An answer-source exclusion is checked against the
                     // native document and the exact compiled policy. It is
                     // not an unsupported content prohibition or a page claim.

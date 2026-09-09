@@ -667,11 +667,11 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
                 guard interpretation.disposition == .research else { return result(.uncompiledRequirement) }
                 if case .clarification? = conditions[requirement.id] { return result(.clarificationApplied) }
                 if case .unresolved(let reason)? = conditions[requirement.id],
-                   [.ambiguousClarification, .clarificationScope, .contradictoryClarification].contains(reason) {
+                   [.ambiguousClarification, .clarificationScope, .contradictoryClarification, .missingQuantityUnit].contains(reason) {
                     return result(.uncompiledRequirement)
                 }
                 let retainedScalar: Bool
-                if case .bound(let condition)? = conditions[requirement.id] { retainedScalar = condition.hasHistoricalSource }
+                if case .bound? = conditions[requirement.id] { retainedScalar = scalars.nativeScalarSourceIDs.contains(requirement.id) }
                 else { retainedScalar = false }
                 if unresolvedSources.contains(requirement.id) { return result(.uncompiledRequirement) }
                 // Page citations and the current source policy cannot prove
@@ -682,6 +682,8 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
                    !reading.matchesAnswerSourceRequirements(sources) { return result(.sourcePolicyMismatch) }
                 if conditions[requirement.id] == .unresolved(.historicalScalarScope) { return result(.uncompiledRequirement) }
                 if case .historicalDateAmbiguity? = conditions[requirement.id] { return result(.uncompiledRequirement) }
+                if case .historicalQuantityUnit? = conditions[requirement.id] { return result(.uncompiledRequirement) }
+                if scalars.nativeScalarSourceIDs.contains(requirement.id) && !retainedScalar { return result(.uncompiledRequirement) }
                 if requirement.field == .answerSource && !retainedScalar {
                     guard reading.documentAnswerSourceStatus != .unconfigured else { return result(.sourceUnconfigured) }
                     guard reading.matchesAnswerSourceRequirements(sources) else { return result(.sourcePolicyMismatch) }
@@ -821,8 +823,8 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
         case .price: return price(text)
         case .date: return day(text).map { .day($0) }
         case .quantity:
-            guard let parts = groups(#"^([0-9]{1,3}) (results|options|flights|concerts|movies|tickets|people|adults|children)$"#, text),
-                  let count = Int64(parts[0]), let unit = Scalars.QuantityUnit(rawValue: parts[1].lowercased()) else { return nil }
+            guard let parts = groups(#"^([0-9]{1,3}) ("# + Scalars.QuantityUnit.literalPattern + #")$"#, text),
+                  let count = Int64(parts[0]), let unit = Scalars.QuantityUnit.literal(parts[1]) else { return nil }
             return .quantity(count, unit)
         default: return nil
         }

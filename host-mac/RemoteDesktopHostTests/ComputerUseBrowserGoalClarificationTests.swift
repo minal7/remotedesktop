@@ -7,6 +7,169 @@ final class ComputerUseBrowserGoalClarificationTests: XCTestCase {
     private typealias Clarification = ComputerUseBrowserGoalClarification
     private typealias Scalars = ComputerUseBrowserScalarRequirements
 
+    func testScopedQuantityAnswersPreserveCountsComparatorsAndPartyRefinements() throws {
+        let cases: [(String, String, Scalars.Comparison, Scalars.QuantityUnit)] = [
+            ("2", "adults", .equal, .adults), ("at least 2", "2 tickets", .atLeast, .tickets),
+            ("more than 2", "tickets", .above, .tickets), ("2 people", "adults", .equal, .adults),
+            ("at least 2 people", "2 children", .atLeast, .children), ("2 tickets", "2", .equal, .tickets)]
+        for (source, answer, comparison, unit) in cases {
+            let ledger = try quantityLedger(source: source, answer: answer)
+            guard case .bound(let count) = ledger.entries[1].resolution,
+                  case .clarification(let binding) = ledger.entries[2].resolution else { return XCTFail("A scoped quantity must bind to its original count") }
+            XCTAssertEqual(count.predicate, .quantity(comparison, 2, unit))
+            XCTAssertTrue(count.hasHistoricalSource)
+            XCTAssertEqual(binding.targetRequirementIDs, [count.requirementID])
+            XCTAssertNil(ledger.quantityQuestionRequirementID)
+            XCTAssertTrue(ledger.nativeScalarSourceIDs.contains(ledger.entries[2].requirementID))
+            XCTAssertTrue(ComputerUseBrowserSourceRequirements(proposal: ledger.proposal).unresolved.isEmpty)
+        }
+    }
+
+    func testQuantityAnswersCannotReplaceCountsComparatorsOrKnownUnitScopes() throws {
+        for (source, answer) in [("2", "3 tickets"), ("at least 2", "exactly 2 tickets"),
+            ("2 tickets", "people"), ("2 adults", "people"), ("2 children", "adults"),
+            ("2 options", "tickets")] {
+            let ledger = try quantityLedger(source: source, answer: answer)
+            XCTAssertEqual(ledger.entries[1].resolution, .unresolved(.contradictoryClarification))
+            XCTAssertEqual(ledger.entries[2].resolution, .unresolved(.contradictoryClarification))
+            XCTAssertTrue(ComputerUseBrowserSourceRequirements(proposal: ledger.proposal).unresolved.isEmpty,
+                "A conflicting quantity literal is still not a website instruction")
+        }
+        for answer in ["2 adults and 1 child", "maybe tickets", "adults or children"] {
+            let ledger = try quantityLedger(source: "2", answer: answer)
+            XCTAssertEqual(ledger.entries[1].resolution, .unresolved(.ambiguousClarification))
+            XCTAssertEqual(ledger.entries[2].resolution, .unresolved(.ambiguousClarification))
+        }
+    }
+
+    func testNewQuantityAnswersKeepTheOutcomeSeparateAndCanAskForTheirMissingUnit() throws {
+        let original = try input("Find concerts."), state = Clarification(input: original)
+        let initial = try proposal(original, rows: [row(original.prompt)])
+        let question = try state.issue(proposal: initial, topic: .quantity, requirementIDs: [initial.requirements[0].id], context: context())
+        let withCount = try state.consume(questionID: question.id, answerTaskID: "count", answer: "2", context: context())
+        let rows = [row(original.prompt), row("2", turn: 1, role: "condition", field: "source")]
+        let current = try proposal(withCount, rows: rows, disposition: "research"), waiting = Scalars(proposal: current)
+        XCTAssertEqual(waiting.entries[0].resolution, .unresolved(.notScalar))
+        XCTAssertEqual(waiting.entries[1].resolution, .unresolved(.missingQuantityUnit))
+        XCTAssertEqual(waiting.quantityQuestionRequirementID, current.requirements[1].id)
+        XCTAssertTrue(ComputerUseBrowserSourceRequirements(proposal: current).unresolved.isEmpty)
+        let unitQuestion = try state.issue(proposal: current, topic: .quantity, requirementIDs: [current.requirements[1].id], context: context())
+        XCTAssertEqual(unitQuestion.scope[0].source, "2")
+        let updated = try state.consume(questionID: unitQuestion.id, answerTaskID: "unit", answer: "adults", context: context())
+        let ledger = Scalars(proposal: try proposal(updated,
+            rows: rows + [row("adults", turn: 2, role: "condition", field: "source")], disposition: "research"))
+        guard case .bound(let count) = ledger.entries[1].resolution,
+              case .clarification(let binding) = ledger.entries[2].resolution else { return XCTFail("The second answer must fill the first answer's unit") }
+        XCTAssertEqual(count.predicate, .quantity(.equal, 2, .adults))
+        XCTAssertFalse(count.hasHistoricalSource, "A new native answer must not invent historical model authority")
+        XCTAssertEqual(ledger.entries[0].resolution, .unresolved(.notScalar))
+        XCTAssertEqual(binding.targetRequirementIDs, [count.requirementID])
+        XCTAssertEqual(updated.rootDigest, original.rootDigest)
+        XCTAssertEqual(updated.referenceMilliseconds, original.referenceMilliseconds)
+        XCTAssertEqual(updated.userTurns, [original.prompt, "2", "adults"])
+        XCTAssertNil(ledger.quantityQuestionRequirementID)
+    }
+
+    func testQuantityScopesDistinguishRepeatedOccurrencesAndApplyMultipleTargetsAtomically() throws {
+        for answer in ["tickets", "2 tickets"] {
+            let original = try input("Find concerts. 2. 3."), state = Clarification(input: original)
+            let rows = [row("Find concerts. "), row("2. ", role: "condition", field: "quantity"), row("3.", role: "condition", field: "quantity")]
+            let initial = try proposal(original, rows: rows)
+            let question = try state.issue(proposal: initial, topic: .quantity, requirementIDs: Array(initial.requirements.dropFirst().map(\.id)), context: context())
+            let updated = try state.consume(questionID: question.id, answerTaskID: "quantity", answer: answer, context: context())
+            let ledger = Scalars(proposal: try proposal(updated, rows: rows + [row(answer, turn: 1, role: "condition", field: "quantity")], disposition: "research"))
+            for index in [1, 2] {
+                if answer == "tickets" {
+                    guard case .bound(let count) = ledger.entries[index].resolution else { return XCTFail("Both selected counts need their own unit") }
+                    XCTAssertEqual(count.predicate, .quantity(.equal, Int64(index + 1), .tickets))
+                } else { XCTAssertEqual(ledger.entries[index].resolution, .unresolved(.contradictoryClarification)) }
+            }
+        }
+        let original = try input("Find concerts. 2. 2."), state = Clarification(input: original)
+        let rows = [row("Find concerts. "), row("2. ", role: "condition", field: "quantity"), row("2.", role: "condition", field: "quantity")]
+        let initial = try proposal(original, rows: rows)
+        let question = try state.issue(proposal: initial, topic: .quantity, requirementIDs: [initial.requirements[2].id], context: context())
+        let updated = try state.consume(questionID: question.id, answerTaskID: "quantity", answer: "tickets", context: context())
+        let ledger = Scalars(proposal: try proposal(updated, rows: rows + [row("tickets", turn: 1, role: "condition", field: "quantity")], disposition: "research"))
+        XCTAssertEqual(ledger.entries[1].resolution, .historicalQuantityUnit([initial.requirements[1].id]))
+        guard case .bound(let count) = ledger.entries[2].resolution else { return XCTFail("Only the selected occurrence may bind") }
+        XCTAssertEqual(count.predicate, .quantity(.equal, 2, .tickets))
+        XCTAssertEqual(ledger.quantityQuestionRequirementID, ledger.entries[1].requirementID)
+        // One broad question containing two counts cannot identify which
+        // count its answer qualifies, even if later rows separate them.
+        let broadInput = try input("Find concerts. 2. 3."), broadState = Clarification(input: broadInput)
+        let broad = try proposal(broadInput, rows: [row(broadInput.prompt)])
+        let broadQuestion = try broadState.issue(proposal: broad, topic: .quantity, requirementIDs: [broad.requirements[0].id], context: context())
+        let broadAnswer = try broadState.consume(questionID: broadQuestion.id, answerTaskID: "quantity", answer: "tickets", context: context())
+        let separated = Scalars(proposal: try proposal(broadAnswer, rows: [row("Find concerts. "),
+            row("2. ", role: "condition", field: "quantity"), row("3.", role: "condition", field: "quantity"),
+            row("tickets", turn: 1, role: "condition", field: "quantity")], disposition: "research"))
+        for index in [1, 2, 3] { XCTAssertEqual(separated.entries[index].resolution, .unresolved(.clarificationScope)) }
+    }
+
+    func testPartialQuantityAnswerWaitsForAUnitAndItsFollowupRetainsTheOriginalTarget() throws {
+        let original = try input("Find concerts. at least 2"), state = Clarification(input: original)
+        let originalRows = [row("Find concerts. "), row("at least 2", role: "condition", field: "quantity")]
+        let initial = try proposal(original, rows: originalRows)
+        let question = try state.issue(proposal: initial, topic: .quantity, requirementIDs: [initial.requirements[1].id], context: context())
+        let withCount = try state.consume(questionID: question.id, answerTaskID: "count", answer: "2", context: context())
+        let rows = originalRows + [row("2", turn: 1, role: "condition", field: "source")]
+        let current = try proposal(withCount, rows: rows, disposition: "research"), waiting = Scalars(proposal: current)
+        XCTAssertEqual(waiting.entries[2].resolution, .unresolved(.missingQuantityUnit), "A count-only parameter must not appear applied yet")
+        let followup = try state.issue(proposal: current, topic: .quantity, requirementIDs: [current.requirements[2].id], context: context())
+        let updated = try state.consume(questionID: followup.id, answerTaskID: "unit", answer: "tickets", context: context())
+        let ledger = Scalars(proposal: try proposal(updated, rows: rows + [row("tickets", turn: 2, role: "condition", field: "source")], disposition: "research"))
+        guard case .bound(let count) = ledger.entries[1].resolution else { return XCTFail("The followup must return to the original quantity") }
+        XCTAssertEqual(count.predicate, .quantity(.atLeast, 2, .tickets))
+        for index in [2, 3] {
+            guard case .clarification(let binding) = ledger.entries[index].resolution else { return XCTFail("Both answers must bind only after the quantity is complete") }
+            XCTAssertEqual(binding.targetRequirementIDs, [count.requirementID])
+        }
+    }
+
+    func testHistoricalUnitlessQuantitiesSurviveRelabelingButRejectMergedAndSplitClauses() throws {
+        let original = try input("Find concerts. at least 2."), state = Clarification(input: original)
+        let initial = try proposal(original, rows: [row("Find concerts. "), row("at least 2.", role: "condition", field: "quantity")])
+        let question = try state.issue(proposal: initial, topic: .location, requirementIDs: [initial.requirements[0].id], context: context())
+        let withLocation = try state.consume(questionID: question.id, answerTaskID: "location", answer: "Paris", context: context())
+        let location = row("Paris", turn: 1, role: "condition", field: "location")
+        var changed = row("at least 2.", role: "prohibition", field: "navigationSource"); changed["relation"] = "below"
+        let rows = [row("Find concerts. "), changed, location]
+        let current = try proposal(withLocation, rows: rows, disposition: "research"), waiting = Scalars(proposal: current)
+        XCTAssertEqual(waiting.entries[1].resolution, .historicalQuantityUnit([initial.requirements[1].id]))
+        XCTAssertEqual(waiting.quantityQuestionRequirementID, current.requirements[1].id)
+        let sources = ComputerUseBrowserSourceRequirements(proposal: current)
+        XCTAssertTrue(sources.unresolved.isEmpty); XCTAssertFalse(sources.requiresNavigationHistory)
+        for partition in [[row(original.prompt), location],
+            [row("Find concerts. "), row("at least "), row("2.", role: "condition", field: "quantity"), location]] {
+            let merged = Scalars(proposal: try proposal(withLocation, rows: partition, disposition: "research"))
+            XCTAssertTrue(merged.entries.contains { $0.resolution == .unresolved(.historicalScalarScope) })
+            XCTAssertNil(merged.quantityQuestionRequirementID)
+        }
+        let unitQuestion = try state.issue(proposal: current, topic: .quantity, requirementIDs: [current.requirements[1].id], context: context())
+        let updated = try state.consume(questionID: unitQuestion.id, answerTaskID: "unit", answer: "tickets", context: context())
+        let ledger = Scalars(proposal: try proposal(updated, rows: rows + [row("tickets", turn: 2, role: "condition", field: "source")], disposition: "research"))
+        guard case .bound(let count) = ledger.entries[1].resolution else { return XCTFail("A quantity answer must resolve the retained original count") }
+        XCTAssertEqual(count.predicate, .quantity(.atLeast, 2, .tickets))
+        XCTAssertEqual(count.historicalRequirementIDs, [initial.requirements[1].id])
+    }
+
+    func testNewCompleteQuantityAnswerHasNativeMeaningDespiteASourceOrProhibitionLabel() throws {
+        let original = try input("Find concerts."), state = Clarification(input: original)
+        let initial = try proposal(original, rows: [row(original.prompt)])
+        let question = try state.issue(proposal: initial, topic: .quantity, requirementIDs: [initial.requirements[0].id], context: context())
+        let updated = try state.consume(questionID: question.id, answerTaskID: "count", answer: "2 options", context: context())
+        let ledger = Scalars(proposal: try proposal(updated, rows: [row(original.prompt),
+            row("2 options", turn: 1, role: "prohibition", field: "navigationSource")], disposition: "research"))
+        guard case .bound(let count) = ledger.entries[1].resolution else { return XCTFail("The new count needs its own native condition") }
+        XCTAssertEqual(count.predicate, .quantity(.equal, 2, .options))
+        XCTAssertFalse(count.hasHistoricalSource)
+        XCTAssertEqual(ledger.entries[0].resolution, .unresolved(.notScalar))
+        XCTAssertTrue(ledger.nativeScalarSourceIDs.contains(count.requirementID))
+        let sources = ComputerUseBrowserSourceRequirements(proposal: ledger.proposal)
+        XCTAssertTrue(sources.unresolved.isEmpty); XCTAssertFalse(sources.requiresNavigationHistory)
+    }
+
     func testRetainedWeekdayAmbiguityCanAskAndConsumeADateQuestionAfterModelRelabeling() throws {
         for field in ["location", "source", "answerSource", "navigationSource"] {
             for role in ["condition", "prohibition"] {
@@ -588,6 +751,14 @@ final class ComputerUseBrowserGoalClarificationTests: XCTestCase {
         XCTAssertEqual(requests[0].httpBody, try planner.makeRequest(continued).httpBody)
     }
 
+    private func quantityLedger(source: String, answer: String) throws -> Scalars {
+        let original = try input("Find concerts. " + source), state = Clarification(input: original)
+        let initial = try proposal(original, rows: [row("Find concerts. "), row(source, role: "condition", field: "quantity")])
+        let question = try state.issue(proposal: initial, topic: .quantity, requirementIDs: [initial.requirements[1].id], context: context())
+        let updated = try state.consume(questionID: question.id, answerTaskID: "quantity", answer: answer, context: context())
+        return Scalars(proposal: try proposal(updated, rows: [row("Find concerts. "), row(source, role: "condition", field: "source"),
+            row(answer, turn: 1, role: "condition", field: "source")], disposition: "research"))
+    }
     private func weekdayAfterLocation(_ source: String, field: String, role: String = "condition") throws
         -> (state: Clarification, initial: ComputerUseBrowserGoalProposal, current: ComputerUseBrowserGoalProposal) {
         let original = try input("Find concerts. " + source), state = Clarification(input: original)
