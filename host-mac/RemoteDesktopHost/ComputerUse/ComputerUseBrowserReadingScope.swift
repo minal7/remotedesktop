@@ -17,7 +17,6 @@ struct ComputerUseBrowserControlRead: Equatable, Sendable {
         }
         return control.researchReadable && (["text", "search", "date", "datetime-local", "month", "week", "time", "number", "select", "checkbox", "radio"].contains(control.kind)
             || ComputerUseBrowserDeclaredState.kinds.contains(control.kind))
-            && (["text", "search"].contains(control.kind) || control.disabled || control.readOnly || ComputerUseBrowserDeclaredState.kinds.contains(control.kind))
             && !control.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 }

@@ -121,7 +121,7 @@ final class ComputerUseBrowserResearchFormNavigation {
             try browser.validateSourceDocument(evidence.document)
             let metadata = try await browser.observePage(document: evidence.document)
             if let scopeReview, !scopeReview.readControls.isEmpty {
-                current = try await browser.observeResearchControls(for: scopeReview.queryReadProposal(for: metadata))
+                current = try await browser.observeResearchControls(for: scopeReview.restoredReadProposal(for: metadata))
             } else { current = metadata }
             try checkCurrent()
             let page = current.page, before = evidence.page

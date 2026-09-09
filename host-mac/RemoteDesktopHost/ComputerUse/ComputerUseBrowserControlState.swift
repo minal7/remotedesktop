@@ -16,7 +16,8 @@ struct ComputerUseBrowserControlState: Decodable, Equatable, Sendable, CustomStr
     }
 
     // Shape validation only. The complete snapshot separately requires scope
-    // membership for text, declared and read-only/disabled value observations.
+    // membership for text, declared and read-only/disabled value observations,
+    // and for every available value when an explicit scope is present.
     func isValid(for control: ComputerUseBrowserPageSnapshot.Control) -> Bool {
         guard controlID == control.id else { return false }
         guard control.compositeRole == nil || kind == .composite || kind == .unavailable else { return false }

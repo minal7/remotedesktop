@@ -113,7 +113,7 @@ final class ComputerUseBrowserReadonlyReadingTests: XCTestCase {
         do { try await fixture.browser.validatePageEvidence(reading); XCTFail("Interactivity flags are retained evidence") }
         catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
         let current = try await input(fixture)
-        XCTAssertTrue(current.readableControlIDs.isEmpty)
+        XCTAssertEqual(current.readableControlIDs, current.evidence.page.controls.map(\.id))
         let general = try await fixture.browser.observePage(document: fixture.document, includingControlState: true)
         XCTAssertTrue(general.page.scopedControlIDs.isEmpty)
         XCTAssertFalse(try XCTUnwrap(general.page.controls.first).readOnly)

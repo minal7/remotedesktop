@@ -285,6 +285,7 @@ struct ComputerUseBrowserPageSnapshot: Decodable, Equatable, Sendable, CustomStr
             guard controlStates.count == controls.count,
                   zip(controlStates, controls).allSatisfy({ pair in
                       pair.0.isValid(for: pair.1) && (!pair.0.requiresScope(for: pair.1) || scopedControlIDs.contains(pair.1.id))
+                        && (scopedControlIDs.isEmpty || [.stateless, .unavailable].contains(pair.0.kind) || scopedControlIDs.contains(pair.1.id))
                   }) else { return false }
         } else if !controlStates.isEmpty { return false }
         func identifier(_ value: String, prefix: String) -> Bool {
@@ -951,7 +952,6 @@ enum ComputerUseBrowserDOM {
           return !!control.label.trim() && !researchValueProtected(element, control);
         }
         return ['text','search','date','datetime-local','month','week','time','number','select','checkbox','radio'].includes(control.kind)
-          && (['text','search'].includes(control.kind) || control.disabled || control.readOnly)
           && !!control.label.trim() && !researchValueProtected(element, control);
       }
       function pageContent(linkBindings, controlBindings, containerBindings, includeControlState = false, scopedControlIDs = []) {
@@ -1132,6 +1132,10 @@ enum ComputerUseBrowserDOM {
           if (!control.compositeRole && ['button','submit','reset','image'].includes(control.kind)) return {...base, kind:'stateless'};
           if (researchValueProtected(element, control)) return unavailable;
           const scoped = scopedControlIDs.includes(control.id) && researchScopeAllowed(element, control);
+          // An explicit scope restricts every value observation, including
+          // ordinary writable settings. Never collect adjacent values merely
+          // because a selected text/composite control caused this reading.
+          if (scopedControlIDs.length && !scoped) return unavailable;
           if (control.compositeRole) {
             if (!scoped) return unavailable;
             const result = compositeState(element, control);
@@ -1171,8 +1175,8 @@ enum ComputerUseBrowserDOM {
             return small(value, 2048) ? {...base, kind:'text', value} : unavailable;
           }
           if (scalarTypes.has(control.kind)) {
-            // General reading admits native scalar values only. Text-entry
-            // values require the explicit scope handled above.
+            // General reading retains its native-scalar capability. Explicit
+            // scopes have already excluded every unselected value above.
             const value = valueGetters[0].call(element);
             return small(value, 2048) ? {...base, kind:'scalar', value} : unavailable;
           }

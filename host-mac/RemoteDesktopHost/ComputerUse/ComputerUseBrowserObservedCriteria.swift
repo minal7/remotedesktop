@@ -19,22 +19,38 @@ enum ComputerUseBrowserObservedCriteria {
                   let state = page.controlStates.first(where: { $0.controlID == id }), state.isValid(for: control) else {
                 throw ComputerUseBrowserOptionSelectionError.invalidIntent
             }
-            parts += [control.id, control.containerID, control.label, control.kind, control.name,
-                String(control.disabled), String(control.readOnly), String(control.required), String(control.multiple),
-                String(control.researchReadable), control.compositeRole ?? "", String(control.constraints.count)]
-            for (key, value) in control.constraints.sorted(by: { $0.key < $1.key }) { parts += [key, value] }
-            parts.append(String(control.options.count))
-            for option in control.options {
-                parts += [option.id, option.label, option.value, option.groupLabel, String(option.disabled), String(option.hidden)]
-            }
-            parts.append(String(control.form != nil))
-            if let form = control.form { parts += [form.id, form.method, form.action, form.target, form.encoding, String(form.noValidate)] }
+            parts += metadataParts(control)
             parts += [state.kind.rawValue, String(state.value != nil), state.value ?? "",
                 String(state.selectedOptionIDs != nil), String(state.selectedOptionIDs?.count ?? 0)]
             parts += state.selectedOptionIDs ?? []
             parts += [state.checked.map { String($0) } ?? "absent", state.indeterminate.map { String($0) } ?? "absent"]
         }
         return ComputerUseTaskContract.digest(parts)
+    }
+
+    /// Native metadata must still mean the original thing before a recovery
+    /// read. This includes private option codes and exact UTF-8 label bytes.
+    static func metadataDigest(controlIDs: [String], page: ComputerUseBrowserPageSnapshot) throws -> String {
+        var parts = ["browser-observed-control-metadata-v1", String(controlIDs.count)]
+        for id in controlIDs {
+            guard let control = page.controls.first(where: { $0.id == id }) else { throw ComputerUseBrowserActionPlanError.inputChanged }
+            parts += metadataParts(control)
+        }
+        return ComputerUseTaskContract.digest(parts)
+    }
+
+    private static func metadataParts(_ control: ComputerUseBrowserPageSnapshot.Control) -> [String] {
+        var parts = [control.id, control.containerID, control.label, control.kind, control.name,
+            String(control.disabled), String(control.readOnly), String(control.required), String(control.multiple),
+            String(control.researchReadable), control.compositeRole ?? "", String(control.constraints.count)]
+        for (key, value) in control.constraints.sorted(by: { $0.key < $1.key }) { parts += [key, value] }
+        parts.append(String(control.options.count))
+        for option in control.options {
+            parts += [option.id, option.label, option.value, option.groupLabel, String(option.disabled), String(option.hidden)]
+        }
+        parts.append(String(control.form != nil))
+        if let form = control.form { parts += [form.id, form.method, form.action, form.target, form.encoding, String(form.noValidate)] }
+        return parts
     }
 
     static func context(controlIDs: [String], original: ComputerUseBrowserPageEvidence,

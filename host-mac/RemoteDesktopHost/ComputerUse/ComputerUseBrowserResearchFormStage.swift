@@ -399,7 +399,12 @@ final class ComputerUseBrowserResearchFormStage {
         try checkCurrent()
         let original = input.evidence.page
         try browser.validateSourceDocument(original.document)
-        let current = try await browser.observePage(document: original.document)
+        let metadata = try await browser.observePage(document: original.document)
+        try checkCurrent()
+        let current: ComputerUseBrowserPageEvidence
+        if let review = input.scopeReview, !review.readControls.isEmpty {
+            current = try await browser.observeResearchControls(for: review.restoredReadProposal(for: metadata))
+        } else { current = metadata }
         try checkCurrent()
         let fields = try await target.bindFields(input.evidence.fields.map(\.editable), to: current)
         try checkCurrent()
@@ -409,9 +414,14 @@ final class ComputerUseBrowserResearchFormStage {
         let comparable = ComputerUseBrowserPageSnapshot(id: before.id, texts: page.texts, links: page.links, controls: page.controls,
             truncated: page.truncated, omittedEmbeddedContent: page.omittedEmbeddedContent, omittedControls: page.omittedControls,
             viewport: before.viewport, containers: page.containers, omittedStructure: page.omittedStructure,
+            controlStates: page.controlStates, controlStateObserved: page.controlStateObserved, scopedControlIDs: page.scopedControlIDs,
             omittedControlMetadata: page.omittedControlMetadata)
         guard current.documentID == original.documentID, comparable == before, fields.fields == input.evidence.fields else {
             throw ComputerUseBrowserResearchFormError.inputChanged
+        }
+        if let review = input.scopeReview {
+            try ComputerUseBrowserObservedCriteria.requireUnchanged(controlIDs: review.readControls.map(\.controlID),
+                original: original, current: current)
         }
         try browser.validateSourceDocument(original.document)
     }

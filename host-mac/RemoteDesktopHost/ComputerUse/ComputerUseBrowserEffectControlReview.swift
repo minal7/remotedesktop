@@ -117,10 +117,17 @@ struct ComputerUseBrowserEffectScopeReview: Equatable, Sendable, CustomStringCon
         readControls = input.optionReadControls; reviews = input.effectControlReviews; formScope = input.formEffectScope
         digest = ComputerUseTaskContract.digest(["browser-effect-scope-review-v1",input.contextJSON])
     }
+    /// Reobserve only the original read scope; new metadata is not authority
+    /// to reinterpret the target or adopt its current value as a new baseline.
     @MainActor
-    func queryReadProposal(for evidence: ComputerUseBrowserPageEvidence) throws -> ComputerUseBrowserActionProposal {
-        guard formScope?.queryControlID != nil, !readControls.isEmpty,
+    func restoredReadProposal(for evidence: ComputerUseBrowserPageEvidence) throws -> ComputerUseBrowserActionProposal {
+        guard formScope != nil, !readControls.isEmpty,
               evidence.document == self.evidence.document, evidence.documentID == self.evidence.documentID else {
+            throw ComputerUseBrowserActionPlanError.inputChanged
+        }
+        let ids = readControls.map(\.controlID)
+        guard try ComputerUseBrowserObservedCriteria.metadataDigest(controlIDs: ids, page: self.evidence.page)
+            == ComputerUseBrowserObservedCriteria.metadataDigest(controlIDs: ids, page: evidence.page) else {
             throw ComputerUseBrowserActionPlanError.inputChanged
         }
         let input = try ComputerUseBrowserActionInput(interpretation: interpretation, evidence: evidence,
