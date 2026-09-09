@@ -10,12 +10,17 @@ final class ComputerUseBrowserResearchPopupTests: XCTestCase {
         configureGoal(fixture)
         fixture.policy.choices = [false]
         _ = try await fixture.start()
+        fixture.actions.select = { input in input.optionReadControls.isEmpty ? try self.inspection(input) : #"{"read_results":true}"# }
         let owner = try fixture.owner(), action = try await owner.planNextAction(using: fixture.actions)
         let input = action.input, id = try XCTUnwrap(input.popupControlIDs.first)
         XCTAssertEqual(input.popupControlIDs.count, 1); XCTAssertTrue(input.needsPlanningDecision)
-        XCTAssertEqual(try object(input.contextJSON)["version"] as? Int, 13)
+        XCTAssertEqual(try object(input.contextJSON)["version"] as? Int, 14)
         XCTAssertFalse(input.contextJSON.contains(fixture.base.absoluteString))
-        XCTAssertFalse(input.contextJSON.contains("General admission"), "Candidate discovery reads no option values")
+        let metadata = try XCTUnwrap(fixture.actions.inputs.dropLast().last)
+        XCTAssertTrue(metadata.popupControlIDs.isEmpty)
+        XCTAssertFalse(metadata.contextJSON.contains("General admission"), "Metadata cannot authorize opening before inspection")
+        XCTAssertTrue(input.contextJSON.contains("General admission"), "Inspection precedes effect preparation")
+        XCTAssertThrowsError(try ComputerUseBrowserActionProposal.decode(content: opening(id), input: metadata))
         let proposal = try ComputerUseBrowserActionProposal.decode(content: opening(id), input: input)
         XCTAssertEqual(proposal.step, .openPopup(id, 0)); XCTAssertTrue(proposal.readControls.isEmpty)
         let forbidden = try XCTUnwrap(input.interpretation.requirements.firstIndex { $0.role == .prohibition })
@@ -30,7 +35,7 @@ final class ComputerUseBrowserResearchPopupTests: XCTestCase {
             bearerToken: "fixture", modelAlias: "fixture-model"), transport: ControlStateUnusedTransport())
         let body = try ResearchAnswerFixture.object(XCTUnwrap(local.makeRequest(input).httpBody))
         let format = try XCTUnwrap(body["response_format"] as? [String: Any])
-        XCTAssertEqual((format["json_schema"] as? [String: Any])?["name"] as? String, "browser_research_action_v13")
+        XCTAssertEqual((format["json_schema"] as? [String: Any])?["name"] as? String, "browser_research_action_v14")
         XCTAssertEqual(fixture.server.count("/opened"), 0)
         let unoffered = try ComputerUseBrowserActionInput(interpretation: input.interpretation, evidence: input.evidence,
             navigationHistory: owner.confirmedNavigationHistory, formHistory: [], latestForm: nil, changedFormTargetIDs: [])
@@ -169,7 +174,7 @@ final class ComputerUseBrowserResearchPopupTests: XCTestCase {
         }
         let owner = try fixture.owner()
         XCTAssertTrue(owner.hasPendingPopup); XCTAssertTrue(owner.popupHistory.isEmpty)
-        XCTAssertEqual(fixture.actions.inputs.count, 1); XCTAssertEqual(fixture.server.count("/opened"), 1)
+        XCTAssertEqual(fixture.actions.inputs.count, 2); XCTAssertEqual(fixture.server.count("/opened"), 1)
         XCTAssertEqual(try journals(fixture).first?.statuses, [.uncertain])
         XCTAssertEqual(owner.input.prompt, fixture.request)
         owner.retire()
@@ -188,7 +193,7 @@ final class ComputerUseBrowserResearchPopupTests: XCTestCase {
         fixture.policy.choices = [false]
         _ = try await fixture.start()
         let owner = try fixture.owner(), original = owner.input
-        fixture.actions.select = { input in self.opening(try XCTUnwrap(input.popupControlIDs.first)) }
+        fixture.actions.select = { input in input.optionReadControls.isEmpty ? try self.inspection(input) : self.opening(try XCTUnwrap(input.popupControlIDs.first)) }
         let old = try await owner.planNextAction(using: fixture.actions)
         try await wait { fixture.server.count("/signal") == 1 }
         fixture.server.releaseHeldResponses()
@@ -211,6 +216,7 @@ final class ComputerUseBrowserResearchPopupTests: XCTestCase {
         fixture.policy.choices = [false]
         fixture.actions.select = { input in
             if let id = input.popupControlIDs.first { return self.opening(id) }
+            if !input.optionInspectionControlIDs.isEmpty && input.popupHistory.last?.outcome != .opened { return try self.inspection(input) }
             if !input.readableControlIDs.isEmpty {
                 return try ResearchAnswerFixture.json(["read_results":true, "read_controls":input.readableControlIDs.map { ["control":$0, "requirement":0] as [String: Any] }])
             }
@@ -243,7 +249,11 @@ final class ComputerUseBrowserResearchPopupTests: XCTestCase {
         <div id=choices role=listbox aria-label='Ticket types' hidden><div role=option aria-selected=false>General admission</div></div>
         </article>
         """
-        + (unsupported ? "<button role=combobox aria-label='Unsupported submit' aria-controls=choices aria-expanded=false>Submit</button>" : "")
+        + (unsupported ? "<button role=combobox aria-label='Unsupported submit' aria-controls=unsupported-choices aria-expanded=false>Submit</button>" : "")
+    }
+    private func inspection(_ input: ComputerUseBrowserActionInput) throws -> String {
+        let owner = try XCTUnwrap(input.evidence.page.controls.first { $0.label == "Ticket type" })
+        return try ResearchAnswerFixture.json(["inspect_options":[["control":owner.id,"requirement":0]]])
     }
     private func opening(_ id: String, requirement: Int = 0) -> String {
         "{\"open_popup\":{\"control\":\"\(id)\",\"requirement\":\(requirement)}}"

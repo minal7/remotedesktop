@@ -531,6 +531,7 @@ struct ComputerUseBrowserDOMReply: Decodable {
     let popupBinding: ComputerUseBrowserPopupBinding?
     let popupReceipt: ComputerUseBrowserPopupReceipt?
     let popupControls: [String]?
+    let popupPreservedControls: [String]?
     let optionSelectionBinding: ComputerUseBrowserOptionSelectionBinding?
     let optionSelectionReceipt: ComputerUseBrowserOptionSelectionReceipt?
     let selectionPreservedControls: [String]?
@@ -586,6 +587,7 @@ enum ComputerUseBrowserDOM {
       };
       function retire(records) {
         retireSelectionRecords(records);
+        retirePopupRecords(records);
         if (records.length > 10000) { for (const binding of bindings.values()) binding.valid = false; lastPageSnapshot = null; formQueries.clear(); return; }
         for (const record of records) {
           for (const [id, query] of formQueries) {
@@ -621,7 +623,7 @@ enum ComputerUseBrowserDOM {
       function synchronize() {
         retire(observer.takeRecords());
         if (root !== doc.documentElement) {
-          if (root) { documentID = nonce(); inputLedgerID = nonce(); bindings.clear(); operations.clear(); pendingChanges.clear(); retiredInputs.clear(); fieldScope = null; viewportOperations.clear(); formQueries.clear(); popupPlans.clear(); popupOperations.clear(); popupRetirements.clear(); selectionPlans.clear(); selectionOperations.clear(); selectionRetirements.clear(); selectionPins = new WeakMap(); lastPageSnapshot = null; }
+          if (root) { documentID = nonce(); inputLedgerID = nonce(); bindings.clear(); operations.clear(); pendingChanges.clear(); retiredInputs.clear(); fieldScope = null; viewportOperations.clear(); formQueries.clear(); popupPlans.clear(); popupOperations.clear(); popupRetirements.clear(); popupPins = new WeakMap(); selectionPlans.clear(); selectionOperations.clear(); selectionRetirements.clear(); selectionPins = new WeakMap(); lastPageSnapshot = null; }
           root = doc.documentElement;
         }
       }
@@ -1386,6 +1388,7 @@ enum ComputerUseBrowserDOM {
           return 'dispatched';
         } catch (_) { return 'uncertain'; }
       }
+      \#(ComputerUseBrowserObservedCriteria.script)
       \#(ComputerUseBrowserPopupScript.source)
       \#(ComputerUseBrowserOptionSelectionScript.source)
       function run(command, args) {
@@ -1487,18 +1490,24 @@ enum ComputerUseBrowserDOM {
             const selectionCurrent = selectionCurrentCommand(command,args,controls);
             if (selectionCurrent) return selectionCurrent;
             if (command === 'popupCandidates') return {...reply('popup-candidates'),
-              popupControls:Array.from(controls).filter(([id,binding]) => popupOpening(binding.element,binding.metadata)).map(([id]) => id)};
+              popupControls:Array.from(controls).filter(([id,binding]) => lastPageSnapshot.includeControlState && lastPageSnapshot.scopedControlIDs.length
+                ? popupCandidate(id,controls) : popupOpening(binding.element,binding.metadata)).map(([id]) => id)};
             if (command === 'preparePopup') {
-              const binding = controls.get(args.controlID), current = binding && popupOpening(binding.element,binding.metadata);
+              const current = popupCandidate(args.controlID,controls), binding = current?.binding;
               if (!current) return reply('popup-unavailable');
               let plan = Array.from(popupPlans.values()).find(plan => plan.snapshotID === args.snapshotID && plan.controlID === args.controlID
-                && !plan.retired && !plan.attemptID && plan.element === binding.element);
+                && !plan.invalid && !plan.retired && !plan.attemptID && plan.element === binding.element);
               if (!plan) {
                 if (popupPlans.size >= 64) return reply('limit');
-                plan = {id:nonce(),controlID:args.controlID,snapshotID:args.snapshotID,url:doc.URL,element:binding.element,form:binding.element.form || null,...current};
+                plan = {id:nonce(),controlID:args.controlID,snapshotID:args.snapshotID,url:doc.URL,element:binding.element,form:binding.element.form || null,...current,scopedControlIDs:[...lastPageSnapshot.scopedControlIDs]};
                 popupPlans.set(plan.id,plan);
+                for (const node of current.required) {
+                  if (!popupPins.has(node)) popupPins.set(node,new Set());
+                  popupPins.get(node).add(plan);
+                }
               }
-              return {...reply('popup-prepared'),popupBinding:{id:plan.id,controlID:plan.controlID}};
+              return {...reply('popup-prepared'),popupBinding:{id:plan.id,controlID:plan.controlID},
+                popupPreservedControls:plan.preserved.map(item => item.id)};
             }
             if (command === 'validatePopup' || command === 'openPopup') {
               const plan = preparedPopup(args,controls);
@@ -1512,6 +1521,7 @@ enum ComputerUseBrowserDOM {
               lastPageSnapshot = null; formQueries.clear();
               try {
                 popupClick.call(plan.element);
+                synchronize(); // Required objects cannot disappear and return as a valid opening.
                 // Preserve a synchronous opening observation even when the
                 // Swift caller is cancelled before its separate receipt read.
                 // Delayed openings still require a query within the same window.

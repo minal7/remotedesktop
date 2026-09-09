@@ -1029,7 +1029,8 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         guard result.changedFieldIDs == nil || command == .inspectFormRequirements else { throw ComputerUseBrowserError.unsupportedDocument }
         guard result.popupBinding == nil || command == .preparePopup,
               result.popupReceipt == nil || command == .popupReceipt,
-              result.popupControls == nil || command == .popupCandidates else { throw ComputerUseBrowserError.unsupportedDocument }
+              result.popupControls == nil || command == .popupCandidates,
+              result.popupPreservedControls == nil || command == .preparePopup else { throw ComputerUseBrowserError.unsupportedDocument }
         guard result.optionSelectionBinding == nil || command == .prepareOptionSelection,
               result.optionSelectionReceipt == nil || command == .optionSelectionReceipt,
               result.optionSelectionCandidates == nil || command == .optionSelectionCandidates,
@@ -1046,7 +1047,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         if result.status == "authentication-required" {
             guard result.fields == nil, result.page == nil, result.scroll == nil, result.formQuery == nil,
                   result.formBindings == nil, result.changedFieldIDs == nil, result.popupBinding == nil, result.popupReceipt == nil,
-                  result.popupControls == nil, result.optionSelectionBinding == nil, result.optionSelectionReceipt == nil,
+                  result.popupControls == nil, result.popupPreservedControls == nil, result.optionSelectionBinding == nil, result.optionSelectionReceipt == nil,
                   result.selectionPreservedControls == nil, result.optionSelectionCandidates == nil else { throw ComputerUseBrowserError.unsupportedDocument }
             throw ComputerUseBrowserError.authenticationRequired
         }

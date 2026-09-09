@@ -46,7 +46,7 @@ final class ComputerUseBrowserPopupStage {
                 .init(id: "prepared", entityID: entity, kind: "popup-preflight", expectedDigest: target.payloadDigest),
                 .init(id: "opened", entityID: entity, kind: "popup-opening-receipt", expectedDigest: target.payloadDigest)],
             steps: [.init(id: stepID, dependencies: [], operation: .init(capabilityID: "browser.openPopup", entityID: entity,
-                payloadDigest: target.payloadDigest, payloadVersion: 1), preconditions: ["prepared"], postconditions: ["opened"])],
+                payloadDigest: target.payloadDigest, payloadVersion: 2), preconditions: ["prepared"], postconditions: ["opened"])],
             invariants: ["owned"], outcomes: ["opened"])
         self.contract = contract
         let operationID = contract.effectIdentity(for: contract.steps[0]); self.operationID = operationID

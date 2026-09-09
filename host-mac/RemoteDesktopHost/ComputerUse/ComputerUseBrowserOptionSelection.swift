@@ -50,32 +50,8 @@ enum ComputerUseBrowserOptionSelectionState {
         return [attributes, list].allSatisfy { $0["aria-busy"] != "true" && $0["aria-readonly"] != "true" && $0["aria-disabled"] != "true" }
     }
 
-    /// Freeze the complete observed baseline in the contract without writing
-    /// its private values to the journal. Presence/count fields keep optional
-    /// values and variable-length lists distinct under length-prefixed hashing.
     static func baselineDigest(controlIDs: [String], page: ComputerUseBrowserPageSnapshot) throws -> String {
-        var parts = ["browser-option-selection-baseline-v1", String(controlIDs.count)]
-        for id in controlIDs {
-            guard let control = page.controls.first(where: { $0.id == id }),
-                  let state = page.controlStates.first(where: { $0.controlID == id }), state.isValid(for: control) else {
-                throw ComputerUseBrowserOptionSelectionError.invalidIntent
-            }
-            parts += [control.id, control.containerID, control.label, control.kind, control.name,
-                String(control.disabled), String(control.readOnly), String(control.required), String(control.multiple),
-                String(control.researchReadable), control.compositeRole ?? "", String(control.constraints.count)]
-            for (key, value) in control.constraints.sorted(by: { $0.key < $1.key }) { parts += [key, value] }
-            parts.append(String(control.options.count))
-            for option in control.options {
-                parts += [option.id, option.label, option.value, option.groupLabel, String(option.disabled), String(option.hidden)]
-            }
-            parts.append(String(control.form != nil))
-            if let form = control.form { parts += [form.id, form.method, form.action, form.target, form.encoding, String(form.noValidate)] }
-            parts += [state.kind.rawValue, String(state.value != nil), state.value ?? "",
-                String(state.selectedOptionIDs != nil), String(state.selectedOptionIDs?.count ?? 0)]
-            parts += state.selectedOptionIDs ?? []
-            parts += [state.checked.map { String($0) } ?? "absent", state.indeterminate.map { String($0) } ?? "absent"]
-        }
-        return ComputerUseTaskContract.digest(parts)
+        try ComputerUseBrowserObservedCriteria.digest(controlIDs: controlIDs, page: page)
     }
 }
 
@@ -96,6 +72,7 @@ struct ComputerUseBrowserOptionSelectionIntent: Equatable, Sendable, CustomStrin
               interpretation.requirements.indices.contains(requirementIndex),
               ComputerUseBrowserControlRead.accepts(interpretation.requirements[requirementIndex]),
               evidence.page.isWellFormed, evidence.page.controlStateObserved, evidence.page.scopedControlIDs.contains(controlID),
+              ComputerUseBrowserObservedCriteria.hasAvailableScopedCriteria(in: evidence.page, excluding: controlID),
               let control = evidence.page.controls.first(where: { $0.id == controlID }),
               control.compositeRole != nil, !control.disabled, !control.readOnly,
               let value = evidence.page.controlStates.first(where: { $0.controlID == controlID && $0.kind == .composite })?.value,
@@ -142,6 +119,7 @@ struct ComputerUseBrowserOptionSelectionChoice: Decodable, Equatable, Sendable {
     let optionIDs: [String]
     func isValid(in evidence: ComputerUseBrowserPageEvidence) -> Bool {
         guard evidence.page.controlStateObserved, evidence.page.scopedControlIDs.contains(controlID),
+              ComputerUseBrowserObservedCriteria.hasAvailableScopedCriteria(in: evidence.page, excluding: controlID),
               let control = evidence.page.controls.first(where: { $0.id == controlID }), !control.disabled, !control.readOnly,
               let value = evidence.page.controlStates.first(where: { $0.controlID == controlID && $0.kind == .composite })?.value,
               let state = ComputerUseBrowserOptionSelectionState.read(value, control: control),

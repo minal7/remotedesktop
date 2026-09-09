@@ -13,10 +13,6 @@ enum ComputerUseBrowserOptionSelectionScript {
           for (const plan of selectionPins.get(removed) || []) plan.invalid = true;
         }
       }
-      function selectionMetadata(binding) {
-        const metadata = {...binding.metadata}; delete metadata.containerID;
-        return JSON.stringify(metadata);
-      }
       function selectionIdentity(graph) {
         const fixed = JSON.parse(JSON.stringify(graph));
         for (const key of ['input_value','display_text','active_option','list_active_option','list_hidden']) delete fixed[key];
@@ -54,28 +50,13 @@ enum ComputerUseBrowserOptionSelectionScript {
         }
         return false;
       }
-      function selectionReferences(binding) {
-        const references = new Set();
-        const starts = [binding.element,...binding.references,...labelFor(binding.element).labels];
-        if (binding.element.form) starts.push(binding.element.form);
-        for (const start of starts) {
-          let reached = false;
-          for (let node = start, depth = 0; node && depth < 128; node = node.assignedSlot || parent(node), depth++) {
-            references.add(node);
-            if (references.size > 4096) return null;
-            if (node === root) { reached = true; break; }
-          }
-          if (!reached) return null;
-        }
-        return Array.from(references);
-      }
       function selectionControlCandidate(args, controls) {
         const binding = controls.get(args.controlID), state = selectionGraph(binding);
         if (!state || binding.metadata.disabled || binding.metadata.readOnly || !selectionReady(state)
             || state.graph.list_hidden || !lastPageSnapshot.scopedControlIDs.includes(args.controlID)
             || state.graph.role === 'combobox' && state.graph.attributes['aria-expanded'] !== 'true') return null;
         const composite = binding.composite;
-        const preserved = [], references = selectionReferences(binding);
+        const preserved = [], references = observedControlReferences(binding);
         if (!references) return null;
         const required = new Set(references);
         for (const [id, other] of controls) {
@@ -90,11 +71,12 @@ enum ComputerUseBrowserOptionSelectionScript {
             if (other.metadata.compositeRole !== 'listbox' || state.graph.role !== 'combobox') return null;
             continue;
           }
+          if (lastPageSnapshot.scopedControlIDs.includes(id) && (!other.state || ['unavailable','stateless'].includes(other.state.kind))) return null;
           if (!other.state || ['unavailable','stateless'].includes(other.state.kind)) continue;
-          const refs = selectionReferences(other);
-          if (!refs) return null;
-          for (const node of refs) { required.add(node); if (required.size > 4096) return null; }
-          preserved.push({id,binding:other,metadata:selectionMetadata(other),state:JSON.stringify(other.state),references:refs,form:other.element.form || null});
+          const record = observedControlRecord(id,other);
+          if (!record) return null;
+          for (const node of record.references) { required.add(node); if (required.size > 4096) return null; }
+          preserved.push(record);
         }
         return {binding,state,list:composite.list,preserved,references,required,
           owner:popupOwnerIdentity(binding.element),form:binding.element.form || null};
@@ -116,15 +98,13 @@ enum ComputerUseBrowserOptionSelectionScript {
         const candidate = selectionCandidate(args,controls);
         if (!candidate || candidate.binding.element !== plan.element || candidate.option !== plan.option || candidate.list !== plan.list
             || candidate.form !== plan.form || !samePopupOwner(candidate.owner,plan.owner)
-            || selectionMetadata(candidate.binding) !== plan.metadata || candidate.references.length !== plan.references.length
+            || observedControlMetadata(candidate.binding) !== plan.metadata || candidate.references.length !== plan.references.length
             || candidate.references.some((node,index) => node !== plan.references[index])
             || candidate.state.mode !== plan.mode || candidate.state.identity !== plan.identity
             || candidate.state.selectedID !== plan.selectedID || candidate.preserved.length !== plan.preserved.length
             || candidate.preserved.some((current,index) => {
               const expected = plan.preserved[index];
-              return current.id !== expected.id || current.binding.element !== expected.binding.element || current.form !== expected.form
-                || current.metadata !== expected.metadata || current.state !== expected.state || current.references.length !== expected.references.length
-                || current.references.some((node,index) => node !== expected.references[index]);
+              return current.id !== expected.id || !observedControlMatches(expected,current.binding);
             })) return null;
         return plan;
       }
@@ -139,20 +119,15 @@ enum ComputerUseBrowserOptionSelectionScript {
         const controls = new Map();
         pageContent(new Map(),controls,new Map(),true,plan.scopedControlIDs);
         const binding = controls.get(plan.controlID), state = selectionGraph(binding);
-        const references = binding && selectionReferences(binding);
+        const references = binding && observedControlReferences(binding);
         const invalid = () => { operation.failed = true; return reply('selection-uncertain'); };
         if (!state || binding.element !== plan.element || (binding.element.form || null) !== plan.form
-            || selectionMetadata(binding) !== plan.metadata || !samePopupOwner(plan.owner,popupOwnerIdentity(binding.element))
+            || observedControlMetadata(binding) !== plan.metadata || !samePopupOwner(plan.owner,popupOwnerIdentity(binding.element))
             || binding.composite.list !== plan.list || state.mode !== plan.mode || state.identity !== plan.identity
             || !references || references.length !== plan.references.length || references.some((node,index) => node !== plan.references[index])
             || binding.composite.optionElements.length !== plan.optionElements.length
             || binding.composite.optionElements.some((node,index) => node !== plan.optionElements[index])) return invalid();
-        for (const expected of plan.preserved) {
-          const current = controls.get(expected.id), refs = current && selectionReferences(current);
-          if (!current || current.element !== expected.binding.element || (current.element.form || null) !== expected.form
-              || selectionMetadata(current) !== expected.metadata || JSON.stringify(current.state) !== expected.state
-              || !refs || refs.length !== expected.references.length || refs.some((node,index) => node !== expected.references[index])) return invalid();
-        }
+        if (plan.preserved.some(expected => !observedControlMatches(expected,controls.get(expected.id)))) return invalid();
         if (!selectionReady(state) || state.selectedID !== plan.optionID) return reply('selection-pending');
         operation.receipt = {operationID:args.operationID,bindingID:plan.id,controlID:plan.controlID,optionID:plan.optionID,documentID,
           didDispatch:operation.didDispatch,afterValue:binding.state.value,preservedControlIDs:plan.preserved.map(item => item.id)};
@@ -198,7 +173,7 @@ enum ComputerUseBrowserOptionSelectionScript {
             if (selectionPlans.size >= 32) return reply('limit');
             plan = {id:nonce(),controlID:args.controlID,optionID:args.optionID,snapshotID:args.snapshotID,url:doc.URL,
               element:candidate.binding.element,option:candidate.option,list:candidate.list,form:candidate.form,owner:candidate.owner,
-              metadata:selectionMetadata(candidate.binding),mode:candidate.state.mode,identity:candidate.state.identity,selectedID:candidate.state.selectedID,
+              metadata:observedControlMetadata(candidate.binding),mode:candidate.state.mode,identity:candidate.state.identity,selectedID:candidate.state.selectedID,
               optionElements:candidate.binding.composite.optionElements,preserved:candidate.preserved,
               references:candidate.references,
               scopedControlIDs:[...lastPageSnapshot.scopedControlIDs],needsDispatch:candidate.state.selectedID !== args.optionID};

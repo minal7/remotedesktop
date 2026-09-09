@@ -3,7 +3,7 @@ import XCTest
 @testable import RemoteDesktopHost
 
 /// Prepared native/journal coverage. These fixtures do not qualify a provider
-/// or the natural-language driver, which does not yet offer popup actions.
+/// or the natural-language driver, whose source integration is unqualified.
 @MainActor
 final class ComputerUseBrowserPopupTests: XCTestCase {
     func testPreparationIsReadOnlyIdempotentAndBoundToAnOriginalResearchRequirement() async throws {
@@ -243,7 +243,12 @@ final class ComputerUseBrowserPopupTests: XCTestCase {
         guard let control = evidence.page.controls.first(where: { $0.compositeRole == "combobox" }) else {
             throw ComputerUseBrowserPopupError.unavailable
         }
-        return try .init(interpretation: interpretation, evidence: evidence, controlID: control.id, requirementIndex: 1)
+        let input = try ComputerUseBrowserActionInput(interpretation: interpretation, evidence: evidence,
+            navigationHistory: [], formHistory: [], latestForm: nil, changedFormTargetIDs: [])
+        let read = try ComputerUseBrowserActionProposal.decode(content: ResearchAnswerFixture.json([
+            "read_results":true,"read_controls":[["control":control.id,"requirement":1]]]), input: input)
+        let scoped = try await fixture.browser.observeResearchControls(for: read)
+        return try .init(interpretation: interpretation, evidence: scoped, controlID: control.id, requirementIndex: 1)
     }
     private func page(handler: String = "this.setAttribute('aria-expanded','true'); document.getElementById('choices').hidden=false; fetch('/opened');") -> String {
         """

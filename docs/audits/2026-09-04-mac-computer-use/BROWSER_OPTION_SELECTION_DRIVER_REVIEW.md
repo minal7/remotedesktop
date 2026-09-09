@@ -2,6 +2,8 @@
 
 Source checkpoint following `95b896b`. The [journaled selection stage](BROWSER_OPTION_SELECTION_STAGE_REVIEW.md) is now connected to the ordinary action planner, research owner and driver. The source has not been typechecked, built or executed. This checkpoint does not qualify model decisions, account login, provider behavior or whole-task completion.
 
+Follow-up: [the popup criterion review](BROWSER_POPUP_CRITERIA_REVIEW.md) records scoped inspection before opening, shared criterion identity, preservation receipts and checks against original values after opening or unsent retirement. The history and counts below describe this earlier integration checkpoint. Complete semantic scope and general task-criterion lifetimes still require repair.
+
 ## First-principles repair
 
 A model cannot choose a ticket type from metadata that omits the actual options. Reading those options must also be distinguishable from reading results: sending the reading straight to the result assessor prevents the action planner from using it. The host now offers an explicit scoped inspection, returns the complete supported graph to the same action decision, and offers only choices that the native adapter can currently bind.

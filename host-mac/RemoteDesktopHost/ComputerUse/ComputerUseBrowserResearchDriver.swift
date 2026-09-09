@@ -130,6 +130,9 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
         } catch is ComputerUseTaskJournalStore.StoreError {
             try validate(run, tools: tools)
             return .userInterventionRequired("The browser could not safely save or recover this action. The original request remains pending; check the Mac before continuing.")
+        } catch ComputerUseBrowserResearchTask.Failure.observedCriteriaChanged {
+            try validate(run, tools: tools)
+            return .userInterventionRequired("A criterion observed before the dropdown action has changed or cannot be checked. Review it on the Mac before continuing; the original request remains pending.")
         } catch ComputerUseBrowserResearchTask.Failure.optionSelectionCriteriaChanged {
             try validate(run, tools: tools)
             return .userInterventionRequired("A criterion observed before the interrupted choice has changed or cannot be checked. Review it on the Mac before continuing; the original request remains pending.")

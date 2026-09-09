@@ -30,7 +30,7 @@ struct ComputerUseBrowserResearchVisit: Equatable, Sendable {
 /// compile arbitrary research actions or certify independent inventory truth.
 @MainActor
 final class ComputerUseBrowserResearchTask {
-    enum Failure: Error, Equatable { case busy, paused, retired, goalChanged, interpretationRequired, questionPending, browserRequired, navigationPending, navigationUnavailable, formPending, formUnavailable, popupPending, popupLimit, optionSelectionPending, optionSelectionLimit, optionSelectionCriteriaChanged }
+    enum Failure: Error, Equatable { case busy, paused, retired, goalChanged, observedCriteriaChanged, interpretationRequired, questionPending, browserRequired, navigationPending, navigationUnavailable, formPending, formUnavailable, popupPending, popupLimit, optionSelectionPending, optionSelectionLimit, optionSelectionCriteriaChanged }
     struct Interpretation: Sendable {
         let proposal: ComputerUseBrowserGoalProposal
         let scalars: ComputerUseBrowserScalarRequirements
@@ -432,6 +432,7 @@ final class ComputerUseBrowserResearchTask {
         let intent = try ComputerUseBrowserPopupIntent(interpretation: action.input.interpretation,
             evidence: action.input.evidence, controlID: controlID, requirementIndex: requirement)
         latestAction = nil; latestCandidates = nil; latestForm = nil
+        try requireOriginalPopupCriteria(in: intent.evidence)
         try await operate { [self] in
             do {
                 let target = try await browser.preparePopup(intent)
@@ -512,6 +513,7 @@ final class ComputerUseBrowserResearchTask {
         let intent = try ComputerUseBrowserOptionSelectionIntent(interpretation: action.input.interpretation,
             evidence: action.input.evidence, controlID: controlID, optionID: optionID, requirementIndex: requirement)
         latestAction = nil; latestCandidates = nil; latestForm = nil
+        try requireOriginalPopupCriteria(in: intent.evidence)
         try requireOriginalOptionSelectionCriteria(intent)
         try await operate { [self] in
             do {
@@ -583,6 +585,19 @@ final class ComputerUseBrowserResearchTask {
         optionSelectionHistory.append(try .init(stage: stage, receipt: receipt, digest: digest))
         optionSelectionStage = nil; optionSelectionNeedsReopen = false; stage.retire()
         latestAction = nil; latestCandidates = nil; latestForm = nil
+    }
+
+    /// An opened or proven-unsent popup cannot turn an overwritten criterion
+    /// into a new starting value. Selection alone does not discharge unrelated
+    /// criteria; explicit task-backed replacements need their own reconciliation.
+    private func requireOriginalPopupCriteria(in evidence: ComputerUseBrowserPageEvidence) throws {
+        do {
+            for record in popupHistory {
+                guard input.continues(record.intent.interpretation.input) else { throw Failure.observedCriteriaChanged }
+                try ComputerUseBrowserObservedCriteria.requireUnchanged(controlIDs: record.intent.observedPreservedControlIDs,
+                    original: record.intent.evidence, current: evidence)
+            }
+        } catch { throw Failure.observedCriteriaChanged }
     }
 
     /// A proven-unsent retirement releases the old native target, not its
@@ -697,6 +712,7 @@ final class ComputerUseBrowserResearchTask {
                 page = try await observeOwnedPage(goal: captured, enforceSources: true)
                 selectedFormID = nil
             }
+            try requireOriginalPopupCriteria(in: page)
             guard browser.hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
             // Same-form dependent work reuses the original adapter and its
             // receipts. It cannot fall back to discovery on extension failure.
@@ -1463,6 +1479,7 @@ final class ComputerUseBrowserResearchTask {
         } else {
             evidence = try await observeOwnedPage(goal: goal, enforceSources: true, includingControlState: true)
         }
+        try requireOriginalPopupCriteria(in: evidence)
         let page = try ComputerUseBrowserResultPageInput(page: evidence.page)
         let proposal = try await resultPlanner.propose(interpretation: interpretation.proposal, page: page)
         try checkCurrent(goal)

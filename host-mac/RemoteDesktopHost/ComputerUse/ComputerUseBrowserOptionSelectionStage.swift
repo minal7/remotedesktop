@@ -252,17 +252,8 @@ struct ComputerUseBrowserResearchOptionSelectionRecord: Equatable, Sendable, Cus
             throw ComputerUseBrowserActionPlanError.invalidInput
         }
         let sameDocument = intent.evidence.document == evidence.document && intent.evidence.documentID == evidence.documentID
-        let preserved: [[String: Any]] = try intent.observedPreservedControlIDs.map { id in
-            guard let control = intent.evidence.page.controls.first(where: { $0.id == id }),
-                  let state = intent.evidence.page.controlStates.first(where: { $0.controlID == id }) else {
-                throw ComputerUseBrowserActionPlanError.invalidInput
-            }
-            return ["label":control.label,"kind":control.kind,"read_only":control.readOnly,"disabled":control.disabled,
-                "required":control.required,"multiple":control.multiple,"constraints":control.constraints,
-                "current_control":sameDocument && projected.contains(id) ? id as Any : NSNull(),
-                "historical_state":state.plannerContext,
-                "native_option_labels":control.options.map { ["id":$0.id,"label":$0.label,"group_label":$0.groupLabel,"disabled":$0.disabled,"hidden":$0.hidden] as [String: Any] }]
-        }
+        let preserved = try ComputerUseBrowserObservedCriteria.context(controlIDs: intent.observedPreservedControlIDs,
+            original: intent.evidence, current: evidence, projected: projected)
         return ["stage":index,"outcome":outcome.rawValue,"did_dispatch":didDispatch.map { $0 as Any } ?? NSNull(),
             "source":source,"turn":requirement.sourceTurnIndex,"sourceByteOffset":requirement.sourceByteOffset,
             "sourceByteCount":requirement.sourceByteCount,"current_goal_revision":previous.input == goal,

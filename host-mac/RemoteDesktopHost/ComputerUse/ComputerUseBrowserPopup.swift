@@ -10,15 +10,24 @@ struct ComputerUseBrowserPopupIntent: Equatable, Sendable, CustomStringConvertib
     let evidence: ComputerUseBrowserPageEvidence
     let controlID: String
     let requirementIndex: Int
+    let observedPreservedControlIDs: [String]
+    let baselineDigest: String
     init(interpretation: ComputerUseBrowserGoalProposal, evidence: ComputerUseBrowserPageEvidence,
          controlID: String, requirementIndex: Int) throws {
         guard interpretation.input.taskID == evidence.document.taskID, interpretation.disposition == .research,
               interpretation.requirements.indices.contains(requirementIndex),
               ComputerUseBrowserControlRead.accepts(interpretation.requirements[requirementIndex]),
+              evidence.page.isWellFormed, evidence.page.controlStateObserved, evidence.page.scopedControlIDs.contains(controlID),
               let control = evidence.page.controls.first(where: { $0.id == controlID }),
-              control.compositeRole == "combobox", ComputerUseBrowserControlRead.allows(control) else {
+              control.compositeRole == "combobox", ComputerUseBrowserControlRead.allows(control),
+              ComputerUseBrowserObservedCriteria.hasAvailableScopedCriteria(in: evidence.page, excluding: controlID) else {
             throw ComputerUseBrowserPopupError.invalidIntent
         }
+        let preserved = evidence.page.controlStates.filter {
+            $0.controlID != controlID && $0.kind != .unavailable && $0.kind != .stateless
+        }.map(\.controlID)
+        observedPreservedControlIDs = preserved
+        baselineDigest = try ComputerUseBrowserObservedCriteria.digest(controlIDs: [controlID] + preserved, page: evidence.page)
         self.interpretation = interpretation; self.evidence = evidence
         self.controlID = controlID; self.requirementIndex = requirementIndex
     }
@@ -42,9 +51,10 @@ struct ComputerUseBrowserPopupReceipt: Decodable, Equatable, Sendable {
     let bindingID: String
     let controlID: String
     let documentID: String
+    let preservedControlIDs: [String]
     func validates(_ target: ComputerUseBrowserPopupTarget, operationID: String) -> Bool {
         self.operationID == operationID && bindingID == target.binding.id && controlID == target.binding.controlID
-            && documentID == target.intent.evidence.documentID
+            && documentID == target.intent.evidence.documentID && preservedControlIDs == target.intent.observedPreservedControlIDs
     }
 }
 
@@ -52,9 +62,9 @@ struct ComputerUseBrowserPopupTarget: Equatable, Sendable, CustomStringConvertib
     let intent: ComputerUseBrowserPopupIntent
     let binding: ComputerUseBrowserPopupBinding
     var payloadDigest: String {
-        ComputerUseTaskContract.digest(["browser-popup-opening-v1", intent.interpretation.input.digest,
+        ComputerUseTaskContract.digest(["browser-popup-opening-v2", intent.interpretation.input.digest,
             intent.evidence.document.contextID, intent.evidence.documentID, intent.evidence.page.id,
-            binding.id, binding.controlID, String(intent.requirementIndex)])
+            binding.id, binding.controlID, String(intent.requirementIndex), intent.baselineDigest])
     }
     var description: String { "BrowserPopupTarget" }
     var debugDescription: String { description }
@@ -81,7 +91,7 @@ extension ComputerUseOwnedBrowser {
         try requirePopupContext(intent.evidence.document)
         guard result.status == "popup-prepared", result.documentID == intent.evidence.documentID,
               let binding = result.popupBinding, binding.isWellFormed, binding.controlID == intent.controlID,
-              result.popupReceipt == nil else { throw ComputerUseBrowserPopupError.unavailable }
+              result.popupReceipt == nil, result.popupPreservedControls == intent.observedPreservedControlIDs else { throw ComputerUseBrowserPopupError.unavailable }
         return .init(intent: intent, binding: binding)
     }
 
@@ -154,6 +164,14 @@ enum ComputerUseBrowserPopupScript {
     static let source = #"""
       const popupPlans = new Map(), popupOperations = new Map(), popupRetirements = new Map();
       const popupClick = HTMLElement.prototype.click;
+      let popupPins = new WeakMap();
+      function retirePopupRecords(records) {
+        if (!popupPlans.size) return;
+        if (records.length > 512) { for (const plan of popupPlans.values()) plan.invalid = true; return; }
+        for (const record of records) if (record.type === 'childList') for (const removed of record.removedNodes) {
+          for (const plan of popupPins.get(removed) || []) plan.invalid = true;
+        }
+      }
       let popupUserInputSerial = 0;
       for (const name of ['pointerdown','mousedown','keydown','input','wheel','touchstart','click']) {
         doc.addEventListener(name,event => { if (event.isTrusted) popupUserInputSerial++; },true);
@@ -216,12 +234,45 @@ enum ComputerUseBrowserPopupScript {
         const owner = popupOwnerIdentity(element);
         return owner ? {key,targetID,list,owner} : null;
       }
+      function popupOwnerCriteria(binding) {
+        if (binding.state?.kind !== 'composite') return binding.element instanceof HTMLInputElement ? undefined : null;
+        const graph = JSON.parse(binding.state.value);
+        // Opening may change visibility and focus, never an existing selection
+        // or native input value. Custom button display text is presentation.
+        for (const key of ['active_option','list_active_option','list_hidden','display_text']) delete graph[key];
+        for (const key of ['aria-expanded','aria-busy']) { delete graph.attributes[key]; delete graph.list_attributes[key]; }
+        for (const option of graph.options) {
+          delete option.hidden;
+          for (const group of option.groups) delete group.hidden;
+        }
+        return JSON.stringify(graph);
+      }
+      function popupCandidate(controlID,controls) {
+        const binding = controls.get(controlID), opening = binding && popupOpening(binding.element,binding.metadata);
+        if (!opening || !lastPageSnapshot.includeControlState || !lastPageSnapshot.scopedControlIDs.includes(controlID)) return null;
+        const references = observedControlReferences(binding), ownerCriteria = popupOwnerCriteria(binding);
+        if (!references || ownerCriteria === undefined || opening.list && ownerCriteria === null) return null;
+        const required = new Set(references), preserved = [];
+        for (const [id,other] of controls) {
+          if (id === controlID) continue;
+          if (lastPageSnapshot.scopedControlIDs.includes(id) && (!other.state || ['unavailable','stateless'].includes(other.state.kind))) return null;
+          if (!other.state || ['unavailable','stateless'].includes(other.state.kind)) continue;
+          const record = observedControlRecord(id,other);
+          if (!record) return null;
+          preserved.push(record);
+          for (const node of record.references) { required.add(node); if (required.size > 4096) return null; }
+        }
+        return {binding,...opening,references,required,preserved,ownerCriteria,metadata:observedControlMetadata(binding)};
+      }
       function preparedPopup(args, controls) {
-        const plan = popupPlans.get(args.bindingID), binding = controls.get(args.controlID);
-        if (!plan || plan.retired || plan.attemptID || !binding || plan.element !== binding.element || plan.form !== (binding.element.form || null)
-            || plan.controlID !== args.controlID || plan.snapshotID !== args.snapshotID || plan.url !== doc.URL) return null;
-        const current = popupOpening(binding.element,binding.metadata);
-        return current && current.key === plan.key && current.targetID === plan.targetID && current.list === plan.list
+        const plan = popupPlans.get(args.bindingID), current = popupCandidate(args.controlID,controls);
+        if (!plan || plan.invalid || plan.retired || plan.attemptID || !current || plan.element !== current.binding.element
+            || plan.form !== (current.binding.element.form || null) || plan.metadata !== current.metadata || plan.ownerCriteria !== current.ownerCriteria
+            || plan.controlID !== args.controlID || plan.snapshotID !== args.snapshotID || plan.url !== doc.URL
+            || plan.references.length !== current.references.length || plan.references.some((node,index) => node !== current.references[index])
+            || plan.preserved.length !== current.preserved.length
+            || plan.preserved.some((expected,index) => expected.id !== current.preserved[index].id || !observedControlMatches(expected,current.preserved[index].binding))) return null;
+        return current.key === plan.key && current.targetID === plan.targetID && current.list === plan.list
           && samePopupOwner(current.owner,plan.owner) ? plan : null;
       }
       function popupHistorical(args) {
@@ -230,19 +281,27 @@ enum ComputerUseBrowserPopupScript {
         if (!plan || plan.controlID !== args.controlID || plan.snapshotID !== args.snapshotID || plan.url !== doc.URL
             || !operation || operation.plan !== plan || plan.attemptID !== args.operationID) return reply('popup-uncertain');
         if (operation.receipt) return {...reply('popup-confirmed'),popupReceipt:operation.receipt};
-        if (!operation.dispatched || operation.failed || popupUserInputSerial !== operation.userInputSerial
+        if (!operation.dispatched || operation.failed || plan.invalid || popupUserInputSerial !== operation.userInputSerial
             || performance.now() > operation.deadline || !plan.element.isConnected || plan.element.ownerDocument !== doc || plan.form !== (plan.element.form || null)
-            || !samePopupOwner(plan.owner,popupOwnerIdentity(plan.element))) return reply('popup-uncertain');
+            || !samePopupOwner(plan.owner,popupOwnerIdentity(plan.element))) { operation.failed = true; return reply('popup-uncertain'); }
         const status = authenticationStatus();
         if (status) return reply(status);
+        const controls = new Map();
+        pageContent(new Map(),controls,new Map(),true,plan.scopedControlIDs);
+        const current = controls.get(plan.controlID);
+        const invalid = () => { operation.failed = true; return reply('popup-uncertain'); };
+        if (!current || current.element !== plan.element || observedControlMetadata(current) !== plan.metadata
+            || plan.ownerCriteria !== null && popupOwnerCriteria(current) !== plan.ownerCriteria
+            || plan.preserved.some(expected => !observedControlMatches(expected,controls.get(expected.id)))) return invalid();
         const list = popupList(plan.element,plan.targetID);
-        if (list === undefined || list && list.getAttribute('role') !== 'listbox') return reply('popup-uncertain');
-        if (list && researchValueProtected(list,{label:labelFor(list).label,name:list.getAttribute('name') || ''})) return reply('popup-uncertain');
+        if (list === undefined || list && list.getAttribute('role') !== 'listbox') return invalid();
+        if (list && researchValueProtected(list,{label:labelFor(list).label,name:list.getAttribute('name') || ''})) return invalid();
         if (plan.element.getAttribute('aria-expanded') !== 'true' || !popupRendered(plan.element) || !list || !popupRendered(list)) return reply('popup-pending');
         // A prepared existing popup cannot be swapped by the opening handler.
         // A lazy popup is captured only after it exists and is visibly linked.
-        if (plan.list && plan.list !== list) return reply('popup-uncertain');
-        operation.receipt = {operationID:args.operationID,bindingID:plan.id,controlID:plan.controlID,documentID};
+        if (plan.list && plan.list !== list) return invalid();
+        operation.receipt = {operationID:args.operationID,bindingID:plan.id,controlID:plan.controlID,documentID,
+          preservedControlIDs:plan.preserved.map(item => item.id)};
         operation.list = list;
         return {...reply('popup-confirmed'),popupReceipt:operation.receipt};
       }
