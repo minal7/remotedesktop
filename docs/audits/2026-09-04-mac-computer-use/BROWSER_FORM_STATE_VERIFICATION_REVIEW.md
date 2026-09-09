@@ -2,6 +2,8 @@
 
 Status: native and host source foundation. Parent-stage and query integration, compilation, assertions and model/browser qualification remain pending.
 
+Follow-up: [parent and query integration](BROWSER_FORM_STATE_INTEGRATION_REVIEW.md) now connects this proof in source to retained research stages, later criteria and query authorization. Execution qualification and mixed-stage repairs remain pending.
+
 ## First principles
 
 An edit receipt answers whether a specific input operation was dispatched. A value proof answers whether particular native controls currently have the requested values. Neither implies the other. If a search form already contains the requested query or category, generating an input event merely to satisfy an edit ledger is unnecessary and can invoke site handlers. Conversely, treating matching bytes as an input receipt corrupts recovery and can conceal an earlier uncertain operation.

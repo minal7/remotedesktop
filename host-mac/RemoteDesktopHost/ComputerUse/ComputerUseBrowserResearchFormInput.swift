@@ -232,7 +232,7 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
         }
         let normalized = Self.normalizations(for: interpretation)
         let priorEdits: [[String: Any]] = try zip(aliases, evidence.fields).compactMap { alias, field in
-            guard let sources = previous?.editedSources[field.editable.snapshot.targetID] else { return nil }
+            guard let sources = previous?.verifiedSources[field.editable.snapshot.targetID] else { return nil }
             return ["field":alias, "sources":try sources.map { try $0.context(in: interpretation) }, "requires_repair":repairs.contains(alias)]
         }
         let unfinished = previous?.pendingEdits ?? []
@@ -264,6 +264,17 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
             context["previous_preparation"] = try preparationBaseline.reviewContext.context(in: interpretation)
             context["captured_unedited_fields"] = zip(aliases, evidence.fields).compactMap { alias, field in
                 preparationBaseline.capturedTargetIDs.contains(field.editable.snapshot.targetID) && !editable.contains(alias) ? alias : nil
+            }
+        }
+        if previous?.stateProofsByTarget.isEmpty == false {
+            context["version"] = 14
+            context.removeValue(forKey: "previous_edits")
+            context["previous_criteria"] = priorEdits.map { row in
+                var row = row
+                if let alias = row["field"] as? String, let index = aliases.firstIndex(of: alias) {
+                    row["verified_without_input"] = previous?.stateProofsByTarget[evidence.fields[index].editable.snapshot.targetID] != nil
+                }
+                return row
             }
         }
         contextJSON = String(decoding: try JSONSerialization.data(withJSONObject: context, options: [.sortedKeys]), as: UTF8.self)

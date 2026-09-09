@@ -166,27 +166,37 @@ struct ComputerUseBrowserActionInput: Equatable, Sendable, CustomStringConvertib
                     return .init(formID: formID, control: .init(controlID: item.controlID, requirementIndex: index))
                 }
             }
-            let fields = stage.input.evidence.fields.filter { continuation.editedTargetIDs.contains($0.editable.snapshot.targetID) }
-            guard fields.count == continuation.editedTargetIDs.count else { throw ComputerUseBrowserActionPlanError.invalidInput }
-            let editedForms = Set(fields.compactMap { $0.control.form?.id })
-            if continuation.pendingEdits.isEmpty, changedFormTargetIDs.isEmpty, editedForms.count == 1,
-               let form = editedForms.first, fields.allSatisfy({ $0.control.form?.id == form }) {
+            let fields = stage.input.evidence.fields.filter { continuation.verifiedTargetIDs.contains($0.editable.snapshot.targetID) }
+            guard fields.count == continuation.verifiedTargetIDs.count else { throw ComputerUseBrowserActionPlanError.invalidInput }
+            let verifiedForms = Set(fields.compactMap { $0.control.form?.id })
+            if continuation.pendingEdits.isEmpty, changedFormTargetIDs.isEmpty, verifiedForms.count == 1,
+               let form = verifiedForms.first, fields.allSatisfy({ $0.control.form?.id == form }) {
                 queryControls = evidence.page.controls.filter {
                     projected.contains($0.id) && $0.kind == "submit" && !$0.disabled
                         && $0.form?.id == form && $0.form?.method.lowercased() == "get"
                 }.map(\.id)
             }
             let edits: [[String: Any]] = try fields.map { field in
-                guard let sources = continuation.editedSources[field.editable.snapshot.targetID], !sources.isEmpty else {
+                guard let sources = continuation.verifiedSources[field.editable.snapshot.targetID], !sources.isEmpty else {
                     throw ComputerUseBrowserActionPlanError.invalidInput
                 }
                 return ["control":field.control.id, "sources":try sources.map { try $0.context(in: interpretation) },
                     "requires_repair":changedFormTargetIDs.contains(field.editable.snapshot.targetID)]
             }
-            verified = ["stage":receipt.index, "edits":edits, "candidate_query_controls":queryControls,
+            var stageContext: [String: Any] = ["stage":receipt.index, "edits":edits, "candidate_query_controls":queryControls,
                 "unfinished_edits":try continuation.pendingEdits.map { try $0.context(in: interpretation) },
                 "complete_stage":receipt.isCompleteStage, "planned_edits":receipt.plannedEditCount,
                 "current_goal_revision":receipt.goalRevision == goal.digest]
+            if formHistory.contains(where: { $0.verifiedWithoutInputCount > 0 }) {
+                stageContext.removeValue(forKey: "edits")
+                stageContext["criteria"] = zip(fields, edits).map { field, context in
+                    var row = context
+                    row["verified_without_input"] = continuation.stateProofsByTarget[field.editable.snapshot.targetID] != nil
+                    return row
+                }
+                stageContext["verified_without_input"] = receipt.verifiedWithoutInputCount
+            }
+            verified = stageContext
             queryReceipt = receipt
         } else if !changedFormTargetIDs.isEmpty { throw ComputerUseBrowserActionPlanError.invalidInput }
         if let preparationReview {
@@ -349,10 +359,20 @@ struct ComputerUseBrowserActionInput: Equatable, Sendable, CustomStringConvertib
             context["version"] = 19
             context["retained_form_preparation"] = try preparationReview.context(in: interpretation)
         }
+        if formHistory.contains(where: { $0.verifiedWithoutInputCount > 0 }) {
+            context["version"] = 20
+            context["form_history"] = formHistory.map {
+                ["stage":$0.index,"edits":$0.editCount,"planned_edits":$0.plannedEditCount,
+                 "verified_without_input":$0.verifiedWithoutInputCount,"complete_stage":$0.isCompleteStage,
+                 "current_goal_revision":$0.goalRevision == goal.digest] as [String: Any]
+            }
+        }
         contextJSON = String(decoding: try JSONSerialization.data(withJSONObject: context, options: [.sortedKeys]), as: UTF8.self)
+        usesFormStateContext = formHistory.contains { $0.verifiedWithoutInputCount > 0 }
         self.interpretation = interpretation; self.evidence = evidence
         queryControlIDs = queryControls; self.queryReceipt = queryReceipt
     }
+    let usesFormStateContext: Bool
     var description: String { "BrowserActionInput(forms: \(formIDs.count))" }
     var debugDescription: String { description }
 }
@@ -590,7 +610,7 @@ struct ComputerUseLocalBrowserActionPlanner: ComputerUseBrowserActionPlanning {
         let body: [String: Any] = ["model":connection.modelAlias,
             "messages":[["role":"system", "content":Self.instructions(for: input)], ["role":"user", "content":input.contextJSON]],
             "temperature":0, "top_p":1, "top_k":0, "max_tokens":ComputerUseLocalBrowserGoalPlanner.outputTokens, "cache_prompt":false,
-            "response_format":["type":"json_schema", "json_schema":["name":input.preparationReview != nil ? "browser_research_action_v19" : input.formEffectScope != nil ? "browser_research_action_v18" : input.usesEffectScopeContext ? "browser_research_action_v15" : (input.usesPopupContext ? "browser_research_action_v14" : (input.usesOptionSelectionContext ? "browser_research_action_v13" : (!input.readableControlIDs.isEmpty ? "browser_research_action_v11" : (input.allowsHistory ? "browser_research_action_v7" : "browser_research_action_v6")))), "strict":true, "schema":["oneOf":choices]]]]
+            "response_format":["type":"json_schema", "json_schema":["name":input.usesFormStateContext ? "browser_research_action_v20" : input.preparationReview != nil ? "browser_research_action_v19" : input.formEffectScope != nil ? "browser_research_action_v18" : input.usesEffectScopeContext ? "browser_research_action_v15" : (input.usesPopupContext ? "browser_research_action_v14" : (input.usesOptionSelectionContext ? "browser_research_action_v13" : (!input.readableControlIDs.isEmpty ? "browser_research_action_v11" : (input.allowsHistory ? "browser_research_action_v7" : "browser_research_action_v6")))), "strict":true, "schema":["oneOf":choices]]]]
         var request = URLRequest(url: connection.baseURL.appendingPathComponent("v1/chat/completions"))
         request.httpMethod = "POST"; request.timeoutInterval = 30
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -648,6 +668,7 @@ struct ComputerUseLocalBrowserActionPlanner: ComputerUseBrowserActionPlanning {
     Supported readonly/native settings can also appear in preservable_controls. Explicit preservation binds their original state privately through edits and queries; it supplies neither an editable alias nor permission to read their values into research context. Keep every user preservation clause attached to its control, including an in-form readonly setting.
     """
     private static let formHistoryInstructions = """
+    Version 20 distinguishes verified criteria from dispatched input. verified_form_stage.criteria carries exact source purposes for values verified by either path; verified_without_input=true identifies a criterion last verified without sending input. form_history.verified_without_input counts such fields in that stage, while edits counts actual input. A complete stage can have zero edits. Do not request input merely to create a receipt when desired values already match. Native inspection still checks current values, original objects, preservation and real input history before offering query controls. Historical verification is not whole-goal completion or proof of current website availability.
     form_history distinguishes verified edits from planned_edits. complete_stage=false means only a prefix was verified; unfinished_edits retains the unsent remainder with historical labels/types and original user sources. Those old labels are not current native references. Select the retained form to replan every unfinished entry; its planner must explicitly map all pending work to current edits. Query controls remain withheld until those obligations and any changed criteria are resolved. Never count a partial receipt as completion of the original stage or the research goal.
     """
     private static let verifiedFormInstructions = """

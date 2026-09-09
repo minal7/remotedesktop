@@ -1384,10 +1384,11 @@ enum ComputerUseBrowserDOM {
         return {status:'form-query', destination:destination.href, signature, members, submittedMembers, form};
       }
       function formRequirementsCurrent(requirements, repairableIDs = [], changes = null, preparation = false, checkingSelection = true) {
+        const withState = !preparation && requirements?.kind === 'verified-form-state-v1';
         if (!requirements || typeof requirements.digest !== 'string' || !/^[a-f0-9]{64}$/.test(requirements.digest)
-            || (preparation ? requirements.kind !== 'prepared-form-v1' : requirements.kind !== undefined)
+            || (preparation ? requirements.kind !== 'prepared-form-v1' : !withState && requirements.kind !== undefined)
             || !Array.isArray(requirements.fields) || requirements.fields.length < 1 || requirements.fields.length > 16
-            || !Array.isArray(requirements.inputOperationIDs) || requirements.inputOperationIDs.length < (preparation ? 0 : 1) || requirements.inputOperationIDs.length > 64
+            || !Array.isArray(requirements.inputOperationIDs) || requirements.inputOperationIDs.length < (preparation || withState ? 0 : 1) || requirements.inputOperationIDs.length > 64
             || new Set(requirements.inputOperationIDs).size !== requirements.inputOperationIDs.length) return false;
         if (preparation && (requirements.inputLedgerID !== inputLedgerID || pendingChanges.size
             || operations.size !== requirements.inputOperationIDs.length || !Array.isArray(repairableIDs) || repairableIDs.length)) return false;
@@ -1417,6 +1418,7 @@ enum ComputerUseBrowserDOM {
         }
         if (!edited || requirements.inputOperationIDs.some(id => typeof id !== 'string' || !/^[a-f0-9]{64}$/.test(id)
             || operations.get(id) !== 'dispatched')) return false;
+        if (withState ? !formStateOriginsCurrent(requirements) : requirements.stateCriteria !== undefined) return false;
         // Only host-selected earlier edits can be re-observed for repair.
         // Query preparation never supplies this exception. Explicitly
         // preserved fields are excluded by the retained host continuation.
@@ -1434,6 +1436,28 @@ enum ComputerUseBrowserDOM {
           if (changes) changes.push(field.id);
           return true;
         });
+      }
+      function formStateOriginsCurrent(requirements) {
+        const claims = requirements.stateCriteria, ids = new Set();
+        if (!Array.isArray(claims) || claims.length < 1 || claims.length > 16
+            || requirements.inputLedgerID !== inputLedgerID || pendingChanges.size
+            || operations.size !== requirements.inputOperationIDs.length) return false;
+        for (const claim of claims) {
+          if (!claim || typeof claim.id !== 'string' || ids.has(claim.id)) return false;
+          ids.add(claim.id);
+          const record = formStateProofs.get(claim.verificationID);
+          const field = requirements.fields.find(field => field.id === claim.id && field.mustSubmit);
+          // Historical origin survives later authorized edits on OTHER fields.
+          // Current value checks remain below in formRequirementsCurrent.
+          if (!record?.proof || record.proof.id !== claim.proofID || record.proof.planDigest !== claim.planDigest
+              || record.documentID !== documentID || record.inputLedgerID !== inputLedgerID
+              || !field || !record.expected.some(value => value.id === claim.id && value.value === field.value)
+              || record.bindings.get(claim.id) !== bindings.get(claim.id)
+              || record.form !== bindings.get(claim.id)?.form
+              || record.requirements.inputOperationIDs.some(id => !requirements.inputOperationIDs.includes(id))) return false;
+        }
+        return requirements.inputOperationIDs.length > 0
+          || requirements.fields.every(field => !field.mustSubmit || ids.has(field.id));
       }
       function formStateCurrent(record) {
         // Caret movement after capture is not a change to a requested value.
@@ -1483,7 +1507,7 @@ enum ComputerUseBrowserDOM {
         // pending notification or query authorization is generated here.
         const matches = expected.every(field => requirements.fields.some(required => required.id === field.id && required.value === field.value));
         const proof = matches ? {id:nonce(),planDigest:args.planDigest} : null;
-        formStateProofs.set(args.verificationID, {shape,proof,form,requirements,documentID,inputLedgerID,bindings:new Map(bindings)});
+        formStateProofs.set(args.verificationID, {shape,proof,form,requirements,expected,documentID,inputLedgerID,bindings:new Map(bindings)});
         return proof ? {...reply('form-state-verified'),formStateProof:proof} : reply('form-state-needs-input');
       }
       function finishPendingChange(operationID) {
@@ -1920,45 +1944,60 @@ struct ComputerUseBrowserFormQueryRequirements: Sendable, CustomStringConvertibl
     let documentID: String
     let digest: String
     private let finalValues: [String: String]
-    private let editedTargetIDs: Set<String>
+    private let submittedTargetIDs: Set<String>
     private let inputOperationIDs: [String]
     private let targets: [String: String]
     private let preservationID: String?
+    private let stateCriteria: [[String: String]]
+    private let stateLedgerID: String?
 
     fileprivate init(document: ComputerUseBrowserDocument, documentID: String,
                      continuation: ComputerUseTextTaskContinuation, targets: [String: String]) throws {
         guard continuation.isCompleteTask else { throw ComputerUseBrowserError.formQueryUnavailable }
         try self.init(document: document, documentID: documentID, taskID: continuation.taskID,
-            finalValues: continuation.finalValues, editedTargetIDs: continuation.editedTargetIDs,
+            finalValues: continuation.finalValues, submittedTargetIDs: continuation.editedTargetIDs,
             inputOperationIDs: continuation.inputOperationIDs, continuationDigest: continuation.digest, targets: targets)
     }
 
     fileprivate init(document: ComputerUseBrowserDocument, documentID: String,
-                     continuation: ComputerUseBrowserResearchFormContinuation, targets: [String: String]) throws {
+                     continuation: ComputerUseBrowserResearchFormContinuation, targets: [String: String], adapterID: UUID) throws {
         guard continuation.document == document, continuation.documentID == documentID else { throw ComputerUseBrowserError.pageChanged }
+        let proofs = continuation.stateProofsByTarget
+        guard Set(proofs.keys).isSubset(of: continuation.verifiedTargetIDs),
+              continuation.verifiedTargetIDs.subtracting(proofs.keys).isSubset(of: continuation.editedTargetIDs),
+              Set(proofs.values.map(\.inputLedgerID)).count <= 1 else { throw ComputerUseBrowserError.pageChanged }
+        let criteria: [[String: String]] = try proofs.keys.sorted().map { targetID in
+            guard let proof = proofs[targetID], proof.adapterID == adapterID, proof.document == document,
+                  proof.documentID == documentID, let nativeID = targets[targetID],
+                  let value = continuation.finalValues[targetID],
+                  proof.verifiedValues[targetID]?.utf8.elementsEqual(value.utf8) == true else { throw ComputerUseBrowserError.pageChanged }
+            return ["id":nativeID,"verificationID":proof.verificationID,"proofID":proof.id,"planDigest":proof.planDigest]
+        }
         try self.init(document: document, documentID: documentID, taskID: continuation.taskID,
-            finalValues: continuation.finalValues, editedTargetIDs: continuation.editedTargetIDs,
+            finalValues: continuation.finalValues, submittedTargetIDs: continuation.verifiedTargetIDs,
             inputOperationIDs: continuation.inputOperationIDs, continuationDigest: continuation.digest, targets: targets,
-            nativePreservation: continuation.nativePreservation)
+            nativePreservation: continuation.nativePreservation, stateCriteria: criteria, stateLedgerID: proofs.values.first?.inputLedgerID)
     }
 
     private init(document: ComputerUseBrowserDocument, documentID: String, taskID: String,
-                 finalValues: [String: String], editedTargetIDs: Set<String>, inputOperationIDs: [String],
-                 continuationDigest: String, targets: [String: String], nativePreservation: ComputerUseBrowserFormPreservation? = nil) throws {
-        guard taskID == document.taskID, (1...16).contains(finalValues.count), !editedTargetIDs.isEmpty,
-              editedTargetIDs.isSubset(of: Set(finalValues.keys)), Set(finalValues.keys).isSubset(of: Set(targets.keys)),
+                 finalValues: [String: String], submittedTargetIDs: Set<String>, inputOperationIDs: [String],
+                 continuationDigest: String, targets: [String: String], nativePreservation: ComputerUseBrowserFormPreservation? = nil,
+                 stateCriteria: [[String: String]] = [], stateLedgerID: String? = nil) throws {
+        guard taskID == document.taskID, (1...16).contains(finalValues.count), !submittedTargetIDs.isEmpty,
+              submittedTargetIDs.isSubset(of: Set(finalValues.keys)), Set(finalValues.keys).isSubset(of: Set(targets.keys)),
               Set(targets.values).count == targets.count, finalValues.values.allSatisfy({ $0.utf8.count <= 8192 }),
               finalValues.values.reduce(0, { $0 + $1.utf8.count }) <= 65536,
-              (1...64).contains(inputOperationIDs.count), Set(inputOperationIDs).count == inputOperationIDs.count else {
+              ((stateCriteria.isEmpty ? 1 : 0)...64).contains(inputOperationIDs.count), Set(inputOperationIDs).count == inputOperationIDs.count else {
             throw ComputerUseBrowserError.formQueryUnavailable
         }
         self.document = document; self.documentID = documentID; self.targets = targets
+        self.stateCriteria = stateCriteria; self.stateLedgerID = stateLedgerID
         if let nativePreservation {
             guard nativePreservation.document == document, nativePreservation.documentID == documentID else { throw ComputerUseBrowserError.pageChanged }
         }
         preservationID = nativePreservation?.id
-        self.finalValues = finalValues; self.editedTargetIDs = editedTargetIDs; self.inputOperationIDs = inputOperationIDs
-        digest = ComputerUseTaskContract.digest(["browser-form-continuation-v2", document.contextID,
+        self.finalValues = finalValues; self.submittedTargetIDs = submittedTargetIDs; self.inputOperationIDs = inputOperationIDs
+        digest = ComputerUseTaskContract.digest([stateCriteria.isEmpty ? "browser-form-continuation-v2" : "browser-form-continuation-v3", document.contextID,
             document.taskID, String(document.generation), documentID, continuationDigest,nativePreservation?.digest ?? ""]
             + finalValues.keys.sorted().flatMap { [$0, targets[$0]!] })
     }
@@ -1966,8 +2005,11 @@ struct ComputerUseBrowserFormQueryRequirements: Sendable, CustomStringConvertibl
     var domArguments: [String: Any] {
         var result: [String: Any] = ["digest": digest, "inputOperationIDs": inputOperationIDs,
          "fields": finalValues.keys.sorted().map { id -> [String: Any] in
-             ["id": targets[id]!, "value": finalValues[id]!, "mustSubmit": editedTargetIDs.contains(id)]
+             ["id": targets[id]!, "value": finalValues[id]!, "mustSubmit": submittedTargetIDs.contains(id)]
          }]
+        if !stateCriteria.isEmpty, let stateLedgerID {
+            result["kind"] = "verified-form-state-v1"; result["stateCriteria"] = stateCriteria; result["inputLedgerID"] = stateLedgerID
+        }
         if let preservationID { result["preservationID"] = preservationID }
         return result
     }
@@ -1988,6 +2030,7 @@ struct ComputerUseBrowserFormStateProof: Equatable, Sendable, CustomStringConver
     let documentID: String
     let inputLedgerID: String
     let planDigest: String
+    let verifiedValues: [String: String]
     let goalRevision: String
     let scopeDigest: String
     let digest: String
@@ -2003,7 +2046,7 @@ struct ComputerUseBrowserFormStateProof: Equatable, Sendable, CustomStringConver
               reply.planDigest == plan.digest, let scopeDigest = input.scopeReview?.digest else { throw ComputerUseBrowserError.pageChanged }
         document = input.evidence.page.document; documentID = input.evidence.page.documentID
         self.inputLedgerID = inputLedgerID; self.verificationID = verificationID; self.adapterID = adapterID
-        id = reply.id; planDigest = plan.digest; goalRevision = input.interpretation.input.digest
+        id = reply.id; planDigest = plan.digest; verifiedValues = plan.expectedValues; goalRevision = input.interpretation.input.digest
         self.scopeDigest = scopeDigest; preservation = input.nativePreservation
         digest = ComputerUseTaskContract.digest(["browser-form-state-proof-v1", document.contextID, document.taskID,
             String(document.generation), documentID, inputLedgerID, verificationID, reply.id, plan.digest,
@@ -2212,7 +2255,7 @@ final class ComputerUseBrowserTextTarget {
         try validate()
         guard let documentID, evidence.document == document, evidence.documentID == documentID else { throw ComputerUseBrowserError.pageChanged }
         let requirements = try ComputerUseBrowserFormQueryRequirements(document: document, documentID: documentID,
-            continuation: continuation, targets: targets)
+            continuation: continuation, targets: targets, adapterID: adapterID)
         let reply = try await browser.callDOM(.inspectFormRequirements, arguments: ["documentID":documentID,
             "snapshotID":evidence.page.id, "requirements":requirements.domArguments,
             "repairableFieldIDs":try repairableNativeIDs(after: continuation)], document: document)
@@ -2247,7 +2290,7 @@ final class ComputerUseBrowserTextTarget {
               continuation.formID == formID, controlIDs.count <= 16, Set(controlIDs).count == controlIDs.count,
               Set(controlIDs).isSubset(of: Set(evidence.page.controls.map(\.id))) else { throw ComputerUseBrowserError.pageChanged }
         let requirements = try ComputerUseBrowserFormQueryRequirements(document: document, documentID: documentID,
-            continuation: continuation, targets: targets)
+            continuation: continuation, targets: targets, adapterID: adapterID)
         var arguments: [String: Any] = ["documentID":documentID,
             "snapshotID":evidence.page.id, "formID":formID, "preservedControlIDs":controlIDs,
             "requirements":requirements.domArguments,
@@ -2451,7 +2494,7 @@ final class ComputerUseBrowserTextTarget {
         guard continuation.pendingEdits.isEmpty else { throw ComputerUseBrowserError.formQueryUnavailable }
         guard evidence.document == document, let documentID, evidence.documentID == documentID else { throw ComputerUseBrowserError.pageChanged }
         let requirements = try ComputerUseBrowserFormQueryRequirements(document: document, documentID: documentID,
-            continuation: continuation, targets: targets)
+            continuation: continuation, targets: targets, adapterID: adapterID)
         let result = try await browser.prepareFormQuery(controlID: controlID, evidence: evidence, requirements: requirements)
         try validate()
         return result
@@ -2625,7 +2668,7 @@ final class ComputerUseBrowserTextTarget {
         if let continuation {
             guard Set(operationIDs).isDisjoint(with: continuation.inputOperationIDs) else { throw ComputerUseBrowserError.pageChanged }
             let requirements = try ComputerUseBrowserFormQueryRequirements(document: document, documentID: documentID,
-                continuation: continuation, targets: targets)
+                continuation: continuation, targets: targets, adapterID: adapterID)
             arguments["requirements"] = requirements.domArguments
             arguments["repairableFieldIDs"] = try repairableNativeIDs(after: continuation)
         }
