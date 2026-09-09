@@ -1918,16 +1918,16 @@ final class ComputerUseBrowserTextTarget {
     /// Read only the selected native form and source-bound preservation
     /// controls. Selection is tied to the exact current page before discovery.
     func fields(in formID: String, page evidence: ComputerUseBrowserPageEvidence, preserving controlIDs: [String],
-                selecting selectedControlIDs: [String]? = nil) async throws -> [ComputerUseTextField] {
+                selecting selectedControlIDs: [String]? = nil, retaining capture: ComputerUseBrowserDOMReadCapture? = nil) async throws -> [ComputerUseTextField] {
         try validate()
-        guard documentID == nil, evidence.document == document,
+        guard (documentID == nil || capture?.didStart == true), evidence.document == document,
               evidence.page.controls.contains(where: { $0.form?.id == formID }), controlIDs.count <= 16,
               Set(controlIDs).count == controlIDs.count,
               Set(controlIDs).isSubset(of: Set(evidence.page.controls.map(\.id))) else { throw ComputerUseBrowserError.pageChanged }
         var arguments: [String: Any] = ["documentID":evidence.documentID,
             "snapshotID":evidence.page.id, "formID":formID, "preservedControlIDs":controlIDs]
         if let selectedControlIDs { arguments["selectedControlIDs"] = selectedControlIDs }
-        let reply = try await browser.callDOM(.formFields, arguments: arguments, document: document)
+        let reply = try await browser.callDOM(.formFields, arguments: arguments, document: document, retaining: capture)
         try validate()
         guard reply.documentID == evidence.documentID else { throw ComputerUseBrowserError.pageChanged }
         guard let fields = try adoptDiscoveredFields(reply) else { throw ComputerUseBrowserError.unsupportedDocument }
@@ -1936,20 +1936,21 @@ final class ComputerUseBrowserTextTarget {
 
     /// Separate native readonly predicates from the editable discovery list.
     /// The reviewed scope binds the original purpose before any value reading.
-    func prepareFormPreservation(scope: ComputerUseBrowserFormEffectScope?, page: ComputerUseBrowserPageEvidence) async throws
+    func prepareFormPreservation(scope: ComputerUseBrowserFormEffectScope?, page: ComputerUseBrowserPageEvidence,
+                                 retaining capture: ComputerUseBrowserDOMReadCapture? = nil) async throws
         -> ComputerUseBrowserFormPreservation? {
         guard let scope, !scope.nativePreservedControlIDs.isEmpty else {
             guard formPreservation == nil else { throw ComputerUseBrowserError.pageChanged }
             return nil
         }
         guard scope.formID != nil else { throw ComputerUseBrowserError.pageChanged }
-        return try await prepareFormPreservation(controlIDs: scope.nativePreservedControlIDs, page: page, scopeDigest: scope.digest)
+        return try await prepareFormPreservation(controlIDs: scope.nativePreservedControlIDs, page: page, scopeDigest: scope.digest, retaining: capture)
     }
 
     /// Callers retain the original purpose and bind the returned predicate
     /// into their parent contract before effects.
     func prepareFormPreservation(controlIDs: [String], page evidence: ComputerUseBrowserPageEvidence,
-                                 scopeDigest: String) async throws -> ComputerUseBrowserFormPreservation {
+                                 scopeDigest: String, retaining capture: ComputerUseBrowserDOMReadCapture? = nil) async throws -> ComputerUseBrowserFormPreservation {
         try validate()
         guard let documentID, let inputLedgerID, evidence.document == document, evidence.documentID == documentID,
               (1...16).contains(controlIDs.count), Set(controlIDs).count == controlIDs.count,
@@ -1958,7 +1959,7 @@ final class ComputerUseBrowserTextTarget {
               Set(formPreservation?.controlIDs ?? []).isSubset(of: Set(controlIDs)) else { throw ComputerUseBrowserError.pageChanged }
         return try await joiningCompletion {
             let reply = try await browser.callDOM(.prepareFormPreservation, arguments: ["documentID":documentID,
-                "inputLedgerID":inputLedgerID,"snapshotID":evidence.page.id,"scopeDigest":scopeDigest,"controlIDs":controlIDs], document: document)
+                "inputLedgerID":inputLedgerID,"snapshotID":evidence.page.id,"scopeDigest":scopeDigest,"controlIDs":controlIDs], document: document, retaining: capture)
             try validate()
             guard reply.status == "form-preservation-prepared", reply.documentID == documentID, reply.inputLedgerID == inputLedgerID,
                   reply.fields == nil, reply.page == nil, let value = reply.formPreservation else { throw ComputerUseBrowserError.pageChanged }
@@ -2046,13 +2047,14 @@ final class ComputerUseBrowserTextTarget {
     /// Bind a previously discovered form to the exact observed page. This
     /// reobserves the retained fields; it does not rediscover replacement
     /// objects, clear input receipts, focus, edit or submit a control.
-    func bindFields(_ fields: [ComputerUseTextField], to evidence: ComputerUseBrowserPageEvidence) async throws -> ComputerUseBrowserFormEvidence {
+    func bindFields(_ fields: [ComputerUseTextField], to evidence: ComputerUseBrowserPageEvidence,
+                    retaining capture: ComputerUseBrowserDOMReadCapture? = nil) async throws -> ComputerUseBrowserFormEvidence {
         try validate()
         guard evidence.document == document, let documentID, evidence.documentID == documentID,
               (1...16).contains(fields.count), fields.count == targets.count,
               Set(fields.map { $0.snapshot.targetID }) == Set(targets.keys) else { throw ComputerUseBrowserError.pageChanged }
         let reply = try await browser.callDOM(.bindPageFields, arguments: ["documentID":documentID,
-            "snapshotID":evidence.page.id, "ids":targets.values.sorted()], document: document)
+            "snapshotID":evidence.page.id, "ids":targets.values.sorted()], document: document, retaining: capture)
         try validate()
         guard reply.status == "page-fields-bound", reply.documentID == documentID,
               let current = reply.fields, let bindings = reply.formBindings,

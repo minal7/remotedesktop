@@ -247,6 +247,20 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                 guard let document, try record(.search, document) else { return reconciliationRequired }
                 continue
             }
+            if owner.hasPendingFormPreparation {
+                progress("Checking the pending form preparation…")
+                let input = try await owner.resumeFormPreparation()
+                let proposal = try await owner.planForm(input, using: formPlanner)
+                try check()
+                if let question = try proposal.questionRequest(for: input) { return .browserClarificationRequired(question) }
+                guard !proposal.isUnavailable else {
+                    return .userInterventionRequired("I could not prepare justified entries for this form. The original request remains pending.")
+                }
+                do { _ = try await owner.executeForm(proposal, input: input) }
+                catch { guard try await retireProvenUnsentForm(owner, after: error) else { throw error } }
+                try check()
+                continue
+            }
             if owner.hasPendingForm {
                 progress("Checking the pending form entries…")
                 do {

@@ -68,6 +68,7 @@ final class ComputerUseBrowserResearchTask {
     private var interpretation: Interpretation?
     private var latestCandidates: ComputerUseBrowserResultCandidates?
     private var latestForm: PreparedForm?
+    private var formPreparation: ComputerUseBrowserResearchFormPreparation?
     private var latestAction: ComputerUseBrowserActionProposal?
     private var formStage: ComputerUseBrowserResearchFormStage?
     private var lastVerifiedFormStage: ComputerUseBrowserResearchFormStage?
@@ -121,6 +122,10 @@ final class ComputerUseBrowserResearchTask {
         return !confirmedNavigationHistory.contains { $0.operationID == formNavigation.operationID && $0.kind == .formQuery }
     }
     var hasPendingForm: Bool {
+        hasPendingFormPreparation || hasPendingFormExecution
+    }
+    var hasPendingFormPreparation: Bool { formPreparation != nil }
+    private var hasPendingFormExecution: Bool {
         guard let formStage else { return false }
         return !confirmedFormHistory.contains { $0.stageID == formStage.id }
     }
@@ -765,23 +770,40 @@ final class ComputerUseBrowserResearchTask {
                 guard browser.hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
                 return PreparedForm(target: next.target, input: next.input)
             }
+            if let action {
+                let preparation = try ComputerUseBrowserResearchFormPreparation(action: action, browser: browser)
+                formPreparation = preparation // Publish intent before the first private read.
+                let prepared = try await preparation.prepare(browser: browser, checkCurrent: { try self.checkCurrent(captured) })
+                try checkCurrent(captured)
+                return PreparedForm(target: preparation.target, input: prepared)
+            }
             let target = ComputerUseBrowserTextTarget(browser: browser, document: page.document,
                 requiresFrontmost: browser.isFrontmostWindow)
-            let preservedControls = action?.preservedControls ?? []
-            let review = try action.map { try ComputerUseBrowserEffectScopeReview(input: $0.input) }
-            let fields: [ComputerUseTextField]
-            if let selectedFormID {
-                fields = try await target.fields(in: selectedFormID, page: page,
-                    preserving: review?.formScope?.editablePreservedControlIDs ?? preservedControls.map(\.controlID),
-                    selecting: action?.input.formEffectScope?.selectedControlIDs)
-            } else { fields = try await target.fields() }
+            let fields = try await target.fields()
             let evidence = try await target.bindFields(fields, to: page)
-            let nativePreservation = try await target.prepareFormPreservation(scope: review?.formScope, page: page)
             try checkCurrent(captured)
             guard browser.hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
-            return PreparedForm(target: target, input: try .init(interpretation: interpretation.proposal, evidence: evidence,
-                selectedFormID: selectedFormID, preservedControls: preservedControls,
-                scopeReview: review, nativePreservation: nativePreservation))
+            return PreparedForm(target: target, input: try .init(interpretation: interpretation.proposal, evidence: evidence))
+        }
+        latestForm = prepared
+        return prepared.input
+    }
+
+    /// Resume the original private preparation after explicit handback. This
+    /// neither asks for another action selection nor discovers a new baseline.
+    func resumeFormPreparation() async throws -> ComputerUseBrowserResearchFormInput {
+        try requireIdle()
+        guard !hasPendingFormExecution, !hasPendingNavigation, !hasQuestion, let preparation = formPreparation else {
+            throw Failure.formUnavailable
+        }
+        guard preparation.interpretation.input == input, interpretation?.proposal == preparation.interpretation else { throw Failure.goalChanged }
+        let captured = input
+        let prepared = try await operate { [self] in
+            guard formPreparation === preparation else { throw Failure.formUnavailable }
+            let value = try await preparation.prepare(browser: browser, checkCurrent: { try self.checkCurrent(captured) })
+            try checkCurrent(captured)
+            guard formPreparation === preparation else { throw Failure.formUnavailable }
+            return PreparedForm(target: preparation.target, input: value)
         }
         latestForm = prepared
         return prepared.input
@@ -791,7 +813,7 @@ final class ComputerUseBrowserResearchTask {
     /// check cannot leave a planning input eligible for later consumption.
     func revalidateFormInput(_ proposed: ComputerUseBrowserResearchFormInput) async throws {
         try requireIdle()
-        guard !hasPendingForm else { throw Failure.formPending }
+        guard !hasPendingFormExecution else { throw Failure.formPending }
         guard !hasPendingNavigation else { throw Failure.navigationPending }
         guard !hasQuestion else { throw Failure.questionPending }
         guard let retained = latestForm, retained.input == proposed,
@@ -814,7 +836,7 @@ final class ComputerUseBrowserResearchTask {
     /// the actual planner before releasing it; no edit is dispatched here.
     func planForm(_ proposed: ComputerUseBrowserResearchFormInput, using planner: any ComputerUseBrowserFormPlanning) async throws -> ComputerUseBrowserFormProposal {
         try requireIdle()
-        guard !hasPendingForm else { throw Failure.formPending }
+        guard !hasPendingFormExecution else { throw Failure.formPending }
         guard !hasPendingNavigation else { throw Failure.navigationPending }
         guard !hasQuestion else { throw Failure.questionPending }
         guard let retained = latestForm, retained.input == proposed,
@@ -847,7 +869,7 @@ final class ComputerUseBrowserResearchTask {
         guard prepared.input.nativePreservation == prepared.target.formPreservation else { throw ComputerUseBrowserResearchFormError.inputChanged }
         guard browser.hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
         try browser.validateSourceDocument(prepared.input.evidence.page.document)
-        if prepared.input.nativePreservation != nil {
+        if prepared.input.scopeReview != nil {
             try await ComputerUseBrowserResearchFormStage.validateOriginalInput(prepared.input, target: prepared.target,
                 browser: browser, checkCurrent: { try self.checkCurrent(goal) })
         } else { try await prepared.target.validateFormEvidence(prepared.input.evidence) }
@@ -867,13 +889,14 @@ final class ComputerUseBrowserResearchTask {
         let stage: ComputerUseBrowserResearchFormStage
         if let formStage, formStage.input == expected, formStage.proposal == proposal { stage = formStage }
         else {
-            guard !hasPendingForm else { throw Failure.formPending }
+            guard !hasPendingFormExecution else { throw Failure.formPending }
             guard let prepared = latestForm, prepared.input == expected, let directory = navigationDirectory else { throw Failure.formUnavailable }
             stage = try .init(input: expected, proposal: proposal, target: prepared.target, browser: browser,
                 index: confirmedFormHistory.count, sequence: formStageSequence, journalDirectory: directory, makeStore: navigationStore)
             formStageSequence += 1
             formStage = stage // Retain before any disk write, native await or effect.
         }
+        formPreparation = nil // The retained execution stage now owns the same input and adapter.
         latestForm = nil; latestAction = nil; latestCandidates = nil
         return try await runForm(stage)
     }
@@ -1286,7 +1309,7 @@ final class ComputerUseBrowserResearchTask {
     func issueQuestion(topic: ComputerUseBrowserClarificationTopic, requirementIDs: [String],
                        controllerID: String, controllerSessionID: String) throws -> ComputerUseBrowserGoalClarification.Question {
         try requireIdle()
-        guard !hasPendingForm else { throw Failure.formPending }
+        guard !hasPendingFormExecution else { throw Failure.formPending }
         guard !hasPendingNavigation else { throw Failure.navigationPending }
         guard let interpretation, interpretation.proposal.input.digest == input.digest else { throw Failure.interpretationRequired }
         let context = try questionContext(controllerID: controllerID, controllerSessionID: controllerSessionID)
@@ -1298,7 +1321,7 @@ final class ComputerUseBrowserResearchTask {
     func answerQuestion(questionID: String, answerTaskID: String, answer: String,
                         controllerID: String, controllerSessionID: String) throws -> ComputerUseBrowserGoalInput {
         try requireIdle()
-        guard !hasPendingForm else { throw Failure.formPending }
+        guard !hasPendingFormExecution else { throw Failure.formPending }
         guard !hasPendingNavigation else { throw Failure.navigationPending }
         let context = try questionContext(controllerID: controllerID, controllerSessionID: controllerSessionID)
         let updated: ComputerUseBrowserGoalInput
@@ -1307,6 +1330,10 @@ final class ComputerUseBrowserResearchTask {
             hasQuestion = false
             throw ComputerUseBrowserGoalClarification.Failure.expired
         }
+        // A new user answer can replace an unstarted plan with no retained
+        // preservation/read obligations. Preserve all other original frames
+        // until goal-revision reconciliation can explicitly carry them.
+        if formPreparation?.hasPreservationObligations == false { formPreparation = nil }
         interpretation = nil; latestCandidates = nil; latestForm = nil; latestAction = nil; hasQuestion = false
         return updated
     }
@@ -1396,6 +1423,7 @@ final class ComputerUseBrowserResearchTask {
 
     func retire() {
         isRetired = true; controlEpoch = UUID(); latestCandidates = nil; latestForm = nil; latestAction = nil; interpretation = nil
+        formPreparation = nil
         confirmedNavigationHistory.removeAll()
         formStage?.retire(); formStage = nil; lastVerifiedFormStage?.retire(); lastVerifiedFormStage = nil
         confirmedFormHistory.removeAll(); retiredFormHistory.removeAll()

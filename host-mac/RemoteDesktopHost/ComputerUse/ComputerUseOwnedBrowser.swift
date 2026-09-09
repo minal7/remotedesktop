@@ -291,6 +291,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     private struct PendingDOM {
         let id: UUID
         let document: ComputerUseBrowserDocument?
+        let capture: ComputerUseBrowserDOMReadCapture?
         var continuation: CheckedContinuation<String, Error>?
         var timeout: Task<Void, Never>?
         var completionWaiters: [CheckedContinuation<Void, Never>] = []
@@ -670,8 +671,8 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     }
 
     func callDOM(_ command: ComputerUseBrowserDOMCommand, arguments: [String: Any],
-                 document expected: ComputerUseBrowserDocument) async throws -> ComputerUseBrowserDOMReply {
-        try await callDOM(command, arguments: arguments, document: expected, validateContext: { self.validate(expected) })
+                 document expected: ComputerUseBrowserDocument, retaining capture: ComputerUseBrowserDOMReadCapture? = nil) async throws -> ComputerUseBrowserDOMReply {
+        try await callDOM(command, arguments: arguments, document: expected, retaining: capture, validateContext: { self.validate(expected) })
     }
 
     func observePage(document expected: ComputerUseBrowserDocument, includingControlState: Bool = false) async throws -> ComputerUseBrowserPageEvidence {
@@ -979,15 +980,19 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
 
     private func callDOM(_ command: ComputerUseBrowserDOMCommand, arguments: [String: Any],
                          document: ComputerUseBrowserDocument? = nil,
+                         retaining capture: ComputerUseBrowserDOMReadCapture? = nil,
                          validateContext: () -> Bool) async throws -> ComputerUseBrowserDOMReply {
         try Task.checkCancellation()
         guard validateContext(), let browser else { throw ComputerUseBrowserError.pageChanged }
         guard pendingDOM == nil else { throw ComputerUseBrowserError.busy }
+        if let retained = try capture?.retainedReply(command: command, arguments: arguments, document: document) { return retained }
         let id = UUID()
         let source = try await withTaskCancellationHandler {
             do {
                 let source: String = try await withCheckedThrowingContinuation { continuation in
-                    pendingDOM = PendingDOM(id: id, document: document, continuation: continuation)
+                    do { try capture?.begin(command: command, arguments: arguments, document: document) }
+                    catch { continuation.resume(throwing: error); return }
+                    pendingDOM = PendingDOM(id: id, document: document, capture: capture, continuation: continuation)
                     pendingDOM?.timeout = Task { [weak self, domTimeout] in
                         do { try await Task.sleep(for: domTimeout) } catch { return }
                         self?.interruptDOM(id: id, error: ComputerUseBrowserError.documentUnresponsive)
@@ -997,15 +1002,19 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
                         guard let self, let pending = pendingDOM, pending.id == id else { return }
                         pendingDOM = nil
                         pending.timeout?.cancel()
-                        for waiter in pending.completionWaiters { waiter.resume() }
+                        defer { for waiter in pending.completionWaiters { waiter.resume() } }
                         switch result {
                         case .success(let value):
                             guard let source = value as? String, source.utf8.count <= 8 * 1_024 * 1_024 else {
+                                pending.capture?.finish(.failure(ComputerUseBrowserError.unsupportedDocument))
                                 pending.continuation?.resume(throwing: ComputerUseBrowserError.unsupportedDocument)
                                 return
                             }
+                            pending.capture?.finish(Result { try Self.decodeDOMReply(source, command: command) })
                             pending.continuation?.resume(returning: source)
-                        case .failure: pending.continuation?.resume(throwing: ComputerUseBrowserError.pageChanged)
+                        case .failure:
+                            pending.capture?.finish(.failure(ComputerUseBrowserError.pageChanged))
+                            pending.continuation?.resume(throwing: ComputerUseBrowserError.pageChanged)
                         }
                     }
                     domScriptDidDispatch?(command)
@@ -1020,12 +1029,17 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             Task { @MainActor [weak self] in self?.interruptDOM(id: id, error: CancellationError()) }
         }
         guard validateContext() else { throw ComputerUseBrowserError.pageChanged }
+        return try Self.decodeDOMReply(source, command: command)
+    }
+
+    static func decodeDOMReply(_ source: String, command: ComputerUseBrowserDOMCommand) throws -> ComputerUseBrowserDOMReply {
         let result = try JSONDecoder().decode(ComputerUseBrowserDOMReply.self, from: Data(source.utf8))
         guard result.scroll == nil || command == .scrollViewport || command == .viewportScrollReceipt else {
             throw ComputerUseBrowserError.unsupportedDocument
         }
         guard result.formQuery == nil || command == .prepareFormQuery else { throw ComputerUseBrowserError.unsupportedDocument }
         guard result.formBindings == nil || command == .bindPageFields else { throw ComputerUseBrowserError.unsupportedDocument }
+        guard result.formPreservation == nil || command == .prepareFormPreservation else { throw ComputerUseBrowserError.unsupportedDocument }
         guard result.changedFieldIDs == nil || command == .inspectFormRequirements else { throw ComputerUseBrowserError.unsupportedDocument }
         guard result.popupBinding == nil || command == .preparePopup,
               result.popupReceipt == nil || command == .popupReceipt,
@@ -1045,6 +1059,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             throw ComputerUseBrowserError.pageChanged
         }
         if result.status == "authentication-required" {
+            guard result.formPreservation == nil else { throw ComputerUseBrowserError.unsupportedDocument }
             guard result.fields == nil, result.page == nil, result.scroll == nil, result.formQuery == nil,
                   result.formBindings == nil, result.changedFieldIDs == nil, result.popupBinding == nil, result.popupReceipt == nil,
                   result.popupControls == nil, result.popupPreservedControls == nil, result.optionSelectionBinding == nil, result.optionSelectionReceipt == nil,
@@ -1279,6 +1294,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     private func releaseBrowser() {
         closeSignInWindow(restoreParent: false)
         if let pendingDOM { interruptDOM(id: pendingDOM.id, error: ComputerUseBrowserError.closed) }
+        pendingDOM?.capture?.finish(.failure(ComputerUseBrowserError.closed))
         let waiters = pendingDOM?.completionWaiters ?? []
         pendingDOM = nil
         observedNavigation = nil

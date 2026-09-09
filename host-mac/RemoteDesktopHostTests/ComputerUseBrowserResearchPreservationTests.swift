@@ -272,6 +272,185 @@ final class ComputerUseBrowserResearchPreservationTests: XCTestCase {
         XCTAssertEqual(history.status, "dispatched")
     }
 
+    func testPreparationResumesEachCapturedReadWithoutRediscoveringItsBaseline() async throws {
+        for interrupted in [ComputerUseBrowserDOMCommand.formFields, .bindPageFields, .prepareFormPreservation] {
+            let fixture = try await make()
+            defer { fixture.close() }
+            _ = try await fixture.start(); configure(fixture)
+            let owner = try fixture.owner(), original = owner.input, action = try await owner.planNextAction(using: fixture.actions)
+            fixture.state.onCommand = { command in
+                guard command == interrupted else { return }; fixture.state.onCommand = nil; owner.pause()
+            }
+            await expectFailure { _ = try await owner.prepareFormInput(for: action) }
+            XCTAssertTrue(owner.hasPendingFormPreparation); XCTAssertTrue(owner.hasPendingForm); XCTAssertFalse(owner.isOperating)
+            let decisions = fixture.actions.inputs.count
+            await expectFailure { _ = try await owner.resumeFormPreparation() }
+            try await owner.resumeAfterUserControl()
+            let input = try await owner.resumeFormPreparation()
+            XCTAssertEqual(input.interpretation.input, original)
+            XCTAssertEqual(fixture.actions.inputs.count, decisions)
+            XCTAssertEqual(fixture.state.commands.filter { $0 == .formFields }.count, 1)
+            XCTAssertEqual(fixture.state.commands.filter { $0 == .prepareFormPreservation }.count, 1)
+            XCTAssertEqual(fixture.state.commands.filter { $0 == .bindPageFields }.count, 2,
+                "One captured correspondence plus a fresh comparison, never a new baseline")
+            _ = try await owner.executeForm(.decode(content: plan(input), input: input), input: input)
+            XCTAssertFalse(owner.hasPendingFormPreparation)
+            XCTAssertEqual(owner.confirmedFormHistory.count, 1)
+            XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 1)
+        }
+    }
+
+    func testChangedCapturedEditableValueBlocksPreparationRecovery() async throws {
+        let fixture = try await make(mutation: "document.getElementById('query').value='changed-during-pause';")
+        defer { fixture.close() }
+        _ = try await fixture.start(); configure(fixture)
+        let owner = try fixture.owner(), action = try await owner.planNextAction(using: fixture.actions)
+        fixture.state.onCommand = { command in
+            guard command == .formFields else { return }; fixture.state.onCommand = nil; owner.pause()
+        }
+        await expectFailure { _ = try await owner.prepareFormInput(for: action) }
+        try await release(fixture); try await owner.resumeAfterUserControl()
+        await expectFailure { _ = try await owner.resumeFormPreparation() }
+        XCTAssertTrue(owner.hasPendingFormPreparation)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .formFields }.count, 1)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit || $0 == .prepareFormPreservation }.count, 0)
+    }
+
+    func testChangedCapturedReadonlyValueBlocksUnpublishedPreparationRecovery() async throws {
+        let fixture = try await make(mutation: "document.getElementById('reference').value='changed-during-pause';")
+        defer { fixture.close() }
+        _ = try await fixture.start(); configure(fixture)
+        let owner = try fixture.owner(), action = try await owner.planNextAction(using: fixture.actions)
+        fixture.state.onCommand = { command in
+            guard command == .prepareFormPreservation else { return }; fixture.state.onCommand = nil; owner.pause()
+        }
+        await expectFailure { _ = try await owner.prepareFormInput(for: action) }
+        try await release(fixture); try await owner.resumeAfterUserControl()
+        await expectFailure { _ = try await owner.resumeFormPreparation() }
+        XCTAssertTrue(owner.hasPendingFormPreparation)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .prepareFormPreservation || $0 == .formFields }.count, 2)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 0)
+        XCTAssertTrue(owner.confirmedFormHistory.isEmpty)
+    }
+
+    func testReplacingAnOriginalFieldCannotTurnCapturedDataIntoNewTargetAuthority() async throws {
+        let fixture = try await make(mutation: "const q=document.getElementById('query'); q.replaceWith(q.cloneNode(true));")
+        defer { fixture.close() }
+        _ = try await fixture.start(); configure(fixture)
+        let owner = try fixture.owner(), action = try await owner.planNextAction(using: fixture.actions)
+        fixture.state.onCommand = { command in
+            guard command == .formFields else { return }; fixture.state.onCommand = nil; owner.pause()
+        }
+        await expectFailure { _ = try await owner.prepareFormInput(for: action) }
+        try await release(fixture); try await owner.resumeAfterUserControl()
+        await expectFailure { _ = try await owner.resumeFormPreparation() }
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .formFields }.count, 1)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 0)
+    }
+
+    func testPreparationSurvivesCancellationDuringItsFinalOriginalInputValidation() async throws {
+        let fixture = try await make()
+        defer { fixture.close() }
+        _ = try await fixture.start(); configure(fixture)
+        let owner = try fixture.owner(), action = try await owner.planNextAction(using: fixture.actions)
+        fixture.state.onCommand = { command in
+            guard command == .validateFormPreservation else { return }; fixture.state.onCommand = nil; owner.pause()
+        }
+        await expectFailure { _ = try await owner.prepareFormInput(for: action) }
+        XCTAssertTrue(owner.hasPendingFormPreparation)
+        try await owner.resumeAfterUserControl()
+        let input = try await owner.resumeFormPreparation()
+        XCTAssertNotNil(input.nativePreservation)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .formFields || $0 == .prepareFormPreservation }.count, 2)
+        _ = try await owner.executeForm(.decode(content: plan(input), input: input), input: input)
+        XCTAssertEqual(owner.confirmedFormHistory.count, 1)
+    }
+
+    func testDriverResumesPreparationBeforeAskingForAnotherAction() async throws {
+        let fixture = try await make()
+        defer { fixture.close() }
+        _ = try await fixture.start(); configure(fixture)
+        let owner = try fixture.owner(), action = try await owner.planNextAction(using: fixture.actions)
+        fixture.state.onCommand = { command in
+            guard command == .prepareFormPreservation else { return }; fixture.state.onCommand = nil; owner.pause()
+        }
+        await expectFailure { _ = try await owner.prepareFormInput(for: action) }
+        fixture.forms.content = #"{"edits":[{"field":"field1","terms":[{"requirement":0,"text":"concerts"}]}],"preserve":[]}"#
+        fixture.actions.select = { _ in
+            XCTAssertEqual(owner.confirmedFormHistory.count, 1, "Finish the retained preparation and stage before selecting another action")
+            return #"{"unavailable":true}"#
+        }
+        try await owner.resumeAfterUserControl(); _ = try await fixture.resume()
+        XCTAssertFalse(owner.hasPendingFormPreparation)
+        XCTAssertEqual(owner.confirmedFormHistory.count, 1)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .formFields || $0 == .prepareFormPreservation }.count, 2)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 1)
+    }
+
+    func testRetiringOwnerDiscardsPreparationWithoutPublishingALateStage() async throws {
+        let fixture = try await make()
+        defer { fixture.close() }
+        _ = try await fixture.start(); configure(fixture)
+        let owner = try fixture.owner(), action = try await owner.planNextAction(using: fixture.actions)
+        fixture.state.onCommand = { command in
+            guard command == .formFields else { return }; fixture.state.onCommand = nil; owner.retire()
+        }
+        await expectFailure { _ = try await owner.prepareFormInput(for: action) }
+        XCTAssertFalse(owner.hasPendingFormPreparation)
+        await expectFailure { _ = try await owner.resumeFormPreparation() }
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 0)
+        XCTAssertTrue(owner.confirmedFormHistory.isEmpty)
+    }
+
+    func testPrivateReadCaptureRejectsEffectsAndChangedArguments() async throws {
+        let fixture = try await ControlStateFixture(body: "<p>Metadata only</p>")
+        defer { fixture.close() }
+        for command in [ComputerUseBrowserDOMCommand.edit, .continueUnsentInput, .openPopup, .selectOption, .scrollViewport] {
+            XCTAssertThrowsError(try ComputerUseBrowserDOMReadCapture(command: command, document: fixture.document))
+        }
+        let capture = try ComputerUseBrowserDOMReadCapture(command: .formFields, document: fixture.document)
+        let arguments: [String: Any] = ["snapshotID":"first","selectedControlIDs":["c1"]]
+        try capture.begin(command: .formFields, arguments: arguments, document: fixture.document)
+        capture.finish(.success(try ComputerUseOwnedBrowser.decodeDOMReply(
+            #"{"status":"ok","documentID":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#, command: .formFields)))
+        XCTAssertNotNil(try capture.retainedReply(command: .formFields,
+            arguments: ["snapshotID":"new-nonce","selectedControlIDs":["c1"]], document: fixture.document))
+        XCTAssertThrowsError(try capture.retainedReply(command: .formFields,
+            arguments: ["snapshotID":"new-nonce","selectedControlIDs":["c2"]], document: fixture.document))
+        XCTAssertThrowsError(try capture.retainedReply(command: .bindPageFields, arguments: arguments, document: fixture.document))
+        XCTAssertFalse(String(describing: capture).contains("c1"))
+    }
+
+    func testUnknownReadFailureCannotBeRetriedAsAnAbsentObservation() async throws {
+        let fixture = try await ControlStateFixture(body: "<p>Metadata only</p>")
+        defer { fixture.close() }
+        let capture = try ComputerUseBrowserDOMReadCapture(command: .formFields, document: fixture.document)
+        try capture.begin(command: .formFields, arguments: [:], document: fixture.document)
+        capture.finish(.failure(ComputerUseBrowserError.pageChanged))
+        XCTAssertThrowsError(try capture.retainedReply(command: .formFields, arguments: [:], document: fixture.document))
+        XCTAssertTrue(capture.didStart)
+        XCTAssertThrowsError(try capture.begin(command: .formFields, arguments: [:], document: fixture.document))
+    }
+
+    func testOnlyAnEmptyAuthenticationReplyCanReleaseAnUnobservedCapture() async throws {
+        let fixture = try await ControlStateFixture(body: "<p>Metadata only</p>")
+        defer { fixture.close() }
+        let capture = try ComputerUseBrowserDOMReadCapture(command: .prepareFormPreservation, document: fixture.document)
+        try capture.begin(command: .prepareFormPreservation, arguments: [:], document: fixture.document)
+        let empty = #"{"status":"authentication-required","documentID":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#
+        capture.finish(Result { try ComputerUseOwnedBrowser.decodeDOMReply(empty, command: .prepareFormPreservation) })
+        XCTAssertNil(try capture.retainedReply(command: .prepareFormPreservation, arguments: [:], document: fixture.document))
+        XCTAssertFalse(capture.didStart)
+        let malformed = try ResearchAnswerFixture.json(["status":"authentication-required","documentID":String(repeating: "a", count: 32),
+            "formPreservation":["id":String(repeating: "b", count: 32),"scopeDigest":String(repeating: "c", count: 64),
+                "controlIDs":["c1"],"states":[["controlID":"c1","kind":"text","value":"private"]]]])
+        for command in [ComputerUseBrowserDOMCommand.prepareFormPreservation, .formFields] {
+            XCTAssertThrowsError(try ComputerUseOwnedBrowser.decodeDOMReply(malformed, command: command)) { error in
+                XCTAssertEqual(error as? ComputerUseBrowserError, .unsupportedDocument)
+            }
+        }
+    }
+
     private func make(inside: Bool = false, notes: Bool = false, category: Bool = false, prohibition: Bool = false,
                       handler: String = "", mutation: String = "") async throws -> ResearchDriverFixture {
         let reference = "<label>Reference<input id=reference readonly value='private-reference'></label>"

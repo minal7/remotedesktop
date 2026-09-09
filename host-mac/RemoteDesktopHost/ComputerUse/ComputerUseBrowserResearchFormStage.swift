@@ -417,15 +417,23 @@ final class ComputerUseBrowserResearchFormStage {
         try checkCurrent()
         if let binding = input.nativePreservation { try await target.validateFormPreservation(binding); try checkCurrent() }
         let original = input.evidence.page
+        let current = try await restoreOriginalPage(original, review: input.scopeReview, browser: browser, checkCurrent: checkCurrent)
+        let fields = try await target.bindFields(input.evidence.fields.map(\.editable), to: current)
+        try checkCurrent()
+        guard fields.fields == input.evidence.fields else { throw ComputerUseBrowserResearchFormError.inputChanged }
+        try browser.validateSourceDocument(original.document)
+    }
+
+    static func restoreOriginalPage(_ original: ComputerUseBrowserPageEvidence, review: ComputerUseBrowserEffectScopeReview?,
+                                    browser: ComputerUseOwnedBrowser, checkCurrent: () throws -> Void) async throws -> ComputerUseBrowserPageEvidence {
+        try checkCurrent()
         try browser.validateSourceDocument(original.document)
         let metadata = try await browser.observePage(document: original.document)
         try checkCurrent()
         let current: ComputerUseBrowserPageEvidence
-        if let review = input.scopeReview, !review.readControls.isEmpty {
+        if let review, !review.readControls.isEmpty {
             current = try await browser.observeResearchControls(for: review.restoredReadProposal(for: metadata))
         } else { current = metadata }
-        try checkCurrent()
-        let fields = try await target.bindFields(input.evidence.fields.map(\.editable), to: current)
         try checkCurrent()
         let page = current.page, before = original.page
         // Field input does not use viewport coordinates. Ignore only the
@@ -435,14 +443,15 @@ final class ComputerUseBrowserResearchFormStage {
             viewport: before.viewport, containers: page.containers, omittedStructure: page.omittedStructure,
             controlStates: page.controlStates, controlStateObserved: page.controlStateObserved, scopedControlIDs: page.scopedControlIDs,
             omittedControlMetadata: page.omittedControlMetadata)
-        guard current.documentID == original.documentID, comparable == before, fields.fields == input.evidence.fields else {
+        guard current.documentID == original.documentID, comparable == before else {
             throw ComputerUseBrowserResearchFormError.inputChanged
         }
-        if let review = input.scopeReview {
+        if let review {
             try ComputerUseBrowserObservedCriteria.requireUnchanged(controlIDs: review.readControls.map(\.controlID),
                 original: original, current: current)
         }
         try browser.validateSourceDocument(original.document)
+        return current
     }
 
     func prepareQuery(controlID: String, evidence: ComputerUseBrowserPageEvidence,

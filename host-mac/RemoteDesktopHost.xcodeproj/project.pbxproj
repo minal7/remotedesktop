@@ -18,6 +18,7 @@
 		C86A8DB9D022FA28189F5528 /* ComputerUseBrowserReviewParts.swift in Sources */ = {isa = PBXBuildFile; fileRef = 727377BD6090C17E99F948BA /* ComputerUseBrowserReviewParts.swift */; };
 		42D364A60327F5052C9EEA7A /* ComputerUseBrowserResearchEvidence.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77D9D8D7CD568B1D1607F9F2 /* ComputerUseBrowserResearchEvidence.swift */; };
 		D571305B2ADDCF6E204C0CFE /* ComputerUseBrowserResearchFormInput.swift in Sources */ = {isa = PBXBuildFile; fileRef = E0291F31D44968C27128E001 /* ComputerUseBrowserResearchFormInput.swift */; };
+		4F46D5E9D4C82666646AB0C0 /* ComputerUseBrowserResearchFormPreparation.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6DCAE7EB1E866795C830CF1 /* ComputerUseBrowserResearchFormPreparation.swift */; };
 		74FA7B01FBAD255F3BC89728 /* ComputerUseBrowserFormPlanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 086087D52753151775B49B08 /* ComputerUseBrowserFormPlanner.swift */; };
 		A4A4DE60C2A5057998720F12 /* ComputerUseBrowserActionPlanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5C1032C8AC3A713FF5E6D43 /* ComputerUseBrowserActionPlanner.swift */; };
 		BFC6167377F9DA12591BC789 /* ComputerUseBrowserFormProposal.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9514DE22A7E763FB1D54C288 /* ComputerUseBrowserFormProposal.swift */; };
@@ -33,6 +34,7 @@
 		9FD15C2B56464D0EDB729E97 /* ComputerUseBrowserOptionSelection.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB8C96004AA0A00B94017C94 /* ComputerUseBrowserOptionSelection.swift */; };
 		DC39E4D716FDF70F98A0AEEF /* ComputerUseBrowserObservedCriteria.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5B09A8F15E1361BB4FBD3988 /* ComputerUseBrowserObservedCriteria.swift */; };
 		C59BF5E1A04F969946A7CC21 /* ComputerUseBrowserFormPreservation.swift in Sources */ = {isa = PBXBuildFile; fileRef = AFAE49F69B6252EFF95BC321 /* ComputerUseBrowserFormPreservation.swift */; };
+		64EFB4B52318A64AD7C92346 /* ComputerUseBrowserDOMReadCapture.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9679DB6867DBFB8BB80996D1 /* ComputerUseBrowserDOMReadCapture.swift */; };
 		62B4A175BBF882CC2F48891B /* ComputerUseBrowserEffectControlReview.swift in Sources */ = {isa = PBXBuildFile; fileRef = 806F4900518999B977952763 /* ComputerUseBrowserEffectControlReview.swift */; };
 		5C4ABCA9DC0A8B945E9D302C /* ComputerUseBrowserFormEffectScope.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C4365C64DDBBBDB24669619 /* ComputerUseBrowserFormEffectScope.swift */; };
 		8B7B0DBF4457F6A43A69902D /* ComputerUseBrowserOptionSelectionStage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 729F328F33BD5DF8224C1BCC /* ComputerUseBrowserOptionSelectionStage.swift */; };
@@ -297,6 +299,7 @@
 		727377BD6090C17E99F948BA /* ComputerUseBrowserReviewParts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseBrowserReviewParts.swift; sourceTree = "<group>"; };
 		77D9D8D7CD568B1D1607F9F2 /* ComputerUseBrowserResearchEvidence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseBrowserResearchEvidence.swift; sourceTree = "<group>"; };
 		E0291F31D44968C27128E001 /* ComputerUseBrowserResearchFormInput.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseBrowserResearchFormInput.swift; sourceTree = "<group>"; };
+		F6DCAE7EB1E866795C830CF1 /* ComputerUseBrowserResearchFormPreparation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseBrowserResearchFormPreparation.swift; sourceTree = "<group>"; };
 		086087D52753151775B49B08 /* ComputerUseBrowserFormPlanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseBrowserFormPlanner.swift; sourceTree = "<group>"; };
 		E5C1032C8AC3A713FF5E6D43 /* ComputerUseBrowserActionPlanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseBrowserActionPlanner.swift; sourceTree = "<group>"; };
 		9514DE22A7E763FB1D54C288 /* ComputerUseBrowserFormProposal.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseBrowserFormProposal.swift; sourceTree = "<group>"; };
@@ -312,6 +315,7 @@
 		BB8C96004AA0A00B94017C94 /* ComputerUseBrowserOptionSelection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseBrowserOptionSelection.swift; sourceTree = "<group>"; };
 		5B09A8F15E1361BB4FBD3988 /* ComputerUseBrowserObservedCriteria.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseBrowserObservedCriteria.swift; sourceTree = "<group>"; };
 		AFAE49F69B6252EFF95BC321 /* ComputerUseBrowserFormPreservation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseBrowserFormPreservation.swift; sourceTree = "<group>"; };
+		9679DB6867DBFB8BB80996D1 /* ComputerUseBrowserDOMReadCapture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseBrowserDOMReadCapture.swift; sourceTree = "<group>"; };
 		806F4900518999B977952763 /* ComputerUseBrowserEffectControlReview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseBrowserEffectControlReview.swift; sourceTree = "<group>"; };
 		0C4365C64DDBBBDB24669619 /* ComputerUseBrowserFormEffectScope.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseBrowserFormEffectScope.swift; sourceTree = "<group>"; };
 		729F328F33BD5DF8224C1BCC /* ComputerUseBrowserOptionSelectionStage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseBrowserOptionSelectionStage.swift; sourceTree = "<group>"; };
@@ -747,6 +751,7 @@
 				727377BD6090C17E99F948BA /* ComputerUseBrowserReviewParts.swift */,
 				77D9D8D7CD568B1D1607F9F2 /* ComputerUseBrowserResearchEvidence.swift */,
 				E0291F31D44968C27128E001 /* ComputerUseBrowserResearchFormInput.swift */,
+				F6DCAE7EB1E866795C830CF1 /* ComputerUseBrowserResearchFormPreparation.swift */,
 				086087D52753151775B49B08 /* ComputerUseBrowserFormPlanner.swift */,
 				E5C1032C8AC3A713FF5E6D43 /* ComputerUseBrowserActionPlanner.swift */,
 				9514DE22A7E763FB1D54C288 /* ComputerUseBrowserFormProposal.swift */,
@@ -762,6 +767,7 @@
 				BB8C96004AA0A00B94017C94 /* ComputerUseBrowserOptionSelection.swift */,
 				5B09A8F15E1361BB4FBD3988 /* ComputerUseBrowserObservedCriteria.swift */,
 				AFAE49F69B6252EFF95BC321 /* ComputerUseBrowserFormPreservation.swift */,
+				9679DB6867DBFB8BB80996D1 /* ComputerUseBrowserDOMReadCapture.swift */,
 				806F4900518999B977952763 /* ComputerUseBrowserEffectControlReview.swift */,
 				0C4365C64DDBBBDB24669619 /* ComputerUseBrowserFormEffectScope.swift */,
 				729F328F33BD5DF8224C1BCC /* ComputerUseBrowserOptionSelectionStage.swift */,
@@ -1185,6 +1191,7 @@
 				C86A8DB9D022FA28189F5528 /* ComputerUseBrowserReviewParts.swift in Sources */,
 				42D364A60327F5052C9EEA7A /* ComputerUseBrowserResearchEvidence.swift in Sources */,
 				D571305B2ADDCF6E204C0CFE /* ComputerUseBrowserResearchFormInput.swift in Sources */,
+				4F46D5E9D4C82666646AB0C0 /* ComputerUseBrowserResearchFormPreparation.swift in Sources */,
 				74FA7B01FBAD255F3BC89728 /* ComputerUseBrowserFormPlanner.swift in Sources */,
 				A4A4DE60C2A5057998720F12 /* ComputerUseBrowserActionPlanner.swift in Sources */,
 				BFC6167377F9DA12591BC789 /* ComputerUseBrowserFormProposal.swift in Sources */,
@@ -1200,6 +1207,7 @@
 				9FD15C2B56464D0EDB729E97 /* ComputerUseBrowserOptionSelection.swift in Sources */,
 				DC39E4D716FDF70F98A0AEEF /* ComputerUseBrowserObservedCriteria.swift in Sources */,
 				C59BF5E1A04F969946A7CC21 /* ComputerUseBrowserFormPreservation.swift in Sources */,
+				64EFB4B52318A64AD7C92346 /* ComputerUseBrowserDOMReadCapture.swift in Sources */,
 				62B4A175BBF882CC2F48891B /* ComputerUseBrowserEffectControlReview.swift in Sources */,
 				5C4ABCA9DC0A8B945E9D302C /* ComputerUseBrowserFormEffectScope.swift in Sources */,
 				8B7B0DBF4457F6A43A69902D /* ComputerUseBrowserOptionSelectionStage.swift in Sources */,
