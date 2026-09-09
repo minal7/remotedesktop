@@ -1,5 +1,55 @@
 import Foundation
 
+/// Unused historical purposes, never a field binding, baseline or receipt.
+/// Old public labels are page data and cannot identify controls on a new page.
+struct ComputerUseBrowserUnobservedFormIntent: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    static let maximumCount = 32
+    struct Purpose: Equatable, Sendable {
+        let label: String
+        let kind: String
+        let disposition: ComputerUseBrowserFormEffectScope.FieldIntent.Disposition
+        let sources: [ComputerUseBrowserFormSource]
+    }
+    let index: Int
+    private let goal: ComputerUseBrowserGoalInput
+    private let retiredAtGoal: ComputerUseBrowserGoalInput
+    private let sessionIdentity: String
+    private let purposes: [Purpose]
+
+    @MainActor
+    init(preparation: ComputerUseBrowserResearchFormPreparation, index: Int,
+         goal: ComputerUseBrowserGoalInput, page: ComputerUseBrowserPageEvidence) throws {
+        guard (0..<Self.maximumCount).contains(index), preparation.canRetireUnobservedInitialIntent,
+              goal.continues(preparation.interpretation.input), page.document.taskID == goal.taskID,
+              page.document.contextID == preparation.page.document.contextID,
+              page.documentID != preparation.page.documentID else { throw ComputerUseBrowserActionPlanError.inputChanged }
+        self.index = index; self.goal = preparation.interpretation.input; retiredAtGoal = goal
+        sessionIdentity = page.document.contextID
+        purposes = try preparation.reviewContext.fieldPurposes.map { purpose in
+            guard let control = preparation.page.page.controls.first(where: { $0.id == purpose.controlID }) else {
+                throw ComputerUseBrowserActionPlanError.inputChanged
+            }
+            return .init(label: control.label, kind: control.kind, disposition: purpose.disposition, sources: purpose.sources)
+        }
+    }
+
+    func context(interpretation: ComputerUseBrowserGoalProposal, evidence: ComputerUseBrowserPageEvidence) throws -> [String: Any] {
+        guard interpretation.input.continues(goal), interpretation.input.continues(retiredAtGoal),
+              evidence.document.contextID == sessionIdentity else { throw ComputerUseBrowserActionPlanError.invalidInput }
+        return ["intent":index, "retired_after_handback":true, "values_observed":false, "input_dispatched":false,
+            "current_field_verification":false, "purposes":try purposes.map { purpose -> [String: Any] in
+                ["historical_label":purpose.label, "historical_kind":purpose.kind, "disposition":purpose.disposition.rawValue,
+                 "sources":try purpose.sources.map { source -> [String: Any] in
+                    ["turn":source.turn, "sourceByteOffset":source.offset, "source":source.source,
+                     "role_at_preparation":source.role.rawValue, "field_at_preparation":source.field.rawValue,
+                     "requirements":try source.indices(in: interpretation)]
+                 }]
+            }]
+    }
+    var description: String { "BrowserUnobservedFormIntent(index: \(index))" }
+    var debugDescription: String { description }
+}
+
 /// Historical and subsequently reviewed purposes for retained preparation. Native
 /// field values, target IDs, guard IDs and operation receipts stay out of this
 /// proposal context. Source overlap is a reference, not semantic equivalence.
@@ -400,6 +450,21 @@ final class ComputerUseBrowserResearchFormPreparation {
     }
     var hasPreservationObligations: Bool {
         originalPreparation != nil || previous != nil || !reviewContext.preservedSources.isEmpty || !reviewContext.readSources.isEmpty
+    }
+
+    /// This is absence of observation/effect, not recovery of a captured
+    /// baseline. The owner must separately prove explicit handback to a new
+    /// document and retain the unused purposes before releasing this frame.
+    var canRetireUnobservedInitialIntent: Bool {
+        parent == nil && previous == nil && originalPreparation == nil && revisionDepth == 0
+            && baseline == nil && baselineOrigin == nil && inheritedCriteriaOrigin == nil
+            && criteriaRepair == nil && revisedAction == nil && criteriaRepairCount == 0
+            && reviewContext == preparedReviewContext && !hasPreservationObligations
+            && !reviewContext.fieldPurposes.contains(where: { $0.disposition == .retain })
+            && fields == nil && evidence == nil && preservation == nil && !preservationFinished && preparedInput == nil
+            && fieldsCapture.initialFieldsWereNotObserved && !bindingCapture.didStart && !preservationCapture.didStart
+            && target.hasNoCapturedFields && !page.page.controlStateObserved
+            && page.page.controlStates.isEmpty && page.page.scopedControlIDs.isEmpty
     }
 
     init(action: ComputerUseBrowserActionProposal, browser: ComputerUseOwnedBrowser, parent: (any ComputerUseBrowserFormStage)? = nil,

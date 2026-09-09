@@ -101,6 +101,16 @@ final class ComputerUseBrowserResearchTask {
     private var retainedEvidence: ComputerUseBrowserResearchEvidence
     private var session: ComputerUseBrowserHandbackRequirement?
     private var handback: ComputerUseBrowserHandbackRequirement?
+    private struct HandbackDocument: Sendable {
+        let goal: ComputerUseBrowserGoalInput
+        let document: ComputerUseBrowserDocument
+        let documentID: String
+    }
+    private struct HandbackOutcome: Sendable {
+        let requirement: ComputerUseBrowserHandbackRequirement?
+        let document: HandbackDocument?
+    }
+    private var lastHandbackDocument: HandbackDocument?
     private var isPaused = false
     private var isRetired = false
     private var operationID: UUID?
@@ -111,6 +121,7 @@ final class ComputerUseBrowserResearchTask {
     private(set) var confirmedFormHistory: [ComputerUseBrowserResearchFormReceipt] = []
     private(set) var formPartyHistory: [ComputerUseBrowserFormPartyHistory] = []
     private(set) var loginHandoffHistory: [ComputerUseBrowserLoginHandoffRecord] = []
+    private(set) var unobservedFormIntentHistory: [ComputerUseBrowserUnobservedFormIntent] = []
     private(set) var retiredFormHistory: [ComputerUseBrowserResearchFormStage.Retirement] = []
     private(set) var retiredHistoryNavigations: [ComputerUseBrowserResearchHistoryNavigation.Retirement] = []
     private(set) var popupHistory: [ComputerUseBrowserResearchPopupRecord] = []
@@ -490,7 +501,8 @@ final class ComputerUseBrowserResearchTask {
                     allowOptionInspection: optionSelectionSequence < 32 && navigationDirectory != nil && optionReads.isEmpty,
                     optionReadControls: optionReads, optionChoices: optionChoices, optionSelectionHistory: optionSelectionHistory,
                     effectControlReviews: effectReviews, formEffectScope: formScope, preparationReview: preparation?.reviewContext,
-                    formPartyHistory: formPartyHistory, loginHandoffHistory: loginHandoffHistory)
+                    formPartyHistory: formPartyHistory, loginHandoffHistory: loginHandoffHistory,
+                    unobservedFormIntentHistory: unobservedFormIntentHistory)
                 // Retain the selected form/query through metadata review. Newly
                 // read query criteria still require an explicit model decision.
                 let readyScope = context.effectScopeAllowsActions ? formScope : nil
@@ -949,14 +961,47 @@ final class ComputerUseBrowserResearchTask {
         try requireIdle(); try requireFormGoalReview()
         guard !hasPendingNavigation else { throw Failure.navigationPending }
         guard !hasQuestion else { throw Failure.questionPending }
-        guard let preparation = formPreparation, preparation.permitsCriteriaRecovery else { return false }
+        guard let preparation = formPreparation else { return false }
         let captured = input
         latestCandidates = nil; latestForm = nil; latestAction = nil
         return try await operate { [self] in
-            try await preparation.recoverCriteriaForReview(browser: browser, checkCurrent: {
+            func check() throws {
                 try self.checkCurrent(captured)
                 guard self.formPreparation === preparation else { throw Failure.formUnavailable }
-            })
+            }
+            // No value/effect recovery is needed for this narrowly proven
+            // absence. Only the document actually checked during explicit
+            // handback may replace the old, never-observed initial intent.
+            if preparation.canRetireUnobservedInitialIntent,
+               unobservedFormIntentHistory.count < ComputerUseBrowserUnobservedFormIntent.maximumCount,
+               let returned = lastHandbackDocument, captured.continues(returned.goal),
+               returned.document.contextID == preparation.page.document.contextID,
+               returned.documentID != preparation.page.documentID {
+                guard sourcePolicy == nil || (sourcePolicyInstalled && sourcePolicy?.goalRevision == captured.digest) else {
+                    throw Failure.navigationUnavailable
+                }
+                let page = try await observeOwnedPage(goal: captured, enforceSources: true)
+                guard page.document == returned.document, page.documentID == returned.documentID else {
+                    throw ComputerUseBrowserError.pageChanged
+                }
+                let record = try ComputerUseBrowserUnobservedFormIntent(preparation: preparation,
+                    index: unobservedFormIntentHistory.count, goal: captured, page: page)
+                do { try await browser.validatePageEvidence(page) }
+                catch {
+                    await browser.joinDOMCompletion(document: page.document)
+                    throw error
+                }
+                try check()
+                // checkCurrent invokes the action gate, which may reenter
+                // Pause. Finish with pure checks before changing ownership.
+                guard !isRetired, !isPaused, input == captured, formPreparation === preparation,
+                      lastHandbackDocument?.document == returned.document,
+                      lastHandbackDocument?.documentID == returned.documentID else { throw Failure.paused }
+                unobservedFormIntentHistory.append(record); formPreparation = nil
+                return true
+            }
+            guard preparation.permitsCriteriaRecovery else { return false }
+            return try await preparation.recoverCriteriaForReview(browser: browser, checkCurrent: check)
         }
     }
 
@@ -1569,6 +1614,7 @@ final class ComputerUseBrowserResearchTask {
     /// operation slot until the actual child task unwinds after cancellation.
     func pause() {
         guard !isRetired else { return }
+        lastHandbackDocument = nil
         retainedEvidence.invalidateAnswerReadings()
         isPaused = true; controlEpoch = UUID()
         if handback == nil {
@@ -1596,20 +1642,23 @@ final class ComputerUseBrowserResearchTask {
         let expected = handback
         operationID = id
         if let expected { browser.recordWorkflowControl(.workflowResumeStarted, requirement: expected, operationID: id) }
-        let child = Task<ComputerUseBrowserHandbackRequirement?, Error> { @MainActor [self] in
+        let child = Task<HandbackOutcome, Error> { @MainActor [self] in
             if let expected {
+                var returnedDocument: HandbackDocument?
                 try await browser.reacquireAfterUserControl(taskID: taskID, requirement: expected, workflowOperationID: id)
                 try Task.checkCancellation()
                 if try !browser.isUnnavigatedSession(expected) {
                     let document = try await browser.acquireObservedDocument(taskID: taskID)
                     try Task.checkCancellation()
-                    _ = try await browser.observePage(document: document)
+                    let page = try await browser.observePage(document: document)
+                    returnedDocument = .init(goal: captured, document: page.document, documentID: page.documentID)
                     try Task.checkCancellation()
                 }
                 try browser.validateWorkflowSession(expected)
-                return expected
+                return .init(requirement: expected, document: returnedDocument)
             }
             if session == nil, requiresBrowserAdmission, browser.hasSession {
+                var returnedDocument: HandbackDocument?
                 let prepared = try await performBrowserAdmission(checkCurrent: {
                     try Task.checkCancellation()
                     guard !self.isRetired, self.isPaused, self.controlEpoch == epoch, self.operationID == id,
@@ -1624,13 +1673,14 @@ final class ComputerUseBrowserResearchTask {
                 try Task.checkCancellation()
                 if try !browser.isUnnavigatedSession(prepared) {
                     let document = try await browser.acquireObservedDocument(taskID: taskID)
-                    _ = try await browser.observePage(document: document)
+                    let page = try await browser.observePage(document: document)
+                    returnedDocument = .init(goal: captured, document: page.document, documentID: page.documentID)
                 }
                 try Task.checkCancellation(); try browser.validateWorkflowSession(prepared)
-                return prepared
+                return .init(requirement: prepared, document: returnedDocument)
             }
             guard session == nil, browser.taskID == nil else { throw ComputerUseBrowserError.handbackContextLost }
-            return nil
+            return .init(requirement: nil, document: nil)
         }
         cancelOperation = { child.cancel() }
         var resumedSuccessfully = false
@@ -1640,7 +1690,8 @@ final class ComputerUseBrowserResearchTask {
             }
             if operationID == id { operationID = nil; cancelOperation = nil }
         }
-        let resumed = try await withTaskCancellationHandler { try await child.value } onCancel: { child.cancel() }
+        let outcome = try await withTaskCancellationHandler { try await child.value } onCancel: { child.cancel() }
+        let resumed = outcome.requirement
         try Task.checkCancellation()
         guard !isRetired, isPaused, epoch == controlEpoch, operationID == id, input.digest == captured.digest, mayAct() else { throw Failure.paused }
         var loginHistory = loginHandoffHistory
@@ -1648,7 +1699,9 @@ final class ComputerUseBrowserResearchTask {
             guard let resumed else { throw ComputerUseBrowserError.handbackContextLost }
             loginHistory[loginHistory.count - 1] = try pending.returningControl(to: captured, handback: resumed)
         }
+        guard !isRetired, isPaused, epoch == controlEpoch, operationID == id, input == captured else { throw Failure.paused }
         session = resumed; self.handback = nil; isPaused = false
+        lastHandbackDocument = outcome.document
         loginHandoffHistory = loginHistory
         resumedSuccessfully = true
         if let resumed { browser.recordWorkflowControl(.workflowResumed, requirement: resumed, operationID: id) }
@@ -1656,10 +1709,11 @@ final class ComputerUseBrowserResearchTask {
 
     func retire() {
         isRetired = true; controlEpoch = UUID(); latestCandidates = nil; latestForm = nil; latestAction = nil; interpretation = nil
-        formPreparation = nil
+        formPreparation = nil; lastHandbackDocument = nil
         confirmedNavigationHistory.removeAll()
         formStage?.retire(); formStage = nil; lastVerifiedFormStage?.retire(); lastVerifiedFormStage = nil
         confirmedFormHistory.removeAll(); formPartyHistory.removeAll(); loginHandoffHistory.removeAll(); retiredFormHistory.removeAll()
+        unobservedFormIntentHistory.removeAll()
         formNavigation?.retire(); formNavigation = nil
         historyNavigation?.retire(); historyNavigation = nil
         retiredHistoryNavigations.removeAll()

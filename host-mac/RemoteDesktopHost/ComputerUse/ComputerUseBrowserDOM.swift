@@ -2287,6 +2287,10 @@ final class ComputerUseBrowserTextTarget {
     private var targets: [String: String] = [:]
     private let adapterID = UUID()
 
+    var hasNoCapturedFields: Bool {
+        documentID == nil && inputLedgerID == nil && targets.isEmpty && formPreservation == nil
+    }
+
     init(browser: ComputerUseOwnedBrowser, document: ComputerUseBrowserDocument, requiresFrontmost: Bool = true) {
         self.browser = browser
         self.document = document

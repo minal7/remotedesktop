@@ -12,6 +12,15 @@ final class ComputerUseBrowserDOMReadCapture: CustomStringConvertible {
     private var recoveredReply: ComputerUseBrowserDOMReply?
     private(set) var didStart = false
 
+    /// Only the initial field read may establish this absence. A pending
+    /// callback, ordinary failure or any recovered result remains retained.
+    var initialFieldsWereNotObserved: Bool {
+        guard command == .formFields, recoveredReply == nil else { return false }
+        if !didStart { return completion == nil }
+        guard case .failure(let error)? = completion else { return false }
+        return error as? ComputerUseBrowserError == .authenticationRequired
+    }
+
     init(command: ComputerUseBrowserDOMCommand, document: ComputerUseBrowserDocument) throws {
         guard [.formFields, .extendFormFields, .reviseFormFields, .verifyFormState, .bindPageFields, .prepareFormPreservation].contains(command) else {
             throw ComputerUseBrowserError.unsupportedDocument
