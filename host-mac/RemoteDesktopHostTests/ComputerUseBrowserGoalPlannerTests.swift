@@ -25,7 +25,8 @@ final class ComputerUseBrowserGoalPlannerTests: XCTestCase {
             let proposed = try XCTUnwrap(owner.proposedQuestionRequest())
             XCTAssertEqual(proposed.topic, topic)
             let issued = try bridge.issue(proposed, owner: owner, for: request)
-            XCTAssertEqual(issued.text, topic.question)
+            XCTAssertEqual(issued.text, topic.question
+                + "\n\nI'm asking about the part inside ⟦ ⟧.\n\nFrom your request:\n“⟦\(input.prompt)⟧”")
             let wire = try ComputerUsePromptRequest.answering(issued.reference, text: answers[index], supportsApprovedActionEvidence: true).encodedBody()
             let decoded = try ComputerUseExecutionPromptDecoder.decode(wire)
             let answer = ComputerUseEnvelope(id: "answer-\(index)", senderID: request.senderID, targetID: request.targetID,

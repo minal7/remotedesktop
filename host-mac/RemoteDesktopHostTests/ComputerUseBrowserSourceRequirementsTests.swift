@@ -131,7 +131,8 @@ final class ComputerUseBrowserSourceRequirementsTests: XCTestCase {
         XCTAssertThrowsError(try state.issue(proposal: proposed, topic: .location, requirementIDs: [proposed.requirements[1].id], context: context))
         let question = try state.issue(proposal: proposed, topic: .source, requirementIDs: [proposed.requirements[1].id], context: context)
         XCTAssertEqual(question.scope[0].source, "Never use tickets.test.")
-        XCTAssertEqual(question.text, ComputerUseBrowserClarificationTopic.source.question)
+        XCTAssertEqual(question.text, ComputerUseBrowserClarificationTopic.source.question
+            + "\n\nI'm asking about the part inside ⟦ ⟧.\n\nFrom your request:\n“Find tickets. ⟦Never use tickets.test.⟧”")
     }
 
     func testUnrelatedAnswerCannotEraseAnEarlierSourceExclusionByRelabelingIt() throws {

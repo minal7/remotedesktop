@@ -112,15 +112,70 @@ final class ComputerUseBrowserGoalClarification {
         let requirements: [ComputerUseBrowserGoalProposal.Requirement]
         let expiresAt: Date
         let context: Context
-        var text: String { topic.question }
+        let text: String
         fileprivate init(proposal: ComputerUseBrowserGoalProposal, topic: ComputerUseBrowserClarificationTopic,
-                         scope: [ComputerUseBrowserGoalClarificationTurn.Scope], expiresAt: Date, context: Context) {
+                         scope: [ComputerUseBrowserGoalClarificationTurn.Scope], expiresAt: Date, context: Context) throws {
             let input = proposal.input
             taskID = input.taskID; inputDigest = input.digest; self.topic = topic; self.scope = scope
             interpretationDigest = proposal.digest; requirements = proposal.requirements
             self.expiresAt = expiresAt; self.context = context
-            id = ComputerUseTaskContract.digest(["browser-goal-question-v2", UUID().uuidString, input.digest, proposal.digest,
-                topic.rawValue, context.identity, String(expiresAt.timeIntervalSince1970)] + scope.map(\.requirementID))
+            text = try Self.render(topic: topic, scope: scope, input: input)
+            guard text.count <= ComputerUseTaskLedger.maximumClarificationCharacters,
+                  text.utf8.count <= ComputerUseTaskLedger.maximumClarificationUTF8Bytes else { throw Failure.inputLimit }
+            id = ComputerUseTaskContract.digest(["browser-goal-question-v3", UUID().uuidString, input.digest, proposal.digest,
+                topic.rawValue, text, context.identity, String(expiresAt.timeIntervalSince1970)] + scope.map(\.requirementID))
+        }
+        private static func render(topic: ComputerUseBrowserClarificationTopic,
+                                   scope: [ComputerUseBrowserGoalClarificationTurn.Scope], input: ComputerUseBrowserGoalInput) throws -> String {
+            let excerpts = try scope.map { item -> String in
+                guard input.userTurns.indices.contains(item.turn) else { throw Failure.invalidProposal }
+                let bytes = Data(input.userTurns[item.turn].utf8), start = item.sourceByteOffset
+                let length = item.source.utf8.count
+                guard start >= 0, start <= bytes.count, length <= bytes.count - start else { throw Failure.invalidProposal }
+                let end = start + length
+                guard Data(bytes[start..<end]) == Data(item.source.utf8),
+                      let prefix = String(data: bytes.prefix(start), encoding: .utf8),
+                      let suffix = String(data: bytes.suffix(bytes.count - end), encoding: .utf8) else { throw Failure.invalidProposal }
+                let before = contextExcerpt(prefix, fromEnd: true), after = contextExcerpt(suffix, fromEnd: false)
+                let excerpt = (before.omitted ? "…" : "") + display(before.text) + "⟦" + display(item.source) + "⟧"
+                    + display(after.text) + (after.omitted ? "…" : "")
+                let label = item.turn == 0 ? "From your request" : "From your answer \(item.turn)"
+                return "\(label):\n“\(excerpt)”"
+            }
+            return topic.question + "\n\nI'm asking about the part inside ⟦ ⟧.\n\n" + excerpts.joined(separator: "\n\n")
+        }
+        /// Nearby context distinguishes repeated clauses. Only context is
+        /// shortened; every selected source scalar has a display representation.
+        private static func contextExcerpt(_ source: String, fromEnd: Bool) -> (text: String, omitted: Bool) {
+            var selected: [Character] = [], scalars = 0
+            func append(_ character: Character) -> Bool {
+                let count = character.unicodeScalars.count
+                guard scalars + count <= 64 else { return false }
+                selected.append(character); scalars += count
+                return true
+            }
+            if fromEnd { for character in source.reversed() { if !append(character) { break } } }
+            else { for character in source { if !append(character) { break } } }
+            let text = fromEnd ? String(selected.reversed()) : String(selected)
+            return (text, text.utf8.count != source.utf8.count)
+        }
+        /// A display projection only. Original source/answer bytes remain
+        /// untouched in the sealed scope and structured model input.
+        private static func display(_ source: String) -> String {
+            var result = ""
+            for scalar in source.unicodeScalars {
+                switch scalar.value {
+                case 0...31: result.unicodeScalars.append(UnicodeScalar(0x2400 + scalar.value)!)
+                case 127: result.append("␡")
+                case 128...159, 0x061C, 0x200E, 0x200F, 0x202A...0x202E, 0x2066...0x2069: result.append("�")
+                case 0x2028: result.append("⏎")
+                case 0x2029: result.append("¶")
+                case 0x27E6: result.append("［")
+                case 0x27E7: result.append("］")
+                default: result.unicodeScalars.append(scalar)
+                }
+            }
+            return result
         }
         var description: String { "BrowserGoalQuestion(topic: \(topic.rawValue))" }
         var debugDescription: String { description }
@@ -153,7 +208,7 @@ final class ComputerUseBrowserGoalClarification {
         }
         let expiry = current.addingTimeInterval(600)
         guard expiry.timeIntervalSince1970.isFinite, expiry > current else { throw Failure.inputLimit }
-        let question = Question(proposal: proposal, topic: topic, scope: scope, expiresAt: expiry, context: context)
+        let question = try Question(proposal: proposal, topic: topic, scope: scope, expiresAt: expiry, context: context)
         pending = question
         return question
     }

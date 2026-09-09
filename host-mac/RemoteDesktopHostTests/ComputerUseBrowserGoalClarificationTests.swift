@@ -15,7 +15,8 @@ final class ComputerUseBrowserGoalClarificationTests: XCTestCase {
         let proposal = try proposal(original, rows: [row(original.prompt)])
         let owner = try context()
         let question = try state.issue(proposal: proposal, topic: .location, requirementIDs: [proposal.requirements[0].id], context: owner)
-        XCTAssertEqual(question.text, ComputerUseBrowserClarificationTopic.location.question)
+        XCTAssertEqual(question.text, ComputerUseBrowserClarificationTopic.location.question
+            + "\n\nI'm asking about the part inside ⟦ ⟧.\n\nFrom your request:\n“⟦\(original.prompt)⟧”")
         XCTAssertFalse(question.text.contains("password"), "Model-authored question text is never displayed by this boundary")
         let answer = "  San Francisco\nCafé e\u{301}  "
         let continued = try state.consume(questionID: question.id, answerTaskID: "answer-1", answer: answer, context: owner)
@@ -31,6 +32,80 @@ final class ComputerUseBrowserGoalClarificationTests: XCTestCase {
         for description in [String(reflecting: continued), String(reflecting: continued.clarifications[0]),
             String(reflecting: continued.clarifications[0].scope[0]), String(reflecting: question), String(reflecting: owner)] {
             XCTAssertFalse(description.contains("San Francisco")); XCTAssertFalse(description.contains("Café"))
+        }
+    }
+
+    func testQuestionDisplaysTheSelectedOccurrenceWithNearbyRequestContext() throws {
+        let sources = ["Find flights from San Francisco to LA ", "tomorrow", " and return from LA to San Francisco ", "tomorrow", "."]
+        let original = try input(sources.joined()), state = Clarification(input: original), owner = try context()
+        let proposed = try proposal(original, rows: sources.enumerated().map { index, text in
+            index == 1 || index == 3 ? row(text, role: "condition", field: "date") : row(text)
+        })
+        let question = try state.issue(proposal: proposed, topic: .date, requirementIDs: [proposed.requirements[3].id], context: owner)
+        XCTAssertTrue(question.text.hasPrefix(ComputerUseBrowserClarificationTopic.date.question))
+        XCTAssertTrue(question.text.contains("return from LA to San Francisco ⟦tomorrow⟧"))
+        XCTAssertFalse(question.text.contains("to LA ⟦tomorrow⟧"))
+        XCTAssertEqual(question.scope.map(\.requirementID), [proposed.requirements[3].id])
+        let continued = try state.consume(questionID: question.id, answerTaskID: "return-date", answer: "2026-10-15", context: owner)
+        XCTAssertEqual(continued.clarifications[0].scope[0].sourceByteOffset, sources.prefix(3).joined().utf8.count)
+        XCTAssertEqual(continued.clarifications[0].priorRequirements, proposed.requirements)
+        XCTAssertEqual(continued.userTurns, [original.prompt, "2026-10-15"])
+    }
+
+    func testQuestionDisplayEscapesControlsButRetainsExactUserSourceAndAnswerBytes() throws {
+        let source = "Find Café e\u{301} 👨‍👩‍👧‍👦 tickets\n⟦nearby⟧\u{202E}\u{0000}."
+        let original = try input(source), state = Clarification(input: original), owner = try context()
+        let proposed = try proposal(original, rows: [row(source)])
+        let question = try state.issue(proposal: proposed, topic: .location, requirementIDs: [proposed.requirements[0].id], context: owner)
+        XCTAssertTrue(question.text.contains("Café e\u{301} 👨‍👩‍👧‍👦 tickets␊［nearby］�␀."))
+        XCTAssertFalse(question.text.contains("\u{202E}")); XCTAssertFalse(question.text.contains("\u{0000}"))
+        XCTAssertTrue(question.scope[0].source.utf8.elementsEqual(source.utf8))
+        let answer = "Paris\n e\u{301}", continued = try state.consume(questionID: question.id, answerTaskID: "display-answer", answer: answer, context: owner)
+        XCTAssertTrue(continued.userTurns[0].utf8.elementsEqual(source.utf8))
+        XCTAssertTrue(continued.userTurns[1].utf8.elementsEqual(answer.utf8))
+        let turn = try XCTUnwrap((continued.plannerContext["clarifications"] as? [[String: Any]])?.first)
+        XCTAssertEqual(turn["question"] as? String, ComputerUseBrowserClarificationTopic.location.question)
+        let scope = try XCTUnwrap((turn["scope"] as? [[String: Any]])?.first?["source"] as? String)
+        XCTAssertTrue(scope.utf8.elementsEqual(source.utf8), "Display escaping never rewrites the model's user source")
+    }
+
+    func testCompleteScopedQuestionSurvivesDurableAndWireReplayWithoutTruncation() throws {
+        let sources = (0..<8).map { String(repeating: "x", count: 510) + "\($0) " }
+        let original = try input(sources.joined()), state = Clarification(input: original), owner = try context()
+        let proposed = try proposal(original, rows: sources.map { row($0) })
+        let question = try state.issue(proposal: proposed, topic: .location, requirementIDs: proposed.requirements.map(\.id), context: owner)
+        XCTAssertGreaterThan(question.text.count, 4_000)
+        XCTAssertLessThanOrEqual(question.text.count, ComputerUseTaskLedger.maximumClarificationCharacters)
+        for source in sources { XCTAssertTrue(question.text.contains("⟦\(source)⟧")) }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("ledger.json"), ledger = ComputerUseTaskLedger(fileURL: url)
+        _ = try ledger.claim(taskID: original.taskID, senderID: "phone", sessionID: "session", promptBody: original.prompt)
+        let reference = try ComputerUseClarificationReference(taskID: original.taskID, expiresAt: question.expiresAt)
+        let terminal = try ledger.complete(taskID: original.taskID, response: question.text, outcome: .userInterventionRequired, clarification: reference)
+        XCTAssertEqual(terminal.response, question.text)
+        let update = ComputerUseTaskUpdate(taskID: original.taskID, text: terminal.response, outcome: terminal.outcome, clarification: terminal.clarification)
+        let decoded = try ComputerUseTaskUpdate.decodeBody(update.encodedBody())
+        XCTAssertEqual(decoded.text, question.text); XCTAssertEqual(decoded.clarification, reference)
+        let reopened = ComputerUseTaskLedger(fileURL: url)
+        XCTAssertEqual(try reopened.claim(taskID: original.taskID, senderID: "phone", sessionID: "session", promptBody: original.prompt), .completed(question.text))
+        XCTAssertEqual(try reopened.complete(taskID: original.taskID, response: String(repeating: "x", count: 8_001),
+            outcome: .userInterventionRequired, clarification: reference).response, question.text, "The first terminal still wins")
+        for (index, invalid) in ["", " \n ", String(repeating: "x", count: 8_001), "e" + String(repeating: "\u{301}", count: 16_384)].enumerated() {
+            let task = "invalid-question-\(index)"
+            _ = try ledger.claim(taskID: task, senderID: "phone", sessionID: "session", promptBody: "Find tickets")
+            let scope = try ComputerUseClarificationReference(taskID: task, expiresAt: question.expiresAt)
+            XCTAssertThrowsError(try ledger.complete(taskID: task, response: invalid, outcome: .userInterventionRequired, clarification: scope)) {
+                XCTAssertEqual($0 as? ComputerUseTaskLedger.LedgerError, .invalidClarification)
+            }
+            XCTAssertEqual(try ledger.complete(taskID: task, response: "Which date?", outcome: .userInterventionRequired, clarification: scope).response, "Which date?")
+        }
+        for task in ["no-question-reference", "foreign-question-reference"] {
+            _ = try ledger.claim(taskID: task, senderID: "phone", sessionID: "session", promptBody: "Find tickets")
+            let terminal = try ledger.complete(taskID: task, response: String(repeating: "x", count: 8_001),
+                outcome: .userInterventionRequired, clarification: task == "foreign-question-reference" ? reference : nil)
+            XCTAssertEqual(terminal.response.count, 4_000)
+            XCTAssertNil(terminal.clarification)
         }
     }
 

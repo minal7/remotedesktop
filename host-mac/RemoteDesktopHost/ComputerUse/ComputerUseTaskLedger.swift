@@ -6,6 +6,10 @@ import Foundation
 /// prompt starts, so an ambiguous CloudKit retry or host restart cannot execute
 /// the same task ID twice. Terminal responses are retained for safe replay.
 final class ComputerUseTaskLedger {
+    /// A retained question must reach the person exactly. This character
+    /// limit matches ComputerUseTaskUpdate's outgoing text bound.
+    static let maximumClarificationCharacters = 8_000
+    static let maximumClarificationUTF8Bytes = 32 * 1_024
     enum Claim: Equatable {
         case new
         case accepted
@@ -45,6 +49,7 @@ final class ComputerUseTaskLedger {
     enum LedgerError: Error, Equatable {
         case invalidIdentity
         case invalidControl
+        case invalidClarification
         case unavailable
     }
 
@@ -571,9 +576,15 @@ final class ComputerUseTaskLedger {
                 response: existingResponse,
                 outcome: record.outcome, clarification: record.clarification)
         }
-        record.response = String(response.prefix(4_000))
+        let retainedQuestion = outcome == .userInterventionRequired && clarification?.taskID == taskID ? clarification : nil
+        if retainedQuestion != nil {
+            guard !response.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  response.count <= Self.maximumClarificationCharacters,
+                  response.utf8.count <= Self.maximumClarificationUTF8Bytes else { throw LedgerError.invalidClarification }
+        }
+        record.response = retainedQuestion == nil ? String(response.prefix(4_000)) : response
         record.outcome = outcome
-        record.clarification = outcome == .userInterventionRequired && clarification?.taskID == taskID ? clarification : nil
+        record.clarification = retainedQuestion
         try commit(record, for: taskID)
         return TerminalResult(
             response: record.response ?? "",

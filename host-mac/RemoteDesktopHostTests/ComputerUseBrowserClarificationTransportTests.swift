@@ -13,7 +13,10 @@ final class ComputerUseBrowserClarificationTransportTests: XCTestCase {
             let proposal = try await owner.interpretGoal().proposal
             let issued = try bridge.issue(.init(taskID: root.taskID, inputDigest: owner.input.digest, topic: .location,
                 requirementIDs: [proposal.requirements[0].id]), owner: owner, for: envelope)
-            XCTAssertEqual(issued.text, ComputerUseBrowserClarificationTopic.location.question)
+            let displayed = try XCTUnwrap(owner.pendingQuestion(controllerID: envelope.senderID, controllerSessionID: envelope.sessionID))
+            XCTAssertEqual(issued.text, displayed.text)
+            XCTAssertTrue(issued.text.hasPrefix(ComputerUseBrowserClarificationTopic.location.question))
+            XCTAssertTrue(issued.text.contains("⟦\(root.prompt)⟧"))
             XCTAssertEqual(issued.reference.taskID, envelope.id)
             XCTAssertTrue(bridge.retains(issued.reference, for: envelope))
             let wire = try ComputerUsePromptRequest.answering(issued.reference, text: answer, supportsApprovedActionEvidence: true).encodedBody()

@@ -752,7 +752,8 @@ final class ComputerUseTests: XCTestCase {
         XCTAssertTrue(fixture.manager.handle(prompt, channel: fixture.channel))
         let first = try await clarificationUpdate(taskID: prompt.id, channel: fixture.channel)
         let owner = try XCTUnwrap(executor.owner), original = owner.input
-        XCTAssertEqual(first.text, ComputerUseBrowserClarificationTopic.location.question)
+        XCTAssertTrue(first.text.hasPrefix(ComputerUseBrowserClarificationTopic.location.question))
+        XCTAssertTrue(first.text.contains("⟦\(original.prompt)⟧"))
         let answerText = "  Paris e\u{301} 😀\n  "
         let answer = makeEnvelope(id: "browser-answer-1", kind: .prompt,
             body: try ComputerUsePromptRequest.answering(XCTUnwrap(first.clarification), text: answerText, supportsApprovedActionEvidence: true).encodedBody())
@@ -764,7 +765,8 @@ final class ComputerUseTests: XCTestCase {
         XCTAssertEqual(owner.executionTaskID, answer.id)
         fixture.browser.requestTaskControl(.resume, displayed: paused)
         let second = try await clarificationUpdate(taskID: answer.id, channel: fixture.channel)
-        XCTAssertEqual(second.text, ComputerUseBrowserClarificationTopic.date.question)
+        XCTAssertTrue(second.text.hasPrefix(ComputerUseBrowserClarificationTopic.date.question))
+        XCTAssertTrue(second.text.contains("⟦\(original.prompt)⟧"))
         XCTAssertEqual(second.clarification?.taskID, answer.id)
         let final = makeEnvelope(id: "browser-answer-2", kind: .prompt,
             body: try ComputerUsePromptRequest.answering(XCTUnwrap(second.clarification), text: "2026-10-15", supportsApprovedActionEvidence: true).encodedBody())
@@ -884,7 +886,8 @@ final class ComputerUseTests: XCTestCase {
         fixture.browser.requestTaskControl(.resume, displayed: paused)
         let question = try await clarificationUpdate(taskID: prompt.id, channel: fixture.channel)
         XCTAssertEqual(question.clarification?.taskID, prompt.id)
-        XCTAssertEqual(question.text, ComputerUseBrowserClarificationTopic.location.question)
+        XCTAssertTrue(question.text.hasPrefix(ComputerUseBrowserClarificationTopic.location.question))
+        XCTAssertTrue(question.text.contains("⟦\(original.prompt)⟧"))
         XCTAssertEqual(preparations, 1, "Explicit Resume continues the retained driver without repeating admission")
         XCTAssertEqual(executor.ordinaryPrompts, [original.prompt])
         XCTAssertEqual(executor.continued.map(\.taskID), [prompt.id])
@@ -963,7 +966,8 @@ final class ComputerUseTests: XCTestCase {
         fixture.browser.requestTaskControl(.resume, displayed: paused)
         let question = try await clarificationUpdate(taskID: prompt.id, channel: fixture.channel)
         XCTAssertEqual(question.clarification?.taskID, prompt.id)
-        XCTAssertEqual(question.text, ComputerUseBrowserClarificationTopic.location.question)
+        XCTAssertTrue(question.text.hasPrefix(ComputerUseBrowserClarificationTopic.location.question))
+        XCTAssertTrue(question.text.contains("⟦\(original.prompt)⟧"))
         XCTAssertEqual(executor.planner.inputs, [original])
         XCTAssertEqual(executor.ordinaryPrompts, [original.prompt])
         XCTAssertEqual(executor.continued.map(\.taskID), [prompt.id])
@@ -1021,7 +1025,8 @@ final class ComputerUseTests: XCTestCase {
         }
         let next = try await clarificationUpdate(taskID: answer.id, channel: fixture.channel)
         XCTAssertEqual(next.clarification?.taskID, answer.id)
-        XCTAssertEqual(next.text, ComputerUseBrowserClarificationTopic.date.question)
+        XCTAssertTrue(next.text.hasPrefix(ComputerUseBrowserClarificationTopic.date.question))
+        XCTAssertTrue(next.text.contains("⟦\(original.prompt)⟧"))
         XCTAssertEqual(executor.planner.inputs.count, 2)
         XCTAssertEqual(owner.input.taskID, prompt.id)
         XCTAssertEqual(owner.input.referenceMilliseconds, original.referenceMilliseconds)
