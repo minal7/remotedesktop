@@ -237,6 +237,7 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
             throw ComputerUseBrowserResearchFormError.invalidInput
         }
         let repairs = zip(aliases, evidence.fields).compactMap { alias, field -> String? in
+            if preparationBaseline?.refreshedTargetIDs.contains(field.editable.snapshot.targetID) == true { return alias }
             guard let value = previous?.finalValues[field.editable.snapshot.targetID],
                   !field.editable.snapshot.value.utf8.elementsEqual(value.utf8) else { return nil }
             return alias
@@ -306,6 +307,10 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
             }
         }
         if editable.isEmpty { context["version"] = 16; context["retain_only"] = true }
+        let refreshedAliases = zip(aliases, evidence.fields).compactMap { alias, field in
+            preparationBaseline?.refreshedTargetIDs.contains(field.editable.snapshot.targetID) == true ? alias : nil
+        }
+        if !refreshedAliases.isEmpty { context["version"] = 17; context["refreshed_edit_fields"] = refreshedAliases }
         contextJSON = String(decoding: try JSONSerialization.data(withJSONObject: context, options: [.sortedKeys]), as: UTF8.self)
         self.interpretation = interpretation; self.evidence = evidence; fieldAliases = aliases
         normalizations = normalized; editableFieldAliases = editable; self.selectedFormID = selectedFormID

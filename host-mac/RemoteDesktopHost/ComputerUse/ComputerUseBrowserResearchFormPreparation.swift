@@ -13,6 +13,7 @@ struct ComputerUseBrowserFormPreparationReviewContext: Equatable, Sendable, Cust
     let preservedSources: [ComputerUseBrowserFormPreservationSource]
     let readSources: [ComputerUseBrowserFormPreservationSource]
     let fieldPurposes: [FieldPurpose]
+    let requiredEditControlIDs: Set<String>
     private let original: ComputerUseBrowserGoalInput
     private let page: ComputerUseBrowserPageEvidence
     let digest: String
@@ -56,16 +57,30 @@ struct ComputerUseBrowserFormPreparationReviewContext: Equatable, Sendable, Cust
             .init(controlID: intent.controlID, disposition: intent.disposition,
                 sources: try intent.requirementIndices.map { try .init(index: $0, interpretation: interpretation) })
         }
-        self.formID = formID; self.original = interpretation.input; self.page = page
+        self.formID = formID; self.original = interpretation.input; self.page = page; requiredEditControlIDs = []
         digest = ComputerUseTaskContract.digest(["browser-form-preparation-review-v2", interpretation.input.digest,
             page.document.contextID, String(page.document.generation), page.documentID, page.page.id, review.digest, previous?.digest ?? "", original?.digest ?? ""])
     }
 
     private init(formID: String, preservedSources: [ComputerUseBrowserFormPreservationSource],
                  readSources: [ComputerUseBrowserFormPreservationSource], fieldPurposes: [FieldPurpose],
-                 original: ComputerUseBrowserGoalInput, page: ComputerUseBrowserPageEvidence, digest: String) {
+                 requiredEditControlIDs: Set<String>, original: ComputerUseBrowserGoalInput, page: ComputerUseBrowserPageEvidence, digest: String) {
         self.formID = formID; self.preservedSources = preservedSources; self.readSources = readSources; self.fieldPurposes = fieldPurposes
         self.original = original; self.page = page; self.digest = digest
+        self.requiredEditControlIDs = requiredEditControlIDs
+    }
+
+    func requiringFreshEdits(_ controlIDs: Set<String>) throws -> Self {
+        let required = requiredEditControlIDs.union(controlIDs)
+        guard required.isSubset(of: Set(fieldPurposes.map(\.controlID))),
+              required.isDisjoint(with: preservedSources.map(\.controlID)),
+              required.isDisjoint(with: readSources.map(\.controlID)) else {
+            throw ComputerUseBrowserActionPlanError.inputChanged
+        }
+        guard required != requiredEditControlIDs else { return self }
+        return .init(formID: formID, preservedSources: preservedSources, readSources: readSources, fieldPurposes: fieldPurposes,
+            requiredEditControlIDs: required, original: original, page: page,
+            digest: ComputerUseTaskContract.digest(["browser-preparation-fresh-edit-review-v1",digest] + required.sorted()))
     }
 
     /// Retain a validated semantic duty before another await. This records
@@ -101,7 +116,7 @@ struct ComputerUseBrowserFormPreparationReviewContext: Equatable, Sendable, Cust
             ["control":$0.controlID,"source":try $0.source.context(in: interpretation)] as [String: Any]
         }, options: [.sortedKeys])
         return .init(formID: formID, preservedSources: sources, readSources: readSources, fieldPurposes: fieldPurposes,
-            original: interpretation.input, page: evidence,
+            requiredEditControlIDs: requiredEditControlIDs, original: interpretation.input, page: evidence,
             digest: ComputerUseTaskContract.digest(["browser-partial-preservation-review-v1",digest,interpretation.input.digest,
                 metadata,String(decoding: data, as: UTF8.self)]))
     }
@@ -138,12 +153,14 @@ struct ComputerUseBrowserFormPreparationReviewContext: Equatable, Sendable, Cust
 
     func context(in interpretation: ComputerUseBrowserGoalProposal) throws -> [String: Any] {
         guard interpretation.disposition == .research, interpretation.input.continues(original) else { throw ComputerUseBrowserActionPlanError.inputChanged }
-        return ["form":formID, "executed":false,
+        var context: [String: Any] = ["form":formID, "executed":false,
          "preservation_sources":try preservedSources.map { ["control":$0.controlID,"source":try $0.source.context(in: interpretation)] as [String: Any] },
          "previous_read_sources":try readSources.map { ["control":$0.controlID,"source":try $0.source.context(in: interpretation)] as [String: Any] },
          "previous_field_intents":try fieldPurposes.map {
              ["control":$0.controlID,"disposition":$0.disposition.rawValue,"sources":try $0.sources.map { try $0.context(in: interpretation) }] as [String: Any]
          }]
+        if !requiredEditControlIDs.isEmpty { context["required_edit_controls"] = requiredEditControlIDs.sorted() }
+        return context
     }
 }
 
@@ -210,6 +227,17 @@ struct ComputerUseBrowserFormPreparationCapture: Equatable, Sendable, CustomStri
             return id
         })
     }
+
+    /// Only a newly captured, explicitly editable field may receive a fresh
+    /// baseline. Earlier invariants, verified criteria and scoped reads keep
+    /// their own provenance and cannot enter this set.
+    var refreshableTargetIDs: Set<String> {
+        guard !isRetainOnly, let previous, let review = scopeReview, let scope = review.formScope else { return [] }
+        let readIDs = Set(review.readControls.map(\.controlID))
+        let editIDs = Set(scope.fieldIntents.filter { $0.disposition == .edit }.map(\.controlID)).subtracting(readIDs)
+        return Set(evidence.fields.filter { editIDs.contains($0.control.id)
+            && previous.finalValues[$0.editable.snapshot.targetID] == nil }.map { $0.editable.snapshot.targetID })
+    }
 }
 
 /// A read-only recovery observation, never a proposal, receipt or new origin.
@@ -217,21 +245,26 @@ struct ComputerUseBrowserFormPreparationCapture: Equatable, Sendable, CustomStri
 struct ComputerUseBrowserFormPreparationRepair: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     let original: ComputerUseBrowserFormPreparationCapture
     let changedTargetIDs: Set<String>
+    let refreshedTargetIDs: Set<String>
+    var revisedTargetIDs: Set<String> { changedTargetIDs.union(refreshedTargetIDs) }
     let digest: String
     var description: String { "BrowserFormPreparationRepair" }
     var debugDescription: String { description }
 
-    @MainActor fileprivate init(original: ComputerUseBrowserFormPreparationCapture, changed: Set<String>, target: ComputerUseBrowserTextTarget) throws {
+    @MainActor fileprivate init(original: ComputerUseBrowserFormPreparationCapture, changed: Set<String>, refreshed: Set<String>, target: ComputerUseBrowserTextTarget) throws {
         guard let previous = original.previous, previous.pendingEdits.isEmpty,
               original.scopeReview?.permitsCriteriaRepair(after: previous, on: original.evidence.page) == true,
-              !changed.isEmpty, changed.isSubset(of: previous.repairableTargetIDs),
+              !changed.isEmpty || !refreshed.isEmpty,
+              changed.isSubset(of: previous.repairableTargetIDs), refreshed.isSubset(of: original.refreshableTargetIDs),
               original.capturedCriterionChanges.isSubset(of: changed),
               changed.isSubset(of: Set(original.evidence.fields.map { $0.editable.snapshot.targetID })) else {
             throw ComputerUseBrowserResearchFormError.inputChanged
         }
-        self.original = original; changedTargetIDs = changed
-        digest = ComputerUseTaskContract.digest([original.isRetainOnly ? "browser-retained-preparation-repair-v1" : "browser-planned-preparation-repair-v1",
-            try target.preparedFormRequirements(from: original, repairingCriteria: !original.isRetainOnly).digest, previous.digest] + changed.sorted())
+        self.original = original; changedTargetIDs = changed; refreshedTargetIDs = refreshed
+        let version = refreshed.isEmpty ? (original.isRetainOnly ? "browser-retained-preparation-repair-v1" : "browser-planned-preparation-repair-v1") : "browser-planned-preparation-refresh-v1"
+        digest = ComputerUseTaskContract.digest([version,
+            try target.preparedFormRequirements(from: original, repairingCriteria: !original.isRetainOnly, refreshingFields: !refreshed.isEmpty).digest,
+            previous.digest] + changed.sorted() + (refreshed.isEmpty ? [] : ["refreshed-fields"] + refreshed.sorted()))
     }
 }
 
@@ -247,6 +280,7 @@ struct ComputerUseBrowserFormPreparationBaseline: Equatable, Sendable, CustomStr
     private let obligationsContext: ComputerUseBrowserFormPreparationReviewContext
     private let ignoresCapturedCaret: Bool
     private let repairableTargetIDs: Set<String>
+    let refreshedTargetIDs: Set<String>
     var preservedSources: [ComputerUseBrowserFormPreservationSource] { obligationsContext.preservedSources }
     let digest: String
     var capturedControlIDs: Set<String> { Set(evidence.fields.map { $0.control.id }) }
@@ -267,15 +301,18 @@ struct ComputerUseBrowserFormPreparationBaseline: Equatable, Sendable, CustomStr
         guard interpretation.input.continues(input.interpretation.input) else { throw ComputerUseBrowserResearchFormError.inputChanged }
         if let repair { guard repair.original == input else { throw ComputerUseBrowserResearchFormError.inputChanged } }
         let physicalRepair = repair != nil && !input.isRetainOnly
-        let requirements = try target.preparedFormRequirements(from: input, repairingCriteria: physicalRepair)
+        let refreshing = repair?.refreshedTargetIDs.isEmpty == false
+        let requirements = try target.preparedFormRequirements(from: input, repairingCriteria: physicalRepair, refreshingFields: refreshing)
         evidence = input.evidence; goal = input.interpretation.input; previous = input.previous; self.reviewContext = reviewContext
         self.captureReviewContext = capturedReview
         obligationsContext = obligations; ignoresCapturedCaret = input.isRetainOnly
-        repairableTargetIDs = repair?.changedTargetIDs ?? []
+        repairableTargetIDs = repair?.revisedTargetIDs ?? []
+        refreshedTargetIDs = repair?.refreshedTargetIDs ?? []
         guard input.wasPreparedInput || repair != nil else { throw ComputerUseBrowserResearchFormError.inputChanged }
         let inherited = capturedReview != reviewContext
         let version: String
-        if physicalRepair { version = "browser-form-preparation-baseline-v7" }
+        if refreshing { version = "browser-form-preparation-baseline-v8" }
+        else if physicalRepair { version = "browser-form-preparation-baseline-v7" }
         else if inherited { version = "browser-form-preparation-baseline-v6" }
         else if !input.wasPreparedInput { version = "browser-form-preparation-baseline-v5" }
         else if repair != nil { version = "browser-form-preparation-baseline-v4" }
@@ -296,6 +333,9 @@ struct ComputerUseBrowserFormPreparationBaseline: Equatable, Sendable, CustomStr
         let preserved = try obligationsContext.preservation(in: interpretation), reads = try obligationsContext.readings(in: interpretation)
         guard preserved.allSatisfy({ review.formScope?.preservedControls.contains($0) == true }),
               reads.allSatisfy({ review.readControls.contains($0) }) else { throw ComputerUseBrowserResearchFormError.inputChanged }
+        let editIDs = Set(review.formScope?.fieldIntents.filter { $0.disposition == .edit }.map(\.controlID) ?? [])
+        guard evidence.fields.filter({ refreshedTargetIDs.contains($0.editable.snapshot.targetID) })
+            .allSatisfy({ editIDs.contains($0.control.id) }) else { throw ComputerUseBrowserResearchFormError.inputChanged }
     }
 }
 
@@ -399,7 +439,9 @@ final class ComputerUseBrowserResearchFormPreparation {
         try reviewContext.validate(interpretation: action.input.interpretation, evidence: action.input.evidence)
         let fresh = try ComputerUseBrowserEffectScopeReview(input: action.input)
         let required = try reviewContext.preservation(in: action.input.interpretation)
-        guard fresh.formScope?.formID == formID, required.allSatisfy({ fresh.formScope?.preservedControls.contains($0) == true }) else {
+        let edits = Set(fresh.formScope?.fieldIntents.filter { $0.disposition == .edit }.map(\.controlID) ?? [])
+        guard fresh.formScope?.formID == formID, required.allSatisfy({ fresh.formScope?.preservedControls.contains($0) == true }),
+              reviewContext.requiredEditControlIDs.isSubset(of: edits) else {
             throw ComputerUseBrowserActionPlanError.invalidProposal
         }
         revisedAction = action
@@ -447,10 +489,14 @@ final class ComputerUseBrowserResearchFormPreparation {
             try check()
             guard bound.evidence.fields == original.evidence.fields else { throw ComputerUseBrowserResearchFormError.inputChanged }
             let changed = bound.changedTargetIDs.union(original.capturedCriterionChanges)
-            guard !changed.isEmpty else { return false }
-            let repair = try ComputerUseBrowserFormPreparationRepair(original: original, changed: changed, target: target)
+            guard !changed.isEmpty || !bound.refreshedTargetIDs.isEmpty else { return false }
+            let repair = try ComputerUseBrowserFormPreparationRepair(original: original, changed: changed,
+                refreshed: bound.refreshedTargetIDs, target: target)
             guard repair != criteriaRepair else { return false }
+            let refreshedControls = Set(original.evidence.fields.filter { repair.refreshedTargetIDs.contains($0.editable.snapshot.targetID) }.map { $0.control.id })
+            let context = try reviewContext.requiringFreshEdits(refreshedControls)
             criteriaRepair = repair; criteriaRepairCount += 1
+            reviewContext = context
             revisedAction = nil
             return true
         } catch {
@@ -508,7 +554,11 @@ final class ComputerUseBrowserResearchFormPreparation {
             _ = try await restoreForReview(browser: browser, checkCurrent: check)
             try check()
             guard inheritedCriteriaOrigin != origin else { return false }
+            let refreshed = origin.repair?.refreshedTargetIDs ?? []
+            let controls = Set(origin.capture.evidence.fields.filter { refreshed.contains($0.editable.snapshot.targetID) }.map { $0.control.id })
+            let context = try reviewContext.requiringFreshEdits(controls)
             inheritedCriteriaOrigin = origin; criteriaRepairCount += 1; revisedAction = nil
+            reviewContext = context
             return true
         } catch {
             await browser.joinDOMCompletion(document: page.document)

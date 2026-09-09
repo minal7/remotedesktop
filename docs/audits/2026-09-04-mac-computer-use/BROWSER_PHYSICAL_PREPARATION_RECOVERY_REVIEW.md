@@ -48,6 +48,8 @@ Five changed Swift files passed `swiftc -frontend -parse`. The assembled DOM, fi
 
 ## Remaining repair order
 
+Follow-up: the [new-edit refresh checkpoint](BROWSER_NEW_EDIT_REFRESH_REVIEW.md) adds a separate fresh-review path for changed values and carets of newly captured edit fields. It retains the old capture until the new scope explicitly requests those edits and native revision captures strict replacement preconditions. Earlier invariants, preserved fields and scoped readings remain excluded. The earlier new-field value/caret boundary cases were revised; execution remains pending.
+
 - Reconcile changes to newly captured, unverified fields through explicit supersession instead of adopting their current values or carets. Current recovery deliberately holds them.
 - Continue accepted preservation/read-duty and immutable-observation handling across repeated physical revisions and answers, including conflicting answers and justified removal of obsolete duties.
 - Reconcile dependent controls, required metadata changes, document/process loss and uncertain input while retaining original evidence.
