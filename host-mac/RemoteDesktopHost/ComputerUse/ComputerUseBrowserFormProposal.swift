@@ -73,14 +73,19 @@ struct ComputerUseBrowserFormProposal: Equatable, Sendable, CustomStringConverti
                     guard ["text", "search", "url", "tel", "email", "textarea"].contains(field.control.kind),
                           case .array(let values)? = item["terms"], !values.isEmpty else { throw invalid }
                     let terms: [[String: Any]] = try values.map { value in
-                        guard case .object(let term) = value, Set(term.keys) == ["requirement", "text"],
+                        guard case .object(let term) = value else { throw invalid }
+                        if Set(term.keys) == ["date"], case .string(let id)? = term["date"] { return ["date":id] }
+                        guard Set(term.keys) == ["requirement", "text"],
                               let reference = term["requirement"], case .string(let text)? = term["text"] else { throw invalid }
                         return ["requirement":try requirementIndex(reference, input: input), "text":text]
                     }
-                    // Reuse exact source ordering, UTF-8 identity, whole-turn
-                    // provenance and non-prohibited-role checks from queries.
+                    // Reuse source ordering, whole native date units and
+                    // literal UTF-8/source-purpose admission from queries.
                     let content = String(decoding: try JSONSerialization.data(withJSONObject: ["terms":terms]), as: UTF8.self)
-                    payload = .text(try .decode(content: content, interpretation: input.interpretation))
+                    let query = try ComputerUseBrowserSearchQuery.decode(content: content, interpretation: input.interpretation)
+                    guard !query.terms.contains(where: { $0.dateNormalizationIdentity != nil })
+                        || ["text", "search", "textarea"].contains(field.control.kind) else { throw invalid }
+                    payload = .text(query)
                 } else if Set(item.keys) == ["field", "normalized"] {
                     guard case .string(let id)? = item["normalized"], let normalized = input.normalizations.first(where: { $0.id == id }),
                           (normalized.kind == .date && field.control.kind == "date")
@@ -98,10 +103,7 @@ struct ComputerUseBrowserFormProposal: Equatable, Sendable, CustomStringConverti
                 if let expected = input.fieldIntentRequirements[alias] {
                     let indices: [Int]
                     switch payload {
-                    case .text(let query): indices = try query.terms.map { term in
-                        guard let index = input.interpretation.requirements.firstIndex(where: { $0.id == term.requirementID }) else { throw invalid }
-                        return index
-                    }
+                    case .text(let query): indices = try query.requirementIndices(in: input.interpretation)
                     case .normalized(let value): indices = value.requirementIndices
                     case .choice(_, let index): indices = [index]
                     }
@@ -159,12 +161,7 @@ struct ComputerUseBrowserFormProposal: Equatable, Sendable, CustomStringConverti
         let indices: [Int]
         switch edit.payload {
         case .text(let query):
-            indices = try query.terms.map { term in
-                guard let index = input.interpretation.requirements.firstIndex(where: { $0.id == term.requirementID }) else {
-                    throw ComputerUseBrowserResearchFormError.invalidProposal
-                }
-                return index
-            }
+            indices = try query.requirementIndices(in: input.interpretation)
         case .normalized(let value): indices = value.requirementIndices
         case .choice(_, let index): indices = [index]
         }

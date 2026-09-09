@@ -422,6 +422,10 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
             let retired = interpretation.retiredTaskPurposeRequirementIDs
             context["retired_task_purpose_requirements"] = interpretation.requirements.indices.filter { retired.contains(interpretation.requirements[$0].id) }
         }
+        if let dates = ComputerUseBrowserSearchQuery.dateTermContext(for: interpretation) {
+            context["version"] = 21
+            context["date_terms"] = dates
+        }
         contextJSON = String(decoding: try JSONSerialization.data(withJSONObject: context, options: [.sortedKeys]), as: UTF8.self)
         self.interpretation = interpretation; self.evidence = evidence; fieldAliases = aliases
         normalizations = normalized; editableFieldAliases = editable; self.selectedFormID = selectedFormID

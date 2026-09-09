@@ -40,6 +40,14 @@ final class ComputerUseBrowserFormPlannerTests: XCTestCase {
     }
 
     func testNativeDateInputUsesTheAcceptedAnswerClockAfterMidnight() async throws {
+        try await verifyDateInputUsesAnswerClock(kind: "date")
+    }
+
+    func testTextDateInputSubmitsTheNativeAnswerDateAfterMidnight() async throws {
+        try await verifyDateInputUsesAnswerClock(kind: "text")
+    }
+
+    private func verifyDateInputUsesAnswerClock(kind: String) async throws {
         let before = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-09-09T23:59:00Z"))
         let after = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-09-10T00:01:00Z"))
         let original = try ComputerUseBrowserGoalInput(taskID: "form-answer-clock", prompt: "Find flights.", referenceDate: before, timeZoneIdentifier: "UTC")
@@ -54,7 +62,7 @@ final class ComputerUseBrowserFormPlannerTests: XCTestCase {
         let goal = try decodeGoal([row("Find flights.", role: "outcome", field: "category"), answer], input: updated)
         var edits = 0
         let fixture = try await FormPlannerFixture(goal: goal,
-            body: "<form action='/results'><label>Departure<input name='departure' type='date'></label><button>Search</button></form>",
+            body: "<form action='/results'><label>Departure<input name='departure' type='\(kind)'></label><button>Search</button></form>",
             additionalRoutes: ["/results?departure=2026-09-11":.init(body: "<p>Accepted answer date received</p>")],
             domScriptDidDispatch: { if $0 == .edit { edits += 1 } })
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -69,7 +77,8 @@ final class ComputerUseBrowserFormPlannerTests: XCTestCase {
         let turns = try XCTUnwrap(modelGoal["clarifications"] as? [[String: Any]])
         let answerClock = try XCTUnwrap(turns[0]["dateContext"] as? [String: Any])
         XCTAssertEqual((answerClock["referenceUnixMilliseconds"] as? NSNumber)?.int64Value, Int64(after.timeIntervalSince1970 * 1_000))
-        let proposed = try ComputerUseBrowserFormProposal.decode(content: plan([["field":"field1", "normalized":"value2"]]), input: input)
+        let proposedEdits: [[String: Any]] = kind == "date" ? [["field":"field1", "normalized":"value2"]] : [["field":"field1", "terms":[["date":"date2"]]]]
+        let proposed = try ComputerUseBrowserFormProposal.decode(content: plan(proposedEdits), input: input)
         XCTAssertEqual(try proposed.sources(for: XCTUnwrap(proposed.edits.first)).map(\.source), ["tomorrow"])
         let receipt = try await owner.executeForm(proposed, input: input)
         XCTAssertEqual(edits, 1); XCTAssertEqual(owner.confirmedFormHistory.count, 1)
@@ -130,7 +139,7 @@ final class ComputerUseBrowserFormPlannerTests: XCTestCase {
         XCTAssertEqual(prepared.requiredRepairFieldAliases, ["field1"])
         XCTAssertEqual(prepared.requiredPreservation.count, 1)
         XCTAssertEqual(prepared.normalizations.map(\.value), ["2026-10-17"])
-        XCTAssertEqual(try object(Data(prepared.contextJSON.utf8))["version"] as? Int, 20)
+        XCTAssertEqual(try object(Data(prepared.contextJSON.utf8))["version"] as? Int, 21)
         XCTAssertThrowsError(try ComputerUseBrowserFormProposal.decode(content: plan([["field":"field1", "normalized":"value2"]],
             preserve: [["field":"field2", "requirement":preservationIndex]]), input: prepared))
         let newPlan = try ComputerUseBrowserFormProposal.decode(content: plan([["field":"field1", "normalized":"value\(replacementIndex + 1)"]],
@@ -162,11 +171,19 @@ final class ComputerUseBrowserFormPlannerTests: XCTestCase {
     }
 
     func testIntroducedDateNormalizationRequiresEveryReviewedSourceAndKeepsNativeProvenance() async throws {
+        try await verifyIntroducedDateSourceProvenance(kind: "date")
+    }
+
+    func testTextDateTermsRequireEveryReviewedSourceAndKeepNativeProvenance() async throws {
+        try await verifyIntroducedDateSourceProvenance(kind: "text")
+    }
+
+    private func verifyIntroducedDateSourceProvenance(kind: String) async throws {
         let (goal, _) = try introducedScalarGoal(parts: ["on 2026-", "10-16."])
         for indices in [[1], [2], [1, 2]] {
             var edits = 0
             let fixture = try await FormPlannerFixture(goal: goal,
-                body: "<form action='/results'><label>Departure<input name='departure' type='date'></label><button>Search</button></form>",
+                body: "<form action='/results'><label>Departure<input name='departure' type='\(kind)'></label><button>Search</button></form>",
                 domScriptDidDispatch: { if $0 == .edit { edits += 1 } })
             let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
             defer { fixture.close(); try? FileManager.default.removeItem(at: directory) }
@@ -181,7 +198,8 @@ final class ComputerUseBrowserFormPlannerTests: XCTestCase {
             let context = try object(Data(input.contextJSON.utf8))
             let normalized = try XCTUnwrap(context["normalized_values"] as? [[String: Any]])
             XCTAssertEqual(normalized.first?["requirements"] as? [Int], [1, 2])
-            let content = try plan([["field":"field1", "normalized":"value2"]])
+            let proposedEdits: [[String: Any]] = kind == "date" ? [["field":"field1", "normalized":"value2"]] : [["field":"field1", "terms":[["date":"date2"]]]]
+            let content = try plan(proposedEdits)
             if indices.count == 1 {
                 XCTAssertThrowsError(try ComputerUseBrowserFormProposal.decode(content: content, input: input))
                 XCTAssertEqual(edits, 0)
@@ -195,6 +213,30 @@ final class ComputerUseBrowserFormPlannerTests: XCTestCase {
             }
             XCTAssertEqual(owner.input, goal.input)
             XCTAssertEqual(fixture.server.count("/results?departure=2026-10-16"), 0)
+        }
+    }
+
+    func testDateTextTermsPreserveBoundsAndRejectIncompatibleFieldKinds() async throws {
+        let goal = try proposal(rows: [row("Find concerts. ", role: "outcome", field: "category"), row("before tomorrow.", field: "date")])
+        for kind in ["text", "search", "textarea", "url", "email", "tel", "date", "number"] {
+            let control = kind == "textarea" ? "<textarea name='date'></textarea>" : "<input name='date' type='\(kind)'>"
+            let fixture = try await FormPlannerFixture(goal: goal, body: "<form><label>Departure\(control)</label><button>Search</button></form>")
+            defer { fixture.close() }
+            let input = fixture.input
+            let content = try plan([["field":"field1", "terms":[["date":"date2"]]]])
+            if ["text", "search", "textarea"].contains(kind) {
+                let proposed = try ComputerUseBrowserFormProposal.decode(content: content, input: input)
+                let contract = try XCTUnwrap(proposed.textContract(for: input))
+                XCTAssertEqual(contract.steps.map(\.after), ["before 2026-03-08"])
+                let request = try local(FormPlannerTransport(content: content)).makeRequest(input)
+                let body = try object(XCTUnwrap(request.httpBody)), format = try XCTUnwrap(body["response_format"] as? [String: Any])
+                XCTAssertEqual((format["json_schema"] as? [String: Any])?["name"] as? String, "browser_form_plan_v17")
+                XCTAssertEqual(try object(Data(input.contextJSON.utf8))["version"] as? Int, 21)
+            } else { XCTAssertThrowsError(try ComputerUseBrowserFormProposal.decode(content: content, input: input)) }
+            for source in ["tomorrow", "before tomorrow."] {
+                XCTAssertThrowsError(try ComputerUseBrowserFormProposal.decode(content: plan([["field":"field1", "terms":[["requirement":1, "text":source]]]]), input: input))
+            }
+            XCTAssertEqual(fixture.server.count("/results"), 0)
         }
     }
 

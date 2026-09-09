@@ -327,6 +327,23 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
     private let dateOrigins: [String: [String]]
     private let rootDateGroups: [RootDateGroup]
     func hasDateOrigin(_ requirement: ComputerUseBrowserGoalProposal.Requirement) -> Bool { dateOrigins[requirement.id] != nil }
+    /// Known or explicitly retained date duties cannot be emitted as an
+    /// arbitrary substring. That could move a relative day or omit a bound.
+    var datePayloadRequirementIDs: Set<String> {
+        var ids = Set(dateOrigins.keys)
+        ids.formUnion(proposal.requirements.filter { $0.role == .condition && $0.field == .date }.map(\.id))
+        for (index, answer) in proposal.input.clarifications.enumerated() {
+            if answer.topic.isDateTopic { ids.formUnion(proposal.requirements.filter { $0.sourceTurnIndex == index + 1 }.map(\.id)) }
+            for historical in answer.priorRequirements where historical.role == .condition && historical.field == .date {
+                guard let span = Self.scalarSpan(historical, input: proposal.input) else { continue }
+                ids.formUnion(proposal.requirements.filter {
+                    $0.sourceTurnIndex == span.turn && $0.sourceByteOffset < span.end
+                        && span.start < $0.sourceByteOffset + $0.sourceByteCount
+                }.map(\.id))
+            }
+        }
+        return ids
+    }
     var dateReplacementContexts: [DateReplacementContext] {
         let indices = Dictionary(uniqueKeysWithValues: proposal.requirements.enumerated().map { ($0.element.id, $0.offset) })
         return entries.enumerated().compactMap { index, entry in

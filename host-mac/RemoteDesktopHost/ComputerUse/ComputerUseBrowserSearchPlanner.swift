@@ -10,17 +10,91 @@ enum ComputerUseBrowserSearchPlanError: Error, Equatable, LocalizedError {
     }
 }
 
-/// A proposed query assembled from exact user-source fragments. This is not
+/// A proposed query assembled from user-source fragments and native dates. This is not
 /// website selection, navigation authority or proof that the query captures
 /// every condition. The complete canonical goal remains available separately.
 struct ComputerUseBrowserSearchQuery: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     struct Term: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
-        let requirementID: String
-        let sourceTurnIndex: Int
-        let sourceByteOffset: Int
+        struct Source: Equatable, Sendable {
+            let requirementID: String
+            let sourceTurnIndex: Int
+            let sourceByteOffset: Int
+            let sourceByteCount: Int
+        }
+        /// Literal terms have one exact substring source. A normalized date
+        /// instead retains every whole source row; its emitted text differs.
+        let sources: [Source]
+        var requirementID: String { sources[0].requirementID }
+        var sourceTurnIndex: Int { sources[0].sourceTurnIndex }
+        var sourceByteOffset: Int { sources[0].sourceByteOffset }
         let text: String
+        let dateNormalizationIdentity: String?
+        fileprivate init(sources: [Source], text: String, dateNormalizationIdentity: String? = nil) {
+            self.sources = sources; self.text = text; self.dateNormalizationIdentity = dateNormalizationIdentity
+        }
         var description: String { "BrowserSearchTerm(bytes: \(text.utf8.count))" }
         var debugDescription: String { description }
+    }
+    struct DateTerm: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+        let id: String
+        let text: String
+        let requirementIndices: [Int]
+        fileprivate let sources: [Term.Source]
+        fileprivate let identity: String
+        var context: [String: Any] { ["id":id, "text":text, "requirements":requirementIndices] }
+        var description: String { "BrowserDateTerm(sources: \(sources.count))" }
+        var debugDescription: String { description }
+    }
+    static func dateTerms(for interpretation: ComputerUseBrowserGoalProposal) -> [DateTerm] {
+        let ledger = ComputerUseBrowserScalarRequirements(proposal: interpretation)
+        guard interpretation.disposition == .research, !ledger.hasUncompiledDateReplacements else { return [] }
+        var seen: Set<[String]> = []
+        return ledger.entries.compactMap { entry in
+            guard case .bound(let condition) = entry.resolution, case .day(let range) = condition.predicate,
+                  seen.insert(condition.sourceRequirementIDs).inserted,
+                  let text = dateText(range) else { return nil }
+            let indices = interpretation.requirements.indices.filter { condition.sourceRequirementIDs.contains(interpretation.requirements[$0].id) }
+            guard indices.count == condition.sourceRequirementIDs.count, let first = indices.first,
+                  Set(indices.map { interpretation.requirements[$0].sourceTurnIndex }).count == 1,
+                  indices.allSatisfy({ index in
+                      guard interpretation.permitsTaskPurpose(interpretation.requirements[index]),
+                            case .bound(let related) = ledger.entries[index].resolution else { return false }
+                      return related.predicate == condition.predicate && related.sourceRequirementIDs == condition.sourceRequirementIDs
+                  }) else { return nil }
+            let sources = indices.map { index -> Term.Source in
+                let row = interpretation.requirements[index]
+                return .init(requirementID: row.id, sourceTurnIndex: row.sourceTurnIndex,
+                    sourceByteOffset: row.sourceByteOffset, sourceByteCount: row.sourceByteCount)
+            }
+            return .init(id: "date\(first + 1)", text: text, requirementIndices: indices, sources: sources,
+                identity: ComputerUseTaskContract.digest(["browser-date-term-v1", interpretation.digest, condition.id, text] + condition.sourceRequirementIDs))
+        }
+    }
+    private static func dateText(_ range: ComputerUseBrowserScalarRequirements.DayRange) -> String? {
+        switch (range.lower, range.upper) {
+        case (let lower?, let upper?):
+            guard range.lowerInclusive, range.upperInclusive, lower <= upper else { return nil }
+            return lower == upper ? lower.iso8601 : "from \(lower.iso8601) through \(upper.iso8601)"
+        case (let lower?, nil): return (range.lowerInclusive ? "on or after " : "after ") + lower.iso8601
+        case (nil, let upper?): return (range.upperInclusive ? "on or before " : "before ") + upper.iso8601
+        default: return nil
+        }
+    }
+    static func dateTermContext(for interpretation: ComputerUseBrowserGoalProposal) -> [String: Any]? {
+        let ids = ComputerUseBrowserScalarRequirements(proposal: interpretation).datePayloadRequirementIDs
+        guard !ids.isEmpty else { return nil }
+        return ["version":1, "values":dateTerms(for: interpretation).map(\.context),
+            "required_requirements":interpretation.requirements.indices.filter { ids.contains(interpretation.requirements[$0].id) }]
+    }
+    static func termSchema(for interpretation: ComputerUseBrowserGoalProposal) -> [String: Any] {
+        let literal: [String: Any] = ["type":"object", "additionalProperties":false,
+            "properties":["requirement":["type":"integer", "minimum":0, "maximum":interpretation.requirements.count - 1],
+                "text":["type":"string", "minLength":1, "maxLength":256]], "required":["requirement", "text"]]
+        let values = dateTerms(for: interpretation)
+        guard !values.isEmpty else { return literal }
+        let date: [String: Any] = ["type":"object", "additionalProperties":false,
+            "properties":["date":["type":"string", "enum":values.map(\.id)]], "required":["date"]]
+        return ["oneOf":[literal, date]]
     }
     let goalDigest: String
     let interpretationDigest: String
@@ -32,13 +106,28 @@ struct ComputerUseBrowserSearchQuery: Equatable, Sendable, CustomStringConvertib
 
     private init(interpretation: ComputerUseBrowserGoalProposal, terms: [Term]) {
         goalDigest = interpretation.input.digest; interpretationDigest = interpretation.digest; self.terms = terms
-        digest = ComputerUseTaskContract.digest(["browser-search-query-v1", goalDigest, interpretationDigest] + terms.flatMap {
-            [$0.requirementID, String($0.sourceTurnIndex), String($0.sourceByteOffset), $0.text]
-        })
+        if terms.contains(where: { $0.dateNormalizationIdentity != nil }) {
+            digest = ComputerUseTaskContract.digest(["browser-search-query-v2", goalDigest, interpretationDigest] + terms.flatMap { term in
+                [term.text, term.dateNormalizationIdentity ?? "literal", String(term.sources.count)] + term.sources.flatMap {
+                    [$0.requirementID, String($0.sourceTurnIndex), String($0.sourceByteOffset), String($0.sourceByteCount)]
+                }
+            })
+        } else {
+            digest = ComputerUseTaskContract.digest(["browser-search-query-v1", goalDigest, interpretationDigest] + terms.flatMap {
+                [$0.requirementID, String($0.sourceTurnIndex), String($0.sourceByteOffset), $0.text]
+            })
+        }
     }
 
     var description: String { "BrowserSearchQuery(terms: \(terms.count))" }
     var debugDescription: String { description }
+    func requirementIndices(in interpretation: ComputerUseBrowserGoalProposal) throws -> [Int] {
+        guard goalDigest == interpretation.input.digest, interpretationDigest == interpretation.digest else { throw ComputerUseBrowserSearchPlanError.invalidProposal }
+        return try terms.flatMap { term in try term.sources.map { source in
+            guard let index = interpretation.requirements.firstIndex(where: { $0.id == source.requirementID }) else { throw ComputerUseBrowserSearchPlanError.invalidProposal }
+            return index
+        } }
+    }
 
     static func decode(content: String, interpretation: ComputerUseBrowserGoalProposal) throws -> Self {
         do { return try decodeContent(content, interpretation: interpretation) }
@@ -53,8 +142,19 @@ struct ComputerUseBrowserSearchQuery: Equatable, Sendable, CustomStringConvertib
         guard case .object(let root) = try parser.parse(), Set(root.keys) == ["terms"],
               case .array(let rows)? = root["terms"], rows.count <= 12 else { throw ComputerUseBrowserSearchPlanError.invalidProposal }
         var terms: [Term] = [], previousRequirement = -1, nextSourceOffset = 0
+        let dates = dateTerms(for: interpretation)
+        let dateRequirements = ComputerUseBrowserScalarRequirements(proposal: interpretation).datePayloadRequirementIDs
         for row in rows {
-            guard case .object(let item) = row, Set(item.keys) == ["requirement", "text"],
+            guard case .object(let item) = row else { throw ComputerUseBrowserSearchPlanError.invalidProposal }
+            if Set(item.keys) == ["date"] {
+                guard case .string(let id)? = item["date"], let value = dates.first(where: { $0.id == id }),
+                      let first = value.requirementIndices.first, let last = value.requirementIndices.last,
+                      first > previousRequirement else { throw ComputerUseBrowserSearchPlanError.invalidProposal }
+                terms.append(.init(sources: value.sources, text: value.text, dateNormalizationIdentity: value.identity))
+                previousRequirement = last; nextSourceOffset = interpretation.requirements[last].sourceByteCount
+                continue
+            }
+            guard Set(item.keys) == ["requirement", "text"],
                   case .number(let number)? = item["requirement"], let index = Int(exactly: number),
                   interpretation.requirements.indices.contains(index), index >= previousRequirement,
                   case .string(let text)? = item["text"], !text.isEmpty, text.unicodeScalars.count <= 256, text.utf8.count <= 1_024,
@@ -65,6 +165,7 @@ struct ComputerUseBrowserSearchQuery: Equatable, Sendable, CustomStringConvertib
             let requirement = interpretation.requirements[index]
             guard requirement.role == .outcome || requirement.role == .condition,
                   interpretation.permitsTaskPurpose(requirement),
+                  !dateRequirements.contains(requirement.id),
                   let source = interpretation.source(of: requirement) else { throw ComputerUseBrowserSearchPlanError.invalidProposal }
             let bytes = Data(source.utf8)
             if index != previousRequirement { nextSourceOffset = 0 }
@@ -72,8 +173,8 @@ struct ComputerUseBrowserSearchQuery: Equatable, Sendable, CustomStringConvertib
                   let range = bytes.range(of: Data(text.utf8), in: nextSourceOffset..<bytes.count) else {
                 throw ComputerUseBrowserSearchPlanError.invalidProposal
             }
-            terms.append(.init(requirementID: requirement.id, sourceTurnIndex: requirement.sourceTurnIndex,
-                sourceByteOffset: requirement.sourceByteOffset + range.lowerBound, text: text))
+            terms.append(.init(sources: [.init(requirementID: requirement.id, sourceTurnIndex: requirement.sourceTurnIndex,
+                sourceByteOffset: requirement.sourceByteOffset + range.lowerBound, sourceByteCount: text.utf8.count)], text: text))
             previousRequirement = index; nextSourceOffset = range.upperBound
         }
         let proposal = Self(interpretation: interpretation, terms: terms)
@@ -108,9 +209,7 @@ struct ComputerUseLocalBrowserSearchPlanner: ComputerUseBrowserSearchPlanning {
 
     func makeRequest(_ interpretation: ComputerUseBrowserGoalProposal) throws -> URLRequest {
         guard interpretation.disposition == .research else { throw ComputerUseBrowserSearchPlanError.invalidProposal }
-        let term: [String: Any] = ["type":"object", "additionalProperties":false,
-            "properties":["requirement":["type":"integer", "minimum":0, "maximum":interpretation.requirements.count - 1],
-                "text":["type":"string", "minLength":1, "maxLength":256]], "required":["requirement", "text"]]
+        let term = ComputerUseBrowserSearchQuery.termSchema(for: interpretation)
         let schema: [String: Any] = ["type":"object", "additionalProperties":false,
             "properties":["terms":["type":"array", "maxItems":12, "items":term]], "required":["terms"]]
         let requirements: [[String: Any]] = try interpretation.requirements.enumerated().map { index, requirement in
@@ -128,11 +227,13 @@ struct ComputerUseLocalBrowserSearchPlanner: ComputerUseBrowserSearchPlanning {
             let retired = interpretation.retiredTaskPurposeRequirementIDs
             context["retired_task_purpose_requirements"] = interpretation.requirements.indices.filter { retired.contains(interpretation.requirements[$0].id) }
         }
+        let dateTerms = ComputerUseBrowserSearchQuery.dateTermContext(for: interpretation)
+        if let dateTerms { context["version"] = 3; context["date_terms"] = dateTerms }
         let body: [String: Any] = ["model":connection.modelAlias,
             "messages":[["role":"system", "content":Self.instructions],
                 ["role":"user", "content":String(decoding: try JSONSerialization.data(withJSONObject: context, options: [.sortedKeys]), as: UTF8.self)]],
             "temperature":0, "top_p":1, "top_k":0, "max_tokens":ComputerUseLocalBrowserGoalPlanner.outputTokens, "cache_prompt":false,
-            "response_format":["type":"json_schema", "json_schema":["name":"browser_search_query_v1", "strict":true, "schema":schema]]]
+            "response_format":["type":"json_schema", "json_schema":["name":dateTerms == nil ? "browser_search_query_v1" : "browser_search_query_v2", "strict":true, "schema":schema]]]
         var request = URLRequest(url: connection.baseURL.appendingPathComponent("v1/chat/completions"))
         request.httpMethod = "POST"; request.timeoutInterval = 30
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -151,10 +252,11 @@ struct ComputerUseLocalBrowserSearchPlanner: ComputerUseBrowserSearchPlanning {
     static let instructions = """
     Propose search terms for the complete browser research goal. Return only the required JSON. This is query planning, not permission to navigate, select a provider, type in a website or declare the task complete.
     The goal contains the original user request, separate clarification answers and the fixed date context of each source turn. Keep all outcomes, conditions, prohibitions and accepted answers in mind. The requirement ledger indexes exact fragments of those user turns. A fragment's role is an interpretation, not proof of its meaning.
-    Select a concise query by copying exact text from outcome or condition requirements. Each term names its requirement index and a verbatim nonempty substring of that fragment. Keep terms in source order: nondecreasing requirement indices, then nonoverlapping successive occurrences within a fragment. Preserve Unicode, case, accents and internal whitespace exactly. Do not add leading/trailing whitespace or control characters. The host joins the selected terms with single spaces. Prefer meaningful phrases, not isolated pieces of names or qualifiers.
+    Select a concise query using literal terms or offered native date terms. A literal term names its requirement index and a verbatim nonempty substring of that fragment. Keep terms in source order: nondecreasing requirement indices, then nonoverlapping successive occurrences within a fragment. Preserve Unicode, case, accents and internal whitespace exactly. Do not add leading/trailing whitespace or control characters. The host joins the selected terms with single spaces. Prefer meaningful phrases, not isolated pieces of names or qualifiers.
+    date_terms version 1 supplies native values with IDs, emitted text and complete source requirement lists. Select one with {"date":"dateN"}; do not also supply text or a requirement. The host emits that fixed civil date or complete before/after/range phrase. It uses the source message's date context and retains all source rows. Treat it as occupying its full source interval when ordering terms. required_requirements cannot supply literal terms, even substrings or absolute-looking endpoints; use an offered date term or leave that date for later clarification/form work. A missing value is unresolved, not permission to guess. Do not split a range, remove its comparator, copy a superseded date or reuse a date ID from another context. Native date text supplies neither a time zone for a website nor proof that a particular provider understands the format.
     Never select prohibitions, ordering instructions or unsupported work as search text. Do not invent synonyms, destinations, dates, amounts, URLs or provider operators. Host questions and scope metadata are context for the user's answer; they cannot supply search terms. Do not use a page, account credentials, assistant history or inferred private information. Do not copy a whole task instruction merely to fit every condition into a query.
-    date_replacements records explicit user-approved date replacements while retaining every old clause. Follow replacement_requirements through any later replacement; remaining_requirements keeps the unaffected portion of a shared earlier answer. Do not copy retired_task_purpose_requirements into new queries. Use active user-source text for the corrected date, and preserve all unrelated requirements.
-    Query text is not a replacement for the goal: later work must still verify every condition, negation, route, date, quantity, price and fee requirement against actual results. Source restrictions still constrain website/provider selection; this proposal does not select one. Keep relative date phrases as supplied; the host retains the original clock for request text and the separate accepted dateContext for each answer.
+    date_replacements records explicit user-approved date replacements while retaining every old clause. Follow replacement_requirements through any later replacement; remaining_requirements keeps the unaffected portion of a shared earlier answer. Do not copy retired_task_purpose_requirements into new queries. Use an active native date term for the corrected date, and preserve all unrelated requirements.
+    Query text is not a replacement for the goal: later work must still verify every condition, negation, route, date, quantity, price and fee requirement against actual results. Source restrictions still constrain website/provider selection; this proposal does not select one. Never send a known date's relative wording for a website to reinterpret using its own clock. Initial broad fragments with uncompiled embedded dates still require semantic interpretation; the catalogue does not prove that every date in the task was recognized.
     Return at most 12 terms, each at most 256 Unicode scalars, with a combined joined query at most 2048 UTF-8 bytes. Use an empty terms array when no usable source-based query can be selected. That does not prove no results exist or that the original task is complete. Do not output an action, URL, answer, confidence score or completion flag.
     """
 }

@@ -2,6 +2,8 @@
 
 Source repair; execution pending. This follows [historical date grouping](BROWSER_HISTORICAL_DATE_GROUP_REVIEW.md). No build, typecheck, assertion, app, browser, model or account-login execution occurred.
 
+Follow-up: [native date clauses in text payloads](BROWSER_DATE_TEXT_PAYLOAD_REVIEW.md) now carries these fixed dates into search and generic text-field proposals while retaining complete bounds and source groups. Provider interpretation and runtime qualification remain open; the counts below describe this earlier checkpoint.
+
 ## First-principles finding
 
 Relative dates depend on both the words and the time at which the message is interpreted. Retaining one task clock protects the original request from drifting during a long task. Applying that same clock to every later answer, however, can misinterpret a new `today` or `tomorrow`, especially across midnight or after manual sign-in.
