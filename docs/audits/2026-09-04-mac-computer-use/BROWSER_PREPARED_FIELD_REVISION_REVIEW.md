@@ -2,6 +2,8 @@
 
 Status: source foundation. The owner does not yet apply this operation to a revised form input, and the driver still holds execution after revised metadata review. No assertions or live model/browser qualification ran.
 
+Subsequent source work connects the parent preparation, planner, contract and driver in the [revision integration review](BROWSER_PREPARATION_REVISION_INTEGRATION_REVIEW.md). The status above describes this foundation checkpoint.
+
 ## First principles
 
 An answer may make a previously deferred field necessary. The application needs to add that field without erasing what it already knows. An old field value is a baseline, an input receipt records an event, and a revised semantic review proposes future work. None can replace the others. In particular, an unexecuted preparation may legitimately have zero input receipts; treating it as a verified query continuation would grant authority it has not earned.

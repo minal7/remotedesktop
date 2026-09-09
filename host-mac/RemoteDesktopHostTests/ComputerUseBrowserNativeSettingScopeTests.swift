@@ -280,6 +280,42 @@ final class ComputerUseBrowserNativeSettingScopeTests: XCTestCase {
         XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 1)
     }
 
+    func testAppliedPreparationRevisionKeepsOriginalResearchReadingsAndEarlierReceipts() async throws {
+        let fixture = try await prepared()
+        defer { fixture.close() }
+        let (original, _) = try await categoryInput(fixture), owner = try fixture.owner()
+        try await beginGoalReview(fixture, input: original)
+        let reviewed = try await owner.reviewFormPreparation(using: fixture.actions)
+        let current = try await owner.applyFormPreparationReview(reviewed)
+        let baseline = try XCTUnwrap(current.preparationBaseline)
+        XCTAssertEqual(baseline.reviewContext.readSources.count, 6)
+        XCTAssertTrue(baseline.reviewContext.readSources.allSatisfy { $0.source.source == "Review displayed search settings. " })
+        XCTAssertEqual(current.evidence.page.page.controlStates, original.evidence.page.page.controlStates)
+        XCTAssertEqual(current.previous, original.previous)
+        XCTAssertEqual(current.requiredPreservation.map(\.source), original.requiredPreservation.map(\.source))
+        let alias = try XCTUnwrap(current.editableFieldAliases.first), field = try current.field(for: alias)
+        let option = try XCTUnwrap(field.control.options.first { $0.label == "Concerts" })
+        let body = try ResearchAnswerFixture.json(["edits":[["field":alias,"choice":option.id,"requirement":0]],"preserve":[]])
+        _ = try await owner.executeForm(.decode(content: body, input: current), input: current)
+        XCTAssertEqual(owner.confirmedFormHistory.count, 2)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .reviseFormFields }.count, 1)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 2)
+    }
+
+    func testChangedResearchReadingAfterReviewCannotBecomeARevisedPreparationBaseline() async throws {
+        let fixture = try await prepared(extra: OptionSelectionFixture.signal("document.getElementById('date').value='2026-09-21';"), heldSignal: true)
+        defer { fixture.close() }
+        let (original, _) = try await categoryInput(fixture), owner = try fixture.owner()
+        try await beginGoalReview(fixture, input: original)
+        let reviewed = try await owner.reviewFormPreparation(using: fixture.actions)
+        try await release(fixture)
+        do { _ = try await owner.applyFormPreparationReview(reviewed); XCTFail("Keep the original setting after the semantic review") }
+        catch { }
+        XCTAssertTrue(owner.hasPendingFormPreparation)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .reviseFormFields }.count, 0)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 1)
+    }
+
     private func beginGoalReview(_ fixture: ResearchDriverFixture, input: ComputerUseBrowserResearchFormInput) async throws {
         let owner = try fixture.owner()
         let question = try owner.issueQuestion(topic: .location, requirementIDs: [input.interpretation.requirements[0].id],
@@ -298,10 +334,13 @@ final class ComputerUseBrowserNativeSettingScopeTests: XCTestCase {
             let revising = mode == .reviseCategory && input.formEffectScope?.formID != nil
             let editing = revising ? ["Category":[0]] : ["Query":[0]]
             let retaining = revising ? ["Query":[0]] : [:]
-            var deferred = self.settingsReferences.mapValues { [$0] }
+            // The authored post-answer interpretation combines the original
+            // request into requirement zero; its answer is a separate row.
+            let references = input.preparationReview == nil ? self.settingsReferences : self.settingsReferences.mapValues { _ in 0 }
+            var deferred = references.mapValues { [$0] }
             if revising { deferred.removeValue(forKey: "Category") }
-            if let reply = try FormEffectScopeFixture.response(input, relevant: self.settingsReferences, unrelated: ["Private notes"],
-                editing: editing, retaining: retaining, deferring: deferred, preserving: ["Reference":2]) { return reply }
+            if let reply = try FormEffectScopeFixture.response(input, relevant: references, unrelated: ["Private notes"],
+                editing: editing, retaining: retaining, deferring: deferred, preserving: ["Reference":input.preparationReview == nil ? 2 : 0]) { return reply }
             if rejectMixed && input.evidence.page.controlStates.contains(where: { $0.indeterminate == true }) { return #"{"unavailable":true}"# }
             if mode == .query || (mode == .reviseCategory && input.formEffectScope?.queryControlID == nil && input.formEffectScope?.formID == nil) {
                 return try ResearchAnswerFixture.json(["query":XCTUnwrap(input.queryControlIDs.first)])

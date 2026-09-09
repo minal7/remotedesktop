@@ -1962,9 +1962,9 @@ struct ComputerUseBrowserPreparedFormRequirements: Sendable, CustomStringConvert
         }
         self.inputLedgerID = inputLedgerID; inputOperationIDs = operations; preservationID = input.nativePreservation?.id
         let data = try JSONSerialization.data(withJSONObject: fields.map(\.arguments), options: [.sortedKeys])
-        digest = ComputerUseTaskContract.digest(["browser-prepared-form-requirements-v1", evidence.page.document.contextID,
+        digest = ComputerUseTaskContract.digest(["browser-prepared-form-requirements-v2", evidence.page.document.contextID,
             evidence.page.document.taskID, String(evidence.page.document.generation), evidence.page.documentID, formID,
-            input.interpretation.input.digest, input.scopeReview?.digest ?? "", input.previous?.digest ?? "",
+            input.interpretation.input.digest, input.scopeReview?.digest ?? "", input.previous?.digest ?? "", input.preparationBaseline?.digest ?? "",
             input.nativePreservation?.digest ?? "", inputLedgerID, String(decoding: data, as: UTF8.self)] + operations)
     }
 
@@ -1999,6 +1999,12 @@ struct ComputerUseBrowserFormEvidence: Equatable, Sendable, CustomStringConverti
         guard page.document == original.document, page.documentID == original.documentID,
               page.page.matchesFormObservation(original.page) else { throw ComputerUseBrowserError.pageChanged }
         return .init(page: original, fields: fields, adapterID: adapterID)
+    }
+    /// Historical correspondence only. Current-page validity still requires
+    /// fresh native binding; matching labels cannot bridge different adapters.
+    func retainsCapturedFields(from original: Self) -> Bool {
+        adapterID == original.adapterID && page.document == original.page.document && page.documentID == original.page.documentID
+            && original.fields.allSatisfy { old in fields.contains { $0.control.id == old.control.id && $0.editable == old.editable } }
     }
     var description: String { "BrowserFormEvidence(fields: \(fields.count))" }
     var debugDescription: String { description }

@@ -847,6 +847,21 @@ final class ComputerUseBrowserResearchTask {
         return prepared.input
     }
 
+    /// Install the reviewed revision before any cancellable native work. The
+    /// new frame owns the old one until every captured baseline is reconciled.
+    func applyFormPreparationReview(_ action: ComputerUseBrowserActionProposal) async throws -> ComputerUseBrowserResearchFormInput {
+        try requireIdle(); try requireFormGoalReview()
+        guard !hasPendingNavigation, !hasQuestion, let preparation = formPreparation,
+              hasRevisedFormPreparationGoal, preparation.revisedAction == action,
+              interpretation?.proposal == action.input.interpretation, action.input.interpretation.input == input,
+              action.input.interpretation.disposition == .research else { throw Failure.formUnavailable }
+        guard sourcePolicy == nil || (sourcePolicyInstalled && sourcePolicy?.goalRevision == input.digest) else { throw Failure.navigationUnavailable }
+        let revised = try ComputerUseBrowserResearchFormPreparation(action: action, browser: browser, revising: preparation)
+        formPreparation = revised
+        latestCandidates = nil; latestForm = nil; latestAction = nil
+        return try await resumeFormPreparation()
+    }
+
     /// Resume the original private preparation after explicit handback. This
     /// neither asks for another action selection nor discovers a new baseline.
     func resumeFormPreparation() async throws -> ComputerUseBrowserResearchFormInput {

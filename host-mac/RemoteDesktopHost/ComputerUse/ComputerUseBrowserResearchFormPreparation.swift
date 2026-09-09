@@ -20,7 +20,7 @@ struct ComputerUseBrowserFormPreparationReviewContext: Equatable, Sendable, Cust
     var debugDescription: String { description }
 
     init(interpretation: ComputerUseBrowserGoalProposal, page: ComputerUseBrowserPageEvidence,
-         review: ComputerUseBrowserEffectScopeReview, previous: ComputerUseBrowserResearchFormContinuation?) throws {
+         review: ComputerUseBrowserEffectScopeReview, previous: ComputerUseBrowserResearchFormContinuation?, retaining original: Self? = nil) throws {
         guard review.matches(interpretation: interpretation, evidence: page), let scope = review.formScope, let formID = scope.formID else {
             throw ComputerUseBrowserActionPlanError.invalidInput
         }
@@ -28,7 +28,13 @@ struct ComputerUseBrowserFormPreparationReviewContext: Equatable, Sendable, Cust
             guard interpretation.input.continues(previous.goal), previous.document == page.document,
                   previous.documentID == page.documentID, previous.formID == formID else { throw ComputerUseBrowserActionPlanError.inputChanged }
         }
-        var sources = previous?.preservedControls ?? []
+        try original?.validate(interpretation: interpretation, evidence: page)
+        var sources = original?.preservedSources ?? []
+        for item in previous?.preservedControls ?? [] {
+            if let old = sources.first(where: { $0.controlID == item.controlID }) {
+                guard old.source == item.source else { throw ComputerUseBrowserActionPlanError.inputChanged }
+            } else { sources.append(item) }
+        }
         for item in scope.preservedControls {
             if let old = sources.first(where: { $0.controlID == item.controlID }) {
                 guard try old.source.indices(in: interpretation).contains(item.requirementIndex) else { throw ComputerUseBrowserActionPlanError.inputChanged }
@@ -38,14 +44,21 @@ struct ComputerUseBrowserFormPreparationReviewContext: Equatable, Sendable, Cust
         }
         guard Set(sources.map(\.controlID)) == Set(scope.preservedControls.map(\.controlID)) else { throw ComputerUseBrowserActionPlanError.inputChanged }
         preservedSources = sources
-        readSources = try review.readControls.map { .init(controlID: $0.controlID, source: try .init(index: $0.requirementIndex, interpretation: interpretation)) }
+        var reads = original?.readSources ?? []
+        for item in review.readControls {
+            if let old = reads.first(where: { $0.controlID == item.controlID }) {
+                guard try old.source.indices(in: interpretation).contains(item.requirementIndex) else { throw ComputerUseBrowserActionPlanError.inputChanged }
+            } else { reads.append(.init(controlID: item.controlID, source: try .init(index: item.requirementIndex, interpretation: interpretation))) }
+        }
+        guard Set(reads.map(\.controlID)) == Set(review.readControls.map(\.controlID)) else { throw ComputerUseBrowserActionPlanError.inputChanged }
+        readSources = reads
         fieldPurposes = try scope.fieldIntents.map { intent in
             .init(controlID: intent.controlID, disposition: intent.disposition,
                 sources: try intent.requirementIndices.map { try .init(index: $0, interpretation: interpretation) })
         }
-        self.formID = formID; original = interpretation.input; self.page = page
-        digest = ComputerUseTaskContract.digest(["browser-form-preparation-review-v1", original.digest,
-            page.document.contextID, String(page.document.generation), page.documentID, page.page.id, review.digest, previous?.digest ?? ""])
+        self.formID = formID; self.original = interpretation.input; self.page = page
+        digest = ComputerUseTaskContract.digest(["browser-form-preparation-review-v2", interpretation.input.digest,
+            page.document.contextID, String(page.document.generation), page.documentID, page.page.id, review.digest, previous?.digest ?? "", original?.digest ?? ""])
     }
 
     func validate(interpretation: ComputerUseBrowserGoalProposal, evidence: ComputerUseBrowserPageEvidence) throws {
@@ -89,6 +102,40 @@ struct ComputerUseBrowserFormPreparationReviewContext: Equatable, Sendable, Cust
     }
 }
 
+/// A sealed historical baseline for a revised input. It supplies no editable
+/// alias or receipt authority. Values remain private, and every original
+/// field must survive a fresh native binding before the input can be planned.
+struct ComputerUseBrowserFormPreparationBaseline: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    private let evidence: ComputerUseBrowserFormEvidence
+    private let goal: ComputerUseBrowserGoalInput
+    private let previous: ComputerUseBrowserResearchFormContinuation?
+    let reviewContext: ComputerUseBrowserFormPreparationReviewContext
+    let digest: String
+    var capturedControlIDs: Set<String> { Set(evidence.fields.map { $0.control.id }) }
+    var capturedTargetIDs: Set<String> { Set(evidence.fields.map { $0.editable.snapshot.targetID }) }
+    var description: String { "BrowserFormPreparationBaseline" }
+    var debugDescription: String { description }
+
+    @MainActor fileprivate init(input: ComputerUseBrowserResearchFormInput, target: ComputerUseBrowserTextTarget,
+                               reviewContext: ComputerUseBrowserFormPreparationReviewContext) throws {
+        try reviewContext.validate(interpretation: input.interpretation, evidence: input.evidence.page)
+        let requirements = try target.preparedFormRequirements(from: input)
+        evidence = input.evidence; goal = input.interpretation.input; previous = input.previous; self.reviewContext = reviewContext
+        digest = ComputerUseTaskContract.digest(["browser-form-preparation-baseline-v1", requirements.digest, reviewContext.digest])
+    }
+
+    func validate(interpretation: ComputerUseBrowserGoalProposal, evidence: ComputerUseBrowserFormEvidence,
+                  formID: String?, review: ComputerUseBrowserEffectScopeReview?, previous: ComputerUseBrowserResearchFormContinuation?) throws {
+        guard interpretation.input.continues(goal), evidence.retainsCapturedFields(from: self.evidence),
+              formID == reviewContext.formID, previous == self.previous, let review,
+              review.matches(interpretation: interpretation, evidence: evidence.page) else { throw ComputerUseBrowserResearchFormError.inputChanged }
+        try reviewContext.validate(interpretation: interpretation, evidence: evidence.page)
+        let preserved = try reviewContext.preservation(in: interpretation), reads = try reviewContext.readings(in: interpretation)
+        guard preserved.allSatisfy({ review.formScope?.preservedControls.contains($0) == true }),
+              reads.allSatisfy({ review.readControls.contains($0) }) else { throw ComputerUseBrowserResearchFormError.inputChanged }
+    }
+}
+
 /// Retained before the first private read. Cancellation can stop the waiter,
 /// but cannot replace this intent, its captured values or its native adapter.
 @MainActor
@@ -102,6 +149,9 @@ final class ComputerUseBrowserResearchFormPreparation {
     private(set) var revisedAction: ComputerUseBrowserActionProposal?
     private let parent: ComputerUseBrowserResearchFormStage?
     private let previous: ComputerUseBrowserResearchFormContinuation?
+    private let originalPreparation: ComputerUseBrowserResearchFormPreparation?
+    private let revisionDepth: Int
+    private var baseline: ComputerUseBrowserFormPreparationBaseline?
     private let fieldsCapture: ComputerUseBrowserDOMReadCapture
     private let bindingCapture: ComputerUseBrowserDOMReadCapture
     private let preservationCapture: ComputerUseBrowserDOMReadCapture
@@ -111,21 +161,32 @@ final class ComputerUseBrowserResearchFormPreparation {
     private var preservationFinished = false
     private(set) var preparedInput: ComputerUseBrowserResearchFormInput?
     var hasPreservationObligations: Bool {
-        previous != nil || review.formScope?.preservedControls.isEmpty != true || !review.readControls.isEmpty
+        originalPreparation != nil || previous != nil || review.formScope?.preservedControls.isEmpty != true || !review.readControls.isEmpty
     }
 
-    init(action: ComputerUseBrowserActionProposal, browser: ComputerUseOwnedBrowser, parent: ComputerUseBrowserResearchFormStage? = nil) throws {
+    init(action: ComputerUseBrowserActionProposal, browser: ComputerUseOwnedBrowser, parent: ComputerUseBrowserResearchFormStage? = nil,
+         revising original: ComputerUseBrowserResearchFormPreparation? = nil) throws {
         guard case .editForm(let formID) = action.step else { throw ComputerUseBrowserActionPlanError.invalidProposal }
         let review = try ComputerUseBrowserEffectScopeReview(input: action.input)
         guard review.formScope?.formID == formID, review.formScope?.preservedControls == action.preservedControls else {
             throw ComputerUseBrowserActionPlanError.invalidProposal
         }
         interpretation = action.input.interpretation; page = action.input.evidence; self.formID = formID; self.review = review
-        let prior = try parent?.preparationContext(for: action)
-        self.parent = parent; previous = prior?.continuation
-        reviewContext = try .init(interpretation: interpretation, page: page, review: review, previous: previous)
-        target = prior?.target ?? .init(browser: browser, document: page.document, requiresFrontmost: browser.isFrontmostWindow)
-        fieldsCapture = try .init(command: prior == nil ? .formFields : .extendFormFields, document: page.document)
+        if let original {
+            guard parent == nil, original.revisedAction == action, action.input.preparationReview == original.reviewContext,
+                  original.revisionDepth < 32, interpretation.input.continues(original.interpretation.input),
+                  formID == original.formID else { throw ComputerUseBrowserActionPlanError.invalidProposal }
+            self.parent = original.parent; previous = original.previous; target = original.target
+            revisionDepth = original.revisionDepth + 1
+        } else {
+            let prior = try parent?.preparationContext(for: action)
+            self.parent = parent; previous = prior?.continuation
+            target = prior?.target ?? .init(browser: browser, document: page.document, requiresFrontmost: browser.isFrontmostWindow)
+            revisionDepth = 0
+        }
+        originalPreparation = original
+        reviewContext = try .init(interpretation: interpretation, page: page, review: review, previous: previous, retaining: original?.reviewContext)
+        fieldsCapture = try .init(command: original != nil ? .reviseFormFields : (previous == nil ? .formFields : .extendFormFields), document: page.document)
         bindingCapture = try .init(command: .bindPageFields, document: page.document)
         preservationCapture = try .init(command: .prepareFormPreservation, document: page.document)
     }
@@ -167,11 +228,23 @@ final class ComputerUseBrowserResearchFormPreparation {
                     browser: browser, checkCurrent: check)
                 return preparedInput
             }
+            if let originalPreparation, baseline == nil {
+                // Finish any interrupted original capture before extending its
+                // catalogue. Once retained here, never rerun that old full-field
+                // preparation against the larger revised adapter.
+                let original = try await originalPreparation.prepare(browser: browser, checkCurrent: check)
+                baseline = try .init(input: original, target: target, reviewContext: originalPreparation.reviewContext)
+                try check()
+            }
             let current = try await ComputerUseBrowserResearchFormStage.restoreOriginalPage(page, review: review,
                 browser: browser, checkCurrent: check)
             guard let scope = review.formScope else { throw ComputerUseBrowserResearchFormError.inputChanged }
             if fields == nil {
-                if let previous {
+                if originalPreparation != nil {
+                    guard baseline != nil, let original = originalPreparation?.preparedInput else { throw ComputerUseBrowserResearchFormError.inputChanged }
+                    fields = try await target.reviseFields(in: formID, page: current, preserving: scope.editablePreservedControlIDs,
+                        selecting: scope.selectedControlIDs, scopeDigest: scope.digest, from: original, retaining: fieldsCapture)
+                } else if let previous {
                     fields = try await target.extendFields(in: formID, page: current, preserving: scope.editablePreservedControlIDs,
                         selecting: scope.selectedControlIDs, after: previous, retaining: fieldsCapture)
                 } else {
@@ -197,7 +270,7 @@ final class ComputerUseBrowserResearchFormPreparation {
             guard let evidence else { throw ComputerUseBrowserResearchFormError.invalidInput }
             let prepared = try ComputerUseBrowserResearchFormInput(interpretation: interpretation, evidence: evidence,
                 selectedFormID: formID, preservedControls: scope.preservedControls, previous: previous,
-                scopeReview: review, nativePreservation: preservation)
+                scopeReview: review, nativePreservation: preservation, preparationBaseline: baseline)
             preparedInput = prepared // Keep the original result before the next cancellable validation.
             try await ComputerUseBrowserResearchFormStage.validateOriginalInput(prepared, target: target, browser: browser, checkCurrent: check)
             return prepared

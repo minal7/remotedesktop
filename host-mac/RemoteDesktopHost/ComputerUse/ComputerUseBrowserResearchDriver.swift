@@ -248,6 +248,7 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                 continue
             }
             if owner.hasPendingFormPreparation {
+                let input: ComputerUseBrowserResearchFormInput
                 if owner.hasRevisedFormPreparationGoal {
                     progress("Reviewing your answer…")
                     let interpretation = try await owner.interpretGoal()
@@ -265,13 +266,15 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                     let reviewed = try await owner.reviewFormPreparation(using: actionPlanner)
                     try check()
                     if let question = reviewed.questionRequest { return .browserClarificationRequired(question) }
-                    // Goal interpretation supplies no authority to reuse the
-                    // old form review or rebase its captured private values.
-                    // Keep that frame until the revised form scope is carried.
-                    return .userInterventionRequired("Your answer is saved. I could not yet update this form while preserving the work already done. Review the task on the Mac before continuing.")
+                    guard case .editForm = reviewed.step else {
+                        return .userInterventionRequired("I could not identify justified changes to this form. Your answer and the original task remain pending.")
+                    }
+                    progress("Checking the revised form preparation…")
+                    input = try await owner.applyFormPreparationReview(reviewed)
+                } else {
+                    progress("Checking the pending form preparation…")
+                    input = try await owner.resumeFormPreparation()
                 }
-                progress("Checking the pending form preparation…")
-                let input = try await owner.resumeFormPreparation()
                 let proposal = try await owner.planForm(input, using: formPlanner)
                 try check()
                 if let question = try proposal.questionRequest(for: input) { return .browserClarificationRequired(question) }
