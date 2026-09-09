@@ -127,8 +127,9 @@ struct ComputerUseBrowserResearchFormContinuation: Equatable, Sendable, CustomSt
     var debugDescription: String { description }
 }
 
-/// Historical proof of one verified form stage, never a current-page assertion
-/// or a completed research answer. Construction stays with native execution.
+/// Historical native evidence for a form stage, never a current-page assertion
+/// or a completed research answer. Recovered input history can still require
+/// criterion repair. Construction stays with native execution.
 struct ComputerUseBrowserResearchFormReceipt: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     let taskID: String
     let rootDigest: String
@@ -139,14 +140,17 @@ struct ComputerUseBrowserResearchFormReceipt: Equatable, Sendable, CustomStringC
     let editCount: Int
     let plannedEditCount: Int
     let verifiedWithoutInputCount: Int
-    var isCompleteStage: Bool { editCount + verifiedWithoutInputCount == plannedEditCount }
-    @MainActor fileprivate init(stage: ComputerUseBrowserResearchFormStage, completedEditCount: Int? = nil, verifiedWithoutInputCount: Int = 0) {
+    let requiresRepairAtPublication: Bool
+    var isCompleteStage: Bool { !requiresRepairAtPublication && editCount + verifiedWithoutInputCount == plannedEditCount }
+    @MainActor fileprivate init(stage: ComputerUseBrowserResearchFormStage, completedEditCount: Int? = nil,
+                               verifiedWithoutInputCount: Int = 0, requiresRepairAtPublication: Bool = false) {
         taskID = stage.input.interpretation.input.taskID; rootDigest = stage.input.interpretation.input.rootDigest
         goalRevision = stage.input.interpretation.input.digest
         stageID = stage.id; index = stage.index; contractDigest = stage.contract.contractDigest
         plannedEditCount = stage.proposal.edits.count
         editCount = completedEditCount ?? stage.contract.steps.count
         self.verifiedWithoutInputCount = verifiedWithoutInputCount
+        self.requiresRepairAtPublication = requiresRepairAtPublication
     }
     var description: String { "BrowserResearchFormReceipt(edits: \(editCount), verifiedWithoutInput: \(verifiedWithoutInputCount))" }
     var debugDescription: String { description }
@@ -409,6 +413,51 @@ final class ComputerUseBrowserResearchFormStage {
             retirement = receipt
             // Publication is historical even if Pause closes the outer return.
             try check()
+            return receipt
+        } catch {
+            await browser.joinDOMCompletion(document: input.evidence.page.document)
+            throw error
+        }
+    }
+
+    /// Every input can have a historical native receipt while a later event
+    /// invalidated an earlier criterion. Preserve that history for explicit
+    /// repair, without revoking a nonexistent suffix or replaying any input.
+    func retainCompletedInputHistory(checkCurrent: @escaping @MainActor () throws -> Void) async throws -> ComputerUseBrowserResearchFormReceipt? {
+        guard !isExecuting else { throw Failure.busy }
+        try Task.checkCancellation(); try checkCurrent()
+        guard !isRetired else { throw Failure.retired }
+        if let completed { return completed }
+        guard !retirementPending else { return nil }
+        isExecuting = true
+        defer { isExecuting = false }
+        let store = try makeStore(directory), persisted = try store.load(taskID: contract.taskID)
+        let lease = try store.acquireExecution(taskID: contract.taskID, expected: persisted)
+        defer { lease.release() }
+        guard let persisted, persisted.statuses.allSatisfy({ $0 == .verified }) else { return nil }
+        // Construction validates the exact unretired contract. Disk flags
+        // supply requirements only; the native inspection below proves them.
+        let history = try ComputerUseTextTask(contract: contract, recovered: persisted,
+            read: { _ in nil }, apply: { _, _ in throw Failure.invalidStage },
+            persist: { _ in throw Failure.invalidStage }, mayAct: { false })
+        let retained = try ComputerUseBrowserResearchFormContinuation(stage: self, current: history.verifiedContinuation(),
+            stateProof: executionPlan.isMixed ? stateProof : nil)
+        func check() throws {
+            try Task.checkCancellation(); try checkCurrent(); try lease.assertOwnership()
+            guard !isRetired else { throw Failure.retired }
+            guard input.nativePreservation == target.formPreservation else { throw ComputerUseBrowserResearchFormError.inputChanged }
+            try browser.validateSourceDocument(input.evidence.page.document)
+        }
+        do {
+            try check(); try store.confirmRecoveredProgress(persisted)
+            let page = try await browser.observePage(document: input.evidence.page.document)
+            try check()
+            let changed = try await target.inspectChangedCriteria(page: page, after: retained)
+            try check(); try store.confirmRecoveredProgress(persisted)
+            let receipt = ComputerUseBrowserResearchFormReceipt(stage: self,
+                verifiedWithoutInputCount: executionPlan.isMixed ? executionPlan.observedEdits.count : 0,
+                requiresRepairAtPublication: !changed.isEmpty)
+            continuation = retained; completed = receipt
             return receipt
         } catch {
             await browser.joinDOMCompletion(document: input.evidence.page.document)

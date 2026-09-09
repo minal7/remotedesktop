@@ -45,6 +45,8 @@ No build, typecheck, assertion execution, inference, app/browser/computer-use la
 
 ## Remaining sequence
 
+The subsequent [full-input history checkpoint](BROWSER_FULL_INPUT_RECOVERY_REVIEW.md) implements the source path for an all-verified physical journal whose current criteria need repair. The sequence below remains this checkpoint's historical boundary; execution qualification is still pending.
+
 1. Recover a stage whose full physical input sequence has native receipts but invalidated an earlier observed criterion before final completion. Retain the historical inputs and original observed goal as explicit repair work; the current proper-prefix interface cannot express that full-input recovery case.
 2. Implement retain-only scopes and explicit supersession of earlier work without manufacturing input receipts or silently dropping original requirements. Qualify semantic pending mappings and criterion lifetimes.
 3. Continue document/process recovery, preservation timing, dependent controls, account/login handoff and independent whole-task/result verification in the [repair TODO](../../../TODO.md).

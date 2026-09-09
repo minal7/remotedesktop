@@ -2792,6 +2792,8 @@ final class ComputerUseBrowserResearchPreservationTests: XCTestCase {
         }
         await expectFailure { _ = try await owner.executeForm(proposal, input: input) }
         try await owner.resumeAfterUserControl()
+        let full = try await owner.retainCompletedFormHistory()
+        XCTAssertNil(full, "An attempted first input cannot become fully dispatched history")
         let prefix = try await owner.retainPendingFormPrefix()
         let whole = try await owner.retirePendingUnsentForm()
         XCTAssertNil(prefix); XCTAssertNil(whole)
@@ -2930,6 +2932,211 @@ final class ComputerUseBrowserResearchPreservationTests: XCTestCase {
         XCTAssertThrowsError(try store.retireRemainingInput(invented, replacing: saved))
         XCTAssertThrowsError(try store.retireUnsent(saved, replacing: saved))
         XCTAssertEqual(try store.load(taskID: before.taskID), saved)
+    }
+
+    func testFullyDispatchedHistoryBecomesExplicitRepairWithoutReplayingCompletedInput() async throws {
+        for observedQuery in [true, false] {
+            let fixture = try await make(category: true, city: true, queryAlreadyMatches: observedQuery,
+                mutation: "document.getElementById('query').value='movies';")
+            defer { fixture.close() }
+            _ = try await pauseAfterAllFormInputs(fixture)
+            let owner = try fixture.owner(), (store, journal) = try pendingMixedJournal(fixture)
+            try await release(fixture); try await owner.resumeAfterUserControl()
+            await expectFailure { _ = try await owner.resumeForm() }
+            let result = try await owner.retainCompletedFormHistory(), receipt = try XCTUnwrap(result)
+            XCTAssertEqual(receipt.editCount, observedQuery ? 2 : 3)
+            XCTAssertEqual(receipt.verifiedWithoutInputCount, observedQuery ? 1 : 0)
+            XCTAssertEqual(receipt.plannedEditCount, 3)
+            XCTAssertTrue(receipt.requiresRepairAtPublication); XCTAssertFalse(receipt.isCompleteStage)
+            XCTAssertTrue(owner.retiredFormHistory.isEmpty)
+            XCTAssertEqual(try store.load(taskID: journal.taskID), journal)
+            configureMixed(fixture, editing: ["Query"], retaining: ["Category","City"])
+            let action = try await owner.planNextAction(using: fixture.actions)
+            XCTAssertTrue(action.input.queryControlIDs.isEmpty); XCTAssertTrue(action.input.usesFormRecoveryContext)
+            let context = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(action.input.contextJSON.utf8)) as? [String: Any])
+            XCTAssertEqual(context["version"] as? Int, 21)
+            let stage = try XCTUnwrap(context["verified_form_stage"] as? [String: Any])
+            XCTAssertEqual(stage["required_repair_when_recorded"] as? Bool, true)
+            XCTAssertEqual(stage["complete_stage"] as? Bool, false); XCTAssertNil(stage["edits"])
+            let criteria = try XCTUnwrap(stage["criteria"] as? [[String: Any]])
+            XCTAssertEqual(criteria.filter { $0["requires_repair"] as? Bool == true }.count, 1)
+            let local = try ComputerUseLocalBrowserActionPlanner(connection: .init(baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:54321")),
+                bearerToken: "fixture", modelAlias: "fixture-model"), transport: ControlStateUnusedTransport())
+            let request = try local.makeRequest(action.input)
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
+            let response = try XCTUnwrap(body["response_format"] as? [String: Any])
+            XCTAssertEqual((response["json_schema"] as? [String: Any])?["name"] as? String, "browser_research_action_v21")
+            let next = try await owner.prepareFormInput(for: action)
+            XCTAssertEqual(next.previous?.pendingEdits, [])
+            XCTAssertEqual(next.previous?.inputOperationIDs.count, observedQuery ? 2 : 3)
+            XCTAssertEqual(next.requiredRepairFieldAliases.count, 1)
+            let proposal = try ComputerUseBrowserFormProposal.decode(content: mixedContent(next, order: ["Query"]), input: next)
+            _ = try await owner.executeForm(proposal, input: next)
+            configureMixed(fixture, editing: ["Query"], retaining: ["Category","City"], querying: true)
+            let query = try await owner.planNextAction(using: fixture.actions)
+            _ = try await owner.openFormQuery(for: query)
+            XCTAssertEqual(fixture.server.count("/filtered?q=concerts&category=concerts&city=Seattle"), 1)
+            XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, observedQuery ? 3 : 4)
+            XCTAssertEqual(fixture.state.commands.filter { $0 == .retireUnsentInputs }.count, 0)
+            XCTAssertEqual(try store.load(taskID: journal.taskID), journal)
+        }
+    }
+
+    func testDriverRecoversFullInputHistoryAndPlansOnlyTheChangedCriterion() async throws {
+        let fixture = try await make(category: true, city: true, queryAlreadyMatches: true,
+            cityHandler: "document.getElementById('query').value='movies';")
+        defer { fixture.close() }
+        _ = try await prepareMixed(fixture)
+        let owner = try fixture.owner()
+        configureMixed(fixture, editing: ["Query"], retaining: ["Category","City"], querying: true)
+        let select = fixture.actions.select
+        fixture.actions.select = { input in
+            guard input.evidence.page.controls.contains(where: { $0.label == "Query" }) else { return #"{"unavailable":true}"# }
+            return try XCTUnwrap(select)(input)
+        }
+        fixture.forms.select = { try self.mixedContent($0, order: $0.previous == nil ? ["Query","Category","City"] : ["Query"]) }
+        _ = try await fixture.resume()
+        XCTAssertEqual(owner.confirmedFormHistory.map(\.editCount), [2,1])
+        XCTAssertEqual(owner.confirmedFormHistory.map(\.requiresRepairAtPublication), [true,false])
+        XCTAssertEqual(owner.confirmedFormHistory.map(\.isCompleteStage), [false,true])
+        XCTAssertTrue(owner.retiredFormHistory.isEmpty)
+        XCTAssertEqual(fixture.forms.inputs.count, 2)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 3)
+        XCTAssertEqual(fixture.server.count("/filtered?q=concerts&category=concerts&city=Seattle"), 1)
+    }
+
+    func testFullHistoryInspectionRequiresHandbackAndPublishesOnlyOnce() async throws {
+        let fixture = try await make(category: true, city: true, queryAlreadyMatches: true,
+            mutation: "document.getElementById('query').value='movies';")
+        defer { fixture.close() }
+        _ = try await pauseAfterAllFormInputs(fixture)
+        let owner = try fixture.owner(), (store, journal) = try pendingMixedJournal(fixture)
+        try await release(fixture); try await owner.resumeAfterUserControl()
+        fixture.state.onCommand = { command in
+            guard command == .inspectFormRequirements else { return }; fixture.state.onCommand = nil; owner.pause()
+        }
+        await expectFailure { _ = try await owner.retainCompletedFormHistory() }
+        XCTAssertTrue(owner.confirmedFormHistory.isEmpty)
+        let commands = fixture.state.commands
+        await expectFailure { _ = try await owner.retainCompletedFormHistory() }
+        XCTAssertEqual(fixture.state.commands, commands)
+        try await owner.resumeAfterUserControl()
+        let result = try await owner.retainCompletedFormHistory(), receipt = try XCTUnwrap(result)
+        XCTAssertTrue(receipt.requiresRepairAtPublication)
+        let duplicate = try await owner.retainCompletedFormHistory()
+        XCTAssertNil(duplicate); XCTAssertEqual(owner.confirmedFormHistory, [receipt])
+        XCTAssertEqual(try store.load(taskID: journal.taskID), journal)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 2)
+    }
+
+    func testFullHistoryCannotUseDiskFlagsAfterTheNativeLedgerIsLost() async throws {
+        for observedQuery in [false, true] {
+            let fixture = try await make(category: true, city: true, queryAlreadyMatches: observedQuery)
+            defer { fixture.close() }
+            let input = try await pauseAfterAllFormInputs(fixture), owner = try fixture.owner()
+            let (store, before) = try pendingMixedJournal(fixture)
+            XCTAssertTrue(before.statuses.allSatisfy { $0 == .verified })
+            try await owner.resumeAfterUserControl()
+            let other = ComputerUseBrowserTextTarget(browser: fixture.browser, document: input.evidence.page.document, requiresFrontmost: false)
+            _ = try await other.fields()
+            await expectFailure { _ = try await owner.retainCompletedFormHistory() }
+            XCTAssertTrue(owner.confirmedFormHistory.isEmpty)
+            XCTAssertEqual(try store.load(taskID: before.taskID), before)
+            XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, observedQuery ? 2 : 3)
+        }
+    }
+
+    func testFullHistoryRejectsChangedPreservationAndReplacedRequiredObjects() async throws {
+        for mutation in ["document.getElementById('reference').value='changed';",
+                         "document.getElementById('query').replaceWith(document.getElementById('query').cloneNode(true));"] {
+            let fixture = try await make(category: true, city: true, queryAlreadyMatches: true, mutation: mutation)
+            defer { fixture.close() }
+            _ = try await pauseAfterAllFormInputs(fixture)
+            let owner = try fixture.owner()
+            try await release(fixture); try await owner.resumeAfterUserControl()
+            await expectFailure { _ = try await owner.retainCompletedFormHistory() }
+            XCTAssertTrue(owner.confirmedFormHistory.isEmpty); XCTAssertTrue(owner.retiredFormHistory.isEmpty)
+            XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 2)
+            XCTAssertEqual(fixture.state.commands.filter { $0 == .prepareFormQuery }.count, 0)
+        }
+    }
+
+    func testFullHistoryCannotPublishAfterItsJournalDisappearsDuringInspection() async throws {
+        let fixture = try await make(category: true, city: true, queryAlreadyMatches: true)
+        defer { fixture.close() }
+        _ = try await pauseAfterAllFormInputs(fixture)
+        let owner = try fixture.owner(), (_, journal) = try pendingMixedJournal(fixture)
+        try await owner.resumeAfterUserControl()
+        let root = fixture.directory.appendingPathComponent("Research/Research Forms")
+        let directory = try XCTUnwrap(FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil).first)
+        let path = directory.appendingPathComponent(ComputerUseTextTaskContract.digest(journal.taskID) + ".json")
+        var mutationError: Error?
+        fixture.state.onCommand = { command in
+            guard command == .inspectFormRequirements else { return }; fixture.state.onCommand = nil
+            do { try FileManager.default.removeItem(at: path) } catch { mutationError = error }
+        }
+        await expectFailure { _ = try await owner.retainCompletedFormHistory() }
+        XCTAssertNil(mutationError); XCTAssertTrue(owner.confirmedFormHistory.isEmpty)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 2)
+    }
+
+    func testFreshInspectionCanCompleteFullHistoryWhoseCriteriaStillMatch() async throws {
+        let fixture = try await make(category: true, city: true, queryAlreadyMatches: true)
+        defer { fixture.close() }
+        _ = try await pauseAfterAllFormInputs(fixture)
+        let owner = try fixture.owner()
+        try await owner.resumeAfterUserControl()
+        let result = try await owner.retainCompletedFormHistory(), receipt = try XCTUnwrap(result)
+        XCTAssertTrue(receipt.isCompleteStage); XCTAssertFalse(receipt.requiresRepairAtPublication)
+        configureMixed(fixture, editing: ["Query","Category","City"], querying: true)
+        let action = try await owner.planNextAction(using: fixture.actions)
+        XCTAssertFalse(action.input.usesFormRecoveryContext)
+        _ = try await owner.openFormQuery(for: action)
+        XCTAssertEqual(fixture.server.count("/filtered?q=concerts&category=concerts&city=Seattle"), 1)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 2)
+    }
+
+    func testHistoricalRepairFlagDoesNotOverrideFreshRestoredCriteria() async throws {
+        let fixture = try await make(category: true, city: true, queryAlreadyMatches: true,
+            mutation: "document.getElementById('query').value='movies';fetch('/signal').then(()=>{document.getElementById('query').value='concerts';fetch('/restored');});")
+        defer { fixture.close() }
+        _ = try await pauseAfterAllFormInputs(fixture)
+        let owner = try fixture.owner()
+        try await release(fixture); try await owner.resumeAfterUserControl()
+        let result = try await owner.retainCompletedFormHistory(), receipt = try XCTUnwrap(result)
+        XCTAssertTrue(receipt.requiresRepairAtPublication); XCTAssertFalse(receipt.isCompleteStage)
+        let deadline = ContinuousClock.now + .seconds(5)
+        while fixture.server.count("/signal") != 2 {
+            guard ContinuousClock.now < deadline else { throw ComputerUseBrowserError.documentUnresponsive }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        fixture.server.releaseHeldResponses()
+        while fixture.server.count("/restored") != 1 {
+            guard ContinuousClock.now < deadline else { throw ComputerUseBrowserError.documentUnresponsive }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        configureMixed(fixture, editing: ["Query","Category","City"], querying: true)
+        let action = try await owner.planNextAction(using: fixture.actions)
+        XCTAssertFalse(action.input.queryControlIDs.isEmpty)
+        XCTAssertTrue(action.input.usesFormRecoveryContext)
+        _ = try await owner.openFormQuery(for: action)
+        XCTAssertEqual(owner.confirmedFormHistory, [receipt])
+        XCTAssertEqual(fixture.server.count("/filtered?q=concerts&category=concerts&city=Seattle"), 1)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 2)
+    }
+
+    private func pauseAfterAllFormInputs(_ fixture: ResearchDriverFixture) async throws -> ComputerUseBrowserResearchFormInput {
+        let (input, proposal) = try await prepareMixed(fixture), owner = try fixture.owner()
+        let plan = try ComputerUseBrowserFormExecutionPlan(input: input, proposal: proposal,
+            stageID: ComputerUseTaskContract.digest(["full-history-fixture"]))
+        let pauseAt = fixture.state.writes + (plan.isMixed ? 1 : 0) + 2 * plan.contract.steps.count
+        fixture.state.onWrite = { if fixture.state.writes == pauseAt { owner.pause() } }
+        await expectFailure { _ = try await owner.executeForm(proposal, input: input) }
+        fixture.state.onWrite = nil
+        let (_, journal) = try pendingMixedJournal(fixture)
+        XCTAssertTrue(journal.statuses.allSatisfy { $0 == .verified })
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, plan.contract.steps.count)
+        return input
     }
 
     private func failFirstMixedAttempt(_ fixture: ResearchDriverFixture) async throws -> ComputerUseBrowserResearchFormInput {
@@ -3092,7 +3299,7 @@ final class ComputerUseBrowserResearchPreservationTests: XCTestCase {
 
     private func make(inside: Bool = false, notes: Bool = false, category: Bool = false, prohibition: Bool = false, referenceReadOnly: Bool = true, city: Bool = false,
                       queryAlreadyMatches: Bool = false, categoryAlreadyMatches: Bool = false,
-                      handler: String = "", categoryHandler: String = "", mutation: String = "") async throws -> ResearchDriverFixture {
+                      handler: String = "", categoryHandler: String = "", cityHandler: String = "", mutation: String = "") async throws -> ResearchDriverFixture {
         let reference = "<label>Reference<input id=reference \(referenceReadOnly ? "readonly" : "") value='private-reference'></label>"
         let categoryHTML = category ? "<label>Category<select name=category><option value=all>All</option><option value=concerts \(categoryAlreadyMatches ? "selected" : "")>Concerts</option></select></label>" : ""
         let cityHTML = city ? "<label>City<input id=city name=city></label>" : ""
@@ -3101,7 +3308,7 @@ final class ComputerUseBrowserResearchPreservationTests: XCTestCase {
         let body = "<form action='/filtered'><label>Query<input id=query name=q value='\(queryAlreadyMatches ? "concerts" : "")'></label>" + categoryHTML + cityHTML + (inside ? reference : "")
             + "<button>Search</button></form>" + (inside ? "" : reference)
             + (notes ? "<label>Notes<input value='private-notes'></label>" : "")
-            + "<script>document.getElementById('query').addEventListener('input',()=>{ \(handler) }); document.querySelector('select')?.addEventListener('input',()=>{ \(categoryHandler) }); fetch('/signal').then(()=>{ \(mutation) fetch('/changed'); });</script>"
+            + "<script>document.getElementById('query').addEventListener('input',()=>{ \(handler) }); document.querySelector('select')?.addEventListener('input',()=>{ \(categoryHandler) }); document.getElementById('city')?.addEventListener('input',()=>{ \(cityHandler) }); fetch('/signal').then(()=>{ \(mutation) fetch('/changed'); });</script>"
         let fixture = try await ResearchDriverFixture.make(request: goalSource + clause + "Do not buy.", searchFormHTML: body, heldSignal: true)
         fixture.goal.select = { _ in try ResearchAnswerFixture.json(["disposition":"research","requirements":[
             ["turn":0,"source":goalSource,"role":"outcome","field":"category","relation":"unspecified","values":[]],

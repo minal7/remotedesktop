@@ -1036,6 +1036,25 @@ final class ComputerUseBrowserResearchTask {
         }
     }
 
+    /// Retain fully dispatched native history even when current criteria need
+    /// repair. This cannot publish an uncertain step or authorize a query.
+    func retainCompletedFormHistory() async throws -> ComputerUseBrowserResearchFormReceipt? {
+        try requireIdle()
+        guard !hasPendingFormPreparation else { throw Failure.formPending }
+        guard !hasPendingNavigation else { throw Failure.navigationPending }
+        guard !hasQuestion else { throw Failure.questionPending }
+        guard hasPendingFormExecution, let stage = formStage else { return nil }
+        guard stage.input.interpretation.input == input else { throw Failure.goalChanged }
+        let captured = input
+        latestForm = nil; latestAction = nil; latestCandidates = nil
+        return try await operate { [self] in
+            guard let receipt = try await stage.retainCompletedInputHistory(checkCurrent: { try self.checkCurrent(captured) }) else { return nil }
+            try recordForm(receipt, stage: stage, goal: captured)
+            try checkCurrent(captured)
+            return receipt
+        }
+    }
+
     private func recordForm(_ receipt: ComputerUseBrowserResearchFormReceipt, stage: ComputerUseBrowserResearchFormStage,
                             goal: ComputerUseBrowserGoalInput) throws {
         guard !isRetired else { return }

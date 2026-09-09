@@ -282,7 +282,7 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                     return .userInterventionRequired("I could not prepare justified entries for this form. The original request remains pending.")
                 }
                 do { _ = try await owner.executeForm(proposal, input: input) }
-                catch { guard try await retireProvenUnsentForm(owner, after: error) else { throw error } }
+                catch { guard try await recoverPendingForm(owner, after: error) else { throw error } }
                 try check()
                 continue
             }
@@ -291,7 +291,7 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                 do {
                     guard try await owner.resumeForm() != nil else { throw Failure.invalidContinuation }
                 } catch {
-                    guard try await retireProvenUnsentForm(owner, after: error) else { throw error }
+                    guard try await recoverPendingForm(owner, after: error) else { throw error }
                 }
                 try check()
                 continue // Choose the next capability using the retained verified stage.
@@ -394,7 +394,7 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                     }
                     do { _ = try await owner.executeForm(proposal, input: input) }
                     catch {
-                        guard try await retireProvenUnsentForm(owner, after: error) else { throw error }
+                        guard try await recoverPendingForm(owner, after: error) else { throw error }
                     }
                     try check()
                     continue
@@ -473,7 +473,7 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                 || error as? ComputerUseBrowserResearchHistoryNavigation.Failure == .retirementPending else { return false }
         return try await owner.retirePendingUnsentHistoryNavigation() != nil
     }
-    private func retireProvenUnsentForm(_ owner: ComputerUseBrowserResearchTask, after error: Error) async throws -> Bool {
+    private func recoverPendingForm(_ owner: ComputerUseBrowserResearchTask, after error: Error) async throws -> Bool {
         guard error as? ComputerUseBrowserError == .pageChanged
                 || error as? ComputerUseBrowserResearchFormError == .inputChanged
                 || error as? ComputerUseTextTaskError == .staleTarget
@@ -482,6 +482,7 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                 || error as? ComputerUseTextEditError == .deliveryUncertain
                 || error as? ComputerUseBrowserResearchFormStage.Failure == .retirementPending
                 || error as? ComputerUseBrowserResearchFormStage.Failure == .valueCheckpointRequired else { return false }
+        if try await owner.retainCompletedFormHistory() != nil { return true }
         if try await owner.retainPendingFormPrefix() != nil { return true }
         return try await owner.retirePendingUnsentForm() != nil
     }
