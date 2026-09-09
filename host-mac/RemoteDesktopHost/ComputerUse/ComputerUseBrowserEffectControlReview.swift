@@ -158,6 +158,18 @@ struct ComputerUseBrowserEffectScopeReview: Equatable, Sendable, CustomStringCon
         return current.page.matchesFormObservation(evidence.page)
     }
 
+    /// First preparation has no historical value origin. Its sealed edit scope
+    /// can request new preconditions only after the adapter proves empty history.
+    func permitsPreparationRecovery(after previous: ComputerUseBrowserResearchFormContinuation?,
+                                    on current: ComputerUseBrowserPageEvidence) -> Bool {
+        if let previous { return permitsCriteriaRepair(after: previous, on: current) }
+        guard let scope = formScope, scope.formID != nil, interpretation.disposition == .research,
+              scope.fieldIntents.contains(where: { $0.disposition == .edit }),
+              !scope.fieldIntents.contains(where: { $0.disposition == .retain }),
+              current.document == evidence.document, current.documentID == evidence.documentID else { return false }
+        return current.page.matchesFormObservation(evidence.page)
+    }
+
     func matches(goal: ComputerUseBrowserGoalInput, evidence: ComputerUseBrowserPageEvidence) -> Bool {
         interpretation.input == goal && self.evidence == evidence
     }

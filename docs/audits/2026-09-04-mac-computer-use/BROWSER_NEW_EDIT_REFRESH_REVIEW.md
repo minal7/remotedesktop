@@ -50,6 +50,8 @@ Six changed Swift files passed `swiftc -frontend -parse`. The assembled DOM, fiv
 
 ## Remaining repair order
 
+Follow-up: the [initial-preparation refresh checkpoint](BROWSER_INITIAL_PREPARATION_REFRESH_REVIEW.md) supports a first form with no preceding continuation by checking the actual empty native input/proof history before review publication and native revision. It creates no dummy stage or origin. Execution remains pending.
+
 - Support first-stage edit refresh without a preceding continuation, using its actual empty native history rather than manufacturing a preceding stage or origin.
 - Reconcile changes around unknown or failed native revision captures without discarding a started callback or replaying a capture under changed arguments.
 - Continue explicit goal supersession, conflicting answers and justified removal of preservation/read duties. Earlier invariant values and immutable readings are not refreshable new-field preconditions.

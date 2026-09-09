@@ -946,12 +946,14 @@ enum ComputerUseBrowserDOM {
       }
       function revisePreparedFields(scope, args) {
         const requirements = args.requirements, retainedPreparation = args.retainedPreparation === true;
-        const refreshing = requirements?.kind === 'refreshable-planned-form-v1';
+        const initialRefresh = requirements?.kind === 'refreshable-initial-form-v1';
+        const refreshing = initialRefresh || requirements?.kind === 'refreshable-planned-form-v1';
         const plannedRepair = refreshing || requirements?.kind === 'repairable-planned-form-v1';
         const repairOrigins = args.criteriaRequirements ?? null, repairing = args.criteriaRequirements !== undefined;
         const repairableIDs = repairing ? args.repairableFieldIDs : [];
         const refreshedIDs = refreshing ? args.refreshedFieldIDs : [];
         if (args.retainedPreparation !== undefined && !retainedPreparation) return reply('unsupported');
+        if (initialRefresh && (retainedPreparation || repairing)) return reply('stale');
         if (refreshing ? !Array.isArray(refreshedIDs) || !refreshedIDs.length : args.refreshedFieldIDs !== undefined) return reply('stale');
         if (typeof args.revisionID !== 'string' || !/^[a-f0-9]{64}$/.test(args.revisionID)
             || typeof args.scopeDigest !== 'string' || !/^[a-f0-9]{64}$/.test(args.scopeDigest)
@@ -965,6 +967,7 @@ enum ComputerUseBrowserDOM {
           requirements.fields.map(field => [field.id,field.value,field.mustSubmit,field.label,field.selectionStart,field.selectionEnd,field.choices])]
           .concat(retainedPreparation ? ['retained-preparation-v1'] : [])
           .concat(repairing ? [refreshing ? 'planned-preparation-refresh-v1' : (plannedRepair ? 'planned-preparation-repair-v1' : 'retained-preparation-repair-v1'),repairOrigins.digest,repairableIDs] : [])
+          .concat(initialRefresh ? ['initial-preparation-refresh-v1'] : [])
           .concat(refreshing ? [refreshedIDs] : []));
         const existing = preparedFieldRevisions.get(args.revisionID);
         if (existing) {
@@ -1396,10 +1399,15 @@ enum ComputerUseBrowserDOM {
         if (encoder.encode(destination.href).length > 8192) return {status:'unsupported'};
         return {status:'form-query', destination:destination.href, signature, members, submittedMembers, form};
       }
+      function preparationHistoryIsEmpty(ledger) {
+        return ledger === inputLedgerID && bindings.size > 0 && operations.size === 0
+          && pendingChanges.size === 0 && retiredInputs.size === 0 && formStateProofs.size === 0;
+      }
       function formRequirementsCurrent(requirements, repairableIDs = [], changes = null, preparation = false, checkingSelection = true, repairOrigins = null, refreshedIDs = []) {
         const withState = !preparation && requirements?.kind === 'verified-form-state-v1';
         const capturedRetention = preparation && requirements?.kind === 'captured-retained-form-v1';
-        const refreshing = preparation && requirements?.kind === 'refreshable-planned-form-v1';
+        const initialRefresh = preparation && requirements?.kind === 'refreshable-initial-form-v1';
+        const refreshing = initialRefresh || (preparation && requirements?.kind === 'refreshable-planned-form-v1');
         const plannedRepair = refreshing || (preparation && requirements?.kind === 'repairable-planned-form-v1');
         if (!requirements || typeof requirements.digest !== 'string' || !/^[a-f0-9]{64}$/.test(requirements.digest)
             || (preparation ? requirements.kind !== 'prepared-form-v1' && !capturedRetention && !plannedRepair : !withState && requirements.kind !== undefined)
@@ -1407,12 +1415,14 @@ enum ComputerUseBrowserDOM {
             || !Array.isArray(requirements.inputOperationIDs) || requirements.inputOperationIDs.length < (preparation || withState ? 0 : 1) || requirements.inputOperationIDs.length > 64
             || new Set(requirements.inputOperationIDs).size !== requirements.inputOperationIDs.length) return false;
         if (capturedRetention && (!repairOrigins || checkingSelection)) return false;
-        if (plannedRepair && (!repairOrigins || !checkingSelection)) return false;
+        if (plannedRepair && ((!initialRefresh && !repairOrigins) || !checkingSelection)) return false;
         if (!Array.isArray(refreshedIDs) || refreshedIDs.length > 16 || new Set(refreshedIDs).size !== refreshedIDs.length
             || (refreshing ? !refreshedIDs.length : refreshedIDs.length)) return false;
         if (preparation && (requirements.inputLedgerID !== inputLedgerID || pendingChanges.size
             || operations.size !== requirements.inputOperationIDs.length || !Array.isArray(repairableIDs)
             || (repairableIDs.length && !repairOrigins))) return false;
+        if (initialRefresh && (repairOrigins || repairableIDs.length || requirements.inputOperationIDs.length
+            || !preparationHistoryIsEmpty(requirements.inputLedgerID))) return false;
         let bytes = 0, edited = 0, choices = 0;
         const ids = new Set();
         // Validate the entire bounded shape before reading any field values.
@@ -1456,7 +1466,7 @@ enum ComputerUseBrowserDOM {
         // No earlier criterion or invariant may be relabeled as a new field.
         if (refreshedIDs.some(id => typeof id !== 'string'
             || !requirements.fields.some(field => field.id === id && field.mustSubmit)
-            || repairOrigins.fields.some(field => field.id === id))) return false;
+            || (!initialRefresh && repairOrigins.fields.some(field => field.id === id)))) return false;
         if (!fieldPreservationCurrent(requirements.preservationID ?? null, true)) return false;
         return requirements.fields.every(field => {
           const binding = bindings.get(field.id), current = binding && snapshot(binding);
@@ -1730,6 +1740,15 @@ enum ComputerUseBrowserDOM {
               catch (_) { operation.failed = true; return reply('popup-uncertain'); }
             }
             if (command === 'inspectFormRequirements') {
+              if (args.requirements?.kind === 'empty-preparation-history-v1') {
+                const history = args.requirements;
+                if (Object.keys(history).sort().join(',') !== 'digest,inputLedgerID,kind,preservationID'
+                    || typeof history.digest !== 'string' || !/^[a-f0-9]{64}$/.test(history.digest)
+                    || !Array.isArray(args.repairableFieldIDs) || args.repairableFieldIDs.length
+                    || !preparationHistoryIsEmpty(history.inputLedgerID)
+                    || !fieldPreservationCurrent(history.preservationID, true)) return reply('stale');
+                return {...reply('empty-preparation-history'),changedFieldIDs:[]};
+              }
               const changes = [];
               if (!formRequirementsCurrent(args.requirements, args.repairableFieldIDs, changes)) return reply('stale');
               // Export only bounded changed IDs, never private field values.
@@ -2138,7 +2157,8 @@ struct ComputerUseBrowserPreparedFormRequirements: Sendable, CustomStringConvert
         let data = try JSONSerialization.data(withJSONObject: fields.map(\.arguments), options: [.sortedKeys])
         let physicalRepair = repairingCriteria && !input.isRetainOnly
         let version: String
-        if refreshingFields { kind = "refreshable-planned-form-v1"; version = "browser-planned-refresh-requirements-v1" }
+        if refreshingFields && input.previous == nil { kind = "refreshable-initial-form-v1"; version = "browser-initial-refresh-requirements-v1" }
+        else if refreshingFields { kind = "refreshable-planned-form-v1"; version = "browser-planned-refresh-requirements-v1" }
         else if physicalRepair { kind = "repairable-planned-form-v1"; version = "browser-planned-repair-requirements-v1" }
         else if input.wasPreparedInput { kind = "prepared-form-v1"; version = "browser-prepared-form-requirements-v2" }
         else { kind = "captured-retained-form-v1"; version = "browser-captured-retained-requirements-v1" }
@@ -2488,7 +2508,8 @@ final class ComputerUseBrowserTextTarget {
         let refreshing = repair?.refreshedTargetIDs.isEmpty == false
         let requirements = try preparedFormRequirements(from: original, repairingCriteria: physicalRepair, refreshingFields: refreshing)
         let version: String
-        if refreshing { version = "browser-prepared-field-revision-v6" }
+        if refreshing && original.previous == nil { version = "browser-prepared-field-revision-v7" }
+        else if refreshing { version = "browser-prepared-field-revision-v6" }
         else if physicalRepair { version = "browser-prepared-field-revision-v5" }
         else if !original.wasPreparedInput { version = "browser-prepared-field-revision-v4" }
         else if repair != nil { version = "browser-prepared-field-revision-v3" }
@@ -2501,12 +2522,16 @@ final class ComputerUseBrowserTextTarget {
                 "scopeDigest":scopeDigest,"revisionID":revisionID,"requirements":requirements.domArguments]
             if original.isRetainOnly { arguments["retainedPreparation"] = true }
             if let repair {
-                guard let prior = original.previous, repair.changedTargetIDs.isSubset(of: prior.repairableTargetIDs) else { throw ComputerUseBrowserError.pageChanged }
-                arguments["criteriaRequirements"] = try ComputerUseBrowserFormQueryRequirements(document: document,
-                    documentID: documentID, continuation: prior, targets: targets, adapterID: adapterID).domArguments
-                arguments["repairableFieldIDs"] = try repair.changedTargetIDs.sorted().map { id -> String in
-                    guard let nativeID = targets[id] else { throw ComputerUseBrowserError.pageChanged }
-                    return nativeID
+                if let prior = original.previous {
+                    guard repair.changedTargetIDs.isSubset(of: prior.repairableTargetIDs) else { throw ComputerUseBrowserError.pageChanged }
+                    arguments["criteriaRequirements"] = try ComputerUseBrowserFormQueryRequirements(document: document,
+                        documentID: documentID, continuation: prior, targets: targets, adapterID: adapterID).domArguments
+                    arguments["repairableFieldIDs"] = try repair.changedTargetIDs.sorted().map { id -> String in
+                        guard let nativeID = targets[id] else { throw ComputerUseBrowserError.pageChanged }
+                        return nativeID
+                    }
+                } else {
+                    guard refreshing, repair.changedTargetIDs.isEmpty else { throw ComputerUseBrowserError.pageChanged }
                 }
                 if refreshing {
                     guard repair.refreshedTargetIDs.isSubset(of: original.refreshableTargetIDs),
@@ -2572,35 +2597,57 @@ final class ComputerUseBrowserTextTarget {
     /// and newly captured edit preconditions. The two change sets stay separate;
     /// they request a fresh review and grant no input or query authority.
     func bindFieldsForCriteriaRepair(_ fields: [ComputerUseTextField], to evidence: ComputerUseBrowserPageEvidence,
-                                    review: ComputerUseBrowserEffectScopeReview, after previous: ComputerUseBrowserResearchFormContinuation,
+                                    review: ComputerUseBrowserEffectScopeReview, after previous: ComputerUseBrowserResearchFormContinuation?,
                                     retaining capture: ComputerUseBrowserDOMReadCapture? = nil) async throws
         -> (evidence: ComputerUseBrowserFormEvidence, changedTargetIDs: Set<String>, refreshedTargetIDs: Set<String>) {
         try Task.checkCancellation()
-        guard review.permitsCriteriaRepair(after: previous, on: evidence) else { throw ComputerUseBrowserError.pageChanged }
+        guard review.permitsPreparationRecovery(after: previous, on: evidence) else { throw ComputerUseBrowserError.pageChanged }
         return try await joiningCompletion {
-            let current = try await inspectChangedCriteria(page: evidence, after: previous)
+            let current = try await inspectPreparationHistory(page: evidence, after: previous)
             try Task.checkCancellation()
             let historical = Set(fields.compactMap { field -> String? in
                 let id = field.snapshot.targetID
-                guard let value = previous.finalValues[id], !value.utf8.elementsEqual(field.snapshot.value.utf8) else { return nil }
+                guard let value = previous?.finalValues[id], !value.utf8.elementsEqual(field.snapshot.value.utf8) else { return nil }
                 return id
             })
             let repairing = current.union(historical)
-            guard repairing.isSubset(of: previous.repairableTargetIDs) else { throw ComputerUseBrowserError.pageChanged }
+            guard repairing.isSubset(of: previous?.repairableTargetIDs ?? []) else { throw ComputerUseBrowserError.pageChanged }
             let refreshControls = Set(review.formScope?.fieldIntents.filter { $0.disposition == .edit }.map(\.controlID) ?? [])
                 .subtracting(review.readControls.map(\.controlID))
             let bound = try await bindFields(fields, to: evidence, retaining: capture,
-                ignoringCaret: review.permitsReadOnlyRetention(after: previous, on: evidence), repairing: repairing,
-                refreshing: refreshControls, excluding: Set(previous.finalValues.keys))
+                ignoringCaret: previous.map { review.permitsReadOnlyRetention(after: $0, on: evidence) } ?? false, repairing: repairing,
+                refreshing: refreshControls, excluding: Set(previous?.finalValues.keys.map { $0 } ?? []))
             try Task.checkCancellation()
             guard let scope = review.formScope, scope.fieldIntents.filter({ $0.disposition == .retain }).allSatisfy({ intent in
                 bound.evidence.fields.contains { field in field.control.id == intent.controlID
-                    && previous.verifiedTargetIDs.contains(field.editable.snapshot.targetID) }
+                    && previous?.verifiedTargetIDs.contains(field.editable.snapshot.targetID) == true }
             }) else { throw ComputerUseBrowserError.pageChanged }
-            let changed = try await inspectChangedCriteria(page: evidence, after: previous)
+            let changed = try await inspectPreparationHistory(page: evidence, after: previous)
             try Task.checkCancellation()
             return (bound.evidence, changed, bound.refreshedTargetIDs)
         }
+    }
+
+    /// Absence of a preceding continuation is not proof that the adapter is
+    /// unused. Inspect the exact native ledger before and after initial capture
+    /// reconciliation; never synthesize a preceding criterion or receipt.
+    private func inspectPreparationHistory(page evidence: ComputerUseBrowserPageEvidence,
+                                           after previous: ComputerUseBrowserResearchFormContinuation?) async throws -> Set<String> {
+        if let previous { return try await inspectChangedCriteria(page: evidence, after: previous) }
+        try validate()
+        guard let documentID, let inputLedgerID, evidence.document == document, evidence.documentID == documentID else {
+            throw ComputerUseBrowserError.pageChanged
+        }
+        let digest = ComputerUseTaskContract.digest(["browser-empty-preparation-history-v1",document.contextID,document.taskID,
+            String(document.generation),documentID,inputLedgerID,formPreservation?.digest ?? ""])
+        let requirements: [String: Any] = ["kind":"empty-preparation-history-v1","digest":digest,
+            "inputLedgerID":inputLedgerID,"preservationID":formPreservation.map { $0.id as Any } ?? NSNull()]
+        let reply = try await browser.callDOM(.inspectFormRequirements, arguments: ["documentID":documentID,
+            "snapshotID":evidence.page.id,"requirements":requirements,"repairableFieldIDs":[String]()], document: document)
+        try validate()
+        guard reply.status == "empty-preparation-history", reply.documentID == documentID, reply.inputLedgerID == inputLedgerID,
+              reply.fields == nil, reply.page == nil, reply.changedFieldIDs == [] else { throw ComputerUseBrowserError.pageChanged }
+        return []
     }
 
     private func bindFields(_ fields: [ComputerUseTextField], to evidence: ComputerUseBrowserPageEvidence,
