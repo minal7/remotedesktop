@@ -32,6 +32,14 @@ final class ComputerUseBrowserFormPlannerTests: XCTestCase {
     }
 
     func testExplicitDateReplacementRequiresFreshFormCriteriaBeforeQuerying() async throws {
+        try await verifyExplicitDateReplacementRequiresFreshFormCriteria(splitOriginal: false)
+    }
+
+    func testRepartitionedOriginalDateStillRequiresFreshFormCriteriaAfterReplacement() async throws {
+        try await verifyExplicitDateReplacementRequiresFreshFormCriteria(splitOriginal: true)
+    }
+
+    private func verifyExplicitDateReplacementRequiresFreshFormCriteria(splitOriginal: Bool) async throws {
         var rows = [row("Find flights. ", role: "outcome", field: "category"), row("2026-10-16. ", field: "date"), row("Leave Reference unchanged.")]
         let initial = try proposal(rows: rows), goals = DateReplacementGoalFixture(value: initial)
         var edits = 0, queryPreparations = 0
@@ -56,6 +64,9 @@ final class ComputerUseBrowserFormPlannerTests: XCTestCase {
         let updated = try owner.answerQuestion(questionID: question.id, answerTaskID: "new-date", answer: "2026-10-17",
             controllerID: "phone", controllerSessionID: "session")
         var answer = row("2026-10-17", field: "date"); answer["turn"] = 1; rows.append(answer)
+        if splitOriginal { rows = [rows[0], row("2026-", field: "location"), row("10-16. ", field: "location"), rows[2], answer] }
+        let preservationIndex = splitOriginal ? 3 : 2, replacementIndex = splitOriginal ? 4 : 3
+        let retiredIndices = splitOriginal ? [1, 2] : [1]
         let current = try decodeGoal(rows, input: updated); goals.value = current
         _ = try await owner.interpretGoal()
         let oldPage = try await owner.observeFormResultPage(after: oldReceipt)
@@ -66,22 +77,22 @@ final class ComputerUseBrowserFormPlannerTests: XCTestCase {
         catch { XCTAssertEqual(error as? ComputerUseBrowserResearchFormError, .inputChanged) }
         XCTAssertEqual(queryPreparations, 0); XCTAssertEqual(edits, 1)
         XCTAssertEqual(owner.confirmedFormHistory, [oldReceipt])
-        let action = try await owner.planNextAction(using: IntroducedDateActionFixture(indices: [3], preservationIndex: 2))
+        let action = try await owner.planNextAction(using: IntroducedDateActionFixture(indices: [replacementIndex], preservationIndex: preservationIndex))
         XCTAssertTrue(action.input.queryControlIDs.isEmpty)
-        XCTAssertFalse(action.input.readableRequirementIndices.contains(1))
-        XCTAssertFalse(action.input.effectFieldRequirementIndices.contains(1))
+        XCTAssertTrue(Set(retiredIndices).isDisjoint(with: action.input.readableRequirementIndices))
+        XCTAssertTrue(Set(retiredIndices).isDisjoint(with: action.input.effectFieldRequirementIndices))
         let actionContext = try object(Data(action.input.contextJSON.utf8))
         XCTAssertEqual(actionContext["version"] as? Int, 30)
-        XCTAssertEqual(actionContext["retired_task_purpose_requirements"] as? [Int], [1])
+        XCTAssertEqual(actionContext["retired_task_purpose_requirements"] as? [Int], retiredIndices)
         let prepared = try await owner.prepareFormInput(for: action)
         XCTAssertEqual(prepared.requiredRepairFieldAliases, ["field1"])
         XCTAssertEqual(prepared.requiredPreservation.count, 1)
         XCTAssertEqual(prepared.normalizations.map(\.value), ["2026-10-17"])
         XCTAssertEqual(try object(Data(prepared.contextJSON.utf8))["version"] as? Int, 20)
         XCTAssertThrowsError(try ComputerUseBrowserFormProposal.decode(content: plan([["field":"field1", "normalized":"value2"]],
-            preserve: [["field":"field2", "requirement":2]]), input: prepared))
-        let newPlan = try ComputerUseBrowserFormProposal.decode(content: plan([["field":"field1", "normalized":"value4"]],
-            preserve: [["field":"field2", "requirement":2]]), input: prepared)
+            preserve: [["field":"field2", "requirement":preservationIndex]]), input: prepared))
+        let newPlan = try ComputerUseBrowserFormProposal.decode(content: plan([["field":"field1", "normalized":"value\(replacementIndex + 1)"]],
+            preserve: [["field":"field2", "requirement":preservationIndex]]), input: prepared)
         let newReceipt = try await owner.executeForm(newPlan, input: prepared)
         XCTAssertEqual(edits, 2); XCTAssertEqual(owner.confirmedFormHistory, [oldReceipt, newReceipt])
         let page = try await owner.observeFormResultPage(after: newReceipt)

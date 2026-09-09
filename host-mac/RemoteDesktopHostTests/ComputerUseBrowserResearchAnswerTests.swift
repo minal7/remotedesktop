@@ -5,6 +5,14 @@ import XCTest
 @MainActor
 final class ComputerUseBrowserResearchAnswerTests: XCTestCase {
     func testDriverRequiresExplicitDateReplacementThenChecksTheNewDateAndOriginalBudget() async throws {
+        try await verifyDateReplacementAnswerEligibility(splitOriginal: false)
+    }
+
+    func testDriverKeepsSplitHistoricalDateCorrectionsInAnswerEligibility() async throws {
+        try await verifyDateReplacementAnswerEligibility(splitOriginal: true)
+    }
+
+    private func verifyDateReplacementAnswerEligibility(splitOriginal: Bool) async throws {
         for (resultDate, price) in [("2026-10-17", "USD 40"), ("2026-10-16", "USD 40"), ("2026-10-17", "USD 60")] {
             let fixture = try await ResearchAnswerFixture.make(price: price, extra: ("2026-10-16. ", "condition", "date"), resultDate: resultDate)
             defer { fixture.source.close() }
@@ -24,9 +32,14 @@ final class ComputerUseBrowserResearchAnswerTests: XCTestCase {
             _ = try owner.answerQuestion(questionID: question.id, answerTaskID: "conflicting-date", answer: "2026-10-17",
                 controllerID: "phone", controllerSessionID: "session")
             rows.append(["turn":1, "source":"2026-10-17", "role":"condition", "field":"navigationSource", "relation":"unspecified", "values":[String]()])
+            if splitOriginal {
+                rows = Array(rows.prefix(2)) + ["2026-", "10-16. "].map {
+                    ["turn":0, "source":$0, "role":"condition", "field":"location", "relation":"unspecified", "values":[String]()] as [String: Any]
+                } + Array(rows.suffix(2))
+            }
             let conflictingRows = rows
             fixture.source.goal.select = { _ in try ResearchAnswerFixture.json([
-                "disposition":"clarification", "requirements":conflictingRows, "question":["topic":"replaceDate", "requirements":[4]]]) }
+                "disposition":"clarification", "requirements":conflictingRows, "question":["topic":"replaceDate", "requirements":[conflictingRows.count - 1]]]) }
             let next = try await fixture.source.driver.continueBrowserResearch(taskID: "conflicting-date", research: owner, tools: fixture.source.tools, progress: { _ in })
             guard case .browserClarificationRequired(let replacement) = next else { return XCTFail("An ordinary conflict must not silently replace the date") }
             XCTAssertEqual(replacement.topic, .replaceDate)
@@ -34,7 +47,7 @@ final class ComputerUseBrowserResearchAnswerTests: XCTestCase {
             let permission = try owner.issueQuestion(topic: replacement.topic, requirementIDs: replacement.requirementIDs,
                 controllerID: "phone", controllerSessionID: "session")
             XCTAssertTrue(permission.text.contains("replace the selected date requirement"))
-            XCTAssertEqual(permission.scope.map(\.source), ["2026-10-16. "])
+            XCTAssertEqual(permission.scope.map(\.source), splitOriginal ? ["2026-", "10-16. "] : ["2026-10-16. "])
             let updated = try owner.answerQuestion(questionID: permission.id, answerTaskID: "explicit-replacement", answer: "2026-10-17",
                 controllerID: "phone", controllerSessionID: "session")
             rows.append(["turn":2, "source":"2026-10-17", "role":"condition", "field":"date", "relation":"unspecified", "values":[String]()])
@@ -52,8 +65,8 @@ final class ComputerUseBrowserResearchAnswerTests: XCTestCase {
             XCTAssertEqual(assessment["version"] as? Int, 13)
             let candidates = try XCTUnwrap(assessment["candidates"] as? [[String: Any]])
             let statuses = try XCTUnwrap(candidates.first?["requirements"] as? [String])
-            XCTAssertEqual(statuses[2], "dateRequirementSuperseded"); XCTAssertEqual(statuses[4], "dateRequirementSuperseded")
-            XCTAssertEqual(statuses[5], resultDate == "2026-10-17" ? "quotedValueMatches" : "quotedValueConflicts")
+            for index in splitOriginal ? [2, 3, 5] : [2, 4] { XCTAssertEqual(statuses[index], "dateRequirementSuperseded") }
+            XCTAssertEqual(statuses[finalRows.count - 1], resultDate == "2026-10-17" ? "quotedValueMatches" : "quotedValueConflicts")
             XCTAssertEqual(statuses[1], price == "USD 40" ? "quotedValueMatches" : "quotedValueConflicts")
             if !qualifies { XCTAssertThrowsError(try ComputerUseBrowserLinkProposal.decode(content: #"{"answer":[0]}"#, input: decision)) }
             XCTAssertTrue(updated.continues(original)); XCTAssertEqual(owner.input, updated)

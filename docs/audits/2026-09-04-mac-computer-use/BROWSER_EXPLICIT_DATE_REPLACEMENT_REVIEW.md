@@ -2,6 +2,8 @@
 
 Source repair; execution pending. This follows the [introduced date origin repair](BROWSER_INTRODUCED_DATE_ORIGIN_REVIEW.md). No build, typecheck, assertion, app, browser, model or account-login execution occurred.
 
+The subsequent [historical date grouping repair](BROWSER_HISTORICAL_DATE_GROUP_REVIEW.md) adds exact splitting/rejoining of previously recognized original date clauses. The findings and counts below describe this earlier checkpoint.
+
 ## First-principles contract
 
 Confirming a value, replacing a requirement and proving a browser effect are separate events. A later literal date does not, by itself, authorize erasing an earlier date. Conversely, retaining every old date as simultaneously active makes an explicit correction impossible. Deleting old text would also destroy the explanation for earlier searches, field values and receipts.

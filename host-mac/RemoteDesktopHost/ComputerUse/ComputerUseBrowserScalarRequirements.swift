@@ -325,6 +325,7 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
     let proposal: ComputerUseBrowserGoalProposal
     let entries: [Entry]
     private let dateOrigins: [String: [String]]
+    private let rootDateGroups: [RootDateGroup]
     func hasDateOrigin(_ requirement: ComputerUseBrowserGoalProposal.Requirement) -> Bool { dateOrigins[requirement.id] != nil }
     var dateReplacementContexts: [DateReplacementContext] {
         let indices = Dictionary(uniqueKeysWithValues: proposal.requirements.enumerated().map { ($0.element.id, $0.offset) })
@@ -386,6 +387,11 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
     }
     var dateQuestionRequirementIDs: [String]? {
         guard let requirement = proposal.requirements.first(where: needsDateDisambiguation) else { return nil }
+        if let group = rootDateGroups.first(where: { $0.requirementIDs.contains(requirement.id) }) {
+            let selected = proposal.requirements.filter { group.requirementIDs.contains($0.id) }
+            guard selected.count <= 8, permitsDateQuestionScope(selected) else { return nil }
+            return selected.map(\.id)
+        }
         if requirement.sourceTurnIndex > 0,
            proposal.input.clarifications[requirement.sourceTurnIndex - 1].topic.isDateTopic {
             let selected = proposal.requirements.filter { $0.sourceTurnIndex == requirement.sourceTurnIndex }
@@ -399,9 +405,11 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
     /// merely because its native origin survives a model relabeling.
     func permitsDateQuestion(_ requirement: ComputerUseBrowserGoalProposal.Requirement) -> Bool {
         if needsDateDisambiguation(requirement) { return true }
-        guard let index = proposal.requirements.firstIndex(of: requirement), requirement.sourceTurnIndex > 0,
-              proposal.input.clarifications.indices.contains(requirement.sourceTurnIndex - 1),
-              proposal.input.clarifications[requirement.sourceTurnIndex - 1].topic.isDateTopic,
+        let introduced = requirement.sourceTurnIndex > 0
+            && proposal.input.clarifications.indices.contains(requirement.sourceTurnIndex - 1)
+            && proposal.input.clarifications[requirement.sourceTurnIndex - 1].topic.isDateTopic
+        guard let index = proposal.requirements.firstIndex(of: requirement),
+              introduced || rootDateGroups.contains(where: { $0.requirementIDs.contains(requirement.id) }),
               nativeScalarSourceIDs.contains(requirement.id) else { return false }
         switch entries[index].resolution {
         case .bound(let condition): if case .day = condition.predicate { return true }
@@ -412,6 +420,10 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
     }
 
     func permitsDateQuestionScope(_ selected: [ComputerUseBrowserGoalProposal.Requirement]) -> Bool {
+        let selectedIDs = Set(selected.map(\.id))
+        guard rootDateGroups.allSatisfy({ group in
+            selectedIDs.isDisjoint(with: group.requirementIDs) || Set(group.requirementIDs).isSubset(of: selectedIDs)
+        }) else { return false }
         guard !selected.contains(where: { requirement in
             guard let index = proposal.requirements.firstIndex(of: requirement) else { return true }
             if case .superseded = entries[index].resolution { return true }
@@ -468,7 +480,9 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
         guard let index = proposal.requirements.firstIndex(of: requirement),
               let ownSource = proposal.source(of: requirement) else { return false }
         let source: String
-        if requirement.sourceTurnIndex > 0, nativeScalarSourceIDs.contains(requirement.id),
+        if let group = rootDateGroups.first(where: { $0.requirementIDs.contains(requirement.id) }) {
+            source = group.source
+        } else if requirement.sourceTurnIndex > 0, nativeScalarSourceIDs.contains(requirement.id),
            proposal.input.clarifications[requirement.sourceTurnIndex - 1].topic.isDateTopic {
             source = proposal.input.userTurns[requirement.sourceTurnIndex]
         } else { source = ownSource }
@@ -502,9 +516,13 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
         }
         let grouping = Self.partyGrouping(proposal)
         partyGroups = grouping.groups
+        let dateGroups = Self.historicalRootDateGroups(proposal)
+        rootDateGroups = dateGroups
         let grouped = Self.applyingPartyGroups(grouping, proposal: proposal, entries: baseEntries)
-        let retained = Self.reconcilingPartyGroups(grouping.groups, entries: Self.retainingHistoricalScalars(proposal,
-            protectedHistory: Set(grouping.groups.flatMap(\.historicalIDs)), entries: grouped))
+        let dateGrouped = Self.applyingRootDateGroups(dateGroups, proposal: proposal, entries: grouped)
+        let retained = Self.reconcilingRootDateGroups(dateGroups, entries: Self.reconcilingPartyGroups(grouping.groups,
+            entries: Self.retainingHistoricalScalars(proposal,
+                protectedHistory: Set(grouping.groups.flatMap(\.historicalIDs) + dateGroups.flatMap(\.historicalIDs)), entries: dateGrouped)))
         var nativeSources = Set(retained.compactMap { entry -> String? in
             switch entry.resolution {
             case .bound(let condition) where condition.hasHistoricalSource: return entry.requirementID
@@ -514,6 +532,7 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
         })
         nativeSources.formUnion(grouping.groups.flatMap(\.requirementIDs))
         nativeSources.formUnion(grouping.ambiguousIDs)
+        nativeSources.formUnion(dateGroups.flatMap(\.requirementIDs))
         if proposal.disposition == .research {
             for (index, answer) in proposal.input.clarifications.enumerated() {
                 let literal: Bool
@@ -528,10 +547,10 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
             }
         }
         nativeScalarSourceIDs = nativeSources
-        let dates = Self.applyingDateClarifications(proposal, to: Self.applyingPriceClarifications(proposal, to: retained))
+        let dates = Self.applyingDateClarifications(proposal, rootGroups: dateGroups, to: Self.applyingPriceClarifications(proposal, to: retained))
         dateOrigins = dates.origins
-        entries = Self.reconcilingClarificationTargets(Self.reconcilingPartyGroups(grouping.groups,
-            entries: Self.applyingQuantityClarifications(proposal, to: dates.entries)))
+        entries = Self.reconcilingClarificationTargets(Self.reconcilingRootDateGroups(dateGroups,
+            entries: Self.reconcilingPartyGroups(grouping.groups, entries: Self.applyingQuantityClarifications(proposal, to: dates.entries))))
     }
 
     private static func baseEntry(_ requirement: ComputerUseBrowserGoalProposal.Requirement, input: ComputerUseBrowserGoalInput) -> Entry {
@@ -563,8 +582,8 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
     }
 
     /// An answer does not authorize dropping a parsed constraint or a known
-    /// weekday ambiguity. Retain only an exact native clause occurrence;
-    /// merged/split meanings need complete obligation reconciliation.
+    /// weekday ambiguity. Complete native date/party groups are reconciled
+    /// separately; other merged/split meanings retain an open obligation.
     private static func retainingHistoricalScalars(_ proposal: ComputerUseBrowserGoalProposal, protectedHistory: Set<String>, entries original: [Entry]) -> [Entry] {
         guard proposal.disposition == .research else { return original }
         var entries = original
@@ -619,6 +638,101 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
     }
 
     private struct ScalarSpan: Hashable, Sendable { let turn: Int; let start: Int; let end: Int }
+    private struct RootDateGroup: Sendable {
+        let span: ScalarSpan
+        let source: String
+        let range: DayRange?
+        let requirementIDs: [String]
+        let historicalIDs: [String]
+    }
+    /// Reassemble only a previously recognized whole date occurrence. The
+    /// current model may divide its bytes, but cannot enlarge its meaning,
+    /// omit its modifier, or make two separate occurrences one origin.
+    private static func historicalRootDateGroups(_ proposal: ComputerUseBrowserGoalProposal) -> [RootDateGroup] {
+        guard proposal.disposition == .research else { return [] }
+        struct Origin {
+            let span: ScalarSpan
+            let source: String
+            let range: DayRange?
+            var ids: [String]
+            var ambiguous = false
+        }
+        var origins: [Origin] = []
+        for answer in proposal.input.clarifications {
+            for historical in answer.priorRequirements where historical.sourceTurnIndex == 0 {
+                guard let source = proposal.input.source(of: historical), let span = scalarSpan(historical, input: proposal.input) else { continue }
+                let resolution = baseEntry(historical, input: proposal.input).resolution
+                let range: DayRange?
+                if case .bound(let condition) = resolution, case .day(let dayRange) = condition.predicate { range = dayRange }
+                else if resolution == .unresolved(.ambiguousDate), [.unspecified, .equal].contains(historical.relation),
+                        weekdayClause(conditionSource(source)) { range = nil }
+                else { continue }
+                if let index = origins.firstIndex(where: { $0.span.start <= span.start && span.end <= $0.span.end }) {
+                    // A later date-labelled endpoint/weekday fragment is part
+                    // of the earlier complete origin, not a new constraint.
+                    if !origins[index].ids.contains(historical.id) { origins[index].ids.append(historical.id) }
+                    continue
+                }
+                let overlap = origins.indices.filter { origins[$0].span.start < span.end && span.start < origins[$0].span.end }
+                for index in overlap { origins[index].ambiguous = true }
+                origins.append(.init(span: span, source: conditionSource(source), range: range,
+                    ids: [historical.id], ambiguous: !overlap.isEmpty))
+            }
+        }
+        return origins.compactMap { origin in
+            guard !origin.ambiguous else { return nil }
+            let rows = proposal.requirements.filter {
+                $0.sourceTurnIndex == 0 && $0.sourceByteOffset < origin.span.end
+                    && origin.span.start < $0.sourceByteOffset + $0.sourceByteCount
+            }
+            guard let first = rows.first else { return nil }
+            var combined = "", cursor = first.sourceByteOffset
+            for row in rows {
+                guard row.sourceByteOffset == cursor, let part = proposal.source(of: row) else { return nil }
+                combined += part; cursor += row.sourceByteCount
+            }
+            let core = conditionSource(combined)
+            guard core == origin.source, let coreRange = combined.range(of: core, options: .literal),
+                  first.sourceByteOffset + combined[..<coreRange.lowerBound].utf8.count == origin.span.start else { return nil }
+            return .init(span: origin.span, source: core, range: origin.range, requirementIDs: rows.map(\.id), historicalIDs: origin.ids)
+        }
+    }
+    private static func applyingRootDateGroups(_ groups: [RootDateGroup], proposal: ComputerUseBrowserGoalProposal, entries original: [Entry]) -> [Entry] {
+        var entries = original
+        for group in groups {
+            for index in entries.indices where group.requirementIDs.contains(entries[index].requirementID) {
+                let resolution: Resolution = group.range.map { range in
+                    .bound(.init(inputDigest: proposal.input.digest, requirementID: entries[index].requirementID,
+                        predicate: .day(range), historicalRequirementIDs: group.historicalIDs, sourceRequirementIDs: group.requirementIDs))
+                } ?? .historicalDateAmbiguity(group.historicalIDs)
+                entries[index] = .init(requirementID: entries[index].requirementID, resolution: resolution)
+            }
+        }
+        return entries
+    }
+    private static func reconcilingRootDateGroups(_ groups: [RootDateGroup], entries original: [Entry]) -> [Entry] {
+        var entries = original
+        for group in groups {
+            let indices = entries.indices.filter { group.requirementIDs.contains(entries[$0].requirementID) }
+            let signatures = indices.compactMap { index -> [String]? in
+                switch entries[index].resolution {
+                case .bound(let condition):
+                    guard case .day = condition.predicate, condition.sourceRequirementIDs == group.requirementIDs else { return nil }
+                    return ["date"] + condition.predicate.identity
+                case .historicalDateAmbiguity: return ["weekday"]
+                case .superseded(let record): return ["superseded"] + record.answerTurns.map(String.init) + record.replacementRequirementIDs
+                default: return nil
+                }
+            }
+            if signatures.count == indices.count, Set(signatures).count == 1 { continue }
+            let reasons = indices.compactMap { index -> UnresolvedReason? in
+                if case .unresolved(let reason) = entries[index].resolution { return reason }; return nil
+            }
+            let reason: UnresolvedReason = reasons.contains(.historicalScalarScope) ? .historicalScalarScope : (reasons.first ?? .contradictoryClarification)
+            for index in indices { entries[index] = .init(requirementID: entries[index].requirementID, resolution: .unresolved(reason)) }
+        }
+        return entries
+    }
     private struct PartyGroup: Sendable {
         let span: ScalarSpan
         let party: PartyComposition
@@ -814,11 +928,10 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
         return entries
     }
 
-    /// A date answer can resolve a selected weekday occurrence or confirm an
-    /// already concrete date/range. It cannot replace a different concrete
-    /// value, choose between several dates in one broad scope, or discard a
-    /// relative-week modifier whose meaning has not been compiled.
-    private static func applyingDateClarifications(_ proposal: ComputerUseBrowserGoalProposal, to original: [Entry]) -> (entries: [Entry], origins: [String: [String]]) {
+    /// Ordinary date answers resolve a selected weekday occurrence or confirm
+    /// a concrete date/range. Only a separate explicit replacement answer may
+    /// change that origin; broad scopes and partial units remain unresolved.
+    private static func applyingDateClarifications(_ proposal: ComputerUseBrowserGoalProposal, rootGroups: [RootDateGroup], to original: [Entry]) -> (entries: [Entry], origins: [String: [String]]) {
         guard proposal.disposition == .research else { return (original, [:]) }
         var entries = original
         let answerTurns = Set(proposal.input.clarifications.enumerated().compactMap { $0.element.topic.isDateTopic ? $0.offset + 1 : nil })
@@ -843,7 +956,11 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
                     && proposal.source(of: requirement).map { Self.weekdayClause(Self.conditionSource($0)) } == true
             default: known = false
             }
-            if known { originGroups[index] = [index] }
+            if known {
+                if let group = rootGroups.first(where: { $0.requirementIDs.contains(original[index].requirementID) }) {
+                    originGroups[index] = original.indices.filter { group.requirementIDs.contains(original[$0].requirementID) }
+                } else { originGroups[index] = [index] }
+            }
         }
         for (index, answer) in proposal.input.clarifications.enumerated() where answer.topic.isDateTopic {
             let turn = index + 1
@@ -852,9 +969,22 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
             var onlyMissingDetailScopes = true, hasMissingDetailScope = false
             for scope in answer.scope {
                 guard scope.turn < turn else { invalidScope = true; continue }
-                let matching = dateIndices.filter { Self.contains(scope, requirement: proposal.requirements[$0], proposal: proposal) }
+                var matching = dateIndices.filter { Self.contains(scope, requirement: proposal.requirements[$0], proposal: proposal) }
+                // A live question may predate either splitting or rejoining
+                // these rows. Reconcile its complete byte coverage, including
+                // internal separators, against the same historical origin.
+                for group in rootGroups {
+                    guard scope.turn == group.span.turn, scope.sourceByteOffset < group.span.end,
+                          group.span.start < scope.sourceByteOffset + scope.source.utf8.count,
+                          Self.coversDateSpan(answer.scope.filter { $0.turn == group.span.turn }.map {
+                              $0.sourceByteOffset..<($0.sourceByteOffset + $0.source.utf8.count)
+                          }, span: group.span, input: proposal.input) else { continue }
+                    matching = Array(Set(matching).union(original.indices.filter { group.requirementIDs.contains(original[$0].requirementID) })).sorted()
+                }
                 possibleTargets.formUnion(matching)
-                if matching.count == 1 { targets.insert(matching[0]); onlyMissingDetailScopes = false }
+                let matchingGroups = matching.compactMap { originGroups[$0] }
+                let wholeGroup = matchingGroups.count == matching.count && Set(matchingGroups).count == 1 && matchingGroups.first == matching
+                if matching.count == 1 || wholeGroup { targets.formUnion(matching); onlyMissingDetailScopes = false }
                 else if matching.isEmpty, scope.turn > 0, let previous = previousTargets[scope.turn],
                         Self.coversDateAnswer(answer.scope.filter { $0.turn == scope.turn }.map {
                             $0.sourceByteOffset..<($0.sourceByteOffset + $0.source.utf8.count)
@@ -874,6 +1004,9 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
                 }
             }
             guard !invalidScope, !(hasMissingDetailScope && !targets.isEmpty) else { unresolved(.clarificationScope); continue }
+            guard targets.allSatisfy({ originGroups[$0].map { Set($0).isSubset(of: targets) } ?? true }) else {
+                unresolved(.clarificationScope); continue
+            }
             let range = Self.answeredDate(answer.answer, input: proposal.input)
             guard Self.isNativeDateAnswer(answer.answer, input: proposal.input) else { unresolved(.ambiguousClarification); continue }
             let ordered = targets.sorted()
@@ -964,10 +1097,11 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
             let compatible = ordered.allSatisfy { target in
                 let requirement = proposal.requirements[target]
                 guard let ownSource = proposal.source(of: requirement) else { return false }
-                let source = originTurns[target].map { proposal.input.userTurns[$0] } ?? ownSource
+                let rootGroup = rootGroups.first(where: { $0.requirementIDs.contains(requirement.id) })
+                let source = originTurns[target].map { proposal.input.userTurns[$0] } ?? rootGroup?.source ?? ownSource
                 // Repartitioning a known date clause must not remove its
                 // modifier/comparator and then resolve the shortened clause.
-                for scope in answer.scope where originTurns[target] == nil && Self.contains(scope, requirement: requirement, proposal: proposal) {
+                for scope in answer.scope where originTurns[target] == nil && rootGroup == nil && Self.contains(scope, requirement: requirement, proposal: proposal) {
                     if let prior = answer.priorRequirements.first(where: { $0.id == scope.requirementID }),
                        prior.field == .date, prior.role == .condition,
                        Self.conditionSource(scope.source) != Self.conditionSource(source) { return false }
@@ -1213,7 +1347,11 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
         guard input.userTurns.indices.contains(turn),
               isNativeDateAnswer(input.userTurns[turn], input: input),
               let span = answerSpan(input.userTurns[turn], turn: turn) else { return false }
-        let bytes = Data(input.userTurns[turn].utf8)
+        return coversDateSpan(ranges, span: span, input: input)
+    }
+    private static func coversDateSpan(_ ranges: [Range<Int>], span: ScalarSpan, input: ComputerUseBrowserGoalInput) -> Bool {
+        guard input.userTurns.indices.contains(span.turn) else { return false }
+        let bytes = Data(input.userTurns[span.turn].utf8)
         var cursor = span.start
         for range in ranges.sorted(by: { $0.lowerBound < $1.lowerBound }) {
             guard range.lowerBound >= 0, range.upperBound <= bytes.count else { return false }
