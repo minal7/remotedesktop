@@ -534,6 +534,7 @@ struct ComputerUseBrowserDOMReply: Decodable {
     let formStateProof: ComputerUseBrowserFormStateProof.Reply?
     let formBindings: [FormBinding]?
     let changedFieldIDs: [String]?
+    let uncapturedRevisionID: String?
     let inputLedgerID: String?
     let formPreservation: ComputerUseBrowserFormPreservation.Reply?
     let popupBinding: ComputerUseBrowserPopupBinding?
@@ -959,9 +960,18 @@ enum ComputerUseBrowserDOM {
             || typeof args.scopeDigest !== 'string' || !/^[a-f0-9]{64}$/.test(args.scopeDigest)
             || !Array.isArray(scope.selected)
             || (repairing ? (!retainedPreparation && !plannedRepair) || (retainedPreparation && plannedRepair)
-              || !repairOrigins || !Array.isArray(repairableIDs) || (!repairableIDs.length && !refreshing) : args.repairableFieldIDs !== undefined)
-            || !formRequirementsCurrent(requirements, repairableIDs, null, true, !retainedPreparation, repairOrigins, refreshedIDs)
-            || refreshedIDs.some(id => !scope.selected.includes(bindings.get(id)?.element))) return reply('stale');
+              || !repairOrigins || !Array.isArray(repairableIDs) || (!repairableIDs.length && !refreshing) : args.repairableFieldIDs !== undefined)) return reply('stale');
+        const existing = preparedFieldRevisions.get(args.revisionID);
+        if (!formRequirementsCurrent(requirements, repairableIDs, null, true, !retainedPreparation, repairOrigins, refreshedIDs)
+            || refreshedIDs.some(id => !scope.selected.includes(bindings.get(id)?.element))) {
+          // This path has inspected only the earlier catalogue. Seal this
+          // attempt before reporting that no revised catalogue was captured.
+          // A completed, uncertain or previously rejected ID cannot acquire
+          // an absence result, even if its current preconditions now fail.
+          if (existing || preparedFieldRevisions.size >= 32) return reply('stale');
+          preparedFieldRevisions.set(args.revisionID, {shape:null,result:reply('stale')});
+          return {...reply('revision-not-captured'),uncapturedRevisionID:args.revisionID};
+        }
         const shape = JSON.stringify([args.formID,args.scopeDigest,args.preservedControlIDs,args.selectedControlIDs,
           requirements.digest,requirements.inputLedgerID,requirements.preservationID ?? null,requirements.inputOperationIDs,
           requirements.fields.map(field => [field.id,field.value,field.mustSubmit,field.label,field.selectionStart,field.selectionEnd,field.choices])]
@@ -969,7 +979,6 @@ enum ComputerUseBrowserDOM {
           .concat(repairing ? [refreshing ? 'planned-preparation-refresh-v1' : (plannedRepair ? 'planned-preparation-repair-v1' : 'retained-preparation-repair-v1'),repairOrigins.digest,repairableIDs] : [])
           .concat(initialRefresh ? ['initial-preparation-refresh-v1'] : [])
           .concat(refreshing ? [refreshedIDs] : []));
-        const existing = preparedFieldRevisions.get(args.revisionID);
         if (existing) {
           if (existing.shape !== shape) return reply('stale');
           if (existing.result.status !== 'ok') return existing.result;
@@ -2560,6 +2569,12 @@ final class ComputerUseBrowserTextTarget {
             await browser.joinDOMCompletion(document: document)
             throw error
         }
+    }
+
+    /// A historical native rejection, never current-page or input proof.
+    func revisionWasNotCaptured(_ capture: ComputerUseBrowserDOMReadCapture) -> Bool {
+        guard let documentID, let inputLedgerID else { return false }
+        return capture.revisionWasNotCaptured(document: document, documentID: documentID, inputLedgerID: inputLedgerID)
     }
 
     /// Bind a previously discovered form to the exact observed page. This

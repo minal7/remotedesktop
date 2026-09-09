@@ -388,9 +388,15 @@ final class ComputerUseBrowserResearchFormPreparation {
         fieldsCapture.didStart || bindingCapture.didStart || preservationCapture.didStart
             || fields != nil || evidence != nil || preservationFinished || preparedInput != nil
     }
+    private var hasUncapturedRevision: Bool {
+        originalPreparation != nil && baselineOrigin != nil && target.revisionWasNotCaptured(fieldsCapture)
+            && !bindingCapture.didStart && !preservationCapture.didStart
+            && fields == nil && evidence == nil && !preservationFinished && preparedInput == nil
+    }
+    private var canRecoverEarlierCapture: Bool { !hasStartedCapture || hasUncapturedRevision }
     var needsCriteriaReview: Bool { criteriaRepair != nil || inheritedCriteriaOrigin != nil }
     var permitsCriteriaRecovery: Bool {
-        permitsOwnCriteriaRecovery || (!hasStartedCapture && originalPreparation?.permitsCriteriaRecovery == true)
+        permitsOwnCriteriaRecovery || (canRecoverEarlierCapture && originalPreparation?.permitsCriteriaRecovery == true)
     }
     var hasPreservationObligations: Bool {
         originalPreparation != nil || previous != nil || !reviewContext.preservedSources.isEmpty || !reviewContext.readSources.isEmpty
@@ -464,9 +470,10 @@ final class ComputerUseBrowserResearchFormPreparation {
     /// input or preceding stage, then request fresh review of changed fields.
     func recoverCriteriaForReview(browser: ComputerUseOwnedBrowser, checkCurrent: () throws -> Void) async throws -> Bool {
         guard criteriaRepairCount < 8, permitsCriteriaRecovery else { return false }
-        // An empty physical revision can inherit its earlier capture. Once
-        // its own callback starts, recovery must preserve that larger capture.
-        if !permitsOwnCriteriaRecovery || (!isReadOnlyRetention && !hasStartedCapture && originalPreparation?.permitsCriteriaRecovery == true) {
+        // Keep every started callback. An explicit native pre-capture
+        // rejection can inherit the earlier capture without retrying its ID.
+        if !permitsOwnCriteriaRecovery || ((!isReadOnlyRetention || hasUncapturedRevision)
+            && canRecoverEarlierCapture && originalPreparation?.permitsCriteriaRecovery == true) {
             return try await recoverInheritedCriteria(browser: browser, checkCurrent: checkCurrent)
         }
         func check() throws {
@@ -517,7 +524,7 @@ final class ComputerUseBrowserResearchFormPreparation {
         }
         do {
             try check()
-            guard inheritedCriteriaOrigin == nil else { throw ComputerUseBrowserResearchFormError.inputChanged }
+            guard inheritedCriteriaOrigin == nil, !hasUncapturedRevision else { throw ComputerUseBrowserResearchFormError.inputChanged }
             if let preparedInput {
                 try await ComputerUseBrowserResearchFormStage.validateOriginalInput(preparedInput, target: target,
                     browser: browser, checkCurrent: check)
@@ -539,13 +546,13 @@ final class ComputerUseBrowserResearchFormPreparation {
         }
     }
 
-    /// An unstarted revision owns reviewed purposes but no new private field
-    /// baseline. Keep that frame while recovering its earlier retained capture.
+    /// An unstarted or provably uncaptured revision owns reviewed purposes
+    /// but no new baseline. Keep that frame and any rejected callback forever.
     private func recoverInheritedCriteria(browser: ComputerUseOwnedBrowser, checkCurrent: () throws -> Void) async throws -> Bool {
-        guard !hasStartedCapture, let originalPreparation else { return false }
+        guard canRecoverEarlierCapture, let originalPreparation else { return false }
         func check() throws {
             try checkCurrent()
-            guard !hasStartedCapture else { throw ComputerUseBrowserResearchFormError.inputChanged }
+            guard canRecoverEarlierCapture else { throw ComputerUseBrowserResearchFormError.inputChanged }
             if let parent, let previous { try parent.validatePreparationContinuation(previous) }
         }
         do {
@@ -571,7 +578,7 @@ final class ComputerUseBrowserResearchFormPreparation {
         }
     }
 
-    /// Traverse only retained, unstarted revisions. Restore every historical
+    /// Traverse only retained, unstarted or proven uncaptured revisions. Restore every historical
     /// read scope and keep its semantic context; never prepare a skipped edit.
     private func captureOriginForRevision(browser: ComputerUseOwnedBrowser, for reviewedPage: ComputerUseBrowserPageEvidence,
                                           checkCurrent: () throws -> Void) async throws -> CaptureOrigin {
@@ -579,7 +586,7 @@ final class ComputerUseBrowserResearchFormPreparation {
         try ComputerUseBrowserObservedCriteria.requireUnchanged(controlIDs: review.readControls.map(\.controlID),
             original: page, current: reviewedPage)
         if let inheritedCriteriaOrigin {
-            guard !hasStartedCapture, let originalPreparation else { throw ComputerUseBrowserResearchFormError.inputChanged }
+            guard canRecoverEarlierCapture, let originalPreparation else { throw ComputerUseBrowserResearchFormError.inputChanged }
             _ = try await restoreForReview(browser: browser, checkCurrent: checkCurrent)
             let original = try await originalPreparation.captureOriginForRevision(browser: browser, for: reviewedPage, checkCurrent: checkCurrent)
             try checkCurrent()

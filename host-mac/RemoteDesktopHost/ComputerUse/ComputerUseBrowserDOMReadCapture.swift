@@ -7,6 +7,7 @@ final class ComputerUseBrowserDOMReadCapture: CustomStringConvertible {
     private let command: ComputerUseBrowserDOMCommand
     private let document: ComputerUseBrowserDocument
     private var argumentDigest: String?
+    private var revisionID: String?
     private var completion: Result<ComputerUseBrowserDOMReply, Error>?
     private(set) var didStart = false
 
@@ -35,12 +36,24 @@ final class ComputerUseBrowserDOMReadCapture: CustomStringConvertible {
     func begin(command: ComputerUseBrowserDOMCommand, arguments: [String: Any], document: ComputerUseBrowserDocument?) throws {
         try validate(command: command, arguments: arguments, document: document)
         guard !didStart else { throw ComputerUseBrowserError.busy }
-        argumentDigest = try digest(arguments); didStart = true
+        argumentDigest = try digest(arguments)
+        revisionID = command == .reviseFormFields ? arguments["revisionID"] as? String : nil
+        didStart = true
     }
 
     func finish(_ completion: Result<ComputerUseBrowserDOMReply, Error>) {
         guard didStart, self.completion == nil else { return }
         self.completion = completion
+    }
+
+    /// Preserve the dispatched callback and its exact arguments forever.
+    /// Only the adapter's explicit pre-capture rejection permits the owner
+    /// to recover an earlier frame; ordinary failures and pending callbacks do not.
+    func revisionWasNotCaptured(document: ComputerUseBrowserDocument, documentID: String, inputLedgerID: String) -> Bool {
+        guard command == .reviseFormFields, self.document == document, didStart,
+              let revisionID, case .success(let reply)? = completion else { return false }
+        return reply.status == "revision-not-captured" && reply.uncapturedRevisionID == revisionID
+            && reply.documentID == documentID && reply.inputLedgerID == inputLedgerID
     }
 
     private func validate(command: ComputerUseBrowserDOMCommand, arguments: [String: Any],

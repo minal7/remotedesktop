@@ -50,7 +50,7 @@ Four changed Swift files passed `swiftc -frontend -parse`. The assembled DOM, fi
 
 ## Remaining repair order
 
-- Reconcile unknown and failed native revision captures without discarding a started callback or retrying private capture under changed arguments. Empty input history does not imply that every private read attempt is unstarted.
+- Reconcile unknown and failed native revision captures without discarding a started callback or retrying private capture under changed arguments. Empty input history does not imply that every private read attempt is unstarted. The subsequent [uncaptured-revision checkpoint](BROWSER_UNCAPTURED_REVISION_RECOVERY_REVIEW.md) handles only explicit native pre-capture rejection; uncertain and partly captured attempts remain held.
 - Continue explicit goal supersession, conflicting answers and justified replacement of earlier invariant, preservation and read duties. Initial refresh does not make those obligations disposable.
 - Complete login document transitions, required-object replacement and dependent-control reconciliation while preserving task and effect history.
 - Continue independent research-result verification and the full [repair checklist](../../../TODO.md). Provider login, real travel/concert/movie tasks, alternate-model comparisons, desktop adaptation and the 8 GB resource target remain unqualified and deferred to the required execution permission. No assertions, app/browser execution, inference, SSH retry, push or installed-app replacement occurred here.

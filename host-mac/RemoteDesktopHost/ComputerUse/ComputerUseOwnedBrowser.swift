@@ -1034,6 +1034,19 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
 
     static func decodeDOMReply(_ source: String, command: ComputerUseBrowserDOMCommand) throws -> ComputerUseBrowserDOMReply {
         let result = try JSONDecoder().decode(ComputerUseBrowserDOMReply.self, from: Data(source.utf8))
+        if result.status == "revision-not-captured" || result.uncapturedRevisionID != nil {
+            guard command == .reviseFormFields, result.status == "revision-not-captured",
+                  let revisionID = result.uncapturedRevisionID, revisionID.utf8.count == 64,
+                  revisionID.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }),
+                  let ledger = result.inputLedgerID, ledger.utf8.count == 32,
+                  ledger.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }),
+                  result.fields == nil, result.page == nil, result.scroll == nil, result.formQuery == nil,
+                  result.formStateProof == nil, result.formBindings == nil, result.formPreservation == nil,
+                  result.changedFieldIDs == nil, result.popupBinding == nil, result.popupReceipt == nil,
+                  result.popupControls == nil, result.popupPreservedControls == nil, result.optionSelectionBinding == nil,
+                  result.optionSelectionReceipt == nil, result.selectionPreservedControls == nil,
+                  result.optionSelectionCandidates == nil else { throw ComputerUseBrowserError.unsupportedDocument }
+        }
         guard result.scroll == nil || command == .scrollViewport || command == .viewportScrollReceipt else {
             throw ComputerUseBrowserError.unsupportedDocument
         }
