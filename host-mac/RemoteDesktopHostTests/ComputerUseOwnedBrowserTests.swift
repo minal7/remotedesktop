@@ -1885,8 +1885,9 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
         }
     }
 
-    func testFailedOrAutomationTimePageChangesCannotBeAdoptedOnHandback() async throws {
-        for row in [(pause: false, status: 200), (pause: true, status: 404)] {
+    func testHandbackAcceptsSuccessfulPageObservationsAndRejectsFailedLoads() async throws {
+        for row in [(pause: false, status: 200), (pause: true, status: 200),
+                    (pause: false, status: 404), (pause: true, status: 404)] {
             let body = "<script>fetch('/signal').then(() => location.href = '/destination')</script>"
             let server = try OwnedBrowserHTTPFixture(routes: [
                 "/login": .init(body: body), "/signal": .init(held: true),
@@ -1897,22 +1898,46 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
             var allowed = true
             let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { allowed })
             defer { browser.close() }
-            try browser.claim(taskID: "rejected-handoff")
-            let original = try await browser.navigate(taskID: "rejected-handoff", operationID: "original",
+            try browser.claim(taskID: "page-handoff")
+            let original = try await browser.navigate(taskID: "page-handoff", operationID: "original",
                 to: base.appendingPathComponent("login"))
-            let requirement = try XCTUnwrap(browser.handbackRequirement(taskID: "rejected-handoff", required: true))
+            let requirement = try XCTUnwrap(browser.handbackRequirement(taskID: "page-handoff", required: true))
             try await waitUntil { server.count("/signal") == 1 }
             allowed = !row.pause
             server.releaseHeldResponses()
             try await waitUntil { server.count("/destination") == 1 && !browser.isLoadingPage }
-            allowed = true
+            XCTAssertFalse(browser.validate(original))
+            XCTAssertEqual(browser.hasPageAwaitingHandback, row.pause && row.status == 200)
+            allowed = false
             do {
-                try await browser.reacquireAfterUserControl(taskID: "rejected-handoff", requirement: requirement)
-                XCTFail("An unobserved or failed navigation cannot be adopted")
-            } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
-            XCTAssertNil(browser.currentDocument(taskID: "rejected-handoff"))
+                try await browser.reacquireAfterUserControl(taskID: "page-handoff", requirement: requirement)
+                XCTFail("A completed load cannot reopen the control gate")
+            } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .ownershipLost) }
+            allowed = true
+            XCTAssertNil(browser.currentDocument(taskID: "page-handoff"), "Opening the gate does not adopt a changed page")
+            if row.status == 200 {
+                try await browser.reacquireAfterUserControl(taskID: "page-handoff", requirement: requirement)
+                let current = try XCTUnwrap(browser.currentDocument(taskID: "page-handoff"))
+                XCTAssertEqual(current.source, row.pause ? .userControlObservation : .activePageObservation,
+                    "Explicit handback preserves when the page was observed")
+                XCTAssertEqual(current.committedURL, base.appendingPathComponent("destination"))
+                XCTAssertNotEqual(current.generation, original.generation)
+                XCTAssertNotEqual(current.operationID, original.operationID)
+                XCTAssertNil(browser.receipt(taskID: "page-handoff", operationID: current.operationID),
+                    "Accepting an observed page never fabricates an automated navigation receipt")
+            } else {
+                do {
+                    try await browser.reacquireAfterUserControl(taskID: "page-handoff", requirement: requirement)
+                    XCTFail("An unsuccessful load cannot become an accepted page observation")
+                } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+                XCTAssertNil(browser.currentDocument(taskID: "page-handoff"))
+            }
             XCTAssertFalse(browser.hasPageAwaitingHandback)
-            XCTAssertEqual(browser.receipt(taskID: "rejected-handoff", operationID: "original"), original)
+            XCTAssertEqual(browser.receipt(taskID: "page-handoff", operationID: "original"), original)
+            let history = try browser.navigationDispatchHistory(taskID: "page-handoff")
+            XCTAssertEqual(history.attempts.count, 1, "Neither handback nor a script creates another automated dispatch")
+            XCTAssertEqual(history.attempts.first?.operationID, original.operationID)
+            XCTAssertEqual(history.attempts.first?.outcome, .documentCommitted)
             XCTAssertEqual(server.count("/login"), 1)
             XCTAssertEqual(server.count("/destination"), 1)
         }
