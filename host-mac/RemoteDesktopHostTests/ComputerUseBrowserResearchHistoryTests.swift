@@ -18,11 +18,14 @@ final class ComputerUseBrowserResearchHistoryTests: XCTestCase {
         let afterBack = try fixture.browser.navigationDispatchHistory(taskID: owner.taskID)
         XCTAssertEqual(afterBack.attempts.last?.historySourceOperationID, back.operationID)
         XCTAssertEqual(afterBack.attempts.last?.outcome, .documentCommitted)
+        XCTAssertNotNil(afterBack.attempts.last?.commitBasis)
         if #available(macOS 26.0, *) {
             let decision = try XCTUnwrap(afterBack.observations.first {
                 $0.phase == .historyRequest && $0.attemptID == afterBack.attempts.last?.id
             })
             XCTAssertEqual(decision.binding, .exactHistoryItem); XCTAssertEqual(decision.decision, .allowed)
+            XCTAssertNotNil(decision.instantBack)
+            if afterBack.attempts.last?.commitBasis == .instantBackHistoryItem { XCTAssertEqual(decision.instantBack, true) }
         }
         let search = try await owner.readCandidates(), forward = try XCTUnwrap(search.historyOptions.first { $0.visit == 1 })
         XCTAssertEqual(forward.mode, .forward, "A real history traversal preserves the forward entry")
@@ -55,6 +58,12 @@ final class ComputerUseBrowserResearchHistoryTests: XCTestCase {
             "The direct native branch must remain visible even though it has no owner-confirmed visit")
         XCTAssertTrue(native.attempts.contains { $0.operationID == "branch-to-beta" && $0.historySourceOperationID == nil })
         XCTAssertNil(native.attempts.last?.historySourceOperationID, "An evicted-page GET is not a native Back/Forward restoration")
+        XCTAssertEqual(native.attempts.last?.commitBasis, .responseAndFinish)
+        let episodes = ComputerUseBrowserResultAssessment.NavigationEpisodes(history: native)
+        XCTAssertEqual(episodes.matchedCommittedAttemptCount, native.attempts.count)
+        XCTAssertFalse(episodes.gaps.contains(.historySourceMissing))
+        XCTAssertFalse(episodes.gaps.contains(.instantBackApprovalMissing))
+        XCTAssertFalse(episodes.gaps.contains(.unmatchedCommittedAttempt))
     }
 
     func testActionAndResultContractsBindOfferedVisitsAndCountTheWholeRequest() async throws {

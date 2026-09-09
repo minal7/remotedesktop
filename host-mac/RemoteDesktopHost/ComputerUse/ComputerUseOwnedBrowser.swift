@@ -188,6 +188,9 @@ struct ComputerUseBrowserNavigationReceipt: Equatable, Sendable, CustomStringCon
 /// queries, fragments and credentials; this value never enters planner JSON.
 struct ComputerUseBrowserNavigationDispatchHistory: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     enum Outcome: String, Sendable { case pending, documentCommitted, failed, sourceBlocked, ownershipLost, timedOut }
+    /// The native branch that admitted the receipt. A response remains
+    /// associated with the pending slot, not an exact WKNavigation.
+    enum CommitBasis: String, Sendable { case responseAndFinish, historyItemAndFinish, instantBackHistoryItem }
     enum Phase: String, Sendable {
         case navigationAction, response, serverRedirect, historyRequest, popupRequest
         case provisionalStart, documentCommitStarted, documentFinished, navigationFailure, webContentTerminated
@@ -250,6 +253,7 @@ struct ComputerUseBrowserNavigationDispatchHistory: Equatable, Sendable, CustomS
     struct Observation: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
         let order: Int
         let phase: Phase
+        let instantBack: Bool?
         let decision: Decision
         let binding: Binding
         let control: Control
@@ -267,8 +271,9 @@ struct ComputerUseBrowserNavigationDispatchHistory: Equatable, Sendable, CustomS
         fileprivate init(order: Int, phase: Phase, decision: Decision, binding: Binding, control: Control, surface: Surface,
                          policyCheck: PolicyCheck, configuredPolicy: ComputerUseBrowserSourcePolicy?, url: URL?,
                          attemptID: UUID?, navigationCorrelationID: UUID?, parentSessionID: UUID,
-                         ownershipEpoch: UUID, generation: UInt64, signInWindowID: UUID?) {
+                         ownershipEpoch: UUID, generation: UInt64, signInWindowID: UUID?, instantBack: Bool?) {
             self.order = order; self.signInWindowID = signInWindowID
+            self.instantBack = phase == .historyRequest ? instantBack : nil
             self.phase = phase; self.decision = decision; self.binding = binding; self.control = control
             self.surface = surface; self.policyCheck = policyCheck; self.configuredPolicy = configuredPolicy
             origin = url.flatMap { try? .init($0) }; self.attemptID = attemptID
@@ -289,6 +294,8 @@ struct ComputerUseBrowserNavigationDispatchHistory: Equatable, Sendable, CustomS
         let requestedOrigin: ComputerUseBrowserSourceOrigin?
         let historySourceOperationID: String?
         fileprivate(set) var committedOrigin: ComputerUseBrowserSourceOrigin?
+        fileprivate(set) var commitBasis: CommitBasis?
+        fileprivate(set) var successfulResponseOrigin: ComputerUseBrowserSourceOrigin?
         fileprivate(set) var outcome: Outcome
         fileprivate(set) var terminalOrder: Int?
 
@@ -298,6 +305,7 @@ struct ComputerUseBrowserNavigationDispatchHistory: Equatable, Sendable, CustomS
             id = UUID(); self.operationID = operationID; self.sessionID = sessionID; self.ownershipEpoch = ownershipEpoch
             self.generation = generation; self.policy = policy; self.historySourceOperationID = historySourceOperationID
             requestedOrigin = try? .init(requestedURL); committedOrigin = nil; outcome = .pending
+            commitBasis = nil; successfulResponseOrigin = nil
         }
         var description: String { "BrowserNavigationDispatch(outcome: \(outcome.rawValue))" }
         var debugDescription: String { description }
@@ -331,7 +339,7 @@ struct ComputerUseBrowserNavigationDispatchHistory: Equatable, Sendable, CustomS
         self.taskID = taskID; self.contextID = contextID; self.beganAfterAnotherClaim = beganAfterAnotherClaim
     }
     var identity: String {
-        ComputerUseTaskContract.digest(["browser-navigation-dispatch-history-v4", taskID, contextID,
+        ComputerUseTaskContract.digest(["browser-navigation-dispatch-history-v5", taskID, contextID,
             ledgerID.uuidString, revision.uuidString])
     }
     fileprivate mutating func recordClaimBoundary() {
@@ -361,7 +369,8 @@ struct ComputerUseBrowserNavigationDispatchHistory: Equatable, Sendable, CustomS
         attempts.append(attempt)
         return attempt.id
     }
-    fileprivate mutating func finish(_ id: UUID?, outcome: Outcome, committedURL: URL? = nil) {
+    fileprivate mutating func finish(_ id: UUID?, outcome: Outcome, committedURL: URL? = nil,
+                                    commitBasis: CommitBasis? = nil, successfulResponseURL: URL? = nil) {
         guard outcome != .pending, let id, let index = attempts.firstIndex(where: { $0.id == id }),
               attempts[index].outcome == .pending else { return }
         advanceRevision()
@@ -369,11 +378,13 @@ struct ComputerUseBrowserNavigationDispatchHistory: Equatable, Sendable, CustomS
         attempts[index].outcome = outcome
         attempts[index].terminalOrder = terminalOrder
         attempts[index].committedOrigin = committedURL.flatMap { try? .init($0) }
+        attempts[index].commitBasis = outcome == .documentCommitted ? commitBasis : nil
+        attempts[index].successfulResponseOrigin = outcome == .documentCommitted ? successfulResponseURL.flatMap { try? .init($0) } : nil
     }
     fileprivate mutating func observe(phase: Phase, decision: Decision, binding: Binding, control: Control, surface: Surface,
                                       policyCheck: PolicyCheck, configuredPolicy: ComputerUseBrowserSourcePolicy?, url: URL?,
                                       attemptID: UUID?, navigationCorrelationID: UUID?, parentSessionID: UUID,
-                                      ownershipEpoch: UUID, generation: UInt64, signInWindowID: UUID?) {
+                                      ownershipEpoch: UUID, generation: UInt64, signInWindowID: UUID?, instantBack: Bool?) {
         // Retain bounded observations and a gap. Omitted callbacks still
         // invalidate snapshots, without allocating a record or parsing URLs.
         advanceRevision()
@@ -385,7 +396,7 @@ struct ComputerUseBrowserNavigationDispatchHistory: Equatable, Sendable, CustomS
         observations.append(.init(order: order, phase: phase, decision: decision, binding: binding, control: control, surface: surface,
             policyCheck: policyCheck, configuredPolicy: configuredPolicy, url: url, attemptID: attemptID,
             navigationCorrelationID: navigationCorrelationID, parentSessionID: parentSessionID,
-            ownershipEpoch: ownershipEpoch, generation: generation, signInWindowID: signInWindowID))
+            ownershipEpoch: ownershipEpoch, generation: generation, signInWindowID: signInWindowID, instantBack: instantBack))
     }
     fileprivate mutating func recordControl(phase: ControlPhase, parentSessionID: UUID, ownershipEpoch: UUID,
                                             generation: UInt64, url: URL?, handback: ComputerUseBrowserHandbackRequirement?,
@@ -538,7 +549,8 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         let sourceAttemptID: UUID?
         let continuation: CheckedContinuation<ComputerUseBrowserDocument, Error>
         var navigation: WKNavigation?
-        var receivedSuccessfulResponse = false
+        var successfulResponseURL: URL?
+        var receivedSuccessfulResponse: Bool { successfulResponseURL != nil }
         var readOnlyRequests = true
         var historyOperationID: String?
         var instantBackApproved = false
@@ -1896,12 +1908,13 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
                                              url: URL?, binding: NavigationHistory.Binding, control: NavigationHistory.Control = .unknown,
                                              policyCheck: NavigationHistory.PolicyCheck = .notChecked,
                                              surface: NavigationHistory.Surface = .mainDocument,
+                                             instantBack: Bool? = nil,
                                              attemptID: UUID? = nil, navigationCorrelationID: UUID? = nil) {
         navigationDispatchLog?.observe(phase: phase, decision: decision, binding: binding, control: control, surface: surface,
             policyCheck: policyCheck, configuredPolicy: surface == .mainDocument ? sourcePolicy : nil,
             url: url, attemptID: attemptID, navigationCorrelationID: navigationCorrelationID,
             parentSessionID: browserSessionID, ownershipEpoch: ownershipEpoch, generation: generation,
-            signInWindowID: surface == .signInWindow ? signInInstanceID : nil)
+            signInWindowID: surface == .signInWindow ? signInInstanceID : nil, instantBack: instantBack)
     }
 
     /// Legacy policy/URL callbacks do not supply a WKNavigation. Being in the
@@ -1910,13 +1923,13 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     private func recordNavigationSlot(_ phase: NavigationHistory.Phase, decision: NavigationHistory.Decision = .observed,
                                       url: URL?, control: NavigationHistory.Control = .unknown,
                                       policyCheck: NavigationHistory.PolicyCheck = .notChecked,
-                                      surface: NavigationHistory.Surface = .mainDocument, exactHistoryItem: Bool = false) {
+                                      surface: NavigationHistory.Surface = .mainDocument, exactHistoryItem: Bool = false, instantBack: Bool? = nil) {
         let pending = surface == .mainDocument ? self.pending : nil
         let observed = surface == .mainDocument ? observedNavigation : nil
         let binding: NavigationHistory.Binding = pending != nil ? (exactHistoryItem ? .exactHistoryItem : .pendingSlot)
             : (observed != nil ? .observedSlot : .none)
         recordNavigationObservation(phase, decision: decision, url: url, binding: binding, control: control,
-            policyCheck: policyCheck, surface: surface, attemptID: pending?.sourceAttemptID,
+            policyCheck: policyCheck, surface: surface, instantBack: instantBack, attemptID: pending?.sourceAttemptID,
             navigationCorrelationID: pending?.id ?? observed?.id)
     }
 
@@ -2045,7 +2058,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             if let pending { failPending(id: pending.id, error: .sourceNotAllowed) }
             return
         }
-        pending?.receivedSuccessfulResponse = true
+        pending?.successfulResponseURL = response.url
         observedNavigation?.successfulResponseURL = response.url
         decide(.allow, control: pending != nil ? .unknown : (appliesPolicy ? .automationAllowed : .userControl),
             policyCheck: appliesPolicy ? (sourcePolicy == nil ? .unconfigured : .permitted) : .notChecked)
@@ -2062,7 +2075,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             if webView === browser || webView === signInBrowser {
                 recordNavigationSlot(.historyRequest, decision: permitted ? .allowed : .cancelled, url: url,
                     control: control, policyCheck: policyCheck, surface: webView === browser ? .mainDocument : .signInWindow,
-                    exactHistoryItem: exactHistoryItem)
+                    exactHistoryItem: exactHistoryItem, instantBack: willUseInstantBack)
             }
             completionHandler(permitted)
         }
@@ -2153,8 +2166,15 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             return
         }
         guard let pending, navigation === pending.navigation else { return }
-        guard hasOwnership(taskID: pending.taskID), pending.generation == generation,
-              pending.receivedSuccessfulResponse || isCurrentHistoryRestoration(pending),
+        guard hasOwnership(taskID: pending.taskID), pending.generation == generation else {
+            failPending(id: pending.id, error: .ownershipLost)
+            return
+        }
+        // Retain exact current-history-item evidence even when WebKit also
+        // delivered a response callback for the cached traversal. This reads
+        // the existing predicate; admission still requires response OR item.
+        let restoredHistory = isCurrentHistoryRestoration(pending)
+        guard pending.receivedSuccessfulResponse || restoredHistory,
               let url = webView.url, Self.validatedURL(url) != nil else {
             failPending(id: pending.id, error: .ownershipLost)
             return
@@ -2163,7 +2183,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             failPending(id: pending.id, error: .sourceNotAllowed)
             return
         }
-        finishPendingNavigation(pending, url: url)
+        finishPendingNavigation(pending, url: url, basis: restoredHistory ? .historyItemAndFinish : .responseAndFinish)
     }
 
     private func isCurrentHistoryRestoration(_ pending: PendingNavigation) -> Bool {
@@ -2177,13 +2197,14 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         guard let pending, pending.id == id, pending.navigation != nil, pending.instantBackApproved,
               hasOwnership(taskID: pending.taskID), pending.generation == generation,
               isCurrentHistoryRestoration(pending), let url = browser?.url, sourcePolicy?.permits(url) != false else { return false }
-        finishPendingNavigation(pending, url: url)
+        finishPendingNavigation(pending, url: url, basis: .instantBackHistoryItem)
         return true
     }
 
-    private func finishPendingNavigation(_ pending: PendingNavigation, url: URL) {
+    private func finishPendingNavigation(_ pending: PendingNavigation, url: URL, basis: NavigationHistory.CommitBasis) {
         guard self.pending?.id == pending.id else { return }
-        navigationDispatchLog?.finish(pending.sourceAttemptID, outcome: .documentCommitted, committedURL: url)
+        navigationDispatchLog?.finish(pending.sourceAttemptID, outcome: .documentCommitted, committedURL: url,
+            commitBasis: basis, successfulResponseURL: pending.successfulResponseURL)
         let receipt = ComputerUseBrowserDocument(contextID: contextID, taskID: pending.taskID,
             generation: generation, operationID: pending.operationID, requestedURL: pending.requestedURL, committedURL: url)
         self.pending = nil

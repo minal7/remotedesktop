@@ -316,6 +316,14 @@ final class ComputerUseBrowserSourcePolicyTests: XCTestCase {
         let history = try browser.navigationDispatchHistory(taskID: input.taskID)
         let attempt = try XCTUnwrap(history.attempts.first)
         let action = try XCTUnwrap(history.observations.first { $0.phase == .navigationAction && $0.attemptID == attempt.id })
+        XCTAssertEqual(attempt.commitBasis, .responseAndFinish)
+        XCTAssertEqual(attempt.successfulResponseOrigin, origin)
+        XCTAssertTrue(history.observations.allSatisfy { $0.instantBack == nil })
+        let episodes = ComputerUseBrowserResultAssessment.NavigationEpisodes(history: history)
+        XCTAssertEqual(episodes.dispatchEpisodeCount, 1); XCTAssertEqual(episodes.observedEpisodeCount, 0)
+        XCTAssertEqual(episodes.matchedCommittedAttemptCount, 1)
+        XCTAssertTrue(episodes.gaps.contains(.responseAssociationUnqualified), "A slot response is not an exact navigation-object association")
+        XCTAssertFalse(episodes.gaps.contains(.unmatchedCommittedAttempt))
         let response = try XCTUnwrap(history.observations.first { $0.phase == .response && $0.attemptID == attempt.id })
         let start = try XCTUnwrap(history.observations.first { $0.phase == .provisionalStart && $0.attemptID == attempt.id })
         let commit = try XCTUnwrap(history.observations.first { $0.phase == .documentCommitStarted && $0.attemptID == attempt.id })
@@ -364,6 +372,12 @@ final class ComputerUseBrowserSourcePolicyTests: XCTestCase {
         let history = try browser.navigationDispatchHistory(taskID: input.taskID)
         let attempt = try XCTUnwrap(history.attempts.first)
         let redirect = try XCTUnwrap(history.observations.first { $0.phase == .serverRedirect && $0.attemptID == attempt.id })
+        XCTAssertEqual(attempt.commitBasis, .responseAndFinish)
+        XCTAssertEqual(attempt.successfulResponseOrigin, try ComputerUseBrowserSourceOrigin(target))
+        let episodes = ComputerUseBrowserResultAssessment.NavigationEpisodes(history: history)
+        XCTAssertEqual(episodes.dispatchEpisodeCount, 1); XCTAssertEqual(episodes.matchedCommittedAttemptCount, 1)
+        XCTAssertGreaterThanOrEqual(episodes.redirectCallbackCount, 1)
+        XCTAssertTrue(episodes.gaps.contains(.redirectDestinationsUnqualified))
         XCTAssertEqual(redirect.binding, .exactPendingNavigation); XCTAssertEqual(redirect.attemptID, attempt.id)
         XCTAssertEqual(redirect.decision, .observed); XCTAssertEqual(redirect.policyCheck, .notChecked)
         XCTAssertEqual(redirect.control, .unknown); XCTAssertEqual(redirect.configuredPolicy, policy)
@@ -404,6 +418,10 @@ final class ComputerUseBrowserSourcePolicyTests: XCTestCase {
         }
         let after = try browser.navigationDispatchHistory(taskID: input.taskID)
         let added = after.observations.dropFirst(before.observations.count)
+        let episodes = ComputerUseBrowserResultAssessment.NavigationEpisodes(history: after)
+        XCTAssertEqual(episodes.dispatchEpisodeCount, 1); XCTAssertEqual(episodes.observedEpisodeCount, 1)
+        XCTAssertEqual(episodes.observedFinishCallbackCount, 1); XCTAssertEqual(episodes.matchedCommittedAttemptCount, 1)
+        XCTAssertTrue(episodes.gaps.contains(.observedAdmissionUnverified), "An unrequested finished callback is not an automated receipt")
         let started = try XCTUnwrap(added.first { $0.phase == .provisionalStart && $0.binding == .exactObservedNavigation })
         let finished = try XCTUnwrap(added.first { $0.phase == .documentFinished && $0.binding == .exactObservedNavigation })
         XCTAssertEqual(started.control, .automationAllowed)
@@ -464,13 +482,23 @@ final class ComputerUseBrowserSourcePolicyTests: XCTestCase {
         let input = try goal()
         try browser.claim(taskID: input.taskID)
         let work = Task { try await browser.navigate(taskID: input.taskID, operationID: "cancelled", to: base.appendingPathComponent("held")) }
-        try await waitUntil { server.count("/held") == 1 }
+        try await waitUntil {
+            server.count("/held") == 1 && (try? browser.navigationDispatchHistory(taskID: input.taskID).observations.contains {
+                $0.phase == .provisionalStart && $0.binding == .exactPendingNavigation
+            }) == true
+        }
         let pending = try browser.navigationDispatchHistory(taskID: input.taskID)
+        let pendingEpisodes = ComputerUseBrowserResultAssessment.NavigationEpisodes(history: pending)
+        XCTAssertEqual(pendingEpisodes.dispatchEpisodeCount, 1)
+        XCTAssertTrue(pendingEpisodes.gaps.contains(.unfinishedEpisode))
         XCTAssertEqual(pending.attempts.first?.outcome, .pending)
         XCTAssertNil(pending.attempts.first?.committedOrigin)
         work.cancel()
         do { _ = try await work.value; XCTFail("Cancelled navigation cannot return a document") } catch { }
         let cancelled = try browser.navigationDispatchHistory(taskID: input.taskID)
+        let cancelledEpisodes = ComputerUseBrowserResultAssessment.NavigationEpisodes(history: cancelled)
+        XCTAssertEqual(cancelledEpisodes.dispatchEpisodeCount, 1); XCTAssertEqual(cancelledEpisodes.matchedCommittedAttemptCount, 0)
+        XCTAssertFalse(cancelledEpisodes.gaps.contains(.unfinishedEpisode), "Native cancellation closes its episode without inventing a didFinish callback")
         XCTAssertEqual(cancelled.attempts.first?.outcome, .ownershipLost)
         XCTAssertNil(cancelled.attempts.first?.committedOrigin)
         XCTAssertEqual(cancelled.attempts.first?.id, pending.attempts.first?.id)
@@ -481,6 +509,7 @@ final class ComputerUseBrowserSourcePolicyTests: XCTestCase {
         let failed = try browser.navigationDispatchHistory(taskID: input.taskID)
         XCTAssertEqual(failed.attempts.map(\.outcome), [.ownershipLost, .failed])
         XCTAssertTrue(failed.attempts.allSatisfy { $0.policy == nil && $0.committedOrigin == nil })
+        XCTAssertTrue(failed.attempts.allSatisfy { $0.commitBasis == nil && $0.successfulResponseOrigin == nil })
         XCTAssertEqual(failed.attempts.map(\.requestedOrigin), [try ComputerUseBrowserSourceOrigin(base), try ComputerUseBrowserSourceOrigin(base)])
         XCTAssertNil(browser.receipt(taskID: input.taskID, operationID: "failed"))
         let rejectedResponse = try XCTUnwrap(failed.observations.first {
@@ -535,6 +564,9 @@ final class ComputerUseBrowserSourcePolicyTests: XCTestCase {
         browser.close(); try browser.claim(taskID: input.taskID)
         _ = try await browser.navigate(taskID: input.taskID, operationID: "after-close", to: base)
         let reopened = try browser.navigationDispatchHistory(taskID: input.taskID)
+        let episodes = ComputerUseBrowserResultAssessment.NavigationEpisodes(history: reopened)
+        XCTAssertEqual(episodes.dispatchEpisodeCount, 3)
+        XCTAssertEqual(episodes.matchedCommittedAttemptCount, 3, "Reused operation text cannot merge distinct native callback identities")
         XCTAssertEqual(reopened.attempts.count, 3)
         XCTAssertEqual(Array(reopened.attempts.prefix(2)), reclaimed.attempts)
         XCTAssertNotEqual(reopened.attempts[1].sessionID, reopened.attempts[2].sessionID)

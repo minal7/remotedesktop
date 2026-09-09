@@ -175,6 +175,139 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
              "gaps":gaps.map(\.rawValue)]
         }
     }
+    /// Exact callback-object episodes, separate from slot-only policy events
+    /// and from the native branch that actually admitted a document receipt.
+    struct NavigationEpisodes: Equatable, Sendable {
+        typealias History = ComputerUseBrowserNavigationDispatchHistory
+        typealias Observation = History.Observation
+        enum Gap: String, CaseIterable, Hashable, Sendable {
+            case attemptOverflow, observationOverflow, callbackIdentityMissing, callbackBindingMismatch
+            case duplicateCallbackPhase, callbackOrderMismatch, missingProvisionalStart, missingDocumentCommitCallback
+            case unfinishedEpisode, observedAdmissionUnverified, unscopedWebContentTermination
+            case commitBasisMissing, commitOriginMissing, unmatchedCommittedAttempt, historySourceMissing, instantBackApprovalMissing
+            case responseAssociationUnqualified, responseOriginMissing, responseOriginMismatch, redirectDestinationsUnqualified
+        }
+        let dispatchEpisodeCount: Int
+        let observedEpisodeCount: Int
+        let observedFinishCallbackCount: Int
+        let matchedCommittedAttemptCount: Int
+        let historyRestorationCommitCount: Int
+        let redirectCallbackCount: Int
+        let gaps: [Gap]
+
+        init(history: History) {
+            var found: Set<Gap> = []
+            if history.overflowed { found.insert(.attemptOverflow) }
+            if history.observationsOverflowed { found.insert(.observationOverflow) }
+            let main = history.observations.filter { $0.surface == .mainDocument }
+            let callbackPhases: [History.Phase] = [.provisionalStart, .serverRedirect, .documentCommitStarted, .documentFinished, .navigationFailure]
+            var groups: [UUID: [Observation]] = [:]
+            for observation in main {
+                if observation.phase == .webContentTerminated { found.insert(.unscopedWebContentTermination) }
+                guard callbackPhases.contains(observation.phase) else { continue }
+                guard [.exactPendingNavigation, .exactObservedNavigation].contains(observation.binding),
+                      let id = observation.navigationCorrelationID else { found.insert(.callbackIdentityMissing); continue }
+                groups[id, default: []].append(observation)
+            }
+            var dispatches = 0, observed = 0, validFinishes: [UUID: [Observation]] = [:]
+            for records in groups.values {
+                guard let first = records.first, records.allSatisfy({
+                    $0.binding == first.binding && $0.attemptID == first.attemptID
+                        && $0.parentSessionID == first.parentSessionID && $0.ownershipEpoch == first.ownershipEpoch
+                        && $0.generation == first.generation
+                }) else { found.insert(.callbackBindingMismatch); continue }
+                let attempt: History.Attempt?
+                if first.binding == .exactPendingNavigation {
+                    guard let id = first.attemptID, let match = history.attempts.first(where: { $0.id == id }),
+                          match.sessionID == first.parentSessionID, match.ownershipEpoch == first.ownershipEpoch,
+                          match.generation == first.generation,
+                          records.allSatisfy({ record in
+                              match.order < record.order && (match.terminalOrder.map { record.order < $0 } ?? true)
+                          }) else {
+                        found.insert(.callbackBindingMismatch); continue
+                    }
+                    attempt = match; dispatches += 1
+                } else {
+                    guard first.attemptID == nil else { found.insert(.callbackBindingMismatch); continue }
+                    attempt = nil; observed += 1; found.insert(.observedAdmissionUnverified)
+                }
+                let starts = records.filter { $0.phase == .provisionalStart }
+                let commits = records.filter { $0.phase == .documentCommitStarted }
+                let terminals = records.filter { [.documentFinished, .navigationFailure].contains($0.phase) }
+                var valid = true
+                if starts.count > 1 || commits.count > 1 || terminals.count > 1 { found.insert(.duplicateCallbackPhase); valid = false }
+                if zip(records, records.dropFirst()).contains(where: { pair in pair.0.order >= pair.1.order }) { found.insert(.callbackOrderMismatch); valid = false }
+                let cached = attempt?.commitBasis == .historyItemAndFinish || attempt?.commitBasis == .instantBackHistoryItem
+                let nativeFailure = attempt.map { $0.outcome != .pending && $0.outcome != .documentCommitted && $0.terminalOrder != nil } ?? false
+                if starts.isEmpty && !cached && !nativeFailure { found.insert(.missingProvisionalStart); valid = false }
+                if let start = starts.first, records.contains(where: { $0.phase != .provisionalStart && $0.order < start.order }) {
+                    found.insert(.callbackOrderMismatch); valid = false
+                }
+                if let terminal = terminals.first {
+                    if records.contains(where: { $0.order > terminal.order }) { found.insert(.callbackOrderMismatch); valid = false }
+                    if terminal.phase == .documentFinished && commits.isEmpty && !cached { found.insert(.missingDocumentCommitCallback); valid = false }
+                } else if !nativeFailure && attempt?.commitBasis != .instantBackHistoryItem { found.insert(.unfinishedEpisode); valid = false }
+                if let commit = commits.first, records.contains(where: { $0.phase == .serverRedirect && $0.order > commit.order }) {
+                    found.insert(.callbackOrderMismatch); valid = false
+                }
+                if valid, let attempt, let finished = terminals.first, finished.phase == .documentFinished {
+                    validFinishes[attempt.id, default: []].append(finished)
+                }
+            }
+            var matched: Set<UUID> = []
+            for attempt in history.attempts where attempt.outcome == .documentCommitted {
+                guard let basis = attempt.commitBasis, let terminalOrder = attempt.terminalOrder else {
+                    found.insert(.commitBasisMissing); continue
+                }
+                guard attempt.committedOrigin != nil else { found.insert(.commitOriginMissing); found.insert(.unmatchedCommittedAttempt); continue }
+                var supported = true
+                if basis == .responseAndFinish {
+                    found.insert(.responseAssociationUnqualified)
+                    if let response = attempt.successfulResponseOrigin {
+                        if response != attempt.committedOrigin { found.insert(.responseOriginMismatch); supported = false }
+                    } else { found.insert(.responseOriginMissing); supported = false }
+                } else {
+                    let sources = history.attempts.filter {
+                        $0.operationID == attempt.historySourceOperationID && $0.sessionID == attempt.sessionID
+                            && $0.ownershipEpoch == attempt.ownershipEpoch && $0.outcome == .documentCommitted
+                            && ($0.terminalOrder.map { $0 < attempt.order } ?? false)
+                            && $0.committedOrigin == attempt.requestedOrigin && $0.committedOrigin == attempt.committedOrigin
+                    }
+                    if attempt.historySourceOperationID == nil || sources.count != 1 { found.insert(.historySourceMissing); supported = false }
+                }
+                if basis == .instantBackHistoryItem {
+                    let approvals = main.filter {
+                        $0.phase == .historyRequest && $0.binding == .exactHistoryItem && $0.instantBack == true
+                            && $0.decision == .allowed && $0.attemptID == attempt.id && $0.parentSessionID == attempt.sessionID
+                            && $0.ownershipEpoch == attempt.ownershipEpoch && $0.generation == attempt.generation
+                            && $0.order > attempt.order && $0.order < terminalOrder && $0.origin == attempt.committedOrigin
+                    }
+                    if approvals.count != 1 { found.insert(.instantBackApprovalMissing); supported = false }
+                } else {
+                    let finishes = validFinishes[attempt.id] ?? []
+                    if finishes.count != 1 || finishes.first?.origin != attempt.committedOrigin { supported = false }
+                }
+                if supported { matched.insert(attempt.id) } else { found.insert(.unmatchedCommittedAttempt) }
+            }
+            dispatchEpisodeCount = dispatches; observedEpisodeCount = observed
+            observedFinishCallbackCount = main.filter { $0.binding == .exactObservedNavigation && $0.phase == .documentFinished }.count
+            matchedCommittedAttemptCount = matched.count
+            historyRestorationCommitCount = history.attempts.filter {
+                $0.outcome == .documentCommitted && ($0.commitBasis == .historyItemAndFinish || $0.commitBasis == .instantBackHistoryItem)
+            }.count
+            redirectCallbackCount = main.filter { $0.phase == .serverRedirect }.count
+            if redirectCallbackCount > 0 { found.insert(.redirectDestinationsUnqualified) }
+            gaps = Gap.allCases.filter(found.contains)
+        }
+
+        var plannerContext: [String: Any] {
+            ["dispatch_episode_count":dispatchEpisodeCount, "observed_episode_count":observedEpisodeCount,
+             "observed_finish_callback_count":observedFinishCallbackCount, "matched_committed_attempt_count":matchedCommittedAttemptCount,
+             "history_restoration_commit_count":historyRestorationCommitCount, "redirect_callback_count":redirectCallbackCount,
+             "gaps":gaps.map(\.rawValue)]
+        }
+    }
+
     /// Diagnostic facts about a frozen native history. There is deliberately
     /// no success value: episode reconciliation and coverage remain open.
     struct NavigationHistory: Equatable, Sendable {
@@ -187,7 +320,7 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
             case weakObservationBinding, unattributedObservation, unorderedObservation
             case ownerHistoryUnavailable, ownerVisitBindingMismatch, duplicateOwnerVisit, ownerVisitOrderMismatch
             case unclaimedCommittedDispatch
-            case controlEpisodesUnreconciled, ownerVisitsUnreconciled, platformCoverageUnqualified
+            case controlEpisodesUnreconciled, ownerVisitsUnreconciled, navigationEpisodesUnreconciled, platformCoverageUnqualified
         }
         let attemptCount: Int
         let observationCount: Int
@@ -196,6 +329,7 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
         let ownerVisitCount: Int?
         let matchedOwnerVisitCount: Int
         let controlHistory: ControlHistory?
+        let navigationEpisodes: NavigationEpisodes?
         /// Callback count, not distinct requests and not proof of a violation:
         /// the native policy may have successfully prevented the request.
         let blockedSourceObservationCount: Int
@@ -208,6 +342,7 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
             blockedSourceObservationCount = history?.observations.filter { $0.policyCheck == .blocked }.count ?? 0
             ownerVisitCount = ownerVisits?.count
             controlHistory = history.map { ControlHistory(history: $0) }
+            navigationEpisodes = history.map { NavigationEpisodes(history: $0) }
             var found: Set<Gap> = [.platformCoverageUnqualified]
             var matched: Set<UUID> = []
             if !sources.unresolved.isEmpty { found.insert(.unresolvedSourceRequirements) }
@@ -240,6 +375,7 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
                     if observation.phase == .unorderedLocationChange { found.insert(.unorderedObservation) }
                 }
                 if controlHistory?.gaps.isEmpty == false { found.insert(.controlEpisodesUnreconciled) }
+                if navigationEpisodes?.gaps.isEmpty == false { found.insert(.navigationEpisodesUnreconciled) }
                 if let ownerVisits {
                     var previousOrder: Int?
                     for visit in ownerVisits {
@@ -278,6 +414,7 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
              "retained_policy_installation_count":policyInstallationCount,
              "owner_visit_count":ownerVisitCount.map { $0 as Any } ?? NSNull(), "matched_owner_visit_count":matchedOwnerVisitCount,
              "control_history":controlHistory.map { $0.plannerContext as Any } ?? NSNull(),
+             "navigation_episodes":navigationEpisodes.map { $0.plannerContext as Any } ?? NSNull(),
              "blocked_source_observation_count":blockedSourceObservationCount]
         }
     }
@@ -494,7 +631,7 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
             || candidates.contains { $0.requirements.contains { $0.status == .navigationHistoryUnverified } }
         let policyAssessment = requirements.contains { $0.field == .answerSource }
             || candidates.contains { $0.requirements.contains { $0.status == .sourcePolicyMismatch } }
-        var context: [String: Any] = ["version":navigationAssessment ? 9 : (policyAssessment ? 5 : (candidates.contains { $0.quotes.contains { !$0.controlIDs.isEmpty } } ? 4 : 3)),
+        var context: [String: Any] = ["version":navigationAssessment ? 10 : (policyAssessment ? 5 : (candidates.contains { $0.quotes.contains { !$0.controlIDs.isEmpty } } ? 4 : 3)),
          "requirements":requirements.enumerated().map { index, value in
              ["index":index, "turn":value.turn, "sourceByteOffset":value.sourceByteOffset, "sourceByteCount":value.sourceByteCount,
               "role":value.role.rawValue, "field":value.field.rawValue, "relation":value.relation.rawValue,
