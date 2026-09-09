@@ -249,7 +249,7 @@ struct ComputerUseBrowserResultCandidates: Sendable, CustomStringConvertible, Cu
     enum DocumentAnswerSourceStatus: String, Sendable { case unconfigured, permitted, excluded }
     let goalRevision: String
     /// Host wall-clock time after native reading validation, not the user's
-    /// fixed date context and not a promise that inventory remains current.
+    /// fixed user-message date contexts and not a promise that inventory remains current.
     let observedAtMilliseconds: Int64
     let historyOptions: [ComputerUseBrowserHistoryOption]
     let candidates: [Candidate]

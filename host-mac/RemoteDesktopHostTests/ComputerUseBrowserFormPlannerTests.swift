@@ -39,6 +39,48 @@ final class ComputerUseBrowserFormPlannerTests: XCTestCase {
         try await verifyExplicitDateReplacementRequiresFreshFormCriteria(splitOriginal: true)
     }
 
+    func testNativeDateInputUsesTheAcceptedAnswerClockAfterMidnight() async throws {
+        let before = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-09-09T23:59:00Z"))
+        let after = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-09-10T00:01:00Z"))
+        let original = try ComputerUseBrowserGoalInput(taskID: "form-answer-clock", prompt: "Find flights.", referenceDate: before, timeZoneIdentifier: "UTC")
+        let initial = try decodeGoal([row("Find flights.", role: "outcome", field: "category")], input: original)
+        var clock = before
+        let clarification = ComputerUseBrowserGoalClarification(input: original, now: { clock })
+        let context = try ComputerUseBrowserGoalClarification.Context(controllerID: "phone", controllerSessionID: "session", browserSessionDigest: nil)
+        let question = try clarification.issue(proposal: initial, topic: .date, requirementIDs: [initial.requirements[0].id], context: context)
+        clock = after
+        let updated = try clarification.consume(questionID: question.id, answerTaskID: "date", answer: "tomorrow", context: context)
+        var answer = row("tomorrow", field: "date"); answer["turn"] = 1
+        let goal = try decodeGoal([row("Find flights.", role: "outcome", field: "category"), answer], input: updated)
+        var edits = 0
+        let fixture = try await FormPlannerFixture(goal: goal,
+            body: "<form action='/results'><label>Departure<input name='departure' type='date'></label><button>Search</button></form>",
+            additionalRoutes: ["/results?departure=2026-09-11":.init(body: "<p>Accepted answer date received</p>")],
+            domScriptDidDispatch: { if $0 == .edit { edits += 1 } })
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { fixture.close(); try? FileManager.default.removeItem(at: directory) }
+        let owner = fixture.owner(journalDirectory: directory)
+        defer { owner.retire() }
+        _ = try await owner.interpretGoal()
+        let action = try await owner.planNextAction(using: IntroducedDateActionFixture(indices: [1]))
+        let input = try await owner.prepareFormInput(for: action)
+        XCTAssertEqual(input.normalizations.map(\.value), ["2026-09-11"])
+        let modelGoal = try XCTUnwrap(try object(Data(input.contextJSON.utf8))["goal"] as? [String: Any])
+        let turns = try XCTUnwrap(modelGoal["clarifications"] as? [[String: Any]])
+        let answerClock = try XCTUnwrap(turns[0]["dateContext"] as? [String: Any])
+        XCTAssertEqual((answerClock["referenceUnixMilliseconds"] as? NSNumber)?.int64Value, Int64(after.timeIntervalSince1970 * 1_000))
+        let proposed = try ComputerUseBrowserFormProposal.decode(content: plan([["field":"field1", "normalized":"value2"]]), input: input)
+        XCTAssertEqual(try proposed.sources(for: XCTUnwrap(proposed.edits.first)).map(\.source), ["tomorrow"])
+        let receipt = try await owner.executeForm(proposed, input: input)
+        XCTAssertEqual(edits, 1); XCTAssertEqual(owner.confirmedFormHistory.count, 1)
+        XCTAssertEqual(owner.input, updated); XCTAssertEqual(updated.referenceMilliseconds, original.referenceMilliseconds)
+        let page = try await owner.observeFormResultPage(after: receipt)
+        let query = try XCTUnwrap(page.page.controls.first { $0.kind == "submit" }).id
+        _ = try await owner.openFormQuery(after: receipt, controlID: query, evidence: page)
+        XCTAssertEqual(fixture.server.count("/results?departure=2026-09-10"), 0)
+        XCTAssertEqual(fixture.server.count("/results?departure=2026-09-11"), 1)
+    }
+
     private func verifyExplicitDateReplacementRequiresFreshFormCriteria(splitOriginal: Bool) async throws {
         var rows = [row("Find flights. ", role: "outcome", field: "category"), row("2026-10-16. ", field: "date"), row("Leave Reference unchanged.")]
         let initial = try proposal(rows: rows), goals = DateReplacementGoalFixture(value: initial)

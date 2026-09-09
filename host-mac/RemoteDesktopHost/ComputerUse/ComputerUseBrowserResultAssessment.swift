@@ -910,7 +910,7 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
         if let parts = groups(#"^(?:Date: )?([0-9]{4})-([0-9]{2})-([0-9]{2})$"#, text),
            let year = Int(parts[0]), let month = Int(parts[1]), let day = Int(parts[2]) { return .init(year: year, month: month, day: day) }
         // Explicit English month names and four-digit years are unambiguous.
-        // A page's "tomorrow" cannot use the user's original task clock: the
+        // A page's "tomorrow" cannot use any user-message clock: the
         // page has its own publication/time-zone context, still unresolved.
         let monthPattern = "(January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)"
         let months = ["jan":1, "feb":2, "mar":3, "apr":4, "may":5, "jun":6, "jul":7, "aug":8, "sep":9, "oct":10, "nov":11, "dec":12]

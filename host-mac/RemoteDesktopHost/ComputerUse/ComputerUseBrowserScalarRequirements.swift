@@ -444,7 +444,7 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
         for turn in turns {
             guard proposal.input.clarifications.indices.contains(turn - 1) else { return false }
             let answer = proposal.input.clarifications[turn - 1]
-            guard answer.topic.isDateTopic, Self.isNativeDateAnswer(answer.answer, input: proposal.input) else { continue }
+            guard answer.topic.isDateTopic, Self.isNativeDateAnswer(answer.answer, input: proposal.input, turn: turn) else { continue }
             let ranges = selected.filter { $0.sourceTurnIndex == turn }.map {
                 $0.sourceByteOffset..<($0.sourceByteOffset + $0.sourceByteCount)
             }
@@ -537,7 +537,7 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
             for (index, answer) in proposal.input.clarifications.enumerated() {
                 let literal: Bool
                 switch answer.topic {
-                case .date, .replaceDate: literal = Self.isNativeDateAnswer(answer.answer, input: proposal.input)
+                case .date, .replaceDate: literal = Self.isNativeDateAnswer(answer.answer, input: proposal.input, turn: index + 1)
                 case .quantity: literal = Self.quantityAnswer(answer.answer) != nil
                 default: literal = Self.parameter(answer.answer, topic: answer.topic) != nil
                 }
@@ -567,7 +567,7 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
         switch requirement.field {
         case .quantity: parsed = Self.quantity(source)
         case .price: parsed = Self.price(source)
-        case .date: parsed = Self.date(source, input: input)
+        case .date: parsed = Self.date(source, input: input, turn: requirement.sourceTurnIndex)
         default: parsed = .failure(.init(reason: .notScalar))
         }
         switch parsed {
@@ -1007,8 +1007,8 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
             guard targets.allSatisfy({ originGroups[$0].map { Set($0).isSubset(of: targets) } ?? true }) else {
                 unresolved(.clarificationScope); continue
             }
-            let range = Self.answeredDate(answer.answer, input: proposal.input)
-            guard Self.isNativeDateAnswer(answer.answer, input: proposal.input) else { unresolved(.ambiguousClarification); continue }
+            let range = Self.answeredDate(answer.answer, input: proposal.input, turn: turn)
+            guard Self.isNativeDateAnswer(answer.answer, input: proposal.input, turn: turn) else { unresolved(.ambiguousClarification); continue }
             let ordered = targets.sorted()
             // Keep the selected origin even after a literal conflict. An
             // explicit replacement can then address that same unit; malformed
@@ -1331,13 +1331,14 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
         return .init(turn: turn, start: start, end: start + source.utf8.count)
     }
 
-    private static func answeredDate(_ source: String, input: ComputerUseBrowserGoalInput) -> DayRange? {
-        guard case .success((.day(let range), _)) = date(conditionSource(source), input: input) else { return nil }
+    private static func answeredDate(_ source: String, input: ComputerUseBrowserGoalInput, turn: Int) -> DayRange? {
+        guard case .success((.day(let range), _)) = date(conditionSource(source), input: input, turn: turn) else { return nil }
         return range
     }
 
-    private static func isNativeDateAnswer(_ source: String, input: ComputerUseBrowserGoalInput) -> Bool {
-        answeredDate(source, input: input) != nil || weekdayClause(conditionSource(source))
+    private static func isNativeDateAnswer(_ source: String, input: ComputerUseBrowserGoalInput, turn: Int) -> Bool {
+        guard input.dateContext(forTurn: turn) != nil else { return false }
+        return answeredDate(source, input: input, turn: turn) != nil || weekdayClause(conditionSource(source))
     }
 
     /// Compare the selected byte intervals with the complete native date
@@ -1345,7 +1346,7 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
     /// no endpoint, modifier or other non-whitespace byte may be omitted.
     private static func coversDateAnswer(_ ranges: [Range<Int>], turn: Int, input: ComputerUseBrowserGoalInput) -> Bool {
         guard input.userTurns.indices.contains(turn),
-              isNativeDateAnswer(input.userTurns[turn], input: input),
+              isNativeDateAnswer(input.userTurns[turn], input: input, turn: turn),
               let span = answerSpan(input.userTurns[turn], turn: turn) else { return false }
         return coversDateSpan(ranges, span: span, input: input)
     }
@@ -1572,27 +1573,28 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
         switch values[4].lowercased() { case "including fees": fees = .included; case "excluding fees": fees = .excluded; default: fees = .unspecified }
         return .success((.price(comparison, amount, basis, fees), comparison.relation))
     }
-    private static func day(_ value: String, input: ComputerUseBrowserGoalInput) -> CivilDay? {
+    private static func day(_ value: String, context: ComputerUseBrowserGoalInput.DateContext) -> CivilDay? {
         if let parts = groups(#"^([0-9]{4})-([0-9]{2})-([0-9]{2})$"#, value),
            let year = Int(parts[0]), let month = Int(parts[1]), let day = Int(parts[2]) { return .init(year: year, month: month, day: day) }
-        guard ["today", "tomorrow"].contains(value.lowercased()), let timeZone = TimeZone(identifier: input.timeZoneIdentifier) else { return nil }
+        guard ["today", "tomorrow"].contains(value.lowercased()), let timeZone = TimeZone(identifier: context.timeZoneIdentifier) else { return nil }
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = timeZone
-        let reference = Date(timeIntervalSince1970: Double(input.referenceMilliseconds) / 1_000)
+        let reference = Date(timeIntervalSince1970: Double(context.referenceMilliseconds) / 1_000)
         let today = calendar.startOfDay(for: reference)
         guard let target = calendar.date(byAdding: .day, value: value.lowercased() == "tomorrow" ? 1 : 0, to: today) else { return nil }
         let parts = calendar.dateComponents([.year, .month, .day], from: target)
         guard let year = parts.year, let month = parts.month, let day = parts.day else { return nil }
         return .init(year: year, month: month, day: day)
     }
-    private static func date(_ source: String, input: ComputerUseBrowserGoalInput) -> Result<(Predicate, ComputerUseBrowserGoalProposal.Relation), BindingFailure> {
+    private static func date(_ source: String, input: ComputerUseBrowserGoalInput, turn: Int) -> Result<(Predicate, ComputerUseBrowserGoalProposal.Relation), BindingFailure> {
+        guard let context = input.dateContext(forTurn: turn) else { return .failure(.init(reason: .invalidValue)) }
         let token = #"(today|tomorrow|[0-9]{4}-[0-9]{2}-[0-9]{2})"#
         if let parts = groups("^(?:(on|for)\\s+)?" + token + "$", source) {
-            guard let value = day(parts[1], input: input) else { return .failure(.init(reason: .invalidValue)) }
+            guard let value = day(parts[1], context: context) else { return .failure(.init(reason: .invalidValue)) }
             return .success((.day(.init(lower: value, lowerInclusive: true, upper: value, upperInclusive: true)), .equal))
         }
         if let parts = groups("^(before|after|on or before|on or after)\\s+" + token + "$", source) {
-            guard let value = day(parts[1], input: input) else { return .failure(.init(reason: .invalidValue)) }
+            guard let value = day(parts[1], context: context) else { return .failure(.init(reason: .invalidValue)) }
             switch parts[0].lowercased() {
             case "before": return .success((.day(.init(lower: nil, lowerInclusive: false, upper: value, upperInclusive: false)), .earlier))
             case "after": return .success((.day(.init(lower: value, lowerInclusive: false, upper: nil, upperInclusive: false)), .later))
@@ -1601,7 +1603,7 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
             }
         }
         if let parts = groups("^from\\s+" + token + "\\s+through\\s+" + token + "$", source) {
-            guard let lower = day(parts[0], input: input), let upper = day(parts[1], input: input), lower <= upper else {
+            guard let lower = day(parts[0], context: context), let upper = day(parts[1], context: context), lower <= upper else {
                 return .failure(.init(reason: .invalidValue))
             }
             return .success((.day(.init(lower: lower, lowerInclusive: true, upper: upper, upperInclusive: true)), .between))

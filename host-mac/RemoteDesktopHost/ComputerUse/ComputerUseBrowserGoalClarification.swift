@@ -68,13 +68,15 @@ struct ComputerUseBrowserGoalClarificationTurn: Equatable, Sendable, CustomStrin
     let priorRequirements: [ComputerUseBrowserGoalProposal.Requirement]
     let answerTaskID: String
     let answer: String
+    let dateContext: ComputerUseBrowserGoalInput.DateContext
     let digest: String
-    fileprivate init(question: ComputerUseBrowserGoalClarification.Question, answerTaskID: String, answer: String) {
+    fileprivate init(question: ComputerUseBrowserGoalClarification.Question, answerTaskID: String, answer: String,
+                     dateContext: ComputerUseBrowserGoalInput.DateContext) {
         inputDigest = question.inputDigest; questionID = question.id; topic = question.topic; scope = question.scope
         priorInterpretationDigest = question.interpretationDigest; priorRequirements = question.requirements
-        self.answerTaskID = answerTaskID; self.answer = answer
-        digest = ComputerUseTaskContract.digest(["browser-goal-answer-v2", inputDigest, questionID,
-            priorInterpretationDigest, answerTaskID, answer])
+        self.answerTaskID = answerTaskID; self.answer = answer; self.dateContext = dateContext
+        digest = ComputerUseTaskContract.digest(["browser-goal-answer-v3", inputDigest, questionID,
+            priorInterpretationDigest, answerTaskID, answer, String(dateContext.referenceMilliseconds), dateContext.timeZoneIdentifier])
     }
     var description: String { "BrowserClarificationTurn(topic: \(topic.rawValue), bytes: \(answer.utf8.count))" }
     var debugDescription: String { description }
@@ -113,15 +115,16 @@ final class ComputerUseBrowserGoalClarification {
         let scope: [ComputerUseBrowserGoalClarificationTurn.Scope]
         let interpretationDigest: String
         let requirements: [ComputerUseBrowserGoalProposal.Requirement]
+        let issuedAt: Date
         let expiresAt: Date
         let context: Context
         let text: String
         fileprivate init(proposal: ComputerUseBrowserGoalProposal, topic: ComputerUseBrowserClarificationTopic,
-                         scope: [ComputerUseBrowserGoalClarificationTurn.Scope], expiresAt: Date, context: Context) throws {
+                         scope: [ComputerUseBrowserGoalClarificationTurn.Scope], issuedAt: Date, expiresAt: Date, context: Context) throws {
             let input = proposal.input
             taskID = input.taskID; inputDigest = input.digest; self.topic = topic; self.scope = scope
             interpretationDigest = proposal.digest; requirements = proposal.requirements
-            self.expiresAt = expiresAt; self.context = context
+            self.issuedAt = issuedAt; self.expiresAt = expiresAt; self.context = context
             text = try Self.render(topic: topic, scope: scope, input: input)
             guard text.count <= ComputerUseTaskLedger.maximumClarificationCharacters,
                   text.utf8.count <= ComputerUseTaskLedger.maximumClarificationUTF8Bytes else { throw Failure.inputLimit }
@@ -142,10 +145,17 @@ final class ComputerUseBrowserGoalClarification {
                 let before = contextExcerpt(prefix, fromEnd: true), after = contextExcerpt(suffix, fromEnd: false)
                 let excerpt = (before.omitted ? "…" : "") + display(before.text) + "⟦" + display(item.source) + "⟧"
                     + display(after.text) + (after.omitted ? "…" : "")
-                let label = item.turn == 0 ? "From your request" : "From your answer \(item.turn)"
+                var label = item.turn == 0 ? "From your request" : "From your answer \(item.turn)"
+                if topic.isDateTopic {
+                    guard let reference = input.dateContext(forTurn: item.turn) else { throw Failure.invalidProposal }
+                    label += " (relative dates use \(reference.civilDateLabel) in \(reference.timeZoneIdentifier))"
+                }
                 return "\(label):\n“\(excerpt)”"
             }
-            return topic.question + "\n\nI'm asking about the part inside ⟦ ⟧.\n\n" + excerpts.joined(separator: "\n\n")
+            let answerClock = topic.isDateTopic
+                ? "\n\nFor words like today or tomorrow, your answer uses the date I receive it in \(input.timeZoneIdentifier). Earlier messages keep their original date references."
+                : ""
+            return topic.question + answerClock + "\n\nI'm asking about the part inside ⟦ ⟧.\n\n" + excerpts.joined(separator: "\n\n")
         }
         /// Nearby context distinguishes repeated clauses. Only context is
         /// shortened; every selected source scalar has a display representation.
@@ -219,8 +229,8 @@ final class ComputerUseBrowserGoalClarification {
             return .init(requirement: requirement, source: source)
         }
         let expiry = current.addingTimeInterval(600)
-        guard expiry.timeIntervalSince1970.isFinite, expiry > current else { throw Failure.inputLimit }
-        let question = try Question(proposal: proposal, topic: topic, scope: scope, expiresAt: expiry, context: context)
+        guard expiry.timeIntervalSince1970 < ComputerUseBrowserGoalInput.DateContext.maximumSeconds, expiry > current else { throw Failure.inputLimit }
+        let question = try Question(proposal: proposal, topic: topic, scope: scope, issuedAt: current, expiresAt: expiry, context: context)
         pending = question
         return question
     }
@@ -228,10 +238,13 @@ final class ComputerUseBrowserGoalClarification {
     func consume(questionID: String, answerTaskID: String, answer: String, context: Context) throws -> ComputerUseBrowserGoalInput {
         guard !isRetired else { throw Failure.retired }
         guard let question = pending, question.id == questionID, question.inputDigest == input.digest else { throw Failure.invalidReference }
-        guard try currentDate() < question.expiresAt else { pending = nil; throw Failure.expired }
+        let acceptedAt = try currentDate()
+        guard acceptedAt < question.expiresAt else { pending = nil; throw Failure.expired }
+        guard acceptedAt >= question.issuedAt else { throw Failure.inputLimit }
         guard question.context == context else { throw Failure.contextChanged }
         guard Context.validIdentifier(answerTaskID) else { throw Failure.inputLimit }
-        let turn = ComputerUseBrowserGoalClarificationTurn(question: question, answerTaskID: answerTaskID, answer: answer)
+        let dateContext = try ComputerUseBrowserGoalInput.DateContext(referenceDate: acceptedAt, timeZoneIdentifier: input.timeZoneIdentifier)
+        let turn = ComputerUseBrowserGoalClarificationTurn(question: question, answerTaskID: answerTaskID, answer: answer, dateContext: dateContext)
         let continued: ComputerUseBrowserGoalInput
         do { continued = try input.appending(turn) } catch { throw Failure.inputLimit }
         // Only a fully validated answer consumes the reference. Failed input
@@ -254,7 +267,8 @@ final class ComputerUseBrowserGoalClarification {
     func retire() { isRetired = true; pending = nil }
     private func currentDate() throws -> Date {
         let value = now()
-        guard value.timeIntervalSince1970.isFinite else { throw Failure.inputLimit }
+        let seconds = value.timeIntervalSince1970
+        guard seconds.isFinite, seconds >= 0, seconds < ComputerUseBrowserGoalInput.DateContext.maximumSeconds else { throw Failure.inputLimit }
         return value
     }
 }

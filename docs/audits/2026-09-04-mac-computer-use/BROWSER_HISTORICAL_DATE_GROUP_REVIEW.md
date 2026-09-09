@@ -2,6 +2,8 @@
 
 Source repair; execution pending. This follows [explicit date replacement](BROWSER_EXPLICIT_DATE_REPLACEMENT_REVIEW.md). No build, typecheck, assertion, app, browser, model or account-login execution occurred.
 
+The subsequent [answer date-context repair](BROWSER_ANSWER_DATE_CONTEXT_REVIEW.md) gives each accepted answer its own fixed reference while preserving the original request's clock. The counts and remaining-work notes below describe this earlier checkpoint.
+
 ## First-principles finding
 
 A requirement's meaning belongs to its complete source occurrence, not the number of rows a model produces. The prior checkpoint could retain or replace one intact original date row, but splitting that same row made its historical meaning uncompiled. For example, a previously recognized `before 2026-10-16` could become `before ` and `2026-10-16`. Its exact original text and user answer still existed, yet a legitimate date replacement could no longer reach form repair or answer eligibility.

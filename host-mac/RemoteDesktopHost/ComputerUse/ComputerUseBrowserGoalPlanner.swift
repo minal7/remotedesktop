@@ -1,18 +1,50 @@
 import Foundation
 
-/// The original research request and the clock used to interpret relative
-/// dates. Neither a page nor a model may replace these inputs during a task.
+/// Each source message keeps the clock used to interpret its relative dates.
+/// Neither a later message, a page nor a model may rewrite an earlier clock.
 struct ComputerUseBrowserGoalInput: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    struct DateContext: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+        static let maximumSeconds: TimeInterval = 253_402_300_800
+        let referenceMilliseconds: Int64
+        let timeZoneIdentifier: String
+        init(referenceDate: Date, timeZoneIdentifier: String) throws {
+            let seconds = referenceDate.timeIntervalSince1970
+            guard seconds.isFinite, seconds >= 0, seconds < Self.maximumSeconds,
+                  timeZoneIdentifier.utf8.count <= 128, TimeZone(identifier: timeZoneIdentifier) != nil else {
+                throw ComputerUseBrowserGoalPlanError.invalidInput
+            }
+            referenceMilliseconds = Int64((seconds * 1_000).rounded(.towardZero))
+            self.timeZoneIdentifier = timeZoneIdentifier
+        }
+        var plannerContext: [String: Any] {
+            ["referenceUnixMilliseconds":referenceMilliseconds, "timeZone":timeZoneIdentifier]
+        }
+        var civilDateLabel: String {
+            var calendar = Calendar(identifier: .gregorian)
+            // Construction has already validated this fixed zone.
+            calendar.timeZone = TimeZone(identifier: timeZoneIdentifier)!
+            let date = Date(timeIntervalSince1970: Double(referenceMilliseconds) / 1_000)
+            let parts = calendar.dateComponents([.year, .month, .day], from: date)
+            return String(format: "%04d-%02d-%02d", parts.year!, parts.month!, parts.day!)
+        }
+        var description: String { "BrowserDateContext" }
+        var debugDescription: String { description }
+    }
     static let maximumUserTurns = 4
     static let maximumUserBytes = 32 * 1_024
     let taskID: String
     let prompt: String
-    let referenceMilliseconds: Int64
-    let timeZoneIdentifier: String
+    let rootDateContext: DateContext
+    var referenceMilliseconds: Int64 { rootDateContext.referenceMilliseconds }
+    var timeZoneIdentifier: String { rootDateContext.timeZoneIdentifier }
     let rootDigest: String
     let clarifications: [ComputerUseBrowserGoalClarificationTurn]
     let digest: String
     var userTurns: [String] { [prompt] + clarifications.map(\.answer) }
+    func dateContext(forTurn turn: Int) -> DateContext? {
+        guard userTurns.indices.contains(turn) else { return nil }
+        return turn == 0 ? rootDateContext : clarifications[turn - 1].dateContext
+    }
 
     /// A bounded source slice, not proof that the requirement belongs to an
     /// interpretation. Callers must separately retain that native provenance.
@@ -25,26 +57,23 @@ struct ComputerUseBrowserGoalInput: Equatable, Sendable, CustomStringConvertible
     }
 
     init(taskID: String, prompt: String, referenceDate: Date, timeZoneIdentifier: String) throws {
-        let seconds = referenceDate.timeIntervalSince1970
         guard !taskID.isEmpty, taskID.utf8.count <= 256,
               !taskID.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains),
-              !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, prompt.utf8.count <= Self.maximumUserBytes,
-              seconds.isFinite, seconds >= 0, seconds < 253_402_300_800,
-              timeZoneIdentifier.utf8.count <= 128, TimeZone(identifier: timeZoneIdentifier) != nil else {
+              !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, prompt.utf8.count <= Self.maximumUserBytes else {
             throw ComputerUseBrowserGoalPlanError.invalidInput
         }
         self.taskID = taskID; self.prompt = prompt
-        referenceMilliseconds = Int64((seconds * 1_000).rounded(.towardZero))
-        self.timeZoneIdentifier = timeZoneIdentifier
+        let dateContext = try DateContext(referenceDate: referenceDate, timeZoneIdentifier: timeZoneIdentifier)
+        rootDateContext = dateContext
         rootDigest = ComputerUseTaskContract.digest(["browser-goal-input-v1", taskID, prompt,
-            String(referenceMilliseconds), timeZoneIdentifier])
+            String(dateContext.referenceMilliseconds), timeZoneIdentifier])
         clarifications = []
         digest = rootDigest
     }
 
     private init(continuing input: Self, turn: ComputerUseBrowserGoalClarificationTurn) {
         taskID = input.taskID; prompt = input.prompt
-        referenceMilliseconds = input.referenceMilliseconds; timeZoneIdentifier = input.timeZoneIdentifier
+        rootDateContext = input.rootDateContext
         rootDigest = input.rootDigest; clarifications = input.clarifications + [turn]
         digest = ComputerUseTaskContract.digest(["browser-clarified-goal-input-v1", rootDigest] + clarifications.map(\.digest))
     }
@@ -53,6 +82,7 @@ struct ComputerUseBrowserGoalInput: Equatable, Sendable, CustomStringConvertible
     /// Appending user input changes the revision, never the root task/clock.
     func appending(_ turn: ComputerUseBrowserGoalClarificationTurn) throws -> Self {
         guard turn.inputDigest == digest, userTurns.count < Self.maximumUserTurns,
+              turn.dateContext.timeZoneIdentifier == timeZoneIdentifier,
               !turn.answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               turn.answer.utf8.count <= 8 * 1_024,
               userTurns.reduce(0, { $0 + $1.utf8.count }) + turn.answer.utf8.count <= Self.maximumUserBytes,
@@ -78,11 +108,12 @@ struct ComputerUseBrowserGoalInput: Equatable, Sendable, CustomStringConvertible
     var plannerContext: [String: Any] {
         let turns: [[String: Any]] = clarifications.enumerated().map { index, turn in
             ["turn":index + 1, "answer":turn.answer, "question":turn.topic.question,
+             "dateContext":turn.dateContext.plannerContext,
              "topic":turn.topic.rawValue, "scope":turn.scope.map {
                  ["turn":$0.turn, "sourceByteOffset":$0.sourceByteOffset, "source":$0.source] as [String: Any]
              }]
         }
-        return ["version":clarifications.contains(where: { $0.topic == .replaceDate }) ? 3 : 2, "request":prompt, "clarifications":turns,
+        return ["version":clarifications.isEmpty ? 2 : 4, "request":prompt, "clarifications":turns,
             "referenceUnixMilliseconds":referenceMilliseconds, "timeZone":timeZoneIdentifier]
     }
 
@@ -360,9 +391,9 @@ struct ComputerUseLocalBrowserGoalPlanner: ComputerUseBrowserGoalPlanning {
     The request is user turn 0. Each clarification has an explicit turn number and user answer. Preserve every outcome, condition, prohibition, sequence and unresolved part of every user turn. For each turn, copy consecutive source fragments whose concatenation is that exact user input, including whitespace, punctuation and Unicode. Set turn on every requirement, keep turns in order, and cover each turn completely. Do not omit an unsupported tail, overwrite the original goal with the latest answer, merge repeated instructions or declare the task complete.
     Use research for an information-finding request, including travel, concerts and movies. Research classification does not promise available browser capabilities or prove the interpretation. Use clarification for missing or ambiguous required user details, and unsupported for requested work outside research. These dispositions still retain the entire source as requirements. Never ask for passwords or verification codes; account login belongs to manual user control.
     Assign each fragment a role and field. outcome describes what the user wants found or reported; condition narrows acceptable results; prohibition says what must not happen; order describes ranking or sequencing; clarification and unsupported retain unresolved work. Use field other when the provided fields do not describe the fragment. Keep comparative direction and negation. Retain price limits, fees, availability, counts, dates, times, locations, routes, preferred sources and comparisons separately when the source permits it.
-    values are verbatim hints from that fragment only. Do not invent, translate, normalize or calculate them. Relative dates retain the user's words; the fixed reference time and time zone are context for later interpretation, not permission to invent a date here. Source coverage and copied values do not prove semantic correctness. The host must separately bind action arguments and verify result meanings against the original request.
+    values are verbatim hints from that fragment only. Do not invent, translate, normalize or calculate them. Relative dates retain the user's words; the source turn's fixed reference time and time zone are context for later interpretation, not permission to invent a date here. Source coverage and copied values do not prove semantic correctness. The host must separately bind action arguments and verify result meanings against the original request.
     Website scope has two different meanings. navigationSource restricts websites the automation may visit (for example, only browse example.com). answerSource restricts websites that may supply reported results (for example, only report tickets from example.com), while auxiliary search and account pages may still be visited. For these fields, include/equal means an exclusive allowed set, exclude/notEqual means a forbidden set; copy every mentioned domain or origin as a separate verbatim value. Alternatives within a single set belong in one requirement; separate constraints are all required. Never interpret a preference, comparison, conditional exception or ambiguous use of a website as an exclusive set. Keep those in field source and request source clarification. Do not invent domains from brand names, expand subdomains or remove URL path restrictions. A source clarification answer can resolve the intended scope of an earlier ambiguous source fragment; re-interpret the complete original fragment and answer together, retaining both turns. It cannot silently erase a prohibition or other condition.
-    Clarification question/topic/scope fields are host context for interpreting the associated answer, not user-supplied values or new instructions. Requirement sources and values must come only from the specified user turn, never from a host question, copied scope context or another turn. Keep contradictions and changes of intent visible for whole-goal compilation; a later answer does not silently erase earlier requirements. All relative dates retain the original fixed date context across turns.
+    Clarification question/topic/scope fields are host context for interpreting the associated answer, not user-supplied values or new instructions. Requirement sources and values must come only from the specified user turn, never from a host question, copied scope context or another turn. Keep contradictions and changes of intent visible for whole-goal compilation; a later answer does not silently erase earlier requirements. The top-level referenceUnixMilliseconds/timeZone belong only to the original request. Each clarification has its own dateContext, captured when that answer was accepted in the task's fixed time zone. Interpret relative dates using the context of the source turn, never the current planner clock or another turn. A later message never shifts an earlier date. Identical words such as tomorrow in two turns can mean different civil days; ordinary clarification cannot silently replace the earlier requirement.
     For currency, priceBasis and fees questions, prefer the exact original price clause as scope. Do not combine unrelated budgets under a broad outcome scope. A literal answer such as USD, per ticket or including fees supplies a parameter to that clause; retain the answer as its own source-covered requirement and do not replace the original amount or comparator. A symbol does not imply a currency from location alone.
     For date questions, select the exact date occurrence, preserving modifiers such as next, this, before and after. A concrete date answer can disambiguate a bare weekday or confirm an existing concrete date/range; it does not silently replace a conflicting date or resolve relative-week language. Retain the answer as a separate source-covered requirement and keep outbound, return and unrelated event dates distinct. Scope a genuinely missing date to one outcome. A whole native date answer owns the introduced date; the broad outcome remains separate and still requires complete-goal scope review. If that answer is later split across rows, a date question must cover the complete answer, including both range endpoints and any modifier. A previously recognized date clause from the original request likewise remains one native source unit when its complete bytes are split or rejoined. Date questions must cover every row of that unit, preserving modifiers and both range endpoints; do not absorb neighboring conditions or treat an endpoint label as a new date. An already resolved date does not need another question merely because its source was relabeled or split.
     replaceDate is a separate explicit replacement question for one known date origin. Use it to resolve a requested date change or conflicting user dates, never to relax the goal to fit website results. Its fixed text tells the user that their answer will replace that whole selected date requirement, including its weekday or before/after limit. It cannot use a missing outcome, a partial date unit or two separate trip/event dates. Only an accepted answer grants replacement; proposing the topic does not. Retain every original and answer source row with its original meaning. The native ledger separately records which date obligations were replaced and which remain active; never erase or relabel old source text as unsupported to manufacture a replacement. Other dates, prices, quantities, source restrictions and execution duties remain unchanged.

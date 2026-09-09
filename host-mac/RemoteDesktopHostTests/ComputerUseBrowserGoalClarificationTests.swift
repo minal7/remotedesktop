@@ -7,6 +7,153 @@ final class ComputerUseBrowserGoalClarificationTests: XCTestCase {
     private typealias Clarification = ComputerUseBrowserGoalClarification
     private typealias Scalars = ComputerUseBrowserScalarRequirements
 
+    func testAcceptedDateAnswerKeepsItsOwnClockAcrossMidnightAndSourceSplitting() throws {
+        let original = try clockInput("Find tickets.", at: "2026-09-09T23:58:00Z")
+        var clock = try clockDate("2026-09-09T23:59:00Z")
+        let state = Clarification(input: original, now: { clock }), initial = try proposal(original, rows: [row(original.prompt)])
+        let question = try state.issue(proposal: initial, topic: .date, requirementIDs: [initial.requirements[0].id], context: context())
+        XCTAssertTrue(question.text.contains("relative dates use 2026-09-09 in UTC"))
+        XCTAssertTrue(question.text.contains("your answer uses the date I receive it in UTC"))
+        clock = try clockDate("2026-09-10T00:01:00Z")
+        let updated = try state.consume(questionID: question.id, answerTaskID: "date", answer: "tomorrow", context: context())
+        let accepted = try XCTUnwrap(updated.dateContext(forTurn: 1))
+        XCTAssertEqual(accepted.referenceMilliseconds, Int64(clock.timeIntervalSince1970 * 1_000))
+        XCTAssertEqual(accepted.civilDateLabel, "2026-09-10")
+        XCTAssertEqual(updated.rootDateContext, original.rootDateContext); XCTAssertTrue(updated.continues(original))
+        let rows = [row(original.prompt), row("to", turn: 1, role: "condition", field: "location"),
+            row("morrow", turn: 1, role: "condition", field: "location")]
+        clock = try clockDate("2026-09-12T12:00:00Z")
+        let current = try proposal(updated, rows: rows, disposition: "research")
+        let values = ComputerUseBrowserResearchFormInput.normalizations(for: current)
+        XCTAssertEqual(values.map(\.value), ["2026-09-11"]); XCTAssertEqual(values.first?.requirementIndices, [1, 2])
+        XCTAssertEqual(updated.dateContext(forTurn: 1), accepted, "Later planning cannot move tomorrow forward")
+        XCTAssertEqual(updated.userTurns, [original.prompt, "tomorrow"])
+        XCTAssertNil(updated.dateContext(forTurn: -1)); XCTAssertNil(updated.dateContext(forTurn: 2))
+    }
+
+    func testIdenticalRelativeWordsAfterMidnightNeedExplicitDateReplacement() throws {
+        let original = try clockInput("Find concerts. tomorrow. Under USD 50.", at: "2026-09-09T23:58:00Z")
+        var clock = try clockDate("2026-09-09T23:59:00Z")
+        let state = Clarification(input: original, now: { clock })
+        var rows = [row("Find concerts. "), row("tomorrow. ", role: "condition", field: "date"),
+            row("Under USD 50.", role: "condition", field: "price")]
+        let initial = try proposal(original, rows: rows, disposition: "research")
+        let ordinary = try state.issue(proposal: initial, topic: .date, requirementIDs: [initial.requirements[1].id], context: context())
+        clock = try clockDate("2026-09-10T00:01:00Z")
+        let conflicted = try state.consume(questionID: ordinary.id, answerTaskID: "ordinary", answer: "tomorrow", context: context())
+        rows.append(row("tomorrow", turn: 1, role: "condition", field: "date"))
+        let current = try proposal(conflicted, rows: rows, disposition: "research"), ledger = Scalars(proposal: current)
+        XCTAssertEqual(ledger.entries[1].resolution, .unresolved(.contradictoryClarification))
+        XCTAssertEqual(ledger.entries[3].resolution, .unresolved(.contradictoryClarification))
+        XCTAssertTrue(ComputerUseBrowserResearchFormInput.normalizations(for: current).isEmpty)
+        let replacement = try state.issue(proposal: current, topic: .replaceDate, requirementIDs: [current.requirements[3].id], context: context())
+        XCTAssertEqual(replacement.scope.map(\.source), ["tomorrow. "])
+        XCTAssertTrue(replacement.text.contains("relative dates use 2026-09-09 in UTC"))
+        clock = try clockDate("2026-09-10T00:02:00Z")
+        let updated = try state.consume(questionID: replacement.id, answerTaskID: "replacement", answer: "tomorrow", context: context())
+        rows.append(row("tomorrow", turn: 2, role: "condition", field: "date"))
+        let final = try proposal(updated, rows: rows, disposition: "research"), replaced = Scalars(proposal: final)
+        for index in [1, 3] { guard case .superseded = replaced.entries[index].resolution else { return XCTFail("Only explicit replacement can retire the earlier day") } }
+        XCTAssertEqual(ComputerUseBrowserResearchFormInput.normalizations(for: final).map(\.value), ["2026-09-11"])
+        guard case .bound(let budget) = replaced.entries[2].resolution else { return XCTFail("The original budget remains active") }
+        XCTAssertEqual(budget.compareLiteral(.price(try XCTUnwrap(Scalars.Amount(hundredths: 6_000, currency: .usd)), .unspecified, .unspecified)), .notSatisfied)
+        XCTAssertEqual(updated.rootDateContext, original.rootDateContext)
+        XCTAssertNotEqual(updated.clarifications[0].dateContext, updated.clarifications[1].dateContext)
+        XCTAssertTrue(updated.continues(conflicted))
+    }
+
+    func testTodayAfterMidnightCanConfirmTheEarlierTomorrowWithoutReplacingIt() throws {
+        let original = try clockInput("Find concerts. tomorrow.", at: "2026-09-09T23:58:00Z")
+        var clock = try clockDate("2026-09-09T23:59:00Z")
+        let state = Clarification(input: original, now: { clock })
+        let rows = [row("Find concerts. "), row("tomorrow.", role: "condition", field: "date")]
+        let initial = try proposal(original, rows: rows, disposition: "research")
+        let question = try state.issue(proposal: initial, topic: .date, requirementIDs: [initial.requirements[1].id], context: context())
+        clock = try clockDate("2026-09-10T00:01:00Z")
+        let updated = try state.consume(questionID: question.id, answerTaskID: "date", answer: "today", context: context())
+        let current = try proposal(updated, rows: rows + [row("today", turn: 1, role: "condition", field: "date")], disposition: "research")
+        guard case .clarification(let binding) = Scalars(proposal: current).entries[2].resolution else { return XCTFail("Different relative words can identify the same day") }
+        XCTAssertEqual(binding.targetRequirementIDs, [current.requirements[1].id])
+        XCTAssertEqual(ComputerUseBrowserResearchFormInput.normalizations(for: current).map(\.value), ["2026-09-10"])
+        XCTAssertTrue(current.dateReplacementContexts.isEmpty)
+        let followup = try state.issue(proposal: current, topic: .date, requirementIDs: [current.requirements[2].id], context: context())
+        XCTAssertTrue(followup.text.contains("From your answer 1 (relative dates use 2026-09-10 in UTC)"))
+        XCTAssertEqual(followup.scope.map(\.source), ["today"])
+    }
+
+    func testAcceptedRelativeDatesUseTheTaskZoneAndCalendarDaysAcrossDST() throws {
+        let cases = [("2026-03-08T07:59:00Z", "2026-03-08T08:01:00Z", 3, 8, "2026-03-08", "2026-03-09"),
+                     ("2026-11-01T06:59:00Z", "2026-11-01T07:01:00Z", 11, 1, "2026-11-01", "2026-11-02")]
+        for (before, after, month, day, today, tomorrow) in cases {
+            for (answer, acceptsToday, acceptsTomorrow, normalized) in [("today", true, false, [today]), ("tomorrow", false, true, [tomorrow]),
+                ("before tomorrow", true, false, []), ("after today", false, true, []), ("from today through tomorrow", true, true, [])] {
+                let original = try clockInput("Find tickets.", at: before, zone: "America/Los_Angeles")
+                var clock = try clockDate(before)
+                let state = Clarification(input: original, now: { clock }), initial = try proposal(original, rows: [row(original.prompt)])
+                let question = try state.issue(proposal: initial, topic: .date, requirementIDs: [initial.requirements[0].id], context: context())
+                clock = try clockDate(after)
+                let updated = try state.consume(questionID: question.id, answerTaskID: "date", answer: answer, context: context())
+                let current = try proposal(updated, rows: [row(original.prompt), row(answer, turn: 1, role: "condition", field: "date")], disposition: "research")
+                guard case .bound(let condition) = Scalars(proposal: current).entries[1].resolution else { return XCTFail("A complete relative day/range needs its accepted clock") }
+                XCTAssertEqual(condition.evaluate(.day(try XCTUnwrap(Scalars.CivilDay(year: 2026, month: month, day: day)))), acceptsToday ? .satisfied : .notSatisfied)
+                XCTAssertEqual(condition.evaluate(.day(try XCTUnwrap(Scalars.CivilDay(year: 2026, month: month, day: day + 1)))), acceptsTomorrow ? .satisfied : .notSatisfied)
+                XCTAssertEqual(ComputerUseBrowserResearchFormInput.normalizations(for: current).map(\.value), normalized)
+                XCTAssertEqual(updated.dateContext(forTurn: 1)?.timeZoneIdentifier, "America/Los_Angeles")
+                XCTAssertEqual(updated.dateContext(forTurn: 1)?.civilDateLabel, today)
+            }
+        }
+    }
+
+    func testInvalidOrRewoundAnswerClocksCannotConsumeALiveQuestion() throws {
+        let original = try clockInput("Find tickets.", at: "2026-09-09T12:00:00Z")
+        let issuedAt = try clockDate("2026-09-09T12:01:00Z")
+        var clock = issuedAt
+        let state = Clarification(input: original, now: { clock }), initial = try proposal(original, rows: [row(original.prompt)])
+        let question = try state.issue(proposal: initial, topic: .date, requirementIDs: [initial.requirements[0].id], context: context())
+        for seconds in [-1, Double.nan, Double.infinity, ComputerUseBrowserGoalInput.DateContext.maximumSeconds, issuedAt.timeIntervalSince1970 - 1] {
+            clock = Date(timeIntervalSince1970: seconds)
+            XCTAssertThrowsError(try state.consume(questionID: question.id, answerTaskID: "date", answer: "tomorrow", context: context())) {
+                XCTAssertEqual($0 as? Clarification.Failure, .inputLimit)
+            }
+            XCTAssertEqual(state.input, original)
+            clock = issuedAt
+            XCTAssertEqual(try state.pendingQuestion(context: context())?.id, question.id)
+        }
+        clock = issuedAt.addingTimeInterval(5)
+        let updated = try state.consume(questionID: question.id, answerTaskID: "date", answer: "tomorrow", context: context())
+        XCTAssertEqual(updated.dateContext(forTurn: 1)?.referenceMilliseconds, Int64(clock.timeIntervalSince1970 * 1_000))
+        clock = issuedAt.addingTimeInterval(10)
+        XCTAssertThrowsError(try state.consume(questionID: question.id, answerTaskID: "date", answer: "today", context: context()))
+        XCTAssertEqual(state.input, updated, "A duplicate answer cannot replace its previously accepted clock")
+    }
+
+    func testNonDateAnswersCarryTheirOwnClockWithoutReinterpretingEarlierSource() throws {
+        let original = try clockInput("Find tickets. tomorrow.", at: "2026-09-09T23:58:00Z")
+        var clock = try clockDate("2026-09-09T23:59:00Z")
+        let state = Clarification(input: original, now: { clock })
+        let rows = [row("Find tickets. "), row("tomorrow.", role: "condition", field: "date")]
+        let initial = try proposal(original, rows: rows, disposition: "research")
+        let question = try state.issue(proposal: initial, topic: .location, requirementIDs: [initial.requirements[0].id], context: context())
+        clock = try clockDate("2026-09-10T00:01:00Z")
+        let updated = try state.consume(questionID: question.id, answerTaskID: "location", answer: "Paris. tomorrow.", context: context())
+        let current = try proposal(updated, rows: rows + [row("Paris. ", turn: 1, role: "condition", field: "location"),
+            row("tomorrow.", turn: 1, role: "condition", field: "date")], disposition: "research")
+        XCTAssertEqual(ComputerUseBrowserResearchFormInput.normalizations(for: current).map(\.value), ["2026-09-10", "2026-09-11"])
+        XCTAssertTrue(current.dateReplacementContexts.isEmpty, "An extra date in a location answer cannot replace an earlier one")
+        let planner = try planner(transport: ClarifiedBrowserTransport())
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(planner.makeRequest(updated).httpBody)) as? [String: Any])
+        let messages = try XCTUnwrap(body["messages"] as? [[String: String]])
+        let text = try XCTUnwrap(messages[1]["content"])
+        let modelContext = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
+        XCTAssertEqual(modelContext["version"] as? Int, 4)
+        XCTAssertEqual((modelContext["referenceUnixMilliseconds"] as? NSNumber)?.int64Value, original.referenceMilliseconds)
+        let turns = try XCTUnwrap(modelContext["clarifications"] as? [[String: Any]])
+        let answerClock = try XCTUnwrap(turns[0]["dateContext"] as? [String: Any])
+        XCTAssertEqual((answerClock["referenceUnixMilliseconds"] as? NSNumber)?.int64Value, updated.clarifications[0].dateContext.referenceMilliseconds)
+        XCTAssertEqual(answerClock["timeZone"] as? String, "UTC")
+        for hidden in [original.taskID, original.rootDigest, question.id, updated.clarifications[0].digest] { XCTAssertFalse(text.contains(hidden)) }
+    }
+
     func testExplicitReplacementSurvivesCompleteHistoricalRootDatePartitions() throws {
         for parts in [["2026-", "10-16. "], ["before ", "2026-10-16. "], ["next ", "Friday. "],
                       ["from 2026-10-16 ", "through ", "2026-10-18. "]] {
@@ -1285,18 +1432,20 @@ final class ComputerUseBrowserGoalClarificationTests: XCTestCase {
     }
 
     func testClarifiedScalarCompilationKeepsEarlierConstraintsAndUsesOriginalDateAnchor() throws {
-        let original = try input("Find flights under USD 500 tomorrow.")
+        let original = try clockInput("Find flights under USD 500 tomorrow.", at: "2026-09-19T12:00:00Z")
         var rows = [row("Find flights "), row("under USD 500 ", role: "condition", field: "price"),
             row("tomorrow.", role: "condition", field: "date")]
         let initial = try proposal(original, rows: rows, disposition: "research")
-        let state = Clarification(input: original), owner = try context()
+        var clock = try clockDate("2026-09-19T12:01:00Z")
+        let state = Clarification(input: original, now: { clock }), owner = try context()
         let dateQuestion = try state.issue(proposal: initial, topic: .date, requirementIDs: [initial.requirements[2].id], context: owner)
         _ = try state.consume(questionID: dateQuestion.id, answerTaskID: "date-answer", answer: "on 2026-09-20", context: owner)
         rows.append(row("on 2026-09-20", turn: 1, role: "condition", field: "date"))
         let dated = try proposal(state.input, rows: rows, disposition: "research")
+        clock = try clockDate("2026-09-21T12:00:00Z")
         let priceQuestion = try state.issue(proposal: dated, topic: .priceBasis, requirementIDs: [dated.requirements[1].id], context: owner)
-        _ = try state.consume(questionID: priceQuestion.id, answerTaskID: "price-answer", answer: "above USD 700", context: owner)
-        rows.append(row("above USD 700", turn: 2, role: "condition", field: "price"))
+        _ = try state.consume(questionID: priceQuestion.id, answerTaskID: "price-answer", answer: "per ticket", context: owner)
+        rows.append(row("per ticket", turn: 2, role: "condition", field: "price"))
         let final = try proposal(state.input, rows: rows, disposition: "research")
         typealias Scalar = ComputerUseBrowserScalarRequirements
         func predicate(_ ledger: Scalar, at index: Int) throws -> Scalar.Predicate {
@@ -1305,10 +1454,13 @@ final class ComputerUseBrowserGoalClarificationTests: XCTestCase {
         }
         let firstLedger = Scalar(proposal: initial), finalLedger = Scalar(proposal: final)
         XCTAssertEqual(finalLedger.entries.count, 5)
-        XCTAssertEqual(try predicate(finalLedger, at: 1), try predicate(firstLedger, at: 1))
+        XCTAssertEqual(try predicate(finalLedger, at: 1), .price(.below, try XCTUnwrap(Scalar.Amount(hundredths: 50_000, currency: .usd)), .perTicket, .unspecified))
         XCTAssertEqual(try predicate(finalLedger, at: 2), try predicate(firstLedger, at: 2),
             "A later answer does not reinterpret tomorrow using a new clock")
-        XCTAssertEqual(try predicate(finalLedger, at: 4), .price(.above, try XCTUnwrap(Scalar.Amount(hundredths: 70_000, currency: .usd)), .unspecified, .unspecified))
+        guard case .clarification(let priceAnswer) = finalLedger.entries[4].resolution,
+              case .clarification(let dateAnswer) = finalLedger.entries[3].resolution else { return XCTFail("Compatible answers retain their original targets") }
+        XCTAssertEqual(priceAnswer.targetRequirementIDs, [final.requirements[1].id])
+        XCTAssertEqual(dateAnswer.targetRequirementIDs, [final.requirements[2].id])
         XCTAssertEqual(final.requirements.map(\.sourceTurnIndex), [0, 0, 0, 1, 2])
         XCTAssertEqual(finalLedger.unresolvedRequirementIDs, [final.requirements[0].id])
         XCTAssertNotEqual(final.requirements[1].id, initial.requirements[1].id)
@@ -1345,12 +1497,19 @@ final class ComputerUseBrowserGoalClarificationTests: XCTestCase {
         return (state, initial, try proposal(updated, rows: rows, disposition: "research"))
     }
     private func dateLedger(source: String, answer: String) throws -> Scalars {
-        let original = try input("Find tickets. " + source), state = Clarification(input: original)
+        let original = try input("Find tickets. " + source)
+        let state = Clarification(input: original, now: { Date(timeIntervalSince1970: Double(original.referenceMilliseconds) / 1_000) })
         let rows = [row("Find tickets. "), row(source, role: "condition", field: "date")]
         let initial = try proposal(original, rows: rows)
         let question = try state.issue(proposal: initial, topic: .date, requirementIDs: [initial.requirements[1].id], context: context())
         let updated = try state.consume(questionID: question.id, answerTaskID: "date", answer: answer, context: context())
         return Scalars(proposal: try proposal(updated, rows: rows + [row(answer, turn: 1, role: "condition", field: "date")], disposition: "research"))
+    }
+    private func clockDate(_ value: String) throws -> Date {
+        try XCTUnwrap(ISO8601DateFormatter().date(from: value))
+    }
+    private func clockInput(_ prompt: String, at value: String, zone: String = "UTC") throws -> ComputerUseBrowserGoalInput {
+        try .init(taskID: "date-context-root", prompt: prompt, referenceDate: clockDate(value), timeZoneIdentifier: zone)
     }
     private func input(_ prompt: String, taskID: String = "browser-original-root") throws -> ComputerUseBrowserGoalInput {
         try .init(taskID: taskID, prompt: prompt, referenceDate: Date(timeIntervalSince1970: 1_800_000_000), timeZoneIdentifier: "America/Los_Angeles")
