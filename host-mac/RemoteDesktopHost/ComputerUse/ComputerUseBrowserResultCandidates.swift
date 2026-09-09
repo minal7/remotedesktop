@@ -260,12 +260,19 @@ struct ComputerUseBrowserResultCandidates: Sendable, CustomStringConvertible, Cu
     /// Frozen with the reading after native page validation. This snapshot
     /// cannot certify a complete route or silently become current on recall.
     fileprivate let navigationSourceHistory: ComputerUseBrowserNavigationDispatchHistory?
+    fileprivate let navigationOwnerVisits: [ComputerUseBrowserResearchVisit]?
     var navigationHistoryIdentity: String? { navigationSourceHistory?.identity }
     func navigationHistoryAssessment(for sources: ComputerUseBrowserSourceRequirements) -> ComputerUseBrowserResultAssessment.NavigationHistory? {
         guard sources.requiresNavigationHistory else { return nil }
         let bound = goalRevision == sources.goal.digest && rootTaskID == sources.goal.taskID
             && goalInterpretation?.digest == sources.interpretationDigest
-        return .init(history: bound ? navigationSourceHistory : nil, sources: sources, contextID: evidence.document.contextID)
+        return .init(history: bound ? navigationSourceHistory : nil, sources: sources, contextID: evidence.document.contextID,
+            ownerVisits: bound ? navigationOwnerVisits : nil)
+    }
+    func matchesOwnerNavigationHistory(_ visits: [ComputerUseBrowserResearchVisit]) -> Bool {
+        guard let goalInterpretation,
+              ComputerUseBrowserSourceRequirements(proposal: goalInterpretation).requiresNavigationHistory else { return true }
+        return navigationOwnerVisits == visits
     }
     let containers: [ComputerUseBrowserPageSnapshot.Container]
     let surroundingTexts: [Text]
@@ -281,9 +288,10 @@ struct ComputerUseBrowserResultCandidates: Sendable, CustomStringConvertible, Cu
     fileprivate let readingInput: ComputerUseBrowserResultPageInput
 
     var requirementAssessmentIdentity: String {
-        ComputerUseTaskContract.digest(["browser-reading-assessment-v3", goalRevision, String(observedAtMilliseconds), evidence.document.contextID,
+        ComputerUseTaskContract.digest(["browser-reading-assessment-v4", goalRevision, String(observedAtMilliseconds), evidence.document.contextID,
             String(evidence.document.generation), evidence.documentID, evidence.page.id, answerSourcePolicy?.digest ?? "", review?.digest ?? "",
-            goalInterpretation?.digest ?? "", navigationHistoryIdentity ?? ""] + candidates.map(\.id))
+            goalInterpretation?.digest ?? "", navigationHistoryIdentity ?? "",
+            ComputerUseBrowserResearchVisit.historyIdentity(navigationOwnerVisits)] + candidates.map(\.id))
     }
     var requirementAssessment: ComputerUseBrowserResultAssessment? {
         guard let goalInterpretation else { return nil }
@@ -344,12 +352,13 @@ struct ComputerUseBrowserResultCandidates: Sendable, CustomStringConvertible, Cu
     fileprivate init(proposal: ComputerUseBrowserResultProposal, goal: ComputerUseBrowserGoalInput,
                      evidence: ComputerUseBrowserPageEvidence, answerPolicy: ComputerUseBrowserAnswerSourcePolicy?,
                      interpretation: ComputerUseBrowserGoalProposal?, historyOptions: [ComputerUseBrowserHistoryOption],
-                     navigationSourceHistory: ComputerUseBrowserNavigationDispatchHistory?) {
+                     navigationSourceHistory: ComputerUseBrowserNavigationDispatchHistory?, ownerVisits: [ComputerUseBrowserResearchVisit]?) {
         self.evidence = evidence; goalRevision = goal.digest; rootTaskID = goal.taskID
         observedAtMilliseconds = Int64(Date().timeIntervalSince1970 * 1_000)
         self.historyOptions = historyOptions
         answerSourcePolicy = answerPolicy
         self.navigationSourceHistory = navigationSourceHistory
+        navigationOwnerVisits = navigationSourceHistory == nil ? nil : ownerVisits
         goalInterpretation = interpretation; review = proposal.review
         documentAnswerSourceStatus = answerPolicy.map { $0.permitsEvidenceFrom(evidence.document.committedURL) ? .permitted : .excluded } ?? .unconfigured
         readingInput = proposal.input
@@ -418,6 +427,7 @@ struct ComputerUseBrowserLinkSelectionInput: Equatable, Sendable, CustomStringCo
          history: [ComputerUseBrowserResearchVisit], evidence: ComputerUseBrowserResearchEvidence? = nil,
          recalledReadings: [Int] = [], allowsAnswer: Bool = false) throws {
         guard candidates.goalRevision == goal.digest, candidates.rootTaskID == goal.taskID,
+              candidates.matchesOwnerNavigationHistory(history),
               history.count <= 33, history.allSatisfy({ $0.rootDigest == goal.rootDigest }),
               Set(history.map(\.operationID)).count == history.count else {
             throw ComputerUseBrowserLinkPlanError.inputChanged
@@ -592,7 +602,8 @@ extension ComputerUseOwnedBrowser {
                                  evidence: ComputerUseBrowserPageEvidence,
                                  answerPolicy: ComputerUseBrowserAnswerSourcePolicy? = nil,
                                  interpretation: ComputerUseBrowserGoalProposal? = nil,
-                                 historyOptions: [ComputerUseBrowserHistoryOption] = []) async throws -> ComputerUseBrowserResultCandidates {
+                                 historyOptions: [ComputerUseBrowserHistoryOption] = [],
+                                 ownerVisits: [ComputerUseBrowserResearchVisit]? = nil) async throws -> ComputerUseBrowserResultCandidates {
         try Task.checkCancellation()
         guard proposal.goalRevision == goal.digest, goal.taskID.utf8.elementsEqual(evidence.document.taskID.utf8),
               answerPolicy == nil || answerPolicy?.goalRevision == goal.digest,
@@ -611,7 +622,7 @@ extension ComputerUseOwnedBrowser {
         let needsHistory = interpretation.map { ComputerUseBrowserSourceRequirements(proposal: $0).requiresNavigationHistory } ?? false
         let history = needsHistory ? try navigationDispatchHistory(taskID: goal.taskID) : nil
         return .init(proposal: proposal, goal: goal, evidence: evidence, answerPolicy: answerPolicy,
-            interpretation: interpretation, historyOptions: historyOptions, navigationSourceHistory: history)
+            interpretation: interpretation, historyOptions: historyOptions, navigationSourceHistory: history, ownerVisits: ownerVisits)
     }
 
     /// Reuse requires the same review, complete goal and current native page.

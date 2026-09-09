@@ -4,6 +4,50 @@ import XCTest
 
 @MainActor
 final class ComputerUseBrowserResearchAnswerTests: XCTestCase {
+    func testNavigationReadingBindsItsCompleteOwnerVisitSnapshotWithoutQualifyingTheRoute() async throws {
+        let fixture = try await ResearchAnswerFixture.make(navigationExclusionRole: "condition")
+        defer { fixture.source.close() }
+        fixture.source.policy.excludedOrigins = [try .init(URL(string: "https://blocked.test")!)]
+        _ = try await fixture.source.start()
+        let owner = try fixture.source.owner(), reading = try await owner.revalidateCandidates()
+        let visits = owner.confirmedNavigationHistory
+        XCTAssertEqual(visits.count, 1)
+        let native = try XCTUnwrap(visits.first?.nativeAttempt)
+        XCTAssertEqual(native.operationID, visits[0].operationID)
+        XCTAssertEqual(native.generation, visits[0].documentGeneration)
+        XCTAssertTrue(reading.matchesOwnerNavigationHistory(visits))
+        XCTAssertFalse(reading.matchesOwnerNavigationHistory([]))
+        XCTAssertFalse(reading.matchesOwnerNavigationHistory(visits + visits))
+        XCTAssertNotEqual(ComputerUseBrowserResearchVisit.historyIdentity(nil), ComputerUseBrowserResearchVisit.historyIdentity([]))
+        XCTAssertThrowsError(try ComputerUseBrowserLinkSelectionInput(goal: owner.input, candidates: reading, history: []))
+        _ = try ComputerUseBrowserLinkSelectionInput(goal: owner.input, candidates: reading, history: visits)
+        let assessment = try XCTUnwrap(reading.requirementAssessment?.navigationHistory)
+        XCTAssertEqual(assessment.ownerVisitCount, 1); XCTAssertEqual(assessment.matchedOwnerVisitCount, 1)
+        XCTAssertFalse(assessment.gaps.contains(.ownerVisitsUnreconciled))
+        XCTAssertTrue(assessment.gaps.contains(.platformCoverageUnqualified))
+        XCTAssertNil(reading.answerPage(goal: owner.input))
+    }
+
+    func testACommittedNativeNavigationWithoutAnOwnerVisitRemainsAnExplicitHistoryGap() async throws {
+        let fixture = try await ResearchAnswerFixture.make(navigationExclusionRole: "condition")
+        defer { fixture.source.close() }
+        fixture.source.policy.excludedOrigins = [try .init(URL(string: "https://blocked.test")!)]
+        _ = try await fixture.source.start()
+        let owner = try fixture.source.owner(), original = try await owner.revalidateCandidates()
+        let browser = fixture.source.browser
+        let document = try XCTUnwrap(browser.currentDocument(taskID: owner.taskID))
+        _ = try await browser.navigate(taskID: owner.taskID, operationID: "unclaimed-native-load", to: document.committedURL)
+        let fresh = try await owner.readCandidates()
+        let assessment = try XCTUnwrap(fresh.requirementAssessment?.navigationHistory)
+        XCTAssertEqual(owner.confirmedNavigationHistory.count, 1)
+        XCTAssertEqual(assessment.attemptCount, 2); XCTAssertEqual(assessment.matchedOwnerVisitCount, 1)
+        XCTAssertTrue(assessment.gaps.contains(.unclaimedCommittedDispatch))
+        XCTAssertTrue(assessment.gaps.contains(.ownerVisitsUnreconciled))
+        XCTAssertFalse(try XCTUnwrap(original.requirementAssessment?.navigationHistory).gaps.contains(.unclaimedCommittedDispatch))
+        XCTAssertNil(fresh.answerPage(goal: owner.input))
+        XCTAssertEqual(fixture.source.server.count("/search?q=concerts"), 2)
+    }
+
     func testSamePageHandbackInvalidatesCurrentHistoryAssessmentButPreservesHistoricalReading() async throws {
         let fixture = try await ResearchAnswerFixture.make(navigationExclusionRole: "condition")
         defer { fixture.source.close() }
@@ -81,13 +125,14 @@ final class ComputerUseBrowserResearchAnswerTests: XCTestCase {
             let assessment = try XCTUnwrap(current.requirementAssessment)
             let index = try XCTUnwrap(assessment.requirements.firstIndex { $0.field == .navigationSource })
             XCTAssertEqual(current.documentAnswerSourceStatus, .permitted)
-            XCTAssertEqual(assessment.plannerContext["version"] as? Int, 7)
+            XCTAssertEqual(assessment.plannerContext["version"] as? Int, 8)
             XCTAssertEqual(assessment.candidates.first?.requirements[index].status, .navigationHistoryUnverified)
             let history = try XCTUnwrap(assessment.navigationHistory)
             XCTAssertEqual(history.gaps.contains(.mismatchedPolicy), !configurePolicy)
             XCTAssertFalse(history.gaps.contains(.historyUnavailable))
             XCTAssertTrue(history.gaps.contains(.platformCoverageUnqualified))
-            XCTAssertTrue(history.gaps.contains(.ownerVisitsUnreconciled))
+            XCTAssertFalse(history.gaps.contains(.ownerVisitsUnreconciled))
+            XCTAssertEqual(history.matchedOwnerVisitCount, owner.confirmedNavigationHistory.count)
             let projected = try String(decoding: JSONSerialization.data(withJSONObject: history.plannerContext), as: UTF8.self)
             for hidden in [owner.taskID, owner.input.digest, try XCTUnwrap(current.navigationHistoryIdentity), "blocked.test"] {
                 XCTAssertFalse(projected.contains(hidden))
@@ -163,7 +208,7 @@ final class ComputerUseBrowserResearchAnswerTests: XCTestCase {
         XCTAssertEqual(current.review?.candidates.first?.requirements?.first?.judgment, .supports)
         XCTAssertEqual(current.documentAnswerSourceStatus, .permitted)
         XCTAssertEqual(assessment.candidates.first?.requirements.first?.status, .navigationHistoryUnverified)
-        XCTAssertEqual(assessment.plannerContext["version"] as? Int, 7)
+        XCTAssertEqual(assessment.plannerContext["version"] as? Int, 8)
         XCTAssertTrue(try XCTUnwrap(assessment.navigationHistory).gaps.contains(.earlierGoalPolicy))
         XCTAssertNil(current.answerPage(goal: updated))
         XCTAssertNil(try current.answerEligibility(goal: updated))

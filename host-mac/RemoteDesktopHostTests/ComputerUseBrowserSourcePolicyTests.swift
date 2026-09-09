@@ -4,6 +4,69 @@ import XCTest
 
 @MainActor
 final class ComputerUseBrowserSourcePolicyTests: XCTestCase {
+    func testConfirmedAttemptRequiresTheNativeReceiptAndRemainsReadableDuringPauseWithoutQueryingControl() async throws {
+        let server = try OwnedBrowserHTTPFixture(), base = try await server.start()
+        defer { server.stop() }
+        var allowed = true, gateCalls = 0
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { gateCalls += 1; return allowed })
+        defer { browser.close() }
+        let input = try goal()
+        try browser.claim(taskID: input.taskID)
+        let document = try await browser.navigate(taskID: input.taskID, operationID: "confirmed", to: base)
+        let native = try XCTUnwrap(browser.confirmedNavigationAttempt(for: document))
+        allowed = false
+        let calls = gateCalls
+        XCTAssertEqual(browser.confirmedNavigationAttempt(for: document), native)
+        let wrongURL = ComputerUseBrowserDocument(contextID: document.contextID, taskID: document.taskID,
+            generation: document.generation, operationID: document.operationID, requestedURL: document.requestedURL,
+            committedURL: base.appendingPathComponent("unobserved"))
+        let manual = ComputerUseBrowserDocument(contextID: document.contextID, taskID: document.taskID,
+            generation: document.generation, operationID: document.operationID, requestedURL: document.requestedURL,
+            committedURL: document.committedURL, source: .userControlObservation)
+        let otherContext = ComputerUseBrowserDocument(contextID: "foreign", taskID: document.taskID,
+            generation: document.generation, operationID: document.operationID, requestedURL: document.requestedURL,
+            committedURL: document.committedURL)
+        XCTAssertNil(browser.confirmedNavigationAttempt(for: wrongURL))
+        XCTAssertNil(browser.confirmedNavigationAttempt(for: manual))
+        XCTAssertNil(browser.confirmedNavigationAttempt(for: otherContext))
+        XCTAssertEqual(gateCalls, calls, "Historical binding must not query or acquire permission to act")
+    }
+
+    func testOwnerVisitReconciliationRequiresExactDistinctOrderedNativeCommits() async throws {
+        let fixture = try await ResearchDriverFixture.make()
+        defer { fixture.close() }
+        fixture.policy.choices = [true, true, false]
+        _ = try await fixture.start()
+        let owner = try fixture.owner(), interpretation = try await owner.interpretGoal()
+        let history = try fixture.browser.navigationDispatchHistory(taskID: owner.taskID)
+        let visits = owner.confirmedNavigationHistory
+        XCTAssertEqual(visits.count, 3)
+        func assess(_ visits: [ComputerUseBrowserResearchVisit]?) -> ComputerUseBrowserResultAssessment.NavigationHistory {
+            .init(history: history, sources: interpretation.sources, contextID: fixture.browser.contextID, ownerVisits: visits)
+        }
+        let matched = assess(visits)
+        XCTAssertEqual(matched.ownerVisitCount, 3); XCTAssertEqual(matched.matchedOwnerVisitCount, 3)
+        XCTAssertFalse(matched.gaps.contains(.ownerVisitsUnreconciled))
+        XCTAssertTrue(matched.gaps.contains(.platformCoverageUnqualified))
+        XCTAssertTrue(assess(nil).gaps.contains(.ownerHistoryUnavailable))
+        XCTAssertNil(assess(nil).ownerVisitCount)
+        XCTAssertEqual(assess([]).ownerVisitCount, 0)
+        XCTAssertTrue(assess([]).gaps.contains(.unclaimedCommittedDispatch))
+        XCTAssertTrue(assess(Array(visits.reversed())).gaps.contains(.ownerVisitOrderMismatch))
+        let duplicate = assess(visits + [visits[0]])
+        XCTAssertTrue(duplicate.gaps.contains(.duplicateOwnerVisit)); XCTAssertEqual(duplicate.matchedOwnerVisitCount, 3)
+        let other = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+        defer { other.close() }
+        try other.claim(taskID: owner.taskID)
+        let foreign = ComputerUseBrowserResultAssessment.NavigationHistory(
+            history: try other.navigationDispatchHistory(taskID: owner.taskID), sources: interpretation.sources,
+            contextID: other.contextID, ownerVisits: visits)
+        XCTAssertEqual(foreign.matchedOwnerVisitCount, 0)
+        XCTAssertTrue(foreign.gaps.contains(.ownerVisitBindingMismatch)); XCTAssertTrue(foreign.gaps.contains(.ownerVisitsUnreconciled))
+        let logged = String(reflecting: visits)
+        for hidden in [owner.taskID, owner.input.digest, history.identity, visits[0].operationID] { XCTAssertFalse(logged.contains(hidden)) }
+    }
+
     func testNativePolicyHistoryRecordsOnlyAcceptedChangesAndCannotEraseAReplacement() throws {
         let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
         let foreign = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
@@ -372,13 +435,17 @@ final class ComputerUseBrowserSourcePolicyTests: XCTestCase {
         let input = try goal(), session = try browser.prepareWorkflowSession(taskID: input.taskID)
         let policy = try ComputerUseBrowserSourcePolicy(goal: input, allowedOrigins: [ComputerUseBrowserSourceOrigin(base)])
         try browser.installSourcePolicy(policy, replacing: nil, session: session)
-        _ = try await browser.navigate(taskID: input.taskID, operationID: "same-id", to: base)
+        let originalDocument = try await browser.navigate(taskID: input.taskID, operationID: "same-id", to: base)
         let first = try browser.navigationDispatchHistory(taskID: input.taskID)
+        XCTAssertEqual(browser.confirmedNavigationAttempt(for: originalDocument), first.attempts.first)
         browser.stop()
+        XCTAssertNil(browser.confirmedNavigationAttempt(for: originalDocument))
         XCTAssertThrowsError(try browser.navigationDispatchHistory(taskID: input.taskID))
         try browser.claim(taskID: input.taskID)
-        _ = try await browser.navigate(taskID: input.taskID, operationID: "same-id", to: base)
+        let reclaimedDocument = try await browser.navigate(taskID: input.taskID, operationID: "same-id", to: base)
         let reclaimed = try browser.navigationDispatchHistory(taskID: input.taskID)
+        XCTAssertNil(browser.confirmedNavigationAttempt(for: originalDocument))
+        XCTAssertEqual(browser.confirmedNavigationAttempt(for: reclaimedDocument), reclaimed.attempts.last)
         XCTAssertTrue(reclaimed.hasClaimBoundary); XCTAssertFalse(first.hasClaimBoundary)
         XCTAssertEqual(reclaimed.attempts.count, 2)
         XCTAssertEqual(reclaimed.attempts[0], first.attempts[0])
@@ -430,7 +497,8 @@ final class ComputerUseBrowserSourcePolicyTests: XCTestCase {
         let full = try browser.navigationDispatchHistory(taskID: input.taskID)
         XCTAssertEqual(full.attempts.count, 64); XCTAssertFalse(full.overflowed)
         browser.stop(); try browser.claim(taskID: input.taskID)
-        _ = try await browser.navigate(taskID: input.taskID, operationID: "after-limit", to: base)
+        let omitted = try await browser.navigate(taskID: input.taskID, operationID: "after-limit", to: base)
+        XCTAssertNil(browser.confirmedNavigationAttempt(for: omitted), "A receipt cannot fabricate an omitted history attempt")
         let overflowed = try browser.navigationDispatchHistory(taskID: input.taskID)
         XCTAssertTrue(overflowed.overflowed); XCTAssertTrue(overflowed.hasClaimBoundary)
         XCTAssertEqual(overflowed.attempts, full.attempts)

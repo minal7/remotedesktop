@@ -14,14 +14,30 @@ struct ComputerUseBrowserResearchAdmissionPause: Error {
 
 /// Historical navigation only. A receipt is neither a verified offer nor an
 /// answer. No URL, account state or model-authored description is retained here.
-struct ComputerUseBrowserResearchVisit: Equatable, Sendable {
+struct ComputerUseBrowserResearchVisit: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     enum Kind: String, Sendable { case search, resultLink, formQuery, revisit }
     let kind: Kind
     let operationID: String
     let goalRevision: String
     let rootDigest: String
-    fileprivate init(kind: Kind, document: ComputerUseBrowserDocument, goal: ComputerUseBrowserGoalInput) {
+    let taskID: String
+    let contextID: String
+    let documentGeneration: UInt64
+    let nativeAttempt: ComputerUseBrowserNavigationDispatchHistory.Attempt?
+    fileprivate init(kind: Kind, document: ComputerUseBrowserDocument, goal: ComputerUseBrowserGoalInput,
+                     nativeAttempt: ComputerUseBrowserNavigationDispatchHistory.Attempt?) {
         self.kind = kind; operationID = document.operationID; goalRevision = goal.digest; rootDigest = goal.rootDigest
+        taskID = document.taskID; contextID = document.contextID; documentGeneration = document.generation
+        self.nativeAttempt = nativeAttempt
+    }
+    var description: String { "BrowserResearchVisit(kind: \(kind.rawValue))" }
+    var debugDescription: String { description }
+    static func historyIdentity(_ visits: [Self]?) -> String {
+        guard let visits else { return ComputerUseTaskContract.digest(["browser-owner-visit-history-v1", "unavailable"]) }
+        return ComputerUseTaskContract.digest(["browser-owner-visit-history-v1", "captured"] + visits.flatMap {
+            [$0.kind.rawValue, $0.taskID, $0.contextID, String($0.documentGeneration), $0.operationID,
+             $0.rootDigest, $0.goalRevision, $0.nativeAttempt?.id.uuidString ?? ""]
+        })
     }
 }
 
@@ -744,7 +760,9 @@ final class ComputerUseBrowserResearchTask {
     func revisitAfterReading(_ option: ComputerUseBrowserHistoryOption) async throws -> ComputerUseBrowserNavigationReceipt {
         try requireIdle(); try checkCurrent(input)
         guard !hasPendingForm, !hasPendingNavigation, !hasQuestion,
-              latestCandidates?.historyOptions.contains(option) == true else { throw Failure.navigationUnavailable }
+              let reading = latestCandidates, reading.historyOptions.contains(option) else { throw Failure.navigationUnavailable }
+        try validateVisitHistory(of: reading)
+        try browser.validateResultNavigationHistory(reading, goal: input)
         return try await beginHistoryNavigation(option)
     }
 
@@ -1235,6 +1253,7 @@ final class ComputerUseBrowserResearchTask {
         latestCandidates = nil; latestForm = nil; latestAction = nil
         let batch = try await operate { [self] in
             try checkCurrent(captured)
+            try validateVisitHistory(of: retained)
             try await browser.validateResultCandidates(retained, goal: captured)
             try checkCurrent(captured)
             return retained
@@ -1252,6 +1271,7 @@ final class ComputerUseBrowserResearchTask {
               let reading = latestCandidates,
               report.readingIdentity == reading.requirementAssessmentIdentity else { throw Failure.goalChanged }
         try browser.validateResultNavigationHistory(reading, goal: input)
+        try validateVisitHistory(of: reading)
     }
 
     func prepareProgressReport() async throws -> ComputerUseBrowserResearchReport? {
@@ -1260,6 +1280,7 @@ final class ComputerUseBrowserResearchTask {
         guard initialSearch?.isPending != true, !hasPendingNavigation, !hasPendingFormNavigation else { throw Failure.navigationPending }
         guard !hasQuestion else { throw Failure.questionPending }
         guard let retained = latestCandidates, let policy = researchSources?.answerPolicy else { return nil }
+        try validateVisitHistory(of: retained)
         let captured = input
         return try await operate { [self] in
             try checkCurrent(captured)
@@ -1278,6 +1299,7 @@ final class ComputerUseBrowserResearchTask {
         guard !hasQuestion else { throw Failure.questionPending }
         guard answer.rootTaskID == taskID, answer.goalRevision == input.digest,
               let reading = latestCandidates, answer.readingIdentity == reading.requirementAssessmentIdentity,
+              reading.matchesOwnerNavigationHistory(confirmedNavigationHistory),
               let eligibility = try reading.answerEligibility(goal: input, evidence: retainedEvidence, recalledReadings: answer.recalledReadings) else { throw Failure.goalChanged }
         try answer.validate(for: eligibility)
         try browser.validateResearchAnswerBinding(answer, reading: reading, goal: input, evidence: retainedEvidence)
@@ -1289,6 +1311,7 @@ final class ComputerUseBrowserResearchTask {
         guard initialSearch?.isPending != true, !hasPendingNavigation, !hasPendingFormNavigation else { throw Failure.navigationPending }
         guard !hasQuestion else { throw Failure.questionPending }
         guard let reading = latestCandidates, let policy = researchSources?.answerPolicy else { throw Failure.interpretationRequired }
+        try validateVisitHistory(of: reading)
         let captured = input
         return try await operate { [self] in
             try checkCurrent(captured)
@@ -1307,6 +1330,7 @@ final class ComputerUseBrowserResearchTask {
         guard let interpretation, interpretation.proposal.input.digest == input.digest,
               interpretation.proposal.disposition == .research else { throw Failure.interpretationRequired }
         let captured = input, candidates = latestCandidates
+        if let candidates { try validateVisitHistory(of: candidates) }
         let selection = ComputerUseBrowserResearchNavigation.Selection(goalRevision: captured.digest, candidateID: candidateID, linkID: linkID)
         latestCandidates = nil; latestForm = nil; latestAction = nil
         return try await operate { [self] in
@@ -1378,6 +1402,7 @@ final class ComputerUseBrowserResearchTask {
                 try checkCandidateLinkDecision(goal: goal, deadline: deadline)
                 try await browser.validateResultCandidates(candidates, goal: goal)
                 try checkCandidateLinkDecision(goal: goal, deadline: deadline)
+                try validateVisitHistory(of: candidates)
                 switch choice {
                 case .revisit(let option):
                     guard candidates.historyOptions.contains(option) else { throw ComputerUseBrowserLinkPlanError.inputChanged }
@@ -1605,10 +1630,15 @@ final class ComputerUseBrowserResearchTask {
         document: ComputerUseBrowserDocument, goal: ComputerUseBrowserGoalInput) throws {
         guard !isRetired else { return }
         guard document.taskID == taskID, goal.taskID == taskID else { throw Failure.goalChanged }
-        let visit = ComputerUseBrowserResearchVisit(kind: kind, document: document, goal: goal)
+        let visit = ComputerUseBrowserResearchVisit(kind: kind, document: document, goal: goal,
+            nativeAttempt: browser.confirmedNavigationAttempt(for: document))
         if let previous = confirmedNavigationHistory.first(where: { $0.operationID == visit.operationID }) {
             guard previous == visit else { throw Failure.goalChanged }
         } else { confirmedNavigationHistory.append(visit) }
+    }
+
+    private func validateVisitHistory(of reading: ComputerUseBrowserResultCandidates) throws {
+        guard reading.matchesOwnerNavigationHistory(confirmedNavigationHistory) else { throw Failure.goalChanged }
     }
 
     private func questionContext(controllerID: String, controllerSessionID: String) throws -> ComputerUseBrowserGoalClarification.Context {
@@ -1740,8 +1770,10 @@ final class ComputerUseBrowserResearchTask {
         guard self.interpretation?.proposal == interpretation.proposal else { throw Failure.interpretationRequired }
         let bound = try await browser.prepareResultCandidates(proposal, goal: goal, evidence: evidence,
             answerPolicy: answerPolicy, interpretation: interpretation.proposal,
-            historyOptions: browser.historyOptions(goal: goal, visits: confirmedNavigationHistory, evidence: evidence))
+            historyOptions: browser.historyOptions(goal: goal, visits: confirmedNavigationHistory, evidence: evidence),
+            ownerVisits: confirmedNavigationHistory)
         try checkCurrent(goal)
+        try validateVisitHistory(of: bound)
         try retainedEvidence.record(bound, goal: goal)
         return bound
     }

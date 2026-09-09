@@ -6,7 +6,7 @@ import Foundation
 struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     typealias Scalars = ComputerUseBrowserScalarRequirements
     /// Diagnostic facts about a frozen native history. There is deliberately
-    /// no success value: coverage and owner/episode reconciliation are open.
+    /// no success value: episode reconciliation and coverage remain open.
     struct NavigationHistory: Equatable, Sendable {
         enum Gap: String, CaseIterable, Hashable, Sendable {
             case historyUnavailable, foreignContext, unresolvedSourceRequirements
@@ -15,23 +15,29 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
             case unconfiguredDispatch, mismatchedPolicy, earlierGoalPolicy, foreignGoalPolicy
             case pendingDispatch, unsuccessfulDispatch, unknownDispatchOrigin
             case weakObservationBinding, unattributedObservation, unorderedObservation
+            case ownerHistoryUnavailable, ownerVisitBindingMismatch, duplicateOwnerVisit, ownerVisitOrderMismatch
+            case unclaimedCommittedDispatch
             case controlEpisodesUnreconciled, ownerVisitsUnreconciled, platformCoverageUnqualified
         }
         let attemptCount: Int
         let observationCount: Int
         let controlEventCount: Int
         let policyInstallationCount: Int
+        let ownerVisitCount: Int?
+        let matchedOwnerVisitCount: Int
         /// Callback count, not distinct requests and not proof of a violation:
         /// the native policy may have successfully prevented the request.
         let blockedSourceObservationCount: Int
         let gaps: [Gap]
 
         init(history: ComputerUseBrowserNavigationDispatchHistory?, sources: ComputerUseBrowserSourceRequirements,
-             contextID: String) {
+             contextID: String, ownerVisits: [ComputerUseBrowserResearchVisit]? = nil) {
             attemptCount = history?.attempts.count ?? 0; observationCount = history?.observations.count ?? 0
             controlEventCount = history?.controlEvents.count ?? 0; policyInstallationCount = history?.policyInstallations.count ?? 0
             blockedSourceObservationCount = history?.observations.filter { $0.policyCheck == .blocked }.count ?? 0
-            var found: Set<Gap> = [.ownerVisitsUnreconciled, .platformCoverageUnqualified]
+            ownerVisitCount = ownerVisits?.count
+            var found: Set<Gap> = [.platformCoverageUnqualified]
+            var matched: Set<UUID> = []
             if !sources.unresolved.isEmpty { found.insert(.unresolvedSourceRequirements) }
             if let history {
                 if history.taskID != sources.goal.taskID || history.contextID != contextID { found.insert(.foreignContext) }
@@ -62,7 +68,35 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
                     if observation.phase == .unorderedLocationChange { found.insert(.unorderedObservation) }
                 }
                 if !history.controlEvents.isEmpty { found.insert(.controlEpisodesUnreconciled) }
+                if let ownerVisits {
+                    var previousOrder: Int?
+                    for visit in ownerVisits {
+                        guard history.taskID == sources.goal.taskID, history.contextID == contextID,
+                              visit.taskID == history.taskID, visit.rootDigest == sources.goal.rootDigest,
+                              visit.contextID == history.contextID, let native = visit.nativeAttempt,
+                              native.outcome == .documentCommitted, let terminalOrder = native.terminalOrder,
+                              native.operationID == visit.operationID, native.generation == visit.documentGeneration,
+                              history.attempts.first(where: { $0.id == native.id }) == native,
+                              native.policy == nil || (native.policy?.taskID == visit.taskID
+                                && native.policy?.rootDigest == visit.rootDigest && native.policy?.goalRevision == visit.goalRevision) else {
+                            found.insert(.ownerVisitBindingMismatch); continue
+                        }
+                        guard matched.insert(native.id).inserted else { found.insert(.duplicateOwnerVisit); continue }
+                        if let previousOrder, terminalOrder <= previousOrder { found.insert(.ownerVisitOrderMismatch) }
+                        previousOrder = terminalOrder
+                    }
+                    if history.attempts.contains(where: { $0.outcome == .documentCommitted && !matched.contains($0.id) }) {
+                        found.insert(.unclaimedCommittedDispatch)
+                    }
+                } else { found.insert(.ownerHistoryUnavailable) }
             } else { found.insert(.historyUnavailable) }
+            if ownerVisits == nil { found.insert(.ownerHistoryUnavailable) }
+            if !found.isDisjoint(with: [.historyUnavailable, .foreignContext, .ownerHistoryUnavailable, .ownerVisitBindingMismatch,
+                                       .duplicateOwnerVisit, .ownerVisitOrderMismatch, .unclaimedCommittedDispatch,
+                                       .attemptOverflow, .claimBoundary, .discardedClaimHistory]) {
+                found.insert(.ownerVisitsUnreconciled)
+            }
+            matchedOwnerVisitCount = matched.count
             gaps = Gap.allCases.filter(found.contains)
         }
 
@@ -70,6 +104,7 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
             ["status":"unverified", "gaps":gaps.map(\.rawValue), "retained_attempt_count":attemptCount,
              "retained_observation_count":observationCount, "retained_control_event_count":controlEventCount,
              "retained_policy_installation_count":policyInstallationCount,
+             "owner_visit_count":ownerVisitCount.map { $0 as Any } ?? NSNull(), "matched_owner_visit_count":matchedOwnerVisitCount,
              "blocked_source_observation_count":blockedSourceObservationCount]
         }
     }
@@ -286,7 +321,7 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
             || candidates.contains { $0.requirements.contains { $0.status == .navigationHistoryUnverified } }
         let policyAssessment = requirements.contains { $0.field == .answerSource }
             || candidates.contains { $0.requirements.contains { $0.status == .sourcePolicyMismatch } }
-        var context: [String: Any] = ["version":navigationAssessment ? 7 : (policyAssessment ? 5 : (candidates.contains { $0.quotes.contains { !$0.controlIDs.isEmpty } } ? 4 : 3)),
+        var context: [String: Any] = ["version":navigationAssessment ? 8 : (policyAssessment ? 5 : (candidates.contains { $0.quotes.contains { !$0.controlIDs.isEmpty } } ? 4 : 3)),
          "requirements":requirements.enumerated().map { index, value in
              ["index":index, "turn":value.turn, "sourceByteOffset":value.sourceByteOffset, "sourceByteCount":value.sourceByteCount,
               "role":value.role.rawValue, "field":value.field.rawValue, "relation":value.relation.rawValue,

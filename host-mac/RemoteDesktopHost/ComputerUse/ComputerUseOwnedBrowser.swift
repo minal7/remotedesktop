@@ -1444,6 +1444,21 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         return navigationDispatchLog
     }
 
+    /// Historical receipt binding only. Do not query the action gate here:
+    /// an owner must retain a completed child's fact even if Pause arrived
+    /// before its outer return. A retired claim cannot bind a replacement.
+    func confirmedNavigationAttempt(for document: ComputerUseBrowserDocument) -> ComputerUseBrowserNavigationDispatchHistory.Attempt? {
+        guard document.source == .automationNavigation, document.taskID == taskID, document.contextID == contextID,
+              receipts[document.operationID] == document,
+              let history = navigationDispatchLog, history.taskID == document.taskID else { return nil }
+        let matches = history.attempts.filter {
+            $0.operationID == document.operationID && $0.sessionID == browserSessionID && $0.ownershipEpoch == ownershipEpoch
+                && $0.generation == document.generation && $0.outcome == .documentCommitted && $0.terminalOrder != nil
+        }
+        guard matches.count == 1 else { return nil }
+        return matches[0]
+    }
+
     func currentDocument(taskID: String) -> ComputerUseBrowserDocument? {
         guard hasOwnership(taskID: taskID), pending == nil, let document,
               document.generation == generation, browser?.isLoading == false,

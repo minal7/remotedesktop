@@ -40,6 +40,8 @@ Nine changed Swift files passed `swiftc -frontend -parse`. Source inventories se
 
 ## Remaining repair order
 
+Source follow-up: [owner-visit reconciliation](BROWSER_OWNER_VISIT_RECONCILIATION_REVIEW.md) now binds each recorded visit to an exact native commit and diagnoses missing, duplicate, reordered and unclaimed records. Episode, control, policy-lineage and platform qualification remain open.
+
 1. Reconcile native attempts/observation episodes with owner-confirmed visits, exact control transitions and goal/source-policy lineage. Installation mismatch is a configuration fact, not proof of a prohibited visit. Revised restrictions need explicit temporal semantics.
 2. Qualify callback coverage and attribution on supported macOS/WebKit versions. Slot matches, ordered records and permitted final origins cannot certify a complete route.
 3. Use qualified reconciliation to replace the [navigation-source completion gate](BROWSER_NAVIGATION_SOURCE_COMPLETION_GATE_REVIEW.md), including current/retained readings and late invalidation. This patch establishes freshness and diagnostics, not affirmative route eligibility.
