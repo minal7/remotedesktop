@@ -4200,6 +4200,224 @@ final class ComputerUseBrowserResearchPreservationTests: XCTestCase {
         return first
     }
 
+    func testAnsweredPhysicalRevisionCanRecoverItsEarlierRetentionCapture() async throws {
+        for observed in [false, true] {
+            let fixture = try await make(category: true, queryAlreadyMatches: observed, categoryAlreadyMatches: observed,
+                mutation: "document.getElementById('query').value='reset';")
+            defer { fixture.close() }
+            let original = try await prepareRetainOnly(fixture), owner = try fixture.owner(), history = owner.confirmedFormHistory
+            let updated = try await beginPreparationReview(fixture, input: original)
+            configureAnsweredRetentionRevision(fixture, editing: ["Query"], retaining: ["Category"])
+            let action = try await owner.reviewFormPreparation(using: fixture.actions)
+            try await release(fixture)
+            await expectFailure { _ = try await owner.applyFormPreparationReview(action) }
+            XCTAssertFalse(owner.hasRevisedFormPreparationGoal); XCTAssertFalse(owner.needsFormPreparationReview)
+            let writes = fixture.state.writes, recovered = try await owner.recoverPendingFormPreparationCriteria()
+            XCTAssertTrue(recovered); XCTAssertTrue(owner.needsFormPreparationReview)
+            XCTAssertEqual(owner.confirmedFormHistory, history); XCTAssertEqual(fixture.state.writes, writes)
+            let commands = fixture.state.commands
+            await expectFailure { _ = try await owner.resumeFormPreparation() }
+            XCTAssertEqual(fixture.state.commands, commands) // The skipped edit scope cannot consume the recovery.
+            let reviewed = try await owner.reviewFormPreparation(using: fixture.actions)
+            let next = try await owner.applyFormPreparationReview(reviewed)
+            XCTAssertEqual(next.interpretation.input, updated.input); XCTAssertEqual(next.previous, original.previous)
+            let query = try XCTUnwrap(next.evidence.fields.first { $0.control.label == "Query" })
+            XCTAssertEqual(query.editable.snapshot.value, "reset")
+            XCTAssertEqual(next.previous?.finalValues[query.editable.snapshot.targetID], "concerts")
+            XCTAssertTrue(next.preparationBaseline?.reviewContext.fieldPurposes.contains {
+                $0.controlID == query.control.id && $0.disposition == .edit
+            } == true) // Keep the newer unexecuted review distinct from the old capture review.
+            XCTAssertEqual(next.requiredRepairFieldAliases.count, 1)
+            _ = try await owner.executeForm(.decode(content: mixedContent(next, order: ["Query"]), input: next), input: next)
+            XCTAssertEqual(owner.confirmedFormHistory.map(\.editCount), [observed ? 0 : 2,1])
+            XCTAssertEqual(owner.confirmedFormHistory.map(\.retainedCriterionCount), [0,0])
+            XCTAssertEqual(fixture.state.commands.filter { $0 == .reviseFormFields }.count, 1)
+        }
+    }
+
+    func testAnAnswerDoesNotHideAnIncompleteRetentionCapture() async throws {
+        for boundary in [ComputerUseBrowserDOMCommand.pageSnapshot, .extendFormFields, .bindPageFields] {
+            let fixture = try await make(category: true, mutation: "document.getElementById('query').value='reset';")
+            defer { fixture.close() }
+            let first = try await interruptRetentionCapture(fixture, at: boundary), owner = try fixture.owner()
+            try await owner.resumeAfterUserControl()
+            _ = try await beginPreparationReview(fixture, input: first)
+            configureAnsweredRetentionRevision(fixture, editing: ["Query"], retaining: ["Category"])
+            let action = try await owner.reviewFormPreparation(using: fixture.actions)
+            try await release(fixture)
+            await expectFailure { _ = try await owner.applyFormPreparationReview(action) }
+            let recovered = try await owner.recoverPendingFormPreparationCriteria()
+            XCTAssertTrue(recovered); XCTAssertTrue(owner.needsFormPreparationReview)
+            XCTAssertEqual(owner.confirmedFormHistory.count, 1)
+            let reviewed = try await owner.reviewFormPreparation(using: fixture.actions), next = try await owner.applyFormPreparationReview(reviewed)
+            XCTAssertEqual(next.requiredRepairFieldAliases.count, 1)
+            XCTAssertEqual(next.previous?.inputOperationIDs.count, 2)
+            XCTAssertEqual(next.interpretation.input.clarifications.map(\.answer), ["Tomorrow."])
+            _ = try await owner.executeForm(.decode(content: mixedContent(next, order: ["Query"]), input: next), input: next)
+            XCTAssertEqual(owner.confirmedFormHistory.map(\.editCount), [2,1])
+            XCTAssertEqual(owner.confirmedFormHistory.map(\.retainedCriterionCount), [0,0])
+        }
+    }
+
+    func testDriverRevisitsTheAnsweredScopeAfterRecoveringAnEarlierCapture() async throws {
+        let fixture = try await make(category: true, city: true, mutation: "document.getElementById('query').value='reset';")
+        defer { fixture.close() }
+        let original = try await prepareRetainOnly(fixture, deferring: ["City"]), owner = try fixture.owner()
+        let updated = try await beginPreparationReview(fixture, input: original)
+        configureAnsweredRetentionRevision(fixture, editing: ["Query","City"], retaining: ["Category"], querying: true)
+        let action = try await owner.reviewFormPreparation(using: fixture.actions)
+        try await release(fixture)
+        await expectFailure { _ = try await owner.applyFormPreparationReview(action) }
+        fixture.forms.select = { input in
+            XCTAssertEqual(input.interpretation.input, updated.input)
+            XCTAssertEqual(input.requiredRepairFieldAliases.count, 1)
+            XCTAssertEqual(input.editableFieldAliases.count, 2)
+            return try self.mixedContent(input, order: ["Query","City"])
+        }
+        _ = try await fixture.resume()
+        XCTAssertEqual(owner.confirmedFormHistory.map(\.editCount), [2,2])
+        XCTAssertEqual(owner.confirmedFormHistory.map(\.retainedCriterionCount), [0,0])
+        XCTAssertEqual(fixture.forms.inputs.count, 1)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 4)
+        XCTAssertEqual(fixture.server.count("/filtered?q=concerts&category=concerts&city=Seattle"), 1)
+    }
+
+    func testInheritedCaptureRecoverySurvivesPauseBeforePublishingToTheRevision() async throws {
+        for (boundary, occurrence) in [(ComputerUseBrowserDOMCommand.bindPageFields,1), (.pageSnapshot,3)] {
+            let fixture = try await make(category: true, mutation: "document.getElementById('query').value='reset';")
+            defer { fixture.close() }
+            let original = try await prepareRetainOnly(fixture), owner = try fixture.owner(), history = owner.confirmedFormHistory
+            _ = try await beginPreparationReview(fixture, input: original)
+            configureAnsweredRetentionRevision(fixture, editing: ["Query"], retaining: ["Category"])
+            let action = try await owner.reviewFormPreparation(using: fixture.actions)
+            try await release(fixture)
+            await expectFailure { _ = try await owner.applyFormPreparationReview(action) }
+            var seen = 0
+            fixture.state.onCommand = { command in
+                guard command == boundary else { return }; seen += 1
+                guard seen == occurrence else { return }; fixture.state.onCommand = nil; owner.pause()
+            }
+            await expectFailure { _ = try await owner.recoverPendingFormPreparationCriteria() }
+            XCTAssertFalse(owner.needsFormPreparationReview); XCTAssertEqual(owner.confirmedFormHistory, history)
+            let commands = fixture.state.commands
+            await expectFailure { _ = try await owner.recoverPendingFormPreparationCriteria() }
+            XCTAssertEqual(fixture.state.commands, commands)
+            try await owner.resumeAfterUserControl()
+            let recovered = try await owner.recoverPendingFormPreparationCriteria()
+            XCTAssertTrue(recovered); XCTAssertTrue(owner.needsFormPreparationReview)
+            XCTAssertEqual(owner.confirmedFormHistory, history)
+            XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 2)
+        }
+    }
+
+    func testInheritedRecoveryCannotSkipARevisionWhosePrivateCaptureStarted() async throws {
+        let fixture = try await make(category: true, city: true, mutation: "document.getElementById('query').value='reset';")
+        defer { fixture.close() }
+        let original = try await prepareRetainOnly(fixture, deferring: ["City"]), owner = try fixture.owner()
+        _ = try await beginPreparationReview(fixture, input: original)
+        configureAnsweredRetentionRevision(fixture, editing: ["City"], retaining: ["Query","Category"])
+        let action = try await owner.reviewFormPreparation(using: fixture.actions)
+        fixture.state.onCommand = { command in
+            guard command == .reviseFormFields else { return }; fixture.state.onCommand = nil; owner.pause()
+        }
+        await expectFailure { _ = try await owner.applyFormPreparationReview(action) }
+        try await release(fixture)
+        try await owner.resumeAfterUserControl()
+        let commands = fixture.state.commands, writes = fixture.state.writes
+        let recovered = try await owner.recoverPendingFormPreparationCriteria()
+        XCTAssertFalse(recovered); XCTAssertFalse(owner.needsFormPreparationReview)
+        XCTAssertEqual(fixture.state.commands, commands); XCTAssertEqual(fixture.state.writes, writes)
+        await expectFailure { _ = try await owner.resumeFormPreparation() }
+        XCTAssertTrue(owner.hasPendingFormPreparation)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .reviseFormFields }.count, 1)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 2)
+        XCTAssertEqual(owner.confirmedFormHistory.count, 1)
+    }
+
+    func testUnchangedEarlierCriteriaDoNotCreateInheritedRecovery() async throws {
+        let fixture = try await make(category: true)
+        defer { fixture.close() }
+        let original = try await prepareRetainOnly(fixture), owner = try fixture.owner()
+        _ = try await beginPreparationReview(fixture, input: original)
+        configureAnsweredRetentionRevision(fixture, editing: ["Query"], retaining: ["Category"])
+        let action = try await owner.reviewFormPreparation(using: fixture.actions)
+        fixture.state.onCommand = { command in
+            guard command == .pageSnapshot else { return }; fixture.state.onCommand = nil; owner.pause()
+        }
+        await expectFailure { _ = try await owner.applyFormPreparationReview(action) }
+        try await owner.resumeAfterUserControl()
+        let recovered = try await owner.recoverPendingFormPreparationCriteria()
+        XCTAssertFalse(recovered); XCTAssertFalse(owner.needsFormPreparationReview)
+        let next = try await owner.resumeFormPreparation()
+        XCTAssertFalse(next.isRetainOnly); XCTAssertEqual(next.editableFieldAliases.count, 1)
+        XCTAssertEqual(next.previous, original.previous)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .reviseFormFields }.count, 1)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 2)
+        XCTAssertEqual(owner.confirmedFormHistory.count, 1)
+    }
+
+    func testInheritedRecoveryCannotDropPreservationOrReplaceTheEarlierObject() async throws {
+        for readonly in [false, true] {
+            for mutation in ["document.getElementById('query').value='reset';document.getElementById('reference').value='changed';",
+                             "document.getElementById('query').outerHTML=document.getElementById('query').outerHTML;"] {
+                let fixture = try await make(category: true, referenceReadOnly: readonly, mutation: mutation)
+                defer { fixture.close() }
+                let original = try await prepareRetainOnly(fixture), owner = try fixture.owner()
+                _ = try await beginPreparationReview(fixture, input: original)
+                configureAnsweredRetentionRevision(fixture, editing: ["Query"], retaining: ["Category"])
+                let action = try await owner.reviewFormPreparation(using: fixture.actions)
+                try await release(fixture)
+                await expectFailure { _ = try await owner.applyFormPreparationReview(action) }
+                await expectFailure { _ = try await owner.recoverPendingFormPreparationCriteria() }
+                XCTAssertFalse(owner.needsFormPreparationReview); XCTAssertTrue(owner.hasPendingFormPreparation)
+                XCTAssertEqual(fixture.state.commands.filter { $0 == .reviseFormFields }.count, 0)
+                XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 2)
+                XCTAssertEqual(owner.confirmedFormHistory.count, 1)
+            }
+        }
+    }
+
+    func testTwoAcceptedAnswersKeepTheEarlierCaptureAcrossUnstartedRevisions() async throws {
+        let fixture = try await make(category: true, mutation: "document.getElementById('query').value='reset';")
+        defer { fixture.close() }
+        let original = try await prepareRetainOnly(fixture), owner = try fixture.owner()
+        let firstGoal = try await beginPreparationReview(fixture, input: original)
+        configureAnsweredRetentionRevision(fixture, editing: ["Query"], retaining: ["Category"])
+        let firstAction = try await owner.reviewFormPreparation(using: fixture.actions)
+        try await release(fixture)
+        await expectFailure { _ = try await owner.applyFormPreparationReview(firstAction) }
+        let question = try owner.issueQuestion(topic: .date, requirementIDs: [firstGoal.requirements[0].id],
+            controllerID: "phone", controllerSessionID: "session")
+        _ = try owner.answerQuestion(questionID: question.id, answerTaskID: "second-answer", answer: "Evening.",
+            controllerID: "phone", controllerSessionID: "session")
+        let interpreted = try await owner.interpretGoal()
+        try owner.configureResearchSources(XCTUnwrap(fixture.policy.sources(for: interpreted)))
+        let secondAction = try await owner.reviewFormPreparation(using: fixture.actions)
+        await expectFailure { _ = try await owner.applyFormPreparationReview(secondAction) }
+        let recovered = try await owner.recoverPendingFormPreparationCriteria()
+        XCTAssertTrue(recovered); XCTAssertTrue(owner.needsFormPreparationReview)
+        let fresh = try await owner.reviewFormPreparation(using: fixture.actions), next = try await owner.applyFormPreparationReview(fresh)
+        XCTAssertEqual(next.interpretation.input.clarifications.map(\.answer), ["Tomorrow.","Evening."])
+        XCTAssertEqual(next.previous, original.previous)
+        XCTAssertTrue(next.contextJSON.contains("Tomorrow.")); XCTAssertTrue(next.contextJSON.contains("Evening."))
+        XCTAssertFalse(next.contextJSON.contains("private-reference")); XCTAssertFalse(next.contextJSON.contains("reset"))
+        _ = try await owner.executeForm(.decode(content: mixedContent(next, order: ["Query"]), input: next), input: next)
+        XCTAssertEqual(owner.confirmedFormHistory.map(\.editCount), [2,1])
+        XCTAssertEqual(owner.confirmedFormHistory.map(\.retainedCriterionCount), [0,0])
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .reviseFormFields }.count, 1)
+    }
+
+    private func configureAnsweredRetentionRevision(_ fixture: ResearchDriverFixture, editing: [String], retaining: [String], querying: Bool = false) {
+        configureMixed(fixture, editing: editing, retaining: retaining, querying: querying)
+        let fallback = fixture.actions.select
+        fixture.actions.select = { input in
+            if let review = try FormEffectScopeFixture.response(input,
+                editing: Dictionary(uniqueKeysWithValues: editing.map { ($0,[0]) }),
+                retaining: Dictionary(uniqueKeysWithValues: retaining.map { ($0,[0]) }), preserving: ["Reference":0]) { return review }
+            return try XCTUnwrap(fallback)(input)
+        }
+    }
+
     private func repairRetainPreparation(_ fixture: ResearchDriverFixture, editing: [String], retaining: [String]) async throws -> ComputerUseBrowserResearchFormInput {
         configureMixed(fixture, editing: editing, retaining: retaining)
         let owner = try fixture.owner(), action = try await owner.reviewFormPreparation(using: fixture.actions)
@@ -4209,14 +4427,7 @@ final class ComputerUseBrowserResearchPreservationTests: XCTestCase {
     private func reviseRetainPreparation(_ fixture: ResearchDriverFixture, input: ComputerUseBrowserResearchFormInput,
                                         editing: [String], retaining: [String]) async throws -> ComputerUseBrowserResearchFormInput {
         _ = try await beginPreparationReview(fixture, input: input)
-        configureMixed(fixture, editing: editing, retaining: retaining)
-        let fallback = fixture.actions.select
-        fixture.actions.select = { input in
-            if let review = try FormEffectScopeFixture.response(input,
-                editing: Dictionary(uniqueKeysWithValues: editing.map { ($0,[0]) }),
-                retaining: Dictionary(uniqueKeysWithValues: retaining.map { ($0,[0]) }), preserving: ["Reference":0]) { return review }
-            return try XCTUnwrap(fallback)(input)
-        }
+        configureAnsweredRetentionRevision(fixture, editing: editing, retaining: retaining)
         let owner = try fixture.owner(), action = try await owner.reviewFormPreparation(using: fixture.actions)
         return try await owner.applyFormPreparationReview(action)
     }

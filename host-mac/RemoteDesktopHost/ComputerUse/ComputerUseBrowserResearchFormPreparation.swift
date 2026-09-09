@@ -242,6 +242,7 @@ struct ComputerUseBrowserFormPreparationBaseline: Equatable, Sendable, CustomStr
     private let goal: ComputerUseBrowserGoalInput
     private let previous: ComputerUseBrowserResearchFormContinuation?
     let reviewContext: ComputerUseBrowserFormPreparationReviewContext
+    private let captureReviewContext: ComputerUseBrowserFormPreparationReviewContext
     private let obligationsContext: ComputerUseBrowserFormPreparationReviewContext
     private let ignoresCapturedCaret: Bool
     private let repairableTargetIDs: Set<String>
@@ -256,18 +257,23 @@ struct ComputerUseBrowserFormPreparationBaseline: Equatable, Sendable, CustomStr
                                reviewContext: ComputerUseBrowserFormPreparationReviewContext,
                                retaining obligations: ComputerUseBrowserFormPreparationReviewContext,
                                interpretation: ComputerUseBrowserGoalProposal,
-                               repair: ComputerUseBrowserFormPreparationRepair? = nil) throws {
-        try reviewContext.validate(interpretation: input.interpretation, evidence: input.evidence.page)
+                               repair: ComputerUseBrowserFormPreparationRepair? = nil,
+                               captureReviewContext: ComputerUseBrowserFormPreparationReviewContext? = nil) throws {
+        let capturedReview = captureReviewContext ?? reviewContext
+        try capturedReview.validate(interpretation: input.interpretation, evidence: input.evidence.page)
+        try reviewContext.validate(interpretation: interpretation, evidence: input.evidence.page)
         try obligations.validate(interpretation: interpretation, evidence: input.evidence.page)
         guard interpretation.input.continues(input.interpretation.input) else { throw ComputerUseBrowserResearchFormError.inputChanged }
         if let repair { guard repair.original == input else { throw ComputerUseBrowserResearchFormError.inputChanged } }
         let requirements = try target.preparedFormRequirements(from: input)
         evidence = input.evidence; goal = input.interpretation.input; previous = input.previous; self.reviewContext = reviewContext
+        self.captureReviewContext = capturedReview
         obligationsContext = obligations; ignoresCapturedCaret = input.isRetainOnly
         repairableTargetIDs = repair?.changedTargetIDs ?? []
         guard input.wasPreparedInput || repair != nil else { throw ComputerUseBrowserResearchFormError.inputChanged }
-        let parts = [!input.wasPreparedInput ? "browser-form-preparation-baseline-v5" : (repair != nil ? "browser-form-preparation-baseline-v4" : (input.isRetainOnly ? "browser-form-preparation-baseline-v3" : "browser-form-preparation-baseline-v2")), requirements.digest, reviewContext.digest, obligations.digest]
-        digest = ComputerUseTaskContract.digest(parts + (repair.map { [$0.digest] } ?? []))
+        let inherited = capturedReview != reviewContext
+        let parts = [inherited ? "browser-form-preparation-baseline-v6" : (!input.wasPreparedInput ? "browser-form-preparation-baseline-v5" : (repair != nil ? "browser-form-preparation-baseline-v4" : (input.isRetainOnly ? "browser-form-preparation-baseline-v3" : "browser-form-preparation-baseline-v2"))), requirements.digest, reviewContext.digest, obligations.digest]
+        digest = ComputerUseTaskContract.digest(parts + (repair.map { [$0.digest] } ?? []) + (inherited ? [capturedReview.digest] : []))
     }
 
     func validate(interpretation: ComputerUseBrowserGoalProposal, evidence: ComputerUseBrowserFormEvidence,
@@ -277,6 +283,7 @@ struct ComputerUseBrowserFormPreparationBaseline: Equatable, Sendable, CustomStr
               formID == reviewContext.formID, previous == self.previous, let review,
               review.matches(interpretation: interpretation, evidence: evidence.page) else { throw ComputerUseBrowserResearchFormError.inputChanged }
         try reviewContext.validate(interpretation: interpretation, evidence: evidence.page)
+        try captureReviewContext.validate(interpretation: interpretation, evidence: evidence.page)
         try obligationsContext.validate(interpretation: interpretation, evidence: evidence.page)
         let preserved = try obligationsContext.preservation(in: interpretation), reads = try obligationsContext.readings(in: interpretation)
         guard preserved.allSatisfy({ review.formScope?.preservedControls.contains($0) == true }),
@@ -288,6 +295,11 @@ struct ComputerUseBrowserFormPreparationBaseline: Equatable, Sendable, CustomStr
 /// but cannot replace this intent, its captured values or its native adapter.
 @MainActor
 final class ComputerUseBrowserResearchFormPreparation {
+    private struct CaptureOrigin: Equatable {
+        let capture: ComputerUseBrowserFormPreparationCapture
+        let reviewContext: ComputerUseBrowserFormPreparationReviewContext
+        let repair: ComputerUseBrowserFormPreparationRepair?
+    }
     let interpretation: ComputerUseBrowserGoalProposal
     let page: ComputerUseBrowserPageEvidence
     let review: ComputerUseBrowserEffectScopeReview
@@ -301,6 +313,8 @@ final class ComputerUseBrowserResearchFormPreparation {
     private let originalPreparation: ComputerUseBrowserResearchFormPreparation?
     private let revisionDepth: Int
     private var baseline: ComputerUseBrowserFormPreparationBaseline?
+    private var baselineOrigin: CaptureOrigin?
+    private var inheritedCriteriaOrigin: CaptureOrigin?
     private let fieldsCapture: ComputerUseBrowserDOMReadCapture
     private let bindingCapture: ComputerUseBrowserDOMReadCapture
     private let preservationCapture: ComputerUseBrowserDOMReadCapture
@@ -311,8 +325,16 @@ final class ComputerUseBrowserResearchFormPreparation {
     private(set) var preparedInput: ComputerUseBrowserResearchFormInput?
     private(set) var criteriaRepair: ComputerUseBrowserFormPreparationRepair?
     private var criteriaRepairCount = 0
-    var permitsCriteriaRecovery: Bool {
+    private var isReadOnlyRetention: Bool {
         previous.map { review.permitsReadOnlyRetention(after: $0, on: page) } ?? false
+    }
+    private var hasStartedCapture: Bool {
+        fieldsCapture.didStart || bindingCapture.didStart || preservationCapture.didStart
+            || fields != nil || evidence != nil || preservationFinished || preparedInput != nil
+    }
+    var needsCriteriaReview: Bool { criteriaRepair != nil || inheritedCriteriaOrigin != nil }
+    var permitsCriteriaRecovery: Bool {
+        isReadOnlyRetention || (!hasStartedCapture && originalPreparation?.permitsCriteriaRecovery == true)
     }
     var hasPreservationObligations: Bool {
         originalPreparation != nil || previous != nil || !reviewContext.preservedSources.isEmpty || !reviewContext.readSources.isEmpty
@@ -384,6 +406,9 @@ final class ComputerUseBrowserResearchFormPreparation {
     /// input, before requesting repair of earlier verified criteria.
     func recoverRetainedCriteriaForReview(browser: ComputerUseOwnedBrowser, checkCurrent: () throws -> Void) async throws -> Bool {
         guard criteriaRepairCount < 8, permitsCriteriaRecovery, let previous else { return false }
+        if !isReadOnlyRetention {
+            return try await recoverInheritedCriteria(browser: browser, checkCurrent: checkCurrent)
+        }
         func check() throws {
             try checkCurrent()
             try parent?.validatePreparationContinuation(previous)
@@ -430,6 +455,7 @@ final class ComputerUseBrowserResearchFormPreparation {
         }
         do {
             try check()
+            guard inheritedCriteriaOrigin == nil else { throw ComputerUseBrowserResearchFormError.inputChanged }
             if let preparedInput {
                 try await ComputerUseBrowserResearchFormStage.validateOriginalInput(preparedInput, target: target,
                     browser: browser, checkCurrent: check)
@@ -451,6 +477,57 @@ final class ComputerUseBrowserResearchFormPreparation {
         }
     }
 
+    /// An unstarted revision owns reviewed purposes but no new private field
+    /// baseline. Keep that frame while recovering its earlier retained capture.
+    private func recoverInheritedCriteria(browser: ComputerUseOwnedBrowser, checkCurrent: () throws -> Void) async throws -> Bool {
+        guard !hasStartedCapture, let originalPreparation else { return false }
+        func check() throws {
+            try checkCurrent()
+            guard !hasStartedCapture else { throw ComputerUseBrowserResearchFormError.inputChanged }
+            if let parent, let previous { try parent.validatePreparationContinuation(previous) }
+        }
+        do {
+            try check()
+            _ = try await restoreForReview(browser: browser, checkCurrent: check)
+            _ = try await originalPreparation.recoverRetainedCriteriaForReview(browser: browser, checkCurrent: check)
+            try check()
+            guard originalPreparation.needsCriteriaReview else { return false }
+            let origin = try await originalPreparation.captureOriginForRevision(browser: browser, for: page, checkCurrent: check)
+            guard origin.repair != nil else { throw ComputerUseBrowserResearchFormError.inputChanged }
+            _ = try await restoreForReview(browser: browser, checkCurrent: check)
+            try check()
+            guard inheritedCriteriaOrigin != origin else { return false }
+            inheritedCriteriaOrigin = origin; criteriaRepairCount += 1; revisedAction = nil
+            return true
+        } catch {
+            await browser.joinDOMCompletion(document: page.document)
+            throw error
+        }
+    }
+
+    /// Traverse only retained, unstarted revisions. Restore every historical
+    /// read scope and keep its semantic context; never prepare a skipped edit.
+    private func captureOriginForRevision(browser: ComputerUseOwnedBrowser, for reviewedPage: ComputerUseBrowserPageEvidence,
+                                          checkCurrent: () throws -> Void) async throws -> CaptureOrigin {
+        try checkCurrent()
+        try ComputerUseBrowserObservedCriteria.requireUnchanged(controlIDs: review.readControls.map(\.controlID),
+            original: page, current: reviewedPage)
+        if let inheritedCriteriaOrigin {
+            guard !hasStartedCapture, let originalPreparation else { throw ComputerUseBrowserResearchFormError.inputChanged }
+            _ = try await restoreForReview(browser: browser, checkCurrent: checkCurrent)
+            let original = try await originalPreparation.captureOriginForRevision(browser: browser, for: reviewedPage, checkCurrent: checkCurrent)
+            try checkCurrent()
+            guard original == inheritedCriteriaOrigin else { throw ComputerUseBrowserResearchFormError.inputChanged }
+            return original
+        }
+        if let criteriaRepair {
+            _ = try await restoreForReview(browser: browser, checkCurrent: checkCurrent)
+            return .init(capture: criteriaRepair.original, reviewContext: preparedReviewContext, repair: criteriaRepair)
+        }
+        let input = try await prepare(browser: browser, checkCurrent: checkCurrent)
+        return .init(capture: .init(input: input), reviewContext: preparedReviewContext, repair: nil)
+    }
+
     private func captureFields(browser: ComputerUseOwnedBrowser, recoveringCriteria: Bool, checkCurrent: () throws -> Void) async throws {
         func check() throws { try checkCurrent() }
         try check()
@@ -458,17 +535,14 @@ final class ComputerUseBrowserResearchFormPreparation {
             // Finish any interrupted original capture before extending its
             // catalogue. Once retained here, never rerun that old full-field
             // preparation against the larger revised adapter.
-            let original: ComputerUseBrowserFormPreparationCapture
-            if recoveringCriteria, originalPreparation.criteriaRepair == nil, originalPreparation.permitsCriteriaRecovery {
+            if recoveringCriteria, !originalPreparation.needsCriteriaReview, originalPreparation.permitsCriteriaRecovery {
                 _ = try await originalPreparation.recoverRetainedCriteriaForReview(browser: browser, checkCurrent: check)
             }
-            if let repair = originalPreparation.criteriaRepair {
-                // The native revision below checks both this immutable
-                // capture and the earlier criteria origins atomically.
-                original = repair.original
-            } else { original = .init(input: try await originalPreparation.prepare(browser: browser, checkCurrent: check)) }
-            baseline = try .init(input: original, target: target, reviewContext: originalPreparation.preparedReviewContext,
-                retaining: originalPreparation.reviewContext, interpretation: interpretation, repair: originalPreparation.criteriaRepair)
+            let origin = try await originalPreparation.captureOriginForRevision(browser: browser, for: page, checkCurrent: check)
+            baseline = try .init(input: origin.capture, target: target, reviewContext: originalPreparation.preparedReviewContext,
+                retaining: originalPreparation.reviewContext, interpretation: interpretation, repair: origin.repair,
+                captureReviewContext: origin.reviewContext)
+            baselineOrigin = origin
             try check()
         }
         let current = try await ComputerUseBrowserResearchFormStage.restoreOriginalPage(page, review: review,
@@ -476,13 +550,12 @@ final class ComputerUseBrowserResearchFormPreparation {
         guard let scope = review.formScope else { throw ComputerUseBrowserResearchFormError.inputChanged }
         if fields == nil {
             if originalPreparation != nil {
-                guard baseline != nil, let originalPreparation,
-                      let original = originalPreparation.criteriaRepair?.original ?? originalPreparation.preparedInput.map({ ComputerUseBrowserFormPreparationCapture(input: $0) }) else {
+                guard baseline != nil, let origin = baselineOrigin else {
                     throw ComputerUseBrowserResearchFormError.inputChanged
                 }
                 fields = try await target.reviseFields(in: formID, page: current, preserving: scope.editablePreservedControlIDs,
-                    selecting: scope.selectedControlIDs, scopeDigest: scope.digest, from: original, retaining: fieldsCapture,
-                    repairing: originalPreparation.criteriaRepair)
+                    selecting: scope.selectedControlIDs, scopeDigest: scope.digest, from: origin.capture, retaining: fieldsCapture,
+                    repairing: origin.repair)
             } else if let previous {
                 fields = try await target.extendFields(in: formID, page: current, preserving: scope.editablePreservedControlIDs,
                     selecting: scope.selectedControlIDs, after: previous, retaining: fieldsCapture)

@@ -131,7 +131,7 @@ final class ComputerUseBrowserResearchTask {
         formPreparation.map { $0.interpretation.input != input } ?? false
     }
     var needsFormPreparationReview: Bool {
-        hasRevisedFormPreparationGoal || formPreparation?.criteriaRepair != nil
+        hasRevisedFormPreparationGoal || formPreparation?.needsCriteriaReview == true
     }
     private var hasPendingFormExecution: Bool {
         guard let formStage else { return false }
@@ -393,7 +393,7 @@ final class ComputerUseBrowserResearchTask {
             return try await withThrowingTaskGroup(of: ComputerUseBrowserActionProposal.self) { group in
                 group.addTask { @MainActor [self] in
                     guard ContinuousClock.now < deadline else { throw ComputerUseBrowserActionPlanError.deadlineExceeded }
-                    if preparation.criteriaRepair == nil, let cached = preparation.revisedAction, cached.input.interpretation == interpretation.proposal {
+                    if !preparation.needsCriteriaReview, let cached = preparation.revisedAction, cached.input.interpretation == interpretation.proposal {
                         _ = try await preparation.restoreForReview(browser: browser, checkCurrent: { try self.checkCurrent(captured) })
                         return cached
                     }

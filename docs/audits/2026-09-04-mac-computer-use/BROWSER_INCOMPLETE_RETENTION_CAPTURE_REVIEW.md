@@ -53,6 +53,8 @@ Allowed checks: four changed Swift files parsed with `swiftc -frontend -parse`; 
 
 ## Remaining repair order
 
+The subsequent [answered-preparation recovery](BROWSER_ANSWERED_PREPARATION_RECOVERY_REVIEW.md) keeps earlier capture recovery reachable through newly installed revisions whose own native capture has not started. The list below records this checkpoint’s earlier boundary; started physical captures and broader clarification/supersession coverage remain open.
+
 - Review recovery during later physical/mixed preparations and additional criterion changes during revised capture. Those paths retain their original preconditions; this repair does not authorize discarding them or replaying uncertain input.
 - Review ordering when an accepted answer installs a physical revision over an earlier unfinished retain-only frame. Recovery must still reach that earlier capture without relaxing the new input scope. Extend clarification coverage across nested frames while retaining every accepted preservation/read duty and source purpose.
 - Continue explicit goal supersession and conflicts with preserved criteria. Source overlap is not semantic equivalence; captured invariants do not become verified criteria.
