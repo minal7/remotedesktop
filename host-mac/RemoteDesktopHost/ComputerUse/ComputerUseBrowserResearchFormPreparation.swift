@@ -201,7 +201,7 @@ final class ComputerUseBrowserResearchFormPreparation {
     private let preparedReviewContext: ComputerUseBrowserFormPreparationReviewContext
     private(set) var reviewContext: ComputerUseBrowserFormPreparationReviewContext
     private(set) var revisedAction: ComputerUseBrowserActionProposal?
-    private let parent: ComputerUseBrowserResearchFormStage?
+    private let parent: (any ComputerUseBrowserFormStage)?
     private let previous: ComputerUseBrowserResearchFormContinuation?
     private let originalPreparation: ComputerUseBrowserResearchFormPreparation?
     private let revisionDepth: Int
@@ -218,7 +218,7 @@ final class ComputerUseBrowserResearchFormPreparation {
         originalPreparation != nil || previous != nil || !reviewContext.preservedSources.isEmpty || !reviewContext.readSources.isEmpty
     }
 
-    init(action: ComputerUseBrowserActionProposal, browser: ComputerUseOwnedBrowser, parent: ComputerUseBrowserResearchFormStage? = nil,
+    init(action: ComputerUseBrowserActionProposal, browser: ComputerUseOwnedBrowser, parent: (any ComputerUseBrowserFormStage)? = nil,
          revising original: ComputerUseBrowserResearchFormPreparation? = nil) throws {
         guard case .editForm(let formID) = action.step else { throw ComputerUseBrowserActionPlanError.invalidProposal }
         let review = try ComputerUseBrowserEffectScopeReview(input: action.input)

@@ -60,7 +60,7 @@ struct ComputerUseBrowserActionInput: Equatable, Sendable, CustomStringConvertib
     @MainActor
     init(interpretation: ComputerUseBrowserGoalProposal, evidence: ComputerUseBrowserPageEvidence,
          navigationHistory: [ComputerUseBrowserResearchVisit], formHistory: [ComputerUseBrowserResearchFormReceipt],
-         latestForm: ComputerUseBrowserResearchFormStage?, changedFormTargetIDs: Set<String>,
+         latestForm: (any ComputerUseBrowserFormStage)?, changedFormTargetIDs: Set<String>,
          researchEvidence: ComputerUseBrowserResearchEvidence? = nil, recalledReadings: [Int] = [],
          historyOptions: [ComputerUseBrowserHistoryOption]? = nil,
          popupControlIDs: [String] = [], popupHistory: [ComputerUseBrowserResearchPopupRecord] = [],
@@ -151,7 +151,7 @@ struct ComputerUseBrowserActionInput: Equatable, Sendable, CustomStringConvertib
         preservableControlIDs = preservableIDs
         var verified: Any = NSNull(), queryControls: [String] = [], queryReceipt: ComputerUseBrowserResearchFormReceipt?
         var carried: [CarriedFormPreservation] = [], queryBound: [String] = [], changedControls: [String] = []
-        var verifiedRetainControls = Set<String>()
+        var verifiedRetainControls = Set<String>(), permitsRetainOnly = false
         if let stage = latestForm, let receipt = stage.nativeReceipt, formHistory.last == receipt,
            interpretation.input.continues(stage.input.interpretation.input), stage.input.evidence.page.document == evidence.document,
            stage.input.evidence.page.documentID == evidence.documentID {
@@ -170,6 +170,7 @@ struct ComputerUseBrowserActionInput: Equatable, Sendable, CustomStringConvertib
             let fields = stage.input.evidence.fields.filter { continuation.verifiedTargetIDs.contains($0.editable.snapshot.targetID) }
             guard fields.count == continuation.verifiedTargetIDs.count else { throw ComputerUseBrowserActionPlanError.invalidInput }
             verifiedRetainControls = Set(fields.map { $0.control.id })
+            permitsRetainOnly = continuation.pendingEdits.isEmpty && changedFormTargetIDs.isEmpty
             let verifiedForms = Set(fields.compactMap { $0.control.form?.id })
             if continuation.pendingEdits.isEmpty, changedFormTargetIDs.isEmpty, verifiedForms.count == 1,
                let form = verifiedForms.first, fields.allSatisfy({ $0.control.form?.id == form }) {
@@ -189,7 +190,7 @@ struct ComputerUseBrowserActionInput: Equatable, Sendable, CustomStringConvertib
                 "unfinished_edits":try continuation.pendingEdits.map { try $0.context(in: interpretation) },
                 "complete_stage":receipt.isCompleteStage, "planned_edits":receipt.plannedEditCount,
                 "current_goal_revision":receipt.goalRevision == goal.digest]
-            if formHistory.contains(where: { $0.verifiedWithoutInputCount > 0 || $0.requiresRepairAtPublication }) {
+            if formHistory.contains(where: { $0.verifiedWithoutInputCount > 0 || $0.requiresRepairAtPublication || $0.retainedCriterionCount > 0 }) {
                 stageContext.removeValue(forKey: "edits")
                 stageContext["criteria"] = zip(fields, edits).map { field, context in
                     var row = context
@@ -201,6 +202,7 @@ struct ComputerUseBrowserActionInput: Equatable, Sendable, CustomStringConvertib
             if formHistory.contains(where: { $0.requiresRepairAtPublication }) {
                 stageContext["required_repair_when_recorded"] = receipt.requiresRepairAtPublication
             }
+            if formHistory.contains(where: { $0.retainedCriterionCount > 0 }) { stageContext["retained_criteria"] = receipt.retainedCriterionCount }
             verified = stageContext
             queryReceipt = receipt
         } else if !changedFormTargetIDs.isEmpty { throw ComputerUseBrowserActionPlanError.invalidInput }
@@ -288,8 +290,10 @@ struct ComputerUseBrowserActionInput: Equatable, Sendable, CustomStringConvertib
         let queryReadingsAvailable = formEffectScope?.queryControlID == nil || optionReadControls.allSatisfy { read in
             evidence.page.controlStates.contains { $0.controlID == read.controlID && ![.unavailable,.stateless].contains($0.kind) }
         }
-        let formHasEdits = formEffectScope?.formID == nil || formEffectScope?.fieldIntents.contains(where: { $0.disposition == .edit }) == true
-        let scopeAllowsActions = formHasEdits && queryReadingsAvailable && effectReviewMetadataComplete && reviewed.count == effectReviewControlIDs.count
+        let formHasCriteria = formEffectScope?.formID == nil
+            || formEffectScope?.fieldIntents.contains(where: { $0.disposition == .edit }) == true
+            || (permitsRetainOnly && formEffectScope?.fieldIntents.contains(where: { $0.disposition == .retain }) == true)
+        let scopeAllowsActions = formHasCriteria && queryReadingsAvailable && effectReviewMetadataComplete && reviewed.count == effectReviewControlIDs.count
             && reviewed.allSatisfy { $0.relationship == .unrelated }
         effectScopeAllowsActions = scopeAllowsActions
         self.popupControlIDs = popupControlIDs.filter { id in formEffectScope == nil && scopeAllowsActions && readableIDs.contains(id) && projected.contains(id)
@@ -383,14 +387,25 @@ struct ComputerUseBrowserActionInput: Equatable, Sendable, CustomStringConvertib
                  "current_goal_revision":$0.goalRevision == goal.digest] as [String: Any]
             }
         }
+        if formHistory.contains(where: { $0.retainedCriterionCount > 0 }) {
+            context["version"] = 22
+            context["form_history"] = formHistory.map {
+                ["stage":$0.index,"edits":$0.editCount,"planned_edits":$0.plannedEditCount,
+                 "verified_without_input":$0.verifiedWithoutInputCount,"retained_criteria":$0.retainedCriterionCount,
+                 "complete_stage":$0.isCompleteStage,"required_repair_when_recorded":$0.requiresRepairAtPublication,
+                 "current_goal_revision":$0.goalRevision == goal.digest] as [String: Any]
+            }
+        }
         contextJSON = String(decoding: try JSONSerialization.data(withJSONObject: context, options: [.sortedKeys]), as: UTF8.self)
         usesFormStateContext = formHistory.contains { $0.verifiedWithoutInputCount > 0 }
         usesFormRecoveryContext = formHistory.contains { $0.requiresRepairAtPublication }
+        usesFormRetentionContext = formHistory.contains { $0.retainedCriterionCount > 0 }
         self.interpretation = interpretation; self.evidence = evidence
         queryControlIDs = queryControls; self.queryReceipt = queryReceipt
     }
     let usesFormStateContext: Bool
     let usesFormRecoveryContext: Bool
+    let usesFormRetentionContext: Bool
     var description: String { "BrowserActionInput(forms: \(formIDs.count))" }
     var debugDescription: String { description }
 }
@@ -628,7 +643,7 @@ struct ComputerUseLocalBrowserActionPlanner: ComputerUseBrowserActionPlanning {
         let body: [String: Any] = ["model":connection.modelAlias,
             "messages":[["role":"system", "content":Self.instructions(for: input)], ["role":"user", "content":input.contextJSON]],
             "temperature":0, "top_p":1, "top_k":0, "max_tokens":ComputerUseLocalBrowserGoalPlanner.outputTokens, "cache_prompt":false,
-            "response_format":["type":"json_schema", "json_schema":["name":input.usesFormRecoveryContext ? "browser_research_action_v21" : input.usesFormStateContext ? "browser_research_action_v20" : input.preparationReview != nil ? "browser_research_action_v19" : input.formEffectScope != nil ? "browser_research_action_v18" : input.usesEffectScopeContext ? "browser_research_action_v15" : (input.usesPopupContext ? "browser_research_action_v14" : (input.usesOptionSelectionContext ? "browser_research_action_v13" : (!input.readableControlIDs.isEmpty ? "browser_research_action_v11" : (input.allowsHistory ? "browser_research_action_v7" : "browser_research_action_v6")))), "strict":true, "schema":["oneOf":choices]]]]
+            "response_format":["type":"json_schema", "json_schema":["name":input.usesFormRetentionContext ? "browser_research_action_v22" : input.usesFormRecoveryContext ? "browser_research_action_v21" : input.usesFormStateContext ? "browser_research_action_v20" : input.preparationReview != nil ? "browser_research_action_v19" : input.formEffectScope != nil ? "browser_research_action_v18" : input.usesEffectScopeContext ? "browser_research_action_v15" : (input.usesPopupContext ? "browser_research_action_v14" : (input.usesOptionSelectionContext ? "browser_research_action_v13" : (!input.readableControlIDs.isEmpty ? "browser_research_action_v11" : (input.allowsHistory ? "browser_research_action_v7" : "browser_research_action_v6")))), "strict":true, "schema":["oneOf":choices]]]]
         var request = URLRequest(url: connection.baseURL.appendingPathComponent("v1/chat/completions"))
         request.httpMethod = "POST"; request.timeoutInterval = 30
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -645,7 +660,7 @@ struct ComputerUseLocalBrowserActionPlanner: ComputerUseBrowserActionPlanning {
         if !input.recalledReadingIndices.isEmpty { parts += [recalledInstructions, capacityInstructions] }
         if !input.recalledReadingIndices.isEmpty || input.interpretation.requirements.contains(where: { $0.field == .quantity }) { parts.append(quantityInstructions) }
         if !input.formIDs.isEmpty { parts.append(formInstructions) }
-        if !input.formIDs.isEmpty || input.usesFormRecoveryContext { parts.append(formHistoryInstructions) }
+        if !input.formIDs.isEmpty || input.usesFormRecoveryContext || input.usesFormRetentionContext { parts.append(formHistoryInstructions) }
         if input.queryReceipt != nil { parts.append(verifiedFormInstructions) }
         if !input.readableControlIDs.isEmpty { parts.append(readingInstructions) }
         if !input.optionInspectionControlIDs.isEmpty { parts.append(inspectionInstructions) }
@@ -683,10 +698,11 @@ struct ComputerUseLocalBrowserActionPlanner: ComputerUseBrowserActionPlanning {
     Historical field_review can distinguish availableQuantity from selectedQuantity, purchaseLimit, packageSize and unknown. Only the first even proposes a capacity meaning, with whole cited qualifiers. quotedCapacitySufficient/quotedCapacityInsufficient compare an observed matching-unit count against a requested exact/minimum count under that proposal; they do not certify current stock, a selected booking quantity, applicable dates/types or the complete request. Other quantity meanings and ambiguous/unparsed counts still need appropriate page/form evidence. Do not repeat or skip an input merely because a historical capacity comparison passes.
     """
     private static let formInstructions = """
-    Return {"form":"ID","preserve":[]} to select a scope for review for an offered editable_forms ID when entering search criteria in that form is the next necessary step. A separate planner will propose exact source-bound field values. For every field the USER explicitly requires to remain unchanged, include {"control":"ID","requirement":index} in preserve, using a preservable_controls reference and its motivating outcome/condition/prohibition requirement. Include those fields even outside the selected form. At most sixteen unique controls; never invent preservation for every unedited field. After per-field scope review completes, discovery reads only declared edit/retained targets and these explicit preservation targets. Carried preservation cannot be dropped by the later form planner. If a required field is missing or unsupported, do not silently omit it; use a justified question or unavailable. Distinguish search controls from unrelated newsletter/account/checkout forms. Do not choose login, password, MFA, payment or booking actions. Do not edit the same form again merely because its current values are hidden. Consider verified_form_stage and form_history before requesting another edit.
+    Return {"form":"ID","preserve":[]} to select a scope for review for an offered editable_forms ID when entering or explicitly retaining search criteria in that form is the next necessary step. A separate planner will propose exact source-bound field values or confirm a fully reviewed retain-only stage. Retain-only requires earlier native verification, no pending edits, and no changed criteria; it cannot turn a captured invariant into a verified criterion. For every field the USER explicitly requires to remain unchanged, include {"control":"ID","requirement":index} in preserve, using a preservable_controls reference and its motivating outcome/condition/prohibition requirement. Include those fields even outside the selected form. At most sixteen unique controls; never invent preservation for every unedited field. After per-field scope review completes, discovery reads only declared edit/retained targets and these explicit preservation targets. Carried preservation cannot be dropped by the later form planner. If a required field is missing or unsupported, do not silently omit it; use a justified question or unavailable. Distinguish search controls from unrelated newsletter/account/checkout forms. Do not choose login, password, MFA, payment or booking actions. Do not edit the same form again merely because its current values are hidden. Consider verified_form_stage and form_history before requesting another edit.
     Supported readonly/native settings can also appear in preservable_controls. Explicit preservation binds their original state privately through edits and queries; it supplies neither an editable alias nor permission to read their values into research context. Keep every user preservation clause attached to its control, including an in-form readonly setting.
     """
     private static let formHistoryInstructions = """
+    Version 22 retained_criteria counts earlier verified criteria explicitly retained under the current review. Such a stage has zero new input and zero new desired-value proof origins; its original input receipts or observation proofs still govern each criterion. A complete read-only retention stage is not a query, a task result, or proof that every user requirement is satisfied. The next action must still advance the complete request. Do not repeat retention merely to produce another history entry.
     Version 20 distinguishes verified criteria from dispatched input. verified_form_stage.criteria carries exact source purposes for values verified by either path; verified_without_input=true identifies a criterion last verified without sending input. form_history.verified_without_input counts such fields in that stage, while edits counts actual input. A complete stage can have zero edits. Do not request input merely to create a receipt when desired values already match. Native inspection still checks current values, original objects, preservation and real input history before offering query controls. Historical verification is not whole-goal completion or proof of current website availability.
     Version 21 also records required_repair_when_recorded when fully dispatched input history was recovered while some original criteria needed repair. All inputs may have receipts and unfinished_edits may be empty while complete_stage=false. Preserve those historical inputs; resolve the currently marked requires_repair criteria through a new source-bound form stage. The recorded repair flag is historical: use fresh per-criterion inspection to decide what still needs repair, including after the user changes the page. Do not replay completed inputs or infer current satisfaction from the history.
     form_history distinguishes verified edits from planned_edits. complete_stage=false means a prefix was verified or the recovered stage required criterion repair; unfinished_edits retains the unsent remainder with historical labels/types and original user sources. Those old labels are not current native references. Select the retained form to replan every unfinished entry; its planner must explicitly map all pending work to current edits. Query controls remain withheld until those obligations and any changed criteria are resolved. Never count a partial receipt as completion of the original stage or the research goal.
@@ -720,7 +736,7 @@ struct ComputerUseLocalBrowserActionPlanner: ComputerUseBrowserActionPlanning {
     """
     private static let formScopeInstructions = """
     effect_scope.form_selection retains a proposed form or query before private discovery or navigation. Every editable member needs metadata review before private discovery, including members inside the selected form. Native ownership is not a task reason to read a value. Unsupported/read-only members and outside controls also need review. No values have been read merely by selecting a form. For a relevant/unknown control offered in additional_preservation_controls, return {"preserve_controls":[{"control":"ID","requirement":0}]} only when the USER requires that field to remain unchanged. This adds explicit preservation without dropping an earlier obligation. It authorizes the existing private native preservation read after the full review completes, including a user's negative preservation clause; it is not permission to read other secrets or to preserve every unedited field. The scope changes and all remaining controls need fresh review. An outside criterion that needs a different edit is not automatically a preservation requirement: select the appropriate offered form or return a justified question/unavailable. Selecting another form cannot discard already retained preservation.
-    For a reviewed relevant/unknown member in additional_edit_controls, return {"plan_fields":[{"control":"ID","disposition":"edit","requirements":[0]}]} only when the complete task requires an edit now. Cite one to eight offered field_requirements that will supply that field's payload; do not select placeholder fields to discover their private values. At most four decisions per reply, eight edit targets and sixteen total edit/retained/preserved targets are supported. The later form planner must edit exactly these targets using exactly these requirement references, or ask a justified question/return unavailable. To keep a previously verified field offered in additional_retained_controls, use disposition=retain with the motivating outcome/condition references. This preserves its original native objects, values, sources and receipts without issuing another edit. required_controls cannot be declared unrelated to discard a retained obligation. Retain is unavailable for newly discovered fields; it does not invent preservation. Explicit user preservation still uses preserve_controls. For an offered additional_deferred_controls member whose value is not needed for this stage, use disposition=deferred with its motivating task references when another stage or clarification must resolve it. This deliberately leaves the value unread and unedited, permits ordinary site reactions, and carries no value invariant or query authority. A supported value-only member such as a checkbox or readonly setting may be deferred for later observation without creating an editable alias. It cannot defer an earlier verified obligation or explicit user preservation. Reconsider it under the complete goal on the next page/action; deferred never means unrelated, satisfied, or safe to submit. Unsupported or unknown dependencies that prevent deciding this stage must still stop it. All remaining metadata is reviewed again after each scope addition. Unrelated members are excluded from private discovery. There must be at least one explicit edit intent before form discovery is released.
+    For a reviewed relevant/unknown member in additional_edit_controls, return {"plan_fields":[{"control":"ID","disposition":"edit","requirements":[0]}]} only when the complete task requires an edit now. Cite one to eight offered field_requirements that will supply that field's payload; do not select placeholder fields to discover their private values. At most four decisions per reply, eight edit targets and sixteen total edit/retained/preserved targets are supported. The later form planner must edit exactly these targets using exactly these requirement references, or ask a justified question/return unavailable. To keep a previously verified field offered in additional_retained_controls, use disposition=retain with the motivating outcome/condition references. This preserves its original native objects, values, sources and receipts without issuing another edit. required_controls cannot be declared unrelated to discard a retained obligation. Retain is unavailable for newly discovered fields; it does not invent preservation. Explicit user preservation still uses preserve_controls. For an offered additional_deferred_controls member whose value is not needed for this stage, use disposition=deferred with its motivating task references when another stage or clarification must resolve it. This deliberately leaves the value unread and unedited, permits ordinary site reactions, and carries no value invariant or query authority. A supported value-only member such as a checkbox or readonly setting may be deferred for later observation without creating an editable alias. It cannot defer an earlier verified obligation or explicit user preservation. Reconsider it under the complete goal on the next page/action; deferred never means unrelated, satisfied, or safe to submit. Unsupported or unknown dependencies that prevent deciding this stage must still stop it. All remaining metadata is reviewed again after each scope addition. Unrelated members are excluded from private discovery. Form discovery requires an explicit edit intent or a nonempty retain-only scope whose earlier criteria remain verified and unchanged with no unfinished edits. A retain-only review performs fresh read-only validation; it cannot replace pending input, resolve changed criteria, or add new desired values.
     A query scope covers only its chosen submitter and fields constrained by the retained verified edit/preservation chain. Other reported controls, including unedited members of that form, require review. query_value_controls identifies visible members whose value could be sent by this query; unrelated is forbidden for these references. They need a justified value reading or a retained verified field obligation. Do not read or preserve unrelated private values just to make submission pass; if this query would transmit information without a task reason, choose another justified path or unavailable. A relevant or unknown unconstrained criterion must not be declared unrelated merely to submit. If it is offered in additional_read_controls, extend_inspection can read it under a readable outcome/condition. After the new snapshot and remaining review, examine its complete observed value against the whole goal and explicitly choose query only if those current criteria justify it. Reading is not proof of suitability. If a change is needed, choose the appropriate form to establish its goal-backed edit or explicit preservation first, then reconsider querying. The host releases the retained form or a query without new value readings after complete review; a query with new readings requires a final explicit query decision; do not repeat the selection to avoid review. Missing metadata, unsupported required preservation and unresolved meaning leave the effect blocked. Explicit field intentions do not prove that the model judged read necessity correctly, that a source semantically matches a control, that hidden server fields are appropriate, or that provider results satisfy the task.
     """
     private static let preparationReviewInstructions = """

@@ -32,11 +32,12 @@ struct ComputerUseBrowserFormProposal: Equatable, Sendable, CustomStringConverti
     let question: Question?
     let preserved: [Preservation]
     let resumptions: [Resumption]
-    var isUnavailable: Bool { edits.isEmpty && question == nil }
+    let isRetention: Bool
+    var isUnavailable: Bool { edits.isEmpty && question == nil && !isRetention }
     private init(input: ComputerUseBrowserResearchFormInput, edits: [Edit] = [], question: Question? = nil,
-                 preserved: [Preservation] = [], resumptions: [Resumption] = []) {
+                 preserved: [Preservation] = [], resumptions: [Resumption] = [], isRetention: Bool = false) {
         self.input = input; self.edits = edits; self.question = question; self.preserved = preserved
-        self.resumptions = resumptions
+        self.resumptions = resumptions; self.isRetention = isRetention
     }
 
     static func decode(content: String, input: ComputerUseBrowserResearchFormInput) throws -> Self {
@@ -56,6 +57,11 @@ struct ComputerUseBrowserFormProposal: Equatable, Sendable, CustomStringConverti
                 guard requirements.allSatisfy(topic.accepts) else { throw invalid }
                 return .init(input: input, question: .init(topic: topic, requirementIDs: requirements.map(\.id)))
             }
+            if Set(root.keys) == ["retain"], case .bool(true)? = root["retain"] {
+                guard input.isRetainOnly, input.pendingEditAliases.isEmpty, input.requiredRepairFieldAliases.isEmpty else { throw invalid }
+                return .init(input: input, preserved: input.requiredPreservation, isRetention: true)
+            }
+            guard !input.isRetainOnly else { throw invalid }
             let keys: Set<String> = input.pendingEditAliases.isEmpty ? ["edits", "preserve"] : ["edits", "preserve", "resume"]
             guard Set(root.keys) == keys, case .array(let rows)? = root["edits"], (1...8).contains(rows.count),
                   case .array(let preservationRows)? = root["preserve"], preservationRows.count <= 16 else { throw invalid }

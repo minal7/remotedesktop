@@ -81,6 +81,7 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
     /// Exact earlier verification purposes plus the current reviewed retain
     /// purposes. Captured invariants alone do not qualify as verified criteria.
     let retainedFieldSources: [String: [ComputerUseBrowserFormSource]]
+    var isRetainOnly: Bool { editableFieldAliases.isEmpty && !retainedFieldSources.isEmpty }
     let requiredPreservation: [ComputerUseBrowserFormProposal.Preservation]
     let nativePreservation: ComputerUseBrowserFormPreservation?
     let nativePreservedSources: [ComputerUseBrowserFormPreservationSource]
@@ -232,7 +233,9 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
             retainedSources[aliases[index]] = sources
         }
         retainedFieldSources = retainedSources
-        guard !editable.isEmpty else { throw ComputerUseBrowserResearchFormError.invalidInput }
+        guard !editable.isEmpty || (!retainedSources.isEmpty && previous?.pendingEdits.isEmpty == true) else {
+            throw ComputerUseBrowserResearchFormError.invalidInput
+        }
         let repairs = zip(aliases, evidence.fields).compactMap { alias, field -> String? in
             guard let value = previous?.finalValues[field.editable.snapshot.targetID],
                   !field.editable.snapshot.value.utf8.elementsEqual(value.utf8) else { return nil }
@@ -302,6 +305,7 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
                 ["field":alias,"sources":try retainedSources[alias]!.map { try $0.context(in: interpretation) }] as [String: Any]
             }
         }
+        if editable.isEmpty { context["version"] = 16; context["retain_only"] = true }
         contextJSON = String(decoding: try JSONSerialization.data(withJSONObject: context, options: [.sortedKeys]), as: UTF8.self)
         self.interpretation = interpretation; self.evidence = evidence; fieldAliases = aliases
         normalizations = normalized; editableFieldAliases = editable; self.selectedFormID = selectedFormID

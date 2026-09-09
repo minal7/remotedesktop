@@ -3273,6 +3273,205 @@ final class ComputerUseBrowserResearchPreservationTests: XCTestCase {
         XCTAssertEqual(try next.retainedFieldSources.keys.map { try next.field(for: $0).control.label }, ["Category"])
     }
 
+    func testRetainOnlyProposalHasNoEditSchemaOrTextContract() async throws {
+        let fixture = try await make(category: true)
+        defer { fixture.close() }
+        let input = try await prepareRetainOnly(fixture)
+        XCTAssertTrue(input.isRetainOnly); XCTAssertTrue(input.editableFieldAliases.isEmpty)
+        let proposal = try ComputerUseBrowserFormProposal.decode(content: #"{"retain":true}"#, input: input)
+        XCTAssertTrue(proposal.isRetention); XCTAssertFalse(proposal.isUnavailable)
+        XCTAssertTrue(proposal.edits.isEmpty); XCTAssertNil(try proposal.textContract(for: input))
+        for content in [#"{"retain":false}"#, #"{"retain":true,"edits":[]}"#, #"{"edits":[],"preserve":[]}"#,
+                        #"{"retain":true,"preserve":[]}"#, #"{"retain":true,"resume":[]}"#] {
+            XCTAssertThrowsError(try ComputerUseBrowserFormProposal.decode(content: content, input: input))
+        }
+        let planner = try ComputerUseLocalBrowserFormPlanner(connection: .init(baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:54321")),
+            bearerToken: "fixture", modelAlias: "fixture-model"), transport: ControlStateUnusedTransport())
+        let request = try planner.makeRequest(input)
+        let body = try ResearchAnswerFixture.object(XCTUnwrap(request.httpBody))
+        let response = try XCTUnwrap(body["response_format"] as? [String: Any])
+        let schema = try XCTUnwrap(response["json_schema"] as? [String: Any])
+        XCTAssertEqual(schema["name"] as? String, "browser_form_plan_v16")
+        let definitions = try XCTUnwrap(schema["schema"] as? [String: Any])
+        let alternatives = try XCTUnwrap(definitions["oneOf"] as? [[String: Any]])
+        XCTAssertEqual((alternatives.first?["required"] as? [String]), ["retain"])
+        let context = try ResearchAnswerFixture.object(Data(input.contextJSON.utf8))
+        XCTAssertEqual(context["version"] as? Int, 16); XCTAssertEqual(context["retain_only"] as? Bool, true)
+    }
+
+    func testRetainOnlyCompletionAndQueryKeepActualAndObservedOriginsDistinct() async throws {
+        for observed in [false, true] {
+            let fixture = try await make(category: true, queryAlreadyMatches: observed, categoryAlreadyMatches: observed)
+            defer { fixture.close() }
+            let input = try await prepareRetainOnly(fixture), owner = try fixture.owner(), writes = fixture.state.writes
+            let proposal = try ComputerUseBrowserFormProposal.decode(content: #"{"retain":true}"#, input: input)
+            let receipt = try await owner.executeForm(proposal, input: input)
+            XCTAssertEqual(receipt.editCount, 0); XCTAssertEqual(receipt.plannedEditCount, 0)
+            XCTAssertEqual(receipt.verifiedWithoutInputCount, 0); XCTAssertEqual(receipt.retainedCriterionCount, 2)
+            XCTAssertTrue(receipt.isCompleteStage); XCTAssertEqual(fixture.state.writes, writes)
+            let repeated = try await owner.executeForm(proposal, input: input)
+            XCTAssertEqual(repeated, receipt); XCTAssertEqual(owner.confirmedFormHistory.count, 2)
+            configureMixed(fixture, editing: [], retaining: ["Query","Category"], querying: true)
+            let action = try await owner.planNextAction(using: fixture.actions)
+            let context = try ResearchAnswerFixture.object(Data(action.input.contextJSON.utf8))
+            XCTAssertEqual(context["version"] as? Int, 22)
+            let stage = try XCTUnwrap(context["verified_form_stage"] as? [String: Any])
+            XCTAssertEqual(stage["retained_criteria"] as? Int, 2)
+            let criteria = try XCTUnwrap(stage["criteria"] as? [[String: Any]])
+            XCTAssertEqual(criteria.count, 2)
+            XCTAssertTrue(criteria.allSatisfy { $0["verified_without_input"] as? Bool == observed })
+            _ = try await owner.openFormQuery(for: action)
+            XCTAssertEqual(fixture.server.count("/filtered?q=concerts&category=concerts"), 1)
+            XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, observed ? 0 : 2)
+            XCTAssertEqual(fixture.state.commands.filter { $0 == .verifyFormState }.count, observed ? 1 : 0)
+        }
+    }
+
+    func testRetainOnlyCarriesANewAnswerWithoutRewritingEarlierInputs() async throws {
+        let fixture = try await make(category: true, city: true)
+        defer { fixture.close() }
+        let mixed = try await prepareRetainedCity(fixture), owner = try fixture.owner()
+        _ = try await owner.executeForm(.decode(content: mixedContent(mixed, order: ["Query","Category"]), input: mixed), input: mixed)
+        let question = try owner.issueQuestion(topic: .location, requirementIDs: [mixed.interpretation.requirements[0].id],
+            controllerID: "phone", controllerSessionID: "session")
+        _ = try owner.answerQuestion(questionID: question.id, answerTaskID: "retain-city-again", answer: "Keep Seattle.",
+            controllerID: "phone", controllerSessionID: "session")
+        let interpretation = try await owner.interpretGoal()
+        try owner.configureResearchSources(XCTUnwrap(fixture.policy.sources(for: interpretation)))
+        configureRetainedCity(fixture, editing: [], alsoRetaining: ["Query","Category"], cityRequirement: 4)
+        let action = try await owner.planNextAction(using: fixture.actions), input = try await owner.prepareFormInput(for: action)
+        XCTAssertTrue(input.isRetainOnly)
+        let old = try XCTUnwrap(input.previous)
+        _ = try await owner.executeForm(.decode(content: #"{"retain":true}"#, input: input), input: input)
+        configureRetainedCity(fixture, editing: ["Query"], alsoRetaining: ["Category"], cityRequirement: 4)
+        let later = try await owner.planNextAction(using: fixture.actions), next = try await owner.prepareFormInput(for: later)
+        let previous = try XCTUnwrap(next.previous)
+        let city = try XCTUnwrap(next.evidence.fields.first { $0.control.label == "City" }).editable.snapshot.targetID
+        XCTAssertEqual(previous.verifiedSources[city]?.count, 3)
+        XCTAssertTrue(previous.verifiedSources[city]?.contains { $0.turn == 2 && $0.source == "Keep Seattle." } == true)
+        XCTAssertEqual(previous.editedSources, old.editedSources)
+        XCTAssertEqual(previous.inputOperationIDs, old.inputOperationIDs)
+        XCTAssertEqual(previous.stateProofsByTarget, old.stateProofsByTarget)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 3)
+    }
+
+    func testRetainOnlyPauseRequiresHandbackAndFreshValidationBeforePublication() async throws {
+        for boundary in [ComputerUseBrowserDOMCommand.bindPageFields, .inspectFormRequirements] {
+            let fixture = try await make(category: true)
+            defer { fixture.close() }
+            let input = try await prepareRetainOnly(fixture), owner = try fixture.owner(), writes = fixture.state.writes
+            let history = owner.confirmedFormHistory
+            fixture.state.onCommand = { command in
+                guard command == boundary else { return }; fixture.state.onCommand = nil; owner.pause()
+            }
+            await expectFailure { _ = try await owner.executeForm(.decode(content: #"{"retain":true}"#, input: input), input: input) }
+            XCTAssertEqual(owner.confirmedFormHistory, history)
+            let commands = fixture.state.commands
+            await expectFailure { _ = try await owner.resumeForm() }
+            XCTAssertEqual(fixture.state.commands, commands)
+            try await owner.resumeAfterUserControl()
+            let result = try await owner.resumeForm(), receipt = try XCTUnwrap(result)
+            XCTAssertEqual(receipt.retainedCriterionCount, 2); XCTAssertTrue(receipt.isCompleteStage)
+            XCTAssertGreaterThan(fixture.state.commands.filter { $0 == boundary }.count, commands.filter { $0 == boundary }.count)
+            XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 2)
+            XCTAssertEqual(fixture.state.writes, writes)
+        }
+    }
+
+    func testRetainOnlyCannotPublishChangedValuesPreservationOrReplacementObjects() async throws {
+        for mutation in ["document.getElementById('query').value='reset';",
+                         "document.getElementById('reference').value='changed';",
+                         "document.getElementById('query').outerHTML=document.getElementById('query').outerHTML;"] {
+            let fixture = try await make(category: true, mutation: mutation)
+            defer { fixture.close() }
+            let input = try await prepareRetainOnly(fixture), owner = try fixture.owner(), history = owner.confirmedFormHistory
+            try await release(fixture)
+            await expectFailure { _ = try await owner.executeForm(.decode(content: #"{"retain":true}"#, input: input), input: input) }
+            XCTAssertEqual(owner.confirmedFormHistory, history)
+            XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 2)
+            XCTAssertEqual(fixture.state.commands.filter { $0 == .prepareFormQuery }.count, 0)
+            XCTAssertTrue(owner.hasPendingForm)
+        }
+    }
+
+    func testRetainOnlyCannotRecreateLostNativeInputOrObservationOrigins() async throws {
+        for observed in [false, true] {
+            let fixture = try await make(category: true, queryAlreadyMatches: observed, categoryAlreadyMatches: observed)
+            defer { fixture.close() }
+            let input = try await prepareRetainOnly(fixture), owner = try fixture.owner(), history = owner.confirmedFormHistory
+            let other = ComputerUseBrowserTextTarget(browser: fixture.browser, document: input.evidence.page.document, requiresFrontmost: false)
+            _ = try await other.fields()
+            await expectFailure { _ = try await owner.executeForm(.decode(content: #"{"retain":true}"#, input: input), input: input) }
+            XCTAssertEqual(owner.confirmedFormHistory, history)
+            XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, observed ? 0 : 2)
+            XCTAssertEqual(fixture.state.commands.filter { $0 == .verifyFormState }.count, observed ? 1 : 0)
+        }
+    }
+
+    func testAChangedCriterionAfterRetentionCanBeRepairedThroughTheSameHistory() async throws {
+        let fixture = try await make(category: true, mutation: "document.getElementById('query').value='reset';")
+        defer { fixture.close() }
+        let input = try await prepareRetainOnly(fixture), owner = try fixture.owner()
+        _ = try await owner.executeForm(.decode(content: #"{"retain":true}"#, input: input), input: input)
+        try await release(fixture)
+        configureMixed(fixture, editing: ["Query"], retaining: ["Category"])
+        let action = try await owner.planNextAction(using: fixture.actions), next = try await owner.prepareFormInput(for: action)
+        XCTAssertEqual(next.requiredRepairFieldAliases.count, 1)
+        XCTAssertEqual(next.previous?.inputOperationIDs, input.previous?.inputOperationIDs)
+        _ = try await owner.executeForm(.decode(content: mixedContent(next, order: ["Query"]), input: next), input: next)
+        configureMixed(fixture, editing: [], retaining: ["Query","Category"], querying: true)
+        let query = try await owner.planNextAction(using: fixture.actions)
+        _ = try await owner.openFormQuery(for: query)
+        XCTAssertEqual(owner.confirmedFormHistory.map(\.editCount), [2,0,1])
+        XCTAssertEqual(owner.confirmedFormHistory.map(\.retainedCriterionCount), [0,2,0])
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 3)
+        XCTAssertEqual(fixture.server.count("/filtered?q=concerts&category=concerts"), 1)
+    }
+
+    func testRetainOnlyCannotDiscardAPendingInputSuffix() async throws {
+        let fixture = try await make(category: true)
+        defer { fixture.close() }
+        let (input, proposal) = try await prepareMixed(fixture, order: ["Query","Category"]), owner = try fixture.owner()
+        XCTAssertThrowsError(try ComputerUseBrowserFormProposal.decode(content: #"{"retain":true}"#, input: input))
+        let pauseAt = fixture.state.writes + 2
+        fixture.state.onWrite = { if fixture.state.writes == pauseAt { owner.pause() } }
+        await expectFailure { _ = try await owner.executeForm(proposal, input: input) }
+        fixture.state.onWrite = nil
+        try await owner.resumeAfterUserControl()
+        let prefix = try await owner.retainPendingFormPrefix()
+        XCTAssertEqual(prefix?.editCount, 1)
+        configureMixed(fixture, editing: [], retaining: ["Query"])
+        let action = try await owner.planNextAction(using: fixture.actions)
+        XCTAssertEqual(action.step, .unavailable); XCTAssertFalse(action.input.effectScopeAllowsActions)
+        XCTAssertTrue(action.input.queryControlIDs.isEmpty)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 1)
+    }
+
+    func testDriverExecutesRetainOnlyBeforeContinuingToTheVerifiedQuery() async throws {
+        let fixture = try await make(category: true)
+        defer { fixture.close() }
+        _ = try await prepareRetainOnly(fixture)
+        let owner = try fixture.owner()
+        configureMixed(fixture, editing: [], retaining: ["Query","Category"], querying: true)
+        fixture.forms.select = { input in
+            XCTAssertTrue(input.isRetainOnly)
+            return #"{"retain":true}"#
+        }
+        _ = try await fixture.resume()
+        XCTAssertEqual(owner.confirmedFormHistory.map(\.retainedCriterionCount), [0,2])
+        XCTAssertEqual(fixture.forms.inputs.count, 1)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 2)
+        XCTAssertEqual(fixture.server.count("/filtered?q=concerts&category=concerts"), 1)
+    }
+
+    private func prepareRetainOnly(_ fixture: ResearchDriverFixture) async throws -> ComputerUseBrowserResearchFormInput {
+        let (first, proposal) = try await prepareMixed(fixture, order: ["Query","Category"]), owner = try fixture.owner()
+        _ = try await owner.executeForm(proposal, input: first)
+        configureMixed(fixture, editing: [], retaining: ["Query","Category"])
+        let action = try await owner.planNextAction(using: fixture.actions)
+        return try await owner.prepareFormInput(for: action)
+    }
+
     private func prepareRetainedCity(_ fixture: ResearchDriverFixture) async throws -> ComputerUseBrowserResearchFormInput {
         _ = try await fixture.start(); configureMixed(fixture, editing: ["City"])
         let fallback = fixture.actions.select
@@ -3306,11 +3505,11 @@ final class ComputerUseBrowserResearchPreservationTests: XCTestCase {
     }
 
     private func configureRetainedCity(_ fixture: ResearchDriverFixture, editing: [String] = ["Query","Category"],
-                                       alsoRetaining: [String] = [], querying: Bool = false) {
+                                       alsoRetaining: [String] = [], querying: Bool = false, cityRequirement: Int = 3) {
         configureMixed(fixture, editing: editing, retaining: alsoRetaining + ["City"], querying: querying)
         let fallback = fixture.actions.select
         fixture.actions.select = { input in
-            var retaining = Dictionary(uniqueKeysWithValues: alsoRetaining.map { ($0,[0]) }); retaining["City"] = [3]
+            var retaining = Dictionary(uniqueKeysWithValues: alsoRetaining.map { ($0,[0]) }); retaining["City"] = [cityRequirement]
             if let review = try FormEffectScopeFixture.response(input,
                 editing: Dictionary(uniqueKeysWithValues: editing.map { ($0,[0]) }), retaining: retaining, preserving: ["Reference":1]) { return review }
             return try XCTUnwrap(fallback)(input)

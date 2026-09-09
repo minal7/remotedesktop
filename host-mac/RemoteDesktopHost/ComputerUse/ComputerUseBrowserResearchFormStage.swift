@@ -129,6 +129,42 @@ struct ComputerUseBrowserResearchFormContinuation: Equatable, Sendable, CustomSt
             + proofs.keys.sorted().flatMap { [$0,proofs[$0]!.digest] })
     }
 
+    /// A read-only continuation keeps earlier proof origins and actual input
+    /// history. Construction describes obligations; native validation below
+    /// must succeed before the stage can publish it.
+    @MainActor fileprivate init(retaining stage: ComputerUseBrowserRetainedFormStage) throws {
+        let input = stage.input
+        guard input.isRetainOnly, stage.proposal.isRetention, let previous = input.previous,
+              previous.pendingEdits.isEmpty, input.interpretation.input.continues(previous.goal),
+              previous.document == input.evidence.page.document, previous.documentID == input.evidence.page.documentID,
+              previous.formID == input.selectedFormID else { throw ComputerUseBrowserResearchFormStage.Failure.invalidStage }
+        taskID = previous.taskID; rootDigest = previous.rootDigest; goalRevision = input.interpretation.input.digest
+        goal = input.interpretation.input; document = previous.document; documentID = previous.documentID; formID = previous.formID
+        stageIDs = previous.stageIDs + [stage.id]
+        guard stageIDs.count <= 32, Set(stageIDs).count == stageIDs.count else { throw ComputerUseBrowserResearchFormError.stageLimit }
+        let captured = Dictionary(uniqueKeysWithValues: input.evidence.fields.map { ($0.editable.snapshot.targetID, $0.editable.snapshot.value) })
+        guard previous.finalValues.allSatisfy({ target, value in captured[target].map { value.utf8.elementsEqual($0.utf8) } == true }) else {
+            throw ComputerUseBrowserResearchFormError.inputChanged
+        }
+        finalValues = captured
+        editedTargetIDs = previous.editedTargetIDs; verifiedTargetIDs = previous.verifiedTargetIDs
+        inputOperationIDs = previous.inputOperationIDs; editedSources = previous.editedSources
+        stateProofsByTarget = previous.stateProofsByTarget; pendingEdits = []
+        var sources = previous.verifiedSources
+        for (alias, purposes) in input.retainedFieldSources {
+            let target = try input.field(for: alias).editable.snapshot.targetID
+            guard verifiedTargetIDs.contains(target), !purposes.isEmpty else { throw ComputerUseBrowserResearchFormStage.Failure.invalidStage }
+            sources[target] = purposes
+        }
+        verifiedSources = sources
+        preservedControls = try stage.proposal.preserved.map {
+            .init(controlID: try input.field(for: $0.field).control.id, source: $0.source)
+        } + input.nativePreservedSources
+        nativePreservation = input.nativePreservation
+        preservedTargetIDs = Set(try stage.proposal.preserved.map { try input.field(for: $0.field).editable.snapshot.targetID })
+        digest = ComputerUseTaskContract.digest(["browser-retained-form-continuation-v1", stage.stageDigest, previous.digest] + stageIDs)
+    }
+
     var description: String { "BrowserResearchFormContinuation(stages: \(stageIDs.count))" }
     var debugDescription: String { description }
 }
@@ -147,6 +183,7 @@ struct ComputerUseBrowserResearchFormReceipt: Equatable, Sendable, CustomStringC
     let plannedEditCount: Int
     let verifiedWithoutInputCount: Int
     let requiresRepairAtPublication: Bool
+    let retainedCriterionCount: Int
     var isCompleteStage: Bool { !requiresRepairAtPublication && editCount + verifiedWithoutInputCount == plannedEditCount }
     @MainActor fileprivate init(stage: ComputerUseBrowserResearchFormStage, completedEditCount: Int? = nil,
                                verifiedWithoutInputCount: Int = 0, requiresRepairAtPublication: Bool = false) {
@@ -156,10 +193,39 @@ struct ComputerUseBrowserResearchFormReceipt: Equatable, Sendable, CustomStringC
         plannedEditCount = stage.proposal.edits.count
         editCount = completedEditCount ?? stage.contract.steps.count
         self.verifiedWithoutInputCount = verifiedWithoutInputCount
-        self.requiresRepairAtPublication = requiresRepairAtPublication
+        self.requiresRepairAtPublication = requiresRepairAtPublication; retainedCriterionCount = 0
+    }
+    @MainActor fileprivate init(retaining stage: ComputerUseBrowserRetainedFormStage) {
+        taskID = stage.input.interpretation.input.taskID; rootDigest = stage.input.interpretation.input.rootDigest
+        goalRevision = stage.input.interpretation.input.digest; stageID = stage.id; index = stage.index
+        contractDigest = stage.stageDigest; plannedEditCount = 0; editCount = 0; verifiedWithoutInputCount = 0
+        requiresRepairAtPublication = false; retainedCriterionCount = stage.input.retainedFieldSources.count
     }
     var description: String { "BrowserResearchFormReceipt(edits: \(editCount), verifiedWithoutInput: \(verifiedWithoutInputCount))" }
     var debugDescription: String { description }
+}
+
+/// Shared ownership and historical query authority, independent of whether
+/// the current review requests physical input or read-only retention.
+@MainActor
+protocol ComputerUseBrowserFormStage: AnyObject {
+    var input: ComputerUseBrowserResearchFormInput { get }
+    var proposal: ComputerUseBrowserFormProposal { get }
+    var id: String { get }
+    var index: Int { get }
+    var stageDigest: String { get }
+    var nativeReceipt: ComputerUseBrowserResearchFormReceipt? { get }
+    var nativeContinuation: ComputerUseBrowserResearchFormContinuation? { get }
+    var nativePrefixResolution: ComputerUseBrowserResearchFormStage.PrefixResolution? { get }
+    func run(checkCurrent: @escaping @MainActor () throws -> Void) async throws -> ComputerUseBrowserResearchFormReceipt
+    func retireUnsent(checkCurrent: @escaping @MainActor () throws -> Void) async throws -> ComputerUseBrowserResearchFormStage.Retirement?
+    func retainVerifiedPrefix(checkCurrent: @escaping @MainActor () throws -> Void) async throws -> ComputerUseBrowserResearchFormStage.PrefixResolution?
+    func retainCompletedInputHistory(checkCurrent: @escaping @MainActor () throws -> Void) async throws -> ComputerUseBrowserResearchFormReceipt?
+    func inspectChangedCriteria(page: ComputerUseBrowserPageEvidence, checkCurrent: @escaping @MainActor () throws -> Void) async throws -> Set<String>
+    func preparationContext(for action: ComputerUseBrowserActionProposal) throws -> (target: ComputerUseBrowserTextTarget, continuation: ComputerUseBrowserResearchFormContinuation)
+    func validatePreparationContinuation(_ expected: ComputerUseBrowserResearchFormContinuation) throws
+    func prepareQuery(controlID: String, evidence: ComputerUseBrowserPageEvidence, checkCurrent: @escaping @MainActor () throws -> Void) async throws -> ComputerUseBrowserNavigationTarget
+    func retire()
 }
 
 /// One immutable, in-memory native binding with a durable per-step journal.
@@ -167,7 +233,7 @@ struct ComputerUseBrowserResearchFormReceipt: Equatable, Sendable, CustomStringC
 /// field objects. Lost browser/process state cannot be reconstructed from the
 /// journal alone and remains an explicit recovery limitation.
 @MainActor
-final class ComputerUseBrowserResearchFormStage {
+final class ComputerUseBrowserResearchFormStage: ComputerUseBrowserFormStage {
     enum Failure: Error, Equatable { case invalidStage, busy, retired, notVerified, retirementPending, valueCheckpointRequired }
     struct Retirement: Equatable, Sendable {
         let stageID: String
@@ -192,6 +258,7 @@ final class ComputerUseBrowserResearchFormStage {
     let id: String
     let index: Int
     let contract: ComputerUseTextTaskContract
+    var stageDigest: String { contract.contractDigest }
     private let browser: ComputerUseOwnedBrowser
     private let target: ComputerUseBrowserTextTarget
     private let directory: URL
@@ -658,4 +725,143 @@ final class ComputerUseBrowserResearchFormStage {
         func assertOwnership() throws { try lease.assertOwnership() }
         func release() { } // The enclosing stage owns the actual release.
     }
+}
+
+/// A retained, read-only review. There is no text contract, operation ID or
+/// input journal to replay. Cancellation repeats only fresh validation of the
+/// original native objects, proof origins, ledger and captured preservation.
+/// Losing those objects still requires explicit recovery; disk values alone
+/// cannot reconstruct this stage.
+@MainActor
+final class ComputerUseBrowserRetainedFormStage: ComputerUseBrowserFormStage {
+    private typealias Failure = ComputerUseBrowserResearchFormStage.Failure
+    let input: ComputerUseBrowserResearchFormInput
+    let proposal: ComputerUseBrowserFormProposal
+    let id: String
+    let index: Int
+    let stageDigest: String
+    private let target: ComputerUseBrowserTextTarget
+    private let browser: ComputerUseOwnedBrowser
+    private var completed: ComputerUseBrowserResearchFormReceipt?
+    private var continuation: ComputerUseBrowserResearchFormContinuation?
+    private var isExecuting = false
+    private var isRetired = false
+    var nativeReceipt: ComputerUseBrowserResearchFormReceipt? { completed }
+    var nativeContinuation: ComputerUseBrowserResearchFormContinuation? { continuation }
+    var nativePrefixResolution: ComputerUseBrowserResearchFormStage.PrefixResolution? { nil }
+
+    init(input: ComputerUseBrowserResearchFormInput, proposal: ComputerUseBrowserFormProposal,
+         target: ComputerUseBrowserTextTarget, browser: ComputerUseOwnedBrowser, index: Int, sequence: Int) throws {
+        try proposal.validate(for: input)
+        guard input.isRetainOnly, proposal.isRetention, input.previous?.pendingEdits.isEmpty == true,
+              input.requiredRepairFieldAliases.isEmpty, input.nativePreservation == target.formPreservation,
+              let review = input.scopeReview else { throw Failure.invalidStage }
+        guard (0..<32).contains(index), (0..<64).contains(sequence) else { throw ComputerUseBrowserResearchFormError.stageLimit }
+        self.input = input; self.proposal = proposal; self.target = target; self.browser = browser; self.index = index
+        id = ComputerUseTaskContract.digest(["browser-retained-form-stage-v1",input.interpretation.input.taskID,
+            input.interpretation.input.rootDigest,String(index),String(sequence)])
+        let requirements = try target.preparedFormRequirements(from: input)
+        stageDigest = ComputerUseTaskContract.digest(["browser-retained-form-contract-v1",id,input.contextJSON,
+            input.previous?.digest ?? "",review.digest,requirements.digest,input.nativePreservation?.digest ?? "",
+            input.preparationBaseline?.digest ?? ""])
+    }
+
+    private func check(_ checkCurrent: @MainActor () throws -> Void) throws {
+        try Task.checkCancellation()
+        guard !isRetired else { throw Failure.retired }
+        try checkCurrent()
+    }
+
+    func run(checkCurrent: @escaping @MainActor () throws -> Void) async throws -> ComputerUseBrowserResearchFormReceipt {
+        guard !isExecuting else { throw Failure.busy }
+        isExecuting = true
+        defer { isExecuting = false }
+        try check(checkCurrent)
+        if let completed { return completed } // Historical review, never a current-value assertion.
+        do {
+            guard input.nativePreservation == target.formPreservation else { throw ComputerUseBrowserResearchFormError.inputChanged }
+            try await ComputerUseBrowserResearchFormStage.validateOriginalInput(input, target: target, browser: browser,
+                checkCurrent: { try self.check(checkCurrent) })
+            try check(checkCurrent)
+            let candidate = try ComputerUseBrowserResearchFormContinuation(retaining: self)
+            let page = try await browser.observePage(document: input.evidence.page.document)
+            try check(checkCurrent)
+            let changed = try await target.inspectChangedCriteria(page: page, after: candidate)
+            try check(checkCurrent)
+            guard changed.isEmpty else { throw ComputerUseBrowserResearchFormError.inputChanged }
+            try browser.validateSourceDocument(page.document)
+            // Publish together only after the fresh native check and ownership
+            // check. No cached read callback can complete a cancelled review.
+            let receipt = ComputerUseBrowserResearchFormReceipt(retaining: self)
+            continuation = candidate; completed = receipt
+            return receipt
+        } catch {
+            await browser.joinDOMCompletion(document: input.evidence.page.document)
+            throw error
+        }
+    }
+
+    private func read<Result>(_ checkCurrent: @escaping @MainActor () throws -> Void,
+                              operation: @MainActor (ComputerUseBrowserResearchFormContinuation) async throws -> Result) async throws -> Result {
+        guard !isExecuting else { throw Failure.busy }
+        try check(checkCurrent)
+        guard completed != nil, let continuation else { throw Failure.notVerified }
+        isExecuting = true
+        defer { isExecuting = false }
+        do {
+            let result = try await operation(continuation)
+            try check(checkCurrent)
+            try browser.validateSourceDocument(input.evidence.page.document)
+            return result
+        } catch {
+            await browser.joinDOMCompletion(document: input.evidence.page.document)
+            throw error
+        }
+    }
+
+    func inspectChangedCriteria(page: ComputerUseBrowserPageEvidence,
+                                checkCurrent: @escaping @MainActor () throws -> Void) async throws -> Set<String> {
+        try await read(checkCurrent) { try await self.target.inspectChangedCriteria(page: page, after: $0) }
+    }
+
+    func prepareQuery(controlID: String, evidence: ComputerUseBrowserPageEvidence,
+                      checkCurrent: @escaping @MainActor () throws -> Void) async throws -> ComputerUseBrowserNavigationTarget {
+        try await read(checkCurrent) { try await self.target.prepareFormQuery(controlID: controlID, evidence: evidence, after: $0) }
+    }
+
+    func preparationContext(for action: ComputerUseBrowserActionProposal) throws
+        -> (target: ComputerUseBrowserTextTarget, continuation: ComputerUseBrowserResearchFormContinuation) {
+        guard let continuation else { throw Failure.notVerified }
+        try validatePreparationContinuation(continuation)
+        guard case .editForm(let formID) = action.step, formID == input.selectedFormID,
+              action.input.interpretation.disposition == .research,
+              action.input.interpretation.input.continues(input.interpretation.input),
+              action.input.evidence.document == input.evidence.page.document,
+              action.input.evidence.documentID == input.evidence.page.documentID else {
+            throw ComputerUseBrowserActionPlanError.retainedFormRequiresExtension
+        }
+        return (target, continuation)
+    }
+
+    func validatePreparationContinuation(_ expected: ComputerUseBrowserResearchFormContinuation) throws {
+        guard !isExecuting else { throw Failure.busy }
+        guard !isRetired else { throw Failure.retired }
+        guard completed != nil, continuation == expected else { throw Failure.notVerified }
+    }
+
+    // Input recovery cannot retire a new preservation obligation or replace
+    // the original native evidence. An interrupted read resumes through run.
+    func retireUnsent(checkCurrent: @escaping @MainActor () throws -> Void) async throws -> ComputerUseBrowserResearchFormStage.Retirement? {
+        guard !isExecuting else { throw Failure.busy }
+        try check(checkCurrent); return nil
+    }
+    func retainVerifiedPrefix(checkCurrent: @escaping @MainActor () throws -> Void) async throws -> ComputerUseBrowserResearchFormStage.PrefixResolution? {
+        guard !isExecuting else { throw Failure.busy }
+        try check(checkCurrent); return nil
+    }
+    func retainCompletedInputHistory(checkCurrent: @escaping @MainActor () throws -> Void) async throws -> ComputerUseBrowserResearchFormReceipt? {
+        guard !isExecuting else { throw Failure.busy }
+        try check(checkCurrent); return nil
+    }
+    func retire() { isRetired = true; completed = nil; continuation = nil }
 }

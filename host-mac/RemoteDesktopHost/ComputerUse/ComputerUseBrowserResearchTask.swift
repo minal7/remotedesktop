@@ -70,8 +70,8 @@ final class ComputerUseBrowserResearchTask {
     private var latestForm: PreparedForm?
     private var formPreparation: ComputerUseBrowserResearchFormPreparation?
     private var latestAction: ComputerUseBrowserActionProposal?
-    private var formStage: ComputerUseBrowserResearchFormStage?
-    private var lastVerifiedFormStage: ComputerUseBrowserResearchFormStage?
+    private var formStage: (any ComputerUseBrowserFormStage)?
+    private var lastVerifiedFormStage: (any ComputerUseBrowserFormStage)?
     private var formStageSequence = 0
     private var formNavigation: ComputerUseBrowserResearchFormNavigation?
     private var historyNavigation: ComputerUseBrowserResearchHistoryNavigation?
@@ -955,7 +955,7 @@ final class ComputerUseBrowserResearchTask {
         try browser.validateSourceDocument(prepared.input.evidence.page.document)
     }
 
-    /// Accept one native edit stage. Repeating its original request resumes
+    /// Accept one native input or read-only retention stage. Repeating its original request resumes
     /// that stage, including after Pause; it cannot create a replacement plan.
     func executeForm(_ proposal: ComputerUseBrowserFormProposal, input expected: ComputerUseBrowserResearchFormInput) async throws -> ComputerUseBrowserResearchFormReceipt {
         try requireIdle()
@@ -966,13 +966,18 @@ final class ComputerUseBrowserResearchTask {
         if let formPreparation, formPreparation.preparedInput != expected { throw Failure.formPending }
         guard expected.interpretation.input == input, interpretation?.proposal == expected.interpretation else { throw Failure.goalChanged }
         try proposal.validate(for: expected)
-        let stage: ComputerUseBrowserResearchFormStage
+        let stage: any ComputerUseBrowserFormStage
         if let formStage, formStage.input == expected, formStage.proposal == proposal { stage = formStage }
         else {
             guard !hasPendingFormExecution else { throw Failure.formPending }
             guard let prepared = latestForm, prepared.input == expected, let directory = navigationDirectory else { throw Failure.formUnavailable }
-            stage = try .init(input: expected, proposal: proposal, target: prepared.target, browser: browser,
-                index: confirmedFormHistory.count, sequence: formStageSequence, journalDirectory: directory, makeStore: navigationStore)
+            if proposal.isRetention {
+                stage = try ComputerUseBrowserRetainedFormStage(input: expected, proposal: proposal, target: prepared.target,
+                    browser: browser, index: confirmedFormHistory.count, sequence: formStageSequence)
+            } else {
+                stage = try ComputerUseBrowserResearchFormStage(input: expected, proposal: proposal, target: prepared.target, browser: browser,
+                    index: confirmedFormHistory.count, sequence: formStageSequence, journalDirectory: directory, makeStore: navigationStore)
+            }
             formStageSequence += 1
             formStage = stage // Retain before any disk write, native await or effect.
         }
@@ -1055,7 +1060,7 @@ final class ComputerUseBrowserResearchTask {
         }
     }
 
-    private func recordForm(_ receipt: ComputerUseBrowserResearchFormReceipt, stage: ComputerUseBrowserResearchFormStage,
+    private func recordForm(_ receipt: ComputerUseBrowserResearchFormReceipt, stage: any ComputerUseBrowserFormStage,
                             goal: ComputerUseBrowserGoalInput) throws {
         guard !isRetired else { return }
         guard formStage === stage, stage.nativeReceipt == receipt,
@@ -1073,7 +1078,7 @@ final class ComputerUseBrowserResearchTask {
         lastVerifiedFormStage = stage
     }
 
-    private func runForm(_ stage: ComputerUseBrowserResearchFormStage) async throws -> ComputerUseBrowserResearchFormReceipt {
+    private func runForm(_ stage: any ComputerUseBrowserFormStage) async throws -> ComputerUseBrowserResearchFormReceipt {
         let captured = input
         return try await operate { [self] in
             let receipt = try await stage.run(checkCurrent: { try self.checkCurrent(captured) })

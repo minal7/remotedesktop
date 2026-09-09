@@ -279,7 +279,7 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                 try check()
                 if let question = try proposal.questionRequest(for: input) { return .browserClarificationRequired(question) }
                 guard !proposal.isUnavailable else {
-                    return .userInterventionRequired("I could not prepare justified entries for this form. The original request remains pending.")
+                    return .userInterventionRequired("I could not justify the requested form criteria. The original request remains pending.")
                 }
                 do { _ = try await owner.executeForm(proposal, input: input) }
                 catch { guard try await recoverPendingForm(owner, after: error) else { throw error } }
@@ -385,12 +385,12 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                         return .userInterventionRequired("The browser reached this task's form-action limit. The original request remains pending.")
                     }
                     let input = try await owner.prepareFormInput(for: action)
-                    progress("Preparing the requested form entries…")
+                    progress("Preparing the requested form criteria…")
                     let proposal = try await owner.planForm(input, using: formPlanner)
                     try check()
                     if let question = try proposal.questionRequest(for: input) { return .browserClarificationRequired(question) }
                     guard !proposal.isUnavailable else {
-                        return .userInterventionRequired("I could not prepare justified entries for this form. The original request remains pending.")
+                        return .userInterventionRequired("I could not justify the requested form criteria. The original request remains pending.")
                     }
                     do { _ = try await owner.executeForm(proposal, input: input) }
                     catch {

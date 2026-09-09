@@ -43,6 +43,8 @@ No build, typecheck, assertion execution, inference, app/browser/computer-use la
 
 ## Remaining sequence
 
+The subsequent [retain-only execution repair](BROWSER_RETAIN_ONLY_EXECUTION_REVIEW.md) adds the separate read-only path. The sequence below records this checkpoint's earlier boundary; pending-review supersession and runtime qualification remain open.
+
 1. Add a dedicated read-only execution path for a completed retain-only review. It must retain original native origins, expected values, current source purposes, preservation and cancellation ownership without compiling a dummy text edit or inventing an input receipt. The current form gate still requires an edit intent and the form proposal still requires nonempty edits.
 2. Handle explicit supersession and changed goals without dropping pending work or uncertainty. Distinguish retained criteria, newly requested desired values and captured invariants throughout preparation and later stages.
 3. Continue uncertain native tails, document/process recovery, preservation timing, dependent controls, account/login handoff and independent whole-task/result verification in the [repair TODO](../../../TODO.md).

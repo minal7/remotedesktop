@@ -13,7 +13,7 @@ final class ComputerUseBrowserResearchFormNavigation {
     let goal: ComputerUseBrowserGoalInput
     let operationID: String
     let scopeReview: ComputerUseBrowserEffectScopeReview?
-    private let stage: ComputerUseBrowserResearchFormStage
+    private let stage: any ComputerUseBrowserFormStage
     private let browser: ComputerUseOwnedBrowser
     private let navigation: ComputerUseBrowserNavigationTask
     private var target: ComputerUseBrowserNavigationTarget?
@@ -24,13 +24,13 @@ final class ComputerUseBrowserResearchFormNavigation {
     private var isRetired = false
 
     init(form: ComputerUseBrowserResearchFormReceipt, controlID: String, evidence: ComputerUseBrowserPageEvidence,
-         stage: ComputerUseBrowserResearchFormStage, browser: ComputerUseOwnedBrowser, journalDirectory: URL,
+         stage: any ComputerUseBrowserFormStage, browser: ComputerUseOwnedBrowser, journalDirectory: URL,
          currentGoal: ComputerUseBrowserGoalInput? = nil, scopeReview: ComputerUseBrowserEffectScopeReview? = nil,
          makeStore: @escaping (URL) throws -> ComputerUseTaskJournalStore = { try .init(directory: $0) }) throws {
         let original = stage.input.interpretation.input, goal = currentGoal ?? original
         guard goal.continues(original), form.stageID == stage.id, form.taskID == goal.taskID, form.rootDigest == goal.rootDigest,
               form.goalRevision == original.digest,
-              form.contractDigest == stage.contract.contractDigest, evidence.document == stage.input.evidence.page.document,
+              form.contractDigest == stage.stageDigest, evidence.document == stage.input.evidence.page.document,
               evidence.documentID == stage.input.evidence.page.documentID,
               evidence.page.controls.contains(where: { $0.id == controlID && $0.kind == "submit" && !$0.disabled }) else {
             throw Failure.invalidIntent
