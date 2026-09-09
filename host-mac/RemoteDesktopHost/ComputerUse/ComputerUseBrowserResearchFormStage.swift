@@ -61,6 +61,19 @@ struct ComputerUseBrowserResearchFormContinuation: Equatable, Sendable, CustomSt
             inputIDs: [], actualEdits: [], proof: proof, evidenceDigest: proof.digest)
     }
 
+    /// Retain a real observed prefix while every physical input remains
+    /// pending. Publication still requires native absence/revocation and a
+    /// durable retirement; this constructor alone grants neither.
+    @MainActor fileprivate init(observedPrefixOf stage: ComputerUseBrowserResearchFormStage,
+                               proof: ComputerUseBrowserFormStateProof) throws {
+        guard stage.executionPlan.isMixed, let plan = stage.executionPlan.statePlan,
+              !stage.executionPlan.observedEdits.isEmpty else { throw ComputerUseBrowserResearchFormStage.Failure.invalidStage }
+        try Self.validate(proof, plan: plan, stage: stage)
+        try self.init(stage: stage, verifiedEdits: stage.executionPlan.observedEdits,
+            pending: stage.executionPlan.inputEdits, finalValues: stage.contract.unchangedValues,
+            inputIDs: [], actualEdits: [], proof: proof, evidenceDigest: proof.digest)
+    }
+
     @MainActor private init(stage: ComputerUseBrowserResearchFormStage, verifiedEdits: [ComputerUseBrowserFormProposal.Edit],
                             pending: [ComputerUseBrowserFormProposal.Edit], finalValues currentValues: [String: String],
                             inputIDs: [String], actualEdits: Set<String>, proof: ComputerUseBrowserFormStateProof?, evidenceDigest: String) throws {
@@ -347,6 +360,9 @@ final class ComputerUseBrowserResearchFormStage {
         if let retirement { return retirement }
         guard !isRetired else { throw Failure.retired }
         guard completed == nil, !observedNativeAttempt else { return nil }
+        // A verified observation is completed work even when no input was
+        // sent. Only prefix retirement may release this stage's remainder.
+        guard !(executionPlan.isMixed && stateProof != nil) else { return nil }
         isExecuting = true
         defer { isExecuting = false }
         let plan = try ComputerUseTextTask(contract: contract, read: { _ in nil },
@@ -362,6 +378,9 @@ final class ComputerUseBrowserResearchFormStage {
                   persisted.contractDigest == initial.contractDigest, persisted.stepIDs == initial.stepIDs,
                   persisted.retainedPrefixCount == nil,
                   persisted.retirementDigest == nil || persisted.retirementDigest == digest else { throw ComputerUseTextTaskError.journalMismatch }
+            // A mixed input attempt was preceded by native observation.
+            // Reconstruction without that proof cannot discard its history.
+            guard !executionPlan.isMixed || persisted.statuses.allSatisfy({ $0 == .planned }) else { return nil }
             guard !persisted.statuses.contains(.verified) else { return nil }
         }
         // Preserve the disk attempt/uncertainty history. Only native proof
@@ -413,16 +432,27 @@ final class ComputerUseBrowserResearchFormStage {
         let store = try makeStore(directory), persisted = try store.load(taskID: contract.taskID)
         let lease = try store.acquireExecution(taskID: contract.taskID, expected: persisted)
         defer { lease.release() }
-        guard let persisted, let prefix = try plan.historicalPrefixRequirements(in: persisted) else { return nil }
-        let count = prefix.inputOperationIDs.count
-        let digest = ComputerUseTaskContract.digest(["browser-form-suffix-retirement-v1", id,
-            input.interpretation.input.rootDigest, input.interpretation.input.digest, contract.contractDigest, String(count)])
+        guard let persisted else { return nil }
+        // Validate exact journal identity even when it has no verified input.
+        let prefix = try plan.historicalPrefixRequirements(in: persisted)
+        let count: Int, retained: ComputerUseBrowserResearchFormContinuation, digest: String
+        if let prefix {
+            count = prefix.inputOperationIDs.count
+            retained = try .init(stage: self, current: prefix, completedEditCount: count,
+                stateProof: executionPlan.isMixed ? stateProof : nil)
+            digest = ComputerUseTaskContract.digest(["browser-form-suffix-retirement-v1", id,
+                input.interpretation.input.rootDigest, input.interpretation.input.digest, contract.contractDigest, String(count)])
+        } else {
+            guard executionPlan.isMixed, let stateProof, !persisted.statuses.contains(.verified) else { return nil }
+            count = 0
+            retained = try .init(observedPrefixOf: self, proof: stateProof)
+            digest = ComputerUseTaskContract.digest(["browser-form-observed-prefix-retirement-v1", id,
+                input.interpretation.input.rootDigest, input.interpretation.input.digest, contract.contractDigest, stateProof.digest])
+        }
         guard (persisted.retirementDigest == nil && persisted.retainedPrefixCount == nil)
                 || (persisted.retirementDigest == digest && persisted.retainedPrefixCount == count) else {
             throw ComputerUseTextTaskError.journalMismatch
         }
-        let retained = try ComputerUseBrowserResearchFormContinuation(stage: self, current: prefix, completedEditCount: count,
-            stateProof: executionPlan.isMixed ? stateProof : nil)
         let retired = ComputerUseTaskJournal(taskID: persisted.taskID, promptDigest: persisted.promptDigest,
             contractDigest: persisted.contractDigest, stepIDs: persisted.stepIDs, statuses: persisted.statuses,
             retirementDigest: digest, retainedPrefixCount: count)
@@ -436,6 +466,7 @@ final class ComputerUseBrowserResearchFormStage {
             if persisted.retirementDigest == nil {
                 guard try await target.retireUnsentInputs(operationIDs: Array(plan.inputOperationIDs.dropFirst(count)), after: retained) else {
                     retirementPending = false
+                    observedNativeAttempt = true
                     return nil
                 }
             }

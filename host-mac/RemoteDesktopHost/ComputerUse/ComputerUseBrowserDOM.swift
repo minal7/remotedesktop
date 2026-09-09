@@ -1596,11 +1596,14 @@ enum ComputerUseBrowserDOM {
           const ids = args.operationIDs;
           if (!Array.isArray(ids) || ids.length < 1 || ids.length > 8 || new Set(ids).size !== ids.length
               || ids.some(id => typeof id !== 'string' || !/^[a-f0-9]{64}$/.test(id))) return reply('unsupported');
+          // A known native attempt is a definitive refusal, before current
+          // criterion/origin checks. No ID is revoked on this return, so the
+          // original stage may still reconcile its input receipt and outcome.
+          if (ids.some(id => operations.has(id))) return reply('unproven');
           if (args.requirements !== undefined) {
             if (!formRequirementsCurrent(args.requirements, args.repairableFieldIDs)
                 || ids.some(id => args.requirements.inputOperationIDs.includes(id))) return reply('stale');
           } else if (args.repairableFieldIDs !== undefined) return reply('unsupported');
-          if (ids.some(id => operations.has(id))) return reply('unproven');
           if (retiredInputs.size + ids.filter(id => !retiredInputs.has(id)).length > 512) return reply('limit');
           // Same ledger, no attempt, and no await: revoke all old operation
           // IDs together. A later equal-value observation cannot revive them.

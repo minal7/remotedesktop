@@ -47,6 +47,8 @@ No build, typecheck, test assertion execution, model/inference run, app/browser/
 
 ## Remaining work
 
+The subsequent [observed-prefix recovery checkpoint](BROWSER_OBSERVED_PREFIX_RECOVERY_REVIEW.md) implements the source path for a leading observation followed by proven-unsent input. The sequence below records this checkpoint's historical boundary; runtime qualification remains pending.
+
 1. Handle prefixes consisting only of observations when subsequent input becomes uncertain, retain-only scopes, and explicit supersession of earlier work. Preserve original evidence and purposes without inventing input receipts.
 2. Review checkpoint recovery after process/document loss and failures during native retirement or durable publication. Current native-proof ownership cannot be reconstructed from current matching values. Conservative interruption remains a limitation where original authority is unavailable.
 3. Qualify semantic pending-field mapping, dependent controls, control equivalence, account/login transitions, preservation timing and whole-task result verification. This bounded form checkpoint does not finish the broader [repair TODO](../../../TODO.md).

@@ -131,8 +131,9 @@ struct ComputerUseTaskJournal: Codable, Equatable, Sendable {
     /// A durable tombstone for a plan's proven-unsent input, optionally its
     /// remaining suffix. This never permits reviving the old contract.
     let retirementDigest: String?
-    /// A retired suffix may keep a verified prefix as historical work.
-    /// Without a count, retirement means none of this plan's input began.
+    /// Number of retained physical input steps. Zero distinguishes a separate
+    /// capability-owned observation prefix from whole-stage retirement (nil).
+    /// A tombstone is historical storage, never native proof of that prefix.
     let retainedPrefixCount: Int?
     init(taskID: String, promptDigest: String, contractDigest: String, stepIDs: [String],
          statuses: [ComputerUseTaskStepStatus], retirementDigest: String? = nil, retainedPrefixCount: Int? = nil) {

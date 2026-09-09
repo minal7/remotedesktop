@@ -239,9 +239,11 @@ final class ComputerUseTaskJournalStore {
         try writeRetirement(retired, replacing: expected)
     }
 
-    /// Keep the exact verified prefix and retire only its unsent remainder.
-    /// The caller must atomically verify original native receipts and revoke
-    /// every remaining ID first. Statuses are historical and never reset.
+    /// Keep the exact verified input prefix and retire its unsent remainder.
+    /// Zero input steps may be retained only when the capability has a separate
+    /// native observation proof. The caller must verify those native origins
+    /// and revoke every remaining ID first. Statuses are never reset. This
+    /// storage marker cannot itself authorize a continuation or an effect.
     func retireRemainingInput(_ retired: ComputerUseTaskJournal, replacing expected: ComputerUseTaskJournal) throws {
         guard Self.isValid(retired), Self.isValid(expected),
               let digest = retired.retirementDigest, let count = retired.retainedPrefixCount,
@@ -349,7 +351,7 @@ final class ComputerUseTaskJournalStore {
         if let digest = journal.retirementDigest {
             guard validDigest(digest) else { return false }
             if let count = journal.retainedPrefixCount {
-                guard count > 0, count < journal.statuses.count,
+                guard count >= 0, count < journal.statuses.count,
                       journal.statuses.prefix(count).allSatisfy({ $0 == .verified }),
                       !journal.statuses.dropFirst(count).contains(.verified) else { return false }
             } else if journal.statuses.contains(.verified) { return false }

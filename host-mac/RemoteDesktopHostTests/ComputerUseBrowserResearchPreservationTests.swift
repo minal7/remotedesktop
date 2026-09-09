@@ -2661,6 +2661,298 @@ final class ComputerUseBrowserResearchPreservationTests: XCTestCase {
         }
     }
 
+    func testObservationOnlyPrefixRetainsAllUnsentInputsAndAnExplicitQueryPath() async throws {
+        let fixture = try await make(category: true, city: true, queryAlreadyMatches: true,
+            handler: "document.getElementById('reference').value='unexpected-query-input';")
+        defer { fixture.close() }
+        let first = try await failFirstMixedAttempt(fixture), owner = try fixture.owner()
+        let (store, before) = try pendingMixedJournal(fixture)
+        XCTAssertEqual(before.statuses, [.attempted,.planned])
+        let discarded = try await owner.retirePendingUnsentForm()
+        XCTAssertNil(discarded, "Whole-stage retirement must not discard verified observations")
+        let result = try await owner.retainPendingFormPrefix(), prefix = try XCTUnwrap(result)
+        XCTAssertEqual(prefix.editCount, 0); XCTAssertEqual(prefix.verifiedWithoutInputCount, 1)
+        XCTAssertEqual(prefix.plannedEditCount, 3); XCTAssertFalse(prefix.isCompleteStage)
+        let saved = try XCTUnwrap(store.load(taskID: first.interpretation.input.taskID))
+        XCTAssertEqual(saved.statuses, before.statuses); XCTAssertEqual(saved.retainedPrefixCount, 0)
+        XCTAssertNotNil(saved.retirementDigest)
+        configureMixed(fixture, editing: ["Category","City"], retaining: ["Query"])
+        let action = try await owner.planNextAction(using: fixture.actions)
+        XCTAssertTrue(action.input.queryControlIDs.isEmpty)
+        let next = try await owner.prepareFormInput(for: action)
+        XCTAssertEqual(next.previous?.pendingEdits.map(\.label), ["Category","City"])
+        XCTAssertEqual(next.previous?.inputOperationIDs, [])
+        XCTAssertEqual(next.previous?.verifiedTargetIDs.count, 1)
+        XCTAssertEqual(next.previous?.editedTargetIDs.count, 0)
+        XCTAssertEqual(next.previous?.stateProofsByTarget.count, 1)
+        let proposal = try ComputerUseBrowserFormProposal.decode(content: mixedContent(next, order: ["Category","City"]), input: next)
+        _ = try await owner.executeForm(proposal, input: next)
+        configureMixed(fixture, editing: ["Category","City"], retaining: ["Query"], querying: true)
+        let query = try await owner.planNextAction(using: fixture.actions)
+        _ = try await owner.openFormQuery(for: query)
+        XCTAssertEqual(fixture.server.count("/filtered?q=concerts&category=concerts&city=Seattle"), 1)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 2)
+        XCTAssertEqual(owner.confirmedFormHistory.map(\.editCount), [0,2])
+        XCTAssertEqual(owner.confirmedFormHistory.map(\.verifiedWithoutInputCount), [1,0])
+        XCTAssertEqual(try store.load(taskID: before.taskID), saved)
+    }
+
+    func testDriverCarriesAnObservationOnlyPrefixThroughTheRemainingForm() async throws {
+        let fixture = try await make(category: true, city: true, queryAlreadyMatches: true,
+            handler: "document.getElementById('reference').value='unexpected-query-input';")
+        defer { fixture.close() }
+        _ = try await failFirstMixedAttempt(fixture)
+        configureMixed(fixture, editing: ["Category","City"], retaining: ["Query"], querying: true)
+        let select = fixture.actions.select
+        fixture.actions.select = { input in
+            guard input.evidence.page.controls.contains(where: { $0.label == "Query" }) else { return #"{"unavailable":true}"# }
+            return try XCTUnwrap(select)(input)
+        }
+        fixture.forms.select = { try self.mixedContent($0, order: ["Category","City"]) }
+        _ = try await fixture.resume()
+        let owner = try fixture.owner()
+        XCTAssertEqual(owner.confirmedFormHistory.map(\.editCount), [0,2])
+        XCTAssertEqual(owner.confirmedFormHistory.map(\.verifiedWithoutInputCount), [1,0])
+        XCTAssertEqual(owner.retiredFormHistory.count, 1)
+        XCTAssertEqual(fixture.forms.inputs.count, 1)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 2)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .verifyFormState }.count, 1)
+        XCTAssertEqual(fixture.server.count("/filtered?q=concerts&category=concerts&city=Seattle"), 1)
+    }
+
+    func testZeroCurrentInputPrefixKeepsEarlierStagesActualInputLedger() async throws {
+        let fixture = try await make(category: true, city: true, categoryAlreadyMatches: true,
+            categoryHandler: "document.getElementById('reference').value='unexpected-choice-input';")
+        defer { fixture.close() }
+        _ = try await fixture.start(); configureMixed(fixture, editing: ["Query"])
+        let fallback = fixture.actions.select
+        fixture.actions.select = { input in
+            if let review = try FormEffectScopeFixture.response(input, editing: ["Query":[0]],
+                deferring: ["Category":[0],"City":[0]], preserving: ["Reference":1]) { return review }
+            return try XCTUnwrap(fallback)(input)
+        }
+        let owner = try fixture.owner(), firstAction = try await owner.planNextAction(using: fixture.actions)
+        let first = try await owner.prepareFormInput(for: firstAction)
+        _ = try await owner.executeForm(.decode(content: mixedContent(first, order: ["Query"]), input: first), input: first)
+        configureMixed(fixture, editing: ["Category","City"], retaining: ["Query"])
+        let action = try await owner.planNextAction(using: fixture.actions)
+        let input = try await owner.prepareFormInput(for: action)
+        let earlierIDs = try XCTUnwrap(input.previous?.inputOperationIDs)
+        XCTAssertEqual(earlierIDs.count, 1)
+        let proposal = try ComputerUseBrowserFormProposal.decode(content: mixedContent(input, order: ["Category","City"]), input: input)
+        fixture.state.failureAtWrite = fixture.state.writes + 2
+        await expectFailure { _ = try await owner.executeForm(proposal, input: input) }
+        fixture.state.failureAtWrite = nil
+        let result = try await owner.retainPendingFormPrefix(), receipt = try XCTUnwrap(result)
+        XCTAssertEqual(receipt.editCount, 0); XCTAssertEqual(receipt.verifiedWithoutInputCount, 1)
+        configureMixed(fixture, editing: ["City"], retaining: ["Query","Category"])
+        let nextAction = try await owner.planNextAction(using: fixture.actions)
+        let next = try await owner.prepareFormInput(for: nextAction)
+        XCTAssertEqual(next.previous?.inputOperationIDs, earlierIDs)
+        XCTAssertEqual(next.previous?.editedTargetIDs.count, 1); XCTAssertEqual(next.previous?.verifiedTargetIDs.count, 2)
+        XCTAssertEqual(next.previous?.stateProofsByTarget.count, 1)
+        XCTAssertEqual(next.previous?.pendingEdits.map(\.label), ["City"])
+        _ = try await owner.executeForm(.decode(content: mixedContent(next, order: ["City"]), input: next), input: next)
+        configureMixed(fixture, editing: ["City"], retaining: ["Query","Category"], querying: true)
+        let query = try await owner.planNextAction(using: fixture.actions)
+        _ = try await owner.openFormQuery(for: query)
+        XCTAssertEqual(owner.confirmedFormHistory.map(\.editCount), [1,0,1])
+        XCTAssertEqual(owner.confirmedFormHistory.map(\.verifiedWithoutInputCount), [0,1,0])
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 2)
+        XCTAssertEqual(fixture.server.count("/filtered?q=concerts&category=concerts&city=Seattle"), 1)
+    }
+
+    func testObservationPrefixCanRetirePlannedInputAfterExplicitHandback() async throws {
+        let fixture = try await make(category: true, city: true, queryAlreadyMatches: true)
+        defer { fixture.close() }
+        let (input, proposal) = try await prepareMixed(fixture), owner = try fixture.owner()
+        fixture.state.onCommand = { command in
+            guard command == .validateFormState else { return }; fixture.state.onCommand = nil; owner.pause()
+        }
+        await expectFailure { _ = try await owner.executeForm(proposal, input: input) }
+        let (_, before) = try pendingMixedJournal(fixture)
+        XCTAssertEqual(before.statuses, [.planned,.planned])
+        let commands = fixture.state.commands
+        await expectFailure { _ = try await owner.retainPendingFormPrefix() }
+        XCTAssertEqual(fixture.state.commands, commands)
+        try await owner.resumeAfterUserControl()
+        let result = try await owner.retainPendingFormPrefix(), receipt = try XCTUnwrap(result)
+        XCTAssertEqual(receipt.editCount, 0); XCTAssertEqual(receipt.verifiedWithoutInputCount, 1)
+        XCTAssertFalse(receipt.isCompleteStage)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 0)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .verifyFormState }.count, 1)
+    }
+
+    func testFirstNativeInputAfterObservationCannotBeRetiredButCanReconcile() async throws {
+        let fixture = try await make(category: true, city: true, queryAlreadyMatches: true)
+        defer { fixture.close() }
+        let (input, proposal) = try await prepareMixed(fixture), owner = try fixture.owner()
+        fixture.state.onCommand = { command in
+            guard command == .edit else { return }; fixture.state.onCommand = nil; owner.pause()
+        }
+        await expectFailure { _ = try await owner.executeForm(proposal, input: input) }
+        try await owner.resumeAfterUserControl()
+        let prefix = try await owner.retainPendingFormPrefix()
+        let whole = try await owner.retirePendingUnsentForm()
+        XCTAssertNil(prefix); XCTAssertNil(whole)
+        XCTAssertTrue(owner.confirmedFormHistory.isEmpty); XCTAssertTrue(owner.retiredFormHistory.isEmpty)
+        let (_, journal) = try pendingMixedJournal(fixture)
+        XCTAssertNil(journal.retirementDigest); XCTAssertNil(journal.retainedPrefixCount)
+        let result = try await owner.resumeForm(), receipt = try XCTUnwrap(result)
+        XCTAssertEqual(receipt.editCount, 2); XCTAssertEqual(receipt.verifiedWithoutInputCount, 1)
+        XCTAssertTrue(receipt.isCompleteStage)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 2)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .verifyFormState }.count, 1)
+    }
+
+    func testObservedPrefixRetirementSurvivesPauseAndFailedDurabilityWithoutDuplicateHistory() async throws {
+        for boundary in ["native", "publication", "durability"] {
+            let fixture = try await make(category: true, city: true, queryAlreadyMatches: true)
+            defer { fixture.close() }
+            _ = try await failFirstMixedAttempt(fixture)
+            let owner = try fixture.owner(), (store, before) = try pendingMixedJournal(fixture)
+            let nextWrite = fixture.state.writes + 1
+            if boundary == "native" {
+                fixture.state.onCommand = { command in
+                    guard command == .retireUnsentInputs else { return }; fixture.state.onCommand = nil; owner.pause()
+                }
+            } else if boundary == "publication" {
+                fixture.state.onWrite = { if fixture.state.writes == nextWrite { owner.pause() } }
+            } else { fixture.state.failureAtWrite = nextWrite }
+            await expectFailure { _ = try await owner.retainPendingFormPrefix() }
+            fixture.state.onWrite = nil; fixture.state.failureAtWrite = nil
+            XCTAssertTrue(owner.confirmedFormHistory.isEmpty)
+            if boundary != "durability" {
+                let commands = fixture.state.commands
+                await expectFailure { _ = try await owner.retainPendingFormPrefix() }
+                XCTAssertEqual(fixture.state.commands, commands)
+                try await owner.resumeAfterUserControl()
+            }
+            await expectFailure { _ = try await owner.resumeForm() }
+            let result = try await owner.retainPendingFormPrefix(), receipt = try XCTUnwrap(result)
+            XCTAssertEqual(receipt.editCount, 0); XCTAssertEqual(receipt.verifiedWithoutInputCount, 1)
+            let duplicate = try await owner.retainPendingFormPrefix()
+            XCTAssertNil(duplicate)
+            XCTAssertEqual(owner.confirmedFormHistory.count, 1); XCTAssertEqual(owner.retiredFormHistory.count, 1)
+            let saved = try XCTUnwrap(store.load(taskID: before.taskID))
+            XCTAssertEqual(saved.retainedPrefixCount, 0); XCTAssertEqual(saved.statuses, before.statuses)
+            XCTAssertNotNil(saved.retirementDigest)
+            XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 0)
+        }
+    }
+
+    func testObservedPrefixRejectsLostObjectsLedgerAndPreservation() async throws {
+        for mutation in ["document.getElementById('query').replaceWith(document.getElementById('query').cloneNode(true));",
+                         "document.getElementById('reference').value='changed';", ""] {
+            let fixture = try await make(category: true, city: true, queryAlreadyMatches: true, mutation: mutation)
+            defer { fixture.close() }
+            let input = try await failFirstMixedAttempt(fixture), owner = try fixture.owner()
+            let (store, before) = try pendingMixedJournal(fixture)
+            if mutation.isEmpty {
+                let other = ComputerUseBrowserTextTarget(browser: fixture.browser, document: input.evidence.page.document, requiresFrontmost: false)
+                _ = try await other.fields()
+            } else { try await release(fixture) }
+            await expectFailure { _ = try await owner.retainPendingFormPrefix() }
+            let whole = try await owner.retirePendingUnsentForm()
+            XCTAssertNil(whole)
+            XCTAssertEqual(try store.load(taskID: before.taskID), before)
+            XCTAssertTrue(owner.confirmedFormHistory.isEmpty); XCTAssertTrue(owner.retiredFormHistory.isEmpty)
+            XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 0)
+        }
+    }
+
+    func testChangedObservedPrefixRemainsARepairAlongsideEveryUnsentInput() async throws {
+        let fixture = try await make(category: true, city: true, queryAlreadyMatches: true,
+            mutation: "document.getElementById('query').value='movies';")
+        defer { fixture.close() }
+        _ = try await failFirstMixedAttempt(fixture)
+        let owner = try fixture.owner()
+        try await release(fixture)
+        let result = try await owner.retainPendingFormPrefix(), receipt = try XCTUnwrap(result)
+        XCTAssertEqual(receipt.editCount, 0); XCTAssertEqual(receipt.verifiedWithoutInputCount, 1)
+        configureMixed(fixture, editing: ["Query","Category","City"])
+        let action = try await owner.planNextAction(using: fixture.actions)
+        XCTAssertTrue(action.input.queryControlIDs.isEmpty)
+        let next = try await owner.prepareFormInput(for: action)
+        XCTAssertEqual(next.previous?.pendingEdits.map(\.label), ["Category","City"])
+        let query = try XCTUnwrap(next.editableFieldAliases.first { (try? next.field(for: $0).control.label) == "Query" })
+        XCTAssertEqual(next.requiredRepairFieldAliases, [query])
+        let proposal = try ComputerUseBrowserFormProposal.decode(content: mixedContent(next, order: ["Query","Category","City"]), input: next)
+        _ = try await owner.executeForm(proposal, input: next)
+        configureMixed(fixture, editing: ["Query","Category","City"], querying: true)
+        let queryAction = try await owner.planNextAction(using: fixture.actions)
+        _ = try await owner.openFormQuery(for: queryAction)
+        XCTAssertEqual(fixture.server.count("/filtered?q=concerts&category=concerts&city=Seattle"), 1)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 3)
+    }
+
+    func testAnAttemptedMixedJournalWithoutItsObservationProofCannotRetireEitherWay() async throws {
+        let fixture = try await make(category: true, city: true, queryAlreadyMatches: true)
+        defer { fixture.close() }
+        _ = try await fixture.start(); configureMixed(fixture, editing: ["Query","Category","City"])
+        let action = try await fixture.owner().planNextAction(using: fixture.actions)
+        let frame = try ComputerUseBrowserResearchFormPreparation(action: action, browser: fixture.browser)
+        let input = try await frame.prepare(browser: fixture.browser, checkCurrent: {})
+        let proposal = try ComputerUseBrowserFormProposal.decode(content: mixedContent(input, order: ["Query","Category","City"]), input: input)
+        let stage = try ComputerUseBrowserResearchFormStage(input: input, proposal: proposal, target: frame.target,
+            browser: fixture.browser, index: 0, journalDirectory: fixture.directory)
+        let plan = try ComputerUseTextTask(contract: stage.contract, read: { _ in nil }, apply: { _, _ in }, persist: { _ in }, mayAct: { false })
+        let store = try ComputerUseTaskJournalStore(directory: fixture.directory.appendingPathComponent("Research Forms").appendingPathComponent(stage.id))
+        try store.save(plan.journal, replacing: nil)
+        var attempted = plan.journal; attempted.statuses[0] = .attempted
+        try store.save(attempted, replacing: plan.journal)
+        let commands = fixture.state.commands
+        let prefix = try await stage.retainVerifiedPrefix(checkCurrent: {})
+        let whole = try await stage.retireUnsent(checkCurrent: {})
+        XCTAssertNil(prefix); XCTAssertNil(whole); XCTAssertNil(stage.nativeReceipt)
+        XCTAssertEqual(fixture.state.commands, commands)
+        XCTAssertEqual(try store.load(taskID: attempted.taskID), attempted)
+    }
+
+    func testZeroInputRetirementMarkerCannotBeInventedOrRemovedByOrdinaryWrites() async throws {
+        let fixture = try await make(category: true, city: true, queryAlreadyMatches: true)
+        defer { fixture.close() }
+        _ = try await failFirstMixedAttempt(fixture)
+        let owner = try fixture.owner(), (store, before) = try pendingMixedJournal(fixture)
+        let invented = ComputerUseTaskJournal(taskID: before.taskID, promptDigest: before.promptDigest,
+            contractDigest: before.contractDigest, stepIDs: before.stepIDs, statuses: before.statuses,
+            retirementDigest: ComputerUseTaskContract.digest(["invented-observation"]), retainedPrefixCount: 0)
+        XCTAssertThrowsError(try store.save(invented, replacing: before))
+        XCTAssertThrowsError(try store.retireUnsent(invented, replacing: before))
+        XCTAssertThrowsError(try store.retireRemainingInput(invented, replacing: before), "A retirement write requires its execution lease")
+        XCTAssertEqual(try store.load(taskID: before.taskID), before)
+        _ = try await owner.retainPendingFormPrefix()
+        let saved = try XCTUnwrap(store.load(taskID: before.taskID))
+        XCTAssertEqual(saved.retainedPrefixCount, 0)
+        XCTAssertThrowsError(try store.save(before, replacing: saved))
+        let lease = try store.acquireExecution(taskID: before.taskID, expected: saved)
+        defer { lease.release() }
+        XCTAssertThrowsError(try store.retireRemainingInput(invented, replacing: saved))
+        XCTAssertThrowsError(try store.retireUnsent(saved, replacing: saved))
+        XCTAssertEqual(try store.load(taskID: before.taskID), saved)
+    }
+
+    private func failFirstMixedAttempt(_ fixture: ResearchDriverFixture) async throws -> ComputerUseBrowserResearchFormInput {
+        let (input, proposal) = try await prepareMixed(fixture), owner = try fixture.owner()
+        // Planned mixed contract, then first input attempt. The observation
+        // between those writes has a native origin but sends no input.
+        fixture.state.failureAtWrite = fixture.state.writes + 2
+        do { _ = try await owner.executeForm(proposal, input: input); XCTFail("The first input attempt write must fail") }
+        catch { XCTAssertEqual(error as? ComputerUseTaskJournalStore.StoreError, .unavailable) }
+        fixture.state.failureAtWrite = nil
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 0)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .verifyFormState }.count, 1)
+        return input
+    }
+
+    private func pendingMixedJournal(_ fixture: ResearchDriverFixture) throws -> (ComputerUseTaskJournalStore, ComputerUseTaskJournal) {
+        let directory = fixture.directory.appendingPathComponent("Research/Research Forms")
+        let paths = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+        XCTAssertEqual(paths.count, 1)
+        let store = try ComputerUseTaskJournalStore(directory: XCTUnwrap(paths.first))
+        return (store, try XCTUnwrap(store.load(taskID: fixture.owner().taskID)))
+    }
+
     private func checkpointRemainder(_ fixture: ResearchDriverFixture, order: [String], remaining: [String], retaining: [String]) async throws
         -> (ComputerUseBrowserResearchFormInput, ComputerUseBrowserFormProposal) {
         let (input, proposal) = try await prepareMixed(fixture, order: order), owner = try fixture.owner()
