@@ -4,6 +4,97 @@ import XCTest
 
 @MainActor
 final class ComputerUseBrowserFormPlannerTests: XCTestCase {
+    func testEveryQuestionDecoderRequiresTheWholeIntroducedDateAnswer() async throws {
+        for parts in [["on 2026-", "10-16."], ["from 2026-10-16 ", "through 2026-10-18"], ["Fri", "day."]] {
+            let (goal, rows) = try introducedScalarGoal(parts: parts)
+            let fixture = try await FormPlannerFixture(goal: goal)
+            defer { fixture.close() }
+            let actionInput = try ComputerUseBrowserActionInput(interpretation: goal, evidence: fixture.input.evidence.page,
+                navigationHistory: [], formHistory: [], latestForm: nil, changedFormTargetIDs: [])
+            for indices in [[1], [2], [1, 2]] {
+                let question: [String: Any] = ["topic":"date", "requirements":indices]
+                let content = try ResearchAnswerFixture.json(["question":question])
+                let goalContent = try ResearchAnswerFixture.json(["disposition":"clarification", "requirements":rows, "question":question])
+                if indices.count == 1 {
+                    XCTAssertThrowsError(try ComputerUseBrowserGoalProposal.decode(content: goalContent, input: goal.input))
+                    XCTAssertThrowsError(try ComputerUseBrowserActionProposal.decode(content: content, input: actionInput))
+                    XCTAssertThrowsError(try ComputerUseBrowserFormProposal.decode(content: content, input: fixture.input))
+                } else {
+                    let ids = indices.map { goal.requirements[$0].id }
+                    XCTAssertEqual(try ComputerUseBrowserGoalProposal.decode(content: goalContent, input: goal.input).question?.requirementIDs, ids)
+                    XCTAssertEqual(try ComputerUseBrowserActionProposal.decode(content: content, input: actionInput).questionRequest?.requirementIDs, ids)
+                    XCTAssertEqual(try ComputerUseBrowserFormProposal.decode(content: content, input: fixture.input).question?.requirementIDs, ids)
+                }
+            }
+        }
+    }
+
+    func testSharedQuestionAdmissionRetainsNativeMissingQuantityUnitsAfterRelabeling() async throws {
+        let (goal, rows) = try introducedScalarGoal(parts: ["2"], topic: .quantity)
+        let fixture = try await FormPlannerFixture(goal: goal)
+        defer { fixture.close() }
+        let actionInput = try ComputerUseBrowserActionInput(interpretation: goal, evidence: fixture.input.evidence.page,
+            navigationHistory: [], formHistory: [], latestForm: nil, changedFormTargetIDs: [])
+        let question: [String: Any] = ["topic":"quantity", "requirements":[1]]
+        let content = try ResearchAnswerFixture.json(["question":question])
+        let goalContent = try ResearchAnswerFixture.json(["disposition":"clarification", "requirements":rows, "question":question])
+        let ids = [goal.requirements[1].id]
+        XCTAssertEqual(try ComputerUseBrowserGoalProposal.decode(content: goalContent, input: goal.input).question?.requirementIDs, ids)
+        XCTAssertEqual(try ComputerUseBrowserActionProposal.decode(content: content, input: actionInput).questionRequest?.requirementIDs, ids)
+        XCTAssertEqual(try ComputerUseBrowserFormProposal.decode(content: content, input: fixture.input).question?.requirementIDs, ids)
+        XCTAssertTrue(ComputerUseBrowserResearchFormInput.normalizations(for: goal).isEmpty)
+    }
+
+    func testIntroducedDateNormalizationRequiresEveryReviewedSourceAndKeepsNativeProvenance() async throws {
+        let (goal, _) = try introducedScalarGoal(parts: ["on 2026-", "10-16."])
+        for indices in [[1], [2], [1, 2]] {
+            var edits = 0
+            let fixture = try await FormPlannerFixture(goal: goal,
+                body: "<form action='/results'><label>Departure<input name='departure' type='date'></label><button>Search</button></form>",
+                domScriptDidDispatch: { if $0 == .edit { edits += 1 } })
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { fixture.close(); try? FileManager.default.removeItem(at: directory) }
+            let owner = fixture.owner(journalDirectory: directory)
+            defer { owner.retire() }
+            _ = try await owner.interpretGoal()
+            let action = try await owner.planNextAction(using: IntroducedDateActionFixture(indices: indices))
+            let input = try await owner.prepareFormInput(for: action)
+            XCTAssertEqual(input.fieldIntentRequirements["field1"], indices)
+            XCTAssertEqual(input.normalizations.count, 1)
+            XCTAssertEqual(input.normalizations.first?.requirementIndices, [1, 2])
+            let context = try object(Data(input.contextJSON.utf8))
+            let normalized = try XCTUnwrap(context["normalized_values"] as? [[String: Any]])
+            XCTAssertEqual(normalized.first?["requirements"] as? [Int], [1, 2])
+            let content = try plan([["field":"field1", "normalized":"value2"]])
+            if indices.count == 1 {
+                XCTAssertThrowsError(try ComputerUseBrowserFormProposal.decode(content: content, input: input))
+                XCTAssertEqual(edits, 0)
+            } else {
+                let proposed = try ComputerUseBrowserFormProposal.decode(content: content, input: input)
+                let sources = try proposed.sources(for: XCTUnwrap(proposed.edits.first))
+                XCTAssertEqual(try sources.flatMap { try $0.indices(in: goal) }, [1, 2])
+                XCTAssertEqual(sources.map(\.source), ["on 2026-", "10-16."])
+                _ = try await owner.executeForm(proposed, input: input)
+                XCTAssertEqual(edits, 1); XCTAssertEqual(owner.confirmedFormHistory.count, 1)
+            }
+            XCTAssertEqual(owner.input, goal.input)
+            XCTAssertEqual(fixture.server.count("/results?departure=2026-10-16"), 0)
+        }
+    }
+
+    private func introducedScalarGoal(parts: [String], topic: ComputerUseBrowserClarificationTopic = .date) throws -> (ComputerUseBrowserGoalProposal, [[String: Any]]) {
+        let initial = try proposal(rows: [row("Find flights.", role: "outcome", field: "category")])
+        let state = ComputerUseBrowserGoalClarification(input: initial.input)
+        let context = try ComputerUseBrowserGoalClarification.Context(controllerID: "phone", controllerSessionID: "session",
+            browserSessionDigest: String(repeating: "a", count: 64))
+        let question = try state.issue(proposal: initial, topic: topic, requirementIDs: [initial.requirements[0].id], context: context)
+        let updated = try state.consume(questionID: question.id, answerTaskID: "date-answer", answer: parts.joined(), context: context)
+        let rows = [row(initial.input.prompt, role: "outcome", field: "category")] + parts.map { source -> [String: Any] in
+            var value = row(source, field: "location"); value["turn"] = 1; return value
+        }
+        return (try decodeGoal(rows, input: updated), rows)
+    }
+
     func testPartyIdentitySurvivesSourceRepartitionButDoesNotCrossTaskRoots() throws {
         let goal = try proposal(rows: [row("Find concerts. ", role: "outcome", field: "category"), row("2 adults and 1 child.", field: "quantity")])
         let original = ComputerUseBrowserResearchFormInput.normalizations(for: goal)
@@ -1387,6 +1478,17 @@ private final class FormPlannerFixture {
 private struct PartyCoverageActionFixture: ComputerUseBrowserActionPlanning {
     func propose(_ input: ComputerUseBrowserActionInput) async throws -> ComputerUseBrowserActionProposal {
         try .decode(content: #"{"unavailable":true}"#, input: input)
+    }
+}
+
+private struct IntroducedDateActionFixture: ComputerUseBrowserActionPlanning {
+    let indices: [Int]
+    func propose(_ input: ComputerUseBrowserActionInput) async throws -> ComputerUseBrowserActionProposal {
+        if let review = try FormEffectScopeFixture.response(input, editing: ["Departure":indices]) {
+            return try .decode(content: review, input: input)
+        }
+        let form = try XCTUnwrap(input.formIDs.first)
+        return try .decode(content: ResearchAnswerFixture.json(["form":form, "preserve":[]]), input: input)
     }
 }
 

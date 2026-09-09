@@ -270,8 +270,8 @@ final class ComputerUseBrowserResearchTask {
         if !scope.isEmpty {
             return .init(taskID: taskID, inputDigest: input.digest, topic: .source, requirementIDs: Array(scope.prefix(8)).map(\.id))
         }
-        if let dateID = interpretation.scalars.dateQuestionRequirementID {
-            return .init(taskID: taskID, inputDigest: input.digest, topic: .date, requirementIDs: [dateID])
+        if let dateIDs = interpretation.scalars.dateQuestionRequirementIDs {
+            return .init(taskID: taskID, inputDigest: input.digest, topic: .date, requirementIDs: dateIDs)
         }
         if let quantityID = interpretation.scalars.quantityQuestionRequirementID {
             return .init(taskID: taskID, inputDigest: input.digest, topic: .quantity, requirementIDs: [quantityID])

@@ -177,13 +177,17 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
     /// of desired results cannot silently become an exact day or booking size.
     static func normalizations(for interpretation: ComputerUseBrowserGoalProposal) -> [Normalization] {
         let ledger = ComputerUseBrowserScalarRequirements(proposal: interpretation)
-        var parties: Set<[String]> = []
+        var parties: Set<[String]> = [], dates: Set<[String]> = []
         return ledger.entries.enumerated().flatMap { index, entry -> [Normalization] in
             guard case .bound(let condition) = entry.resolution else { return [] }
             switch condition.predicate {
             case .day(let range):
-                guard let day = range.lower, range.upper == day, range.lowerInclusive, range.upperInclusive else { return [] }
-                return [.init(id: "value\(index + 1)", requirementIndex: index, kind: .date, value: day.iso8601, unit: "civilDay")]
+                guard let day = range.lower, range.upper == day, range.lowerInclusive, range.upperInclusive,
+                      dates.insert(condition.sourceRequirementIDs).inserted else { return [] }
+                let indices = interpretation.requirements.indices.filter { condition.sourceRequirementIDs.contains(interpretation.requirements[$0].id) }
+                guard indices.count == condition.sourceRequirementIDs.count, let primary = indices.first else { return [] }
+                return [.init(id: "value\(index + 1)", requirementIndex: primary, kind: .date, value: day.iso8601,
+                    unit: "civilDay", requirementIndices: indices)]
             case .party(let party):
                 guard parties.insert(condition.sourceRequirementIDs).inserted else { return [] }
                 return [(ComputerUseBrowserScalarRequirements.QuantityUnit.adults, party.adults), (.children, party.children)].compactMap { unit, count in

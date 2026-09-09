@@ -487,6 +487,53 @@ final class ComputerUseBrowserResultAssessmentTests: XCTestCase {
         XCTAssertEqual(result.fixture.server.count("/details"), 0)
     }
 
+    func testMissingWeekdayAnswerUsesItsWholeNativeScopeBeforeTheDriverSearches() async throws {
+        let fixture = try await ResearchDriverFixture.make(candidateBodyHTML: "<p>2026-10-16</p>")
+        defer { fixture.close() }
+        let original = try ComputerUseBrowserGoalInput(taskID: ResearchDriverFixture.root, prompt: "Find concerts.",
+            referenceDate: ResearchDriverFixture.date, timeZoneIdentifier: "America/Los_Angeles")
+        var rows = [row(original.prompt)]
+        let initial = try ComputerUseBrowserGoalProposal.decode(content: ResearchAnswerFixture.json([
+            "disposition":"clarification", "requirements":rows, "question":["topic":"date", "requirements":[0]]]), input: original)
+        let goals = AssessmentGoalFixture(value: initial)
+        let driver = ComputerUseBrowserResearchDriver(goalPlanner: goals,
+            resultPlanner: AssessmentResultFixture(fields: [.init(.date, ["2026-10-16"])], empty: false),
+            searchPlanner: fixture.search, actionPlanner: BrowserResearchActionFixture(), formPlanner: BrowserResearchFormFixture(),
+            planning: ComputerUseModelBrowserResearchPlanning(providers: [fixture.policy.provider], linkPlanner: AssessmentLinkFixture()),
+            now: { ResearchDriverFixture.date }, timeZoneIdentifier: { "America/Los_Angeles" })
+        let first = try await driver.executeBrowserResearch(taskID: original.taskID, prompt: original.prompt, tools: fixture.tools, progress: { _ in })
+        guard case .browserClarificationRequired(let missing)? = first else { return XCTFail("Expected the missing-date question") }
+        let owner = try fixture.owner()
+        let question = try owner.issueQuestion(topic: missing.topic, requirementIDs: missing.requirementIDs,
+            controllerID: "phone", controllerSessionID: "session")
+        let dated = try owner.answerQuestion(questionID: question.id, answerTaskID: "weekday", answer: "Friday.",
+            controllerID: "phone", controllerSessionID: "session")
+        for text in ["Fri", "day."] { var answer = row(text, field: "navigationSource"); answer["turn"] = 1; rows.append(answer) }
+        let uncertain = try proposal(rows, input: dated); goals.value = uncertain
+        let next = try await driver.continueBrowserResearch(taskID: "weekday", research: owner, tools: fixture.tools, progress: { _ in })
+        guard case .browserClarificationRequired(let request) = next else { return XCTFail("The introduced weekday still needs its civil date") }
+        XCTAssertEqual(request.topic, .date)
+        XCTAssertEqual(request.requirementIDs, [uncertain.requirements[1].id, uncertain.requirements[2].id])
+        XCTAssertFalse(fixture.browser.hasSession); XCTAssertEqual(fixture.server.requestCount, 0); XCTAssertTrue(fixture.search.inputs.isEmpty)
+        let followup = try owner.issueQuestion(topic: request.topic, requirementIDs: request.requirementIDs,
+            controllerID: "phone", controllerSessionID: "session")
+        let confirmed = try owner.answerQuestion(questionID: followup.id, answerTaskID: "civil-date", answer: "2026-10-16",
+            controllerID: "phone", controllerSessionID: "session")
+        var literal = row("2026-10-16", field: "location"); literal["turn"] = 2; rows.append(literal)
+        let current = try proposal(rows, input: confirmed); goals.value = current
+        let result = try await driver.continueBrowserResearch(taskID: "civil-date", research: owner, tools: fixture.tools, progress: { _ in })
+        guard case .browserResearchProgress = result else { return XCTFail("A compatible date should release the original search") }
+        XCTAssertNil(try owner.proposedQuestionRequest())
+        let batch = try await owner.readCandidates(), assessment = try XCTUnwrap(batch.requirementAssessment)
+        XCTAssertEqual(assessment.candidates[0].requirements.map(\.status),
+            [.needsSemanticVerification, .quotedValueMatches, .quotedValueMatches, .clarificationApplied])
+        try await fixture.browser.validateResultAssessment(assessment, reading: batch, interpretation: current)
+        XCTAssertEqual(fixture.search.inputs.map(\.input), [confirmed]); XCTAssertEqual(fixture.server.count("/search?q=concerts"), 1)
+        XCTAssertEqual(fixture.server.count("/details"), 0)
+        XCTAssertEqual(confirmed.userTurns, [original.prompt, "Friday.", "2026-10-16"])
+        XCTAssertEqual(confirmed.rootDigest, original.rootDigest)
+    }
+
     func testScopedDateAnswerReachesFreshNativeAssessmentWithoutRepeatingTheSearch() async throws {
         var rows = [row("Find concerts. "), row("Friday.", field: "date")]
         let fixture = try await ResearchDriverFixture.make(candidateBodyHTML: "<p>2026-10-16</p>")

@@ -7,6 +7,140 @@ final class ComputerUseBrowserGoalClarificationTests: XCTestCase {
     private typealias Clarification = ComputerUseBrowserGoalClarification
     private typealias Scalars = ComputerUseBrowserScalarRequirements
 
+    func testMissingDateHasItsOwnOriginThroughConfirmationAndModelRelabeling() throws {
+        for field in ["date", "location", "navigationSource"] {
+            let original = try input("Find tickets."), state = Clarification(input: original)
+            let initial = try proposal(original, rows: [row(original.prompt)])
+            let question = try state.issue(proposal: initial, topic: .date, requirementIDs: [initial.requirements[0].id], context: context())
+            let dated = try state.consume(questionID: question.id, answerTaskID: "missing-date", answer: "2026-10-16", context: context())
+            let rows = [row(original.prompt), row("2026-10-16", turn: 1, role: "condition", field: field)]
+            let current = try proposal(dated, rows: rows, disposition: "research")
+            let first = Scalars(proposal: current)
+            XCTAssertEqual(first.entries[0].resolution, .unresolved(.notScalar))
+            guard case .bound(let date) = first.entries[1].resolution else { return XCTFail("The answer must own the new date") }
+            XCTAssertNil(first.dateQuestionRequirementIDs, "Eligibility must not cause a redundant fallback")
+            XCTAssertTrue(first.permitsDateQuestion(current.requirements[1]))
+            let followup = try state.issue(proposal: current, topic: .date, requirementIDs: [current.requirements[1].id], context: context())
+            let confirmed = try state.consume(questionID: followup.id, answerTaskID: "date-confirmation", answer: "on 2026-10-16", context: context())
+            let final = try proposal(confirmed, rows: rows + [row("on 2026-10-16", turn: 2, role: "condition", field: "location")], disposition: "research")
+            let ledger = Scalars(proposal: final)
+            guard case .bound(let retained) = ledger.entries[1].resolution,
+                  case .clarification(let binding) = ledger.entries[2].resolution else { return XCTFail("Confirmation must retain the introduced date") }
+            XCTAssertEqual(retained.predicate, date.predicate)
+            XCTAssertEqual(binding.targetRequirementIDs, [final.requirements[1].id])
+            XCTAssertEqual(ledger.entries[0].resolution, .unresolved(.notScalar))
+            XCTAssertNil(ledger.dateQuestionRequirementIDs)
+            XCTAssertEqual(confirmed.rootDigest, original.rootDigest); XCTAssertTrue(confirmed.continues(dated))
+            XCTAssertEqual(confirmed.userTurns, [original.prompt, "2026-10-16", "on 2026-10-16"])
+        }
+    }
+
+    func testIntroducedDateGroupsSurviveResegmentationAndNormalizeAllTheirSourcesOnce() throws {
+        let original = try input("Find tickets."), state = Clarification(input: original)
+        let initial = try proposal(original, rows: [row(original.prompt)])
+        let question = try state.issue(proposal: initial, topic: .date, requirementIDs: [initial.requirements[0].id], context: context())
+        let dated = try state.consume(questionID: question.id, answerTaskID: "date", answer: "on 2026-10-16.", context: context())
+        let current = try proposal(dated, rows: [row(original.prompt), row("on 2026-10-16.", turn: 1, role: "condition", field: "date")], disposition: "research")
+        let followup = try state.issue(proposal: current, topic: .date, requirementIDs: [current.requirements[1].id], context: context())
+        let confirmed = try state.consume(questionID: followup.id, answerTaskID: "confirm", answer: "2026-10-16", context: context())
+        for parts in [["on ", "2026-10-16."], ["on 2026-", "10-16", "."]] {
+            let final = try proposal(confirmed, rows: [row(original.prompt)]
+                + parts.map { row($0, turn: 1, role: "condition", field: "location") }
+                + [row("2026-10-16", turn: 2, role: "condition", field: "date")], disposition: "research")
+            let ledger = Scalars(proposal: final), expected = Array(1...parts.count)
+            let sourceIDs = expected.map { final.requirements[$0].id }
+            for index in expected {
+                guard case .bound(let date) = ledger.entries[index].resolution else { return XCTFail("Every date fragment must retain the whole origin") }
+                XCTAssertEqual(date.sourceRequirementIDs, sourceIDs)
+            }
+            let last = try XCTUnwrap(ledger.entries.last)
+            guard case .clarification(let binding) = last.resolution else { return XCTFail("Expected a confirmation binding") }
+            XCTAssertEqual(binding.targetRequirementIDs, sourceIDs)
+            let values = ComputerUseBrowserResearchFormInput.normalizations(for: final)
+            XCTAssertEqual(values.count, 1); XCTAssertEqual(values.first?.value, "2026-10-16")
+            XCTAssertEqual(values.first?.requirementIndices, expected)
+            XCTAssertNil(ledger.dateQuestionRequirementIDs)
+        }
+    }
+
+    func testIntroducedWeekdayKeepsItsWholeFallbackScopeUntilACompatibleCivilDateArrives() throws {
+        for answer in ["2026-10-16", "2026-10-17"] {
+            let original = try input("Find tickets."), state = Clarification(input: original)
+            let initial = try proposal(original, rows: [row(original.prompt)])
+            let question = try state.issue(proposal: initial, topic: .date, requirementIDs: [initial.requirements[0].id], context: context())
+            let dated = try state.consume(questionID: question.id, answerTaskID: "weekday", answer: "Friday.", context: context())
+            let rows = [row(original.prompt), row("Fri", turn: 1, role: "condition", field: "location"),
+                row("day.", turn: 1, role: "condition", field: "location")]
+            let current = try proposal(dated, rows: rows, disposition: "research"), unresolved = Scalars(proposal: current)
+            let ids = Array(current.requirements.dropFirst().map(\.id))
+            XCTAssertEqual(unresolved.dateQuestionRequirementIDs, ids)
+            XCTAssertNil(unresolved.dateQuestionRequirementID, "The singular compatibility accessor must not truncate a group")
+            XCTAssertTrue(ComputerUseBrowserResearchFormInput.normalizations(for: current).isEmpty)
+            XCTAssertThrowsError(try state.issue(proposal: current, topic: .date, requirementIDs: [ids[1]], context: context()))
+            let followup = try state.issue(proposal: current, topic: .date, requirementIDs: ids, context: context())
+            let updated = try state.consume(questionID: followup.id, answerTaskID: "civil-date", answer: answer, context: context())
+            let final = try proposal(updated, rows: rows + [row(answer, turn: 2, role: "condition", field: "date")], disposition: "research")
+            let ledger = Scalars(proposal: final)
+            if answer == "2026-10-16" {
+                XCTAssertEqual(ComputerUseBrowserResearchFormInput.normalizations(for: final).map(\.value), [answer])
+                XCTAssertNil(ledger.dateQuestionRequirementIDs)
+            } else {
+                XCTAssertTrue(ledger.entries.dropFirst().allSatisfy { $0.resolution == .unresolved(.contradictoryClarification) })
+            }
+        }
+    }
+
+    func testIntroducedRangeRequiresAWholeQuestionScopeAndCannotBecomeAnEndpointOrReplacement() throws {
+        for confirmation in ["from 2026-10-16 through 2026-10-18", "2026-10-16"] {
+            let original = try input("Find tickets."), state = Clarification(input: original)
+            let initial = try proposal(original, rows: [row(original.prompt)])
+            let question = try state.issue(proposal: initial, topic: .date, requirementIDs: [initial.requirements[0].id], context: context())
+            let answer = "from 2026-10-16 through 2026-10-18"
+            let dated = try state.consume(questionID: question.id, answerTaskID: "range", answer: answer, context: context())
+            let rows = [row(original.prompt), row("from 2026-10-16 ", turn: 1, role: "condition", field: "date"),
+                row("through 2026-10-18", turn: 1, role: "condition", field: "date")]
+            let current = try proposal(dated, rows: rows, disposition: "research")
+            XCTAssertTrue(ComputerUseBrowserResearchFormInput.normalizations(for: current).isEmpty)
+            for index in [1, 2] {
+                XCTAssertThrowsError(try state.issue(proposal: current, topic: .date, requirementIDs: [current.requirements[index].id], context: context()))
+            }
+            let followup = try state.issue(proposal: current, topic: .date, requirementIDs: Array(current.requirements.dropFirst().map(\.id)), context: context())
+            let updated = try state.consume(questionID: followup.id, answerTaskID: "range-confirm", answer: confirmation, context: context())
+            let final = try proposal(updated, rows: rows + [row(confirmation, turn: 2, role: "condition", field: "date")], disposition: "research")
+            let ledger = Scalars(proposal: final)
+            if confirmation == answer {
+                guard case .clarification(let binding) = ledger.entries[3].resolution else { return XCTFail("The full range should confirm its origin") }
+                XCTAssertEqual(binding.targetRequirementIDs, [final.requirements[1].id, final.requirements[2].id])
+            } else { XCTAssertTrue(ledger.entries.dropFirst().allSatisfy { $0.resolution == .unresolved(.contradictoryClarification) }) }
+            XCTAssertTrue(ComputerUseBrowserResearchFormInput.normalizations(for: final).isEmpty)
+        }
+    }
+
+    func testIntroducedRelativeWeekdayDoesNotLoseItsModifierWhenItsSourceRowsChange() throws {
+        let original = try input("Find tickets."), state = Clarification(input: original)
+        let initial = try proposal(original, rows: [row(original.prompt)])
+        let question = try state.issue(proposal: initial, topic: .date, requirementIDs: [initial.requirements[0].id], context: context())
+        let dated = try state.consume(questionID: question.id, answerTaskID: "relative", answer: "next Friday", context: context())
+        let rows = [row(original.prompt), row("next ", turn: 1, role: "condition", field: "date"), row("Friday", turn: 1, role: "condition", field: "date")]
+        let current = try proposal(dated, rows: rows, disposition: "research")
+        XCTAssertNil(Scalars(proposal: current).dateQuestionRequirementIDs)
+        XCTAssertTrue(ComputerUseBrowserResearchFormInput.normalizations(for: current).isEmpty)
+        XCTAssertThrowsError(try state.issue(proposal: current, topic: .date, requirementIDs: [current.requirements[2].id], context: context()))
+        let followup = try state.issue(proposal: current, topic: .date, requirementIDs: Array(current.requirements.dropFirst().map(\.id)), context: context())
+        let updated = try state.consume(questionID: followup.id, answerTaskID: "literal", answer: "2026-10-16", context: context())
+        let ledger = Scalars(proposal: try proposal(updated, rows: rows + [row("2026-10-16", turn: 2, role: "condition", field: "date")], disposition: "research"))
+        XCTAssertTrue(ledger.entries.dropFirst().allSatisfy { $0.resolution == .unresolved(.contradictoryClarification) })
+    }
+
+    func testDateQuestionCannotIntroduceOneSharedOriginForMultipleMissingOutcomes() throws {
+        let original = try input("Find concerts. Find movies."), state = Clarification(input: original)
+        let current = try proposal(original, rows: [row("Find concerts. "), row("Find movies.")])
+        XCTAssertThrowsError(try state.issue(proposal: current, topic: .date, requirementIDs: current.requirements.map(\.id), context: context()))
+        let question = try state.issue(proposal: current, topic: .date, requirementIDs: [current.requirements[0].id], context: context())
+        XCTAssertEqual(question.scope.map(\.requirementID), [current.requirements[0].id])
+        XCTAssertNil(Scalars(proposal: current).dateQuestionRequirementIDs)
+    }
+
     func testWholePartyQuestionAppliesAtomicallyAfterItsSourceRowsSplit() throws {
         for answer in ["2 adults", "3 adults"] {
             let original = try input("Find concerts. 2 adults and 1 child."), state = Clarification(input: original)

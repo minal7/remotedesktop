@@ -696,11 +696,11 @@ struct ComputerUseBrowserActionProposal: Equatable, Sendable, CustomStringConver
                       case .array(let rows)? = question["requirements"], (1...8).contains(rows.count) {
                 let indices = try rows.map { value -> Int in
                     guard case .number(let number) = value, let index = Int(exactly: number),
-                          input.interpretation.requirements.indices.contains(index),
-                          topic.accepts(input.interpretation.requirements[index]) else { throw invalid }
+                          input.interpretation.requirements.indices.contains(index) else { throw invalid }
                     return index
                 }
-                guard Set(indices).count == indices.count else { throw invalid }
+                guard Set(indices).count == indices.count, input.interpretation.permitsQuestion(topic: topic,
+                    requirements: indices.map { input.interpretation.requirements[$0] }) else { throw invalid }
                 step = .question(topic, indices.map { input.interpretation.requirements[$0].id })
             } else { throw invalid }
             return .init(input: input, step: step)
@@ -892,6 +892,7 @@ struct ComputerUseLocalBrowserActionPlanner: ComputerUseBrowserActionPlanning {
     """
     private static let questionInstructions = """
     Return a typed question with one to eight motivating requirement indices only for a missing, ambiguous or conflicting task detail. Respect prior scoped answers. Account access uses visible user handoff and explicit return of control, never this question channel. If no justified supported next step exists, return {"unavailable":true}; the original task remains pending. Do not claim no results exist, an answer is verified or the request is complete.
+    Scope a missing date to one outcome. A question about an accepted native date answer must cover that whole answer, even when it spans several requirement rows; retain both range endpoints and any modifier. A concrete answer may confirm a date or disambiguate a bare weekday, but cannot silently replace a conflicting date. A resolved date does not need another question merely because the model split or relabeled its source.
     """
     private static let outputInstructions = """
     Return no URL, field value, free-form question, credentials, executable instruction, confidence, explanation or completion flag.

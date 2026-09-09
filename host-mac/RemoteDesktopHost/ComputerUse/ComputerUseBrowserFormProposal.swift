@@ -54,7 +54,7 @@ struct ComputerUseBrowserFormProposal: Equatable, Sendable, CustomStringConverti
                 let indices = try rows.map { try requirementIndex($0, input: input) }
                 guard Set(indices).count == indices.count else { throw invalid }
                 let requirements = indices.map { input.interpretation.requirements[$0] }
-                guard requirements.allSatisfy(topic.accepts) else { throw invalid }
+                guard input.interpretation.permitsQuestion(topic: topic, requirements: requirements) else { throw invalid }
                 return .init(input: input, question: .init(topic: topic, requirementIDs: requirements.map(\.id)))
             }
             if Set(root.keys) == ["retain"], case .bool(true)? = root["retain"] {

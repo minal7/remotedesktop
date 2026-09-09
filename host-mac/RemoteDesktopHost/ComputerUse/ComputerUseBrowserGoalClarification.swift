@@ -201,11 +201,8 @@ final class ComputerUseBrowserGoalClarification {
         guard proposal.input.digest == input.digest, proposal.disposition != .unsupported,
               (1...8).contains(requirementIDs.count), Set(requirementIDs).count == requirementIDs.count else { throw Failure.invalidProposal }
         let requirements = proposal.requirements.filter { requirementIDs.contains($0.id) }
-        let nativeScalars = [.date, .quantity].contains(topic) ? ComputerUseBrowserScalarRequirements(proposal: proposal) : nil
         guard requirements.count == requirementIDs.count,
-              requirements.allSatisfy({ topic.accepts($0)
-                  || (topic == .date && nativeScalars?.permitsDateQuestion($0) == true)
-                  || (topic == .quantity && nativeScalars?.permitsQuantityQuestion($0) == true) }) else { throw Failure.invalidProposal }
+              proposal.permitsQuestion(topic: topic, requirements: requirements) else { throw Failure.invalidProposal }
         let scope = try requirements.map { requirement -> ComputerUseBrowserGoalClarificationTurn.Scope in
             guard let source = proposal.source(of: requirement) else { throw Failure.invalidProposal }
             return .init(requirement: requirement, source: source)
