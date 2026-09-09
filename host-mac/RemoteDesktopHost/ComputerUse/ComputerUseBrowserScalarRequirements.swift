@@ -294,6 +294,19 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
     let proposal: ComputerUseBrowserGoalProposal
     let entries: [Entry]
     private let partyGroups: [PartyGroup]
+    func partySourceIdentity(for condition: Condition) -> String {
+        let span = partyGroups.first(where: { $0.requirementIDs == condition.sourceRequirementIDs })?.span
+            ?? proposal.requirements.first(where: { $0.id == condition.requirementID }).flatMap { Self.scalarSpan($0, input: proposal.input) }
+        guard let span, proposal.input.userTurns.indices.contains(span.turn) else {
+            return ComputerUseTaskContract.digest(["browser-party-source-fallback-v1", condition.id])
+        }
+        let bytes = Array(proposal.input.userTurns[span.turn].utf8)
+        guard span.start >= 0, span.end >= span.start, span.end <= bytes.count else {
+            return ComputerUseTaskContract.digest(["browser-party-source-fallback-v1", condition.id])
+        }
+        return ComputerUseTaskContract.digest(["browser-party-source-v1", proposal.input.rootDigest, String(span.turn),
+            String(span.start), String(span.end), String(decoding: bytes[span.start..<span.end], as: UTF8.self)])
+    }
     func partyRequirementIndices(for condition: Condition, unit: QuantityUnit) -> [Int] {
         guard let group = partyGroups.first(where: { $0.requirementIDs == condition.sourceRequirementIDs }),
               let span = group.components[unit] else {

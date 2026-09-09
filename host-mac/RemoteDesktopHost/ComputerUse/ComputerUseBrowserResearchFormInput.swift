@@ -66,6 +66,70 @@ struct ComputerUseBrowserFormPendingEdit: Equatable, Sendable, CustomStringConve
     var debugDescription: String { description }
 }
 
+/// A completed native value with a proposed field meaning. This identifies
+/// which goal component supplied the value, not provider/category semantics.
+struct ComputerUseBrowserFormPartyCriterion: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    let partySourceID: String
+    let unit: String
+    let value: String
+    init?(_ normalized: ComputerUseBrowserResearchFormInput.Normalization) {
+        guard normalized.kind == .partySize, let source = normalized.partySourceID,
+              ["adults", "children"].contains(normalized.unit) else { return nil }
+        partySourceID = source; unit = normalized.unit; value = normalized.value
+    }
+    var identity: [String] { [partySourceID, unit, value] }
+    func context(partyAlias: String) -> [String: Any] { ["party":partyAlias, "unit":unit, "value":value] }
+    var description: String { "BrowserFormPartyCriterion" }
+    var debugDescription: String { description }
+}
+
+/// Coverage of intended structured counts. Missing/changed/duplicate records
+/// cannot become full coverage through source-row overlap or numeric totals.
+struct ComputerUseBrowserFormPartyCoverage: Equatable, Sendable {
+    enum State: String, Sendable { case missing, recorded, changed, ambiguous }
+    struct Component: Equatable, Sendable {
+        let unit: String
+        let value: String
+        let state: State
+        let targetIDs: [String]
+    }
+    let partySourceID: String
+    let requirementIndices: [Int]
+    let components: [Component]
+    var allComponentsRecorded: Bool { components.count == 2 && Set(components.map(\.unit)) == ["adults", "children"] && components.allSatisfy { $0.state == .recorded } }
+    func context(partyAlias: String) -> [String: Any] {
+        ["party":partyAlias, "requirements":requirementIndices, "all_components_recorded":allComponentsRecorded,
+         "components":components.map { ["unit":$0.unit, "value":$0.value, "state":$0.state.rawValue, "recorded_fields":$0.targetIDs.count] as [String: Any] }]
+    }
+    /// Context-local references never expose native task or target digests.
+    static func aliases(for coverage: [Self], records: [String: ComputerUseBrowserFormPartyCriterion]) -> [String: String] {
+        var aliases: [String: String] = [:]
+        for source in coverage.map(\.partySourceID) + records.keys.sorted().compactMap({ records[$0]?.partySourceID }) {
+            if aliases[source] == nil { aliases[source] = "party\(aliases.count + 1)" }
+        }
+        return aliases
+    }
+    static func collect(normalizations: [ComputerUseBrowserResearchFormInput.Normalization],
+                        records: [String: ComputerUseBrowserFormPartyCriterion], values: [String: String], changedTargets: Set<String> = []) -> [Self] {
+        var seen: Set<String> = []
+        return normalizations.compactMap { first in
+            guard let sourceID = first.partySourceID, seen.insert(sourceID).inserted else { return nil }
+            let required = normalizations.filter { $0.partySourceID == sourceID }
+            let components = required.map { value -> Component in
+                let targets = records.keys.filter { records[$0]?.partySourceID == sourceID && records[$0]?.unit == value.unit }.sorted()
+                let state: State
+                if targets.isEmpty { state = .missing }
+                else if targets.count != 1 { state = .ambiguous }
+                else if let target = targets.first, let record = records[target], !changedTargets.contains(target),
+                        record.value.utf8.elementsEqual(value.value.utf8), values[target]?.utf8.elementsEqual(value.value.utf8) == true { state = .recorded }
+                else { state = .changed }
+                return .init(unit: value.unit, value: value.value, state: state, targetIDs: targets)
+            }
+            return .init(partySourceID: sourceID, requirementIndices: Set(required.flatMap(\.requirementIndices)).sorted(), components: components)
+        }
+    }
+}
+
 /// Proposal-only form context. Aliases describe native correspondence, not
 /// permission to edit or submit. The original request and every accepted answer
 /// remain intact; a later compiler must account for the remaining requirements.
@@ -94,12 +158,14 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
         let id: String
         let requirementIndex: Int
         let requirementIndices: [Int]
+        let partySourceID: String?
         let kind: Kind
         let value: String
         let unit: String
-        init(id: String, requirementIndex: Int, kind: Kind, value: String, unit: String, requirementIndices: [Int]? = nil) {
+        init(id: String, requirementIndex: Int, kind: Kind, value: String, unit: String, requirementIndices: [Int]? = nil, partySourceID: String? = nil) {
             self.id = id; self.requirementIndex = requirementIndex; self.kind = kind; self.value = value; self.unit = unit
             self.requirementIndices = requirementIndices ?? [requirementIndex]
+            self.partySourceID = partySourceID
         }
         var description: String { "BrowserFormNormalization(kind: \(kind.rawValue))" }
         var debugDescription: String { description }
@@ -124,7 +190,7 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
                     let indices = ledger.partyRequirementIndices(for: condition, unit: unit)
                     guard let primary = indices.first else { return nil }
                     return .init(id: "value\(index + 1)-\(unit.rawValue)", requirementIndex: primary, kind: .partySize, value: String(count), unit: unit.rawValue,
-                        requirementIndices: indices)
+                        requirementIndices: indices, partySourceID: ledger.partySourceIdentity(for: condition))
                 }
             case .quantity(.equal, let count, let unit):
                 let kind: Normalization.Kind
@@ -268,9 +334,16 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
                 "relation":requirement.relation.rawValue, "values":requirement.values]
         }
         let normalized = Self.normalizations(for: interpretation)
+        let partyCoverage = ComputerUseBrowserFormPartyCoverage.collect(normalizations: normalized, records: previous?.partyCriteria ?? [:],
+            values: Dictionary(uniqueKeysWithValues: evidence.fields.map { ($0.editable.snapshot.targetID, $0.editable.snapshot.value) }))
+        let partyAliases = ComputerUseBrowserFormPartyCoverage.aliases(for: partyCoverage, records: previous?.partyCriteria ?? [:])
         let priorEdits: [[String: Any]] = try zip(aliases, evidence.fields).compactMap { alias, field in
             guard let sources = previous?.verifiedSources[field.editable.snapshot.targetID] else { return nil }
-            return ["field":alias, "sources":try sources.map { try $0.context(in: interpretation) }, "requires_repair":repairs.contains(alias)]
+            var row: [String: Any] = ["field":alias, "sources":try sources.map { try $0.context(in: interpretation) }, "requires_repair":repairs.contains(alias)]
+            if let criterion = previous?.partyCriteria[field.editable.snapshot.targetID], let party = partyAliases[criterion.partySourceID] {
+                row["party_component"] = criterion.context(partyAlias: party)
+            }
+            return row
         }
         let unfinished = previous?.pendingEdits ?? []
         let pendingAliases = unfinished.indices.map { "pending\($0 + 1)" }
@@ -291,6 +364,7 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
                 var row: [String: Any] = ["id":value.id, "requirement":value.requirementIndex,
                     "kind":value.kind.rawValue, "value":value.value, "unit":value.unit]
                 if value.requirementIndices.count > 1 { row["requirements"] = value.requirementIndices }
+                if let source = value.partySourceID, let party = partyAliases[source] { row["party"] = party }
                 return row
             }]
         if scopeReview != nil {
@@ -330,6 +404,10 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
         }
         if !refreshedAliases.isEmpty { context["version"] = 17; context["refreshed_edit_fields"] = refreshedAliases }
         if normalized.contains(where: { $0.requirementIndices.count > 1 }) { context["version"] = 18 }
+        if !partyCoverage.isEmpty || previous?.partyCriteria.isEmpty == false {
+            context["version"] = 19
+            context["party_criteria"] = partyCoverage.map { $0.context(partyAlias: partyAliases[$0.partySourceID]!) }
+        }
         contextJSON = String(decoding: try JSONSerialization.data(withJSONObject: context, options: [.sortedKeys]), as: UTF8.self)
         self.interpretation = interpretation; self.evidence = evidence; fieldAliases = aliases
         normalizations = normalized; editableFieldAliases = editable; self.selectedFormID = selectedFormID

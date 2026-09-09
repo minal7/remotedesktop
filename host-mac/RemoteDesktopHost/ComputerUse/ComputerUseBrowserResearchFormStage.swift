@@ -21,6 +21,22 @@ struct ComputerUseBrowserResearchFormContinuation: Equatable, Sendable, CustomSt
     let preservedTargetIDs: Set<String>
     let editedSources: [String: [ComputerUseBrowserFormSource]]
     let verifiedSources: [String: [ComputerUseBrowserFormSource]]
+    let partyCriteria: [String: ComputerUseBrowserFormPartyCriterion]
+    let partyNormalizations: [ComputerUseBrowserResearchFormInput.Normalization]
+    var partyCoverage: [ComputerUseBrowserFormPartyCoverage] {
+        ComputerUseBrowserFormPartyCoverage.collect(normalizations: partyNormalizations, records: partyCriteria, values: finalValues)
+    }
+    func partyCoverage(in interpretation: ComputerUseBrowserGoalProposal, changedTargets: Set<String> = []) -> [ComputerUseBrowserFormPartyCoverage] {
+        ComputerUseBrowserFormPartyCoverage.collect(normalizations: ComputerUseBrowserResearchFormInput.normalizations(for: interpretation), records: partyCriteria,
+            values: finalValues, changedTargets: changedTargets)
+    }
+    private static func partyIdentity(_ values: [ComputerUseBrowserResearchFormInput.Normalization],
+                                      records: [String: ComputerUseBrowserFormPartyCriterion]) -> [String] {
+        guard !values.isEmpty || !records.isEmpty else { return [] }
+        return ["browser-form-party-criteria-v1", String(values.count)]
+            + values.flatMap { [$0.partySourceID ?? "", $0.unit, $0.value] }
+            + records.keys.sorted().flatMap { [$0] + (records[$0]?.identity ?? []) }
+    }
     let pendingEdits: [ComputerUseBrowserFormPendingEdit]
     var repairableTargetIDs: Set<String> { verifiedTargetIDs.subtracting(preservedTargetIDs) }
     let digest: String
@@ -107,6 +123,7 @@ struct ComputerUseBrowserResearchFormContinuation: Equatable, Sendable, CustomSt
         nativePreservation = input.nativePreservation
         preservedTargetIDs = Set(try stage.proposal.preserved.map { try input.field(for: $0.field).editable.snapshot.targetID })
         var editedSources = previous?.editedSources ?? [:], sources = previous?.verifiedSources ?? [:]
+        var partyRecords = previous?.partyCriteria ?? [:]
         var proofs = previous?.stateProofsByTarget ?? [:]
         for (alias, purposes) in input.retainedFieldSources {
             let targetID = try input.field(for: alias).editable.snapshot.targetID
@@ -117,16 +134,22 @@ struct ComputerUseBrowserResearchFormContinuation: Equatable, Sendable, CustomSt
         for edit in verifiedEdits {
             let targetID = try input.field(for: edit.field).editable.snapshot.targetID
             sources[targetID] = try stage.proposal.resolvedSources(for: edit)
+            if case .normalized(let value) = edit.payload, let criterion = ComputerUseBrowserFormPartyCriterion(value) {
+                partyRecords[targetID] = criterion
+            } else { partyRecords.removeValue(forKey: targetID) }
             if actualEdits.contains(targetID) { editedSources[targetID] = sources[targetID]; proofs.removeValue(forKey: targetID) }
             else if let proof { proofs[targetID] = proof }
             else { throw ComputerUseBrowserResearchFormStage.Failure.invalidStage }
         }
         self.editedSources = editedSources; verifiedSources = sources; stateProofsByTarget = proofs
+        partyCriteria = partyRecords; partyNormalizations = input.normalizations.filter { $0.partySourceID != nil }
+        guard Set(partyRecords.keys).isSubset(of: verifiedTargetIDs) else { throw ComputerUseBrowserResearchFormStage.Failure.invalidStage }
         pendingEdits = try pending.map { try stage.proposal.pendingEdit(for: $0) }
-        digest = ComputerUseTaskContract.digest([!input.retainedFieldSources.isEmpty ? "browser-research-form-continuation-v8" : stage.executionPlan.isMixed ? "browser-research-form-continuation-v7" : "browser-research-form-continuation-v6", taskID, rootDigest, goalRevision,
+        let partyIdentity = Self.partyIdentity(partyNormalizations, records: partyRecords)
+        digest = ComputerUseTaskContract.digest([!partyIdentity.isEmpty ? "browser-research-form-continuation-v9" : !input.retainedFieldSources.isEmpty ? "browser-research-form-continuation-v8" : stage.executionPlan.isMixed ? "browser-research-form-continuation-v7" : "browser-research-form-continuation-v6", taskID, rootDigest, goalRevision,
             document.contextID, String(document.generation), documentID, formID ?? "", previous?.digest ?? "", evidenceDigest]
             + [stage.contract.contractDigest, String(verifiedEdits.count)] + stageIDs + inputOperationIDs
-            + proofs.keys.sorted().flatMap { [$0,proofs[$0]!.digest] })
+            + proofs.keys.sorted().flatMap { [$0,proofs[$0]!.digest] } + partyIdentity)
     }
 
     /// A read-only continuation keeps earlier proof origins and actual input
@@ -157,12 +180,15 @@ struct ComputerUseBrowserResearchFormContinuation: Equatable, Sendable, CustomSt
             sources[target] = purposes
         }
         verifiedSources = sources
+        partyCriteria = previous.partyCriteria; partyNormalizations = input.normalizations.filter { $0.partySourceID != nil }
         preservedControls = try stage.proposal.preserved.map {
             .init(controlID: try input.field(for: $0.field).control.id, source: $0.source)
         } + input.nativePreservedSources
         nativePreservation = input.nativePreservation
         preservedTargetIDs = Set(try stage.proposal.preserved.map { try input.field(for: $0.field).editable.snapshot.targetID })
-        digest = ComputerUseTaskContract.digest(["browser-retained-form-continuation-v1", stage.stageDigest, previous.digest] + stageIDs)
+        let partyIdentity = Self.partyIdentity(partyNormalizations, records: partyCriteria)
+        digest = ComputerUseTaskContract.digest([partyIdentity.isEmpty ? "browser-retained-form-continuation-v1" : "browser-retained-form-continuation-v2",
+            stage.stageDigest, previous.digest] + stageIDs + partyIdentity)
     }
 
     var description: String { "BrowserResearchFormContinuation(stages: \(stageIDs.count))" }

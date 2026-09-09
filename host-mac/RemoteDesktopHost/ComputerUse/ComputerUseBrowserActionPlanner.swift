@@ -179,17 +179,26 @@ struct ComputerUseBrowserActionInput: Equatable, Sendable, CustomStringConvertib
                         && $0.form?.id == form && $0.form?.method.lowercased() == "get"
                 }.map(\.id)
             }
+            let partyCoverage = continuation.partyCoverage(in: interpretation, changedTargets: changedFormTargetIDs)
+            let partyAliases = ComputerUseBrowserFormPartyCoverage.aliases(for: partyCoverage, records: continuation.partyCriteria)
             let edits: [[String: Any]] = try fields.map { field in
                 guard let sources = continuation.verifiedSources[field.editable.snapshot.targetID], !sources.isEmpty else {
                     throw ComputerUseBrowserActionPlanError.invalidInput
                 }
-                return ["control":field.control.id, "sources":try sources.map { try $0.context(in: interpretation) },
+                var row: [String: Any] = ["control":field.control.id, "sources":try sources.map { try $0.context(in: interpretation) },
                     "requires_repair":changedFormTargetIDs.contains(field.editable.snapshot.targetID)]
+                if let criterion = continuation.partyCriteria[field.editable.snapshot.targetID], let party = partyAliases[criterion.partySourceID] {
+                    row["party_component"] = criterion.context(partyAlias: party)
+                }
+                return row
             }
             var stageContext: [String: Any] = ["stage":receipt.index, "edits":edits, "candidate_query_controls":queryControls,
                 "unfinished_edits":try continuation.pendingEdits.map { try $0.context(in: interpretation) },
                 "complete_stage":receipt.isCompleteStage, "planned_edits":receipt.plannedEditCount,
                 "current_goal_revision":receipt.goalRevision == goal.digest]
+            if !partyCoverage.isEmpty || !continuation.partyCriteria.isEmpty {
+                stageContext["party_criteria"] = partyCoverage.map { $0.context(partyAlias: partyAliases[$0.partySourceID]!) }
+            }
             if formHistory.contains(where: { $0.verifiedWithoutInputCount > 0 || $0.requiresRepairAtPublication || $0.retainedCriterionCount > 0 }) {
                 stageContext.removeValue(forKey: "edits")
                 stageContext["criteria"] = zip(fields, edits).map { field, context in
@@ -397,6 +406,7 @@ struct ComputerUseBrowserActionInput: Equatable, Sendable, CustomStringConvertib
             }
         }
         if preparationReview?.requiredEditControlIDs.isEmpty == false { context["version"] = 23 }
+        if (verified as? [String: Any])?["party_criteria"] != nil { context["version"] = 24 }
         contextJSON = String(decoding: try JSONSerialization.data(withJSONObject: context, options: [.sortedKeys]), as: UTF8.self)
         usesFormStateContext = formHistory.contains { $0.verifiedWithoutInputCount > 0 }
         usesFormRecoveryContext = formHistory.contains { $0.requiresRepairAtPublication }
@@ -705,6 +715,7 @@ struct ComputerUseLocalBrowserActionPlanner: ComputerUseBrowserActionPlanning {
     private static let formHistoryInstructions = """
     Version 22 retained_criteria counts earlier verified criteria explicitly retained under the current review. Such a stage has zero new input and zero new desired-value proof origins; its original input receipts or observation proofs still govern each criterion. A recovered retention review can have required_repair_when_recorded=true and complete_stage=false: its earlier origins and desired values remain obligations, while current native values need repair. The retained count never proves those values currently match. A complete read-only retention stage is not a query, a task result, or proof that every user requirement is satisfied. The next action must still advance the complete request. Do not repeat retention merely to produce another history entry.
     Version 20 distinguishes verified criteria from dispatched input. verified_form_stage.criteria carries exact source purposes for values verified by either path; verified_without_input=true identifies a criterion last verified without sending input. form_history.verified_without_input counts such fields in that stage, while edits counts actual input. A complete stage can have zero edits. Do not request input merely to create a receipt when desired values already match. Native inspection still checks current values, original objects, preservation and real input history before offering query controls. Historical verification is not whole-goal completion or proof of current website availability.
+    Version 24 verified_form_stage.party_criteria compares recorded adult/child components with the CURRENT native party requirements. Per-field party_component identifies the proposed category and recorded value. missing means no completed criterion records that component; changed means the required value differs or native inspection found a changed field; ambiguous means multiple fields record the category. recorded requires one unchanged criterion with the expected count but does not prove its provider/category meaning. all_components_recorded and complete_stage are not whole-goal completion. A shared source row, matching total or captured unedited default cannot supply a missing component. Carry outstanding categories into later planning and assessment, including after an exploratory query; do not present partial criteria as a complete party setup.
     Version 21 also records required_repair_when_recorded when fully dispatched input history was recovered while some original criteria needed repair. All inputs may have receipts and unfinished_edits may be empty while complete_stage=false. Preserve those historical inputs; resolve the currently marked requires_repair criteria through a new source-bound form stage. The recorded repair flag is historical: use fresh per-criterion inspection to decide what still needs repair, including after the user changes the page. Do not replay completed inputs or infer current satisfaction from the history.
     form_history distinguishes verified edits from planned_edits. complete_stage=false means a prefix was verified or the recovered stage required criterion repair; unfinished_edits retains the unsent remainder with historical labels/types and original user sources. Those old labels are not current native references. Select the retained form to replan every unfinished entry; its planner must explicitly map all pending work to current edits. Query controls remain withheld until those obligations and any changed criteria are resolved. Never count a partial receipt as completion of the original stage or the research goal.
     """

@@ -39,6 +39,8 @@ final class ComputerUseBrowserGoalClarificationTests: XCTestCase {
             let originalParts = splitFirst ? split : ["2 adults and 1 child."]
             let currentParts = splitFirst ? ["2 adults and 1 child."] : split
             let initial = try proposal(original, rows: [row("Find concerts. ")] + originalParts.map { row($0, role: "condition", field: "quantity") })
+            let originalValues = ComputerUseBrowserResearchFormInput.normalizations(for: try proposal(original,
+                rows: [row("Find concerts. ")] + originalParts.map { row($0, role: "condition", field: "quantity") }, disposition: "research"))
             let question = try state.issue(proposal: initial, topic: .location, requirementIDs: [initial.requirements[0].id], context: context())
             let updated = try state.consume(questionID: question.id, answerTaskID: "location", answer: "Paris", context: context())
             let current = try proposal(updated, rows: [row("Find concerts. ")] + currentParts.map { row($0, role: "prohibition", field: "navigationSource") }
@@ -52,7 +54,13 @@ final class ComputerUseBrowserGoalClarificationTests: XCTestCase {
             }
             let sources = ComputerUseBrowserSourceRequirements(proposal: current)
             XCTAssertTrue(sources.unresolved.isEmpty); XCTAssertFalse(sources.requiresNavigationHistory)
-            XCTAssertEqual(ComputerUseBrowserResearchFormInput.normalizations(for: current).map(\.value), ["2", "1"])
+            let currentValues = ComputerUseBrowserResearchFormInput.normalizations(for: current)
+            XCTAssertEqual(currentValues.map(\.value), ["2", "1"])
+            XCTAssertEqual(currentValues.map(\.partySourceID), originalValues.map(\.partySourceID))
+            let records = try Dictionary(uniqueKeysWithValues: originalValues.map { ($0.unit, try XCTUnwrap(ComputerUseBrowserFormPartyCriterion($0))) })
+            let coverage = ComputerUseBrowserFormPartyCoverage.collect(normalizations: currentValues, records: records, values: ["adults":"2", "children":"1"])
+            XCTAssertEqual(coverage.first?.allComponentsRecorded, true)
+            XCTAssertEqual(coverage.first?.requirementIndices, Array(1...currentParts.count))
             XCTAssertEqual(updated.rootDigest, original.rootDigest)
         }
         for modifier in ["at most ", "not "] {
