@@ -4,6 +4,69 @@ import XCTest
 
 @MainActor
 final class ComputerUseBrowserResearchAnswerTests: XCTestCase {
+    func testSamePageHandbackInvalidatesCurrentHistoryAssessmentButPreservesHistoricalReading() async throws {
+        let fixture = try await ResearchAnswerFixture.make(navigationExclusionRole: "condition")
+        defer { fixture.source.close() }
+        fixture.source.policy.excludedOrigins = [try .init(URL(string: "https://blocked.test")!)]
+        _ = try await fixture.source.start()
+        let owner = try fixture.source.owner(), original = try await owner.revalidateCandidates()
+        let interpretation = try await owner.interpretGoal()
+        let assessment = try XCTUnwrap(original.requirementAssessment)
+        let historyIdentity = try XCTUnwrap(original.navigationHistoryIdentity)
+        let page = try XCTUnwrap(fixture.source.browser.currentDocument(taskID: owner.taskID))
+        try await fixture.source.browser.validateResultAssessment(assessment, reading: original, interpretation: interpretation.proposal)
+        owner.pause()
+        try await owner.resumeAfterUserControl()
+        XCTAssertEqual(fixture.source.browser.currentDocument(taskID: owner.taskID), page)
+        do {
+            try await fixture.source.browser.validateResultAssessment(assessment, reading: original, interpretation: interpretation.proposal)
+            XCTFail("Same-document handback changes the navigation/control history")
+        } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+        XCTAssertEqual(original.navigationHistoryIdentity, historyIdentity)
+        XCTAssertEqual(original.requirementAssessment, assessment, "The old reading remains a historical fact")
+        let historical = try original.historicalPlannerContext()
+        let historicalAssessment = try XCTUnwrap(historical["requirement_assessment_at_reading"] as? [String: Any])
+        let historicalHistory = try XCTUnwrap(historicalAssessment["navigation_history_at_reading"] as? [String: Any])
+        XCTAssertEqual(historicalHistory["retained_control_event_count"] as? Int, assessment.navigationHistory?.controlEventCount)
+        let fresh = try await owner.readCandidates()
+        XCTAssertNotEqual(fresh.navigationHistoryIdentity, historyIdentity)
+        XCTAssertTrue(try XCTUnwrap(fresh.requirementAssessment?.navigationHistory).gaps.contains(.controlEpisodesUnreconciled))
+        XCTAssertNil(fresh.answerPage(goal: owner.input))
+        XCTAssertEqual(fixture.source.server.count("/search?q=concerts"), 1)
+    }
+
+    func testRestoringTheReadingPolicyCannotReviveItsOldNavigationAssessment() async throws {
+        let fixture = try await ResearchAnswerFixture.make(navigationExclusionRole: "condition")
+        defer { fixture.source.close() }
+        fixture.source.policy.excludedOrigins = [try .init(URL(string: "https://blocked.test")!)]
+        _ = try await fixture.source.start()
+        let owner = try fixture.source.owner(), original = try await owner.revalidateCandidates()
+        let browser = fixture.source.browser
+        let preparedReport = try await owner.prepareProgressReport()
+        let report = try XCTUnwrap(preparedReport)
+        try owner.validateProgressReport(report)
+        let session = try XCTUnwrap(browser.handbackRequirement(taskID: owner.taskID))
+        let history = try browser.navigationDispatchHistory(taskID: owner.taskID)
+        let originalPolicy = try XCTUnwrap(history.policyInstallations.last?.policy)
+        let replacement = try ComputerUseBrowserSourcePolicy(goal: owner.input)
+        try browser.installSourcePolicy(replacement, replacing: originalPolicy.digest, session: session)
+        try browser.installSourcePolicy(originalPolicy, replacing: replacement.digest, session: session)
+        XCTAssertThrowsError(try owner.validateProgressReport(report)) { error in
+            XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged)
+        }
+        do {
+            try await browser.validateResultCandidates(original, goal: owner.input)
+            XCTFail("Returning to the old configuration cannot erase intervening policy history")
+        } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+        let fresh = try await owner.readCandidates()
+        XCTAssertNotEqual(fresh.navigationHistoryIdentity, original.navigationHistoryIdentity)
+        XCTAssertFalse(try XCTUnwrap(original.requirementAssessment?.navigationHistory).gaps.contains(.mismatchedPolicy))
+        XCTAssertTrue(try XCTUnwrap(fresh.requirementAssessment?.navigationHistory).gaps.contains(.mismatchedPolicy))
+        XCTAssertEqual(try browser.navigationDispatchHistory(taskID: owner.taskID).attempts, history.attempts)
+        XCTAssertNil(fresh.answerPage(goal: owner.input))
+        XCTAssertEqual(fixture.source.server.count("/search?q=concerts"), 1)
+    }
+
     func testNavigationConditionCannotCompleteFromAPermittedDocumentOrConfiguredPolicy() async throws {
         for configurePolicy in [false, true] {
             let fixture = try await ResearchAnswerFixture.make(navigationExclusionRole: "condition")
@@ -18,8 +81,17 @@ final class ComputerUseBrowserResearchAnswerTests: XCTestCase {
             let assessment = try XCTUnwrap(current.requirementAssessment)
             let index = try XCTUnwrap(assessment.requirements.firstIndex { $0.field == .navigationSource })
             XCTAssertEqual(current.documentAnswerSourceStatus, .permitted)
-            XCTAssertEqual(assessment.plannerContext["version"] as? Int, 6)
+            XCTAssertEqual(assessment.plannerContext["version"] as? Int, 7)
             XCTAssertEqual(assessment.candidates.first?.requirements[index].status, .navigationHistoryUnverified)
+            let history = try XCTUnwrap(assessment.navigationHistory)
+            XCTAssertEqual(history.gaps.contains(.mismatchedPolicy), !configurePolicy)
+            XCTAssertFalse(history.gaps.contains(.historyUnavailable))
+            XCTAssertTrue(history.gaps.contains(.platformCoverageUnqualified))
+            XCTAssertTrue(history.gaps.contains(.ownerVisitsUnreconciled))
+            let projected = try String(decoding: JSONSerialization.data(withJSONObject: history.plannerContext), as: UTF8.self)
+            for hidden in [owner.taskID, owner.input.digest, try XCTUnwrap(current.navigationHistoryIdentity), "blocked.test"] {
+                XCTAssertFalse(projected.contains(hidden))
+            }
             XCTAssertNil(current.answerPage(goal: owner.input))
             XCTAssertTrue(try XCTUnwrap(fixture.inputs.last).answerCounts.isEmpty)
             XCTAssertEqual(fixture.source.server.count("/search?q=concerts"), 1)
@@ -91,7 +163,8 @@ final class ComputerUseBrowserResearchAnswerTests: XCTestCase {
         XCTAssertEqual(current.review?.candidates.first?.requirements?.first?.judgment, .supports)
         XCTAssertEqual(current.documentAnswerSourceStatus, .permitted)
         XCTAssertEqual(assessment.candidates.first?.requirements.first?.status, .navigationHistoryUnverified)
-        XCTAssertEqual(assessment.plannerContext["version"] as? Int, 6)
+        XCTAssertEqual(assessment.plannerContext["version"] as? Int, 7)
+        XCTAssertTrue(try XCTUnwrap(assessment.navigationHistory).gaps.contains(.earlierGoalPolicy))
         XCTAssertNil(current.answerPage(goal: updated))
         XCTAssertNil(try current.answerEligibility(goal: updated))
         XCTAssertEqual(fixture.source.server.count("/search?q=concerts"), 1)
@@ -105,6 +178,8 @@ final class ComputerUseBrowserResearchAnswerTests: XCTestCase {
         guard case .browserResearchAnswer(let answer)? = result else { return XCTFail("A verified source exclusion must allow a complete answer") }
         let owner = try fixture.source.owner(), current = try await owner.revalidateCandidates()
         let assessment = try XCTUnwrap(current.requirementAssessment)
+        XCTAssertNil(current.navigationHistoryIdentity)
+        XCTAssertNil(assessment.navigationHistory, "An answer-source clause does not invent a navigation-history obligation")
         let index = try XCTUnwrap(assessment.requirements.firstIndex { $0.field == .answerSource })
         XCTAssertEqual(assessment.plannerContext["version"] as? Int, 5)
         XCTAssertEqual(current.documentAnswerSourceStatus, .permitted)

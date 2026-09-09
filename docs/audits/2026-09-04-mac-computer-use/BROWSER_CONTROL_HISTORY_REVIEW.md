@@ -43,6 +43,8 @@ Five changed Swift files passed `swiftc -frontend -parse`. The added authenticat
 
 ## Remaining repair order
 
+Source follow-up: [policy installation history and reading freshness](BROWSER_NAVIGATION_HISTORY_READING_REVIEW.md) now bind diagnostic assessments to frozen native history and invalidate current use after later recorded or overflow activity. They still do not certify complete route compliance.
+
 1. Reconcile ordered control events, native observation episodes, dispatches and owner-confirmed visits into a source/goal-bound history assessment. Treat unmatched operations, unknown attribution, claim discontinuities, unrecorded workflow scopes and all overflow markers explicitly.
 2. Qualify callback ordering and coverage on supported macOS/WebKit versions. The ordering of retained records does not establish complete platform coverage or strengthen a slot correlation into an exact navigation identity.
 3. Bind qualified history to current and retained readings and final answer admission. A later violating or unknown event must invalidate earlier eligibility. The [navigation-source completion gate](BROWSER_NAVIGATION_SOURCE_COMPLETION_GATE_REVIEW.md) remains active; this patch does not yet issue a compliance certificate.

@@ -257,6 +257,16 @@ struct ComputerUseBrowserResultCandidates: Sendable, CustomStringConvertible, Cu
     let documentAnswerSourceStatus: DocumentAnswerSourceStatus
     fileprivate let answerSourcePolicy: ComputerUseBrowserAnswerSourcePolicy?
     fileprivate let goalInterpretation: ComputerUseBrowserGoalProposal?
+    /// Frozen with the reading after native page validation. This snapshot
+    /// cannot certify a complete route or silently become current on recall.
+    fileprivate let navigationSourceHistory: ComputerUseBrowserNavigationDispatchHistory?
+    var navigationHistoryIdentity: String? { navigationSourceHistory?.identity }
+    func navigationHistoryAssessment(for sources: ComputerUseBrowserSourceRequirements) -> ComputerUseBrowserResultAssessment.NavigationHistory? {
+        guard sources.requiresNavigationHistory else { return nil }
+        let bound = goalRevision == sources.goal.digest && rootTaskID == sources.goal.taskID
+            && goalInterpretation?.digest == sources.interpretationDigest
+        return .init(history: bound ? navigationSourceHistory : nil, sources: sources, contextID: evidence.document.contextID)
+    }
     let containers: [ComputerUseBrowserPageSnapshot.Container]
     let surroundingTexts: [Text]
     let surroundingLinks: [Link]
@@ -271,9 +281,9 @@ struct ComputerUseBrowserResultCandidates: Sendable, CustomStringConvertible, Cu
     fileprivate let readingInput: ComputerUseBrowserResultPageInput
 
     var requirementAssessmentIdentity: String {
-        ComputerUseTaskContract.digest(["browser-reading-assessment-v2", goalRevision, String(observedAtMilliseconds), evidence.document.contextID,
+        ComputerUseTaskContract.digest(["browser-reading-assessment-v3", goalRevision, String(observedAtMilliseconds), evidence.document.contextID,
             String(evidence.document.generation), evidence.documentID, evidence.page.id, answerSourcePolicy?.digest ?? "", review?.digest ?? "",
-            goalInterpretation?.digest ?? ""] + candidates.map(\.id))
+            goalInterpretation?.digest ?? "", navigationHistoryIdentity ?? ""] + candidates.map(\.id))
     }
     var requirementAssessment: ComputerUseBrowserResultAssessment? {
         guard let goalInterpretation else { return nil }
@@ -333,11 +343,13 @@ struct ComputerUseBrowserResultCandidates: Sendable, CustomStringConvertible, Cu
 
     fileprivate init(proposal: ComputerUseBrowserResultProposal, goal: ComputerUseBrowserGoalInput,
                      evidence: ComputerUseBrowserPageEvidence, answerPolicy: ComputerUseBrowserAnswerSourcePolicy?,
-                     interpretation: ComputerUseBrowserGoalProposal?, historyOptions: [ComputerUseBrowserHistoryOption]) {
+                     interpretation: ComputerUseBrowserGoalProposal?, historyOptions: [ComputerUseBrowserHistoryOption],
+                     navigationSourceHistory: ComputerUseBrowserNavigationDispatchHistory?) {
         self.evidence = evidence; goalRevision = goal.digest; rootTaskID = goal.taskID
         observedAtMilliseconds = Int64(Date().timeIntervalSince1970 * 1_000)
         self.historyOptions = historyOptions
         answerSourcePolicy = answerPolicy
+        self.navigationSourceHistory = navigationSourceHistory
         goalInterpretation = interpretation; review = proposal.review
         documentAnswerSourceStatus = answerPolicy.map { $0.permitsEvidenceFrom(evidence.document.committedURL) ? .permitted : .excluded } ?? .unconfigured
         readingInput = proposal.input
@@ -490,6 +502,7 @@ extension ComputerUseOwnedBrowser {
     func validateResearchAnswerBinding(_ answer: ComputerUseBrowserResearchAnswer, reading: ComputerUseBrowserResultCandidates,
                                       goal: ComputerUseBrowserGoalInput, evidence: ComputerUseBrowserResearchEvidence) throws {
         try Task.checkCancellation()
+        try validateResultNavigationHistory(reading, goal: goal)
         try validateSourceDocument(reading.evidence.document)
         guard currentDocument(taskID: goal.taskID) == reading.evidence.document,
               let eligibility = try reading.answerEligibility(goal: goal, evidence: evidence, recalledReadings: answer.recalledReadings) else { throw ComputerUseBrowserError.pageChanged }
@@ -595,7 +608,10 @@ extension ComputerUseOwnedBrowser {
         }
         try await validatePageEvidence(evidence)
         try Task.checkCancellation()
-        return .init(proposal: proposal, goal: goal, evidence: evidence, answerPolicy: answerPolicy, interpretation: interpretation, historyOptions: historyOptions)
+        let needsHistory = interpretation.map { ComputerUseBrowserSourceRequirements(proposal: $0).requiresNavigationHistory } ?? false
+        let history = needsHistory ? try navigationDispatchHistory(taskID: goal.taskID) : nil
+        return .init(proposal: proposal, goal: goal, evidence: evidence, answerPolicy: answerPolicy,
+            interpretation: interpretation, historyOptions: historyOptions, navigationSourceHistory: history)
     }
 
     /// Reuse requires the same review, complete goal and current native page.
@@ -642,11 +658,26 @@ extension ComputerUseOwnedBrowser {
         do {
             try await validatePageEvidence(batch.evidence)
             try Task.checkCancellation()
+            try validateResultNavigationHistory(batch, goal: goal)
         } catch {
             // A timeout may win while WebKit still owns a validation callback.
             // Do not release the research operation until that work has joined.
             await joinDOMCompletion(document: batch.evidence.document)
             throw error
+        }
+    }
+
+    /// Reading/answer-source-only requests do not acquire a new history duty.
+    /// For a route-constrained task, even same-page handback or policy changes
+    /// invalidate current use of the old assessment. Recall stays historical.
+    func validateResultNavigationHistory(_ batch: ComputerUseBrowserResultCandidates,
+                                         goal: ComputerUseBrowserGoalInput) throws {
+        guard let interpretation = batch.goalInterpretation,
+              ComputerUseBrowserSourceRequirements(proposal: interpretation).requiresNavigationHistory else { return }
+        guard let retained = batch.navigationSourceHistory,
+              retained.taskID == goal.taskID, retained.contextID == batch.evidence.document.contextID,
+              try navigationDispatchHistory(taskID: goal.taskID).identity == retained.identity else {
+            throw ComputerUseBrowserError.pageChanged
         }
     }
 }

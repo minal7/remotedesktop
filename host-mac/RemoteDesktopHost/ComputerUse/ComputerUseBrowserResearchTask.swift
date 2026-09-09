@@ -1249,7 +1249,9 @@ final class ComputerUseBrowserResearchTask {
         try requireIdle()
         try checkCurrent(input)
         guard report.rootTaskID == taskID, report.goalRevision == input.digest,
-              report.readingIdentity == latestCandidates?.requirementAssessmentIdentity else { throw Failure.goalChanged }
+              let reading = latestCandidates,
+              report.readingIdentity == reading.requirementAssessmentIdentity else { throw Failure.goalChanged }
+        try browser.validateResultNavigationHistory(reading, goal: input)
     }
 
     func prepareProgressReport() async throws -> ComputerUseBrowserResearchReport? {

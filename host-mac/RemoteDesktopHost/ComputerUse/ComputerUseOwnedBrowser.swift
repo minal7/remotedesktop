@@ -206,6 +206,24 @@ struct ComputerUseBrowserNavigationDispatchHistory: Equatable, Sendable, CustomS
         case nativeReacquisitionStarted, nativeReacquisitionFinished, nativeReacquisitionFailed
         case signInWindowOpened, signInWindowClosed
     }
+    /// An accepted native configuration change, not a navigation or evidence
+    /// that earlier activity complied with the newly installed policy.
+    struct PolicyInstallation: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+        let order: Int
+        let parentSessionID: UUID
+        let ownershipEpoch: UUID
+        let generation: UInt64
+        let previousPolicy: ComputerUseBrowserSourcePolicy?
+        let policy: ComputerUseBrowserSourcePolicy
+
+        fileprivate init(order: Int, parentSessionID: UUID, ownershipEpoch: UUID, generation: UInt64,
+                         previousPolicy: ComputerUseBrowserSourcePolicy?, policy: ComputerUseBrowserSourcePolicy) {
+            self.order = order; self.parentSessionID = parentSessionID; self.ownershipEpoch = ownershipEpoch
+            self.generation = generation; self.previousPolicy = previousPolicy; self.policy = policy
+        }
+        var description: String { "BrowserSourcePolicyInstallation" }
+        var debugDescription: String { description }
+    }
     struct ControlEvent: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
         let order: Int
         let phase: ControlPhase
@@ -299,10 +317,13 @@ struct ComputerUseBrowserNavigationDispatchHistory: Equatable, Sendable, CustomS
     fileprivate(set) var observationsOverflowed = false
     fileprivate(set) var controlEvents: [ControlEvent] = []
     fileprivate(set) var controlEventsOverflowed = false
+    fileprivate(set) var policyInstallations: [PolicyInstallation] = []
+    fileprivate(set) var policyInstallationsOverflowed = false
     private let ledgerID = UUID()
     private var revision = UUID()
     /// Ordinals cover retained records only. With 64 attempts, 64 terminal
-    /// outcomes, 512 observations and 128 control events this cannot overflow.
+    /// outcomes, 512 observations, 128 control events and 64 installations
+    /// this cannot overflow.
     /// Omitted activity is represented by the separate overflow markers.
     private var nextOrder = 0
 
@@ -310,12 +331,22 @@ struct ComputerUseBrowserNavigationDispatchHistory: Equatable, Sendable, CustomS
         self.taskID = taskID; self.contextID = contextID; self.beganAfterAnotherClaim = beganAfterAnotherClaim
     }
     var identity: String {
-        ComputerUseTaskContract.digest(["browser-navigation-dispatch-history-v3", taskID, contextID,
+        ComputerUseTaskContract.digest(["browser-navigation-dispatch-history-v4", taskID, contextID,
             ledgerID.uuidString, revision.uuidString])
     }
     fileprivate mutating func recordClaimBoundary() {
         hasClaimBoundary = true
         advanceRevision()
+    }
+    fileprivate mutating func recordPolicyInstallation(parentSessionID: UUID, ownershipEpoch: UUID, generation: UInt64,
+                                                       previousPolicy: ComputerUseBrowserSourcePolicy?, policy: ComputerUseBrowserSourcePolicy) {
+        // Even after saturation, an actual configuration change invalidates
+        // snapshots. Idempotent installation never calls this method.
+        advanceRevision()
+        guard policyInstallations.count < 64 else { policyInstallationsOverflowed = true; return }
+        let order = takeOrder()
+        policyInstallations.append(.init(order: order, parentSessionID: parentSessionID, ownershipEpoch: ownershipEpoch,
+            generation: generation, previousPolicy: previousPolicy, policy: policy))
     }
     fileprivate mutating func begin(operationID: String, sessionID: UUID, ownershipEpoch: UUID, generation: UInt64,
                                     policy: ComputerUseBrowserSourcePolicy?, requestedURL: URL,
@@ -343,13 +374,13 @@ struct ComputerUseBrowserNavigationDispatchHistory: Equatable, Sendable, CustomS
                                       policyCheck: PolicyCheck, configuredPolicy: ComputerUseBrowserSourcePolicy?, url: URL?,
                                       attemptID: UUID?, navigationCorrelationID: UUID?, parentSessionID: UUID,
                                       ownershipEpoch: UUID, generation: UInt64, signInWindowID: UUID?) {
-        // Retain the first bounded observations and an explicit gap. Once
-        // saturated, callbacks do no further allocation or origin parsing.
+        // Retain bounded observations and a gap. Omitted callbacks still
+        // invalidate snapshots, without allocating a record or parsing URLs.
+        advanceRevision()
         guard observations.count < 512 else {
-            if !observationsOverflowed { observationsOverflowed = true; advanceRevision() }
+            observationsOverflowed = true
             return
         }
-        advanceRevision()
         let order = takeOrder()
         observations.append(.init(order: order, phase: phase, decision: decision, binding: binding, control: control, surface: surface,
             policyCheck: policyCheck, configuredPolicy: configuredPolicy, url: url, attemptID: attemptID,
@@ -359,11 +390,11 @@ struct ComputerUseBrowserNavigationDispatchHistory: Equatable, Sendable, CustomS
     fileprivate mutating func recordControl(phase: ControlPhase, parentSessionID: UUID, ownershipEpoch: UUID,
                                             generation: UInt64, url: URL?, handback: ComputerUseBrowserHandbackRequirement?,
                                             workflowOperationID: UUID?, nativeOperationID: UUID?, signInWindowID: UUID?) {
+        advanceRevision()
         guard controlEvents.count < 128 else {
-            if !controlEventsOverflowed { controlEventsOverflowed = true; advanceRevision() }
+            controlEventsOverflowed = true
             return
         }
-        advanceRevision()
         let order = takeOrder()
         controlEvents.append(.init(order: order, phase: phase, parentSessionID: parentSessionID,
             ownershipEpoch: ownershipEpoch, generation: generation, url: url, handback: handback,
@@ -763,7 +794,12 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         guard policy.taskID == session.taskID, sourcePolicy?.digest == expectedDigest else { throw ComputerUseBrowserError.pageChanged }
         try Task.checkCancellation()
         try validateSessionIdentity(session, taskID: session.taskID)
-        sourcePolicy = policy
+        if sourcePolicy != policy {
+            let previousPolicy = sourcePolicy
+            sourcePolicy = policy
+            navigationDispatchLog?.recordPolicyInstallation(parentSessionID: browserSessionID, ownershipEpoch: ownershipEpoch,
+                generation: generation, previousPolicy: previousPolicy, policy: policy)
+        }
     }
 
     func validateSourcePolicy(_ expected: ComputerUseBrowserSourcePolicy?, session: ComputerUseBrowserHandbackRequirement) throws {

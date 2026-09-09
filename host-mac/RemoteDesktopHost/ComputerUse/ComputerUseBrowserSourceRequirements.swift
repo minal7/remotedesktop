@@ -189,6 +189,18 @@ struct ComputerUseBrowserSourceRequirements: Sendable {
         return policy == expected
     }
 
+    /// Exact configuration correspondence, not evidence that a route obeyed
+    /// it. Older goal revisions require lineage reconciliation separately.
+    func matchesNavigationPolicy(_ policy: ComputerUseBrowserSourcePolicy?) -> Bool {
+        guard isResearch, unresolved.isEmpty, let policy,
+              policy.taskID == goal.taskID, policy.rootDigest == goal.rootDigest,
+              policy.goalRevision == goal.digest else { return false }
+        guard requiresNavigationHistory else { return true }
+        guard let expected = try? ComputerUseBrowserSourcePolicy(goal: goal,
+            allowedOrigins: navigation.allowed.map(Array.init), excludedOrigins: Array(navigation.excluded)) else { return false }
+        return policy == expected
+    }
+
     /// A resegmented row may contain other work as well. This identifies
     /// an additional source-policy obligation, not its complete meaning.
     func hasAnswerPolicyObligation(for requirementID: String) -> Bool {

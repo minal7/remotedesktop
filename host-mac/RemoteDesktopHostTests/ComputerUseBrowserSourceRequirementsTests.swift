@@ -4,6 +4,26 @@ import XCTest
 
 @MainActor
 final class ComputerUseBrowserSourceRequirementsTests: XCTestCase {
+    func testNavigationPolicyCorrespondenceRequiresTheCompiledRestrictionsAndExactGoal() throws {
+        let interpreted = try proposal([row("Find concert tickets. "),
+            row("Only use tickets.test. ", field: "navigationSource", values: ["tickets.test"]),
+            row("Exclude blocked.test.", role: "prohibition", field: "navigationSource", relation: "exclude", values: ["blocked.test"])])
+        let sources = ComputerUseBrowserSourceRequirements(proposal: interpreted)
+        let allowed = try ComputerUseBrowserSourceOrigin(url("https://tickets.test"))
+        let excluded = try ComputerUseBrowserSourceOrigin(url("https://blocked.test"))
+        let exact = try ComputerUseBrowserSourcePolicy(goal: interpreted.input, allowedOrigins: [allowed], excludedOrigins: [excluded])
+        XCTAssertTrue(sources.matchesNavigationPolicy(exact))
+        XCTAssertFalse(sources.matchesNavigationPolicy(nil))
+        XCTAssertFalse(sources.matchesNavigationPolicy(try .init(goal: interpreted.input)))
+        XCTAssertFalse(sources.matchesNavigationPolicy(try .init(goal: interpreted.input, allowedOrigins: [allowed])))
+        XCTAssertFalse(sources.matchesNavigationPolicy(try .init(goal: goal(interpreted.input.prompt, id: "other-root"),
+            allowedOrigins: [allowed], excludedOrigins: [excluded])))
+        let answerOnly = ComputerUseBrowserSourceRequirements(proposal: try proposal([
+            row("Find tickets. "), row("Only use tickets.test.", field: "answerSource", values: ["tickets.test"])]))
+        XCTAssertFalse(answerOnly.requiresNavigationHistory)
+        XCTAssertTrue(answerOnly.matchesNavigationPolicy(try .init(goal: answerOnly.goal, allowedOrigins: [allowed])))
+    }
+
     func testAnswerRestrictionsKeepAuxiliarySearchAvailableWhileNavigationRestrictionsSelectAnotherProvider() throws {
         let search = try provider("https://search.test/search"), site = try provider("https://tickets.test/search")
         for field in ["answerSource", "navigationSource"] {

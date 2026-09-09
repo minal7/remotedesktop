@@ -4,6 +4,62 @@ import XCTest
 
 @MainActor
 final class ComputerUseBrowserSourcePolicyTests: XCTestCase {
+    func testNativePolicyHistoryRecordsOnlyAcceptedChangesAndCannotEraseAReplacement() throws {
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+        let foreign = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+        defer { browser.close(); foreign.close() }
+        let input = try goal(), session = try browser.prepareWorkflowSession(taskID: input.taskID)
+        let foreignSession = try foreign.prepareWorkflowSession(taskID: input.taskID)
+        let original = try ComputerUseBrowserSourcePolicy(goal: input)
+        let replacement = try ComputerUseBrowserSourcePolicy(goal: input,
+            excludedOrigins: [ComputerUseBrowserSourceOrigin(url("https://blocked.test"))])
+        try browser.installSourcePolicy(original, replacing: nil, session: session)
+        let first = try browser.navigationDispatchHistory(taskID: input.taskID)
+        try browser.installSourcePolicy(original, replacing: original.digest, session: session)
+        XCTAssertEqual(try browser.navigationDispatchHistory(taskID: input.taskID), first, "An idempotent installation adds no history")
+        XCTAssertThrowsError(try browser.installSourcePolicy(replacement, replacing: original.digest, session: foreignSession))
+        XCTAssertThrowsError(try browser.installSourcePolicy(replacement, replacing: nil, session: session))
+        XCTAssertEqual(try browser.navigationDispatchHistory(taskID: input.taskID), first, "Rejected changes add no accepted event")
+        try browser.installSourcePolicy(replacement, replacing: original.digest, session: session)
+        try browser.installSourcePolicy(original, replacing: replacement.digest, session: session)
+        let restored = try browser.navigationDispatchHistory(taskID: input.taskID)
+        XCTAssertEqual(restored.policyInstallations.map(\.policy), [original, replacement, original])
+        XCTAssertEqual(restored.policyInstallations.map(\.previousPolicy), [nil, original, replacement])
+        XCTAssertEqual(restored.policyInstallations.map(\.order), [0, 1, 2])
+        XCTAssertEqual(Set(restored.policyInstallations.map(\.parentSessionID)).count, 1)
+        XCTAssertEqual(Set(restored.policyInstallations.map(\.ownershipEpoch)).count, 1)
+        XCTAssertNotEqual(restored.identity, first.identity)
+        XCTAssertTrue(restored.attempts.isEmpty); XCTAssertTrue(restored.observations.isEmpty)
+        let logged = String(reflecting: restored.policyInstallations)
+        for hidden in [input.taskID, original.digest, replacement.digest, "blocked.test"] { XCTAssertFalse(logged.contains(hidden)) }
+    }
+
+    func testPolicyHistoryBoundsAlternatingChangesAndInvalidatesEveryOmittedReplacement() throws {
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+        defer { browser.close() }
+        let input = try goal(), session = try browser.prepareWorkflowSession(taskID: input.taskID)
+        let first = try ComputerUseBrowserSourcePolicy(goal: input)
+        let second = try ComputerUseBrowserSourcePolicy(goal: input,
+            excludedOrigins: [ComputerUseBrowserSourceOrigin(url("https://blocked.test"))])
+        var previous: ComputerUseBrowserSourcePolicy?
+        for index in 0..<64 {
+            let next = index.isMultiple(of: 2) ? first : second
+            try browser.installSourcePolicy(next, replacing: previous?.digest, session: session)
+            previous = next
+        }
+        let full = try browser.navigationDispatchHistory(taskID: input.taskID)
+        XCTAssertEqual(full.policyInstallations.count, 64); XCTAssertFalse(full.policyInstallationsOverflowed)
+        try browser.installSourcePolicy(first, replacing: second.digest, session: session)
+        let overflow = try browser.navigationDispatchHistory(taskID: input.taskID)
+        try browser.installSourcePolicy(second, replacing: first.digest, session: session)
+        let later = try browser.navigationDispatchHistory(taskID: input.taskID)
+        XCTAssertTrue(overflow.policyInstallationsOverflowed); XCTAssertTrue(later.policyInstallationsOverflowed)
+        XCTAssertEqual(full.policyInstallations, overflow.policyInstallations)
+        XCTAssertEqual(full.policyInstallations, later.policyInstallations)
+        XCTAssertNotEqual(full.identity, overflow.identity); XCTAssertNotEqual(overflow.identity, later.identity)
+        XCTAssertTrue(later.attempts.isEmpty); XCTAssertTrue(try browser.isUnnavigatedSession(session))
+    }
+
     func testWorkflowResumeHistoryLinksNativeReacquisitionToTheAcceptedParentOperation() async throws {
         let fixture = try await ResearchDriverFixture.make()
         defer { fixture.close() }
@@ -98,6 +154,10 @@ final class ComputerUseBrowserSourcePolicyTests: XCTestCase {
         XCTAssertTrue(overflowed.controlEventsOverflowed)
         XCTAssertEqual(overflowed.controlEvents, full.controlEvents)
         XCTAssertNotEqual(overflowed.identity, full.identity)
+        try await browser.reacquireAfterUserControl(taskID: input.taskID, requirement: session)
+        let later = try browser.navigationDispatchHistory(taskID: input.taskID)
+        XCTAssertEqual(later.controlEvents, full.controlEvents)
+        XCTAssertNotEqual(later.identity, overflowed.identity, "Omitted control activity still invalidates a frozen reading")
         XCTAssertTrue(overflowed.attempts.isEmpty)
         XCTAssertTrue(try browser.isUnnavigatedSession(session))
     }
@@ -143,7 +203,8 @@ final class ComputerUseBrowserSourcePolicyTests: XCTestCase {
         let terminalOrder = try XCTUnwrap(attempt.terminalOrder)
         XCTAssertLessThan(attempt.order, start.order)
         XCTAssertLessThan(finish.order, terminalOrder)
-        let orders = [attempt.order, terminalOrder] + history.observations.map(\.order) + history.controlEvents.map(\.order)
+        let orders = [attempt.order, terminalOrder] + history.observations.map(\.order)
+            + history.controlEvents.map(\.order) + history.policyInstallations.map(\.order)
         XCTAssertEqual(orders.sorted(), Array(0..<orders.count), "Retained native records share one ordered sequence")
     }
 

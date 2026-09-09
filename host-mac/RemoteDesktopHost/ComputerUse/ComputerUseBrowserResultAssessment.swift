@@ -5,6 +5,74 @@ import Foundation
 /// or whole-goal fulfillment. No completion flag or answer text is produced.
 struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     typealias Scalars = ComputerUseBrowserScalarRequirements
+    /// Diagnostic facts about a frozen native history. There is deliberately
+    /// no success value: coverage and owner/episode reconciliation are open.
+    struct NavigationHistory: Equatable, Sendable {
+        enum Gap: String, CaseIterable, Hashable, Sendable {
+            case historyUnavailable, foreignContext, unresolvedSourceRequirements
+            case discardedClaimHistory, claimBoundary
+            case attemptOverflow, observationOverflow, controlOverflow, policyInstallationOverflow
+            case unconfiguredDispatch, mismatchedPolicy, earlierGoalPolicy, foreignGoalPolicy
+            case pendingDispatch, unsuccessfulDispatch, unknownDispatchOrigin
+            case weakObservationBinding, unattributedObservation, unorderedObservation
+            case controlEpisodesUnreconciled, ownerVisitsUnreconciled, platformCoverageUnqualified
+        }
+        let attemptCount: Int
+        let observationCount: Int
+        let controlEventCount: Int
+        let policyInstallationCount: Int
+        /// Callback count, not distinct requests and not proof of a violation:
+        /// the native policy may have successfully prevented the request.
+        let blockedSourceObservationCount: Int
+        let gaps: [Gap]
+
+        init(history: ComputerUseBrowserNavigationDispatchHistory?, sources: ComputerUseBrowserSourceRequirements,
+             contextID: String) {
+            attemptCount = history?.attempts.count ?? 0; observationCount = history?.observations.count ?? 0
+            controlEventCount = history?.controlEvents.count ?? 0; policyInstallationCount = history?.policyInstallations.count ?? 0
+            blockedSourceObservationCount = history?.observations.filter { $0.policyCheck == .blocked }.count ?? 0
+            var found: Set<Gap> = [.ownerVisitsUnreconciled, .platformCoverageUnqualified]
+            if !sources.unresolved.isEmpty { found.insert(.unresolvedSourceRequirements) }
+            if let history {
+                if history.taskID != sources.goal.taskID || history.contextID != contextID { found.insert(.foreignContext) }
+                if history.beganAfterAnotherClaim { found.insert(.discardedClaimHistory) }
+                if history.hasClaimBoundary { found.insert(.claimBoundary) }
+                if history.overflowed { found.insert(.attemptOverflow) }
+                if history.observationsOverflowed { found.insert(.observationOverflow) }
+                if history.controlEventsOverflowed { found.insert(.controlOverflow) }
+                if history.policyInstallationsOverflowed { found.insert(.policyInstallationOverflow) }
+                for attempt in history.attempts {
+                    if attempt.policy == nil { found.insert(.unconfiguredDispatch) }
+                    if attempt.outcome == .pending { found.insert(.pendingDispatch) }
+                    else if attempt.outcome != .documentCommitted { found.insert(.unsuccessfulDispatch) }
+                    if attempt.requestedOrigin == nil || (attempt.outcome == .documentCommitted && attempt.committedOrigin == nil) {
+                        found.insert(.unknownDispatchOrigin)
+                    }
+                }
+                let policies = history.policyInstallations.map(\.policy) + history.attempts.compactMap(\.policy)
+                    + history.observations.filter { $0.surface == .mainDocument }.compactMap(\.configuredPolicy)
+                for policy in policies {
+                    if policy.taskID != sources.goal.taskID || policy.rootDigest != sources.goal.rootDigest { found.insert(.foreignGoalPolicy) }
+                    else if policy.goalRevision != sources.goal.digest { found.insert(.earlierGoalPolicy) }
+                    else if sources.unresolved.isEmpty && !sources.matchesNavigationPolicy(policy) { found.insert(.mismatchedPolicy) }
+                }
+                for observation in history.observations {
+                    if [.pendingSlot, .observedSlot].contains(observation.binding) { found.insert(.weakObservationBinding) }
+                    if observation.binding == .none { found.insert(.unattributedObservation) }
+                    if observation.phase == .unorderedLocationChange { found.insert(.unorderedObservation) }
+                }
+                if !history.controlEvents.isEmpty { found.insert(.controlEpisodesUnreconciled) }
+            } else { found.insert(.historyUnavailable) }
+            gaps = Gap.allCases.filter(found.contains)
+        }
+
+        var plannerContext: [String: Any] {
+            ["status":"unverified", "gaps":gaps.map(\.rawValue), "retained_attempt_count":attemptCount,
+             "retained_observation_count":observationCount, "retained_control_event_count":controlEventCount,
+             "retained_policy_installation_count":policyInstallationCount,
+             "blocked_source_observation_count":blockedSourceObservationCount]
+        }
+    }
     enum Status: String, Sendable {
         case needsSemanticVerification, needsResultSet, uncompiledRequirement, clarificationApplied
         case needsTicketInventory, needsPartyCapacity
@@ -57,6 +125,7 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
     let interpretationDigest: String
     let requirements: [Requirement]
     let candidates: [Candidate]
+    let navigationHistory: NavigationHistory?
     private let readingIdentity: String
 
     init(interpretation: ComputerUseBrowserGoalProposal, reading: ComputerUseBrowserResultCandidates) throws {
@@ -65,6 +134,7 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
         goalRevision = interpretation.input.digest; interpretationDigest = interpretation.digest
         readingIdentity = reading.requirementAssessmentIdentity
         let scalars = Scalars(proposal: interpretation), sources = ComputerUseBrowserSourceRequirements(proposal: interpretation)
+        navigationHistory = reading.navigationHistoryAssessment(for: sources)
         let unresolvedSources = Set(sources.unresolved.map(\.requirementID))
         let conditions = Dictionary(uniqueKeysWithValues: scalars.entries.map { ($0.requirementID, $0.resolution) })
         requirements = interpretation.requirements.map { requirement in
@@ -212,11 +282,11 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
     /// Planning gets indices and existing text references, never native URLs,
     /// goal/session hashes, candidate authority or invented normalized prose.
     var plannerContext: [String: Any] {
-        let navigationAssessment = requirements.contains { $0.field == .navigationSource }
+        let navigationAssessment = navigationHistory != nil || requirements.contains { $0.field == .navigationSource }
             || candidates.contains { $0.requirements.contains { $0.status == .navigationHistoryUnverified } }
         let policyAssessment = requirements.contains { $0.field == .answerSource }
             || candidates.contains { $0.requirements.contains { $0.status == .sourcePolicyMismatch } }
-        return ["version":navigationAssessment ? 6 : (policyAssessment ? 5 : (candidates.contains { $0.quotes.contains { !$0.controlIDs.isEmpty } } ? 4 : 3)),
+        var context: [String: Any] = ["version":navigationAssessment ? 7 : (policyAssessment ? 5 : (candidates.contains { $0.quotes.contains { !$0.controlIDs.isEmpty } } ? 4 : 3)),
          "requirements":requirements.enumerated().map { index, value in
              ["index":index, "turn":value.turn, "sourceByteOffset":value.sourceByteOffset, "sourceByteCount":value.sourceByteCount,
               "role":value.role.rawValue, "field":value.field.rawValue, "relation":value.relation.rawValue,
@@ -228,6 +298,8 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
                   "source_kind":$0.sourceKind.rawValue, "parsed":$0.literal != nil] as [String: Any]
              }, "requirements":candidate.requirements.map(\.status.rawValue)] as [String: Any]
          }]
+        if let navigationHistory { context["navigation_history_at_reading"] = navigationHistory.plannerContext }
+        return context
     }
 
     private static func parse(_ source: String, kind: ComputerUseBrowserResultProposal.Kind) -> Scalars.Literal? {
