@@ -41,6 +41,8 @@ Seven changed Swift files passed `swiftc -frontend -parse`. Source inventories s
 
 ## Remaining repair order
 
+Source follow-up: [control-episode reconciliation](BROWSER_CONTROL_EPISODE_RECONCILIATION_REVIEW.md) now separates and pairs recorded native handback, owner Resume and sign-in lifetimes. Navigation-episode, claim/scope, policy-lineage and platform qualification remain open.
+
 1. Reconcile native observation episodes with dispatches and ordered control transitions. Exact owner/receipt correspondence does not upgrade a weak callback association or an unrecorded episode.
 2. Define and reconcile temporal source-policy/goal lineage, including legitimate clarification/replacement and manual login boundaries. A configured policy mismatch is not automatically proof of a prohibited visit.
 3. Qualify supported macOS/WebKit callback coverage, then replace the [navigation-source completion gate](BROWSER_NAVIGATION_SOURCE_COMPLETION_GATE_REVIEW.md) with qualified current and retained-history evidence.

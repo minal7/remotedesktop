@@ -772,6 +772,13 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
         XCTAssertNil(browser.currentDocument(taskID: "incomplete-login"))
         allowed = true
         let closedHistory = try browser.navigationDispatchHistory(taskID: "incomplete-login")
+        let controlAssessment = ComputerUseBrowserResultAssessment.ControlHistory(history: closedHistory)
+        XCTAssertEqual(controlAssessment.closedSignInWindowCount, 1)
+        XCTAssertEqual(controlAssessment.openSignInWindowCount, 0)
+        XCTAssertEqual(controlAssessment.completedNativeHandbackCount, 0)
+        XCTAssertEqual(controlAssessment.completedWorkflowResumeCount, 0)
+        XCTAssertTrue(controlAssessment.gaps.contains(.signInWindowWithoutRecordedPause),
+            "The fixture's paused window controls are not a research-owner Pause record")
         let opened = try XCTUnwrap(closedHistory.controlEvents.first { $0.phase == .signInWindowOpened })
         let closed = try XCTUnwrap(closedHistory.controlEvents.first { $0.phase == .signInWindowClosed })
         XCTAssertNotNil(opened.signInWindowID); XCTAssertEqual(opened.signInWindowID, closed.signInWindowID)
@@ -866,6 +873,13 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
             let current = try XCTUnwrap(browser.currentDocument(taskID: "popup-login"))
             XCTAssertEqual(current.source, .userControlObservation)
             let history = try browser.navigationDispatchHistory(taskID: "popup-login")
+            let controlAssessment = ComputerUseBrowserResultAssessment.ControlHistory(history: history)
+            XCTAssertEqual(controlAssessment.closedSignInWindowCount, 1)
+            XCTAssertEqual(controlAssessment.completedNativeHandbackCount, 1)
+            XCTAssertEqual(controlAssessment.failedNativeHandbackCount, 1)
+            XCTAssertEqual(controlAssessment.completedWorkflowResumeCount, 0)
+            XCTAssertFalse(controlAssessment.gaps.contains(.signInObservationOutsideLifetime))
+            XCTAssertTrue(controlAssessment.gaps.contains(.nativeHandbackWithoutWorkflow))
             let signInObservations = history.observations.filter { $0.surface == .signInWindow }
             let opened = try XCTUnwrap(history.controlEvents.first { $0.phase == .signInWindowOpened })
             let closed = try XCTUnwrap(history.controlEvents.first { $0.phase == .signInWindowClosed })

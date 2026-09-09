@@ -4,6 +4,74 @@ import XCTest
 
 @MainActor
 final class ComputerUseBrowserSourcePolicyTests: XCTestCase {
+    func testPairedWorkflowFailureCanBeFollowedByAValidResumeWithoutErasingTheFailure() async throws {
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+        defer { browser.close() }
+        let input = try goal(), session = try browser.prepareWorkflowSession(taskID: input.taskID)
+        browser.recordWorkflowControl(.workflowPaused, requirement: session)
+        let failedID = UUID()
+        browser.recordWorkflowControl(.workflowResumeStarted, requirement: session, operationID: failedID)
+        try await browser.reacquireAfterUserControl(taskID: input.taskID, requirement: session, workflowOperationID: failedID)
+        // Model the owner's separate page/authentication check failing after
+        // native return; these calls exercise history reconciliation only.
+        browser.recordWorkflowControl(.workflowResumeFailed, requirement: session, operationID: failedID)
+        let failed = ComputerUseBrowserResultAssessment.ControlHistory(history: try browser.navigationDispatchHistory(taskID: input.taskID))
+        XCTAssertEqual(failed.completedNativeHandbackCount, 1); XCTAssertEqual(failed.completedWorkflowResumeCount, 0)
+        XCTAssertEqual(failed.failedWorkflowResumeCount, 1); XCTAssertEqual(failed.unclosedPauseScopeCount, 1)
+        XCTAssertEqual(failed.gaps, [.unclosedPause])
+        let resumedID = UUID()
+        browser.recordWorkflowControl(.workflowResumeStarted, requirement: session, operationID: resumedID)
+        try await browser.reacquireAfterUserControl(taskID: input.taskID, requirement: session, workflowOperationID: resumedID)
+        browser.recordWorkflowControl(.workflowResumed, requirement: session, operationID: resumedID)
+        let resumed = ComputerUseBrowserResultAssessment.ControlHistory(history: try browser.navigationDispatchHistory(taskID: input.taskID))
+        XCTAssertEqual(resumed.completedNativeHandbackCount, 2); XCTAssertEqual(resumed.completedWorkflowResumeCount, 1)
+        XCTAssertEqual(resumed.failedWorkflowResumeCount, 1); XCTAssertEqual(resumed.unclosedPauseScopeCount, 0)
+        XCTAssertTrue(resumed.gaps.isEmpty)
+    }
+
+    func testAnotherPauseInvalidatesAnEarlierResumeEvenAfterNativeHandbackReturned() async throws {
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+        defer { browser.close() }
+        let input = try goal(), session = try browser.prepareWorkflowSession(taskID: input.taskID), id = UUID()
+        browser.recordWorkflowControl(.workflowPaused, requirement: session)
+        browser.recordWorkflowControl(.workflowResumeStarted, requirement: session, operationID: id)
+        try await browser.reacquireAfterUserControl(taskID: input.taskID, requirement: session, workflowOperationID: id)
+        browser.recordWorkflowControl(.workflowPaused, requirement: session)
+        browser.recordWorkflowControl(.workflowResumed, requirement: session, operationID: id)
+        let assessment = ComputerUseBrowserResultAssessment.ControlHistory(history: try browser.navigationDispatchHistory(taskID: input.taskID))
+        XCTAssertEqual(assessment.completedNativeHandbackCount, 1); XCTAssertEqual(assessment.completedWorkflowResumeCount, 0)
+        XCTAssertEqual(assessment.unclosedPauseScopeCount, 1)
+        XCTAssertTrue(assessment.gaps.contains(.resumeAfterAnotherPause)); XCTAssertTrue(assessment.gaps.contains(.unclosedPause))
+    }
+
+    func testMissingNativeHandbackAndReusedWorkflowIdentityCannotCompleteARecordedResume() throws {
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+        defer { browser.close() }
+        let input = try goal(), session = try browser.prepareWorkflowSession(taskID: input.taskID), id = UUID()
+        browser.recordWorkflowControl(.workflowPaused, requirement: session)
+        browser.recordWorkflowControl(.workflowResumeStarted, requirement: session, operationID: id)
+        browser.recordWorkflowControl(.workflowResumed, requirement: session, operationID: id)
+        browser.recordWorkflowControl(.workflowResumeStarted, requirement: session, operationID: id)
+        browser.recordWorkflowControl(.workflowResumed, requirement: session, operationID: id)
+        let assessment = ComputerUseBrowserResultAssessment.ControlHistory(history: try browser.navigationDispatchHistory(taskID: input.taskID))
+        XCTAssertEqual(assessment.completedNativeHandbackCount, 0); XCTAssertEqual(assessment.completedWorkflowResumeCount, 0)
+        XCTAssertTrue(assessment.gaps.contains(.resumeWithoutNativeHandback))
+        XCTAssertTrue(assessment.gaps.contains(.reusedOperation)); XCTAssertTrue(assessment.gaps.contains(.unmatchedWorkflowResume))
+        XCTAssertEqual(assessment.unclosedPauseScopeCount, 1)
+    }
+
+    func testStandaloneNativeHandbackCannotSupplyAMissingOwnerResumeOperation() async throws {
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+        defer { browser.close() }
+        let input = try goal(), session = try browser.prepareWorkflowSession(taskID: input.taskID)
+        try await browser.reacquireAfterUserControl(taskID: input.taskID, requirement: session)
+        browser.recordWorkflowControl(.workflowResumed, requirement: session, operationID: UUID())
+        let assessment = ComputerUseBrowserResultAssessment.ControlHistory(history: try browser.navigationDispatchHistory(taskID: input.taskID))
+        XCTAssertEqual(assessment.completedNativeHandbackCount, 1); XCTAssertEqual(assessment.completedWorkflowResumeCount, 0)
+        XCTAssertTrue(assessment.gaps.contains(.nativeHandbackWithoutWorkflow))
+        XCTAssertTrue(assessment.gaps.contains(.unmatchedWorkflowResume))
+    }
+
     func testConfirmedAttemptRequiresTheNativeReceiptAndRemainsReadableDuringPauseWithoutQueryingControl() async throws {
         let server = try OwnedBrowserHTTPFixture(), base = try await server.start()
         defer { server.stop() }
@@ -134,6 +202,10 @@ final class ComputerUseBrowserSourcePolicyTests: XCTestCase {
         XCTAssertEqual(pause.phase, .workflowPaused)
         try await owner.resumeAfterUserControl()
         let resumed = try fixture.browser.navigationDispatchHistory(taskID: owner.taskID)
+        let controlAssessment = ComputerUseBrowserResultAssessment.ControlHistory(history: resumed)
+        XCTAssertEqual(controlAssessment.completedNativeHandbackCount, 1)
+        XCTAssertEqual(controlAssessment.completedWorkflowResumeCount, 1)
+        XCTAssertEqual(controlAssessment.unclosedPauseScopeCount, 0); XCTAssertTrue(controlAssessment.gaps.isEmpty)
         let workflowStart = try XCTUnwrap(resumed.controlEvents.first { $0.phase == .workflowResumeStarted })
         let nativeStart = try XCTUnwrap(resumed.controlEvents.first { $0.phase == .nativeReacquisitionStarted })
         let nativeFinish = try XCTUnwrap(resumed.controlEvents.first { $0.phase == .nativeReacquisitionFinished })
@@ -170,6 +242,12 @@ final class ComputerUseBrowserSourcePolicyTests: XCTestCase {
         do { try await owner.resumeAfterUserControl(); XCTFail("The new authentication control requires continued user intervention") }
         catch { XCTAssertEqual(error as? ComputerUseBrowserError, .authenticationRequired) }
         let after = try fixture.browser.navigationDispatchHistory(taskID: owner.taskID)
+        let controlAssessment = ComputerUseBrowserResultAssessment.ControlHistory(history: after)
+        XCTAssertEqual(controlAssessment.completedNativeHandbackCount, 1)
+        XCTAssertEqual(controlAssessment.failedWorkflowResumeCount, 1)
+        XCTAssertEqual(controlAssessment.completedWorkflowResumeCount, 0)
+        XCTAssertEqual(controlAssessment.unclosedPauseScopeCount, 1)
+        XCTAssertTrue(controlAssessment.gaps.contains(.unclosedPause))
         let nativeFinish = try XCTUnwrap(after.controlEvents.first { $0.phase == .nativeReacquisitionFinished })
         let workflowFailure = try XCTUnwrap(after.controlEvents.first { $0.phase == .workflowResumeFailed })
         XCTAssertNotNil(nativeFinish.workflowOperationID)

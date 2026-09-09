@@ -5,6 +5,176 @@ import Foundation
 /// or whole-goal fulfillment. No completion flag or answer text is produced.
 struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     typealias Scalars = ComputerUseBrowserScalarRequirements
+    /// Reconcile recorded control episodes only. Even a complete pair does
+    /// not prove authentication, callback coverage or authority to act now.
+    struct ControlHistory: Equatable, Sendable {
+        typealias History = ComputerUseBrowserNavigationDispatchHistory
+        typealias Event = History.ControlEvent
+        enum Gap: String, CaseIterable, Hashable, Sendable {
+            case claimBoundary, discardedClaimHistory, controlOverflow, observationOverflow
+            case malformedEvent, outOfOrderEvents, bindingMismatch, reusedOperation, overlappingWorkflowResumes
+            case unmatchedNativeHandback, nativeHandbackWithoutWorkflow, unmatchedWorkflowResume
+            case resumeWithoutPause, resumeAfterAnotherPause, resumeWithoutNativeHandback, unclosedPause
+            case unmatchedSignInWindow, overlappingSignInWindows, signInWindowWithoutRecordedPause
+            case openSignInWindow, signInObservationOutsideLifetime, resumeWithSignInWindow
+        }
+        private struct Context: Hashable {
+            let session: UUID
+            let epoch: UUID
+            init(_ event: Event) { session = event.parentSessionID; epoch = event.ownershipEpoch }
+        }
+        let completedNativeHandbackCount: Int
+        let failedNativeHandbackCount: Int
+        let completedWorkflowResumeCount: Int
+        let failedWorkflowResumeCount: Int
+        let admittedContextCount: Int
+        let closedSignInWindowCount: Int
+        let openSignInWindowCount: Int
+        let unclosedPauseScopeCount: Int
+        let gaps: [Gap]
+
+        init(history: History) {
+            var found: Set<Gap> = []
+            if history.hasClaimBoundary { found.insert(.claimBoundary) }
+            if history.beganAfterAnotherClaim { found.insert(.discardedClaimHistory) }
+            if history.controlEventsOverflowed { found.insert(.controlOverflow) }
+            if history.observationsOverflowed { found.insert(.observationOverflow) }
+            var native: [UUID: Event] = [:], workflows: [UUID: Event] = [:], pauses: [Context: Event] = [:]
+            var nativeTerminalsByWorkflow: [UUID: (start: Event, terminal: Event)] = [:], nativeCountsByWorkflow: [UUID: Int] = [:]
+            var invalidWorkflows: Set<UUID> = []
+            var seenNative: Set<UUID> = [], seenWorkflows: Set<UUID> = []
+            var windows: [UUID: (open: Event, close: Event?)] = [:]
+            var nativeSuccesses = 0, nativeFailures = 0, workflowSuccesses = 0, workflowFailures = 0, admissions = 0, closedWindows = 0
+            var lastOrder: Int?
+            func sameBinding(_ first: Event, _ second: Event) -> Bool {
+                Context(first) == Context(second) && first.handback == second.handback
+            }
+            for event in history.controlEvents {
+                if let lastOrder, event.order <= lastOrder { found.insert(.outOfOrderEvents) }
+                lastOrder = event.order
+                let context = Context(event)
+                if [.signInWindowOpened, .signInWindowClosed].contains(event.phase) {
+                    guard let id = event.signInWindowID, event.handback == nil,
+                          event.workflowOperationID == nil, event.nativeOperationID == nil else {
+                        found.insert(.malformedEvent); continue
+                    }
+                    if event.phase == .signInWindowOpened {
+                        guard windows[id] == nil else { found.insert(.unmatchedSignInWindow); continue }
+                        if pauses[context] == nil { found.insert(.signInWindowWithoutRecordedPause) }
+                        if windows.values.contains(where: { Context($0.open) == context && $0.close == nil }) { found.insert(.overlappingSignInWindows) }
+                        windows[id] = (event, nil)
+                    } else {
+                        guard let window = windows[id], window.close == nil, window.open.order < event.order,
+                              Context(window.open) == context else { found.insert(.unmatchedSignInWindow); continue }
+                        windows[id] = (window.open, event); closedWindows += 1
+                    }
+                    continue
+                }
+                guard let requirement = event.handback, requirement.taskID == history.taskID else {
+                    found.insert(.malformedEvent); continue
+                }
+                switch event.phase {
+                case .workflowPaused:
+                    guard event.workflowOperationID == nil, event.nativeOperationID == nil else { found.insert(.malformedEvent); continue }
+                    // A second Pause invalidates a suspended Resume, even
+                    // though both records bind the same native session.
+                    pauses[context] = event
+                case .workflowResumeStarted, .workflowContextAdmitted:
+                    guard let id = event.workflowOperationID, event.nativeOperationID == nil else { found.insert(.malformedEvent); continue }
+                    guard seenWorkflows.insert(id).inserted else { found.insert(.reusedOperation); invalidWorkflows.insert(id); continue }
+                    let overlapping = workflows.filter { Context($0.value) == context }.map(\.key)
+                    if !overlapping.isEmpty {
+                        found.insert(.overlappingWorkflowResumes); invalidWorkflows.formUnion(overlapping); invalidWorkflows.insert(id)
+                    }
+                    if event.phase == .workflowResumeStarted {
+                        if let pause = pauses[context] {
+                            if !sameBinding(pause, event) { found.insert(.bindingMismatch); invalidWorkflows.insert(id) }
+                        } else { found.insert(.resumeWithoutPause); invalidWorkflows.insert(id) }
+                    } else {
+                        // This root had no owned context in which to record
+                        // its earlier Pause. Native admission starts its pair.
+                        pauses[context] = event; admissions += 1
+                    }
+                    workflows[id] = event
+                case .nativeReacquisitionStarted:
+                    guard let id = event.nativeOperationID else { found.insert(.malformedEvent); continue }
+                    guard seenNative.insert(id).inserted else { found.insert(.reusedOperation); continue }
+                    native[id] = event
+                    if let ownerID = event.workflowOperationID {
+                        nativeCountsByWorkflow[ownerID, default: 0] += 1
+                        if let owner = workflows[ownerID], owner.phase == .workflowResumeStarted {
+                            if !sameBinding(owner, event) { found.insert(.bindingMismatch); invalidWorkflows.insert(ownerID) }
+                        } else { found.insert(.nativeHandbackWithoutWorkflow); invalidWorkflows.insert(ownerID) }
+                    } else { found.insert(.nativeHandbackWithoutWorkflow) }
+                case .nativeReacquisitionFinished, .nativeReacquisitionFailed:
+                    guard let id = event.nativeOperationID, let start = native[id], start.order < event.order else {
+                        found.insert(.unmatchedNativeHandback); continue
+                    }
+                    guard sameBinding(start, event), start.workflowOperationID == event.workflowOperationID else {
+                        found.insert(.bindingMismatch); continue
+                    }
+                    native.removeValue(forKey: id)
+                    if event.phase == .nativeReacquisitionFinished { nativeSuccesses += 1 } else { nativeFailures += 1 }
+                    if let ownerID = event.workflowOperationID { nativeTerminalsByWorkflow[ownerID] = (start, event) }
+                case .workflowResumed, .workflowResumeFailed:
+                    guard let id = event.workflowOperationID, event.nativeOperationID == nil,
+                          let start = workflows[id], start.order < event.order else { found.insert(.unmatchedWorkflowResume); continue }
+                    guard sameBinding(start, event) else { found.insert(.bindingMismatch); continue }
+                    workflows.removeValue(forKey: id)
+                    if event.phase == .workflowResumeFailed {
+                        workflowFailures += 1
+                        // Failure is a paired historical outcome, not a
+                        // successful handback. A later Resume may close Pause.
+                        continue
+                    }
+                    var accepted = !invalidWorkflows.contains(id)
+                    if let pause = pauses[context] {
+                        if pause.order > start.order { found.insert(.resumeAfterAnotherPause); accepted = false }
+                        if !sameBinding(pause, event) { found.insert(.bindingMismatch); accepted = false }
+                    } else { found.insert(.resumeWithoutPause); accepted = false }
+                    if start.phase == .workflowResumeStarted {
+                        if let pair = nativeTerminalsByWorkflow[id], pair.terminal.phase == .nativeReacquisitionFinished,
+                           nativeCountsByWorkflow[id] == 1, start.order < pair.start.order, pair.terminal.order < event.order,
+                           sameBinding(pair.terminal, event),
+                           !native.values.contains(where: { $0.workflowOperationID == id }) {
+                            // Native return and owner acceptance remain two
+                            // separately counted, correctly ordered outcomes.
+                        } else { found.insert(.resumeWithoutNativeHandback); accepted = false }
+                    }
+                    if event.signInWindowID != nil || windows.values.contains(where: { Context($0.open) == context && $0.close == nil }) {
+                        found.insert(.resumeWithSignInWindow); accepted = false
+                    }
+                    if accepted { workflowSuccesses += 1; pauses.removeValue(forKey: context) }
+                case .signInWindowOpened, .signInWindowClosed: break
+                }
+            }
+            for observation in history.observations where observation.surface == .signInWindow {
+                guard let id = observation.signInWindowID, let window = windows[id], window.open.order < observation.order,
+                      window.close.map({ observation.order < $0.order }) ?? true,
+                      observation.parentSessionID == window.open.parentSessionID,
+                      observation.ownershipEpoch == window.open.ownershipEpoch else {
+                    found.insert(.signInObservationOutsideLifetime); continue
+                }
+            }
+            if !native.isEmpty { found.insert(.unmatchedNativeHandback) }
+            if !workflows.isEmpty { found.insert(.unmatchedWorkflowResume) }
+            if !pauses.isEmpty { found.insert(.unclosedPause) }
+            let openWindows = windows.values.filter { $0.close == nil }.count
+            if openWindows > 0 { found.insert(.openSignInWindow) }
+            completedNativeHandbackCount = nativeSuccesses; failedNativeHandbackCount = nativeFailures
+            completedWorkflowResumeCount = workflowSuccesses; failedWorkflowResumeCount = workflowFailures
+            admittedContextCount = admissions; closedSignInWindowCount = closedWindows; openSignInWindowCount = openWindows
+            unclosedPauseScopeCount = pauses.count; gaps = Gap.allCases.filter(found.contains)
+        }
+
+        var plannerContext: [String: Any] {
+            ["completed_native_handback_count":completedNativeHandbackCount, "failed_native_handback_count":failedNativeHandbackCount,
+             "completed_workflow_resume_count":completedWorkflowResumeCount, "failed_workflow_resume_count":failedWorkflowResumeCount,
+             "admitted_context_count":admittedContextCount, "closed_sign_in_window_count":closedSignInWindowCount,
+             "open_sign_in_window_count":openSignInWindowCount, "unclosed_pause_scope_count":unclosedPauseScopeCount,
+             "gaps":gaps.map(\.rawValue)]
+        }
+    }
     /// Diagnostic facts about a frozen native history. There is deliberately
     /// no success value: episode reconciliation and coverage remain open.
     struct NavigationHistory: Equatable, Sendable {
@@ -25,6 +195,7 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
         let policyInstallationCount: Int
         let ownerVisitCount: Int?
         let matchedOwnerVisitCount: Int
+        let controlHistory: ControlHistory?
         /// Callback count, not distinct requests and not proof of a violation:
         /// the native policy may have successfully prevented the request.
         let blockedSourceObservationCount: Int
@@ -36,6 +207,7 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
             controlEventCount = history?.controlEvents.count ?? 0; policyInstallationCount = history?.policyInstallations.count ?? 0
             blockedSourceObservationCount = history?.observations.filter { $0.policyCheck == .blocked }.count ?? 0
             ownerVisitCount = ownerVisits?.count
+            controlHistory = history.map { ControlHistory(history: $0) }
             var found: Set<Gap> = [.platformCoverageUnqualified]
             var matched: Set<UUID> = []
             if !sources.unresolved.isEmpty { found.insert(.unresolvedSourceRequirements) }
@@ -67,7 +239,7 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
                     if observation.binding == .none { found.insert(.unattributedObservation) }
                     if observation.phase == .unorderedLocationChange { found.insert(.unorderedObservation) }
                 }
-                if !history.controlEvents.isEmpty { found.insert(.controlEpisodesUnreconciled) }
+                if controlHistory?.gaps.isEmpty == false { found.insert(.controlEpisodesUnreconciled) }
                 if let ownerVisits {
                     var previousOrder: Int?
                     for visit in ownerVisits {
@@ -105,6 +277,7 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
              "retained_observation_count":observationCount, "retained_control_event_count":controlEventCount,
              "retained_policy_installation_count":policyInstallationCount,
              "owner_visit_count":ownerVisitCount.map { $0 as Any } ?? NSNull(), "matched_owner_visit_count":matchedOwnerVisitCount,
+             "control_history":controlHistory.map { $0.plannerContext as Any } ?? NSNull(),
              "blocked_source_observation_count":blockedSourceObservationCount]
         }
     }
@@ -321,7 +494,7 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
             || candidates.contains { $0.requirements.contains { $0.status == .navigationHistoryUnverified } }
         let policyAssessment = requirements.contains { $0.field == .answerSource }
             || candidates.contains { $0.requirements.contains { $0.status == .sourcePolicyMismatch } }
-        var context: [String: Any] = ["version":navigationAssessment ? 8 : (policyAssessment ? 5 : (candidates.contains { $0.quotes.contains { !$0.controlIDs.isEmpty } } ? 4 : 3)),
+        var context: [String: Any] = ["version":navigationAssessment ? 9 : (policyAssessment ? 5 : (candidates.contains { $0.quotes.contains { !$0.controlIDs.isEmpty } } ? 4 : 3)),
          "requirements":requirements.enumerated().map { index, value in
              ["index":index, "turn":value.turn, "sourceByteOffset":value.sourceByteOffset, "sourceByteCount":value.sourceByteCount,
               "role":value.role.rawValue, "field":value.field.rawValue, "relation":value.relation.rawValue,
