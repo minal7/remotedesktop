@@ -290,6 +290,10 @@ struct ComputerUseBrowserResultCandidates: Sendable, CustomStringConvertible, Cu
         goalInterpretation?.digest == current.goalInterpretation?.digest && answerSourcePolicy == current.answerSourcePolicy
     }
 
+    func matchesAnswerSourceRequirements(_ requirements: ComputerUseBrowserSourceRequirements) -> Bool {
+        goalRevision == requirements.goal.digest && requirements.matchesAnswerPolicy(answerSourcePolicy)
+    }
+
     func answerPage(goal: ComputerUseBrowserGoalInput) -> ComputerUseBrowserResearchAnswer.Page? {
         guard goalRevision == goal.digest, rootTaskID == goal.taskID,
               let interpretation = goalInterpretation,

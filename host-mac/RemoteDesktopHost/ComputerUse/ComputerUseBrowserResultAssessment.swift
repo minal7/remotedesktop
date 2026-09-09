@@ -15,7 +15,7 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
         case quotedValueMatches, quotedValueConflicts, incompatibleLiteral
         case reviewMixedOffers, reviewUnresolved, reviewPageContext, reviewQualifiedPrice
         case reviewRequirementSupported, reviewRequirementConflict, reviewRequirementUnresolved
-        case sourceOriginPermitted, sourceOriginExcluded, sourceUnconfigured, incompletePage
+        case sourceOriginPermitted, sourceOriginExcluded, sourceUnconfigured, sourcePolicyMismatch, incompletePage
     }
     struct Requirement: Equatable, Sendable {
         let id: String
@@ -92,7 +92,11 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
                 guard interpretation.disposition == .research else { return result(.uncompiledRequirement) }
                 if case .clarification? = conditions[requirement.id] { return result(.clarificationApplied) }
                 if unresolvedSources.contains(requirement.id) { return result(.uncompiledRequirement) }
+                if sources.hasAnswerPolicyObligation(for: requirement.id), reading.documentAnswerSourceStatus != .unconfigured,
+                   !reading.matchesAnswerSourceRequirements(sources) { return result(.sourcePolicyMismatch) }
                 if requirement.field == .answerSource {
+                    guard reading.documentAnswerSourceStatus != .unconfigured else { return result(.sourceUnconfigured) }
+                    guard reading.matchesAnswerSourceRequirements(sources) else { return result(.sourcePolicyMismatch) }
                     switch reading.documentAnswerSourceStatus {
                     case .unconfigured: return result(.sourceUnconfigured)
                     case .excluded: return result(.sourceOriginExcluded)
@@ -203,7 +207,9 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
     /// Planning gets indices and existing text references, never native URLs,
     /// goal/session hashes, candidate authority or invented normalized prose.
     var plannerContext: [String: Any] {
-        ["version":candidates.contains { $0.quotes.contains { !$0.controlIDs.isEmpty } } ? 4 : 3,
+        let policyAssessment = requirements.contains { $0.field == .answerSource }
+            || candidates.contains { $0.requirements.contains { $0.status == .sourcePolicyMismatch } }
+        return ["version":policyAssessment ? 5 : (candidates.contains { $0.quotes.contains { !$0.controlIDs.isEmpty } } ? 4 : 3),
          "requirements":requirements.enumerated().map { index, value in
              ["index":index, "turn":value.turn, "sourceByteOffset":value.sourceByteOffset, "sourceByteCount":value.sourceByteCount,
               "role":value.role.rawValue, "field":value.field.rawValue, "relation":value.relation.rawValue,

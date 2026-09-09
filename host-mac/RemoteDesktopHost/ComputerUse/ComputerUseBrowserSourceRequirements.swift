@@ -177,4 +177,21 @@ struct ComputerUseBrowserSourceRequirements: Sendable {
         }
         return nil
     }
+
+    /// Match the policy that actually governed this reading, not merely a
+    /// permitted-origin label from an unrelated or looser configuration.
+    /// Extra filtering remains usable when the goal has no answer-source clause.
+    func matchesAnswerPolicy(_ policy: ComputerUseBrowserAnswerSourcePolicy?) -> Bool {
+        guard isResearch, unresolved.isEmpty, let policy, policy.goalRevision == goal.digest else { return false }
+        guard !answers.requirementIDs.isEmpty else { return true }
+        guard let expected = try? ComputerUseBrowserAnswerSourcePolicy(goal: goal,
+            allowedOrigins: answers.allowed.map(Array.init), excludedOrigins: Array(answers.excluded)) else { return false }
+        return policy == expected
+    }
+
+    /// A resegmented row may contain other work as well. This identifies
+    /// an additional source-policy obligation, not its complete meaning.
+    func hasAnswerPolicyObligation(for requirementID: String) -> Bool {
+        answers.requirementIDs.contains(requirementID)
+    }
 }

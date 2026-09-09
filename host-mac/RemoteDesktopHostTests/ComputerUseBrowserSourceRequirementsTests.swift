@@ -190,6 +190,44 @@ final class ComputerUseBrowserSourceRequirementsTests: XCTestCase {
         XCTAssertEqual(sources.policy.goalRevision, second.digest)
     }
 
+    func testAnswerPolicyMatchingRequiresTheCurrentCompiledOriginSets() throws {
+        let current = try proposal([row("Find tickets. "), row("Only report from tickets.test. ", field: "answerSource", values: ["tickets.test"]),
+            row("Exclude blocked.test.", role: "prohibition", field: "answerSource", relation: "exclude", values: ["blocked.test"])])
+        let compiled = ComputerUseBrowserSourceRequirements(proposal: current)
+        let tickets = try ComputerUseBrowserSourceOrigin(url("https://tickets.test")), blocked = try ComputerUseBrowserSourceOrigin(url("https://blocked.test"))
+        let other = try ComputerUseBrowserSourceOrigin(url("https://other.test"))
+        let expected = try ComputerUseBrowserAnswerSourcePolicy(goal: current.input, allowedOrigins: [tickets], excludedOrigins: [blocked])
+        XCTAssertTrue(compiled.matchesAnswerPolicy(expected))
+        XCTAssertFalse(compiled.matchesAnswerPolicy(nil))
+        for policy in [try ComputerUseBrowserAnswerSourcePolicy(goal: current.input),
+            try .init(goal: current.input, allowedOrigins: [tickets,other], excludedOrigins: [blocked]),
+            try .init(goal: current.input, allowedOrigins: [tickets]),
+            try .init(goal: goal(current.input.prompt, id: "foreign-root"), allowedOrigins: [tickets], excludedOrigins: [blocked])] {
+            XCTAssertFalse(compiled.matchesAnswerPolicy(policy))
+        }
+    }
+
+    func testAnswerPolicyMatchingIncludesHistoricalRestrictionsHiddenByResegmentation() throws {
+        let initial = try proposal([row("Find tickets. "), row("Do not report from blocked.test.", role: "prohibition", field: "answerSource", relation: "exclude", values: ["blocked.test"])])
+        let continued = try answered(initial, with: "Tomorrow.")
+        let latest = try proposal([row(initial.input.prompt), row("Tomorrow.", field: "date", relation: "equal", values: ["Tomorrow"], turn: 1)], input: continued)
+        let compiled = ComputerUseBrowserSourceRequirements(proposal: latest)
+        XCTAssertFalse(latest.requirements.contains { $0.field == .answerSource })
+        XCTAssertTrue(compiled.hasAnswerPolicyObligation(for: latest.requirements[0].id))
+        XCTAssertFalse(compiled.hasAnswerPolicyObligation(for: latest.requirements[1].id))
+        XCTAssertFalse(compiled.matchesAnswerPolicy(try .init(goal: continued)))
+        let policy = try ComputerUseBrowserAnswerSourcePolicy(goal: continued, excludedOrigins: [ComputerUseBrowserSourceOrigin(url("https://blocked.test"))])
+        XCTAssertTrue(compiled.matchesAnswerPolicy(policy))
+    }
+
+    func testGoalsWithoutAnswerSourceClausesCanUseAdditionalFilteringFromTheSameGoal() throws {
+        let current = try proposal([row("Find tickets.")]), compiled = ComputerUseBrowserSourceRequirements(proposal: current)
+        let blocked = try ComputerUseBrowserSourceOrigin(url("https://blocked.test"))
+        XCTAssertTrue(compiled.matchesAnswerPolicy(try .init(goal: current.input, excludedOrigins: [blocked])))
+        XCTAssertFalse(compiled.matchesAnswerPolicy(nil))
+        XCTAssertFalse(compiled.matchesAnswerPolicy(try .init(goal: goal(current.input.prompt, id: "other-root"), excludedOrigins: [blocked])))
+    }
+
     func testNativeCandidateEvidenceUsesItsCommittedOriginNotAllowedSiteNamesInPageText() async throws {
         let fixture = try await ResearchDriverFixture.make(additionalCardHTML: "<p>Official offers from allowed.test</p>")
         defer { fixture.close() }

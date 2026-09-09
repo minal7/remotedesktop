@@ -24,13 +24,15 @@ struct ComputerUseBrowserResearchAnswer: Equatable, Sendable, CustomStringConver
 
         init?(goal: ComputerUseBrowserGoalInput, reading: ComputerUseBrowserResultCandidates,
               interpretation: ComputerUseBrowserGoalProposal, source: String) {
+            let sourceRequirements = ComputerUseBrowserSourceRequirements(proposal: interpretation)
             guard interpretation.input == goal, interpretation.disposition == .research,
                   reading.documentAnswerSourceStatus == .permitted,
+                  reading.matchesAnswerSourceRequirements(sourceRequirements),
                   !reading.sourceTruncated, !reading.omittedStructure, !reading.omittedEmbeddedContent,
                   !reading.projectionOmittedRecords,
                   let review = reading.review, review.hasRequirementMapping,
                   let assessment = reading.requirementAssessment,
-                  ComputerUseBrowserSourceRequirements(proposal: interpretation).unresolved.isEmpty else { return nil }
+                  sourceRequirements.unresolved.isEmpty else { return nil }
             self.readingIdentity = reading.requirementAssessmentIdentity; self.source = source
             observedAtMilliseconds = reading.observedAtMilliseconds
             requirements = interpretation.requirements.compactMap { interpretation.source(of: $0) }
@@ -57,6 +59,13 @@ struct ComputerUseBrowserResearchAnswer: Equatable, Sendable, CustomStringConver
                 guard evaluations.count == interpretation.requirements.count else { continue }
                 let covered = interpretation.requirements.enumerated().allSatisfy { offset, requirement in
                     let status = evaluations[offset].status
+                    // A host-bound literal price parameter keeps its typed
+                    // meaning even if the model labeled it as a source clause.
+                    if status == .clarificationApplied { return [.outcome, .condition].contains(requirement.role) }
+                    // An answer-source exclusion is checked against the
+                    // native document and the exact compiled policy. It is
+                    // not an unsupported content prohibition or a page claim.
+                    if requirement.field == .answerSource { return status == .sourceOriginPermitted }
                     // Execution restrictions remain in the complete model
                     // request and answer ledger. They are not page facts.
                     if requirement.role == .prohibition {

@@ -4,6 +4,59 @@ import XCTest
 
 @MainActor
 final class ComputerUseBrowserResearchAnswerTests: XCTestCase {
+    func testAnswerSourceExclusionCanCompleteWithItsMatchedNativePolicy() async throws {
+        let fixture = try await ResearchAnswerFixture.make(answerExclusion: "blocked.test")
+        defer { fixture.source.close() }
+        fixture.source.policy.answerExcludedOrigins = [try .init(URL(string: "https://blocked.test")!)]
+        let result = try await fixture.source.start()
+        guard case .browserResearchAnswer(let answer)? = result else { return XCTFail("A verified source exclusion must allow a complete answer") }
+        let owner = try fixture.source.owner(), current = try await owner.revalidateCandidates()
+        let assessment = try XCTUnwrap(current.requirementAssessment)
+        let index = try XCTUnwrap(assessment.requirements.firstIndex { $0.field == .answerSource })
+        XCTAssertEqual(assessment.plannerContext["version"] as? Int, 5)
+        XCTAssertEqual(current.documentAnswerSourceStatus, .permitted)
+        XCTAssertEqual(assessment.candidates.first?.requirements[index].status, .sourceOriginPermitted)
+        XCTAssertTrue(answer.message.contains("Do not report results from blocked.test."))
+        XCTAssertTrue(answer.message.contains(fixture.source.base.appendingPathComponent("details").absoluteString))
+        XCTAssertEqual(fixture.source.server.count("/search?q=concerts"), 1)
+    }
+
+    func testPermittedDocumentUnderALooserPolicyCannotProveAnAnswerSourceRestriction() async throws {
+        let fixture = try await ResearchAnswerFixture.make(answerExclusion: "blocked.test")
+        defer { fixture.source.close() }
+        let result = try await fixture.source.start()
+        switch result {
+        case .browserResearchProgress, .userInterventionRequired: break
+        default: XCTFail("A looser reading policy cannot satisfy the requested source exclusion")
+        }
+        let owner = try fixture.source.owner(), current = try await owner.revalidateCandidates()
+        XCTAssertEqual(current.documentAnswerSourceStatus, .permitted)
+        let assessment = try XCTUnwrap(current.requirementAssessment)
+        let index = try XCTUnwrap(assessment.requirements.firstIndex { $0.field == .answerSource })
+        XCTAssertEqual(assessment.candidates.first?.requirements[index].status, .sourcePolicyMismatch)
+        XCTAssertEqual(assessment.plannerContext["version"] as? Int, 5)
+        XCTAssertNil(current.answerPage(goal: owner.input))
+        XCTAssertTrue(try XCTUnwrap(fixture.inputs.last).answerCounts.isEmpty)
+    }
+
+    func testMatchedAnswerSourcePolicyCannotSatisfyAnUnresolvedContentProhibition() async throws {
+        let fixture = try await ResearchAnswerFixture.make(extra: ("Do not include outdoor venues. ", "prohibition", "location"),
+            answerExclusion: "blocked.test")
+        defer { fixture.source.close() }
+        fixture.source.policy.answerExcludedOrigins = [try .init(URL(string: "https://blocked.test")!)]
+        let result = try await fixture.source.start()
+        switch result {
+        case .browserResearchProgress, .userInterventionRequired: break
+        default: XCTFail("Source eligibility cannot discharge a separate venue restriction")
+        }
+        let owner = try fixture.source.owner(), current = try await owner.revalidateCandidates()
+        let assessment = try XCTUnwrap(current.requirementAssessment)
+        let index = try XCTUnwrap(assessment.requirements.firstIndex { $0.field == .answerSource })
+        XCTAssertEqual(assessment.candidates.first?.requirements[index].status, .sourceOriginPermitted)
+        XCTAssertNil(current.answerPage(goal: owner.input))
+        XCTAssertTrue(try XCTUnwrap(fixture.inputs.last).answerCounts.isEmpty)
+    }
+
     func testMultiPageAnswerRecallsWholeEvidenceAndDeliversEachSourceAndObservationTime() async throws {
         let fixture = try await ResearchAnswerFixture.make(requested: 2, multiPage: true)
         defer { fixture.source.close() }
@@ -289,7 +342,7 @@ struct ResearchAnswerFixture {
                      includeControls: Bool = false, multiPage: Bool = false, repeatedPage: Bool = false,
                      historyRoute: Bool = false, controlHTML: String = "", resultDate: String? = nil, resultLocation: String? = nil,
                      surroundingHTML: String = "", controlRelationships: [ComputerUseBrowserControlRelevance.Relationship]? = nil,
-                     heldSignal: Bool = false) async throws -> Self {
+                     heldSignal: Bool = false, answerExclusion: String? = nil) async throws -> Self {
         let transport = ResearchAnswerTransport(followCount: multiPage ? 2 : 1, recall: multiPage ? 1 : nil, historyRoute: historyRoute)
         let local = try ComputerUseLocalBrowserLinkPlanner(connection: .init(baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:54321")),
             bearerToken: "fixture-token", modelAlias: "fixture-model"), transport: transport)
@@ -301,6 +354,11 @@ struct ResearchAnswerFixture {
         if let requested { rows.append(row("\(requested) options. ", "condition", "quantity")) }
         if inventory != nil { rows.append(row("2 tickets. ", "condition", "quantity")) }
         if let extra { rows.append(row(extra.0, extra.1, extra.2)) }
+        if let answerExclusion {
+            var restriction = row("Do not report results from \(answerExclusion). ", "prohibition", "answerSource")
+            restriction["relation"] = "exclude"; restriction["values"] = [answerExclusion]
+            rows.append(restriction)
+        }
         rows.append(row("Do not buy.", "prohibition", "other"))
         let request = rows.compactMap { $0["source"] as? String }.joined()
         let additional = (1..<count).map { index in
