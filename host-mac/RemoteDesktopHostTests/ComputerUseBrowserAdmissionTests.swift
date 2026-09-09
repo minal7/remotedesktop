@@ -163,7 +163,7 @@ final class ComputerUseBrowserAdmissionTests: XCTestCase {
     }
 
     func testResearchReplacementWaitsForRetiredPredecessorToActuallyUnwind() async throws {
-        let directory = temporaryDirectory(), browser = ComputerUseOwnedBrowser(presentsWindow: false)
+        let directory = temporaryDirectory(), browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
         let coordinator = ComputerUseBrowserNavigationTask(browser: browser, journalDirectory: directory)
         let gate = BrowserResearchGate(), planner = BrowserResearchGoalFixture()
         defer { gate.release(); coordinator.close(); try? FileManager.default.removeItem(at: directory) }
@@ -295,7 +295,7 @@ final class ComputerUseBrowserAdmissionTests: XCTestCase {
     }
 
     func testBrowserAdmissionRequiresCurrentCoordinatorOwnerAndLiveOperation() async throws {
-        let directory = temporaryDirectory(), browser = ComputerUseOwnedBrowser(presentsWindow: false)
+        let directory = temporaryDirectory(), browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
         let coordinator = ComputerUseBrowserNavigationTask(browser: browser, journalDirectory: directory)
         let other = ComputerUseBrowserNavigationTask(browser: browser, journalDirectory: directory)
         defer { coordinator.close(); other.close(); try? FileManager.default.removeItem(at: directory) }

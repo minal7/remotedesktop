@@ -237,7 +237,7 @@ final class ComputerUseCapabilityExecutorTests: XCTestCase {
     }
 
     private func researchTools() -> (tools: ComputerUseHostTools, browser: ComputerUseOwnedBrowser) {
-        let browser = ComputerUseOwnedBrowser(presentsWindow: false)
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
         let navigation = ComputerUseBrowserNavigationTask(browser: browser,
             journalDirectory: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
         return (.init(injector: InputInjector(), mayAct: { true }, browserNavigationTask: navigation), browser)

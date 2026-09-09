@@ -871,7 +871,7 @@ final class ComputerUseTests: XCTestCase {
             preparations += 1
             session = try fixture.browser.prepareWorkflowSession(taskID: root)
             let controls = try XCTUnwrap(fixture.browser.taskControls)
-            fixture.browser.requestTaskControl(.pause, displayed: controls)
+            fixture.browser.requestTaskControl(.takeControl, displayed: controls)
         }
         let prompt = makeEnvelope(id: "unused-browser-root", kind: .prompt, body: "Find concert tickets tomorrow. Do not buy anything.")
         fixture.manager.authorizePeer(senderID: prompt.senderID)

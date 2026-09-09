@@ -4,7 +4,7 @@ import XCTest
 @MainActor
 final class ComputerUseBrowserClarificationTransportTests: XCTestCase {
     func testBrowserReferenceUsesExistingWireAndRetainsRootClockAndExactAnswers() async throws {
-        let browser = ComputerUseOwnedBrowser(presentsWindow: false), planner = BrowserResearchGoalFixture()
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true }), planner = BrowserResearchGoalFixture()
         defer { browser.close() }
         let owner = try makeOwner(browser, planner: planner), root = owner.input
         let bridge = ComputerUseBrowserClarificationTransport()
@@ -39,7 +39,7 @@ final class ComputerUseBrowserClarificationTransportTests: XCTestCase {
     }
 
     func testBrowserReferenceRejectsForeignControllerOwnerRevisionAndInvalidAnswerWithoutConsumingQuestion() async throws {
-        let browser = ComputerUseOwnedBrowser(presentsWindow: false), planner = BrowserResearchGoalFixture()
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true }), planner = BrowserResearchGoalFixture()
         defer { browser.close() }
         let owner = try makeOwner(browser, planner: planner), original = owner.input
         let proposal = try await owner.interpretGoal().proposal, bridge = ComputerUseBrowserClarificationTransport()
@@ -70,7 +70,7 @@ final class ComputerUseBrowserClarificationTransportTests: XCTestCase {
     func testExpiredPausedRetiredOrInvalidatedBrowserQuestionCannotBeRevivedByWireReplay() async throws {
         for reason in ["expired", "paused", "retired", "invalidated"] {
             var now = Date(timeIntervalSince1970: 1_800_000_000)
-            let browser = ComputerUseOwnedBrowser(presentsWindow: false), planner = BrowserResearchGoalFixture()
+            let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true }), planner = BrowserResearchGoalFixture()
             defer { browser.close() }
             let owner = try makeOwner(browser, planner: planner, now: { now }), original = owner.input
             let proposal = try await owner.interpretGoal().proposal, bridge = ComputerUseBrowserClarificationTransport()
@@ -89,7 +89,7 @@ final class ComputerUseBrowserClarificationTransportTests: XCTestCase {
     }
 
     func testAcceptedAnswerMapsOnlyCurrentExecutionToBrowserRootAndLifecycle() async throws {
-        let browser = ComputerUseOwnedBrowser(presentsWindow: false), planner = BrowserResearchGoalFixture()
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true }), planner = BrowserResearchGoalFixture()
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let navigation = ComputerUseBrowserNavigationTask(browser: browser, journalDirectory: directory)
         let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true }, browserNavigationTask: navigation)

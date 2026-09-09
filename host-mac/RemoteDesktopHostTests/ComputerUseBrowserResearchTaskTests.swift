@@ -83,7 +83,7 @@ final class ComputerUseBrowserResearchTaskTests: XCTestCase {
     }
 
     func testQuestionRequestRequiresCurrentInterpretationAndCannotEscapePauseOrRetirement() async throws {
-        let planner = BrowserResearchGoalFixture(), browser = ComputerUseOwnedBrowser(presentsWindow: false)
+        let planner = BrowserResearchGoalFixture(), browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
         defer { browser.close() }
         let owner = makeOwner(try goal(), browser: browser, planner: planner)
         XCTAssertThrowsError(try owner.proposedQuestionRequest()) {
@@ -120,7 +120,7 @@ final class ComputerUseBrowserResearchTaskTests: XCTestCase {
     }
 
     func testResearchOwnerRetainsInterpretationAndRejectsForeignProposal() async throws {
-        let planner = BrowserResearchGoalFixture(), browser = ComputerUseOwnedBrowser(presentsWindow: false)
+        let planner = BrowserResearchGoalFixture(), browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
         defer { browser.close() }
         let input = try goal(), owner = makeOwner(input, browser: browser, planner: planner)
         planner.replacement = try goal(taskID: "foreign")
@@ -138,7 +138,7 @@ final class ComputerUseBrowserResearchTaskTests: XCTestCase {
     }
 
     func testResearchPauseHoldsCancelledOperationUntilActualUnwindAndExplicitResume() async throws {
-        let gate = BrowserResearchGate(), planner = BrowserResearchGoalFixture(), browser = ComputerUseOwnedBrowser(presentsWindow: false)
+        let gate = BrowserResearchGate(), planner = BrowserResearchGoalFixture(), browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
         defer { gate.release(); browser.close() }
         planner.beforeReply = { await gate.suspend() }
         let input = try goal(), owner = makeOwner(input, browser: browser, planner: planner)
@@ -161,7 +161,7 @@ final class ComputerUseBrowserResearchTaskTests: XCTestCase {
     }
 
     func testParentCancellationRetainsExclusionWithoutInventingACompletedInterpretation() async throws {
-        let gate = BrowserResearchGate(), planner = BrowserResearchGoalFixture(), browser = ComputerUseOwnedBrowser(presentsWindow: false)
+        let gate = BrowserResearchGate(), planner = BrowserResearchGoalFixture(), browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
         defer { gate.release(); browser.close() }
         planner.beforeReply = { await gate.suspend() }
         let owner = makeOwner(try goal(), browser: browser, planner: planner)
@@ -179,7 +179,7 @@ final class ComputerUseBrowserResearchTaskTests: XCTestCase {
     }
 
     func testResearchQuestionsPreserveRootAndInvalidateRevisionCaches() async throws {
-        let planner = BrowserResearchGoalFixture(), browser = ComputerUseOwnedBrowser(presentsWindow: false)
+        let planner = BrowserResearchGoalFixture(), browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
         defer { browser.close() }
         let input = try goal(), owner = makeOwner(input, browser: browser, planner: planner)
         let interpreted = try await owner.interpretGoal()
@@ -203,7 +203,7 @@ final class ComputerUseBrowserResearchTaskTests: XCTestCase {
 
     func testExpiredQuestionAndPauseCannotLeavePhantomPendingState() async throws {
         var now = Date(timeIntervalSince1970: 1_800_000_000)
-        let planner = BrowserResearchGoalFixture(), browser = ComputerUseOwnedBrowser(presentsWindow: false)
+        let planner = BrowserResearchGoalFixture(), browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
         defer { browser.close() }
         let owner = ComputerUseBrowserResearchTask(input: try goal(), browser: browser, goalPlanner: planner,
             resultPlanner: BrowserResearchResultFixture(), mayAct: { true }, now: { now })
@@ -226,7 +226,7 @@ final class ComputerUseBrowserResearchTaskTests: XCTestCase {
     }
 
     func testRetirementCannotBeUndoneByLateModelReplyOrControlChange() async throws {
-        let gate = BrowserResearchGate(), planner = BrowserResearchGoalFixture(), browser = ComputerUseOwnedBrowser(presentsWindow: false)
+        let gate = BrowserResearchGate(), planner = BrowserResearchGoalFixture(), browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
         var mayAct = true
         defer { gate.release(); browser.close() }
         planner.beforeReply = { await gate.suspend() }
@@ -247,7 +247,7 @@ final class ComputerUseBrowserResearchTaskTests: XCTestCase {
 
     func testHostPreparationRetainsClockAndWiresPauseResumeStopAndReplacement() async throws {
         let planner = BrowserResearchGoalFixture(), reader = BrowserResearchResultFixture()
-        let browser = ComputerUseOwnedBrowser(presentsWindow: false)
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let navigation = ComputerUseBrowserNavigationTask(browser: browser, journalDirectory: directory)
         let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true }, browserNavigationTask: navigation)

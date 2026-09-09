@@ -92,7 +92,7 @@ final class ComputerUseBrowserSourceRequirementsTests: XCTestCase {
 
     func testHostSourceQuestionKeepsRootAndRequiresACompleteFreshInterpretationAfterAnswer() async throws {
         let rows = [row("Find concert tickets. "), row("Use tickets.test.", field: "source", values: ["tickets.test"])]
-        let initial = try proposal(rows), planner = SourceGoalFixture(initial), browser = ComputerUseOwnedBrowser(presentsWindow: false)
+        let initial = try proposal(rows), planner = SourceGoalFixture(initial), browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
         defer { browser.close() }
         let owner = ComputerUseBrowserResearchTask(input: initial.input, browser: browser, goalPlanner: planner,
             resultPlanner: BrowserResearchResultFixture(), mayAct: { true })

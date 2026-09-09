@@ -6,7 +6,7 @@ final class ComputerUseBrowserGoalPlannerTests: XCTestCase {
     @MainActor
     func testLocalPlannerQuestionsReachExistingAnswerWireWithOriginalGoalAndClock() async throws {
         let input = try goal("Find movie tickets tomorrow. Do not purchase."), transport = BrowserGoalFixtureTransport(response: Data())
-        let browser = ComputerUseOwnedBrowser(presentsWindow: false)
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
         defer { browser.close() }
         let owner = ComputerUseBrowserResearchTask(input: input, browser: browser, goalPlanner: try planner(transport: transport),
             resultPlanner: BrowserResearchResultFixture(), mayAct: { true })

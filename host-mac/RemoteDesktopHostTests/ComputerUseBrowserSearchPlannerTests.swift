@@ -119,7 +119,7 @@ final class ComputerUseBrowserSearchPlannerTests: XCTestCase {
     }
 
     func testOwnerSearchPlanningRequiresCurrentInterpretationAndRetainsExactAnswers() async throws {
-        let browser = ComputerUseOwnedBrowser(presentsWindow: false), planner = SearchOwnerFixture()
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true }), planner = SearchOwnerFixture()
         defer { browser.close() }
         let input = try proposal(["Find tickets."]).input
         let owner = ComputerUseBrowserResearchTask(input: input, browser: browser, goalPlanner: BrowserResearchGoalFixture(),
@@ -158,7 +158,7 @@ final class ComputerUseBrowserSearchPlannerTests: XCTestCase {
 
     func testOwnerSearchPlanningHoldsCancellationUntilUnwindAndRequiresExplicitHandback() async throws {
         for retires in [false, true] {
-            let browser = ComputerUseOwnedBrowser(presentsWindow: false), planner = SearchOwnerFixture(), gate = BrowserResearchGate()
+            let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true }), planner = SearchOwnerFixture(), gate = BrowserResearchGate()
             defer { gate.release(); browser.close() }
             let owner = ComputerUseBrowserResearchTask(input: try proposal(["Find tickets."]).input, browser: browser,
                 goalPlanner: BrowserResearchGoalFixture(), resultPlanner: BrowserResearchResultFixture(), mayAct: { true })
