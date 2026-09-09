@@ -681,6 +681,7 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
                 if sources.hasAnswerPolicyObligation(for: requirement.id), reading.documentAnswerSourceStatus != .unconfigured,
                    !reading.matchesAnswerSourceRequirements(sources) { return result(.sourcePolicyMismatch) }
                 if conditions[requirement.id] == .unresolved(.historicalScalarScope) { return result(.uncompiledRequirement) }
+                if case .historicalDateAmbiguity? = conditions[requirement.id] { return result(.uncompiledRequirement) }
                 if requirement.field == .answerSource && !retainedScalar {
                     guard reading.documentAnswerSourceStatus != .unconfigured else { return result(.sourceUnconfigured) }
                     guard reading.matchesAnswerSourceRequirements(sources) else { return result(.sourcePolicyMismatch) }

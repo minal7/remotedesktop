@@ -40,11 +40,7 @@ struct ComputerUseBrowserSourceRequirements: Sendable {
         goal = proposal.input; interpretationDigest = proposal.digest
         isResearch = proposal.disposition == .research
         var navigation = Scope(), answers = Scope(), unresolved: [Unresolved] = []
-        let nativeScalarSources = Set(ComputerUseBrowserScalarRequirements(proposal: proposal).entries.compactMap { entry -> String? in
-            if case .clarification = entry.resolution { return entry.requirementID }
-            if case .bound(let condition) = entry.resolution, condition.hasHistoricalSource { return entry.requirementID }
-            return nil
-        })
+        let nativeScalarSources = ComputerUseBrowserScalarRequirements(proposal: proposal).nativeScalarSourceIDs
         for requirement in proposal.requirements {
             // A sealed literal answer or retained native scalar clause has
             // host-known meaning even if its model field label is wrong.

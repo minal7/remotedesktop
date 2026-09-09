@@ -7,6 +7,93 @@ final class ComputerUseBrowserGoalClarificationTests: XCTestCase {
     private typealias Clarification = ComputerUseBrowserGoalClarification
     private typealias Scalars = ComputerUseBrowserScalarRequirements
 
+    func testRetainedWeekdayAmbiguityCanAskAndConsumeADateQuestionAfterModelRelabeling() throws {
+        for field in ["location", "source", "answerSource", "navigationSource"] {
+            for role in ["condition", "prohibition"] {
+                let fixture = try weekdayAfterLocation("Friday.", field: field, role: role)
+                let current = fixture.current, ledger = Scalars(proposal: current), target = current.requirements[1]
+                XCTAssertEqual(ledger.entries[1].resolution, .historicalDateAmbiguity([fixture.initial.requirements[1].id]))
+                XCTAssertTrue(ledger.unresolvedRequirementIDs.contains(target.id))
+                XCTAssertEqual(ledger.dateQuestionRequirementID, target.id)
+                XCTAssertTrue(ledger.permitsDateQuestion(target))
+                XCTAssertTrue(ledger.nativeScalarSourceIDs.contains(target.id))
+                XCTAssertTrue(ComputerUseBrowserSourceRequirements(proposal: current).unresolved.isEmpty)
+                XCTAssertThrowsError(try fixture.state.issue(proposal: current, topic: .quantity, requirementIDs: [target.id], context: context()))
+                let question = try fixture.state.issue(proposal: current, topic: .date, requirementIDs: [target.id], context: context())
+                XCTAssertEqual(question.scope[0].source, "Friday.")
+                XCTAssertTrue(question.text.contains("⟦Friday.⟧"))
+                let updated = try fixture.state.consume(questionID: question.id, answerTaskID: "date", answer: "2026-10-16", context: context())
+                var rows = [row("Find concerts. "), row("Friday.", role: role, field: field), row("Paris", turn: 1, role: "condition", field: "location"),
+                    row("2026-10-16", turn: 2, role: "condition", field: "source")]
+                rows[1]["relation"] = "above"
+                let final = Scalars(proposal: try proposal(updated, rows: rows, disposition: "research"))
+                guard case .bound(let date) = final.entries[1].resolution,
+                      case .clarification(let answer) = final.entries[3].resolution else { return XCTFail("The historical weekday and its answer must bind together") }
+                XCTAssertTrue(date.hasHistoricalSource)
+                XCTAssertEqual(date.historicalRequirementIDs, [fixture.initial.requirements[1].id])
+                XCTAssertEqual(date.evaluate(.day(try XCTUnwrap(Scalars.CivilDay(year: 2026, month: 10, day: 16)))), .satisfied)
+                XCTAssertEqual(answer.targetRequirementIDs, [final.entries[1].requirementID])
+                XCTAssertNil(final.dateQuestionRequirementID)
+                XCTAssertTrue(ComputerUseBrowserSourceRequirements(proposal: final.proposal).unresolved.isEmpty)
+                XCTAssertEqual(updated.userTurns, [fixture.initial.input.prompt, "Paris", "2026-10-16"])
+            }
+        }
+    }
+
+    func testRetainedRelativeWeekModifiersRemainUnresolvedWithoutBecomingWebsiteRequirements() throws {
+        for source in ["this Friday.", "next Friday."] {
+            let fixture = try weekdayAfterLocation(source, field: "source"), ledger = Scalars(proposal: fixture.current)
+            XCTAssertEqual(ledger.entries[1].resolution, .historicalDateAmbiguity([fixture.initial.requirements[1].id]))
+            XCTAssertTrue(ledger.unresolvedRequirementIDs.contains(fixture.current.requirements[1].id))
+            XCTAssertNil(ledger.dateQuestionRequirementID)
+            XCTAssertFalse(ledger.permitsDateQuestion(fixture.current.requirements[1]))
+            XCTAssertTrue(ComputerUseBrowserSourceRequirements(proposal: fixture.current).unresolved.isEmpty)
+            XCTAssertThrowsError(try fixture.state.issue(proposal: fixture.current, topic: .date,
+                requirementIDs: [fixture.current.requirements[1].id], context: context()))
+        }
+        let unscoped = try input("Find concerts. Friday.")
+        let current = try proposal(unscoped, rows: [row("Find concerts. "), row("Friday.", role: "condition", field: "source")], disposition: "research")
+        XCTAssertFalse(Scalars(proposal: current).permitsDateQuestion(current.requirements[1]))
+        XCTAssertThrowsError(try Clarification(input: unscoped).issue(proposal: current, topic: .date,
+            requirementIDs: [current.requirements[1].id], context: context()), "A weekday spelling alone cannot mint historical date authority")
+    }
+
+    func testRetainedWeekdayAmbiguityCannotBeErasedByMergingSplittingOrDroppingAModifier() throws {
+        for source in ["Friday.", "next Friday."] {
+            let fixture = try weekdayAfterLocation(source, field: "location"), current = fixture.current.input
+            let answer = row("Paris", turn: 1, role: "condition", field: "location")
+            let merged = Scalars(proposal: try proposal(current, rows: [row(current.prompt), answer], disposition: "research"))
+            XCTAssertEqual(merged.entries[0].resolution, .unresolved(.historicalScalarScope))
+            XCTAssertNil(merged.dateQuestionRequirementID)
+            let splitSources = source == "Friday." ? ["Fri", "day."] : ["next ", "Friday."]
+            let split = Scalars(proposal: try proposal(current, rows: [row("Find concerts. "), row(splitSources[0]),
+                row(splitSources[1], role: "condition", field: "date"), answer], disposition: "research"))
+            XCTAssertEqual(split.entries[1].resolution, .unresolved(.historicalScalarScope))
+            XCTAssertEqual(split.entries[2].resolution, .unresolved(.historicalScalarScope))
+            XCTAssertNil(split.dateQuestionRequirementID)
+        }
+    }
+
+    func testConflictingScalarLiteralsRetainTheirMeaningWithoutSatisfyingTheOriginalConstraint() throws {
+        for (source, field, topic, answer) in [("Under USD 50.", "price", ComputerUseBrowserClarificationTopic.currency, "CAD"),
+            ("On 2026-10-16.", "date", .date, "2026-10-15")] {
+            let original = try input("Find concerts. " + source), state = Clarification(input: original)
+            let initial = try proposal(original, rows: [row("Find concerts. "), row(source, role: "condition", field: field)])
+            let question = try state.issue(proposal: initial, topic: topic, requirementIDs: [initial.requirements[1].id], context: context())
+            let updated = try state.consume(questionID: question.id, answerTaskID: "conflict", answer: answer, context: context())
+            let current = try proposal(updated, rows: [row("Find concerts. "), row(source, role: "condition", field: "source"),
+                row(answer, turn: 1, role: "condition", field: "source")], disposition: "research")
+            let ledger = Scalars(proposal: current)
+            for index in [1, 2] {
+                XCTAssertEqual(ledger.entries[index].resolution, .unresolved(.contradictoryClarification))
+                XCTAssertTrue(ledger.nativeScalarSourceIDs.contains(current.requirements[index].id))
+            }
+            XCTAssertTrue(ComputerUseBrowserSourceRequirements(proposal: current).unresolved.isEmpty,
+                "The native conflict is not a request for a website")
+            XCTAssertNil(ledger.dateQuestionRequirementID)
+        }
+    }
+
     func testUnrelatedAnswerRetainsNativeBudgetDateAndQuantityDespiteNewFieldRoleAndRelationLabels() throws {
         let rows = [row("Find tickets. "), row("Under USD 50. ", role: "condition", field: "price"),
             row("On 2026-10-16. ", role: "condition", field: "date"), row("3 tickets.", role: "condition", field: "quantity")]
@@ -99,7 +186,7 @@ final class ComputerUseBrowserGoalClarificationTests: XCTestCase {
         let updated = try state.consume(questionID: question.id, answerTaskID: "return-date", answer: "2026-10-16", context: context())
         let current = try proposal(updated, rows: rows + [row("2026-10-16", turn: 1, role: "condition", field: "date")], disposition: "research")
         let ledger = Scalars(proposal: current), day = try XCTUnwrap(Scalars.CivilDay(year: 2026, month: 10, day: 16))
-        XCTAssertEqual(ledger.entries[1].resolution, .unresolved(.ambiguousDate))
+        XCTAssertEqual(ledger.entries[1].resolution, .historicalDateAmbiguity([proposed.requirements[1].id]))
         XCTAssertEqual(ledger.dateQuestionRequirementID, current.requirements[1].id)
         guard case .bound(let condition) = ledger.entries[3].resolution,
               case .clarification(let binding) = ledger.entries[4].resolution else { return XCTFail("The selected date and its answer must bind together") }
@@ -501,6 +588,16 @@ final class ComputerUseBrowserGoalClarificationTests: XCTestCase {
         XCTAssertEqual(requests[0].httpBody, try planner.makeRequest(continued).httpBody)
     }
 
+    private func weekdayAfterLocation(_ source: String, field: String, role: String = "condition") throws
+        -> (state: Clarification, initial: ComputerUseBrowserGoalProposal, current: ComputerUseBrowserGoalProposal) {
+        let original = try input("Find concerts. " + source), state = Clarification(input: original)
+        let initial = try proposal(original, rows: [row("Find concerts. "), row(source, role: "condition", field: "date")])
+        let question = try state.issue(proposal: initial, topic: .location, requirementIDs: [initial.requirements[0].id], context: context())
+        let updated = try state.consume(questionID: question.id, answerTaskID: "location", answer: "Paris", context: context())
+        var rows = [row("Find concerts. "), row(source, role: role, field: field), row("Paris", turn: 1, role: "condition", field: "location")]
+        rows[1]["relation"] = "above"
+        return (state, initial, try proposal(updated, rows: rows, disposition: "research"))
+    }
     private func dateLedger(source: String, answer: String) throws -> Scalars {
         let original = try input("Find tickets. " + source), state = Clarification(input: original)
         let rows = [row("Find tickets. "), row(source, role: "condition", field: "date")]

@@ -11,7 +11,12 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
         case ambiguousClarification, clarificationScope, contradictoryClarification
         case historicalScalarScope
     }
-    enum Resolution: Equatable, Sendable { case bound(Condition), clarification(ClarificationBinding), unresolved(UnresolvedReason) }
+    enum Resolution: Equatable, Sendable {
+        case bound(Condition), clarification(ClarificationBinding), unresolved(UnresolvedReason)
+        /// A complete weekday clause retained from a prior interpretation.
+        /// These native source IDs preserve the uncertainty, not a date value.
+        case historicalDateAmbiguity([String])
+    }
     struct ClarificationBinding: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
         enum Parameter: Equatable, Sendable {
             case currency(Currency), priceBasis(PriceBasis), fees(Fees), date(DayRange)
@@ -225,20 +230,31 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
 
     let proposal: ComputerUseBrowserGoalProposal
     let entries: [Entry]
+    /// Native source meaning is independent of whether a parameter answer
+    /// was compatible or its target could be resolved. A failed date answer
+    /// must not become an unrelated website instruction after relabeling.
+    let nativeScalarSourceIDs: Set<String>
     var unresolvedRequirementIDs: [String] {
-        entries.compactMap { if case .unresolved = $0.resolution { return $0.requirementID }; return nil }
+        entries.compactMap {
+            switch $0.resolution { case .unresolved, .historicalDateAmbiguity: return $0.requirementID; default: return nil }
+        }
     }
     /// Ask about one resolvable weekday occurrence at a time. Separate trip
     /// legs must not be grouped into an ambiguous native fallback question.
     var dateQuestionRequirementID: String? {
-        for (requirement, entry) in zip(proposal.requirements, entries) {
-            guard entry.resolution == .unresolved(.ambiguousDate),
-                  [.unspecified, .equal].contains(requirement.relation),
-                  let source = proposal.source(of: requirement),
-                  Self.unqualifiedWeekday(Self.conditionSource(source)) != nil else { continue }
-            return requirement.id
+        proposal.requirements.first(where: permitsDateQuestion)?.id
+    }
+    /// A native fallback may use retained weekday meaning even when the
+    /// current model's field/role no longer accepts a date-topic question.
+    func permitsDateQuestion(_ requirement: ComputerUseBrowserGoalProposal.Requirement) -> Bool {
+        guard let index = proposal.requirements.firstIndex(of: requirement),
+              let source = proposal.source(of: requirement),
+              Self.unqualifiedWeekday(Self.conditionSource(source)) != nil else { return false }
+        switch entries[index].resolution {
+        case .historicalDateAmbiguity: return true
+        case .unresolved(.ambiguousDate): return [.unspecified, .equal].contains(requirement.relation)
+        default: return false
         }
-        return nil
     }
     var description: String { "BrowserScalarRequirements(entries: \(entries.count), unresolved: \(unresolvedRequirementIDs.count))" }
     var debugDescription: String { description }
@@ -251,8 +267,26 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
             }
             return Self.baseEntry(requirement, input: proposal.input)
         }
+        let retained = Self.retainingHistoricalScalars(proposal, entries: baseEntries)
+        var nativeSources = Set(retained.compactMap { entry -> String? in
+            switch entry.resolution {
+            case .bound(let condition) where condition.hasHistoricalSource: return entry.requirementID
+            case .historicalDateAmbiguity: return entry.requirementID
+            default: return nil
+            }
+        })
+        if proposal.disposition == .research {
+            for (index, answer) in proposal.input.clarifications.enumerated() {
+                let literal = answer.topic == .date ? Self.answeredDate(answer.answer, input: proposal.input) != nil
+                    : Self.parameter(answer.answer, topic: answer.topic) != nil
+                if literal {
+                    nativeSources.formUnion(proposal.requirements.filter { $0.sourceTurnIndex == index + 1 }.map(\.id))
+                }
+            }
+        }
+        nativeScalarSourceIDs = nativeSources
         entries = Self.reconcilingClarificationTargets(Self.applyingDateClarifications(proposal,
-            to: Self.applyingPriceClarifications(proposal, to: Self.retainingHistoricalScalars(proposal, entries: baseEntries))))
+            to: Self.applyingPriceClarifications(proposal, to: retained)))
     }
 
     private static func baseEntry(_ requirement: ComputerUseBrowserGoalProposal.Requirement, input: ComputerUseBrowserGoalInput) -> Entry {
@@ -279,16 +313,22 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
         }
     }
 
-    /// An answer does not authorize dropping a previously parsed constraint.
-    /// Restore only an exact native clause occurrence. Merged/split meanings
-    /// stay unresolved until their complete obligations can be reconciled.
+    /// An answer does not authorize dropping a parsed constraint or a known
+    /// weekday ambiguity. Retain only an exact native clause occurrence;
+    /// merged/split meanings need complete obligation reconciliation.
     private static func retainingHistoricalScalars(_ proposal: ComputerUseBrowserGoalProposal, entries original: [Entry]) -> [Entry] {
         guard proposal.disposition == .research else { return original }
         var entries = original
         for answer in proposal.input.clarifications {
             for historical in answer.priorRequirements {
-                guard case .bound(let previous) = Self.baseEntry(historical, input: proposal.input).resolution,
-                      let oldSpan = Self.scalarSpan(historical, input: proposal.input) else { continue }
+                let previous = Self.baseEntry(historical, input: proposal.input).resolution
+                let retainedWeekday: Bool
+                if previous == .unresolved(.ambiguousDate), [.unspecified, .equal].contains(historical.relation),
+                   let source = proposal.input.source(of: historical) {
+                    retainedWeekday = Self.weekdayClause(Self.conditionSource(source))
+                } else { retainedWeekday = false }
+                if !retainedWeekday { guard case .bound = previous else { continue } }
+                guard let oldSpan = Self.scalarSpan(historical, input: proposal.input) else { continue }
                 let overlaps = proposal.requirements.indices.filter {
                     let current = proposal.requirements[$0]
                     return current.sourceTurnIndex == historical.sourceTurnIndex
@@ -304,13 +344,20 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
                 }
                 if entries[target].resolution == .unresolved(.historicalScalarScope) { continue }
                 let ids: [String]
-                if case .bound(let current) = entries[target].resolution {
-                    ids = current.historicalRequirementIDs
-                } else { ids = [] }
+                switch entries[target].resolution {
+                case .bound(let current): ids = current.historicalRequirementIDs
+                case .historicalDateAmbiguity(let retained): ids = retained
+                default: ids = []
+                }
                 let retained = ids.contains(historical.id) ? ids : ids + [historical.id]
+                if retainedWeekday {
+                    entries[target] = .init(requirementID: entries[target].requirementID, resolution: .historicalDateAmbiguity(retained))
+                    continue
+                }
+                guard case .bound(let condition) = previous else { continue }
                 entries[target] = .init(requirementID: entries[target].requirementID,
                     resolution: .bound(.init(inputDigest: proposal.input.digest, requirementID: entries[target].requirementID,
-                        predicate: previous.predicate, historicalRequirementIDs: retained)))
+                        predicate: condition.predicate, historicalRequirementIDs: retained)))
             }
         }
         return entries
@@ -397,6 +444,7 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
             let requirement = proposal.requirements[$0]
             guard !answerTurns.contains(requirement.sourceTurnIndex) else { return false }
             if case .bound(let condition) = original[$0].resolution, case .day = condition.predicate { return true }
+            if case .historicalDateAmbiguity = original[$0].resolution { return true }
             return requirement.role == .condition && requirement.field == .date
         }
         var previousTargets: [Int: [Int]] = [:]
@@ -444,9 +492,10 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
                 }
                 switch entries[target].resolution {
                 case .bound(let condition): return condition.predicate == .day(range)
-                case .unresolved(.ambiguousDate):
-                    guard [.unspecified, .equal].contains(requirement.relation),
-                          let weekday = Self.unqualifiedWeekday(Self.conditionSource(source)),
+                case .unresolved(.ambiguousDate), .historicalDateAmbiguity:
+                    if case .unresolved = entries[target].resolution,
+                       ![.unspecified, .equal].contains(requirement.relation) { return false }
+                    guard let weekday = Self.unqualifiedWeekday(Self.conditionSource(source)),
                           let day = range.lower, range.upper == day, range.lowerInclusive, range.upperInclusive else { return false }
                     return Self.weekday(of: day) == weekday
                 default: return false
@@ -455,8 +504,11 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
             guard compatible else { unresolved(.contradictoryClarification); continue }
             for target in ordered {
                 let historicalIDs: [String]
-                if case .bound(let condition) = entries[target].resolution { historicalIDs = condition.historicalRequirementIDs }
-                else { historicalIDs = [] }
+                switch entries[target].resolution {
+                case .bound(let condition): historicalIDs = condition.historicalRequirementIDs
+                case .historicalDateAmbiguity(let ids): historicalIDs = ids
+                default: historicalIDs = []
+                }
                 entries[target] = .init(requirementID: original[target].requirementID,
                     resolution: .bound(.init(inputDigest: proposal.input.digest, requirementID: original[target].requirementID,
                         predicate: .day(range), historicalRequirementIDs: historicalIDs)))
@@ -477,6 +529,10 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
     private static func unqualifiedWeekday(_ source: String) -> Int? {
         guard let values = groups(#"^(?:(?:on|for)\s+)?(Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday)$"#, source) else { return nil }
         return ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"].firstIndex(of: values[0].lowercased())
+    }
+
+    private static func weekdayClause(_ source: String) -> Bool {
+        groups(#"^(?:(?:on|for)\s+)?(?:(?:this|next)\s+)?(?:Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday)$"#, source) != nil
     }
 
     /// Proleptic Gregorian civil arithmetic, matching CivilDay's validation.

@@ -7,6 +7,59 @@ final class ComputerUseBrowserResultAssessmentTests: XCTestCase {
     private typealias Status = ComputerUseBrowserResultAssessment.Status
     private typealias Spec = AssessmentResultFixture.Spec
 
+    func testDriverRecoversARelabeledWeekdayAfterAnUnrelatedAnswerWithoutAskingForWebsites() async throws {
+        for dateAnswer in ["2026-10-16", "2026-10-15"] {
+            let fixture = try await ResearchDriverFixture.make(candidateBodyHTML: "<p>2026-10-16</p><p>Paris</p>")
+            defer { fixture.close() }
+            let original = try ComputerUseBrowserGoalInput(taskID: ResearchDriverFixture.root, prompt: "Find concerts. Friday.",
+                referenceDate: ResearchDriverFixture.date, timeZoneIdentifier: "America/Los_Angeles")
+            let originalRows = [row("Find concerts. "), row("Friday.", field: "date")]
+            let content = try JSONSerialization.data(withJSONObject: ["disposition":"clarification", "requirements":originalRows,
+                "question":["topic":"location", "requirements":[0]]])
+            let initial = try ComputerUseBrowserGoalProposal.decode(content: String(decoding: content, as: UTF8.self), input: original)
+            let goals = AssessmentGoalFixture(value: initial)
+            let driver = ComputerUseBrowserResearchDriver(goalPlanner: goals,
+                resultPlanner: AssessmentResultFixture(fields: [.init(.date, ["2026-10-16"]), .init(.location, ["Paris"])], empty: false),
+                searchPlanner: fixture.search, actionPlanner: BrowserResearchActionFixture(), formPlanner: BrowserResearchFormFixture(),
+                planning: ComputerUseModelBrowserResearchPlanning(providers: [fixture.policy.provider], linkPlanner: AssessmentLinkFixture()),
+                now: { ResearchDriverFixture.date }, timeZoneIdentifier: { "America/Los_Angeles" })
+            let first = try await driver.executeBrowserResearch(taskID: original.taskID, prompt: original.prompt, tools: fixture.tools, progress: { _ in })
+            guard case .browserClarificationRequired(let location)? = first else { return XCTFail("Expected the model's scoped location question") }
+            XCTAssertEqual(location.topic, .location)
+            let owner = try fixture.owner()
+            let locationQuestion = try owner.issueQuestion(topic: location.topic, requirementIDs: location.requirementIDs,
+                controllerID: "phone", controllerSessionID: "session")
+            let withLocation = try owner.answerQuestion(questionID: locationQuestion.id, answerTaskID: "location", answer: "Paris",
+                controllerID: "phone", controllerSessionID: "session")
+            var locationRow = row("Paris", field: "location"); locationRow["turn"] = 1
+            var rows = [originalRows[0], row("Friday.", field: "source"), locationRow]
+            goals.value = try proposal(rows, input: withLocation)
+            let second = try await driver.continueBrowserResearch(taskID: "location", research: owner, tools: fixture.tools, progress: { _ in })
+            guard case .browserClarificationRequired(let date) = second else { return XCTFail("The retained weekday must produce a date question") }
+            XCTAssertEqual(date.topic, .date)
+            XCTAssertEqual(date.requirementIDs, [goals.value.requirements[1].id])
+            XCTAssertFalse(fixture.browser.hasSession); XCTAssertEqual(fixture.server.requestCount, 0)
+            XCTAssertTrue(fixture.search.inputs.isEmpty)
+            let dateQuestion = try owner.issueQuestion(topic: date.topic, requirementIDs: date.requirementIDs,
+                controllerID: "phone", controllerSessionID: "session")
+            let updated = try owner.answerQuestion(questionID: dateQuestion.id, answerTaskID: "date", answer: dateAnswer,
+                controllerID: "phone", controllerSessionID: "session")
+            var answerRow = row(dateAnswer, field: "source"); answerRow["turn"] = 2; rows.append(answerRow)
+            goals.value = try proposal(rows, input: updated)
+            let continued = try await driver.continueBrowserResearch(taskID: "date", research: owner, tools: fixture.tools, progress: { _ in })
+            guard case .browserResearchProgress = continued else { return XCTFail("A conflicting scalar stays unresolved without asking for a website") }
+            XCTAssertNil(try owner.proposedQuestionRequest())
+            let reading = try await owner.readCandidates(), assessment = try XCTUnwrap(reading.requirementAssessment)
+            XCTAssertEqual(assessment.candidates[0].requirements[1].status, dateAnswer == "2026-10-16" ? .quotedValueMatches : .uncompiledRequirement)
+            XCTAssertEqual(assessment.candidates[0].requirements[3].status, dateAnswer == "2026-10-16" ? .clarificationApplied : .uncompiledRequirement)
+            XCTAssertEqual(updated.userTurns, [original.prompt, "Paris", dateAnswer])
+            XCTAssertEqual(updated.rootDigest, original.rootDigest)
+            XCTAssertEqual(updated.referenceMilliseconds, original.referenceMilliseconds)
+            XCTAssertEqual(fixture.search.inputs.map(\.input), [updated])
+            XCTAssertEqual(fixture.server.count("/search?q=concerts"), 1)
+        }
+    }
+
     func testBoundReadingAccountsForEveryRequirementWithoutPromotingQuotesToVerifiedOffers() async throws {
         let rows = [row("Find concerts. "), row("Under USD 50 total including fees. ", field: "price", relation: "below"),
                     row("On 2027-01-16. ", field: "date", relation: "equal"), row("3 results. ", field: "quantity", relation: "equal"),
