@@ -49,6 +49,8 @@ Allowed checks: three changed Swift files parsed with `swiftc -frontend -parse`;
 
 ## Remaining repair order
 
+Follow-up: the [physical-preparation recovery checkpoint](BROWSER_PHYSICAL_PREPARATION_RECOVERY_REVIEW.md) extends recovery to a frame whose own capture has started. It keeps that frame's expanded capture and applies exceptions only to changed earlier verified criteria; the historical boundary case above was renamed and extended. This remains a source repair with execution pending.
+
 - Recover changed earlier criteria after a physical revision's own capture has started, keeping newly captured, unverified fields and exact input preconditions. A started callback cannot be treated as an empty frame merely because no input has been dispatched.
 - Cover additional accepted preservation/read duties and changed scoped observations across these inherited paths. Immutable observations cannot be replaced by later equal-looking metadata or resegmented source text.
 - Continue explicit goal supersession, conflicting answers and removal of obsolete duties only with a justified change to the retained task. Captured invariants do not become verified criteria.

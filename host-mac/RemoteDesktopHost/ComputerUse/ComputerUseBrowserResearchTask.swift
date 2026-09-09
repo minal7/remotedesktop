@@ -899,7 +899,7 @@ final class ComputerUseBrowserResearchTask {
         let captured = input
         latestCandidates = nil; latestForm = nil; latestAction = nil
         return try await operate { [self] in
-            try await preparation.recoverRetainedCriteriaForReview(browser: browser, checkCurrent: {
+            try await preparation.recoverCriteriaForReview(browser: browser, checkCurrent: {
                 try self.checkCurrent(captured)
                 guard self.formPreparation === preparation else { throw Failure.formUnavailable }
             })

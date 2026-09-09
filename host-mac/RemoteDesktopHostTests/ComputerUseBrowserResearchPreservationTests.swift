@@ -4310,7 +4310,7 @@ final class ComputerUseBrowserResearchPreservationTests: XCTestCase {
         }
     }
 
-    func testInheritedRecoveryCannotSkipARevisionWhosePrivateCaptureStarted() async throws {
+    func testStartedRevisionRecoversItsOwnCaptureInsteadOfSkippingIt() async throws {
         let fixture = try await make(category: true, city: true, mutation: "document.getElementById('query').value='reset';")
         defer { fixture.close() }
         let original = try await prepareRetainOnly(fixture, deferring: ["City"]), owner = try fixture.owner()
@@ -4323,15 +4323,27 @@ final class ComputerUseBrowserResearchPreservationTests: XCTestCase {
         await expectFailure { _ = try await owner.applyFormPreparationReview(action) }
         try await release(fixture)
         try await owner.resumeAfterUserControl()
-        let commands = fixture.state.commands, writes = fixture.state.writes
+        let history = owner.confirmedFormHistory, writes = fixture.state.writes
         let recovered = try await owner.recoverPendingFormPreparationCriteria()
-        XCTAssertFalse(recovered); XCTAssertFalse(owner.needsFormPreparationReview)
-        XCTAssertEqual(fixture.state.commands, commands); XCTAssertEqual(fixture.state.writes, writes)
+        XCTAssertTrue(recovered); XCTAssertTrue(owner.needsFormPreparationReview)
+        XCTAssertEqual(owner.confirmedFormHistory, history); XCTAssertEqual(fixture.state.writes, writes)
         await expectFailure { _ = try await owner.resumeFormPreparation() }
         XCTAssertTrue(owner.hasPendingFormPreparation)
         XCTAssertEqual(fixture.state.commands.filter { $0 == .reviseFormFields }.count, 1)
         XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 2)
-        XCTAssertEqual(owner.confirmedFormHistory.count, 1)
+        configureAnsweredRetentionRevision(fixture, editing: ["Query","City"], retaining: ["Category"])
+        let fresh = try await owner.reviewFormPreparation(using: fixture.actions), next = try await owner.applyFormPreparationReview(fresh)
+        let baseline = try XCTUnwrap(next.preparationBaseline)
+        let city = try XCTUnwrap(next.evidence.fields.first { $0.control.label == "City" })
+        XCTAssertTrue(baseline.capturedTargetIDs.contains(city.editable.snapshot.targetID))
+        XCTAssertTrue(city.editable.snapshot.value.isEmpty)
+        XCTAssertFalse(original.evidence.fields.contains { $0.control.label == "City" })
+        XCTAssertEqual(next.previous, original.previous)
+        XCTAssertEqual(next.interpretation.input.clarifications.map(\.answer), ["Tomorrow."])
+        _ = try await owner.executeForm(.decode(content: mixedContent(next, order: ["Query","City"]), input: next), input: next)
+        XCTAssertEqual(owner.confirmedFormHistory.map(\.editCount), [2,2])
+        XCTAssertEqual(owner.confirmedFormHistory.map(\.retainedCriterionCount), [0,0])
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .reviseFormFields }.count, 2)
     }
 
     func testUnchangedEarlierCriteriaDoNotCreateInheritedRecovery() async throws {
@@ -4405,6 +4417,204 @@ final class ComputerUseBrowserResearchPreservationTests: XCTestCase {
         XCTAssertEqual(owner.confirmedFormHistory.map(\.editCount), [2,1])
         XCTAssertEqual(owner.confirmedFormHistory.map(\.retainedCriterionCount), [0,0])
         XCTAssertEqual(fixture.state.commands.filter { $0 == .reviseFormFields }.count, 1)
+    }
+
+    func testPhysicalPreparationsRecoverEarlierCriteriaAtEveryCaptureBoundary() async throws {
+        for observed in [false, true] {
+            for boundary in [ComputerUseBrowserDOMCommand.extendFormFields, .bindPageFields, .prepareFormPreservation] {
+                let fixture = try await make(category: true, city: true, queryAlreadyMatches: observed, categoryAlreadyMatches: observed,
+                    mutation: "document.getElementById('query').value='reset';")
+                defer { fixture.close() }
+                let (first, _) = try await preparePhysicalCity(fixture, interrupting: boundary), owner = try fixture.owner()
+                let history = owner.confirmedFormHistory, writes = fixture.state.writes
+                let extensions = fixture.state.commands.filter { $0 == .extendFormFields }.count
+                try await release(fixture)
+                try await owner.resumeAfterUserControl()
+                let recovered = try await owner.recoverPendingFormPreparationCriteria()
+                XCTAssertTrue(recovered); XCTAssertTrue(owner.needsFormPreparationReview)
+                XCTAssertEqual(owner.confirmedFormHistory, history); XCTAssertEqual(fixture.state.writes, writes)
+                XCTAssertEqual(fixture.state.commands.filter { $0 == .extendFormFields }.count, extensions)
+                let next = try await repairRetainPreparation(fixture, editing: ["Query","City"], retaining: ["Category"])
+                let city = try XCTUnwrap(next.evidence.fields.first { $0.control.label == "City" })
+                XCTAssertTrue(try XCTUnwrap(next.preparationBaseline).capturedTargetIDs.contains(city.editable.snapshot.targetID))
+                XCTAssertTrue(city.editable.snapshot.value.isEmpty)
+                XCTAssertFalse(first.evidence.fields.contains { $0.control.id == city.control.id })
+                XCTAssertEqual(next.requiredRepairFieldAliases.count, 1)
+                _ = try await owner.executeForm(.decode(content: mixedContent(next, order: ["Query","City"]), input: next), input: next)
+                XCTAssertEqual(owner.confirmedFormHistory.map(\.editCount), [observed ? 0 : 2,2])
+                XCTAssertEqual(owner.confirmedFormHistory.map(\.retainedCriterionCount), [0,0])
+                XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, observed ? 2 : 4)
+            }
+        }
+    }
+
+    func testCompletedPhysicalPreparationRecoversWithoutConsumingItsOldProposal() async throws {
+        let fixture = try await make(category: true, city: true, mutation: "document.getElementById('query').value='reset';")
+        defer { fixture.close() }
+        let (_, prepared) = try await preparePhysicalCity(fixture), original = try XCTUnwrap(prepared), owner = try fixture.owner()
+        let stale = try ComputerUseBrowserFormProposal.decode(content: mixedContent(original, order: ["City"]), input: original)
+        let history = owner.confirmedFormHistory, writes = fixture.state.writes
+        try await release(fixture)
+        let recovered = try await owner.recoverPendingFormPreparationCriteria()
+        XCTAssertTrue(recovered); XCTAssertTrue(owner.needsFormPreparationReview)
+        await expectFailure { _ = try await owner.executeForm(stale, input: original) }
+        XCTAssertEqual(owner.confirmedFormHistory, history); XCTAssertEqual(fixture.state.writes, writes)
+        let next = try await repairRetainPreparation(fixture, editing: ["Query","City"], retaining: ["Category"])
+        XCTAssertEqual(next.previous, original.previous)
+        let oldCity = try XCTUnwrap(original.evidence.fields.first { $0.control.label == "City" })
+        XCTAssertEqual(next.evidence.fields.first { $0.control.label == "City" }?.editable, oldCity.editable)
+        _ = try await owner.executeForm(.decode(content: mixedContent(next, order: ["Query","City"]), input: next), input: next)
+        XCTAssertEqual(owner.confirmedFormHistory.map(\.editCount), [2,2])
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 4)
+    }
+
+    func testPhysicalRecoveryRejectsChangedUnverifiedFieldValues() async throws {
+        for boundary in [ComputerUseBrowserDOMCommand.extendFormFields, .bindPageFields] {
+            for mutation in ["document.getElementById('query').value='reset';document.getElementById('city').value='Portland';",
+                             "document.getElementById('query').value='reset';document.getElementById('city').outerHTML=document.getElementById('city').outerHTML;",
+                             "document.getElementById('query').value='reset';document.getElementById('reference').value='changed';"] {
+                let fixture = try await make(category: true, city: true, mutation: mutation)
+                defer { fixture.close() }
+                _ = try await preparePhysicalCity(fixture, interrupting: boundary)
+                let owner = try fixture.owner(), history = owner.confirmedFormHistory, writes = fixture.state.writes
+                try await release(fixture)
+                try await owner.resumeAfterUserControl()
+                await expectFailure { _ = try await owner.recoverPendingFormPreparationCriteria() }
+                XCTAssertFalse(owner.needsFormPreparationReview); XCTAssertTrue(owner.hasPendingFormPreparation)
+                XCTAssertEqual(owner.confirmedFormHistory, history); XCTAssertEqual(fixture.state.writes, writes)
+                XCTAssertEqual(fixture.state.commands.filter { $0 == .extendFormFields }.count, 1)
+                XCTAssertEqual(fixture.state.commands.filter { $0 == .reviseFormFields }.count, 0)
+                XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 2)
+            }
+        }
+    }
+
+    func testPhysicalRecoveryKeepsTheCaretOfANewFieldStrict() async throws {
+        for mutation in ["document.getElementById('city').value='draft';document.getElementById('city').setSelectionRange(5,5);fetch('/signal').then(()=>{document.getElementById('city').setSelectionRange(0,0);fetch('/restored');});",
+                         "document.getElementById('city').value='draft';document.getElementById('city').setSelectionRange(5,5);fetch('/signal').then(()=>{document.getElementById('query').value='reset';document.getElementById('city').setSelectionRange(0,0);fetch('/restored');});"] {
+            let fixture = try await make(category: true, city: true, mutation: mutation)
+            defer { fixture.close() }
+            let (first, proposal) = try await prepareMixed(fixture, order: ["Query","Category"], deferring: ["City"]), owner = try fixture.owner()
+            // The first input must be consumed before City becomes a captured field.
+            _ = try await owner.executeForm(proposal, input: first)
+            try await release(fixture)
+            configureMixed(fixture, editing: ["City"], retaining: ["Query","Category"])
+            let action = try await owner.planNextAction(using: fixture.actions), original = try await owner.prepareFormInput(for: action)
+            let city = try XCTUnwrap(original.evidence.fields.first { $0.control.label == "City" }).editable.snapshot
+            XCTAssertEqual(city.value, "draft"); XCTAssertEqual(city.selection, NSRange(location: 5, length: 0))
+            let history = owner.confirmedFormHistory, writes = fixture.state.writes
+            try await releaseSecondSignal(fixture)
+            await expectFailure { _ = try await owner.recoverPendingFormPreparationCriteria() }
+            XCTAssertFalse(owner.needsFormPreparationReview); XCTAssertTrue(owner.hasPendingFormPreparation)
+            XCTAssertEqual(owner.confirmedFormHistory, history); XCTAssertEqual(fixture.state.writes, writes)
+            XCTAssertEqual(fixture.state.commands.filter { $0 == .reviseFormFields }.count, 0)
+            XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 2)
+        }
+    }
+
+    func testPhysicalCriteriaRecoveryRequiresHandbackAtBindingAndOriginChecks() async throws {
+        for (boundary, occurrence) in [(ComputerUseBrowserDOMCommand.bindPageFields,1), (.inspectFormRequirements,2)] {
+            let fixture = try await make(category: true, city: true, mutation: "document.getElementById('query').value='reset';")
+            defer { fixture.close() }
+            _ = try await preparePhysicalCity(fixture)
+            let owner = try fixture.owner(), history = owner.confirmedFormHistory, writes = fixture.state.writes
+            try await release(fixture)
+            var seen = 0
+            fixture.state.onCommand = { command in
+                guard command == boundary else { return }; seen += 1
+                guard seen == occurrence else { return }; fixture.state.onCommand = nil; owner.pause()
+            }
+            await expectFailure { _ = try await owner.recoverPendingFormPreparationCriteria() }
+            XCTAssertFalse(owner.needsFormPreparationReview)
+            let commands = fixture.state.commands
+            await expectFailure { _ = try await owner.recoverPendingFormPreparationCriteria() }
+            XCTAssertEqual(fixture.state.commands, commands)
+            try await owner.resumeAfterUserControl()
+            let recovered = try await owner.recoverPendingFormPreparationCriteria()
+            XCTAssertTrue(recovered); XCTAssertTrue(owner.needsFormPreparationReview)
+            XCTAssertEqual(owner.confirmedFormHistory, history); XCTAssertEqual(fixture.state.writes, writes)
+            XCTAssertEqual(fixture.state.commands.filter { $0 == .extendFormFields }.count, 1)
+            XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 2)
+        }
+    }
+
+    func testPhysicalPreparationRevisionRechecksNativeOriginsAfterReview() async throws {
+        for observed in [false, true] {
+            let fixture = try await make(category: true, city: true, queryAlreadyMatches: observed, categoryAlreadyMatches: observed,
+                mutation: "document.getElementById('query').value='reset';")
+            defer { fixture.close() }
+            let (_, prepared) = try await preparePhysicalCity(fixture), original = try XCTUnwrap(prepared), owner = try fixture.owner()
+            let history = owner.confirmedFormHistory
+            try await release(fixture)
+            let recovered = try await owner.recoverPendingFormPreparationCriteria()
+            XCTAssertTrue(recovered)
+            configureMixed(fixture, editing: ["Query","City"], retaining: ["Category"])
+            let action = try await owner.reviewFormPreparation(using: fixture.actions)
+            let other = ComputerUseBrowserTextTarget(browser: fixture.browser, document: original.evidence.page.document, requiresFrontmost: false)
+            _ = try await other.fields()
+            await expectFailure { _ = try await owner.applyFormPreparationReview(action) }
+            XCTAssertTrue(owner.hasPendingFormPreparation); XCTAssertEqual(owner.confirmedFormHistory, history)
+            XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, observed ? 0 : 2)
+            XCTAssertEqual(fixture.state.commands.filter { $0 == .verifyFormState }.count, observed ? 1 : 0)
+        }
+    }
+
+    func testPhysicalRecoveryKeepsAChangedCaptureSeparateFromItsEarlierDesiredValue() async throws {
+        let mutation = "document.getElementById('query').value='reset';fetch('/signal').then(()=>{document.getElementById('query').value='another';fetch('/restored');});"
+        let fixture = try await make(category: true, city: true, mutation: mutation)
+        defer { fixture.close() }
+        let (first, proposal) = try await prepareMixed(fixture, order: ["Query","Category"], deferring: ["City"]), owner = try fixture.owner()
+        _ = try await owner.executeForm(proposal, input: first)
+        try await release(fixture)
+        configureMixed(fixture, editing: ["Query","City"], retaining: ["Category"])
+        let action = try await owner.planNextAction(using: fixture.actions), original = try await owner.prepareFormInput(for: action)
+        let query = try XCTUnwrap(original.evidence.fields.first { $0.control.label == "Query" }).editable.snapshot
+        XCTAssertEqual(query.value, "reset"); XCTAssertEqual(original.previous?.finalValues[query.targetID], "concerts")
+        try await releaseSecondSignal(fixture)
+        let recovered = try await owner.recoverPendingFormPreparationCriteria()
+        XCTAssertTrue(recovered)
+        let next = try await repairRetainPreparation(fixture, editing: ["Query","City"], retaining: ["Category"])
+        XCTAssertEqual(next.evidence.fields.first { $0.control.label == "Query" }?.editable.snapshot.value, "another")
+        XCTAssertEqual(next.previous, original.previous)
+        XCTAssertEqual(query.value, "reset")
+        _ = try await owner.executeForm(.decode(content: mixedContent(next, order: ["Query","City"]), input: next), input: next)
+        XCTAssertEqual(owner.confirmedFormHistory.map(\.editCount), [2,2])
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 4)
+    }
+
+    func testPhysicalRepairRechecksNewFieldValuesAfterTheFreshReview() async throws {
+        let mutation = "document.getElementById('query').value='reset';fetch('/signal').then(()=>{document.getElementById('city').value='Portland';fetch('/restored');});"
+        let fixture = try await make(category: true, city: true, mutation: mutation)
+        defer { fixture.close() }
+        _ = try await preparePhysicalCity(fixture)
+        let owner = try fixture.owner(), history = owner.confirmedFormHistory
+        try await release(fixture)
+        let recovered = try await owner.recoverPendingFormPreparationCriteria()
+        XCTAssertTrue(recovered)
+        configureMixed(fixture, editing: ["Query","City"], retaining: ["Category"])
+        let action = try await owner.reviewFormPreparation(using: fixture.actions)
+        try await releaseSecondSignal(fixture)
+        await expectFailure { _ = try await owner.applyFormPreparationReview(action) }
+        XCTAssertTrue(owner.hasPendingFormPreparation); XCTAssertEqual(owner.confirmedFormHistory, history)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 2)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .extendFormFields }.count, 1)
+    }
+
+    private func preparePhysicalCity(_ fixture: ResearchDriverFixture, interrupting boundary: ComputerUseBrowserDOMCommand? = nil) async throws
+        -> (ComputerUseBrowserResearchFormInput, ComputerUseBrowserResearchFormInput?) {
+        let (first, proposal) = try await prepareMixed(fixture, order: ["Query","Category"], deferring: ["City"]), owner = try fixture.owner()
+        _ = try await owner.executeForm(proposal, input: first)
+        configureMixed(fixture, editing: ["City"], retaining: ["Query","Category"])
+        let action = try await owner.planNextAction(using: fixture.actions)
+        if let boundary {
+            fixture.state.onCommand = { command in
+                guard command == boundary else { return }; fixture.state.onCommand = nil; owner.pause()
+            }
+            await expectFailure { _ = try await owner.prepareFormInput(for: action) }
+            XCTAssertTrue(owner.hasPendingFormPreparation)
+            return (first, nil)
+        }
+        return (first, try await owner.prepareFormInput(for: action))
     }
 
     private func configureAnsweredRetentionRevision(_ fixture: ResearchDriverFixture, editing: [String], retaining: [String], querying: Bool = false) {

@@ -139,9 +139,18 @@ struct ComputerUseBrowserEffectScopeReview: Equatable, Sendable, CustomStringCon
     /// position an input precondition. It grants no edit or new value origin.
     func permitsReadOnlyRetention(after previous: ComputerUseBrowserResearchFormContinuation,
                                   on current: ComputerUseBrowserPageEvidence) -> Bool {
-        guard let scope = formScope, let formID = scope.formID,
+        guard let scope = formScope,
               scope.fieldIntents.contains(where: { $0.disposition == .retain }),
-              !scope.fieldIntents.contains(where: { $0.disposition == .edit }),
+              !scope.fieldIntents.contains(where: { $0.disposition == .edit }) else { return false }
+        return permitsCriteriaRepair(after: previous, on: current)
+    }
+
+    /// An unexecuted scope can reobserve earlier verified criteria for review.
+    /// This grants no input and does not classify newly captured fields as verified.
+    func permitsCriteriaRepair(after previous: ComputerUseBrowserResearchFormContinuation,
+                               on current: ComputerUseBrowserPageEvidence) -> Bool {
+        guard let scope = formScope, let formID = scope.formID,
+              scope.fieldIntents.contains(where: { $0.disposition == .edit || $0.disposition == .retain }),
               previous.pendingEdits.isEmpty, previous.formID == formID,
               interpretation.input.continues(previous.goal),
               previous.document == evidence.document, previous.documentID == evidence.documentID,
