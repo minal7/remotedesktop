@@ -656,6 +656,150 @@ final class ComputerUseBrowserResearchPreservationTests: XCTestCase {
         XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 1)
     }
 
+    func testGoalReviewKeepsPreservedPreparationAcrossMultipleAcceptedAnswers() async throws {
+        let fixture = try await make()
+        defer { fixture.close() }
+        let (first, _) = try await prepare(fixture), owner = try fixture.owner(), original = owner.input
+        _ = try answerPreparedQuestion(owner, input: first)
+        XCTAssertTrue(owner.hasRevisedFormPreparationGoal)
+        fixture.goal.select = nil; fixture.goal.base.questionTopic = .location
+        let reviewed = try await owner.interpretGoal()
+        let request = try XCTUnwrap(try owner.proposedQuestionRequest())
+        XCTAssertEqual(request.topic, .location); XCTAssertEqual(request.inputDigest, owner.input.digest)
+        XCTAssertEqual(reviewed.proposal.input, owner.input)
+        let question = try owner.issueQuestion(topic: request.topic, requirementIDs: request.requirementIDs,
+            controllerID: "phone", controllerSessionID: "session")
+        let updated = try owner.answerQuestion(questionID: question.id, answerTaskID: "second-answer", answer: "Seattle.",
+            controllerID: "phone", controllerSessionID: "session")
+        fixture.goal.base.questionTopic = nil
+        let finalReview = try await owner.interpretGoal()
+        _ = try await owner.interpretGoal() // Reuse only the exact current interpretation.
+        XCTAssertEqual(finalReview.proposal.input, updated)
+        XCTAssertEqual(updated.userTurns, original.userTurns + ["Tomorrow.", "Seattle."])
+        XCTAssertEqual(updated.rootDigest, original.rootDigest)
+        XCTAssertEqual(updated.referenceMilliseconds, original.referenceMilliseconds)
+        XCTAssertEqual(updated.timeZoneIdentifier, original.timeZoneIdentifier)
+        XCTAssertEqual(fixture.goal.inputs.count, 3)
+        XCTAssertTrue(owner.hasPendingFormPreparation)
+        await expectFailure { _ = try await owner.resumeFormPreparation() }
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .formFields || $0 == .prepareFormPreservation }.count, 2)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 0)
+    }
+
+    func testDriverAsksCurrentGoalQuestionBeforeTryingOldPreparation() async throws {
+        let fixture = try await make(category: true)
+        defer { fixture.close() }
+        let (_, action) = try await prepareLaterAction(fixture), owner = try fixture.owner()
+        let prepared = try await owner.prepareFormInput(for: action), history = owner.confirmedFormHistory
+        let updated = try answerPreparedQuestion(owner, input: prepared)
+        fixture.goal.select = nil; fixture.goal.base.questionTopic = .location
+        let decisions = fixture.actions.inputs.count, forms = fixture.forms.inputs.count
+        let result = try await fixture.resume()
+        guard case .browserClarificationRequired(let request) = result else { return XCTFail("Review the current answer before touching the old prepared form") }
+        XCTAssertEqual(request.inputDigest, updated.digest); XCTAssertEqual(request.topic, .location)
+        XCTAssertEqual(fixture.goal.inputs.last, updated)
+        XCTAssertEqual(fixture.actions.inputs.count, decisions); XCTAssertEqual(fixture.forms.inputs.count, forms)
+        XCTAssertEqual(owner.confirmedFormHistory, history)
+        XCTAssertTrue(owner.hasPendingFormPreparation)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .extendFormFields }.count, 1)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 1)
+    }
+
+    func testFreshGoalInterpretationAloneCannotReleasePreservedPreparation() async throws {
+        for unsupported in [false, true] {
+            let fixture = try await make()
+            defer { fixture.close() }
+            let (prepared, oldProposal) = try await prepare(fixture), owner = try fixture.owner()
+            let updated = try answerPreparedQuestion(owner, input: prepared)
+            fixture.goal.select = nil; fixture.goal.unsupported = unsupported
+            let decisions = fixture.actions.inputs.count, forms = fixture.forms.inputs.count
+            let result = try await fixture.resume()
+            guard case .userInterventionRequired = result else { return XCTFail("A fresh interpretation does not reconcile the old form scope") }
+            XCTAssertEqual(fixture.goal.inputs.last, updated)
+            XCTAssertTrue(owner.hasPendingFormPreparation); XCTAssertTrue(owner.hasRevisedFormPreparationGoal)
+            await expectFailure { _ = try await owner.executeForm(oldProposal, input: prepared) }
+            await expectFailure { _ = try await owner.planNextAction(using: fixture.actions) }
+            XCTAssertEqual(fixture.actions.inputs.count, decisions); XCTAssertEqual(fixture.forms.inputs.count, forms)
+            XCTAssertTrue(owner.confirmedFormHistory.isEmpty)
+            XCTAssertEqual(fixture.state.commands.filter { $0 == .formFields || $0 == .prepareFormPreservation }.count, 2)
+            XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 0)
+        }
+    }
+
+    func testUnchangedPreparedGoalReturnsItsExistingInterpretationWithoutAnotherProposal() async throws {
+        let fixture = try await make()
+        defer { fixture.close() }
+        let (prepared, _) = try await prepare(fixture), owner = try fixture.owner()
+        let decisions = fixture.goal.inputs.count, commands = fixture.state.commands
+        let reviewed = try await owner.interpretGoal()
+        XCTAssertEqual(reviewed.proposal, prepared.interpretation)
+        XCTAssertFalse(owner.hasRevisedFormPreparationGoal); XCTAssertTrue(owner.hasPendingFormPreparation)
+        XCTAssertEqual(fixture.goal.inputs.count, decisions); XCTAssertEqual(fixture.state.commands, commands)
+    }
+
+    func testCancellationDuringRevisedGoalReviewKeepsThePreparationAndRequiresHandback() async throws {
+        let fixture = try await make()
+        defer { fixture.close() }
+        let (prepared, _) = try await prepare(fixture), owner = try fixture.owner()
+        let updated = try answerPreparedQuestion(owner, input: prepared)
+        fixture.goal.select = nil; fixture.goal.base.questionTopic = .location
+        fixture.goal.base.beforeReply = { owner.pause() }
+        await expectFailure { _ = try await owner.interpretGoal() }
+        XCTAssertTrue(owner.hasPendingFormPreparation); XCTAssertFalse(owner.isOperating)
+        let decisions = fixture.goal.inputs.count
+        await expectFailure { _ = try await owner.interpretGoal() }
+        XCTAssertEqual(fixture.goal.inputs.count, decisions)
+        fixture.goal.base.beforeReply = nil
+        try await owner.resumeAfterUserControl()
+        XCTAssertThrowsError(try owner.proposedQuestionRequest(), "A cancelled interpretation must not be published")
+        let reviewed = try await owner.interpretGoal()
+        XCTAssertEqual(reviewed.proposal.input, updated)
+        XCTAssertTrue(owner.hasPendingFormPreparation)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .formFields || $0 == .prepareFormPreservation }.count, 2)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 0)
+    }
+
+    func testGoalReviewStillRejectsAnUnfinishedFormExecution() async throws {
+        let fixture = try await make()
+        defer { fixture.close() }
+        let (prepared, proposal) = try await prepare(fixture), owner = try fixture.owner()
+        fixture.state.onCommand = { command in
+            guard command == .edit else { return }; fixture.state.onCommand = nil; owner.pause()
+        }
+        await expectFailure { _ = try await owner.executeForm(proposal, input: prepared) }
+        try await owner.resumeAfterUserControl()
+        let decisions = fixture.goal.inputs.count
+        await expectFailure { _ = try await owner.interpretGoal() }
+        XCTAssertThrowsError(try owner.proposedQuestionRequest())
+        XCTAssertTrue(owner.hasPendingForm); XCTAssertFalse(owner.hasPendingFormPreparation)
+        XCTAssertEqual(fixture.goal.inputs.count, decisions)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 1)
+    }
+
+    func testForeignGoalReviewCannotReplaceTheRetainedPreparationRevision() async throws {
+        let fixture = try await make()
+        defer { fixture.close() }
+        let (prepared, _) = try await prepare(fixture), owner = try fixture.owner()
+        let updated = try answerPreparedQuestion(owner, input: prepared)
+        fixture.goal.select = nil; fixture.goal.base.replacement = prepared.interpretation.input
+        await expectFailure { _ = try await owner.interpretGoal() }
+        XCTAssertThrowsError(try owner.proposedQuestionRequest())
+        XCTAssertTrue(owner.hasPendingFormPreparation); XCTAssertTrue(owner.hasRevisedFormPreparationGoal)
+        XCTAssertEqual(owner.input, updated)
+        fixture.goal.base.replacement = nil
+        let reviewed = try await owner.interpretGoal()
+        XCTAssertEqual(reviewed.proposal.input, updated)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .formFields || $0 == .prepareFormPreservation }.count, 2)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 0)
+    }
+
+    private func answerPreparedQuestion(_ owner: ComputerUseBrowserResearchTask, input: ComputerUseBrowserResearchFormInput) throws -> ComputerUseBrowserGoalInput {
+        let question = try owner.issueQuestion(topic: .date, requirementIDs: [input.interpretation.requirements[0].id],
+            controllerID: "phone", controllerSessionID: "session")
+        return try owner.answerQuestion(questionID: question.id, answerTaskID: "first-answer", answer: "Tomorrow.",
+            controllerID: "phone", controllerSessionID: "session")
+    }
+
     private func prepareLaterAction(_ fixture: ResearchDriverFixture) async throws
         -> (ComputerUseBrowserResearchFormInput, ComputerUseBrowserActionProposal) {
         let (first, proposal) = try await prepare(fixture, category: true), owner = try fixture.owner()

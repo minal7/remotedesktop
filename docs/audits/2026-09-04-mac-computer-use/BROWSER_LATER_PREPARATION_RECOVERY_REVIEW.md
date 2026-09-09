@@ -2,6 +2,8 @@
 
 Status: source repair only. Native behavior, type correctness, model decisions and real website workflows remain unqualified.
 
+Follow-up: [goal review during retained preparation](BROWSER_PREPARATION_GOAL_REVIEW.md) permits fresh interpretation and further clarification questions after an accepted answer. Revised form-scope reconciliation and execution remain pending.
+
 ## Problem and invariant
 
 A task can set a search term, verify the input, and then prepare another field such as Category. The first stage's values, native objects and operation receipts are still obligations of the task. Pause can cancel the second preparation's caller after WebKit has already extended the retained field catalogue or captured an additional preservation scope. Losing that result would invite rediscovery, a changed baseline or an attempt to resume with the wrong scope.

@@ -125,6 +125,11 @@ final class ComputerUseBrowserResearchTask {
         hasPendingFormPreparation || hasPendingFormExecution
     }
     var hasPendingFormPreparation: Bool { formPreparation != nil }
+    /// An accepted answer changes interpretation, not the retained native
+    /// baseline. Goal review may continue while effect preparation stays held.
+    var hasRevisedFormPreparationGoal: Bool {
+        formPreparation.map { $0.interpretation.input != input } ?? false
+    }
     private var hasPendingFormExecution: Bool {
         guard let formStage else { return false }
         return !confirmedFormHistory.contains { $0.stageID == formStage.id }
@@ -194,7 +199,7 @@ final class ComputerUseBrowserResearchTask {
 
     func interpretGoal() async throws -> Interpretation {
         try requireIdle()
-        guard !hasPendingForm else { throw Failure.formPending }
+        try requireFormGoalReview()
         guard !hasPendingNavigation else { throw Failure.navigationPending }
         guard !hasQuestion else { throw Failure.questionPending }
         if let interpretation, interpretation.proposal.input.digest == input.digest { return interpretation }
@@ -217,7 +222,7 @@ final class ComputerUseBrowserResearchTask {
     /// another proposal; the host still binds the live controller/session.
     func proposedQuestionRequest() throws -> ComputerUseBrowserQuestionRequest? {
         try requireIdle()
-        guard !hasPendingForm else { throw Failure.formPending }
+        try requireFormGoalReview()
         guard !hasPendingNavigation else { throw Failure.navigationPending }
         guard !hasQuestion else { throw Failure.questionPending }
         guard let interpretation, interpretation.proposal.input.digest == input.digest else { throw Failure.interpretationRequired }
@@ -229,6 +234,16 @@ final class ComputerUseBrowserResearchTask {
         let scope = interpretation.proposal.requirements.filter { unresolved.contains($0.id) && ComputerUseBrowserClarificationTopic.source.accepts($0) }
         guard !scope.isEmpty else { return nil }
         return .init(taskID: taskID, inputDigest: input.digest, topic: .source, requirementIDs: Array(scope.prefix(8)).map(\.id))
+    }
+
+    /// Interpreting the complete retained conversation is not a form effect.
+    /// A pending execution still owns its old contract; only an unstarted
+    /// preparation may coexist with review of a continuing goal revision.
+    private func requireFormGoalReview() throws {
+        guard !hasPendingFormExecution else { throw Failure.formPending }
+        if let preparation = formPreparation {
+            guard input.continues(preparation.interpretation.input) else { throw Failure.goalChanged }
+        }
     }
 
     /// Propose a first search from the complete retained user source. This

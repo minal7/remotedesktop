@@ -248,6 +248,16 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                 continue
             }
             if owner.hasPendingFormPreparation {
+                if owner.hasRevisedFormPreparationGoal {
+                    progress("Reviewing your answer…")
+                    _ = try await owner.interpretGoal()
+                    try check()
+                    if let question = try owner.proposedQuestionRequest() { return .browserClarificationRequired(question) }
+                    // Goal interpretation supplies no authority to reuse the
+                    // old form review or rebase its captured private values.
+                    // Keep that frame until the revised form scope is carried.
+                    return .userInterventionRequired("Your answer is saved. I could not yet update this form while preserving the work already done. Review the task on the Mac before continuing.")
+                }
                 progress("Checking the pending form preparation…")
                 let input = try await owner.resumeFormPreparation()
                 let proposal = try await owner.planForm(input, using: formPlanner)
