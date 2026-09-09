@@ -2,6 +2,8 @@
 
 Source checkpoint: 2026-09-09. Parent: `4310a3e`. Source repair and authored regressions only. Compilation, assertions, inference, app/browser execution and live qualification remain paused.
 
+Follow-up: the [navigation-source completion gate](BROWSER_NAVIGATION_SOURCE_COMPLETION_GATE_REVIEW.md) removes the generic source-field shortcut and retains an explicit unverified-history obligation, including across clarification. A positive native route-history proof remains open; the counts below describe this earlier checkpoint.
+
 ## First-principles finding
 
 Where evidence comes from and what that evidence proves are different questions. A source restriction should be checked against the native document origin and the policy governing its reading. A page cannot prove its own source eligibility by naming an allowed site or claiming not to use an excluded site.

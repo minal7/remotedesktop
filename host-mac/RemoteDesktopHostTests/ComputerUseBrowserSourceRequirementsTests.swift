@@ -207,6 +207,42 @@ final class ComputerUseBrowserSourceRequirementsTests: XCTestCase {
         }
     }
 
+    func testNavigationHistoryObligationsIncludeAllowListsAndExclusions() throws {
+        let current = try proposal([row("Find tickets. "),
+            row("Only visit tickets.test. ", field: "navigationSource", values: ["tickets.test"]),
+            row("Do not visit blocked.test.", role: "prohibition", field: "navigationSource", relation: "exclude", values: ["blocked.test"])])
+        let compiled = ComputerUseBrowserSourceRequirements(proposal: current)
+        XCTAssertTrue(compiled.unresolved.isEmpty)
+        XCTAssertTrue(compiled.requiresNavigationHistory)
+        XCTAssertFalse(compiled.hasNavigationHistoryObligation(for: current.requirements[0].id))
+        XCTAssertTrue(compiled.hasNavigationHistoryObligation(for: current.requirements[1].id))
+        XCTAssertTrue(compiled.hasNavigationHistoryObligation(for: current.requirements[2].id))
+        XCTAssertFalse(compiled.hasNavigationHistoryObligation(for: "unknown-requirement"))
+    }
+
+    func testNavigationHistoryObligationsSurviveRelabelingAndResegmentation() throws {
+        let initial = try proposal([row("Find tickets. "),
+            row("Do not visit blocked.test.", role: "prohibition", field: "navigationSource", relation: "exclude", values: ["blocked.test"])])
+        let continued = try answered(initial, with: "Tomorrow.")
+        let latest = try proposal([row(initial.input.prompt), row("Tomorrow.", field: "date", relation: "equal", values: ["Tomorrow"], turn: 1)], input: continued)
+        let compiled = ComputerUseBrowserSourceRequirements(proposal: latest)
+        XCTAssertTrue(compiled.unresolved.isEmpty)
+        XCTAssertFalse(latest.requirements.contains { $0.field == .navigationSource })
+        XCTAssertTrue(compiled.requiresNavigationHistory)
+        XCTAssertTrue(compiled.hasNavigationHistoryObligation(for: latest.requirements[0].id))
+        XCTAssertFalse(compiled.hasNavigationHistoryObligation(for: latest.requirements[1].id))
+    }
+
+    func testAnswerSourceRestrictionsDoNotInventANavigationHistoryObligation() throws {
+        for rows in [[row("Find tickets.")], [row("Find tickets. "),
+            row("Do not report from blocked.test.", role: "prohibition", field: "answerSource", relation: "exclude", values: ["blocked.test"])]] {
+            let current = try proposal(rows), compiled = ComputerUseBrowserSourceRequirements(proposal: current)
+            XCTAssertTrue(compiled.unresolved.isEmpty)
+            XCTAssertFalse(compiled.requiresNavigationHistory)
+            XCTAssertTrue(current.requirements.allSatisfy { !compiled.hasNavigationHistoryObligation(for: $0.id) })
+        }
+    }
+
     func testAnswerPolicyMatchingIncludesHistoricalRestrictionsHiddenByResegmentation() throws {
         let initial = try proposal([row("Find tickets. "), row("Do not report from blocked.test.", role: "prohibition", field: "answerSource", relation: "exclude", values: ["blocked.test"])])
         let continued = try answered(initial, with: "Tomorrow.")

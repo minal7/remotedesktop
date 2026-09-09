@@ -32,7 +32,11 @@ struct ComputerUseBrowserResearchAnswer: Equatable, Sendable, CustomStringConver
                   !reading.projectionOmittedRecords,
                   let review = reading.review, review.hasRequirementMapping,
                   let assessment = reading.requirementAssessment,
-                  sourceRequirements.unresolved.isEmpty else { return nil }
+                  sourceRequirements.unresolved.isEmpty,
+                  // No native route-history certificate exists yet. Keep
+                  // this duty open even if its original clause was merged
+                  // into another requirement by a later interpretation.
+                  !sourceRequirements.requiresNavigationHistory else { return nil }
             self.readingIdentity = reading.requirementAssessmentIdentity; self.source = source
             observedAtMilliseconds = reading.observedAtMilliseconds
             requirements = interpretation.requirements.compactMap { interpretation.source(of: $0) }
@@ -75,7 +79,7 @@ struct ComputerUseBrowserResearchAnswer: Equatable, Sendable, CustomStringConver
                             "don't buy", "don't book", "don't purchase", "don't reserve"].contains(clause)
                     }
                     guard [.outcome, .condition].contains(requirement.role) else { return false }
-                    if [.source, .navigationSource, .answerSource].contains(requirement.field) { return true }
+                    if [.source, .navigationSource].contains(requirement.field) { return false }
                     if status == .needsResultSet { return counts.contains { $0.requirementID == requirement.id } }
                     if status == .quotedCapacitySufficient {
                         // A stock number alone cannot reconcile a selected

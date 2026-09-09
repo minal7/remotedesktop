@@ -4,6 +4,99 @@ import XCTest
 
 @MainActor
 final class ComputerUseBrowserResearchAnswerTests: XCTestCase {
+    func testNavigationConditionCannotCompleteFromAPermittedDocumentOrConfiguredPolicy() async throws {
+        for configurePolicy in [false, true] {
+            let fixture = try await ResearchAnswerFixture.make(navigationExclusionRole: "condition")
+            defer { fixture.source.close() }
+            if configurePolicy { fixture.source.policy.excludedOrigins = [try .init(URL(string: "https://blocked.test")!)] }
+            let result = try await fixture.source.start()
+            switch result {
+            case .browserResearchProgress, .userInterventionRequired: break
+            default: XCTFail("A source condition needs actual navigation history, including under the matching policy")
+            }
+            let owner = try fixture.source.owner(), current = try await owner.revalidateCandidates()
+            let assessment = try XCTUnwrap(current.requirementAssessment)
+            let index = try XCTUnwrap(assessment.requirements.firstIndex { $0.field == .navigationSource })
+            XCTAssertEqual(current.documentAnswerSourceStatus, .permitted)
+            XCTAssertEqual(assessment.plannerContext["version"] as? Int, 6)
+            XCTAssertEqual(assessment.candidates.first?.requirements[index].status, .navigationHistoryUnverified)
+            XCTAssertNil(current.answerPage(goal: owner.input))
+            XCTAssertTrue(try XCTUnwrap(fixture.inputs.last).answerCounts.isEmpty)
+            XCTAssertEqual(fixture.source.server.count("/search?q=concerts"), 1)
+        }
+    }
+
+    func testNavigationProhibitionHasItsOwnUnverifiedHistoryStatus() async throws {
+        let fixture = try await ResearchAnswerFixture.make(navigationExclusionRole: "prohibition")
+        defer { fixture.source.close() }
+        fixture.source.policy.excludedOrigins = [try .init(URL(string: "https://blocked.test")!)]
+        let result = try await fixture.source.start()
+        switch result {
+        case .browserResearchProgress, .userInterventionRequired: break
+        default: XCTFail("An execution history restriction must remain open without native route evidence")
+        }
+        let owner = try fixture.source.owner(), current = try await owner.revalidateCandidates()
+        let assessment = try XCTUnwrap(current.requirementAssessment)
+        let index = try XCTUnwrap(assessment.requirements.firstIndex { $0.field == .navigationSource })
+        XCTAssertEqual(assessment.requirements[index].role, .prohibition)
+        XCTAssertEqual(assessment.candidates.first?.requirements[index].status, .navigationHistoryUnverified)
+        XCTAssertNil(current.answerPage(goal: owner.input))
+        XCTAssertTrue(try XCTUnwrap(fixture.inputs.last).answerCounts.isEmpty)
+    }
+
+    func testMatchedAnswerSourceCannotDischargeASeparateNavigationRestriction() async throws {
+        let fixture = try await ResearchAnswerFixture.make(answerExclusion: "blocked.test", navigationExclusionRole: "condition")
+        defer { fixture.source.close() }
+        let excluded = try ComputerUseBrowserSourceOrigin(URL(string: "https://blocked.test")!)
+        fixture.source.policy.answerExcludedOrigins = [excluded]
+        fixture.source.policy.excludedOrigins = [excluded]
+        let result = try await fixture.source.start()
+        switch result {
+        case .browserResearchProgress, .userInterventionRequired: break
+        default: XCTFail("Answer-source and navigation-source obligations require separate evidence")
+        }
+        let owner = try fixture.source.owner(), current = try await owner.revalidateCandidates()
+        let assessment = try XCTUnwrap(current.requirementAssessment)
+        let answerIndex = try XCTUnwrap(assessment.requirements.firstIndex { $0.field == .answerSource })
+        let navigationIndex = try XCTUnwrap(assessment.requirements.firstIndex { $0.field == .navigationSource })
+        XCTAssertEqual(assessment.candidates.first?.requirements[answerIndex].status, .sourceOriginPermitted)
+        XCTAssertEqual(assessment.candidates.first?.requirements[navigationIndex].status, .navigationHistoryUnverified)
+        XCTAssertNil(current.answerPage(goal: owner.input))
+        XCTAssertTrue(try XCTUnwrap(fixture.inputs.last).answerCounts.isEmpty)
+    }
+
+    func testRelabeledNavigationHistoryDutyStillBlocksAReviewedAnswerAfterClarification() async throws {
+        let fixture = try await ResearchAnswerFixture.make(navigationExclusionRole: "condition")
+        defer { fixture.source.close() }
+        fixture.source.policy.excludedOrigins = [try .init(URL(string: "https://blocked.test")!)]
+        _ = try await fixture.source.start()
+        let owner = try fixture.source.owner(), original = try await owner.interpretGoal()
+        let question = try owner.issueQuestion(topic: .quantity, requirementIDs: [original.proposal.requirements[0].id],
+            controllerID: "phone", controllerSessionID: "session")
+        let updated = try owner.answerQuestion(questionID: question.id, answerTaskID: "answer", answer: "1 option.",
+            controllerID: "phone", controllerSessionID: "session")
+        // Deliberately misclassify the entire original turn as one category
+        // outcome. The retained source span still has a separate history duty.
+        let rows: [[String: Any]] = [
+            ["turn":0, "source":updated.prompt, "role":"outcome", "field":"category", "relation":"unspecified", "values":[String]()],
+            ["turn":1, "source":"1 option.", "role":"condition", "field":"quantity", "relation":"unspecified", "values":[String]()]]
+        fixture.source.goal.select = { _ in try ResearchAnswerFixture.json([
+            "disposition":"research", "requirements":rows, "question":["topic":"none", "requirements":[]]]) }
+        let interpreted = try await owner.interpretGoal()
+        let sources = try XCTUnwrap(interpreted.sources.selectSources(from: [fixture.source.policy.provider]))
+        try owner.configureResearchSources(sources)
+        let current = try await owner.readCandidates()
+        let assessment = try XCTUnwrap(current.requirementAssessment)
+        XCTAssertFalse(assessment.requirements.contains { $0.field == .navigationSource })
+        XCTAssertEqual(current.review?.candidates.first?.requirements?.first?.judgment, .supports)
+        XCTAssertEqual(current.documentAnswerSourceStatus, .permitted)
+        XCTAssertEqual(assessment.candidates.first?.requirements.first?.status, .navigationHistoryUnverified)
+        XCTAssertEqual(assessment.plannerContext["version"] as? Int, 6)
+        XCTAssertNil(current.answerPage(goal: updated))
+        XCTAssertNil(try current.answerEligibility(goal: updated))
+        XCTAssertEqual(fixture.source.server.count("/search?q=concerts"), 1)
+    }
+
     func testAnswerSourceExclusionCanCompleteWithItsMatchedNativePolicy() async throws {
         let fixture = try await ResearchAnswerFixture.make(answerExclusion: "blocked.test")
         defer { fixture.source.close() }
@@ -342,7 +435,7 @@ struct ResearchAnswerFixture {
                      includeControls: Bool = false, multiPage: Bool = false, repeatedPage: Bool = false,
                      historyRoute: Bool = false, controlHTML: String = "", resultDate: String? = nil, resultLocation: String? = nil,
                      surroundingHTML: String = "", controlRelationships: [ComputerUseBrowserControlRelevance.Relationship]? = nil,
-                     heldSignal: Bool = false, answerExclusion: String? = nil) async throws -> Self {
+                     heldSignal: Bool = false, answerExclusion: String? = nil, navigationExclusionRole: String? = nil) async throws -> Self {
         let transport = ResearchAnswerTransport(followCount: multiPage ? 2 : 1, recall: multiPage ? 1 : nil, historyRoute: historyRoute)
         let local = try ComputerUseLocalBrowserLinkPlanner(connection: .init(baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:54321")),
             bearerToken: "fixture-token", modelAlias: "fixture-model"), transport: transport)
@@ -357,6 +450,11 @@ struct ResearchAnswerFixture {
         if let answerExclusion {
             var restriction = row("Do not report results from \(answerExclusion). ", "prohibition", "answerSource")
             restriction["relation"] = "exclude"; restriction["values"] = [answerExclusion]
+            rows.append(restriction)
+        }
+        if let navigationExclusionRole {
+            var restriction = row("Do not visit blocked.test. ", navigationExclusionRole, "navigationSource")
+            restriction["relation"] = "exclude"; restriction["values"] = ["blocked.test"]
             rows.append(restriction)
         }
         rows.append(row("Do not buy.", "prohibition", "other"))

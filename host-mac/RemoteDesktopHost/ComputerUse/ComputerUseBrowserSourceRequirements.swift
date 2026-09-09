@@ -194,4 +194,13 @@ struct ComputerUseBrowserSourceRequirements: Sendable {
     func hasAnswerPolicyObligation(for requirementID: String) -> Bool {
         answers.requirementIDs.contains(requirementID)
     }
+
+    /// Navigation constraints describe the automation's actions over time.
+    /// Neither an installed policy nor a permitted answer document proves
+    /// that history. Include retained constraints hidden by resegmentation.
+    var requiresNavigationHistory: Bool { !navigation.requirementIDs.isEmpty }
+
+    func hasNavigationHistoryObligation(for requirementID: String) -> Bool {
+        navigation.requirementIDs.contains(requirementID)
+    }
 }
