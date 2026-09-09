@@ -151,6 +151,7 @@ struct ComputerUseBrowserActionInput: Equatable, Sendable, CustomStringConvertib
         preservableControlIDs = preservableIDs
         var verified: Any = NSNull(), queryControls: [String] = [], queryReceipt: ComputerUseBrowserResearchFormReceipt?
         var carried: [CarriedFormPreservation] = [], queryBound: [String] = [], changedControls: [String] = []
+        var verifiedRetainControls = Set<String>()
         if let stage = latestForm, let receipt = stage.nativeReceipt, formHistory.last == receipt,
            interpretation.input.continues(stage.input.interpretation.input), stage.input.evidence.page.document == evidence.document,
            stage.input.evidence.page.documentID == evidence.documentID {
@@ -168,6 +169,7 @@ struct ComputerUseBrowserActionInput: Equatable, Sendable, CustomStringConvertib
             }
             let fields = stage.input.evidence.fields.filter { continuation.verifiedTargetIDs.contains($0.editable.snapshot.targetID) }
             guard fields.count == continuation.verifiedTargetIDs.count else { throw ComputerUseBrowserActionPlanError.invalidInput }
+            verifiedRetainControls = Set(fields.map { $0.control.id })
             let verifiedForms = Set(fields.compactMap { $0.control.form?.id })
             if continuation.pendingEdits.isEmpty, changedFormTargetIDs.isEmpty, verifiedForms.count == 1,
                let form = verifiedForms.first, fields.allSatisfy({ $0.control.form?.id == form }) {
@@ -275,7 +277,9 @@ struct ComputerUseBrowserActionInput: Equatable, Sendable, CustomStringConvertib
                   (formEffectScope?.fieldIntents.filter { $0.disposition == .edit }.count ?? 0) < 8 else { return [] }
             return editableControls.filter { $0.form?.id == form && unplanned.contains($0.id) }.map(\.id)
         } ?? []
-        effectAdditionalRetainedControlIDs = (formEffectScope?.plannedControlIDs.count ?? 0) < 16 ? retainedFormControls.filter { unplanned.contains($0) && !changedControls.contains($0) } : []
+        effectAdditionalRetainedControlIDs = (formEffectScope?.plannedControlIDs.count ?? 0) < 16 ? retainedFormControls.filter {
+            verifiedRetainControls.contains($0) && unplanned.contains($0) && !changedControls.contains($0)
+        } : []
         effectAdditionalDeferredControlIDs = formEffectScope?.formID.map { form in
             guard (formEffectScope?.plannedControlIDs.count ?? 0) < 16 else { return [] }
             return evidence.page.controls.filter { $0.form?.id == form && unplanned.contains($0.id) && !queryBound.contains($0.id)

@@ -78,6 +78,9 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
     let selectedFormID: String?
     let scopeReview: ComputerUseBrowserEffectScopeReview?
     let fieldIntentRequirements: [String: [Int]]
+    /// Exact earlier verification purposes plus the current reviewed retain
+    /// purposes. Captured invariants alone do not qualify as verified criteria.
+    let retainedFieldSources: [String: [ComputerUseBrowserFormSource]]
     let requiredPreservation: [ComputerUseBrowserFormProposal.Preservation]
     let nativePreservation: ComputerUseBrowserFormPreservation?
     let nativePreservedSources: [ComputerUseBrowserFormPreservationSource]
@@ -139,7 +142,7 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
                   scope.preservedControls == preservedControls,
                   Set(evidence.fields.map { $0.control.id }) == Set(scope.discoveryControlIDs).union(captured).union(inherited),
                   scope.fieldIntents.allSatisfy({ intent in intent.disposition != .retain || evidence.fields.contains {
-                      $0.control.id == intent.controlID && previous?.finalValues[$0.editable.snapshot.targetID] != nil
+                      $0.control.id == intent.controlID && previous?.verifiedTargetIDs.contains($0.editable.snapshot.targetID) == true
                   } }) else { throw ComputerUseBrowserResearchFormError.inputChanged }
         }
         self.scopeReview = scopeReview
@@ -213,6 +216,22 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
             return (alias, intent.requirementIndices)
         })
         fieldIntentRequirements = intentRequirements
+        var retainedSources: [String: [ComputerUseBrowserFormSource]] = [:]
+        for intent in scopeReview?.formScope?.fieldIntents ?? [] where intent.disposition == .retain {
+            guard let index = evidence.fields.firstIndex(where: { $0.control.id == intent.controlID }),
+                  let previous, previous.verifiedTargetIDs.contains(evidence.fields[index].editable.snapshot.targetID),
+                  var sources = previous.verifiedSources[evidence.fields[index].editable.snapshot.targetID], !sources.isEmpty,
+                  let expected = previous.finalValues[evidence.fields[index].editable.snapshot.targetID],
+                  expected.utf8.elementsEqual(evidence.fields[index].editable.snapshot.value.utf8) else {
+                throw ComputerUseBrowserResearchFormError.inputChanged
+            }
+            for requirement in intent.requirementIndices {
+                let source = try ComputerUseBrowserFormSource(index: requirement, interpretation: interpretation)
+                if !sources.contains(source) { sources.append(source) }
+            }
+            retainedSources[aliases[index]] = sources
+        }
+        retainedFieldSources = retainedSources
         guard !editable.isEmpty else { throw ComputerUseBrowserResearchFormError.invalidInput }
         let repairs = zip(aliases, evidence.fields).compactMap { alias, field -> String? in
             guard let value = previous?.finalValues[field.editable.snapshot.targetID],
@@ -275,6 +294,12 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
                     row["verified_without_input"] = previous?.stateProofsByTarget[evidence.fields[index].editable.snapshot.targetID] != nil
                 }
                 return row
+            }
+        }
+        if !retainedSources.isEmpty {
+            context["version"] = 15
+            context["retained_criteria"] = try retainedSources.keys.sorted().map { alias in
+                ["field":alias,"sources":try retainedSources[alias]!.map { try $0.context(in: interpretation) }] as [String: Any]
             }
         }
         contextJSON = String(decoding: try JSONSerialization.data(withJSONObject: context, options: [.sortedKeys]), as: UTF8.self)

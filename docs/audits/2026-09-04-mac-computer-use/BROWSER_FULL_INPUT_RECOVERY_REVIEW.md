@@ -38,6 +38,8 @@ No build, typecheck, assertion execution, inference, app/browser/computer-use la
 
 ## Remaining sequence
 
+The subsequent [retained-criterion source repair](BROWSER_RETAINED_CRITERIA_REVIEW.md) tightens retain eligibility and preserves current retain purposes in existing mixed stages. Retain-only execution remains open; the sequence below records this checkpoint's historical boundary.
+
 1. Implement retain-only scopes and explicit supersession of earlier work without manufacturing input receipts or dropping original source purposes. Qualify semantic pending-field mapping and criterion lifetimes against complete natural-language goals.
 2. Keep unresolved native tails on their original operation identities. This recovery path deliberately requires every physical journal step verified; a dispatched or partially dispatched operation whose journal remains uncertain is not qualified by this checkpoint. Lost original proof/document/process state remains a recovery limitation.
 3. Continue preservation timing, dependent controls, account/login handoff and independent whole-task/result verification in the [repair TODO](../../../TODO.md).

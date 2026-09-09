@@ -108,6 +108,12 @@ struct ComputerUseBrowserResearchFormContinuation: Equatable, Sendable, CustomSt
         preservedTargetIDs = Set(try stage.proposal.preserved.map { try input.field(for: $0.field).editable.snapshot.targetID })
         var editedSources = previous?.editedSources ?? [:], sources = previous?.verifiedSources ?? [:]
         var proofs = previous?.stateProofsByTarget ?? [:]
+        for (alias, purposes) in input.retainedFieldSources {
+            let targetID = try input.field(for: alias).editable.snapshot.targetID
+            guard previous?.verifiedTargetIDs.contains(targetID) == true, !actualEdits.contains(targetID),
+                  !verified.contains(targetID), !purposes.isEmpty else { throw ComputerUseBrowserResearchFormStage.Failure.invalidStage }
+            sources[targetID] = purposes
+        }
         for edit in verifiedEdits {
             let targetID = try input.field(for: edit.field).editable.snapshot.targetID
             sources[targetID] = try stage.proposal.resolvedSources(for: edit)
@@ -117,7 +123,7 @@ struct ComputerUseBrowserResearchFormContinuation: Equatable, Sendable, CustomSt
         }
         self.editedSources = editedSources; verifiedSources = sources; stateProofsByTarget = proofs
         pendingEdits = try pending.map { try stage.proposal.pendingEdit(for: $0) }
-        digest = ComputerUseTaskContract.digest([stage.executionPlan.isMixed ? "browser-research-form-continuation-v7" : "browser-research-form-continuation-v6", taskID, rootDigest, goalRevision,
+        digest = ComputerUseTaskContract.digest([!input.retainedFieldSources.isEmpty ? "browser-research-form-continuation-v8" : stage.executionPlan.isMixed ? "browser-research-form-continuation-v7" : "browser-research-form-continuation-v6", taskID, rootDigest, goalRevision,
             document.contextID, String(document.generation), documentID, formID ?? "", previous?.digest ?? "", evidenceDigest]
             + [stage.contract.contractDigest, String(verifiedEdits.count)] + stageIDs + inputOperationIDs
             + proofs.keys.sorted().flatMap { [$0,proofs[$0]!.digest] })

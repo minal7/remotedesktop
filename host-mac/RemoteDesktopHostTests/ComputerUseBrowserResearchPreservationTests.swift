@@ -3125,6 +3125,198 @@ final class ComputerUseBrowserResearchPreservationTests: XCTestCase {
         XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 2)
     }
 
+    func testCurrentRetainSourcesSurviveCompletionAndQueryWithoutAnotherInput() async throws {
+        let fixture = try await make(category: true, city: true,
+            cityHandler: "if(document.getElementById('query').value==='concerts'){document.getElementById('reference').value='unexpected-city-input';}")
+        defer { fixture.close() }
+        let input = try await prepareRetainedCity(fixture), owner = try fixture.owner()
+        let alias = try XCTUnwrap(input.fieldAliases.first { (try? input.field(for: $0).control.label) == "City" })
+        let purposes = try XCTUnwrap(input.retainedFieldSources[alias])
+        XCTAssertEqual(purposes.count, 2)
+        XCTAssertTrue(purposes.contains { $0.turn == 0 && $0.source == "Find concerts in Seattle. " })
+        XCTAssertTrue(purposes.contains { $0.turn == 1 && $0.source == "Seattle." })
+        XCTAssertFalse(input.editableFieldAliases.contains(alias))
+        let context = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(input.contextJSON.utf8)) as? [String: Any])
+        XCTAssertEqual(context["version"] as? Int, 15)
+        XCTAssertEqual((context["retained_criteria"] as? [[String: Any]])?.count, 1)
+        let planner = try ComputerUseLocalBrowserFormPlanner(connection: .init(baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:54321")),
+            bearerToken: "fixture", modelAlias: "fixture-model"), transport: ControlStateUnusedTransport())
+        let request = try planner.makeRequest(input)
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
+        let response = try XCTUnwrap(body["response_format"] as? [String: Any])
+        XCTAssertEqual((response["json_schema"] as? [String: Any])?["name"] as? String, "browser_form_plan_v15")
+        let proposal = try ComputerUseBrowserFormProposal.decode(content: mixedContent(input, order: ["Query","Category"]), input: input)
+        let city = try input.field(for: alias).editable.snapshot
+        XCTAssertEqual(try proposal.textContract(for: input)?.unchangedValues[city.targetID], "Seattle")
+        _ = try await owner.executeForm(proposal, input: input)
+        configureRetainedCity(fixture, querying: true)
+        let action = try await owner.planNextAction(using: fixture.actions)
+        let actionContext = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(action.input.contextJSON.utf8)) as? [String: Any])
+        let stage = try XCTUnwrap(actionContext["verified_form_stage"] as? [String: Any])
+        let rows = try XCTUnwrap(stage["edits"] as? [[String: Any]])
+        let control = try input.field(for: alias).control.id
+        let retained = try XCTUnwrap(rows.first { $0["control"] as? String == control })
+        let sources = try XCTUnwrap(retained["sources"] as? [[String: Any]])
+        XCTAssertEqual(sources.count, 2); XCTAssertTrue(sources.contains { $0["source"] as? String == "Seattle." })
+        _ = try await owner.openFormQuery(for: action)
+        XCTAssertEqual(fixture.server.count("/filtered?q=concerts&category=concerts&city=Seattle"), 1)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 3)
+    }
+
+    func testRetainPurposesDoNotRewriteEarlierActualInputSourcesOrDuplicateOnLaterReview() async throws {
+        let fixture = try await make(category: true, city: true)
+        defer { fixture.close() }
+        let input = try await prepareRetainedCity(fixture), owner = try fixture.owner()
+        let city = try XCTUnwrap(input.evidence.fields.first { $0.control.label == "City" }).editable.snapshot.targetID
+        let originalSources = try XCTUnwrap(input.previous?.editedSources[city])
+        let originalIDs = try XCTUnwrap(input.previous?.inputOperationIDs)
+        _ = try await owner.executeForm(.decode(content: mixedContent(input, order: ["Query","Category"]), input: input), input: input)
+        configureMixed(fixture, editing: ["Query"], retaining: ["Category","City"])
+        let action = try await owner.planNextAction(using: fixture.actions)
+        let next = try await owner.prepareFormInput(for: action)
+        XCTAssertEqual(next.previous?.editedSources[city], originalSources)
+        XCTAssertEqual(next.previous?.verifiedSources[city]?.count, 2)
+        XCTAssertEqual(Array(next.previous?.inputOperationIDs.prefix(originalIDs.count) ?? []), originalIDs)
+        XCTAssertEqual(next.previous?.inputOperationIDs.count, 3)
+        let alias = try XCTUnwrap(next.fieldAliases.first { (try? next.field(for: $0).control.label) == "City" })
+        XCTAssertEqual(next.retainedFieldSources[alias], next.previous?.verifiedSources[city])
+        XCTAssertEqual(next.retainedFieldSources[alias]?.count, 2)
+    }
+
+    func testRetainSourcesSurvivePartialInputRecoveryAlongsidePendingEdits() async throws {
+        let fixture = try await make(category: true, city: true)
+        defer { fixture.close() }
+        let input = try await prepareRetainedCity(fixture), owner = try fixture.owner()
+        let proposal = try ComputerUseBrowserFormProposal.decode(content: mixedContent(input, order: ["Query","Category"]), input: input)
+        let pauseAt = fixture.state.writes + 2
+        fixture.state.onWrite = { if fixture.state.writes == pauseAt { owner.pause() } }
+        await expectFailure { _ = try await owner.executeForm(proposal, input: input) }
+        fixture.state.onWrite = nil
+        try await owner.resumeAfterUserControl()
+        let result = try await owner.retainPendingFormPrefix(), receipt = try XCTUnwrap(result)
+        XCTAssertEqual(receipt.editCount, 1); XCTAssertFalse(receipt.isCompleteStage)
+        configureRetainedCity(fixture, editing: ["Category"], alsoRetaining: ["Query"])
+        let action = try await owner.planNextAction(using: fixture.actions)
+        let next = try await owner.prepareFormInput(for: action)
+        let city = try XCTUnwrap(next.evidence.fields.first { $0.control.label == "City" }).editable.snapshot.targetID
+        XCTAssertEqual(next.previous?.verifiedSources[city]?.count, 2)
+        XCTAssertTrue(next.previous?.verifiedSources[city]?.contains { $0.turn == 1 && $0.source == "Seattle." } == true)
+        XCTAssertEqual(next.previous?.pendingEdits.map(\.label), ["Category"])
+        XCTAssertEqual(next.previous?.inputOperationIDs.count, 2)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 2)
+    }
+
+    func testAnObservedRetainedCriterionKeepsItsNativeOriginWithoutBecomingAnInput() async throws {
+        let fixture = try await make(category: true, queryAlreadyMatches: true)
+        defer { fixture.close() }
+        let (_, action) = try await prepareLaterAction(fixture), owner = try fixture.owner()
+        let input = try await owner.prepareFormInput(for: action)
+        let query = try XCTUnwrap(input.evidence.fields.first { $0.control.label == "Query" }).editable.snapshot.targetID
+        let proof = try XCTUnwrap(input.previous?.stateProofsByTarget[query])
+        XCTAssertEqual(input.retainedFieldSources.count, 1)
+        XCTAssertEqual(input.retainedFieldSources.values.first?.count, 1)
+        XCTAssertEqual(input.previous?.editedTargetIDs.count, 0)
+        _ = try await owner.executeForm(.decode(content: categoryPlan(input), input: input), input: input)
+        configure(fixture, category: true, revising: true, querying: true)
+        let queryAction = try await owner.planNextAction(using: fixture.actions)
+        _ = try await owner.openFormQuery(for: queryAction)
+        XCTAssertEqual(fixture.server.count("/filtered?q=concerts&category=concerts"), 1)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 1)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .verifyFormState }.count, 1)
+        XCTAssertEqual(proof.verifiedValues[query], "concerts")
+    }
+
+    func testChangedRetainedCriterionCannotPublishItsCurrentRetainPurposes() async throws {
+        let fixture = try await make(category: true, city: true,
+            mutation: "document.getElementById('city').value='Portland';")
+        defer { fixture.close() }
+        let input = try await prepareRetainedCity(fixture), owner = try fixture.owner(), history = owner.confirmedFormHistory
+        try await release(fixture)
+        await expectFailure {
+            _ = try await owner.executeForm(.decode(content: self.mixedContent(input, order: ["Query","Category"]), input: input), input: input)
+        }
+        XCTAssertEqual(owner.confirmedFormHistory, history)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 1)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .prepareFormQuery }.count, 0)
+    }
+
+    func testCapturedInvariantCannotBeOfferedOrDecodedAsAVerifiedRetainCriterion() async throws {
+        let fixture = try await make(category: true)
+        defer { fixture.close() }
+        let (original, _) = try await prepare(fixture, category: true), owner = try fixture.owner()
+        _ = try await beginPreparationReview(fixture, input: original); configurePreparedRevision(fixture)
+        let reviewed = try await owner.reviewFormPreparation(using: fixture.actions)
+        let revised = try await owner.applyFormPreparationReview(reviewed)
+        _ = try await owner.executeForm(.decode(content: categoryPlan(revised), input: revised), input: revised)
+        configure(fixture, category: true)
+        let fallback = fixture.actions.select
+        var checked = false
+        fixture.actions.select = { input in
+            let query = try XCTUnwrap(input.evidence.page.controls.first { $0.label == "Query" }?.id)
+            XCTAssertFalse(input.effectAdditionalRetainedControlIDs.contains(query))
+            if input.effectAdditionalEditControlIDs.contains(query) {
+                checked = true
+                let content = try ResearchAnswerFixture.json(["plan_fields":[["control":query,"disposition":"retain","requirements":[0]]]])
+                XCTAssertThrowsError(try ComputerUseBrowserActionProposal.decode(content: content, input: input))
+            }
+            if let response = try FormEffectScopeFixture.response(input, editing: ["Query":[0]], retaining: ["Category":[0]],
+                preserving: ["Reference":0]) { return response }
+            return try XCTUnwrap(fallback)(input)
+        }
+        let action = try await owner.planNextAction(using: fixture.actions)
+        let next = try await owner.prepareFormInput(for: action)
+        XCTAssertTrue(checked)
+        let query = try XCTUnwrap(next.evidence.fields.first { $0.control.label == "Query" }).editable.snapshot.targetID
+        XCTAssertNotNil(next.previous?.finalValues[query])
+        XCTAssertFalse(next.previous?.verifiedTargetIDs.contains(query) ?? true)
+        XCTAssertEqual(next.retainedFieldSources.count, 1)
+        XCTAssertEqual(try next.retainedFieldSources.keys.map { try next.field(for: $0).control.label }, ["Category"])
+    }
+
+    private func prepareRetainedCity(_ fixture: ResearchDriverFixture) async throws -> ComputerUseBrowserResearchFormInput {
+        _ = try await fixture.start(); configureMixed(fixture, editing: ["City"])
+        let fallback = fixture.actions.select
+        fixture.actions.select = { input in
+            if let review = try FormEffectScopeFixture.response(input, editing: ["City":[0]],
+                deferring: ["Query":[0],"Category":[0]], preserving: ["Reference":1]) { return review }
+            return try XCTUnwrap(fallback)(input)
+        }
+        let owner = try fixture.owner(), action = try await owner.planNextAction(using: fixture.actions)
+        let first = try await owner.prepareFormInput(for: action)
+        _ = try await owner.executeForm(.decode(content: mixedContent(first, order: ["City"]), input: first), input: first)
+        let question = try owner.issueQuestion(topic: .location, requirementIDs: [first.interpretation.requirements[0].id],
+            controllerID: "phone", controllerSessionID: "session")
+        _ = try owner.answerQuestion(questionID: question.id, answerTaskID: "confirm-city", answer: "Seattle.",
+            controllerID: "phone", controllerSessionID: "session")
+        let originalGoal = try XCTUnwrap(fixture.goal.select)
+        fixture.goal.select = { input in
+            var body = try ResearchAnswerFixture.object(Data(originalGoal(input).utf8))
+            var rows = try XCTUnwrap(body["requirements"] as? [[String: Any]])
+            rows += input.clarifications.enumerated().map { index, answer in
+                ["turn":index + 1,"source":answer.answer,"role":"condition","field":"location","relation":"unspecified","values":[]]
+            }
+            body["requirements"] = rows
+            return try ResearchAnswerFixture.json(body)
+        }
+        let interpretation = try await owner.interpretGoal()
+        try owner.configureResearchSources(XCTUnwrap(fixture.policy.sources(for: interpretation)))
+        configureRetainedCity(fixture)
+        let next = try await owner.planNextAction(using: fixture.actions)
+        return try await owner.prepareFormInput(for: next)
+    }
+
+    private func configureRetainedCity(_ fixture: ResearchDriverFixture, editing: [String] = ["Query","Category"],
+                                       alsoRetaining: [String] = [], querying: Bool = false) {
+        configureMixed(fixture, editing: editing, retaining: alsoRetaining + ["City"], querying: querying)
+        let fallback = fixture.actions.select
+        fixture.actions.select = { input in
+            var retaining = Dictionary(uniqueKeysWithValues: alsoRetaining.map { ($0,[0]) }); retaining["City"] = [3]
+            if let review = try FormEffectScopeFixture.response(input,
+                editing: Dictionary(uniqueKeysWithValues: editing.map { ($0,[0]) }), retaining: retaining, preserving: ["Reference":1]) { return review }
+            return try XCTUnwrap(fallback)(input)
+        }
+    }
+
     private func pauseAfterAllFormInputs(_ fixture: ResearchDriverFixture) async throws -> ComputerUseBrowserResearchFormInput {
         let (input, proposal) = try await prepareMixed(fixture), owner = try fixture.owner()
         let plan = try ComputerUseBrowserFormExecutionPlan(input: input, proposal: proposal,
