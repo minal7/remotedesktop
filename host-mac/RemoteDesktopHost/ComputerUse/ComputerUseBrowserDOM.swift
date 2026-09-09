@@ -5,6 +5,7 @@ enum ComputerUseBrowserDOMCommand: String {
     case fields, read, edit, receipt, reobserve, preflight, pageIdentity, pageSnapshot, validatePageSnapshot, observeResearchControls
     case scrollViewport, viewportScrollReceipt, validatePageLink, finishPendingChange, continueUnsentInput
     case prepareFormQuery, validateFormQuery, bindPageFields, formFields, extendFormFields, inspectFormRequirements, retireUnsentInputs
+    case prepareFormPreservation, validateFormPreservation
     case popupCandidates, preparePopup, validatePopup, openPopup, popupReceipt, retireUnsentPopup
     case optionSelectionCandidates, prepareOptionSelection, validateOptionSelection, selectOption, optionSelectionReceipt, retireUnsentOptionSelection
 }
@@ -533,6 +534,7 @@ struct ComputerUseBrowserDOMReply: Decodable {
     let formBindings: [FormBinding]?
     let changedFieldIDs: [String]?
     let inputLedgerID: String?
+    let formPreservation: ComputerUseBrowserFormPreservation.Reply?
     let popupBinding: ComputerUseBrowserPopupBinding?
     let popupReceipt: ComputerUseBrowserPopupReceipt?
     let popupControls: [String]?
@@ -627,9 +629,11 @@ enum ComputerUseBrowserDOM {
       observer.observe(doc, observationOptions);
       function synchronize() {
         retire(observer.takeRecords());
+        retireFormPreservationRecords(formPreservationObserver.takeRecords());
         if (root !== doc.documentElement) {
           if (root) { documentID = nonce(); inputLedgerID = nonce(); bindings.clear(); operations.clear(); pendingChanges.clear(); retiredInputs.clear(); fieldScope = null; viewportOperations.clear(); formQueries.clear(); popupPlans.clear(); popupOperations.clear(); popupRetirements.clear(); popupPins = new WeakMap(); selectionPlans.clear(); selectionOperations.clear(); selectionRetirements.clear(); selectionPins = new WeakMap(); lastPageSnapshot = null; }
           root = doc.documentElement;
+          formPreservationPlans.clear(); formPreservationPins = new WeakMap(); formPreservationObserver.disconnect();
         }
       }
       function kind(element) {
@@ -829,6 +833,8 @@ enum ComputerUseBrowserDOM {
                 selectionEnd: end === null ? -1 : end};
       }
       function fields(expectedIDs, scope = null) {
+        if (expectedIDs === undefined && fieldScope?.preservationID) return reply('unsupported');
+        if (expectedIDs !== undefined && !fieldPreservationCurrent()) return reply('constraint-changed');
         let retained = null;
         if (expectedIDs !== undefined) {
           if (!Array.isArray(expectedIDs) || expectedIDs.length < 1 || expectedIDs.length > 16 || new Set(expectedIDs).size !== expectedIDs.length) return reply('unsupported');
@@ -929,7 +935,7 @@ enum ComputerUseBrowserDOM {
         // Commit only a complete catalogue. Never clear input operations.
         // Retrying after a lost callback reuses these same native IDs.
         bindings.clear(); for (const [id, binding] of next) bindings.set(id, binding);
-        fieldScope = {form:scope.form, additional, selected};
+        fieldScope = {form:scope.form, additional, selected, preservationID:fieldScope.preservationID};
         for (const binding of next.values()) {
           const tree = binding.element.getRootNode();
           if (tree instanceof ShadowRoot) observer.observe(tree, observationOptions);
@@ -1368,6 +1374,7 @@ enum ComputerUseBrowserDOM {
         if (!Array.isArray(repairableIDs) || repairableIDs.length > 16
             || new Set(repairableIDs).size !== repairableIDs.length
             || repairableIDs.some(id => typeof id !== 'string' || !requirements.fields.some(field => field.id === id && field.mustSubmit))) return false;
+        if (!fieldPreservationCurrent()) return false;
         return requirements.fields.every(field => {
           const binding = bindings.get(field.id), current = binding && snapshot(binding);
           if (!current) return false;
@@ -1385,6 +1392,7 @@ enum ComputerUseBrowserDOM {
             || doc !== document || doc.readyState !== 'complete' || doc.URL !== pending.url) return 'stale';
         const status = authenticationStatus();
         if (status) return status;
+        if (!fieldPreservationCurrent(pending.preservationID)) return 'constraint-changed';
         const current = snapshot(pending.binding);
         if (!current || current.value !== pending.expected) return 'stale';
         for (const required of pending.requiredValues) {
@@ -1403,10 +1411,13 @@ enum ComputerUseBrowserDOM {
         try {
           pending.binding.element.dispatchEvent(new Event('change', {bubbles: true}));
           operations.set(operationID, 'dispatched');
+          if (fieldScope?.preservationID) { const status = authenticationStatus(); if (status) return status; }
+          if (!fieldPreservationCurrent(pending.preservationID)) return 'constraint-changed';
           return 'dispatched';
         } catch (_) { return 'uncertain'; }
       }
       \#(ComputerUseBrowserObservedCriteria.script)
+      \#(ComputerUseBrowserFormPreservation.script)
       \#(ComputerUseBrowserPopupScript.source)
       \#(ComputerUseBrowserOptionSelectionScript.source)
       function run(command, args) {
@@ -1422,6 +1433,12 @@ enum ComputerUseBrowserDOM {
         const selectionHistory = selectionHistoricalCommand(command,args);
         if (selectionHistory) return selectionHistory;
         if (command === 'popupReceipt') return popupHistorical(args);
+        if (command === 'validateFormPreservation') {
+          if (args.documentID !== documentID || args.inputLedgerID !== inputLedgerID
+              || typeof args.preservationID !== 'string' || args.preservationID !== fieldScope?.preservationID) return reply('stale');
+          const status = authenticationStatus(); if (status) return reply(status);
+          return reply(fieldPreservationCurrent(args.preservationID) ? 'form-preservation-current' : 'constraint-changed');
+        }
         if (command === 'retireUnsentPopup') {
           if (args.documentID !== documentID || typeof args.operationID !== 'string' || !/^[a-f0-9]{64}$/.test(args.operationID)) return reply('stale');
           const plan = popupPlans.get(args.bindingID);
@@ -1473,7 +1490,7 @@ enum ComputerUseBrowserDOM {
               || JSON.stringify(readViewport()) !== JSON.stringify(operation.receipt.after)) return reply('uncertain');
           return {...reply('viewport-scroll-confirmed'), scroll: operation.receipt};
         }
-        if (['pageSnapshot', 'observeResearchControls', 'validatePageSnapshot', 'scrollViewport', 'validatePageLink', 'prepareFormQuery', 'validateFormQuery', 'bindPageFields', 'formFields', 'extendFormFields', 'inspectFormRequirements', 'popupCandidates', 'preparePopup', 'validatePopup', 'openPopup', 'optionSelectionCandidates', 'prepareOptionSelection', 'validateOptionSelection', 'selectOption'].includes(command)) {
+        if (['pageSnapshot', 'observeResearchControls', 'validatePageSnapshot', 'scrollViewport', 'validatePageLink', 'prepareFormQuery', 'validateFormQuery', 'bindPageFields', 'formFields', 'extendFormFields', 'inspectFormRequirements', 'prepareFormPreservation', 'popupCandidates', 'preparePopup', 'validatePopup', 'openPopup', 'optionSelectionCandidates', 'prepareOptionSelection', 'validateOptionSelection', 'selectOption'].includes(command)) {
           const status = authenticationStatus();
           if (status) { lastPageSnapshot = null; return reply(status); }
           if (doc.readyState !== 'complete') return reply('stale');
@@ -1566,6 +1583,7 @@ enum ComputerUseBrowserDOM {
                 url:doc.URL, scroller:doc.scrollingElement, links:observedLinks, controls:observedControls, containers:observedContainers};
               return {status:'page-snapshot', documentID, page:{id, ...reading}};
             }
+            if (command === 'prepareFormPreservation') return prepareFieldPreservation(args,controls);
             if (command === 'formFields' || command === 'extendFormFields') {
               if (typeof args.formID !== 'string' || !Array.isArray(args.preservedControlIDs)
                   || args.preservedControlIDs.length > 16 || args.preservedControlIDs.some(id => typeof id !== 'string')
@@ -1629,6 +1647,7 @@ enum ComputerUseBrowserDOM {
               // supplied by a caller. This also checks invariants outside the
               // submitted form and receipts lost through field rediscovery.
               const requirements = previous ? previous.requirements : args.requirements;
+              if (!fieldPreservationCurrent()) return reply('constraint-changed');
               if (requirements !== undefined && !formRequirementsCurrent(requirements)) return reply('stale');
               const current = readFormQuery(controls.get(args.controlID));
               if (current.status !== 'form-query') return reply(current.status);
@@ -1692,6 +1711,7 @@ enum ComputerUseBrowserDOM {
         if (['fields', 'read', 'edit', 'continueUnsentInput', 'reobserve', 'preflight'].includes(command)) {
           const status = authenticationStatus();
           if (status) return reply(status);
+          if (!fieldPreservationCurrent(['edit','continueUnsentInput','preflight'].includes(command) ? args.preservationID ?? null : undefined)) return reply('constraint-changed');
         }
         if (command === 'fields') return fields();
         if (command === 'reobserve') {
@@ -1755,6 +1775,7 @@ enum ComputerUseBrowserDOM {
         // one-use boundary also prevents a lost callback from repeating input.
         const scalar = scalarTypes.has(binding.element.type) || choice;
         const pending = scalar ? {binding, expected, url:doc.URL, documentID, inputLedgerID,
+          preservationID:fieldScope?.preservationID || null,
           requiredValues:args.requiredValues.filter(required => required.id !== args.id).map(required => ({...required})),
           copySource:args.copySourceID !== undefined && args.copySourceID !== args.id
             ? {id:args.copySourceID, value:args.copySourceValue} : null} : null;
@@ -1778,6 +1799,8 @@ enum ComputerUseBrowserDOM {
             return reply(status);
           }
           operations.set(args.operationID, 'dispatched');
+          if (fieldScope?.preservationID) { const status = authenticationStatus(); if (status) return reply(status); }
+          if (!fieldPreservationCurrent(args.preservationID)) return reply('constraint-changed');
           return reply('attempted');
         } catch (_) { return reply('uncertain'); }
       }
@@ -1869,6 +1892,7 @@ final class ComputerUseBrowserTextTarget {
     private let requiresFrontmost: Bool
     private var documentID: String?
     private var inputLedgerID: String?
+    private(set) var formPreservation: ComputerUseBrowserFormPreservation?
     private var targets: [String: String] = [:]
     private let adapterID = UUID()
 
@@ -1900,6 +1924,42 @@ final class ComputerUseBrowserTextTarget {
         guard reply.documentID == evidence.documentID else { throw ComputerUseBrowserError.pageChanged }
         guard let fields = try adoptDiscoveredFields(reply) else { throw ComputerUseBrowserError.unsupportedDocument }
         return fields
+    }
+
+    /// Native foundation only: callers must retain the original purpose and
+    /// bind the returned predicate into their parent contract before effects.
+    func prepareFormPreservation(controlIDs: [String], page evidence: ComputerUseBrowserPageEvidence,
+                                 scopeDigest: String) async throws -> ComputerUseBrowserFormPreservation {
+        try validate()
+        guard let documentID, let inputLedgerID, evidence.document == document, evidence.documentID == documentID,
+              (1...16).contains(controlIDs.count), Set(controlIDs).count == controlIDs.count,
+              scopeDigest.utf8.count == 64, scopeDigest.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }),
+              controlIDs.allSatisfy({ id in evidence.page.controls.contains { $0.id == id && ComputerUseBrowserFormPreservation.allows($0) } }),
+              Set(formPreservation?.controlIDs ?? []).isSubset(of: Set(controlIDs)) else { throw ComputerUseBrowserError.pageChanged }
+        return try await joiningCompletion {
+            let reply = try await browser.callDOM(.prepareFormPreservation, arguments: ["documentID":documentID,
+                "inputLedgerID":inputLedgerID,"snapshotID":evidence.page.id,"scopeDigest":scopeDigest,"controlIDs":controlIDs], document: document)
+            try validate()
+            guard reply.status == "form-preservation-prepared", reply.documentID == documentID, reply.inputLedgerID == inputLedgerID,
+                  reply.fields == nil, reply.page == nil, let value = reply.formPreservation else { throw ComputerUseBrowserError.pageChanged }
+            let binding = try ComputerUseBrowserFormPreservation(reply: value, evidence: evidence, inputLedgerID: inputLedgerID,
+                scopeDigest: scopeDigest, controlIDs: controlIDs)
+            formPreservation = binding
+            return binding
+        }
+    }
+
+    func validateFormPreservation(_ binding: ComputerUseBrowserFormPreservation) async throws {
+        try validate()
+        guard binding == formPreservation, binding.document == document, binding.documentID == documentID,
+              binding.inputLedgerID == inputLedgerID else { throw ComputerUseBrowserError.pageChanged }
+        try await joiningCompletion {
+            let reply = try await browser.callDOM(.validateFormPreservation, arguments: ["documentID":binding.documentID,
+                "inputLedgerID":binding.inputLedgerID,"preservationID":binding.id], document: document)
+            try validate()
+            guard reply.status == "form-preservation-current", reply.documentID == documentID, reply.inputLedgerID == inputLedgerID,
+                  reply.fields == nil, reply.page == nil else { throw ComputerUseBrowserError.pageChanged }
+        }
     }
 
     /// Read required fields against their original native identities and input
@@ -2107,7 +2167,10 @@ final class ComputerUseBrowserTextTarget {
     /// cancellation can interrupt its first asynchronous observation.
     func transferForClarification(taskID: String) throws -> ComputerUseBrowserTextTarget {
         try validate()
-        guard !taskID.isEmpty, taskID != document.taskID, let documentID, !targets.isEmpty else {
+        // A new parent must explicitly carry the original predicate and its
+        // durable contract. Until that integration exists, never transfer
+        // editable fields while silently discarding readonly obligations.
+        guard formPreservation == nil, !taskID.isEmpty, taskID != document.taskID, let documentID, !targets.isEmpty else {
             throw ComputerUseBrowserError.pageChanged
         }
         let nextDocument = try browser.acquireCurrentDocument(taskID: taskID)
@@ -2225,11 +2288,14 @@ final class ComputerUseBrowserTextTarget {
             }
             return ["id": id, "after": step.after]
         }
-        let reply = try await browser.callDOM(.preflight, arguments: ["documentID": documentID, "steps": steps], document: document)
+        var arguments: [String: Any] = ["documentID": documentID, "steps": steps]
+        if let formPreservation { arguments["preservationID"] = formPreservation.id }
+        let reply = try await browser.callDOM(.preflight, arguments: arguments, document: document)
         try validate()
         guard reply.documentID == documentID else { throw ComputerUseBrowserError.pageChanged }
         if reply.status == "stale" { throw ComputerUseTextTaskError.staleTarget }
         if reply.status == "unrepresentable" { throw ComputerUseTextEditError.valueNotRepresentable }
+        if reply.status == "constraint-changed" { throw ComputerUseTextTaskError.incompleteOutcome }
         guard reply.status == "ok" else { throw ComputerUseBrowserError.unsupportedDocument }
     }
 
@@ -2293,6 +2359,7 @@ final class ComputerUseBrowserTextTarget {
             "requiredValues": requirements,
             "selectionStart": expected.selection.location == NSNotFound ? -1 : expected.selection.location,
             "selectionEnd": expected.selection.location == NSNotFound ? -1 : NSMaxRange(expected.selection)]
+        if let formPreservation { arguments["preservationID"] = formPreservation.id }
         if let copySource {
             guard let sourceID = targets[copySource.targetID], copySource.isEditable, !copySource.isSecure else {
                 throw ComputerUseTextTaskError.staleTarget

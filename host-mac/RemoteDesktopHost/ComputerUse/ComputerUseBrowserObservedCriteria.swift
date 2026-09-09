@@ -13,10 +13,14 @@ enum ComputerUseBrowserObservedCriteria {
     /// its private values to the journal. Presence/count fields keep optional
     /// values and variable-length lists distinct under length-prefixed hashing.
     static func digest(controlIDs: [String], page: ComputerUseBrowserPageSnapshot) throws -> String {
+        try digest(controlIDs: controlIDs, controls: page.controls, states: page.controlStates)
+    }
+
+    static func digest(controlIDs: [String], controls: [ComputerUseBrowserPageSnapshot.Control], states: [ComputerUseBrowserControlState]) throws -> String {
         var parts = ["browser-option-selection-baseline-v1", String(controlIDs.count)]
         for id in controlIDs {
-            guard let control = page.controls.first(where: { $0.id == id }),
-                  let state = page.controlStates.first(where: { $0.controlID == id }), state.isValid(for: control) else {
+            guard let control = controls.first(where: { $0.id == id }),
+                  let state = states.first(where: { $0.controlID == id }), state.isValid(for: control) else {
                 throw ComputerUseBrowserOptionSelectionError.invalidIntent
             }
             parts += metadataParts(control)
