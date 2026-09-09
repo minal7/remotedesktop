@@ -2,6 +2,8 @@
 
 Status: source repair for retaining accepted preservation decisions during revised preparation review. Assertion execution, native behavior and model qualification remain pending.
 
+Follow-up: [separate form-state verification](BROWSER_FORM_STATE_VERIFICATION_REVIEW.md) adds a native/host no-input proof foundation. Parent-stage and query integration remain pending.
+
 ## First principles
 
 A review can identify a control that must remain unchanged before it has decided how to complete the form. A subsequent question, cancellation or failed page check must not erase that duty. However, identifying a duty is not observing its value, validating the current page or authorizing an edit. The application must retain the source purpose separately from those later proofs.

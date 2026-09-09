@@ -228,3 +228,36 @@ struct ComputerUseBrowserFormProposal: Equatable, Sendable, CustomStringConverti
     var description: String { "BrowserFormProposal(edits: \(edits.count), question: \(question != nil))" }
     var debugDescription: String { description }
 }
+
+/// Desired values compiled from an exact reviewed proposal, without executing
+/// its text contract. Matching captured bytes are only a candidate for a fresh
+/// native verification, never evidence that input was dispatched.
+struct ComputerUseBrowserFormStatePlan: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    private let input: ComputerUseBrowserResearchFormInput
+    let expectedValues: [String: String]
+    let digest: String
+
+    init(input: ComputerUseBrowserResearchFormInput, proposal: ComputerUseBrowserFormProposal) throws {
+        try proposal.validate(for: input)
+        guard input.scopeReview?.formScope != nil, input.selectedFormID != nil,
+              input.previous?.pendingEdits.isEmpty != false, proposal.resumptions.isEmpty,
+              let contract = try proposal.textContract(for: input), (1...8).contains(contract.steps.count) else {
+            throw ComputerUseBrowserResearchFormError.invalidInput
+        }
+        self.input = input
+        expectedValues = Dictionary(uniqueKeysWithValues: contract.steps.map { ($0.targetID, $0.after) })
+        digest = ComputerUseTaskContract.digest(["browser-form-state-plan-v1", contract.contractDigest])
+    }
+
+    func validate(for current: ComputerUseBrowserResearchFormInput) throws {
+        guard input == current else { throw ComputerUseBrowserResearchFormError.inputChanged }
+    }
+
+    var capturedValuesMatch: Bool {
+        expectedValues.allSatisfy { targetID, value in
+            input.evidence.fields.contains { $0.editable.snapshot.targetID == targetID && $0.editable.snapshot.value.utf8.elementsEqual(value.utf8) }
+        }
+    }
+    var description: String { "BrowserFormStatePlan(criteria: \(expectedValues.count))" }
+    var debugDescription: String { description }
+}

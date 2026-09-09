@@ -1038,6 +1038,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             throw ComputerUseBrowserError.unsupportedDocument
         }
         guard result.formQuery == nil || command == .prepareFormQuery else { throw ComputerUseBrowserError.unsupportedDocument }
+        guard result.formStateProof == nil || command == .verifyFormState else { throw ComputerUseBrowserError.unsupportedDocument }
         guard result.formBindings == nil || command == .bindPageFields else { throw ComputerUseBrowserError.unsupportedDocument }
         guard result.formPreservation == nil || command == .prepareFormPreservation else { throw ComputerUseBrowserError.unsupportedDocument }
         guard result.changedFieldIDs == nil || command == .inspectFormRequirements else { throw ComputerUseBrowserError.unsupportedDocument }
@@ -1049,7 +1050,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
               result.optionSelectionReceipt == nil || command == .optionSelectionReceipt,
               result.optionSelectionCandidates == nil || command == .optionSelectionCandidates,
               result.selectionPreservedControls == nil || command == .prepareOptionSelection else { throw ComputerUseBrowserError.unsupportedDocument }
-        if [.popupCandidates, .preparePopup, .validatePopup, .openPopup, .popupReceipt, .retireUnsentPopup,
+        if [.verifyFormState, .validateFormState, .popupCandidates, .preparePopup, .validatePopup, .openPopup, .popupReceipt, .retireUnsentPopup,
             .optionSelectionCandidates, .prepareOptionSelection, .validateOptionSelection, .selectOption, .optionSelectionReceipt, .retireUnsentOptionSelection].contains(command) {
             guard result.fields == nil, result.page == nil, result.scroll == nil, result.formQuery == nil,
                   result.formBindings == nil, result.changedFieldIDs == nil else { throw ComputerUseBrowserError.unsupportedDocument }
@@ -1059,7 +1060,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             throw ComputerUseBrowserError.pageChanged
         }
         if result.status == "authentication-required" {
-            guard result.formPreservation == nil else { throw ComputerUseBrowserError.unsupportedDocument }
+            guard result.formPreservation == nil, result.formStateProof == nil else { throw ComputerUseBrowserError.unsupportedDocument }
             guard result.fields == nil, result.page == nil, result.scroll == nil, result.formQuery == nil,
                   result.formBindings == nil, result.changedFieldIDs == nil, result.popupBinding == nil, result.popupReceipt == nil,
                   result.popupControls == nil, result.popupPreservedControls == nil, result.optionSelectionBinding == nil, result.optionSelectionReceipt == nil,
