@@ -81,12 +81,16 @@ struct ComputerUseBrowserFormPreservation: Equatable, Sendable, CustomStringConv
         }
         return {...binding,references:Array.from(new Set(references))};
       }
-      function fieldPreservationCurrent(expectedID) {
+      function fieldPreservationCurrent(expectedID, allowEarlierScope = false) {
         const id = fieldScope?.preservationID;
         if (!id) return expectedID === undefined || expectedID === null;
         const plan = formPreservationPlans.get(id);
         retireFormPreservationRecords(formPreservationObserver.takeRecords());
-        if (!plan || plan.invalid || (expectedID !== undefined && expectedID !== id)
+        // Earlier form requirements remain meaningful after additive
+        // preservation. All original records survive in the stronger plan;
+        // preflight and input still require its exact active identity.
+        if (!plan || plan.invalid || (expectedID !== undefined && expectedID !== id
+              && !(allowEarlierScope && (expectedID === null || plan.earlierIDs.includes(expectedID))))
             || plan.inputLedgerID !== inputLedgerID || plan.form !== fieldScope.form
             || !plan.form.isConnected || plan.form.ownerDocument !== doc) return false;
         if (authenticationStatus()) return false;
@@ -137,7 +141,7 @@ struct ComputerUseBrowserFormPreservation: Equatable, Sendable, CustomStringConv
           records.push(record);
         }
         const plan = {id:nonce(),scopeDigest:args.scopeDigest,controlIDs:[...args.controlIDs],records,
-          form:fieldScope.form,inputLedgerID,invalid:false};
+          form:fieldScope.form,inputLedgerID,invalid:false,earlierIDs:previous ? [...previous.earlierIDs,previous.id] : []};
         const references = new Set(records.flatMap(item => item.references));
         if (references.size > 4096) return reply('limit');
         for (const node of references) {

@@ -138,7 +138,9 @@ struct ComputerUseBrowserActionInput: Equatable, Sendable, CustomStringConvertib
             projected.contains($0.id) && editableKinds.contains($0.kind) && !$0.disabled && !$0.readOnly && !$0.multiple
         }
         let availableFormIDs = Array(Set(editableControls.compactMap { $0.form?.id })).sorted()
-        let preservableIDs = editableControls.map(\.id)
+        let editableIDs = editableControls.map(\.id)
+        let preservableIDs = evidence.page.controls.filter { projected.contains($0.id)
+            && (editableIDs.contains($0.id) || ComputerUseBrowserFormPreservation.allows($0)) }.map(\.id)
         preservableControlIDs = preservableIDs
         var verified: Any = NSNull(), queryControls: [String] = [], queryReceipt: ComputerUseBrowserResearchFormReceipt?
         var carried: [CarriedFormPreservation] = [], queryBound: [String] = [], changedControls: [String] = []
@@ -149,6 +151,7 @@ struct ComputerUseBrowserActionInput: Equatable, Sendable, CustomStringConvertib
                 throw ComputerUseBrowserActionPlanError.invalidInput
             }
             queryBound = stage.input.evidence.fields.filter { continuation.finalValues[$0.editable.snapshot.targetID] != nil }.map { $0.control.id }
+                + (continuation.nativePreservation?.controlIDs ?? [])
             changedControls = stage.input.evidence.fields.filter { changedFormTargetIDs.contains($0.editable.snapshot.targetID) }.map { $0.control.id }
             if let formID = continuation.formID {
                 carried = try continuation.preservedControls.map { item in
@@ -185,7 +188,7 @@ struct ComputerUseBrowserActionInput: Equatable, Sendable, CustomStringConvertib
             guard scope.matches(interpretation: interpretation, evidence: evidence, forms: availableFormIDs,
                 queries: queryControls, receipt: queryReceipt), scope.preservedControls.allSatisfy({ preservableIDs.contains($0.controlID) }),
                 scope.fieldIntents.allSatisfy({ intent in evidence.page.controls.contains { $0.id == intent.controlID && $0.form?.id == scope.formID
-                    && (preservableIDs.contains($0.id) || (intent.disposition == .deferred && readableIDs.contains($0.id))) }
+                    && (editableIDs.contains($0.id) || (intent.disposition == .deferred && readableIDs.contains($0.id))) }
                     && (intent.disposition != .retain || (queryBound.contains(intent.controlID) && !changedControls.contains(intent.controlID)))
                     && (intent.disposition != .deferred || !queryBound.contains(intent.controlID)) }) else {
                 throw ComputerUseBrowserActionPlanError.inputChanged
@@ -309,7 +312,7 @@ struct ComputerUseBrowserActionInput: Equatable, Sendable, CustomStringConvertib
         }
         if !self.popupControlIDs.isEmpty || !popupHistory.isEmpty { context["version"] = 14 }
         if inspecting {
-            context["version"] = formEffectScope == nil ? 15 : 17
+            context["version"] = formEffectScope == nil ? 15 : 18
             context["effect_scope"] = ["metadata_complete":effectReviewMetadataComplete,"unread_controls":effectReviewControlIDs,
                 "review_controls":effectReviewNextControlIDs,"review_evidence":effectReviewEvidenceIDs,
                 "reviews":reviewed.map(\.context),"additional_read_controls":effectAdditionalReadControlIDs,
@@ -562,7 +565,7 @@ struct ComputerUseLocalBrowserActionPlanner: ComputerUseBrowserActionPlanning {
         let body: [String: Any] = ["model":connection.modelAlias,
             "messages":[["role":"system", "content":Self.instructions(for: input)], ["role":"user", "content":input.contextJSON]],
             "temperature":0, "top_p":1, "top_k":0, "max_tokens":ComputerUseLocalBrowserGoalPlanner.outputTokens, "cache_prompt":false,
-            "response_format":["type":"json_schema", "json_schema":["name":input.formEffectScope != nil ? "browser_research_action_v17" : input.usesEffectScopeContext ? "browser_research_action_v15" : (input.usesPopupContext ? "browser_research_action_v14" : (input.usesOptionSelectionContext ? "browser_research_action_v13" : (!input.readableControlIDs.isEmpty ? "browser_research_action_v11" : (input.allowsHistory ? "browser_research_action_v7" : "browser_research_action_v6")))), "strict":true, "schema":["oneOf":choices]]]]
+            "response_format":["type":"json_schema", "json_schema":["name":input.formEffectScope != nil ? "browser_research_action_v18" : input.usesEffectScopeContext ? "browser_research_action_v15" : (input.usesPopupContext ? "browser_research_action_v14" : (input.usesOptionSelectionContext ? "browser_research_action_v13" : (!input.readableControlIDs.isEmpty ? "browser_research_action_v11" : (input.allowsHistory ? "browser_research_action_v7" : "browser_research_action_v6")))), "strict":true, "schema":["oneOf":choices]]]]
         var request = URLRequest(url: connection.baseURL.appendingPathComponent("v1/chat/completions"))
         request.httpMethod = "POST"; request.timeoutInterval = 30
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -616,6 +619,7 @@ struct ComputerUseLocalBrowserActionPlanner: ComputerUseBrowserActionPlanning {
     """
     private static let formInstructions = """
     Return {"form":"ID","preserve":[]} to select a scope for review for an offered editable_forms ID when entering search criteria in that form is the next necessary step. A separate planner will propose exact source-bound field values. For every field the USER explicitly requires to remain unchanged, include {"control":"ID","requirement":index} in preserve, using a preservable_controls reference and its motivating outcome/condition/prohibition requirement. Include those fields even outside the selected form. At most sixteen unique controls; never invent preservation for every unedited field. After per-field scope review completes, discovery reads only declared edit/retained targets and these explicit preservation targets. Carried preservation cannot be dropped by the later form planner. If a required field is missing or unsupported, do not silently omit it; use a justified question or unavailable. Distinguish search controls from unrelated newsletter/account/checkout forms. Do not choose login, password, MFA, payment or booking actions. Do not edit the same form again merely because its current values are hidden. Consider verified_form_stage and form_history before requesting another edit.
+    Supported readonly/native settings can also appear in preservable_controls. Explicit preservation binds their original state privately through edits and queries; it supplies neither an editable alias nor permission to read their values into research context. Keep every user preservation clause attached to its control, including an in-form readonly setting.
     """
     private static let formHistoryInstructions = """
     form_history distinguishes verified edits from planned_edits. complete_stage=false means only a prefix was verified; unfinished_edits retains the unsent remainder with historical labels/types and original user sources. Those old labels are not current native references. Select the retained form to replan every unfinished entry; its planner must explicitly map all pending work to current edits. Query controls remain withheld until those obligations and any changed criteria are resolved. Never count a partial receipt as completion of the original stage or the research goal.

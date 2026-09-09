@@ -79,6 +79,8 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
     let scopeReview: ComputerUseBrowserEffectScopeReview?
     let fieldIntentRequirements: [String: [Int]]
     let requiredPreservation: [ComputerUseBrowserFormProposal.Preservation]
+    let nativePreservation: ComputerUseBrowserFormPreservation?
+    let nativePreservedSources: [ComputerUseBrowserFormPreservationSource]
     let requiredRepairFieldAliases: [String]
     let pendingEditAliases: [String]
     let previous: ComputerUseBrowserResearchFormContinuation?
@@ -120,7 +122,7 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
 
     init(interpretation: ComputerUseBrowserGoalProposal, evidence: ComputerUseBrowserFormEvidence, selectedFormID: String? = nil,
          preservedControls: [ComputerUseBrowserControlPreservation] = [], previous: ComputerUseBrowserResearchFormContinuation? = nil,
-         scopeReview: ComputerUseBrowserEffectScopeReview? = nil) throws {
+         scopeReview: ComputerUseBrowserEffectScopeReview? = nil, nativePreservation: ComputerUseBrowserFormPreservation? = nil) throws {
         guard interpretation.disposition == .research,
               interpretation.input.taskID.utf8.elementsEqual(evidence.page.document.taskID.utf8),
               (1...16).contains(evidence.fields.count), preservedControls.count <= 16,
@@ -135,6 +137,18 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
                   } }) else { throw ComputerUseBrowserResearchFormError.inputChanged }
         }
         self.scopeReview = scopeReview
+        let nativeIDs = scopeReview?.formScope?.nativePreservedControlIDs ?? []
+        if let nativePreservation {
+            guard !nativeIDs.isEmpty, nativePreservation.controlIDs == nativeIDs,
+                  nativePreservation.scopeDigest == scopeReview?.formScope?.digest,
+                  nativePreservation.document == evidence.page.document, nativePreservation.documentID == evidence.page.documentID,
+                  Set(previous?.nativePreservation?.controlIDs ?? []).isSubset(of: Set(nativeIDs)) else {
+                throw ComputerUseBrowserResearchFormError.inputChanged
+            }
+        } else if !nativeIDs.isEmpty || previous?.nativePreservation != nil {
+            throw ComputerUseBrowserResearchFormError.inputChanged
+        }
+        self.nativePreservation = nativePreservation
         if let previous {
             guard previous.taskID == interpretation.input.taskID, previous.rootDigest == interpretation.input.rootDigest,
                   interpretation.input.continues(previous.goal), previous.formID == selectedFormID,
@@ -152,17 +166,20 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
                 guard try earlier.source.indices(in: interpretation).contains(control.requirementIndex) else { throw ComputerUseBrowserResearchFormError.invalidInput }
             } else { carriedControls.append(.init(controlID: control.controlID, source: source)) }
         }
+        let nativeSources = carriedControls.filter { nativeIDs.contains($0.controlID) }
+        guard Set(nativeSources.map(\.controlID)) == Set(nativeIDs) else { throw ComputerUseBrowserResearchFormError.inputChanged }
+        nativePreservedSources = nativeSources
         let serialized = try ComputerUseBrowserPlanningContext(page: evidence.page.page).serialized()
         guard let page = try JSONSerialization.jsonObject(with: Data(serialized.utf8)) as? [String: Any],
               let records = page["records"] as? [[String: Any]] else { throw ComputerUseBrowserResearchFormError.invalidInput }
         let projectedControls = Set(records.filter { $0["kind"] as? String == "control" }.compactMap { $0["id"] as? String })
-        guard Set(evidence.fields.map { $0.control.id }).isSubset(of: projectedControls) else {
+        guard Set(evidence.fields.map { $0.control.id } + nativeIDs).isSubset(of: projectedControls) else {
             // An alias without its complete observed type/constraints/choices
             // would ask the planner to guess. Never trim a control to fit.
             throw ComputerUseBrowserResearchFormError.contextLimit
         }
         let aliases = evidence.fields.indices.map { "field\($0 + 1)" }
-        let preserved: [ComputerUseBrowserFormProposal.Preservation] = try carriedControls.map { item in
+        let preserved: [ComputerUseBrowserFormProposal.Preservation] = try carriedControls.filter { !nativeIDs.contains($0.controlID) }.map { item in
             guard let index = evidence.fields.firstIndex(where: { $0.control.id == item.controlID }),
                   [.outcome, .condition, .prohibition].contains(item.source.role) else {
                 throw ComputerUseBrowserResearchFormError.invalidInput
@@ -214,7 +231,7 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
             row["id"] = alias
             return row
         }
-        var context: [String: Any] = ["version":scopeReview == nil ? 9 : 11, "goal":interpretation.input.plannerContext,
+        var context: [String: Any] = ["version":scopeReview == nil ? 9 : 12, "goal":interpretation.input.plannerContext,
             "selected_form":selectedFormID.map { $0 as Any } ?? NSNull(),
             "required_preservation":try preserved.map { ["field":$0.field, "source":try $0.source.context(in: interpretation)] as [String: Any] },
             "previous_edits":priorEdits,
@@ -225,6 +242,9 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
             "normalized_values":normalized.map { ["id":$0.id, "requirement":$0.requirementIndex,
                 "kind":$0.kind.rawValue, "value":$0.value, "unit":$0.unit] as [String: Any] }]
         if scopeReview != nil {
+            context["required_native_preservation"] = try nativeSources.map {
+                ["control":$0.controlID,"source":try $0.source.context(in: interpretation)] as [String: Any]
+            }
             context["scope_reviewed"] = true
             context["deferred_fields"] = scopeReview?.formScope?.fieldIntents.filter { $0.disposition == .deferred }.map(\.context) ?? []
             context["required_edit_intents"] = editable.map { ["field":$0, "requirements":intentRequirements[$0] ?? []] as [String: Any] }

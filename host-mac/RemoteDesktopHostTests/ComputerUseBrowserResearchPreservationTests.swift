@@ -1,0 +1,336 @@
+import Foundation
+import XCTest
+@testable import RemoteDesktopHost
+
+/// Authored decisions and native fixture coverage, prepared but not executed.
+@MainActor
+final class ComputerUseBrowserResearchPreservationTests: XCTestCase {
+    func testReadonlyPreservationInsideAndOutsideTheFormUsesPrivatePredicates() async throws {
+        for inside in [false, true] {
+            let fixture = try await make(inside: inside)
+            defer { fixture.close() }
+            let (input, _) = try await prepare(fixture)
+            let binding = try XCTUnwrap(input.nativePreservation)
+            XCTAssertEqual(input.evidence.fields.map { $0.control.label }, ["Query"])
+            XCTAssertEqual(input.requiredPreservation.count, 0)
+            XCTAssertEqual(input.nativePreservedSources.map(\.controlID), binding.controlIDs)
+            XCTAssertEqual(input.nativePreservedSources.first?.source.role, .condition)
+            XCTAssertFalse(input.contextJSON.contains("private-reference"))
+            XCTAssertTrue(input.contextJSON.contains("required_native_preservation"))
+            XCTAssertEqual(fixture.state.commands.filter { $0 == .prepareFormPreservation }.count, 1)
+            XCTAssertEqual(fixture.state.commands.filter { $0 == .observeResearchControls || $0 == .edit }.count, 0)
+            let scope = try XCTUnwrap(input.scopeReview?.formScope)
+            XCTAssertEqual(scope.nativePreservedControlIDs, binding.controlIDs)
+            XCTAssertTrue(Set(scope.discoveryControlIDs).isDisjoint(with: Set(binding.controlIDs)))
+        }
+    }
+
+    func testNativeAndEditablePreservationShareTheUserClauseWithoutSharingAliases() async throws {
+        let fixture = try await make(notes: true)
+        defer { fixture.close() }
+        let (input, proposal) = try await prepare(fixture, notes: true)
+        XCTAssertEqual(Set(input.evidence.fields.map { $0.control.label }), ["Query","Notes"])
+        XCTAssertEqual(input.requiredPreservation.count, 1)
+        XCTAssertEqual(input.nativePreservedSources.count, 1)
+        XCTAssertEqual(input.editableFieldAliases.count, 1)
+        for value in ["private-reference","private-notes"] { XCTAssertFalse(input.contextJSON.contains(value)) }
+        let contract = try XCTUnwrap(proposal.textContract(for: input))
+        let notes = try XCTUnwrap(input.evidence.fields.first { $0.control.label == "Notes" })
+        XCTAssertEqual(contract.unchangedValues[notes.editable.snapshot.targetID], notes.editable.snapshot.value)
+        _ = try await fixture.owner().executeForm(proposal, input: input)
+        XCTAssertEqual(try fixture.owner().confirmedFormHistory.count, 1)
+    }
+
+    func testReviewedInputRejectsMissingOrDifferentPurposeNativeBindings() async throws {
+        let fixture = try await make()
+        defer { fixture.close() }
+        let (input, _) = try await prepare(fixture), scope = try XCTUnwrap(input.scopeReview?.formScope)
+        XCTAssertThrowsError(try ComputerUseBrowserResearchFormInput(interpretation: input.interpretation, evidence: input.evidence,
+            selectedFormID: input.selectedFormID, preservedControls: scope.preservedControls, scopeReview: input.scopeReview))
+        let changed = try forgedBinding(input, value: "private-reference", purpose: ComputerUseTaskContract.digest(["another-purpose"]))
+        XCTAssertThrowsError(try ComputerUseBrowserResearchFormInput(interpretation: input.interpretation, evidence: input.evidence,
+            selectedFormID: input.selectedFormID, preservedControls: scope.preservedControls, scopeReview: input.scopeReview,
+            nativePreservation: changed))
+    }
+
+    func testProhibitionPreservesPrivatelyWithoutGrantingResearchReadPermission() async throws {
+        let fixture = try await make(prohibition: true)
+        defer { fixture.close() }
+        let (input, proposal) = try await prepare(fixture)
+        XCTAssertEqual(input.nativePreservedSources.first?.source.role, .prohibition)
+        XCTAssertFalse(ComputerUseBrowserControlRead.accepts(input.interpretation.requirements[1]))
+        XCTAssertFalse(input.contextJSON.contains("private-reference"))
+        _ = try await fixture.owner().executeForm(proposal, input: input)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .observeResearchControls }.count, 0)
+        XCTAssertEqual(try fixture.owner().confirmedFormHistory.count, 1)
+    }
+
+    func testPrivateBaselineChangesTheDurableContractWithoutChangingModelContext() async throws {
+        let fixture = try await make()
+        defer { fixture.close() }
+        let (input, proposal) = try await prepare(fixture), scope = try XCTUnwrap(input.scopeReview?.formScope)
+        let changed = try ComputerUseBrowserResearchFormInput(interpretation: input.interpretation, evidence: input.evidence,
+            selectedFormID: input.selectedFormID, preservedControls: scope.preservedControls, scopeReview: input.scopeReview,
+            nativePreservation: forgedBinding(input, value: "another-private-value"))
+        XCTAssertEqual(input.contextJSON, changed.contextJSON)
+        let other = try ComputerUseBrowserFormProposal.decode(content: plan(changed), input: changed)
+        let originalContract = try XCTUnwrap(proposal.textContract(for: input, stageID: "same-stage"))
+        let changedContract = try XCTUnwrap(other.textContract(for: changed, stageID: "same-stage"))
+        XCTAssertNotEqual(originalContract.contractDigest, changedContract.contractDigest)
+        XCTAssertFalse(String(reflecting: changed.nativePreservation).contains("another-private-value"))
+    }
+
+    func testChangedReadonlyValuePreventsTheFirstFormEdit() async throws {
+        let fixture = try await make(mutation: "document.getElementById('reference').value='changed';")
+        defer { fixture.close() }
+        let (input, proposal) = try await prepare(fixture)
+        try await release(fixture)
+        await expectFailure { _ = try await fixture.owner().executeForm(proposal, input: input) }
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 0)
+        XCTAssertTrue(try fixture.owner().confirmedFormHistory.isEmpty)
+    }
+
+    func testHandlerViolationCannotBecomeACompletedResearchStageOrRepeatInput() async throws {
+        let fixture = try await make(handler: "document.getElementById('reference').value='changed';")
+        defer { fixture.close() }
+        let (input, proposal) = try await prepare(fixture), owner = try fixture.owner()
+        await expectFailure { _ = try await owner.executeForm(proposal, input: input) }
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 1)
+        XCTAssertTrue(owner.confirmedFormHistory.isEmpty)
+        await expectFailure { _ = try await owner.resumeForm() }
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 1)
+        XCTAssertEqual(fixture.server.count("/filtered?q=concerts"), 0)
+    }
+
+    func testUnsentPauseRetainsTheSamePrivateBaselineUntilExplicitHandback() async throws {
+        let fixture = try await make()
+        defer { fixture.close() }
+        let (input, proposal) = try await prepare(fixture), owner = try fixture.owner()
+        let original = owner.input, binding = input.nativePreservation
+        fixture.state.onCommand = { command in
+            guard command == .validateFormPreservation else { return }
+            fixture.state.onCommand = nil; owner.pause()
+        }
+        await expectFailure { _ = try await owner.executeForm(proposal, input: input) }
+        XCTAssertTrue(owner.hasPendingForm); XCTAssertFalse(owner.isOperating)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 0)
+        let decisions = fixture.actions.inputs.count
+        try await owner.resumeAfterUserControl(); _ = try await owner.resumeForm()
+        XCTAssertEqual(owner.input, original); XCTAssertEqual(input.nativePreservation, binding)
+        XCTAssertEqual(fixture.actions.inputs.count, decisions)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .prepareFormPreservation }.count, 1)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 1)
+        XCTAssertEqual(owner.confirmedFormHistory.count, 1)
+    }
+
+    func testPauseAfterNativeInputReconcilesTheGuardWithoutReplayingTheEdit() async throws {
+        let fixture = try await make()
+        defer { fixture.close() }
+        let (input, proposal) = try await prepare(fixture), owner = try fixture.owner()
+        fixture.state.onCommand = { command in
+            guard command == .edit else { return }; fixture.state.onCommand = nil; owner.pause()
+        }
+        await expectFailure { _ = try await owner.executeForm(proposal, input: input) }
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 1)
+        try await owner.resumeAfterUserControl(); _ = try await owner.resumeForm()
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 1)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .prepareFormPreservation }.count, 1)
+        XCTAssertEqual(owner.confirmedFormHistory.count, 1)
+    }
+
+    func testPreparedFormSurvivesIdlePauseAndCancellationInsideItsPlanner() async throws {
+        for duringPlanning in [false, true] {
+            let fixture = try await make()
+            defer { fixture.close() }
+            let (input, _) = try await prepare(fixture), owner = try fixture.owner()
+            fixture.forms.content = try plan(input)
+            if duringPlanning {
+                fixture.forms.beforeReply = { fixture.forms.beforeReply = nil; owner.pause() }
+                await expectFailure { _ = try await owner.planForm(input, using: fixture.forms) }
+            } else { owner.pause() }
+            XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 0)
+            try await owner.resumeAfterUserControl()
+            let proposal = try await owner.planForm(input, using: fixture.forms)
+            _ = try await owner.executeForm(proposal, input: input)
+            XCTAssertEqual(fixture.state.commands.filter { $0 == .prepareFormPreservation }.count, 1)
+            XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 1)
+            XCTAssertEqual(owner.confirmedFormHistory.count, 1)
+        }
+    }
+
+    func testHandbackCannotAdoptAChangedReadonlyBaseline() async throws {
+        let fixture = try await make(mutation: "document.getElementById('reference').value='changed';")
+        defer { fixture.close() }
+        let (input, proposal) = try await prepare(fixture), owner = try fixture.owner()
+        fixture.state.onCommand = { command in
+            guard command == .validateFormPreservation else { return }; fixture.state.onCommand = nil; owner.pause()
+        }
+        await expectFailure { _ = try await owner.executeForm(proposal, input: input) }
+        try await release(fixture)
+        await expectFailure { try await owner.resumeAfterUserControl(); _ = try await owner.resumeForm() }
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 0)
+        XCTAssertTrue(owner.confirmedFormHistory.isEmpty)
+    }
+
+    func testQueryCarriesReadonlyPreservationWithoutAResearchValueRead() async throws {
+        let fixture = try await make()
+        defer { fixture.close() }
+        let (input, proposal) = try await prepare(fixture), owner = try fixture.owner()
+        _ = try await owner.executeForm(proposal, input: input)
+        configure(fixture, querying: true)
+        let action = try await owner.planNextAction(using: fixture.actions)
+        guard case .openQuery = action.step else { return XCTFail("The verified form should be queryable") }
+        let ids = try XCTUnwrap(input.nativePreservation?.controlIDs)
+        XCTAssertTrue(Set(ids).isSubset(of: Set(action.input.queryBoundControlIDs)))
+        XCTAssertEqual(action.input.carriedFormPreservation.map { $0.control.controlID }, ids)
+        XCTAssertFalse(action.input.contextJSON.contains("private-reference"))
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .observeResearchControls }.count, 0)
+        _ = try await owner.openFormQuery(for: action)
+        XCTAssertEqual(fixture.server.count("/filtered?q=concerts"), 1)
+    }
+
+    func testQueryHandbackChecksTheOriginalNativePredicateBeforeLoading() async throws {
+        let fixture = try await make(mutation: "document.getElementById('reference').value='changed';")
+        defer { fixture.close() }
+        let (input, proposal) = try await prepare(fixture), owner = try fixture.owner()
+        _ = try await owner.executeForm(proposal, input: input)
+        configure(fixture, querying: true)
+        let action = try await owner.planNextAction(using: fixture.actions)
+        fixture.state.onCommand = { command in
+            guard command == .prepareFormQuery else { return }; fixture.state.onCommand = nil; owner.pause()
+        }
+        await expectFailure { _ = try await owner.openFormQuery(for: action) }
+        try await release(fixture)
+        await expectFailure { try await owner.resumeAfterUserControl(); _ = try await owner.resumeFormNavigation() }
+        XCTAssertEqual(fixture.server.count("/filtered?q=concerts"), 0)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 1)
+    }
+
+    func testLaterFormStageRetainsReadonlySourcesAndEarlierInputReceipts() async throws {
+        let fixture = try await make(category: true)
+        defer { fixture.close() }
+        let (first, firstProposal) = try await prepare(fixture, category: true), owner = try fixture.owner()
+        _ = try await owner.executeForm(firstProposal, input: first)
+        configure(fixture, category: true, revising: true)
+        let action = try await owner.planNextAction(using: fixture.actions)
+        let next = try await owner.prepareFormInput(for: action)
+        XCTAssertEqual(next.previous?.nativePreservation, first.nativePreservation)
+        XCTAssertEqual(next.nativePreservedSources, first.nativePreservedSources)
+        XCTAssertEqual(next.nativePreservation?.controlIDs, first.nativePreservation?.controlIDs)
+        XCTAssertNotEqual(next.nativePreservation?.id, first.nativePreservation?.id)
+        XCTAssertEqual(next.previous?.inputOperationIDs.count, 1)
+        let alias = try XCTUnwrap(next.editableFieldAliases.first)
+        XCTAssertEqual(try next.field(for: alias).control.label, "Category")
+        let choice = try XCTUnwrap(try next.field(for: alias).control.options.first { $0.label == "Concerts" })
+        let content = try ResearchAnswerFixture.json(["edits":[["field":alias,"choice":choice.id,"requirement":0]],"preserve":[]])
+        _ = try await owner.executeForm(.decode(content: content, input: next), input: next)
+        XCTAssertEqual(owner.confirmedFormHistory.count, 2)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 2)
+    }
+
+    func testAdditiveNativeScopeStillEnforcesEarlierQueryRequirementsAndReceipts() async throws {
+        let fixture = try await ControlStateFixture(body: """
+            <form action=/filtered><label>Query<input name=q value=old></label><button>Search</button></form>
+            <label>Reference<input id=reference readonly value=keep></label><label>Direct<input type=checkbox checked></label>
+            <script>fetch('/signal').then(()=>{ document.getElementById('reference').value='changed'; fetch('/changed'); });</script>
+            """, heldSignal: true)
+        defer { fixture.close() }
+        let page = try await fixture.browser.observePage(document: fixture.document)
+        func id(_ label: String) throws -> String { try XCTUnwrap(page.page.controls.first { $0.label == label }?.id) }
+        let form = try XCTUnwrap(page.page.controls.first { $0.label == "Query" }?.form?.id)
+        let fields = try await fixture.browser.callDOM(.formFields, arguments: ["documentID":page.documentID,
+            "snapshotID":page.page.id,"formID":form,"preservedControlIDs":[],"selectedControlIDs":[try id("Query")]], document: fixture.document)
+        let field = try XCTUnwrap(fields.fields?.first), ledger = try XCTUnwrap(fields.inputLedgerID)
+        func preserve(_ labels: [String], purpose: String) async throws -> ComputerUseBrowserFormPreservation.Reply {
+            let reply = try await fixture.browser.callDOM(.prepareFormPreservation, arguments: ["documentID":page.documentID,
+                "inputLedgerID":ledger,"snapshotID":page.page.id,"scopeDigest":ComputerUseTaskContract.digest([purpose]),
+                "controlIDs":try labels.map(id)], document: fixture.document)
+            return try XCTUnwrap(reply.formPreservation)
+        }
+        let first = try await preserve(["Reference"], purpose: "original")
+        let operation = ComputerUseTaskContract.digest(["original-input"])
+        let edit = try await fixture.browser.callDOM(.edit, arguments: ["documentID":page.documentID,"id":field.id,
+            "operationID":operation,"mode":"replaceAll","payload":"concerts","before":"old","after":"concerts",
+            "selectionStart":field.selectionStart,"selectionEnd":field.selectionEnd,"requiredValues":[],"preservationID":first.id], document: fixture.document)
+        XCTAssertEqual(edit.status, "attempted")
+        let next = try await preserve(["Reference","Direct"], purpose: "added-setting")
+        XCTAssertNotEqual(next.id, first.id)
+        let requirements: [String: Any] = ["digest":ComputerUseTaskContract.digest(["original-contract"]),"inputOperationIDs":[operation],
+            "preservationID":first.id,"fields":[["id":field.id,"value":"concerts","mustSubmit":true] as [String: Any]]]
+        let queryArguments: [String: Any] = ["documentID":page.documentID,"snapshotID":page.page.id,"controlID":try id("Search"),"requirements":requirements]
+        let query = try await fixture.browser.callDOM(.prepareFormQuery, arguments: queryArguments, document: fixture.document)
+        XCTAssertEqual(query.status, "form-query-prepared", "A stronger guard keeps the original required values and receipts")
+        var unknownRequirements = requirements; unknownRequirements["preservationID"] = String(repeating: "0", count: 32)
+        var unknownQuery = queryArguments; unknownQuery["requirements"] = unknownRequirements
+        let unknown = try await fixture.browser.callDOM(.prepareFormQuery, arguments: unknownQuery, document: fixture.document)
+        XCTAssertEqual(unknown.status, "stale", "An unrelated guard cannot stand in for an ancestor")
+        try await fixture.wait { fixture.server.count("/signal") == 1 }; fixture.server.releaseHeldResponses()
+        try await fixture.wait { fixture.server.count("/changed") == 1 }
+        let changed = try await fixture.browser.callDOM(.prepareFormQuery, arguments: queryArguments, document: fixture.document)
+        XCTAssertEqual(changed.status, "constraint-changed")
+        let history = try await fixture.browser.callDOM(.receipt, arguments: ["documentID":page.documentID,"operationID":operation], document: fixture.document)
+        XCTAssertEqual(history.status, "dispatched")
+    }
+
+    private func make(inside: Bool = false, notes: Bool = false, category: Bool = false, prohibition: Bool = false,
+                      handler: String = "", mutation: String = "") async throws -> ResearchDriverFixture {
+        let reference = "<label>Reference<input id=reference readonly value='private-reference'></label>"
+        let categoryHTML = category ? "<label>Category<select name=category><option value=all>All</option><option value=concerts>Concerts</option></select></label>" : ""
+        let clause = prohibition ? "Do not change Reference. " : (notes ? "Leave Reference and Notes unchanged. " : "Leave Reference unchanged. ")
+        let body = "<form action='/filtered'><label>Query<input id=query name=q></label>" + categoryHTML + (inside ? reference : "")
+            + "<button>Search</button></form>" + (inside ? "" : reference)
+            + (notes ? "<label>Notes<input value='private-notes'></label>" : "")
+            + "<script>document.getElementById('query').addEventListener('input',()=>{ \(handler) }); fetch('/signal').then(()=>{ \(mutation) fetch('/changed'); });</script>"
+        let fixture = try await ResearchDriverFixture.make(request: "Find concerts. " + clause + "Do not buy.", searchFormHTML: body, heldSignal: true)
+        fixture.goal.select = { _ in try ResearchAnswerFixture.json(["disposition":"research","requirements":[
+            ["turn":0,"source":"Find concerts. ","role":"outcome","field":"category","relation":"unspecified","values":[]],
+            ["turn":0,"source":clause,"role":prohibition ? "prohibition" : "condition","field":"other","relation":"unspecified","values":[]],
+            ["turn":0,"source":"Do not buy.","role":"prohibition","field":"other","relation":"unspecified","values":[]]],
+            "question":["topic":"none","requirements":[]]]) }
+        fixture.policy.choices = [false]
+        return fixture
+    }
+
+    private func configure(_ fixture: ResearchDriverFixture, notes: Bool = false, category: Bool = false,
+                           revising: Bool = false, querying: Bool = false) {
+        fixture.actions.select = { input in
+            if let review = try FormEffectScopeFixture.response(input, editing: revising ? ["Category":[0]] : ["Query":[0]],
+                retaining: revising ? ["Query":[0]] : [:], deferring: category && !revising ? ["Category":[0]] : [:],
+                preserving: notes ? ["Reference":1,"Notes":1] : ["Reference":1]) { return review }
+            if input.formEffectScope != nil && !input.effectScopeAllowsActions { return #"{"unavailable":true}"# }
+            if querying, let query = input.queryControlIDs.first { return try ResearchAnswerFixture.json(["query":query]) }
+            let form = try XCTUnwrap(input.evidence.page.controls.first { $0.label == "Query" }?.form?.id)
+            return try ResearchAnswerFixture.json(["form":form,"preserve":[]])
+        }
+    }
+    private func prepare(_ fixture: ResearchDriverFixture, notes: Bool = false, category: Bool = false) async throws
+        -> (ComputerUseBrowserResearchFormInput, ComputerUseBrowserFormProposal) {
+        _ = try await fixture.start(); configure(fixture, notes: notes, category: category)
+        let owner = try fixture.owner(), action = try await owner.planNextAction(using: fixture.actions)
+        let input = try await owner.prepareFormInput(for: action)
+        return (input, try .decode(content: plan(input), input: input))
+    }
+    private func plan(_ input: ComputerUseBrowserResearchFormInput) throws -> String {
+        let alias = try XCTUnwrap(input.editableFieldAliases.first)
+        return try ResearchAnswerFixture.json(["edits":[["field":alias,"terms":[["requirement":0,"text":"concerts"]]]],"preserve":[]])
+    }
+    private func forgedBinding(_ input: ComputerUseBrowserResearchFormInput, value: String, purpose: String? = nil) throws -> ComputerUseBrowserFormPreservation {
+        let binding = try XCTUnwrap(input.nativePreservation), id = try XCTUnwrap(binding.controlIDs.first)
+        let state = ComputerUseBrowserControlState(controlID: id, kind: .text, value: value, selectedOptionIDs: nil, checked: nil, indeterminate: nil)
+        return try .init(reply: .init(id: binding.id, scopeDigest: purpose ?? binding.scopeDigest, controlIDs: binding.controlIDs, states: [state]),
+            evidence: input.evidence.page, inputLedgerID: binding.inputLedgerID, scopeDigest: purpose ?? binding.scopeDigest, controlIDs: binding.controlIDs)
+    }
+    private func release(_ fixture: ResearchDriverFixture) async throws {
+        let deadline = ContinuousClock.now + .seconds(5)
+        while fixture.server.count("/signal") != 1 {
+            guard ContinuousClock.now < deadline else { throw ComputerUseBrowserError.documentUnresponsive }; try await Task.sleep(for: .milliseconds(10))
+        }
+        fixture.server.releaseHeldResponses()
+        while fixture.server.count("/changed") != 1 {
+            guard ContinuousClock.now < deadline else { throw ComputerUseBrowserError.documentUnresponsive }; try await Task.sleep(for: .milliseconds(10))
+        }
+    }
+    private func expectFailure(_ operation: () async throws -> Void, file: StaticString = #filePath, line: UInt = #line) async {
+        do { try await operation(); XCTFail("Preservation must remain enforced", file: file, line: line) } catch { }
+    }
+}

@@ -1374,7 +1374,7 @@ enum ComputerUseBrowserDOM {
         if (!Array.isArray(repairableIDs) || repairableIDs.length > 16
             || new Set(repairableIDs).size !== repairableIDs.length
             || repairableIDs.some(id => typeof id !== 'string' || !requirements.fields.some(field => field.id === id && field.mustSubmit))) return false;
-        if (!fieldPreservationCurrent()) return false;
+        if (!fieldPreservationCurrent(requirements.preservationID ?? null, true)) return false;
         return requirements.fields.every(field => {
           const binding = bindings.get(field.id), current = binding && snapshot(binding);
           if (!current) return false;
@@ -1819,6 +1819,7 @@ struct ComputerUseBrowserFormQueryRequirements: Sendable, CustomStringConvertibl
     private let editedTargetIDs: Set<String>
     private let inputOperationIDs: [String]
     private let targets: [String: String]
+    private let preservationID: String?
 
     fileprivate init(document: ComputerUseBrowserDocument, documentID: String,
                      continuation: ComputerUseTextTaskContinuation, targets: [String: String]) throws {
@@ -1833,12 +1834,13 @@ struct ComputerUseBrowserFormQueryRequirements: Sendable, CustomStringConvertibl
         guard continuation.document == document, continuation.documentID == documentID else { throw ComputerUseBrowserError.pageChanged }
         try self.init(document: document, documentID: documentID, taskID: continuation.taskID,
             finalValues: continuation.finalValues, editedTargetIDs: continuation.editedTargetIDs,
-            inputOperationIDs: continuation.inputOperationIDs, continuationDigest: continuation.digest, targets: targets)
+            inputOperationIDs: continuation.inputOperationIDs, continuationDigest: continuation.digest, targets: targets,
+            nativePreservation: continuation.nativePreservation)
     }
 
     private init(document: ComputerUseBrowserDocument, documentID: String, taskID: String,
                  finalValues: [String: String], editedTargetIDs: Set<String>, inputOperationIDs: [String],
-                 continuationDigest: String, targets: [String: String]) throws {
+                 continuationDigest: String, targets: [String: String], nativePreservation: ComputerUseBrowserFormPreservation? = nil) throws {
         guard taskID == document.taskID, (1...16).contains(finalValues.count), !editedTargetIDs.isEmpty,
               editedTargetIDs.isSubset(of: Set(finalValues.keys)), Set(finalValues.keys).isSubset(of: Set(targets.keys)),
               Set(targets.values).count == targets.count, finalValues.values.allSatisfy({ $0.utf8.count <= 8192 }),
@@ -1847,17 +1849,23 @@ struct ComputerUseBrowserFormQueryRequirements: Sendable, CustomStringConvertibl
             throw ComputerUseBrowserError.formQueryUnavailable
         }
         self.document = document; self.documentID = documentID; self.targets = targets
+        if let nativePreservation {
+            guard nativePreservation.document == document, nativePreservation.documentID == documentID else { throw ComputerUseBrowserError.pageChanged }
+        }
+        preservationID = nativePreservation?.id
         self.finalValues = finalValues; self.editedTargetIDs = editedTargetIDs; self.inputOperationIDs = inputOperationIDs
-        digest = ComputerUseTaskContract.digest(["browser-form-continuation-v1", document.contextID,
-            document.taskID, String(document.generation), documentID, continuationDigest]
+        digest = ComputerUseTaskContract.digest(["browser-form-continuation-v2", document.contextID,
+            document.taskID, String(document.generation), documentID, continuationDigest,nativePreservation?.digest ?? ""]
             + finalValues.keys.sorted().flatMap { [$0, targets[$0]!] })
     }
 
     var domArguments: [String: Any] {
-        ["digest": digest, "inputOperationIDs": inputOperationIDs,
+        var result: [String: Any] = ["digest": digest, "inputOperationIDs": inputOperationIDs,
          "fields": finalValues.keys.sorted().map { id -> [String: Any] in
              ["id": targets[id]!, "value": finalValues[id]!, "mustSubmit": editedTargetIDs.contains(id)]
          }]
+        if let preservationID { result["preservationID"] = preservationID }
+        return result
     }
 
     var description: String { "BrowserFormContinuationRequirements" }
@@ -1926,8 +1934,20 @@ final class ComputerUseBrowserTextTarget {
         return fields
     }
 
-    /// Native foundation only: callers must retain the original purpose and
-    /// bind the returned predicate into their parent contract before effects.
+    /// Separate native readonly predicates from the editable discovery list.
+    /// The reviewed scope binds the original purpose before any value reading.
+    func prepareFormPreservation(scope: ComputerUseBrowserFormEffectScope?, page: ComputerUseBrowserPageEvidence) async throws
+        -> ComputerUseBrowserFormPreservation? {
+        guard let scope, !scope.nativePreservedControlIDs.isEmpty else {
+            guard formPreservation == nil else { throw ComputerUseBrowserError.pageChanged }
+            return nil
+        }
+        guard scope.formID != nil else { throw ComputerUseBrowserError.pageChanged }
+        return try await prepareFormPreservation(controlIDs: scope.nativePreservedControlIDs, page: page, scopeDigest: scope.digest)
+    }
+
+    /// Callers retain the original purpose and bind the returned predicate
+    /// into their parent contract before effects.
     func prepareFormPreservation(controlIDs: [String], page evidence: ComputerUseBrowserPageEvidence,
                                  scopeDigest: String) async throws -> ComputerUseBrowserFormPreservation {
         try validate()

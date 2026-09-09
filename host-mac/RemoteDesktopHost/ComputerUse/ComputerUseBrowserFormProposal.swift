@@ -209,8 +209,8 @@ struct ComputerUseBrowserFormProposal: Equatable, Sendable, CustomStringConverti
         let unchanged = Set(explicit).union(inherited).sorted()
         let identity: String
         if let review = input.scopeReview {
-            identity = ComputerUseTaskContract.digest(["browser-research-form-contract-v3",stageID ?? "",input.contextJSON,
-                input.previous?.digest ?? "",review.digest])
+            identity = ComputerUseTaskContract.digest(["browser-research-form-contract-v4",stageID ?? "",input.contextJSON,
+                input.previous?.digest ?? "",review.digest,input.nativePreservation?.digest ?? ""])
         } else {
             identity = stageID.map { ComputerUseTaskContract.digest(["browser-research-form-contract-v2", $0, input.contextJSON,
                 input.previous?.digest ?? ""]) } ?? input.contextJSON

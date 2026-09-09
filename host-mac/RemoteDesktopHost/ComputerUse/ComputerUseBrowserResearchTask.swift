@@ -768,17 +768,20 @@ final class ComputerUseBrowserResearchTask {
             let target = ComputerUseBrowserTextTarget(browser: browser, document: page.document,
                 requiresFrontmost: browser.isFrontmostWindow)
             let preservedControls = action?.preservedControls ?? []
+            let review = try action.map { try ComputerUseBrowserEffectScopeReview(input: $0.input) }
             let fields: [ComputerUseTextField]
             if let selectedFormID {
-                fields = try await target.fields(in: selectedFormID, page: page, preserving: preservedControls.map(\.controlID),
+                fields = try await target.fields(in: selectedFormID, page: page,
+                    preserving: review?.formScope?.editablePreservedControlIDs ?? preservedControls.map(\.controlID),
                     selecting: action?.input.formEffectScope?.selectedControlIDs)
             } else { fields = try await target.fields() }
             let evidence = try await target.bindFields(fields, to: page)
+            let nativePreservation = try await target.prepareFormPreservation(scope: review?.formScope, page: page)
             try checkCurrent(captured)
             guard browser.hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
             return PreparedForm(target: target, input: try .init(interpretation: interpretation.proposal, evidence: evidence,
                 selectedFormID: selectedFormID, preservedControls: preservedControls,
-                scopeReview: try action.map { try ComputerUseBrowserEffectScopeReview(input: $0.input) }))
+                scopeReview: review, nativePreservation: nativePreservation))
         }
         latestForm = prepared
         return prepared.input
@@ -795,6 +798,11 @@ final class ComputerUseBrowserResearchTask {
               interpretation?.proposal == proposed.interpretation,
               proposed.interpretation.input == input else { throw ComputerUseBrowserResearchFormError.inputChanged }
         let captured = input
+        defer {
+            // A cancelled private validation must not discard the only
+            // adapter holding this baseline. Reuse still revalidates it.
+            if proposed.nativePreservation != nil, input == captured, !isRetired { latestForm = retained }
+        }
         latestForm = nil; latestAction = nil
         try await operate { [self] in
             try await validatePreparedForm(retained, goal: captured)
@@ -814,6 +822,9 @@ final class ComputerUseBrowserResearchTask {
             throw ComputerUseBrowserResearchFormError.inputChanged
         }
         let captured = input
+        defer {
+            if proposed.nativePreservation != nil, input == captured, !isRetired { latestForm = retained }
+        }
         latestForm = nil; latestAction = nil
         let result = try await operate { [self] in
             try await validatePreparedForm(retained, goal: captured)
@@ -833,9 +844,13 @@ final class ComputerUseBrowserResearchTask {
 
     private func validatePreparedForm(_ prepared: PreparedForm, goal: ComputerUseBrowserGoalInput) async throws {
         try checkCurrent(goal)
+        guard prepared.input.nativePreservation == prepared.target.formPreservation else { throw ComputerUseBrowserResearchFormError.inputChanged }
         guard browser.hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
         try browser.validateSourceDocument(prepared.input.evidence.page.document)
-        try await prepared.target.validateFormEvidence(prepared.input.evidence)
+        if prepared.input.nativePreservation != nil {
+            try await ComputerUseBrowserResearchFormStage.validateOriginalInput(prepared.input, target: prepared.target,
+                browser: browser, checkCurrent: { try self.checkCurrent(goal) })
+        } else { try await prepared.target.validateFormEvidence(prepared.input.evidence) }
         try checkCurrent(goal)
         guard browser.hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
         try browser.validateSourceDocument(prepared.input.evidence.page.document)
@@ -1318,7 +1333,12 @@ final class ComputerUseBrowserResearchTask {
         if handback == nil {
             handback = session ?? (browser.taskID == taskID ? browser.handbackRequirement(taskID: taskID, required: true) : nil)
         }
-        latestCandidates = nil; latestForm = nil; latestAction = nil; clarification.invalidateQuestion(); hasQuestion = false
+        latestCandidates = nil
+        // Retain private invariants through an idle Pause too. This is not
+        // permission to act: explicit handback and original-input validation
+        // are still required before planning or executing the retained form.
+        if latestForm?.input.nativePreservation == nil { latestForm = nil }
+        latestAction = nil; clarification.invalidateQuestion(); hasQuestion = false
         cancelOperation?()
     }
 

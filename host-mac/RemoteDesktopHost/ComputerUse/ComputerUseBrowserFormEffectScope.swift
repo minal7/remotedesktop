@@ -20,7 +20,13 @@ struct ComputerUseBrowserFormEffectScope: Equatable, Sendable, CustomStringConve
     let preservedControls: [ComputerUseBrowserControlPreservation]
     let fieldIntents: [FieldIntent]
     var plannedControlIDs: [String] { fieldIntents.map(\.controlID) + preservedControls.map(\.controlID) }
-    var discoveryControlIDs: [String] { fieldIntents.filter { $0.disposition != .deferred }.map(\.controlID) + preservedControls.map(\.controlID) }
+    var discoveryControlIDs: [String] { selectedControlIDs + editablePreservedControlIDs }
+    var nativePreservedControlIDs: [String] {
+        preservedControls.compactMap { item in evidence.page.controls.contains {
+            $0.id == item.controlID && ComputerUseBrowserFormPreservation.allows($0)
+        } ? item.controlID : nil }
+    }
+    var editablePreservedControlIDs: [String] { preservedControls.map(\.controlID).filter { !nativePreservedControlIDs.contains($0) } }
     var selectedControlIDs: [String] { fieldIntents.filter { $0.disposition != .deferred }.map(\.controlID) }
     private let interpretation: ComputerUseBrowserGoalProposal
     private let evidence: ComputerUseBrowserPageEvidence
@@ -90,7 +96,7 @@ struct ComputerUseBrowserFormEffectScope: Equatable, Sendable, CustomStringConve
         case .form(let id): target = ["form", id]
         case .query(let id, let receipt): target = ["query", id, receipt.stageID, receipt.contractDigest]
         }
-        digest = ComputerUseTaskContract.digest(["browser-form-effect-scope-v2", interpretation.input.digest,
+        digest = ComputerUseTaskContract.digest(["browser-form-effect-scope-v3", interpretation.input.digest,
             evidence.document.contextID, evidence.documentID, evidence.page.id] + target
             + [String(preservedControls.count)] + preservedControls.flatMap { [$0.controlID, String($0.requirementIndex)] }
             + [String(fieldIntents.count)] + fieldIntents.flatMap { [$0.controlID, $0.disposition.rawValue, String($0.requirementIndices.count)] + $0.requirementIndices.map(String.init) })

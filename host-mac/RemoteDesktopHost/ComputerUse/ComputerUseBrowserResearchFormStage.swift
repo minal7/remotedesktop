@@ -15,6 +15,7 @@ struct ComputerUseBrowserResearchFormContinuation: Equatable, Sendable, CustomSt
     let editedTargetIDs: Set<String>
     let inputOperationIDs: [String]
     let preservedControls: [ComputerUseBrowserFormPreservationSource]
+    let nativePreservation: ComputerUseBrowserFormPreservation?
     let preservedTargetIDs: Set<String>
     let editedSources: [String: [ComputerUseBrowserFormSource]]
     let pendingEdits: [ComputerUseBrowserFormPendingEdit]
@@ -51,7 +52,8 @@ struct ComputerUseBrowserResearchFormContinuation: Equatable, Sendable, CustomSt
         }
         preservedControls = try stage.proposal.preserved.map {
             .init(controlID: try input.field(for: $0.field).control.id, source: $0.source)
-        }
+        } + input.nativePreservedSources
+        nativePreservation = input.nativePreservation
         preservedTargetIDs = Set(try stage.proposal.preserved.map { try input.field(for: $0.field).editable.snapshot.targetID })
         var sources = previous?.editedSources ?? [:]
         for edit in stage.proposal.edits.prefix(count) {
@@ -60,7 +62,7 @@ struct ComputerUseBrowserResearchFormContinuation: Equatable, Sendable, CustomSt
         }
         editedSources = sources
         pendingEdits = try stage.proposal.edits.dropFirst(count).map { try stage.proposal.pendingEdit(for: $0) }
-        digest = ComputerUseTaskContract.digest(["browser-research-form-continuation-v4", taskID, rootDigest, goalRevision,
+        digest = ComputerUseTaskContract.digest(["browser-research-form-continuation-v5", taskID, rootDigest, goalRevision,
             document.contextID, String(document.generation), documentID, formID ?? "", previous?.digest ?? "", current.digest]
             + [stage.contract.contractDigest, String(count)] + stageIDs + inputOperationIDs)
     }
@@ -140,6 +142,7 @@ final class ComputerUseBrowserResearchFormStage {
          target: ComputerUseBrowserTextTarget, browser: ComputerUseOwnedBrowser, index: Int, sequence: Int? = nil, journalDirectory: URL,
          makeStore: @escaping (URL) throws -> ComputerUseTaskJournalStore = { try .init(directory: $0) }) throws {
         guard (0..<32).contains(index), (0..<64).contains(sequence ?? index) else { throw ComputerUseBrowserResearchFormError.stageLimit }
+        guard input.nativePreservation == target.formPreservation else { throw ComputerUseBrowserResearchFormError.inputChanged }
         self.input = input; self.proposal = proposal; self.target = target; self.browser = browser; self.index = index
         id = ComputerUseTaskContract.digest(["browser-research-form-stage-v2", input.interpretation.input.taskID,
             input.interpretation.input.rootDigest, String(index), String(sequence ?? index)])
@@ -157,6 +160,7 @@ final class ComputerUseBrowserResearchFormStage {
         func check() throws {
             try Task.checkCancellation()
             guard !isRetired else { throw Failure.retired }
+            guard completed != nil || input.nativePreservation == target.formPreservation else { throw ComputerUseBrowserResearchFormError.inputChanged }
             try checkCurrent()
         }
         try check()
@@ -207,6 +211,10 @@ final class ComputerUseBrowserResearchFormStage {
             // reconciliation. Matching a value alone never permits replay.
             try await task.run()
             try check(); try lease.assertOwnership()
+            if let binding = input.nativePreservation {
+                try await target.validateFormPreservation(binding)
+                try check(); try lease.assertOwnership()
+            }
             continuation = try .init(stage: self, current: task.verifiedContinuation())
             let receipt = ComputerUseBrowserResearchFormReceipt(stage: self)
             completed = receipt
@@ -378,13 +386,16 @@ final class ComputerUseBrowserResearchFormStage {
         }
         do {
             try check()
-            let fields = try await target.extendFields(in: formID, page: page, preserving: preserving.map(\.controlID),
+            let fields = try await target.extendFields(in: formID, page: page,
+                preserving: scopeReview?.formScope?.editablePreservedControlIDs ?? preserving.map(\.controlID),
                 selecting: scopeReview?.formScope?.selectedControlIDs, after: continuation)
             try check()
             let evidence = try await target.bindFields(fields, to: page)
+            let nativePreservation = try await target.prepareFormPreservation(scope: scopeReview?.formScope, page: page)
             try check()
             let next = try ComputerUseBrowserResearchFormInput(interpretation: interpretation, evidence: evidence,
-                selectedFormID: formID, preservedControls: preserving, previous: continuation, scopeReview: scopeReview)
+                selectedFormID: formID, preservedControls: preserving, previous: continuation, scopeReview: scopeReview,
+                nativePreservation: nativePreservation)
             return (target, next)
         } catch {
             await browser.joinDOMCompletion(document: page.document)
@@ -396,7 +407,15 @@ final class ComputerUseBrowserResearchFormStage {
     /// the page or field objects. Refresh only the no-attempt observation under
     /// the execution lease; keep the exact original proposal and contract.
     private func validateUnsentInput(checkCurrent: () throws -> Void) async throws {
+        try await Self.validateOriginalInput(input, target: target, browser: browser, checkCurrent: checkCurrent)
+    }
+
+    /// Re-establish observation nonces after handback without changing the
+    /// retained proposal, source scope, native objects or private baseline.
+    static func validateOriginalInput(_ input: ComputerUseBrowserResearchFormInput, target: ComputerUseBrowserTextTarget,
+                                      browser: ComputerUseOwnedBrowser, checkCurrent: () throws -> Void) async throws {
         try checkCurrent()
+        if let binding = input.nativePreservation { try await target.validateFormPreservation(binding); try checkCurrent() }
         let original = input.evidence.page
         try browser.validateSourceDocument(original.document)
         let metadata = try await browser.observePage(document: original.document)

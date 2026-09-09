@@ -27,7 +27,7 @@ final class ComputerUseBrowserFormEffectScopeTests: XCTestCase {
 
     func testUnsupportedPreservationInsideOrOutsideTheFormCannotDisappear() async throws {
         for inside in [false, true] {
-            let reference = "<label>Reference<input readonly value='private-reference'></label>"
+            let reference = "<label>Reference<input type=email readonly value='private-reference@example.test'></label>"
             let body = "<form action='/filtered'><label>Query<input name=q></label>" + (inside ? reference : "")
                 + "<button>Search</button></form>" + (inside ? "" : reference)
             let fixture = try await make(body: body)
