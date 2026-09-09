@@ -136,7 +136,9 @@
     "RemoteDesktopHostTests/ComputerUseBrowserFormEffectScopeTests",
     "RemoteDesktopHostTests/ComputerUseBrowserNativeSettingScopeTests",
     "RemoteDesktopHostTests/ComputerUseBrowserFormPreservationTests",
-    "RemoteDesktopHostTests/ComputerUseBrowserResearchPreservationTests"
+    "RemoteDesktopHostTests/ComputerUseBrowserResearchPreservationTests",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testObservedPageHistoryStaysBoundedAndOmittedAdoptionsStillInvalidateSnapshots",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testObservedPageTransferRetainsItsOriginalClaimWithoutInventingAcceptanceHistory"
   ],
   "expectedTests": [
     "RemoteDesktopHostTests/ComputerUseBrowserActionPlannerTests/testActionContextRetainsTheWholeGoalAndObservedFormsWithoutPrivateValuesOrTargets",
@@ -1043,6 +1045,8 @@
     "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testHandbackAcceptsSuccessfulPageObservationsAndRejectsFailedLoads",
     "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testHandbackRequirementBindsTaskBrowserAndOwnershipWithoutReloading",
     "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testHandbackRequirementCannotSurviveStoppedOrRecreatedSession",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testObservedPageHistoryStaysBoundedAndOmittedAdoptionsStillInvalidateSnapshots",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testObservedPageTransferRetainsItsOriginalClaimWithoutInventingAcceptanceHistory",
     "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testPageEvidenceAfterLoginRequiresHandbackAndUsesOnlyTheCurrentDocument",
     "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testUnnavigatedHandbackDoesNotReauthorizeJournaledNavigationAttempt",
     "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testUnnavigatedSessionCannotSurviveOwnershipOrBrowserReplacement",

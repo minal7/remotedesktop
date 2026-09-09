@@ -1098,6 +1098,13 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
             try await browser.reacquireAfterUserControl(taskID: "active-history", requirement: requirement)
             let current = try XCTUnwrap(browser.currentDocument(taskID: "active-history"))
             XCTAssertEqual(current.source, .activePageObservation, "Handback cannot reclassify the earlier page change as a requested navigation or a user-time observation")
+            let history = try browser.navigationDispatchHistory(taskID: "active-history")
+            let observationHistory = ComputerUseBrowserResultAssessment.PageObservationHistory(history: history)
+            XCTAssertGreaterThan(observationHistory.sameDocumentCandidateCount, 0)
+            XCTAssertEqual(observationHistory.matchedAdoptionCount, 1)
+            XCTAssertEqual(observationHistory.nativeHandbackLinkedAdoptionCount, 1)
+            XCTAssertEqual(observationHistory.gaps, [.sameDocumentSourceUnqualified])
+            XCTAssertTrue(history.pageObservationEvents.allSatisfy { $0.observation.navigationCorrelationID == nil })
             XCTAssertFalse(browser.validate(original), "An A -> B -> A history transition cannot revive an old document")
             XCTAssertNil(browser.receipt(taskID: "active-history", operationID: current.operationID))
             XCTAssertEqual(browser.receipt(taskID: "active-history", operationID: "login"), original)
@@ -1225,6 +1232,14 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
                 let fresh = try await browser.acquireObservedDocument(taskID: "interrupted-observation")
                 XCTAssertEqual(fresh.source, .activePageObservation)
                 XCTAssertNil(browser.receipt(taskID: "interrupted-observation", operationID: fresh.operationID))
+                let history = try browser.navigationDispatchHistory(taskID: "interrupted-observation")
+                let accepted = try XCTUnwrap(history.pageObservationEvents.first)
+                XCTAssertEqual(accepted.observation.source, .activePageObservation)
+                XCTAssertEqual(accepted.observation.requiresExplicitHandback, interruption == "pause")
+                let assessment = ComputerUseBrowserResultAssessment.PageObservationHistory(history: history)
+                XCTAssertEqual(assessment.matchedAdoptionCount, 1)
+                XCTAssertEqual(assessment.nativeHandbackLinkedAdoptionCount, interruption == "pause" ? 1 : 0)
+                XCTAssertTrue(assessment.gaps.isEmpty)
             }
             XCTAssertEqual(server.count("/results"), 1)
         }
@@ -1885,6 +1900,85 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
         }
     }
 
+    func testObservedPageTransferRetainsItsOriginalClaimWithoutInventingAcceptanceHistory() async throws {
+        let server = try OwnedBrowserHTTPFixture(routes: [
+            "/start": .init(body: "<script>fetch('/signal').then(() => location.href='/destination')</script>"),
+            "/signal": .init(held: true),
+        ])
+        let base = try await server.start()
+        defer { server.stop() }
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+        defer { browser.close() }
+        try browser.claim(taskID: "original-observation-owner")
+        _ = try await browser.navigate(taskID: "original-observation-owner", operationID: "open", to: base.appendingPathComponent("start"))
+        try await waitUntil { server.count("/signal") == 1 }
+        server.releaseHeldResponses()
+        try await waitUntil {
+            (try? browser.navigationDispatchHistory(taskID: "original-observation-owner").pageObservationEvents.count) == 1
+        }
+        let before = try browser.navigationDispatchHistory(taskID: "original-observation-owner")
+        let accepted = try XCTUnwrap(before.pageObservationEvents.first)
+        let transferred = try await browser.acquireObservedDocument(taskID: "new-observation-owner")
+        let after = try browser.navigationDispatchHistory(taskID: "new-observation-owner")
+        XCTAssertTrue(after.beganAfterAnotherClaim)
+        XCTAssertTrue(after.attempts.isEmpty)
+        XCTAssertEqual(after.pageObservationEvents.count, 1)
+        let adoption = try XCTUnwrap(after.pageObservationEvents.first)
+        XCTAssertEqual(adoption.phase, .adopted)
+        XCTAssertEqual(adoption.observation, accepted.observation)
+        XCTAssertEqual(adoption.observation.taskID, "original-observation-owner")
+        XCTAssertNotEqual(adoption.ownershipEpoch, accepted.observation.ownershipEpoch)
+        XCTAssertEqual(adoption.generation, transferred.generation)
+        XCTAssertNil(adoption.nativeReacquisitionID)
+        let assessment = ComputerUseBrowserResultAssessment.PageObservationHistory(history: after)
+        XCTAssertEqual(assessment.acceptedCount, 0); XCTAssertEqual(assessment.adoptedCount, 1)
+        XCTAssertEqual(assessment.matchedAdoptionCount, 0)
+        XCTAssertTrue(assessment.gaps.contains(.claimTransferUnreconciled))
+        XCTAssertTrue(assessment.gaps.contains(.unmatchedAdoption))
+        XCTAssertEqual(transferred.source, .activePageObservation)
+        XCTAssertNil(browser.receipt(taskID: "new-observation-owner", operationID: transferred.operationID))
+        XCTAssertEqual(server.count("/destination"), 1)
+    }
+
+    func testObservedPageHistoryStaysBoundedAndOmittedAdoptionsStillInvalidateSnapshots() async throws {
+        let script = """
+            (async () => { let step = 0; while (true) {
+                await fetch('/signal'); history.replaceState({}, '', '/page?step=' + step++); await fetch('/changed');
+            } })();
+            """
+        let server = try OwnedBrowserHTTPFixture(routes: ["/start": .init(body: "<script>\(script)</script>"), "/signal": .init(held: true)])
+        let base = try await server.start()
+        defer { server.stop() }
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+        defer { browser.close() }
+        try browser.claim(taskID: "bounded-observations")
+        var current = try await browser.navigate(taskID: "bounded-observations", operationID: "open", to: base.appendingPathComponent("start"))
+        for step in 0..<66 {
+            try await waitUntil { server.count("/signal") == step + 1 }
+            server.releaseHeldResponses()
+            try await waitUntil { server.count("/changed") == step + 1 && !browser.validate(current) }
+            let beforeAdoption = try browser.navigationDispatchHistory(taskID: "bounded-observations")
+            current = try await browser.acquireObservedDocument(taskID: "bounded-observations")
+            let afterAdoption = try browser.navigationDispatchHistory(taskID: "bounded-observations")
+            XCTAssertEqual(current.source, .activePageObservation)
+            XCTAssertNil(browser.receipt(taskID: "bounded-observations", operationID: current.operationID))
+            if step >= 64 {
+                XCTAssertEqual(afterAdoption.pageObservationEvents.count, 128)
+                XCTAssertTrue(afterAdoption.pageObservationEventsOverflowed)
+                XCTAssertEqual(afterAdoption.pageObservationEvents, beforeAdoption.pageObservationEvents)
+                XCTAssertEqual(afterAdoption.observations, beforeAdoption.observations)
+                XCTAssertEqual(afterAdoption.controlEvents, beforeAdoption.controlEvents)
+                XCTAssertEqual(afterAdoption.attempts, beforeAdoption.attempts)
+                XCTAssertEqual(afterAdoption.policyInstallations, beforeAdoption.policyInstallations)
+                XCTAssertNotEqual(afterAdoption.identity, beforeAdoption.identity, "An omitted adoption still invalidates the frozen history")
+                let assessment = ComputerUseBrowserResultAssessment.PageObservationHistory(history: afterAdoption)
+                XCTAssertTrue(assessment.gaps.contains(.overflow))
+            }
+        }
+        XCTAssertEqual(server.count("/start"), 1)
+        XCTAssertEqual(try browser.navigationDispatchHistory(taskID: "bounded-observations").attempts.count, 1)
+    }
+
     func testHandbackAcceptsSuccessfulPageObservationsAndRejectsFailedLoads() async throws {
         for row in [(pause: false, status: 200), (pause: true, status: 200),
                     (pause: false, status: 404), (pause: true, status: 404)] {
@@ -1938,6 +2032,17 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
             XCTAssertEqual(history.attempts.count, 1, "Neither handback nor a script creates another automated dispatch")
             XCTAssertEqual(history.attempts.first?.operationID, original.operationID)
             XCTAssertEqual(history.attempts.first?.outcome, .documentCommitted)
+            let observations = ComputerUseBrowserResultAssessment.PageObservationHistory(history: history)
+            XCTAssertEqual(observations.acceptedCount, row.status == 200 ? 1 : 0)
+            XCTAssertEqual(observations.adoptedCount, row.status == 200 ? 1 : 0)
+            XCTAssertEqual(observations.matchedAdoptionCount, row.status == 200 ? 1 : 0)
+            XCTAssertEqual(observations.nativeHandbackLinkedAdoptionCount, row.status == 200 ? 1 : 0)
+            XCTAssertTrue(observations.gaps.isEmpty)
+            if row.status == 200 {
+                XCTAssertEqual(history.pageObservationEvents.map(\.phase), [.accepted, .adopted])
+                XCTAssertEqual(history.pageObservationEvents.first?.observation, history.pageObservationEvents.last?.observation)
+                XCTAssertNotNil(history.pageObservationEvents.last?.nativeReacquisitionID)
+            }
             XCTAssertEqual(server.count("/login"), 1)
             XCTAssertEqual(server.count("/destination"), 1)
         }

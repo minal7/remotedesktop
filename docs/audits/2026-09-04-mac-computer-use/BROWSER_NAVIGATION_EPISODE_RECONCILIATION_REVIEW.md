@@ -48,6 +48,8 @@ The held-load fixture now waits for its exact provisional-start record before ch
 
 ## Remaining repair order
 
+Follow-up: [page-observation history](BROWSER_PAGE_OBSERVATION_HISTORY_REVIEW.md) now records native candidate acceptance and adoption, pairs accepted navigation candidates with exact callbacks and retains native handback links. Full control intervals, claim/source lineage and platform qualification remain open.
+
 1. Retain and reconcile actual admission/adoption of unrequested or same-document page observations, then join navigation episodes to recorded control intervals without inferring actor identity from the action gate.
 2. Give claim/retirement and workflow scopes precise temporal semantics and reconcile source-policy/goal lineage through manual login and legitimate clarification/replacement.
 3. Qualify supported macOS/WebKit callback coverage, response association and redirect behavior before issuing affirmative route evidence. The current counters cannot substitute for that qualification.

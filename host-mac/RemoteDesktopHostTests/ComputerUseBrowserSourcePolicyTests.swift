@@ -353,7 +353,7 @@ final class ComputerUseBrowserSourcePolicyTests: XCTestCase {
         XCTAssertLessThan(attempt.order, start.order)
         XCTAssertLessThan(finish.order, terminalOrder)
         let orders = [attempt.order, terminalOrder] + history.observations.map(\.order)
-            + history.controlEvents.map(\.order) + history.policyInstallations.map(\.order)
+            + history.controlEvents.map(\.order) + history.policyInstallations.map(\.order) + history.pageObservationEvents.map(\.order)
         XCTAssertEqual(orders.sorted(), Array(0..<orders.count), "Retained native records share one ordered sequence")
     }
 
@@ -421,17 +421,42 @@ final class ComputerUseBrowserSourcePolicyTests: XCTestCase {
         let episodes = ComputerUseBrowserResultAssessment.NavigationEpisodes(history: after)
         XCTAssertEqual(episodes.dispatchEpisodeCount, 1); XCTAssertEqual(episodes.observedEpisodeCount, 1)
         XCTAssertEqual(episodes.observedFinishCallbackCount, 1); XCTAssertEqual(episodes.matchedCommittedAttemptCount, 1)
-        XCTAssertTrue(episodes.gaps.contains(.observedAdmissionUnverified), "An unrequested finished callback is not an automated receipt")
+        XCTAssertEqual(episodes.matchedObservedAdmissionCount, 1)
+        XCTAssertFalse(episodes.gaps.contains(.observedAdmissionUnverified))
+        let accepted = try XCTUnwrap(after.pageObservationEvents.first)
+        XCTAssertEqual(after.pageObservationEvents.count, 1)
+        XCTAssertEqual(accepted.phase, .accepted)
+        XCTAssertEqual(accepted.observation.basis, .completedNavigation)
+        XCTAssertEqual(accepted.observation.source, .activePageObservation)
+        XCTAssertNil(accepted.adoptedSource); XCTAssertNil(accepted.nativeReacquisitionID)
         let started = try XCTUnwrap(added.first { $0.phase == .provisionalStart && $0.binding == .exactObservedNavigation })
         let finished = try XCTUnwrap(added.first { $0.phase == .documentFinished && $0.binding == .exactObservedNavigation })
         XCTAssertEqual(started.control, .automationAllowed)
         XCTAssertEqual(started.navigationCorrelationID, finished.navigationCorrelationID)
         XCTAssertNotNil(started.navigationCorrelationID)
+        XCTAssertEqual(accepted.observation.navigationCorrelationID, started.navigationCorrelationID)
+        XCTAssertGreaterThan(accepted.order, finished.order)
         XCTAssertNil(started.attemptID); XCTAssertNil(finished.attemptID)
         XCTAssertEqual(after.attempts, before.attempts)
         XCTAssertNotEqual(after.identity, before.identity)
         XCTAssertEqual(finished.origin, try ComputerUseBrowserSourceOrigin(target))
         XCTAssertEqual(destination.count("/landed"), 1)
+        let current = try await browser.acquireObservedDocument(taskID: input.taskID)
+        XCTAssertEqual(current.source, .activePageObservation)
+        XCTAssertNil(browser.receipt(taskID: input.taskID, operationID: current.operationID))
+        let adopted = try browser.navigationDispatchHistory(taskID: input.taskID)
+        XCTAssertEqual(adopted.attempts, before.attempts)
+        XCTAssertEqual(adopted.pageObservationEvents.map(\.phase), [.accepted, .adopted])
+        XCTAssertEqual(adopted.pageObservationEvents.last?.observation, accepted.observation)
+        XCTAssertNil(adopted.pageObservationEvents.last?.nativeReacquisitionID)
+        let adoption = ComputerUseBrowserResultAssessment.PageObservationHistory(history: adopted)
+        XCTAssertEqual(adoption.acceptedCount, 1); XCTAssertEqual(adoption.matchedAdoptionCount, 1)
+        XCTAssertEqual(adoption.nativeHandbackLinkedAdoptionCount, 0)
+        XCTAssertTrue(adoption.gaps.isEmpty)
+        let projection = try String(decoding: JSONSerialization.data(withJSONObject: adoption.plannerContext), as: UTF8.self)
+        for hidden in [input.taskID, accepted.observation.id.uuidString, accepted.observation.parentSessionID.uuidString,
+                       accepted.observation.ownershipEpoch.uuidString, try XCTUnwrap(accepted.observation.navigationCorrelationID).uuidString,
+                       target.absoluteString] { XCTAssertFalse(projection.contains(hidden)) }
     }
 
     func testDispatchHistoryKeepsNativeOriginsAndThePolicyUsedByEachAttempt() async throws {
