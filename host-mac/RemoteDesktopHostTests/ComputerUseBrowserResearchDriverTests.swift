@@ -16,6 +16,8 @@ final class ComputerUseBrowserResearchDriverTests: XCTestCase {
         guard case .userInterventionRequired(let message) = result else { return XCTFail("Expected a nonterminal manual sign-in request") }
         XCTAssertTrue(message.contains("Let AI continue")); XCTAssertFalse(message.contains(fixture.base.absoluteString))
         let owner = try fixture.owner(), original = owner.input
+        XCTAssertEqual(owner.loginHandoffHistory.count, 1)
+        XCTAssertEqual(owner.loginHandoffHistory.first?.controlReturned, false)
         XCTAssertFalse(owner.isOperating)
         XCTAssertEqual(fixture.server.count("/account"), 0)
         XCTAssertEqual(owner.confirmedNavigationHistory.map(\.kind), [.search])
@@ -28,16 +30,25 @@ final class ComputerUseBrowserResearchDriverTests: XCTestCase {
         let calls = fixture.actions.inputs.count
         do { try await owner.resumeAfterUserControl(); XCTFail("The credential field still requires manual control") }
         catch { XCTAssertEqual(error as? ComputerUseBrowserError, .authenticationRequired) }
+        XCTAssertEqual(owner.loginHandoffHistory.first?.controlReturned, false)
         XCTAssertEqual(fixture.actions.inputs.count, calls)
         do { _ = try await fixture.resume(); XCTFail("An authentication barrier does not complete handback") }
         catch { XCTAssertEqual(error as? ComputerUseBrowserResearchTask.Failure, .paused) }
         _ = try await fixture.browser.navigate(taskID: owner.taskID, operationID: "fixture-manual-ready", to: fixture.base.appendingPathComponent("account-ready"))
         try await owner.resumeAfterUserControl()
+        XCTAssertEqual(owner.loginHandoffHistory.count, 1)
+        XCTAssertEqual(owner.loginHandoffHistory.first?.controlReturned, true)
         _ = try await fixture.resume()
         XCTAssertEqual(owner.input, original)
         XCTAssertEqual(fixture.search.inputs.count, 1); XCTAssertEqual(fixture.server.count("/search?q=concerts"), 1)
         XCTAssertEqual(fixture.server.count("/account"), 1)
         XCTAssertTrue(fixture.actions.inputs.allSatisfy { $0.interpretation.input == original })
+        let last = try XCTUnwrap(fixture.actions.inputs.last)
+        let context = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(last.contextJSON.utf8)) as? [String: Any])
+        let history = try XCTUnwrap(context["login_handoff_history"] as? [[String: Any]])
+        XCTAssertEqual(history.first?["control_returned"] as? Bool, true)
+        XCTAssertEqual(history.first?["authentication_verified"] as? Bool, false)
+        XCTAssertEqual(history.first?["same_document"] as? Bool, false)
     }
 
     func testDriverNavigatesSearchAndSelectedLinksWithoutClaimingAnAnswerOrRepeatingSearch() async throws {

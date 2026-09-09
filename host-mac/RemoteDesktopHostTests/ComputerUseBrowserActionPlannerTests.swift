@@ -4,6 +4,96 @@ import XCTest
 
 @MainActor
 final class ComputerUseBrowserActionPlannerTests: XCTestCase {
+    func testSamePageHandbackRecordsControlReturnWithoutClaimingSignInOrRepeatingTheRequest() async throws {
+        let fixture = try await ResearchDriverFixture.make(searchBodyHTML: "<a href='/account?private=handoff-secret'>Sign in</a><article><h2>Concert Alpha</h2><a href='/details'>Alpha details</a></article>")
+        defer { fixture.close() }
+        fixture.policy.choices = [false]
+        _ = try await fixture.start()
+        let owner = try fixture.owner(), original = owner.input
+        fixture.actions.select = { input in try self.json(["login_handoff":XCTUnwrap(input.loginHandoffTargets.first?.id)]) }
+        let action = try await owner.planNextAction(using: fixture.actions)
+        _ = try await owner.requestLoginHandoff(for: action)
+        let requested = try XCTUnwrap(owner.loginHandoffHistory.first)
+        XCTAssertFalse(requested.controlReturned)
+        // Returning on the unchanged public page is not evidence of authentication.
+        try await owner.resumeAfterUserControl()
+        let returned = try XCTUnwrap(owner.loginHandoffHistory.first)
+        XCTAssertTrue(returned.controlReturned); XCTAssertEqual(returned.goal, original)
+        fixture.actions.select = { _ in #"{"read_results":true}"# }
+        let next = try await owner.planNextAction(using: fixture.actions)
+        XCTAssertEqual(next.step, .readResults); XCTAssertTrue(next.input.usesLoginHandoffHistoryContext)
+        let context = try object(next.input.contextJSON)
+        XCTAssertEqual(context["version"] as? Int, 27)
+        let rows = try XCTUnwrap(context["login_handoff_history"] as? [[String: Any]])
+        XCTAssertEqual(rows.count, 1); XCTAssertEqual(rows.first?["control_returned"] as? Bool, true)
+        XCTAssertEqual(rows.first?["authentication_verified"] as? Bool, false)
+        XCTAssertEqual(rows.first?["same_document"] as? Bool, true)
+        XCTAssertEqual(rows.first?["entry_label"] as? String, "Sign in")
+        for hidden in [returned.documentID, returned.sessionIdentity, returned.sessionBindingDigest, "handoff-secret"] {
+            XCTAssertFalse(next.input.contextJSON.contains(hidden))
+        }
+        XCTAssertTrue(ComputerUseLocalBrowserActionPlanner.instructions(for: next.input).contains("login_handoff_history"))
+        XCTAssertEqual(owner.loginHandoffHistory, [returned]); XCTAssertEqual(fixture.server.count("/account?private=handoff-secret"), 0)
+        do { _ = try await owner.requestLoginHandoff(for: action); XCTFail("An old handoff proposal cannot be reused after return") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserActionPlanError, .inputChanged) }
+        owner.retire(); XCTAssertTrue(owner.loginHandoffHistory.isEmpty)
+    }
+
+    func testCancelledHandbackCannotMarkTheLoginRequestAsReturned() async throws {
+        let fixture = try await ResearchDriverFixture.make(searchBodyHTML: "<a href='/account'>Sign in</a><article><h2>Concert Alpha</h2><a href='/details'>Alpha details</a></article>")
+        defer { fixture.close() }
+        fixture.policy.choices = [false]
+        _ = try await fixture.start()
+        let owner = try fixture.owner()
+        fixture.actions.select = { input in try self.json(["login_handoff":XCTUnwrap(input.loginHandoffTargets.first?.id)]) }
+        let action = try await owner.planNextAction(using: fixture.actions)
+        _ = try await owner.requestLoginHandoff(for: action)
+        fixture.state.onCommand = { command in
+            guard command == .pageSnapshot else { return }
+            fixture.state.onCommand = nil; owner.pause()
+        }
+        do { try await owner.resumeAfterUserControl(); XCTFail("A cancelled page check cannot record returned control") }
+        catch { XCTAssertTrue(error is CancellationError || error as? ComputerUseBrowserResearchTask.Failure == .paused) }
+        XCTAssertFalse(owner.isOperating); XCTAssertEqual(owner.loginHandoffHistory.first?.controlReturned, false)
+        try await owner.resumeAfterUserControl()
+        XCTAssertEqual(owner.loginHandoffHistory.first?.controlReturned, true); XCTAssertEqual(owner.loginHandoffHistory.count, 1)
+    }
+
+    func testLoginHistoryRequiresSessionAndGoalAncestryAndBoundsFurtherRequests() async throws {
+        let body = "<a href='/account'>Sign in</a><article><h2>Concert Alpha</h2><a href='/details'>Alpha details</a></article>"
+        let fixture = try await ResearchDriverFixture.make(searchBodyHTML: body), other = try await ResearchDriverFixture.make(searchBodyHTML: body)
+        defer { fixture.close(); other.close() }
+        fixture.policy.choices = [false]; other.policy.choices = [false]
+        _ = try await fixture.start(); _ = try await other.start()
+        let owner = try fixture.owner(), foreign = try other.owner()
+        fixture.actions.select = { input in try self.json(["login_handoff":XCTUnwrap(input.loginHandoffTargets.first?.id)]) }
+        let action = try await owner.planNextAction(using: fixture.actions)
+        let native = try XCTUnwrap(fixture.browser.handbackRequirement(taskID: owner.taskID, required: true))
+        let foreignNative = try XCTUnwrap(other.browser.handbackRequirement(taskID: foreign.taskID, required: true))
+        let first = try ComputerUseBrowserLoginHandoffRecord(action: action, index: 0, handback: native)
+        XCTAssertThrowsError(try first.returningControl(to: owner.input, handback: foreignNative))
+        let foreignPage = try await foreign.planNextAction(using: other.actions).input.evidence
+        XCTAssertThrowsError(try first.context(goal: foreign.input, evidence: foreignPage))
+        let foreignGoal = try ComputerUseBrowserGoalInput(taskID: owner.taskID, prompt: "Find movies.", referenceDate: ResearchDriverFixture.date, timeZoneIdentifier: "America/Los_Angeles")
+        XCTAssertThrowsError(try first.returningControl(to: foreignGoal, handback: native))
+        func context(_ history: [ComputerUseBrowserLoginHandoffRecord]) throws -> ComputerUseBrowserActionInput {
+            try .init(interpretation: action.input.interpretation, evidence: action.input.evidence,
+                navigationHistory: [], formHistory: [], latestForm: nil, changedFormTargetIDs: [], loginHandoffHistory: history)
+        }
+        XCTAssertTrue(try context([first]).loginHandoffTargets.isEmpty)
+        let second = try ComputerUseBrowserLoginHandoffRecord(action: action, index: 1, handback: native)
+        XCTAssertThrowsError(try context([first, second])) // Only the last request can await handback.
+        XCTAssertThrowsError(try context([second]))
+        let history = try (0..<ComputerUseBrowserLoginHandoffRecord.maximumCount).map { index in
+            try ComputerUseBrowserLoginHandoffRecord(action: action, index: index, handback: native).returningControl(to: owner.input, handback: native)
+        }
+        let bounded = try context(history)
+        XCTAssertTrue(bounded.loginHandoffLimitReached); XCTAssertTrue(bounded.loginHandoffTargets.isEmpty)
+        XCTAssertTrue(bounded.needsPlanningDecision)
+        XCTAssertThrowsError(try ComputerUseBrowserActionProposal.decode(content: #"{"login_handoff":"login1"}"#, input: bounded))
+        XCTAssertThrowsError(try history[0].returningControl(to: owner.input, handback: native))
+    }
+
     func testLoginHandoffLabelsRequireAnExplicitSignInEntry() {
         for label in ["Sign in", " Log In \n", "LOGIN", "Sign in to continue", "Sign in to your account", "Sign in with Google", "Continue with Apple"] {
             XCTAssertTrue(ComputerUseBrowserLoginHandoffTarget.recognizes(label), label)
@@ -72,6 +162,7 @@ final class ComputerUseBrowserActionPlannerTests: XCTestCase {
                 else { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
             }
             XCTAssertFalse(owner.isOperating)
+            XCTAssertTrue(owner.loginHandoffHistory.isEmpty)
             XCTAssertEqual(fixture.server.count("/account"), 0)
             XCTAssertFalse(fixture.state.commands.contains(.edit))
             if cancel {

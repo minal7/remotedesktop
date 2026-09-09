@@ -110,6 +110,7 @@ final class ComputerUseBrowserResearchTask {
     private(set) var confirmedNavigationHistory: [ComputerUseBrowserResearchVisit] = []
     private(set) var confirmedFormHistory: [ComputerUseBrowserResearchFormReceipt] = []
     private(set) var formPartyHistory: [ComputerUseBrowserFormPartyHistory] = []
+    private(set) var loginHandoffHistory: [ComputerUseBrowserLoginHandoffRecord] = []
     private(set) var retiredFormHistory: [ComputerUseBrowserResearchFormStage.Retirement] = []
     private(set) var retiredHistoryNavigations: [ComputerUseBrowserResearchHistoryNavigation.Retirement] = []
     private(set) var popupHistory: [ComputerUseBrowserResearchPopupRecord] = []
@@ -489,7 +490,7 @@ final class ComputerUseBrowserResearchTask {
                     allowOptionInspection: optionSelectionSequence < 32 && navigationDirectory != nil && optionReads.isEmpty,
                     optionReadControls: optionReads, optionChoices: optionChoices, optionSelectionHistory: optionSelectionHistory,
                     effectControlReviews: effectReviews, formEffectScope: formScope, preparationReview: preparation?.reviewContext,
-                    formPartyHistory: formPartyHistory)
+                    formPartyHistory: formPartyHistory, loginHandoffHistory: loginHandoffHistory)
                 // Retain the selected form/query through metadata review. Newly
                 // read query criteria still require an explicit model decision.
                 let readyScope = context.effectScopeAllowsActions ? formScope : nil
@@ -557,7 +558,9 @@ final class ComputerUseBrowserResearchTask {
     func requestLoginHandoff(for action: ComputerUseBrowserActionProposal) async throws -> String {
         try validateAction(action)
         guard case .loginHandoff(let id) = action.step,
-              action.input.loginHandoffTargets.contains(where: { $0.id == id }) else { throw ComputerUseBrowserActionPlanError.invalidProposal }
+              action.input.loginHandoffTargets.contains(where: { $0.id == id }),
+              loginHandoffHistory.count < ComputerUseBrowserLoginHandoffRecord.maximumCount,
+              loginHandoffHistory.last?.controlReturned != false else { throw ComputerUseBrowserActionPlanError.invalidProposal }
         let captured = input
         try await operate { [self] in
             try await browser.validatePageEvidence(action.input.evidence)
@@ -565,7 +568,13 @@ final class ComputerUseBrowserResearchTask {
             guard latestAction == action else { throw ComputerUseBrowserActionPlanError.inputChanged }
         }
         try Task.checkCancellation(); try checkCurrent(captured)
+        guard let requirement = browser.handbackRequirement(taskID: captured.taskID, required: true) else { throw ComputerUseBrowserError.handbackContextLost }
+        try browser.validateWorkflowSession(requirement)
+        let record = try ComputerUseBrowserLoginHandoffRecord(action: action, index: loginHandoffHistory.count, handback: requirement)
+        try Task.checkCancellation()
+        guard !isRetired, !isPaused, latestAction == action, input == captured else { throw ComputerUseBrowserActionPlanError.inputChanged }
         pause()
+        loginHandoffHistory.append(record)
         return "Use the AI browser to sign in, then choose Let AI continue. Your original request is still pending."
     }
 
@@ -1634,7 +1643,13 @@ final class ComputerUseBrowserResearchTask {
         let resumed = try await withTaskCancellationHandler { try await child.value } onCancel: { child.cancel() }
         try Task.checkCancellation()
         guard !isRetired, isPaused, epoch == controlEpoch, operationID == id, input.digest == captured.digest, mayAct() else { throw Failure.paused }
+        var loginHistory = loginHandoffHistory
+        if let pending = loginHistory.last, !pending.controlReturned {
+            guard let resumed else { throw ComputerUseBrowserError.handbackContextLost }
+            loginHistory[loginHistory.count - 1] = try pending.returningControl(to: captured, handback: resumed)
+        }
         session = resumed; self.handback = nil; isPaused = false
+        loginHandoffHistory = loginHistory
         resumedSuccessfully = true
         if let resumed { browser.recordWorkflowControl(.workflowResumed, requirement: resumed, operationID: id) }
     }
@@ -1644,7 +1659,7 @@ final class ComputerUseBrowserResearchTask {
         formPreparation = nil
         confirmedNavigationHistory.removeAll()
         formStage?.retire(); formStage = nil; lastVerifiedFormStage?.retire(); lastVerifiedFormStage = nil
-        confirmedFormHistory.removeAll(); formPartyHistory.removeAll(); retiredFormHistory.removeAll()
+        confirmedFormHistory.removeAll(); formPartyHistory.removeAll(); loginHandoffHistory.removeAll(); retiredFormHistory.removeAll()
         formNavigation?.retire(); formNavigation = nil
         historyNavigation?.retire(); historyNavigation = nil
         retiredHistoryNavigations.removeAll()
