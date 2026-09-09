@@ -77,6 +77,7 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
     let editableFieldAliases: [String]
     let selectedFormID: String?
     let scopeReview: ComputerUseBrowserEffectScopeReview?
+    let fieldIntentRequirements: [String: [Int]]
     let requiredPreservation: [ComputerUseBrowserFormProposal.Preservation]
     let requiredRepairFieldAliases: [String]
     let pendingEditAliases: [String]
@@ -127,7 +128,11 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
         if let scopeReview {
             guard scopeReview.matches(interpretation: interpretation, evidence: evidence.page),
                   let scope = scopeReview.formScope, let selectedFormID, scope.formID == selectedFormID,
-                  scope.preservedControls == preservedControls else { throw ComputerUseBrowserResearchFormError.inputChanged }
+                  scope.preservedControls == preservedControls,
+                  Set(evidence.fields.map { $0.control.id }) == Set(scope.discoveryControlIDs),
+                  scope.fieldIntents.allSatisfy({ intent in intent.disposition != .retain || evidence.fields.contains {
+                      $0.control.id == intent.controlID && previous?.finalValues[$0.editable.snapshot.targetID] != nil
+                  } }) else { throw ComputerUseBrowserResearchFormError.inputChanged }
         }
         self.scopeReview = scopeReview
         if let previous {
@@ -172,8 +177,14 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
             }
         }
         let editable = zip(aliases, evidence.fields).compactMap { alias, field in
-            !preservedIDs.contains(field.control.id) && (selectedFormID == nil || field.control.form?.id == selectedFormID) ? alias : nil
+            !preservedIDs.contains(field.control.id) && (selectedFormID == nil || field.control.form?.id == selectedFormID)
+                && (scopeReview == nil || scopeReview?.formScope?.fieldIntents.contains { $0.controlID == field.control.id && $0.disposition == .edit } == true) ? alias : nil
         }
+        let intentRequirements = Dictionary(uniqueKeysWithValues: zip(aliases, evidence.fields).compactMap { alias, field -> (String, [Int])? in
+            guard let intent = scopeReview?.formScope?.fieldIntents.first(where: { $0.controlID == field.control.id && $0.disposition == .edit }) else { return nil }
+            return (alias, intent.requirementIndices)
+        })
+        fieldIntentRequirements = intentRequirements
         guard !editable.isEmpty else { throw ComputerUseBrowserResearchFormError.invalidInput }
         let repairs = zip(aliases, evidence.fields).compactMap { alias, field -> String? in
             guard let value = previous?.finalValues[field.editable.snapshot.targetID],
@@ -203,7 +214,7 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
             row["id"] = alias
             return row
         }
-        var context: [String: Any] = ["version":scopeReview == nil ? 9 : 10, "goal":interpretation.input.plannerContext,
+        var context: [String: Any] = ["version":scopeReview == nil ? 9 : 11, "goal":interpretation.input.plannerContext,
             "selected_form":selectedFormID.map { $0 as Any } ?? NSNull(),
             "required_preservation":try preserved.map { ["field":$0.field, "source":try $0.source.context(in: interpretation)] as [String: Any] },
             "previous_edits":priorEdits,
@@ -213,7 +224,11 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
             "requirements":requirements, "page":page, "field_bindings":bindings,
             "normalized_values":normalized.map { ["id":$0.id, "requirement":$0.requirementIndex,
                 "kind":$0.kind.rawValue, "value":$0.value, "unit":$0.unit] as [String: Any] }]
-        if scopeReview != nil { context["scope_reviewed"] = true }
+        if scopeReview != nil {
+            context["scope_reviewed"] = true
+            context["deferred_fields"] = scopeReview?.formScope?.fieldIntents.filter { $0.disposition == .deferred }.map(\.context) ?? []
+            context["required_edit_intents"] = editable.map { ["field":$0, "requirements":intentRequirements[$0] ?? []] as [String: Any] }
+        }
         contextJSON = String(decoding: try JSONSerialization.data(withJSONObject: context, options: [.sortedKeys]), as: UTF8.self)
         self.interpretation = interpretation; self.evidence = evidence; fieldAliases = aliases
         normalizations = normalized; editableFieldAliases = editable; self.selectedFormID = selectedFormID

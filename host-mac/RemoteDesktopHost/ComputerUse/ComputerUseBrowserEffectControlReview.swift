@@ -51,7 +51,7 @@ struct ComputerUseBrowserEffectControlReview: Equatable, Sendable, CustomStringC
             }
             let entry = Entry(controlID: id, relationship: relationship, requirementIndices: indices, evidenceIDs: references)
             guard entry.isValid(controlIDs: input.effectReviewControlIDs, evidenceIDs: input.effectReviewEvidenceIDs,
-                requirementIndices: input.effectReviewRequirementIndices, metadataComplete: input.effectReviewMetadataComplete, requiredValueControls: input.effectQueryValueControlIDs) else { throw invalid }
+                requirementIndices: input.effectReviewRequirementIndices, metadataComplete: input.effectReviewMetadataComplete, requiredValueControls: input.effectRequiredControlIDs) else { throw invalid }
             return entry
         }
         return .init(input: input, entries: entries)
@@ -88,7 +88,7 @@ struct ComputerUseBrowserEffectControlReview: Equatable, Sendable, CustomStringC
     }
 
     static func schema(_ input: ComputerUseBrowserActionInput) -> [String: Any] {
-        let allowsUnrelated = input.effectReviewMetadataComplete && input.effectReviewNextControlIDs.contains { !input.effectQueryValueControlIDs.contains($0) }
+        let allowsUnrelated = input.effectReviewMetadataComplete && input.effectReviewNextControlIDs.contains { !input.effectRequiredControlIDs.contains($0) }
         let relationships = allowsUnrelated ? ["unrelated","relevant","unknown"] : ["relevant","unknown"]
         let properties: [String: Any] = ["control":["type":"string","enum":input.effectReviewNextControlIDs],
             "relationship":["type":"string","enum":relationships],

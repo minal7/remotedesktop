@@ -378,7 +378,8 @@ final class ComputerUseBrowserResearchFormStage {
         }
         do {
             try check()
-            let fields = try await target.extendFields(in: formID, page: page, preserving: preserving.map(\.controlID), after: continuation)
+            let fields = try await target.extendFields(in: formID, page: page, preserving: preserving.map(\.controlID),
+                selecting: scopeReview?.formScope?.selectedControlIDs, after: continuation)
             try check()
             let evidence = try await target.bindFields(fields, to: page)
             try check()

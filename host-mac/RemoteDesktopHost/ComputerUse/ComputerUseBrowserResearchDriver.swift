@@ -319,7 +319,7 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                 let action = try await owner.planNextAction(using: actionPlanner)
                 try check()
                 switch action.step {
-                case .recall, .inspectOptions, .extendInspection, .preserveControls, .reviewControls: throw Failure.invalidProposal // Resolved inside the owner, never an executable action.
+                case .recall, .inspectOptions, .extendInspection, .preserveControls, .planFields, .reviewControls: throw Failure.invalidProposal // Resolved inside the owner, never an executable action.
                 case .selectOption:
                     progress("Selecting the requested option…")
                     do { _ = try await owner.selectOption(for: action) }

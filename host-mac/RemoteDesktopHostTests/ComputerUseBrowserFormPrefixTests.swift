@@ -290,12 +290,22 @@ final class ComputerUseBrowserFormPrefixTests: XCTestCase {
     func testAPartialRevisionKeepsTheEarlierCriterionUntilItsReplacementIsVerified() async throws {
         let fixture = try await make(categoryInputHandler: "document.getElementById('city').value = '';")
         defer { fixture.close() }
+        fixture.actions.select = { input in
+            if let review = try FormEffectScopeFixture.response(input, editing: ["City":[0]], deferring: ["Category":[0]]) { return review }
+            let form = try XCTUnwrap(input.evidence.page.controls.first { $0.label == "Category" }?.form?.id)
+            let reference = try XCTUnwrap(input.evidence.page.controls.first { $0.label == "Reference" })
+            return try self.json(["form":form,"preserve":[["control":reference.id,"requirement":0]]])
+        }
+        fixture.forms.select = { input in
+            try self.json(["edits":[["field":try self.alias("City", input),"terms":[["requirement":0,"text":"Paris"]]]],"preserve":[]])
+        }
         let owner = try fixture.owner(), initial = try await prepare(fixture)
         let firstPlan = try ComputerUseBrowserFormProposal.decode(content: json([
             "edits":[["field":try alias("City", initial.input),"terms":[["requirement":0,"text":"Paris"]]]],"preserve":[]]), input: initial.input)
         let first = try await owner.executeForm(firstPlan, input: initial.input)
         fixture.actions.beforeReply = nil
         fixture.actions.select = { input in
+            if let review = try FormEffectScopeFixture.response(input, editing: ["Category":[0],"City":[0]]) { return review }
             let category = try XCTUnwrap(input.evidence.page.controls.first { $0.label == "Category" })
             let reference = try XCTUnwrap(input.evidence.page.controls.first { $0.label == "Reference" })
             return try self.json(["form":try XCTUnwrap(category.form?.id),"preserve":[["control":reference.id,"requirement":0]]])
@@ -375,6 +385,7 @@ final class ComputerUseBrowserFormPrefixTests: XCTestCase {
         do {
             _ = try await fixture.start()
             fixture.actions.select = { input in
+                if let review = try self.actionReview(input) { return review }
                 if let query = input.queryControlIDs.first { return try self.json(["query":query]) }
                 guard let form = input.evidence.page.controls.first(where: { $0.label == "Category" })?.form?.id else { return #"{"read_results":true}"# }
                 let reference = try XCTUnwrap(input.evidence.page.controls.first { $0.label == "Reference" })
@@ -388,6 +399,21 @@ final class ComputerUseBrowserFormPrefixTests: XCTestCase {
             fixture.forms.select = { try self.plan($0) }
             return fixture
         } catch { fixture.close(); throw error }
+    }
+    private func actionReview(_ input: ComputerUseBrowserActionInput) throws -> String? {
+        let verified = try object(input.contextJSON)["verified_form_stage"] as? [String: Any]
+        let edits = verified?["edits"] as? [[String: Any]] ?? []
+        let pending = verified?["unfinished_edits"] as? [[String: Any]] ?? []
+        let cityIndex = input.interpretation.requirements.firstIndex { $0.sourceTurnIndex == 1 } ?? 0
+        var editing: [String: [Int]] = [:], retaining: [String: [Int]] = [:]
+        for label in ["Category", "City", "Region"] {
+            guard let id = input.evidence.page.controls.first(where: { $0.label == label })?.id else { continue }
+            let previous = edits.first { $0["control"] as? String == id }
+            if verified == nil || previous?["requires_repair"] as? Bool == true || pending.contains(where: { $0["label"] as? String == label }) {
+                editing[label] = [label == "Category" ? 0 : cityIndex]
+            } else { retaining[label] = [label == "Category" ? 0 : cityIndex] }
+        }
+        return try FormEffectScopeFixture.response(input, editing: editing, retaining: retaining)
     }
     private func plan(_ input: ComputerUseBrowserResearchFormInput) throws -> String {
         var edits: [[String: Any]] = []

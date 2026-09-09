@@ -203,6 +203,10 @@ final class ComputerUseBrowserFormClarificationTests: XCTestCase {
         try owner.configureResearchSources(XCTUnwrap(fixture.policy.sources(for: interpretation)))
     }
     private func action(_ input: ComputerUseBrowserActionInput, queryWhenReady: Bool = true) throws -> String {
+        let hasPrevious = !input.queryBoundControlIDs.isEmpty
+        let cityIndex = input.interpretation.requirements.firstIndex { $0.sourceTurnIndex == 1 } ?? 0
+        if let review = try FormEffectScopeFixture.response(input, editing: hasPrevious ? ["City":[cityIndex]] : ["Category":[0]],
+            retaining: hasPrevious ? ["Category":[0]] : [:], deferring: hasPrevious ? [:] : ["City":[0]]) { return review }
         let context = try object(input.contextJSON), verified = context["verified_form_stage"] as? [String: Any]
         let edits = verified?["edits"] as? [[String: Any]] ?? []
         if queryWhenReady, let city = input.evidence.page.controls.first(where: { $0.label == "City" }),

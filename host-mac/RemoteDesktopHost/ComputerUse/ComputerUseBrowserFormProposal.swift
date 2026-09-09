@@ -88,12 +88,27 @@ struct ComputerUseBrowserFormProposal: Equatable, Sendable, CustomStringConverti
                     guard requirement.role == .outcome || requirement.role == .condition else { throw invalid }
                     payload = .choice(id: id, requirementIndex: index)
                 } else { throw invalid }
+                if let expected = input.fieldIntentRequirements[alias] {
+                    let indices: [Int]
+                    switch payload {
+                    case .text(let query): indices = try query.terms.map { term in
+                        guard let index = input.interpretation.requirements.firstIndex(where: { $0.id == term.requirementID }) else { throw invalid }
+                        return index
+                    }
+                    case .normalized(let value): indices = [value.requirementIndex]
+                    case .choice(_, let index): indices = [index]
+                    }
+                    guard Set(indices) == Set(expected) else { throw invalid }
+                }
                 edits.append(.init(field: alias, payload: payload))
             }
             // A changed historical criterion cannot become an unchanged
             // invariant at its newly observed value. Repair every such field
             // with a new goal-backed operation before this stage can run.
             guard Set(input.requiredRepairFieldAliases).isSubset(of: usedFields) else { throw invalid }
+            if input.scopeReview != nil {
+                guard usedFields == Set(input.fieldIntentRequirements.keys) else { throw invalid }
+            }
             var resumptions: [Resumption] = []
             if !input.pendingEditAliases.isEmpty {
                 guard case .array(let rows)? = root["resume"], rows.count == input.pendingEditAliases.count else { throw invalid }

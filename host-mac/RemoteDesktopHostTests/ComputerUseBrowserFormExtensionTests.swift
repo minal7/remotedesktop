@@ -20,6 +20,9 @@ final class ComputerUseBrowserFormExtensionTests: XCTestCase {
         let fixture = try await ResearchDriverFixture.make(request: request, searchFormHTML: body)
         defer { fixture.close() }
         fixture.actions.select = { input in
+            let hasPrevious = !input.queryBoundControlIDs.isEmpty
+            if let review = try FormEffectScopeFixture.response(input, editing: hasPrevious ? ["City":[0]] : ["Category":[0]],
+                retaining: hasPrevious ? ["Category":[0]] : [:], deferring: hasPrevious ? [:] : ["City":[0]]) { return review }
             let context = try self.object(input.contextJSON)
             let verified = context["verified_form_stage"] as? [String: Any]
             let edits = verified?["edits"] as? [[String: Any]] ?? []
@@ -239,6 +242,7 @@ final class ComputerUseBrowserFormExtensionTests: XCTestCase {
             _ = try await fixture.start()
             let owner = try fixture.owner()
             fixture.actions.select = { input in
+                if let review = try FormEffectScopeFixture.response(input, editing: ["Category":[0]], deferring: ["City":[0]]) { return review }
                 let form = try XCTUnwrap(input.evidence.page.controls.first { $0.label == "Category" }?.form?.id)
                 let reference = try XCTUnwrap(input.evidence.page.controls.first { $0.label == "Reference" })
                 return try self.json(["form":form,"preserve":[["control":reference.id,"requirement":0]]])
@@ -252,6 +256,7 @@ final class ComputerUseBrowserFormExtensionTests: XCTestCase {
     }
     private func nextInput(_ fixture: ResearchDriverFixture) async throws -> ComputerUseBrowserResearchFormInput {
         fixture.actions.select = { input in
+            if let review = try FormEffectScopeFixture.response(input, editing: ["City":[0]], retaining: ["Category":[0]]) { return review }
             let form = try XCTUnwrap(input.evidence.page.controls.first { $0.label == "Category" }?.form?.id)
             return try self.json(["form":form,"preserve":[]])
         }

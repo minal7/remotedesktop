@@ -507,6 +507,7 @@ final class ComputerUseBrowserPendingChangeTests: XCTestCase {
         do {
             _ = try await fixture.start()
             fixture.actions.select = { input in
+                if let review = try FormEffectScopeFixture.response(input, editing: ["Category":[0],"City":[0]]) { return review }
                 if let query = input.queryControlIDs.first { return try self.json(["query":query]) }
                 guard let form = input.evidence.page.controls.first(where: { $0.label == "Category" })?.form?.id else { return #"{"read_results":true}"# }
                 let reference = try XCTUnwrap(input.evidence.page.controls.first { $0.label == "Reference" })

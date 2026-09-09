@@ -3,12 +3,25 @@ import Foundation
 /// A retained form/query selection before discovery or navigation. It grants
 /// no effect authority; the remaining control metadata must be accounted for.
 struct ComputerUseBrowserFormEffectScope: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    struct FieldIntent: Equatable, Sendable {
+        enum Disposition: String, Sendable { case edit, retain, deferred }
+        let controlID: String
+        let disposition: Disposition
+        let requirementIndices: [Int]
+        var context: [String: Any] {
+            ["control":controlID, "disposition":disposition.rawValue, "requirements":requirementIndices]
+        }
+    }
     enum Kind: Equatable, Sendable {
         case form(String)
         case query(String, ComputerUseBrowserResearchFormReceipt)
     }
     let kind: Kind
     let preservedControls: [ComputerUseBrowserControlPreservation]
+    let fieldIntents: [FieldIntent]
+    var plannedControlIDs: [String] { fieldIntents.map(\.controlID) + preservedControls.map(\.controlID) }
+    var discoveryControlIDs: [String] { fieldIntents.filter { $0.disposition != .deferred }.map(\.controlID) + preservedControls.map(\.controlID) }
+    var selectedControlIDs: [String] { fieldIntents.filter { $0.disposition != .deferred }.map(\.controlID) }
     private let interpretation: ComputerUseBrowserGoalProposal
     private let evidence: ComputerUseBrowserPageEvidence
     let digest: String
@@ -18,7 +31,8 @@ struct ComputerUseBrowserFormEffectScope: Equatable, Sendable, CustomStringConve
     var queryControlID: String? { if case .query(let id, _) = kind { return id }; return nil }
     var context: [String: Any] {
         ["kind":formID == nil ? "query" : "form", "target":formID ?? queryControlID ?? "",
-         "preserve":preservedControls.map { ["control":$0.controlID,"requirement":$0.requirementIndex] as [String: Any] }]
+         "preserve":preservedControls.map { ["control":$0.controlID,"requirement":$0.requirementIndex] as [String: Any] },
+         "fields":fieldIntents.map(\.context)]
     }
     var actionContent: String {
         get throws {
@@ -51,25 +65,35 @@ struct ComputerUseBrowserFormEffectScope: Equatable, Sendable, CustomStringConve
         case .openQuery(let id, let receipt): kind = .query(id, receipt); preserved = []
         default: throw ComputerUseBrowserActionPlanError.invalidProposal
         }
-        try self.init(kind: kind, preservedControls: preserved, interpretation: input.interpretation, evidence: input.evidence)
+        try self.init(kind: kind, preservedControls: preserved, fieldIntents: [], interpretation: input.interpretation, evidence: input.evidence)
     }
 
-    private init(kind: Kind, preservedControls: [ComputerUseBrowserControlPreservation],
+    private init(kind: Kind, preservedControls: [ComputerUseBrowserControlPreservation], fieldIntents: [FieldIntent],
                  interpretation: ComputerUseBrowserGoalProposal, evidence: ComputerUseBrowserPageEvidence) throws {
-        guard preservedControls.count <= 16, Set(preservedControls.map(\.controlID)).count == preservedControls.count,
+        let ids = preservedControls.map(\.controlID) + fieldIntents.map(\.controlID)
+        guard ids.count <= 16, Set(ids).count == ids.count,
+              fieldIntents.filter({ $0.disposition == .edit }).count <= 8,
+              fieldIntents.allSatisfy({ intent in
+                  (1...8).contains(intent.requirementIndices.count)
+                    && Set(intent.requirementIndices).count == intent.requirementIndices.count
+                    && intent.requirementIndices.allSatisfy { index in interpretation.requirements.indices.contains(index)
+                        && [.outcome, .condition].contains(interpretation.requirements[index].role) }
+              }),
               preservedControls.allSatisfy({ interpretation.requirements.indices.contains($0.requirementIndex)
                 && [.outcome, .condition, .prohibition].contains(interpretation.requirements[$0.requirementIndex].role) }) else {
             throw ComputerUseBrowserActionPlanError.invalidProposal
         }
-        self.kind = kind; self.preservedControls = preservedControls; self.interpretation = interpretation; self.evidence = evidence
+        self.kind = kind; self.preservedControls = preservedControls; self.fieldIntents = fieldIntents
+        self.interpretation = interpretation; self.evidence = evidence
         let target: [String]
         switch kind {
         case .form(let id): target = ["form", id]
         case .query(let id, let receipt): target = ["query", id, receipt.stageID, receipt.contractDigest]
         }
-        digest = ComputerUseTaskContract.digest(["browser-form-effect-scope-v1", interpretation.input.digest,
+        digest = ComputerUseTaskContract.digest(["browser-form-effect-scope-v2", interpretation.input.digest,
             evidence.document.contextID, evidence.documentID, evidence.page.id] + target
-            + preservedControls.flatMap { [$0.controlID, String($0.requirementIndex)] })
+            + [String(preservedControls.count)] + preservedControls.flatMap { [$0.controlID, String($0.requirementIndex)] }
+            + [String(fieldIntents.count)] + fieldIntents.flatMap { [$0.controlID, $0.disposition.rawValue, String($0.requirementIndices.count)] + $0.requirementIndices.map(String.init) })
     }
 
     func extending(_ controls: [ComputerUseBrowserControlPreservation]) throws -> Self {
@@ -77,7 +101,14 @@ struct ComputerUseBrowserFormEffectScope: Equatable, Sendable, CustomStringConve
               controls.allSatisfy({ added in !preservedControls.contains { $0.controlID == added.controlID } }) else {
             throw ComputerUseBrowserActionPlanError.invalidProposal
         }
-        return try .init(kind: kind, preservedControls: preservedControls + controls, interpretation: interpretation, evidence: evidence)
+        return try .init(kind: kind, preservedControls: preservedControls + controls, fieldIntents: fieldIntents, interpretation: interpretation, evidence: evidence)
+    }
+
+    func planning(_ intents: [FieldIntent]) throws -> Self {
+        guard formID != nil, !intents.isEmpty,
+              intents.allSatisfy({ !plannedControlIDs.contains($0.controlID) }) else { throw ComputerUseBrowserActionPlanError.invalidProposal }
+        return try .init(kind: kind, preservedControls: preservedControls, fieldIntents: fieldIntents + intents,
+                         interpretation: interpretation, evidence: evidence)
     }
 
     /// Only the owner uses this after native revalidation and an additive read.
@@ -85,7 +116,7 @@ struct ComputerUseBrowserFormEffectScope: Equatable, Sendable, CustomStringConve
         guard queryControlID != nil, evidence.document == self.evidence.document, evidence.documentID == self.evidence.documentID else {
             throw ComputerUseBrowserActionPlanError.inputChanged
         }
-        return try .init(kind: kind, preservedControls: preservedControls, interpretation: interpretation, evidence: evidence)
+        return try .init(kind: kind, preservedControls: preservedControls, fieldIntents: fieldIntents, interpretation: interpretation, evidence: evidence)
     }
 
     func matches(interpretation: ComputerUseBrowserGoalProposal, evidence: ComputerUseBrowserPageEvidence,
@@ -97,9 +128,9 @@ struct ComputerUseBrowserFormEffectScope: Equatable, Sendable, CustomStringConve
         }
     }
 
-    func coveredControlIDs(in page: ComputerUseBrowserPageSnapshot, discoverableControls: [String], queryBoundControls: [String]) -> Set<String> {
+    func coveredControlIDs(in page: ComputerUseBrowserPageSnapshot, queryBoundControls: [String]) -> Set<String> {
         switch kind {
-        case .form(let id): return Set(page.controls.filter { $0.form?.id == id && (discoverableControls.contains($0.id) || ["submit","button","reset","image"].contains($0.kind)) }.map(\.id) + preservedControls.map(\.controlID))
+        case .form(let id): return Set(page.controls.filter { $0.form?.id == id && ["submit","button","reset","image"].contains($0.kind) }.map(\.id) + plannedControlIDs)
         case .query(let id, _): return Set(queryBoundControls + [id])
         }
     }

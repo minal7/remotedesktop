@@ -67,7 +67,10 @@ final class ComputerUseBrowserActionPlannerTests: XCTestCase {
         defer { gate.release(); fixture.close() }
         _ = try await fixture.start()
         let owner = try fixture.owner()
-        fixture.actions.select = { try self.json(["form":XCTUnwrap($0.formIDs.first),"preserve":[]]) }
+        fixture.actions.select = { input in
+            if let review = try FormEffectScopeFixture.response(input, editing: ["Query":[0]]) { return review }
+            return try self.json(["form":XCTUnwrap(input.formIDs.first),"preserve":[]])
+        }
         let previous = try await owner.planNextAction(using: fixture.actions)
         fixture.actions.beforeReply = { await gate.suspend() }
         let running = Task { try await owner.planNextAction(using: fixture.actions) }
@@ -248,7 +251,7 @@ final class ComputerUseBrowserActionPlannerTests: XCTestCase {
         let heading = input.evidence.page.texts.first { $0.text == "Newsletter preferences" }?.id
         var unrelated: Set<String> = ["Newsletter", "Subscribe"]
         if heading != nil { unrelated.insert("") }
-        return try FormEffectScopeFixture.response(input, unrelated: unrelated, extraEvidence: heading.map { [$0] } ?? [])
+        return try FormEffectScopeFixture.response(input, unrelated: unrelated, extraEvidence: heading.map { [$0] } ?? [], editing: ["Query":[0]])
     }
     private func object(_ text: String) throws -> [String: Any] { try XCTUnwrap(JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any]) }
     private func local(_ transport: ActionPlannerTransport) throws -> ComputerUseLocalBrowserActionPlanner {

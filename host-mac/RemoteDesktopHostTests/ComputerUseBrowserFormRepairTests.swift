@@ -193,7 +193,7 @@ final class ComputerUseBrowserFormRepairTests: XCTestCase {
         let fixture = try await ResearchDriverFixture.make(request: prompt, searchFormHTML: body, heldSignal: true)
         do {
             _ = try await fixture.start()
-            fixture.actions.select = { try self.formAction($0) }
+            fixture.actions.select = { try self.formAction($0, initialCity: initialCity) }
             let owner = try fixture.owner(), input = try await nextInput(fixture)
             let proposal = try ComputerUseBrowserFormProposal.decode(content: plan(input, city: initialCity), input: input)
             _ = try await owner.executeForm(proposal, input: input)
@@ -214,14 +214,20 @@ final class ComputerUseBrowserFormRepairTests: XCTestCase {
                rows.contains(where: { $0["control"] as? String == cityID }), let control = input.queryControlIDs.first {
                 return try self.json(["query":control])
             }
-            return try self.formAction(input)
+            return try self.formAction(input, cityRequirement: requirement)
         }
         fixture.forms.select = { input in
             let category = try self.alias("Category", in: input)
             return try self.plan(input, category: input.requiredRepairFieldAliases.contains(category), cityValue: city, requirement: requirement)
         }
     }
-    private func formAction(_ input: ComputerUseBrowserActionInput) throws -> String {
+    private func formAction(_ input: ComputerUseBrowserActionInput, cityRequirement: Int = 0, initialCity: Bool = true) throws -> String {
+        let verified = try object(input.contextJSON)["verified_form_stage"] as? [String: Any]
+        let categoryID = input.evidence.page.controls.first { $0.label == "Category" }?.id
+        let rows = verified?["edits"] as? [[String: Any]] ?? []
+        let repairCategory = verified == nil || rows.contains { $0["control"] as? String == categoryID && $0["requires_repair"] as? Bool == true }
+        if let review = try FormEffectScopeFixture.response(input, editing: repairCategory ? (verified == nil && !initialCity ? ["Category":[0]] : ["Category":[0],"City":[cityRequirement]]) : ["City":[cityRequirement]],
+            retaining: repairCategory ? [:] : ["Category":[0]], deferring: verified == nil && !initialCity ? ["City":[0]] : [:]) { return review }
         guard let form = input.evidence.page.controls.first(where: { $0.label == "Category" })?.form?.id else { return #"{"read_results":true}"# }
         let reference = try XCTUnwrap(input.evidence.page.controls.first { $0.label == "Reference" })
         return try json(["form":form,"preserve":[["control":reference.id,"requirement":0]]])

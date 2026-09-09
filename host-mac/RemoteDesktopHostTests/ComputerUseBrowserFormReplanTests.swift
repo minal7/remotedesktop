@@ -192,7 +192,7 @@ final class ComputerUseBrowserFormReplanTests: XCTestCase {
         let proposal: ComputerUseBrowserFormProposal
     }
     private func stale(mutation: String, dependent: Bool = false) async throws -> Pending {
-        let fixture = try await make(mutation: mutation)
+        let fixture = try await make(mutation: mutation, initialCity: !dependent)
         do {
             let owner = try fixture.owner()
             if dependent {
@@ -214,7 +214,7 @@ final class ComputerUseBrowserFormReplanTests: XCTestCase {
             return .init(fixture: fixture, input: input, proposal: proposal)
         } catch { fixture.close(); throw error }
     }
-    private func make(mutation: String) async throws -> ResearchDriverFixture {
+    private func make(mutation: String, initialCity: Bool = true) async throws -> ResearchDriverFixture {
         let body = """
             <form action='/filtered'><label>Category<select name='category'><option value=''>Choose</option><option value='concerts'>Concerts</option></select></label>
             <label>City<input id='city' name='city'></label><button>Search</button></form><label>Reference<input value='private-reference'></label>
@@ -224,6 +224,9 @@ final class ComputerUseBrowserFormReplanTests: XCTestCase {
         do {
             _ = try await fixture.start()
             fixture.actions.select = { input in
+                let hasPrevious = !input.queryBoundControlIDs.isEmpty
+                if let review = try FormEffectScopeFixture.response(input, editing: hasPrevious ? ["City":[0]] : (initialCity ? ["Category":[0],"City":[0]] : ["Category":[0]]),
+                    retaining: hasPrevious ? ["Category":[0]] : [:], deferring: !hasPrevious && !initialCity ? ["City":[0]] : [:]) { return review }
                 guard let form = input.evidence.page.controls.first(where: { $0.label == "Category" })?.form?.id else { return #"{"read_results":true}"# }
                 if let query = input.queryControlIDs.first,
                    let verified = try self.object(input.contextJSON)["verified_form_stage"] as? [String: Any],

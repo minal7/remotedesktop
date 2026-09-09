@@ -491,6 +491,7 @@ final class ComputerUseBrowserResearchDriverTests: XCTestCase {
     private func configureAutomaticFormQueries(_ fixture: ResearchDriverFixture) {
         fixture.forms.content = formContent
         fixture.actions.select = { input in
+            if let review = try FormEffectScopeFixture.response(input, editing: ["Query":[0]]) { return review }
             let choice: [String: Any]
             if let control = input.queryControlIDs.first { choice = ["query":control] }
             else if let form = input.formIDs.first { choice = ["form":form,"preserve":[]] }

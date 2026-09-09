@@ -12,11 +12,12 @@ final class ComputerUseBrowserActionRecallTests: XCTestCase {
         let beforeCalls = fixture.actions.inputs.count, beforeReadings = fixture.results.inputs.count
         fixture.actions.select = { input in
             if input.recalledReadingIndices.isEmpty { return #"{"reading":0}"# }
+            if let review = try FormEffectScopeFixture.response(input, editing: ["Query":[0]]) { return review }
             if let query = input.queryControlIDs.first { return try self.json(["query":query]) }
             return try self.json(["form":XCTUnwrap(input.formIDs.first), "preserve":[]])
         }
         let action = try await owner.planNextAction(using: fixture.actions)
-        XCTAssertEqual(fixture.actions.inputs.count - beforeCalls, 2)
+        XCTAssertEqual(fixture.actions.inputs.count - beforeCalls, 4)
         XCTAssertEqual(action.input.recalledReadingIndices, [0])
         let context = try object(action.input.contextJSON), recalled = try XCTUnwrap(context["recalled_readings"] as? [[String: Any]])
         XCTAssertEqual((context["goal"] as? [String: Any])?["request"] as? String, original.prompt)

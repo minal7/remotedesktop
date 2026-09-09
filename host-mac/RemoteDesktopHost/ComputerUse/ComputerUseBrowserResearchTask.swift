@@ -414,6 +414,9 @@ final class ComputerUseBrowserResearchTask {
                     case .preserveControls:
                         guard let scope = formScope else { throw ComputerUseBrowserActionPlanError.invalidProposal }
                         formScope = try scope.extending(proposal.preservedControls); effectReviews = []; continue
+                    case .planFields(let intents):
+                        guard let scope = formScope else { throw ComputerUseBrowserActionPlanError.invalidProposal }
+                        formScope = try scope.planning(intents); effectReviews = []; continue
                     default: break
                     }
                 }
@@ -767,7 +770,8 @@ final class ComputerUseBrowserResearchTask {
             let preservedControls = action?.preservedControls ?? []
             let fields: [ComputerUseTextField]
             if let selectedFormID {
-                fields = try await target.fields(in: selectedFormID, page: page, preserving: preservedControls.map(\.controlID))
+                fields = try await target.fields(in: selectedFormID, page: page, preserving: preservedControls.map(\.controlID),
+                    selecting: action?.input.formEffectScope?.selectedControlIDs)
             } else { fields = try await target.fields() }
             let evidence = try await target.bindFields(fields, to: page)
             try checkCurrent(captured)

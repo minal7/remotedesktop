@@ -848,7 +848,9 @@ enum ComputerUseBrowserDOM {
           if (members.length > 10000) return reply('limit');
           // Native form.elements includes controls associated via form=,
           // including those outside the form's DOM subtree.
-          scoped = Array.from(new Set([...Array.from(members), ...fieldScope.additional]));
+          if (fieldScope.selected && fieldScope.selected.some(element => element.form !== fieldScope.form
+              || !Array.from(members).includes(element) || !editable(element))) return reply('stale');
+          scoped = Array.from(new Set([...(fieldScope.selected || Array.from(members)), ...fieldScope.additional]));
         }
         const found = [], walkers = fieldScope ? [] : [doc.createTreeWalker(doc, NodeFilter.SHOW_ELEMENT)];
         let count = 0, totalBytes = 0, totalChoices = 0;
@@ -898,7 +900,11 @@ enum ComputerUseBrowserDOM {
           ...requirements.fields.filter(field => !field.mustSubmit).map(field => bindings.get(field.id).element)]));
         const members = formElements.call(scope.form);
         if (members.length > 10000) return reply('limit');
-        const candidates = Array.from(new Set([...Array.from(members), ...additional]));
+        const selected = scope.selected ? Array.from(new Set([...scope.selected,
+          ...requirements.fields.filter(field => field.mustSubmit).map(field => bindings.get(field.id).element)])) : null;
+        if (selected && selected.some(element => element.form !== scope.form
+            || !Array.from(members).includes(element) || !editable(element))) return reply('stale');
+        const candidates = Array.from(new Set([...(selected || Array.from(members)), ...additional]));
         if (candidates.length > 10000) return reply('limit');
         const byElement = new Map(Array.from(bindings.values()).map(binding => [binding.element, binding]));
         const next = new Map(), found = [];
@@ -922,7 +928,7 @@ enum ComputerUseBrowserDOM {
         // Commit only a complete catalogue. Never clear input operations.
         // Retrying after a lost callback reuses these same native IDs.
         bindings.clear(); for (const [id, binding] of next) bindings.set(id, binding);
-        fieldScope = {form:scope.form, additional};
+        fieldScope = {form:scope.form, additional, selected};
         for (const binding of next.values()) {
           const tree = binding.element.getRootNode();
           if (tree instanceof ShadowRoot) observer.observe(tree, observationOptions);
@@ -1569,8 +1575,21 @@ enum ComputerUseBrowserDOM {
                 if (!control || !editable(control.element) || control.form !== control.element.form) return reply('unsupported');
                 additional.push(control.element);
               }
-              if (command === 'extendFormFields') return extendFields({form, additional}, args.requirements, args.repairableFieldIDs);
-              return fields(undefined, {form, additional});
+              let selected = null;
+              if (args.selectedControlIDs !== undefined) {
+                const ids = args.selectedControlIDs;
+                if (!Array.isArray(ids) || ids.length + additional.length > 16
+                    || new Set([...ids, ...args.preservedControlIDs]).size !== ids.length + additional.length) return reply('unsupported');
+                selected = [];
+                for (const id of ids) {
+                  const control = controls.get(id);
+                  if (typeof id !== 'string' || !control || control.form !== form || control.element.form !== form
+                      || !editable(control.element)) return reply('unsupported');
+                  selected.push(control.element);
+                }
+              }
+              if (command === 'extendFormFields') return extendFields({form, additional, selected}, args.requirements, args.repairableFieldIDs);
+              return fields(undefined, {form, additional, selected});
             }
             if (command === 'bindPageFields') {
               // Join independently observed IDs only through the retained
@@ -1862,14 +1881,17 @@ final class ComputerUseBrowserTextTarget {
 
     /// Read only the selected native form and source-bound preservation
     /// controls. Selection is tied to the exact current page before discovery.
-    func fields(in formID: String, page evidence: ComputerUseBrowserPageEvidence, preserving controlIDs: [String]) async throws -> [ComputerUseTextField] {
+    func fields(in formID: String, page evidence: ComputerUseBrowserPageEvidence, preserving controlIDs: [String],
+                selecting selectedControlIDs: [String]? = nil) async throws -> [ComputerUseTextField] {
         try validate()
         guard documentID == nil, evidence.document == document,
               evidence.page.controls.contains(where: { $0.form?.id == formID }), controlIDs.count <= 16,
               Set(controlIDs).count == controlIDs.count,
               Set(controlIDs).isSubset(of: Set(evidence.page.controls.map(\.id))) else { throw ComputerUseBrowserError.pageChanged }
-        let reply = try await browser.callDOM(.formFields, arguments: ["documentID":evidence.documentID,
-            "snapshotID":evidence.page.id, "formID":formID, "preservedControlIDs":controlIDs], document: document)
+        var arguments: [String: Any] = ["documentID":evidence.documentID,
+            "snapshotID":evidence.page.id, "formID":formID, "preservedControlIDs":controlIDs]
+        if let selectedControlIDs { arguments["selectedControlIDs"] = selectedControlIDs }
+        let reply = try await browser.callDOM(.formFields, arguments: arguments, document: document)
         try validate()
         guard reply.documentID == evidence.documentID else { throw ComputerUseBrowserError.pageChanged }
         guard let fields = try adoptDiscoveredFields(reply) else { throw ComputerUseBrowserError.unsupportedDocument }
@@ -1911,6 +1933,7 @@ final class ComputerUseBrowserTextTarget {
     /// complete, read-only catalogue extension. Changed edit values must later
     /// be explicitly repaired; preservation and required object identity hold.
     func extendFields(in formID: String, page evidence: ComputerUseBrowserPageEvidence, preserving controlIDs: [String],
+                      selecting selectedControlIDs: [String]? = nil,
                       after continuation: ComputerUseBrowserResearchFormContinuation) async throws -> [ComputerUseTextField] {
         try validate()
         guard let documentID, evidence.document == document, evidence.documentID == documentID,
@@ -1918,10 +1941,12 @@ final class ComputerUseBrowserTextTarget {
               Set(controlIDs).isSubset(of: Set(evidence.page.controls.map(\.id))) else { throw ComputerUseBrowserError.pageChanged }
         let requirements = try ComputerUseBrowserFormQueryRequirements(document: document, documentID: documentID,
             continuation: continuation, targets: targets)
-        let reply = try await browser.callDOM(.extendFormFields, arguments: ["documentID":documentID,
+        var arguments: [String: Any] = ["documentID":documentID,
             "snapshotID":evidence.page.id, "formID":formID, "preservedControlIDs":controlIDs,
             "requirements":requirements.domArguments,
-            "repairableFieldIDs":try repairableNativeIDs(after: continuation)], document: document)
+            "repairableFieldIDs":try repairableNativeIDs(after: continuation)]
+        if let selectedControlIDs { arguments["selectedControlIDs"] = selectedControlIDs }
+        let reply = try await browser.callDOM(.extendFormFields, arguments: arguments, document: document)
         try validate()
         guard reply.documentID == documentID else { throw ComputerUseBrowserError.pageChanged }
         let previous = targets
