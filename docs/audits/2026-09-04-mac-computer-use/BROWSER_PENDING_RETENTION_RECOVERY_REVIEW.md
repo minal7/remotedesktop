@@ -46,7 +46,7 @@ No build, typecheck, assertion execution, inference, app/browser/computer-use la
 
 ## Remaining work
 
-The subsequent [retained-caret repair](BROWSER_RETAINED_CARET_REVIEW.md) separates incidental selection movement from read-only criterion validation and establishes fresh selections for later edit revisions. The list below records this checkpoint's earlier boundary; actual value changes during preparation remain open.
+The subsequent [retained-caret repair](BROWSER_RETAINED_CARET_REVIEW.md) separates incidental selection movement from read-only criterion validation and establishes fresh selections for later edit revisions. The later [preparation-criteria recovery](BROWSER_PREPARATION_CRITERIA_RECOVERY_REVIEW.md) covers fully captured, unexecuted retention and planning. The list below records this checkpoint's earlier boundary; changes before a complete private capture and later physical-preparation recovery remain open.
 
 - This path starts after an exact retention proposal is accepted into execution. Changes during still-pending preparation or model planning need a corresponding reviewed recovery path that keeps their original capture and semantic duties. They cannot be promoted to an accepted retention execution merely to reuse this method.
 - The full preparation/unchanged-retention validator still compares entire text snapshots through `bindFields`, including caret selection. Review whether incidental selection changes should block a read-only criterion review, while keeping exact input preconditions and requested preservation. This checkpoint does not relax that check.

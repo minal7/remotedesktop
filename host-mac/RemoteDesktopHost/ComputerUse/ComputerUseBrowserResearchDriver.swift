@@ -249,33 +249,40 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
             }
             if owner.hasPendingFormPreparation {
                 let input: ComputerUseBrowserResearchFormInput
-                if owner.hasRevisedFormPreparationGoal {
-                    progress("Reviewing your answer…")
-                    let interpretation = try await owner.interpretGoal()
-                    try check()
-                    if let question = try owner.proposedQuestionRequest() { return .browserClarificationRequired(question) }
-                    guard interpretation.proposal.disposition == .research else {
-                        return .userInterventionRequired("The complete request still has unresolved work. Review the original task before continuing.")
-                    }
-                    if run.sources?.policy.goalRevision != run.input.digest {
-                        guard let sources = try planning.sources(for: interpretation) else {
-                            return .userInterventionRequired("I need a search source that matches your request. The original task is still pending.")
+                let proposal: ComputerUseBrowserFormProposal
+                do {
+                    if owner.needsFormPreparationReview {
+                        progress("Reviewing the pending form criteria…")
+                        let interpretation = try await owner.interpretGoal()
+                        try check()
+                        if let question = try owner.proposedQuestionRequest() { return .browserClarificationRequired(question) }
+                        guard interpretation.proposal.disposition == .research else {
+                            return .userInterventionRequired("The complete request still has unresolved work. Review the original task before continuing.")
                         }
-                        try check(); try owner.configureResearchSources(sources); run.sources = sources
+                        if run.sources?.policy.goalRevision != run.input.digest {
+                            guard let sources = try planning.sources(for: interpretation) else {
+                                return .userInterventionRequired("I need a search source that matches your request. The original task is still pending.")
+                            }
+                            try check(); try owner.configureResearchSources(sources); run.sources = sources
+                        }
+                        let reviewed = try await owner.reviewFormPreparation(using: actionPlanner)
+                        try check()
+                        if let question = reviewed.questionRequest { return .browserClarificationRequired(question) }
+                        guard case .editForm = reviewed.step else {
+                            return .userInterventionRequired("I could not identify justified changes to this form. Your answer and the original task remain pending.")
+                        }
+                        progress("Checking the revised form preparation…")
+                        input = try await owner.applyFormPreparationReview(reviewed)
+                    } else {
+                        progress("Checking the pending form preparation…")
+                        input = try await owner.resumeFormPreparation()
                     }
-                    let reviewed = try await owner.reviewFormPreparation(using: actionPlanner)
+                    proposal = try await owner.planForm(input, using: formPlanner)
+                } catch {
+                    guard try await recoverPendingForm(owner, after: error) else { throw error }
                     try check()
-                    if let question = reviewed.questionRequest { return .browserClarificationRequired(question) }
-                    guard case .editForm = reviewed.step else {
-                        return .userInterventionRequired("I could not identify justified changes to this form. Your answer and the original task remain pending.")
-                    }
-                    progress("Checking the revised form preparation…")
-                    input = try await owner.applyFormPreparationReview(reviewed)
-                } else {
-                    progress("Checking the pending form preparation…")
-                    input = try await owner.resumeFormPreparation()
+                    continue
                 }
-                let proposal = try await owner.planForm(input, using: formPlanner)
                 try check()
                 if let question = try proposal.questionRequest(for: input) { return .browserClarificationRequired(question) }
                 guard !proposal.isUnavailable else {
@@ -384,9 +391,17 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                     guard owner.confirmedFormHistory.count < 32 else {
                         return .userInterventionRequired("The browser reached this task's form-action limit. The original request remains pending.")
                     }
-                    let input = try await owner.prepareFormInput(for: action)
-                    progress("Preparing the requested form criteria…")
-                    let proposal = try await owner.planForm(input, using: formPlanner)
+                    let input: ComputerUseBrowserResearchFormInput
+                    let proposal: ComputerUseBrowserFormProposal
+                    do {
+                        input = try await owner.prepareFormInput(for: action)
+                        progress("Preparing the requested form criteria…")
+                        proposal = try await owner.planForm(input, using: formPlanner)
+                    } catch {
+                        guard try await recoverPendingForm(owner, after: error) else { throw error }
+                        try check()
+                        continue
+                    }
                     try check()
                     if let question = try proposal.questionRequest(for: input) { return .browserClarificationRequired(question) }
                     guard !proposal.isUnavailable else {
@@ -482,6 +497,7 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                 || error as? ComputerUseTextEditError == .deliveryUncertain
                 || error as? ComputerUseBrowserResearchFormStage.Failure == .retirementPending
                 || error as? ComputerUseBrowserResearchFormStage.Failure == .valueCheckpointRequired else { return false }
+        if owner.hasPendingFormPreparation { return try await owner.recoverPendingFormPreparationCriteria() }
         if try await owner.recoverPendingRetainedCriteria() != nil { return true }
         if try await owner.retainCompletedFormHistory() != nil { return true }
         if try await owner.retainPendingFormPrefix() != nil { return true }

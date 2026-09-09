@@ -50,6 +50,8 @@ No build, typecheck, test assertion execution, inference, app/browser/computer-u
 
 ## Remaining work
 
+Subsequent source work adds [preparation-criteria recovery](BROWSER_PREPARATION_CRITERIA_RECOVERY_REVIEW.md) for a fully captured, unexecuted retain-only input. The list below records this checkpoint’s earlier boundary; incomplete captures and later physical preparations still need corresponding recovery.
+
 - Recover actual criterion changes during pending preparation/model planning while preserving original captures and semantic duties. Caret-only movement is handled here; changed values and required metadata still reject.
 - Continue explicit supersession and changed goals, including conflicts with preserved criteria, without discarding unaccepted work or uncertain input. A captured invariant still does not qualify as a verified task criterion.
 - Qualify the interaction with later revision retries, dependent controls, scoped-reading changes and document/process recovery. Ordinary input selection checks remain deliberately unchanged by this checkpoint.

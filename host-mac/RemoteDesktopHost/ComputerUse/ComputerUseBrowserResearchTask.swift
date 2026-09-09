@@ -130,6 +130,9 @@ final class ComputerUseBrowserResearchTask {
     var hasRevisedFormPreparationGoal: Bool {
         formPreparation.map { $0.interpretation.input != input } ?? false
     }
+    var needsFormPreparationReview: Bool {
+        hasRevisedFormPreparationGoal || formPreparation?.criteriaRepair != nil
+    }
     private var hasPendingFormExecution: Bool {
         guard let formStage else { return false }
         return !confirmedFormHistory.contains { $0.stageID == formStage.id }
@@ -372,14 +375,14 @@ final class ComputerUseBrowserResearchTask {
         return action
     }
 
-    /// Reconsider metadata under an accepted answer without rediscovering
+    /// Reconsider metadata after an accepted answer or changed criteria without rediscovering
     /// fields or consuming the original preparation. The returned proposal is
     /// held separately until native preparation can carry the revised scope.
     func reviewFormPreparation(using planner: any ComputerUseBrowserActionPlanning, budget: Duration = .seconds(30)) async throws -> ComputerUseBrowserActionProposal {
         try requireIdle(); try requireFormGoalReview()
         guard !hasPendingNavigation else { throw Failure.navigationPending }
         guard !hasQuestion else { throw Failure.questionPending }
-        guard let preparation = formPreparation, hasRevisedFormPreparationGoal,
+        guard let preparation = formPreparation, needsFormPreparationReview,
               let interpretation, interpretation.proposal.input == input,
               interpretation.proposal.disposition == .research else { throw Failure.interpretationRequired }
         guard sourcePolicy == nil || (sourcePolicyInstalled && sourcePolicy?.goalRevision == input.digest) else { throw Failure.navigationUnavailable }
@@ -390,7 +393,7 @@ final class ComputerUseBrowserResearchTask {
             return try await withThrowingTaskGroup(of: ComputerUseBrowserActionProposal.self) { group in
                 group.addTask { @MainActor [self] in
                     guard ContinuousClock.now < deadline else { throw ComputerUseBrowserActionPlanError.deadlineExceeded }
-                    if let cached = preparation.revisedAction, cached.input.interpretation == interpretation.proposal {
+                    if preparation.criteriaRepair == nil, let cached = preparation.revisedAction, cached.input.interpretation == interpretation.proposal {
                         _ = try await preparation.restoreForReview(browser: browser, checkCurrent: { try self.checkCurrent(captured) })
                         return cached
                     }
@@ -856,7 +859,7 @@ final class ComputerUseBrowserResearchTask {
     func applyFormPreparationReview(_ action: ComputerUseBrowserActionProposal) async throws -> ComputerUseBrowserResearchFormInput {
         try requireIdle(); try requireFormGoalReview()
         guard !hasPendingNavigation, !hasQuestion, let preparation = formPreparation,
-              hasRevisedFormPreparationGoal, preparation.revisedAction == action,
+              needsFormPreparationReview, preparation.revisedAction == action,
               interpretation?.proposal == action.input.interpretation, action.input.interpretation.input == input,
               action.input.interpretation.disposition == .research else { throw Failure.formUnavailable }
         guard sourcePolicy == nil || (sourcePolicyInstalled && sourcePolicy?.goalRevision == input.digest) else { throw Failure.navigationUnavailable }
@@ -884,6 +887,23 @@ final class ComputerUseBrowserResearchTask {
         }
         latestForm = prepared
         return prepared.input
+    }
+
+    /// Preparation recovery never publishes a form stage. The old capture,
+    /// accepted sources and native history remain owned until a new review.
+    func recoverPendingFormPreparationCriteria() async throws -> Bool {
+        try requireIdle(); try requireFormGoalReview()
+        guard !hasPendingNavigation else { throw Failure.navigationPending }
+        guard !hasQuestion else { throw Failure.questionPending }
+        guard let preparation = formPreparation, preparation.preparedInput?.isRetainOnly == true else { return false }
+        let captured = input
+        latestCandidates = nil; latestForm = nil; latestAction = nil
+        return try await operate { [self] in
+            try await preparation.recoverRetainedCriteriaForReview(browser: browser, checkCurrent: {
+                try self.checkCurrent(captured)
+                guard self.formPreparation === preparation else { throw Failure.formUnavailable }
+            })
+        }
     }
 
     /// Reuse the exact adapter, page and field set. A failed or interrupted

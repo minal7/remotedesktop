@@ -900,8 +900,8 @@ enum ComputerUseBrowserDOM {
         return Object.values(value).every(n => Number.isFinite(n) && Math.abs(n) <= 10000000)
           && value.width > 0 && value.height > 0 && value.contentWidth >= 0 && value.contentHeight >= 0 ? value : null;
       }
-      function extendFields(scope, requirements, repairableIDs, preparation = false, checkingSelection = true) {
-        if (!fieldScope || fieldScope.form !== scope.form || !formRequirementsCurrent(requirements, repairableIDs, null, preparation, checkingSelection)) return reply('stale');
+      function extendFields(scope, requirements, repairableIDs, preparation = false, checkingSelection = true, repairOrigins = null) {
+        if (!fieldScope || fieldScope.form !== scope.form || !formRequirementsCurrent(requirements, repairableIDs, null, preparation, checkingSelection, repairOrigins)) return reply('stale');
         const requiredIDs = new Set(requirements.fields.map(field => field.id));
         // Earlier explicit preservation may be outside the submitted form.
         // Keep its actual object even when the new proposal omits the control.
@@ -946,14 +946,19 @@ enum ComputerUseBrowserDOM {
       }
       function revisePreparedFields(scope, args) {
         const requirements = args.requirements, retainedPreparation = args.retainedPreparation === true;
+        const repairOrigins = args.criteriaRequirements ?? null, repairing = args.criteriaRequirements !== undefined;
+        const repairableIDs = repairing ? args.repairableFieldIDs : [];
         if (args.retainedPreparation !== undefined && !retainedPreparation) return reply('unsupported');
         if (typeof args.revisionID !== 'string' || !/^[a-f0-9]{64}$/.test(args.revisionID)
             || typeof args.scopeDigest !== 'string' || !/^[a-f0-9]{64}$/.test(args.scopeDigest)
-            || !Array.isArray(scope.selected) || args.repairableFieldIDs !== undefined
-            || !formRequirementsCurrent(requirements, [], null, true, !retainedPreparation)) return reply('stale');
+            || !Array.isArray(scope.selected)
+            || (repairing ? !retainedPreparation || !repairOrigins || !Array.isArray(repairableIDs) || !repairableIDs.length : args.repairableFieldIDs !== undefined)
+            || !formRequirementsCurrent(requirements, repairableIDs, null, true, !retainedPreparation, repairOrigins)) return reply('stale');
         const shape = JSON.stringify([args.formID,args.scopeDigest,args.preservedControlIDs,args.selectedControlIDs,
           requirements.digest,requirements.inputLedgerID,requirements.preservationID ?? null,requirements.inputOperationIDs,
-          requirements.fields.map(field => [field.id,field.value,field.mustSubmit,field.label,field.selectionStart,field.selectionEnd,field.choices])].concat(retainedPreparation ? ['retained-preparation-v1'] : []));
+          requirements.fields.map(field => [field.id,field.value,field.mustSubmit,field.label,field.selectionStart,field.selectionEnd,field.choices])]
+          .concat(retainedPreparation ? ['retained-preparation-v1'] : [])
+          .concat(repairing ? ['retained-preparation-repair-v1',repairOrigins.digest,repairableIDs] : []));
         const existing = preparedFieldRevisions.get(args.revisionID);
         if (existing) {
           if (existing.shape !== shape) return reply('stale');
@@ -968,7 +973,7 @@ enum ComputerUseBrowserDOM {
         // be read. Reusing its ID cannot silently take another baseline.
         const record = {shape,result:reply('stale'),fields:null,snapshots:null,bindings:null};
         preparedFieldRevisions.set(args.revisionID, record);
-        const result = extendFields(scope, requirements, [], true, !retainedPreparation);
+        const result = extendFields(scope, requirements, repairableIDs, true, !retainedPreparation, repairOrigins);
         record.result = result;
         if (result.status === 'ok') {
           record.fields = result.fields; record.snapshots = result.fields.map(field => JSON.stringify(field));
@@ -1384,7 +1389,7 @@ enum ComputerUseBrowserDOM {
         if (encoder.encode(destination.href).length > 8192) return {status:'unsupported'};
         return {status:'form-query', destination:destination.href, signature, members, submittedMembers, form};
       }
-      function formRequirementsCurrent(requirements, repairableIDs = [], changes = null, preparation = false, checkingSelection = true) {
+      function formRequirementsCurrent(requirements, repairableIDs = [], changes = null, preparation = false, checkingSelection = true, repairOrigins = null) {
         const withState = !preparation && requirements?.kind === 'verified-form-state-v1';
         if (!requirements || typeof requirements.digest !== 'string' || !/^[a-f0-9]{64}$/.test(requirements.digest)
             || (preparation ? requirements.kind !== 'prepared-form-v1' : !withState && requirements.kind !== undefined)
@@ -1392,7 +1397,8 @@ enum ComputerUseBrowserDOM {
             || !Array.isArray(requirements.inputOperationIDs) || requirements.inputOperationIDs.length < (preparation || withState ? 0 : 1) || requirements.inputOperationIDs.length > 64
             || new Set(requirements.inputOperationIDs).size !== requirements.inputOperationIDs.length) return false;
         if (preparation && (requirements.inputLedgerID !== inputLedgerID || pendingChanges.size
-            || operations.size !== requirements.inputOperationIDs.length || !Array.isArray(repairableIDs) || repairableIDs.length)) return false;
+            || operations.size !== requirements.inputOperationIDs.length || !Array.isArray(repairableIDs)
+            || (repairableIDs.length && !repairOrigins))) return false;
         let bytes = 0, edited = 0, choices = 0;
         const ids = new Set();
         // Validate the entire bounded shape before reading any field values.
@@ -1426,6 +1432,11 @@ enum ComputerUseBrowserDOM {
         if (!Array.isArray(repairableIDs) || repairableIDs.length > 16
             || new Set(repairableIDs).size !== repairableIDs.length
             || repairableIDs.some(id => typeof id !== 'string' || !requirements.fields.some(field => field.id === id && field.mustSubmit))) return false;
+        // An unexecuted capture has no value-origin authority. Only the
+        // separate earlier native history can justify these repair exceptions.
+        if (repairOrigins && (!preparation || !formRequirementsCurrent(repairOrigins, repairableIDs)
+            || repairableIDs.some(id => !requirements.fields.some(field => field.id === id && field.mustSubmit
+              && repairOrigins.fields.some(origin => origin.id === id && origin.mustSubmit && origin.value === field.value))))) return false;
         if (!fieldPreservationCurrent(requirements.preservationID ?? null, true)) return false;
         return requirements.fields.every(field => {
           const binding = bindings.get(field.id), current = binding && snapshot(binding);
@@ -2139,10 +2150,11 @@ struct ComputerUseBrowserFormEvidence: Equatable, Sendable, CustomStringConverti
     }
     /// Historical correspondence only. Current-page validity still requires
     /// fresh native binding; matching labels cannot bridge different adapters.
-    func retainsCapturedFields(from original: Self, ignoringCaret: Bool = false) -> Bool {
+    func retainsCapturedFields(from original: Self, ignoringCaret: Bool = false, repairing targetIDs: Set<String> = []) -> Bool {
         adapterID == original.adapterID && page.document == original.page.document && page.documentID == original.page.documentID
             && original.fields.allSatisfy { old in fields.contains { $0.control.id == old.control.id
-                && Self.matchesCapturedField($0.editable, old.editable, ignoringCaret: ignoringCaret) } }
+                && Self.matchesCapturedField($0.editable, old.editable, ignoringCaret: ignoringCaret,
+                    allowingValueChange: targetIDs.contains(old.editable.snapshot.targetID)) } }
     }
     fileprivate static func matchesSnapshot(_ current: ComputerUseTextSnapshot, _ original: ComputerUseTextSnapshot,
                                            ignoringCaret: Bool) -> Bool {
@@ -2151,7 +2163,12 @@ struct ComputerUseBrowserFormEvidence: Equatable, Sendable, CustomStringConverti
             && current.isEditable == original.isEditable && current.isSecure == original.isSecure
     }
     fileprivate static func matchesCapturedField(_ current: ComputerUseTextField, _ original: ComputerUseTextField,
-                                                ignoringCaret: Bool) -> Bool {
+                                                ignoringCaret: Bool, allowingValueChange: Bool = false) -> Bool {
+        if allowingValueChange {
+            return ignoringCaret && current.label.utf8.elementsEqual(original.label.utf8) && current.choices == original.choices
+                && current.snapshot.targetID == original.snapshot.targetID
+                && current.snapshot.isEditable == original.snapshot.isEditable && current.snapshot.isSecure == original.snapshot.isSecure
+        }
         guard ignoringCaret else { return current == original }
         return current.label.utf8.elementsEqual(original.label.utf8) && current.choices == original.choices
             && matchesSnapshot(current.snapshot, original.snapshot, ignoringCaret: ignoringCaret)
@@ -2408,7 +2425,8 @@ final class ComputerUseBrowserTextTarget {
     /// before constructing a revised input for the executor.
     func reviseFields(in formID: String, page evidence: ComputerUseBrowserPageEvidence,
                       preserving controlIDs: [String], selecting selectedControlIDs: [String], scopeDigest: String,
-                      from original: ComputerUseBrowserResearchFormInput, retaining capture: ComputerUseBrowserDOMReadCapture) async throws -> [ComputerUseTextField] {
+                      from original: ComputerUseBrowserResearchFormInput, retaining capture: ComputerUseBrowserDOMReadCapture,
+                      repairing repair: ComputerUseBrowserFormPreparationRepair? = nil) async throws -> [ComputerUseTextField] {
         try validate()
         guard let documentID, let inputLedgerID, evidence.document == document, evidence.documentID == documentID,
               original.evidence.adapterID == adapterID, original.evidence.page.document == document,
@@ -2419,20 +2437,32 @@ final class ComputerUseBrowserTextTarget {
               scopeDigest.utf8.count == 64, scopeDigest.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else {
             throw ComputerUseBrowserError.pageChanged
         }
+        if let repair { guard repair.original == original, original.isRetainOnly else { throw ComputerUseBrowserError.pageChanged } }
         let requirements = try preparedFormRequirements(from: original)
-        let revisionID = ComputerUseTaskContract.digest([original.isRetainOnly ? "browser-prepared-field-revision-v2" : "browser-prepared-field-revision-v1", requirements.digest, scopeDigest])
+        let parts = [repair != nil ? "browser-prepared-field-revision-v3" : (original.isRetainOnly ? "browser-prepared-field-revision-v2" : "browser-prepared-field-revision-v1"), requirements.digest, scopeDigest]
+        let revisionID = ComputerUseTaskContract.digest(parts + (repair.map { [$0.digest] } ?? []))
         do {
             var arguments: [String: Any] = ["documentID":documentID,"snapshotID":evidence.page.id,
                 "formID":formID,"preservedControlIDs":controlIDs,"selectedControlIDs":selectedControlIDs,
                 "scopeDigest":scopeDigest,"revisionID":revisionID,"requirements":requirements.domArguments]
             if original.isRetainOnly { arguments["retainedPreparation"] = true }
+            if let repair {
+                guard let prior = original.previous, repair.changedTargetIDs.isSubset(of: prior.repairableTargetIDs) else { throw ComputerUseBrowserError.pageChanged }
+                arguments["criteriaRequirements"] = try ComputerUseBrowserFormQueryRequirements(document: document,
+                    documentID: documentID, continuation: prior, targets: targets, adapterID: adapterID).domArguments
+                arguments["repairableFieldIDs"] = try repair.changedTargetIDs.sorted().map { id -> String in
+                    guard let nativeID = targets[id] else { throw ComputerUseBrowserError.pageChanged }
+                    return nativeID
+                }
+            }
             let reply = try await browser.callDOM(.reviseFormFields, arguments: arguments, document: document, retaining: capture)
             try validate()
             guard reply.documentID == documentID, reply.inputLedgerID == inputLedgerID,
                   let fields = try decodeDiscoveredFields(reply) else { throw ComputerUseBrowserError.pageChanged }
             let previous = targets, replacement = Dictionary(uniqueKeysWithValues: fields.map { ($0.field.snapshot.targetID,$0.nativeID) })
             guard original.evidence.fields.allSatisfy({ old in fields.contains {
-                ComputerUseBrowserFormEvidence.matchesCapturedField($0.field, old.editable, ignoringCaret: original.isRetainOnly)
+                ComputerUseBrowserFormEvidence.matchesCapturedField($0.field, old.editable, ignoringCaret: original.isRetainOnly,
+                    allowingValueChange: repair?.changedTargetIDs.contains(old.editable.snapshot.targetID) == true)
                     && previous[$0.field.snapshot.targetID] == $0.nativeID
             } }) else { throw ComputerUseBrowserError.pageChanged }
             targets = replacement
