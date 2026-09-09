@@ -47,6 +47,7 @@ struct ComputerUseBrowserActionInput: Equatable, Sendable, CustomStringConvertib
     var usesOptionSelectionContext: Bool { !optionInspectionControlIDs.isEmpty || !optionReadControls.isEmpty || !optionSelectionHistory.isEmpty }
     let queryControlIDs: [String]
     let queryReceipt: ComputerUseBrowserResearchFormReceipt?
+    let usesFormPartyHistoryContext: Bool
     let recallableReadingIndices: [Int]
     let recalledReadingIndices: [Int]
     let historyOptions: [ComputerUseBrowserHistoryOption]
@@ -55,7 +56,7 @@ struct ComputerUseBrowserActionInput: Equatable, Sendable, CustomStringConvertib
     private let archiveDigest: String?
     let contextJSON: String
     var needsFormDecision: Bool { !formIDs.isEmpty || !queryControlIDs.isEmpty }
-    var needsPlanningDecision: Bool { usesEffectScopeContext || needsFormDecision || usesPopupContext || usesOptionSelectionContext || !readableControlIDs.isEmpty || !recallableReadingIndices.isEmpty || !recalledReadingIndices.isEmpty || !historyOptions.isEmpty }
+    var needsPlanningDecision: Bool { usesEffectScopeContext || needsFormDecision || usesFormPartyHistoryContext || usesPopupContext || usesOptionSelectionContext || !readableControlIDs.isEmpty || !recallableReadingIndices.isEmpty || !recalledReadingIndices.isEmpty || !historyOptions.isEmpty }
 
     @MainActor
     init(interpretation: ComputerUseBrowserGoalProposal, evidence: ComputerUseBrowserPageEvidence,
@@ -69,7 +70,8 @@ struct ComputerUseBrowserActionInput: Equatable, Sendable, CustomStringConvertib
          optionSelectionHistory: [ComputerUseBrowserResearchOptionSelectionRecord] = [],
          effectControlReviews: [ComputerUseBrowserEffectControlReview] = [],
          formEffectScope: ComputerUseBrowserFormEffectScope? = nil,
-         preparationReview: ComputerUseBrowserFormPreparationReviewContext? = nil) throws {
+         preparationReview: ComputerUseBrowserFormPreparationReviewContext? = nil,
+         formPartyHistory: [ComputerUseBrowserFormPartyHistory] = []) throws {
         let goal = interpretation.input
         self.preparationReview = preparationReview
         if let preparationReview {
@@ -82,6 +84,19 @@ struct ComputerUseBrowserActionInput: Equatable, Sendable, CustomStringConvertib
               formHistory.allSatisfy({ $0.taskID == goal.taskID && $0.rootDigest == goal.rootDigest }),
               Set(navigationHistory.map(\.operationID)).count == navigationHistory.count,
               Set(formHistory.map(\.stageID)).count == formHistory.count else { throw ComputerUseBrowserActionPlanError.invalidInput }
+        guard formPartyHistory.count <= formHistory.count,
+              Set(formPartyHistory.map { $0.receipt.stageID }).count == formPartyHistory.count,
+              formPartyHistory.allSatisfy({ history in
+                  goal.continues(history.goal) && history.sessionIdentity == evidence.document.contextID
+                    && formHistory.contains(history.receipt)
+              }), formPartyHistory.map({ $0.receipt.index }) == formPartyHistory.map({ $0.receipt.index }).sorted() else {
+            throw ComputerUseBrowserActionPlanError.invalidInput
+        }
+        usesFormPartyHistoryContext = !formPartyHistory.isEmpty
+        let partyNormalizations = ComputerUseBrowserResearchFormInput.normalizations(for: interpretation)
+        let partyAliases = ComputerUseBrowserFormPartyCoverage.aliases(
+            for: ComputerUseBrowserFormPartyCoverage.collect(normalizations: partyNormalizations, records: [:], values: [:]),
+            records: latestForm?.nativeContinuation?.partyCriteria ?? [:], historicalSources: formPartyHistory.flatMap { $0.parties.map(\.sourceID) })
         let catalog = try researchEvidence?.actionCatalog(goal: goal, page: evidence)
         self.historyOptions = historyOptions ?? []; allowsHistory = historyOptions != nil
         guard Set(self.historyOptions.map(\.visit)).count == self.historyOptions.count,
@@ -180,7 +195,6 @@ struct ComputerUseBrowserActionInput: Equatable, Sendable, CustomStringConvertib
                 }.map(\.id)
             }
             let partyCoverage = continuation.partyCoverage(in: interpretation, changedTargets: changedFormTargetIDs)
-            let partyAliases = ComputerUseBrowserFormPartyCoverage.aliases(for: partyCoverage, records: continuation.partyCriteria)
             let edits: [[String: Any]] = try fields.map { field in
                 guard let sources = continuation.verifiedSources[field.editable.snapshot.targetID], !sources.isEmpty else {
                     throw ComputerUseBrowserActionPlanError.invalidInput
@@ -407,6 +421,19 @@ struct ComputerUseBrowserActionInput: Equatable, Sendable, CustomStringConvertib
         }
         if preparationReview?.requiredEditControlIDs.isEmpty == false { context["version"] = 23 }
         if (verified as? [String: Any])?["party_criteria"] != nil { context["version"] = 24 }
+        if usesFormPartyHistoryContext {
+            context["version"] = 25
+            guard let rows = context["form_history"] as? [[String: Any]], rows.count == formHistory.count else {
+                throw ComputerUseBrowserActionPlanError.invalidInput
+            }
+            context["form_history"] = try zip(formHistory, rows).map { receipt, row in
+                var row = row
+                if let history = formPartyHistory.first(where: { $0.receipt == receipt }) {
+                    row["party_criteria_at_stage"] = try history.context(in: interpretation, aliases: partyAliases, normalizations: partyNormalizations)
+                }
+                return row
+            }
+        }
         contextJSON = String(decoding: try JSONSerialization.data(withJSONObject: context, options: [.sortedKeys]), as: UTF8.self)
         usesFormStateContext = formHistory.contains { $0.verifiedWithoutInputCount > 0 }
         usesFormRecoveryContext = formHistory.contains { $0.requiresRepairAtPublication }
@@ -671,7 +698,7 @@ struct ComputerUseLocalBrowserActionPlanner: ComputerUseBrowserActionPlanning {
         if !input.recalledReadingIndices.isEmpty { parts += [recalledInstructions, capacityInstructions] }
         if !input.recalledReadingIndices.isEmpty || input.interpretation.requirements.contains(where: { $0.field == .quantity }) { parts.append(quantityInstructions) }
         if !input.formIDs.isEmpty { parts.append(formInstructions) }
-        if !input.formIDs.isEmpty || input.usesFormRecoveryContext || input.usesFormRetentionContext { parts.append(formHistoryInstructions) }
+        if !input.formIDs.isEmpty || input.usesFormRecoveryContext || input.usesFormRetentionContext || input.usesFormPartyHistoryContext { parts.append(formHistoryInstructions) }
         if input.queryReceipt != nil { parts.append(verifiedFormInstructions) }
         if !input.readableControlIDs.isEmpty { parts.append(readingInstructions) }
         if !input.optionInspectionControlIDs.isEmpty { parts.append(inspectionInstructions) }
@@ -716,6 +743,7 @@ struct ComputerUseLocalBrowserActionPlanner: ComputerUseBrowserActionPlanning {
     Version 22 retained_criteria counts earlier verified criteria explicitly retained under the current review. Such a stage has zero new input and zero new desired-value proof origins; its original input receipts or observation proofs still govern each criterion. A recovered retention review can have required_repair_when_recorded=true and complete_stage=false: its earlier origins and desired values remain obligations, while current native values need repair. The retained count never proves those values currently match. A complete read-only retention stage is not a query, a task result, or proof that every user requirement is satisfied. The next action must still advance the complete request. Do not repeat retention merely to produce another history entry.
     Version 20 distinguishes verified criteria from dispatched input. verified_form_stage.criteria carries exact source purposes for values verified by either path; verified_without_input=true identifies a criterion last verified without sending input. form_history.verified_without_input counts such fields in that stage, while edits counts actual input. A complete stage can have zero edits. Do not request input merely to create a receipt when desired values already match. Native inspection still checks current values, original objects, preservation and real input history before offering query controls. Historical verification is not whole-goal completion or proof of current website availability.
     Version 24 verified_form_stage.party_criteria compares recorded adult/child components with the CURRENT native party requirements. Per-field party_component identifies the proposed category and recorded value. missing means no completed criterion records that component; changed means the required value differs or native inspection found a changed field; ambiguous means multiple fields record the category. recorded requires one unchanged criterion with the expected count but does not prove its provider/category meaning. all_components_recorded and complete_stage are not whole-goal completion. A shared source row, matching total or captured unedited default cannot supply a missing component. Carry outstanding categories into later planning and assessment, including after an exploratory query; do not present partial criteria as a complete party setup.
+    Version 25 form_history.party_criteria_at_stage preserves historical party component records after leaving a form. Each row is the accumulated snapshot on that form at that stage, not new input counts and not verification on the current page. components_at_stage retains missing, recorded, changed or ambiguous categories. current_native_requirement=same_counts means only that the native requested composition still agrees; changed_counts or unresolved requires reconsideration against the complete current request and scoped answers. Historical sources project overlapping current rows, not provider meaning. Public party aliases join the current request and historical snapshots within this context only. Do not combine snapshots across forms/documents to invent a complete setup, add their accumulated counts, or reuse an earlier field reference. Even an identical form on a new document requires fresh scope, observation and verification. required_repair_when_recorded=true additionally means publication already needed criterion repair. These records cannot restore account state, complete login, authorize navigation or prove current availability. Preserve missing requirements through exploratory browsing and user login handoff; current_field_verification is always false for this history.
     Version 21 also records required_repair_when_recorded when fully dispatched input history was recovered while some original criteria needed repair. All inputs may have receipts and unfinished_edits may be empty while complete_stage=false. Preserve those historical inputs; resolve the currently marked requires_repair criteria through a new source-bound form stage. The recorded repair flag is historical: use fresh per-criterion inspection to decide what still needs repair, including after the user changes the page. Do not replay completed inputs or infer current satisfaction from the history.
     form_history distinguishes verified edits from planned_edits. complete_stage=false means a prefix was verified or the recovered stage required criterion repair; unfinished_edits retains the unsent remainder with historical labels/types and original user sources. Those old labels are not current native references. Select the retained form to replan every unfinished entry; its planner must explicitly map all pending work to current edits. Query controls remain withheld until those obligations and any changed criteria are resolved. Never count a partial receipt as completion of the original stage or the research goal.
     """

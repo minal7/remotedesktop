@@ -231,6 +231,67 @@ struct ComputerUseBrowserResearchFormReceipt: Equatable, Sendable, CustomStringC
     var debugDescription: String { description }
 }
 
+/// Historical component accounting survives navigation without retaining any
+/// native target, control, query or input capability. It cannot prove a value
+/// on a later document, even when that document renders an identical form.
+struct ComputerUseBrowserFormPartyHistory: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    struct Component: Equatable, Sendable {
+        let unit: String
+        let value: String
+        let state: ComputerUseBrowserFormPartyCoverage.State
+        let recordedFields: Int
+    }
+    struct Party: Equatable, Sendable {
+        let sourceID: String
+        let sources: [ComputerUseBrowserFormSource]
+        let components: [Component]
+    }
+    let receipt: ComputerUseBrowserResearchFormReceipt
+    let goal: ComputerUseBrowserGoalInput
+    let sessionIdentity: String
+    let continuationDigest: String
+    let parties: [Party]
+
+    @MainActor init?(receipt: ComputerUseBrowserResearchFormReceipt, stage: any ComputerUseBrowserFormStage) throws {
+        guard let continuation = stage.nativeContinuation, stage.nativeReceipt == receipt, stage.id == receipt.stageID,
+              continuation.stageIDs.last == receipt.stageID, continuation.goal == stage.input.interpretation.input,
+              continuation.goalRevision == receipt.goalRevision, continuation.rootDigest == receipt.rootDigest else {
+            throw ComputerUseBrowserResearchFormError.inputChanged
+        }
+        let coverage = continuation.partyCoverage
+        guard !coverage.isEmpty else { return nil }
+        self.receipt = receipt; goal = continuation.goal; sessionIdentity = continuation.document.contextID
+        continuationDigest = continuation.digest
+        parties = try coverage.map { value in
+            .init(sourceID: value.partySourceID,
+                sources: try value.requirementIndices.map { try ComputerUseBrowserFormSource(index: $0, interpretation: stage.input.interpretation) },
+                components: value.components.map { .init(unit: $0.unit, value: $0.value, state: $0.state, recordedFields: $0.targetIDs.count) })
+        }
+    }
+
+    func context(in interpretation: ComputerUseBrowserGoalProposal, aliases: [String: String],
+                 normalizations: [ComputerUseBrowserResearchFormInput.Normalization]) throws -> [String: Any] {
+        guard interpretation.input.continues(goal) else { throw ComputerUseBrowserResearchFormError.inputChanged }
+        let values: [[String: Any]] = try parties.map { party in
+            guard let alias = aliases[party.sourceID] else { throw ComputerUseBrowserResearchFormError.invalidInput }
+            let current = normalizations.filter { $0.partySourceID == party.sourceID }
+            let sameCounts = current.count == party.components.count && party.components.allSatisfy { old in
+                current.contains { $0.unit == old.unit && $0.value.utf8.elementsEqual(old.value.utf8) }
+            }
+            return ["party":alias, "sources":try party.sources.map { try $0.context(in: interpretation) },
+                "current_native_requirement":current.isEmpty ? "unresolved" : sameCounts ? "same_counts" : "changed_counts",
+                "components_at_stage":party.components.map { component in
+                    ["unit":component.unit, "value":component.value, "state":component.state.rawValue,
+                     "recorded_fields":component.recordedFields] as [String: Any]
+                }]
+        }
+        return ["historical":true, "current_field_verification":false, "accepted_answer_count_at_stage":goal.clarifications.count,
+            "required_repair_when_recorded":receipt.requiresRepairAtPublication, "parties":values]
+    }
+    var description: String { "BrowserFormPartyHistory(stage: \(receipt.index))" }
+    var debugDescription: String { description }
+}
+
 /// Shared ownership and historical query authority, independent of whether
 /// the current review requests physical input or read-only retention.
 @MainActor

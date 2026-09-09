@@ -69,7 +69,7 @@ final class ComputerUseBrowserFormPlannerTests: XCTestCase {
         XCTAssertTrue(adultReceipt.isCompleteStage); XCTAssertEqual(adultReceipt.editCount, 1)
         let action = try await owner.planNextAction(using: PartyCoverageActionFixture())
         let actionContext = try object(Data(action.input.contextJSON.utf8))
-        XCTAssertEqual(actionContext["version"] as? Int, 24)
+        XCTAssertEqual(actionContext["version"] as? Int, 25)
         let stage = try XCTUnwrap(actionContext["verified_form_stage"] as? [String: Any])
         XCTAssertEqual(stage["complete_stage"] as? Bool, true)
         let actionCoverage = try XCTUnwrap(stage["party_criteria"] as? [[String: Any]])
@@ -96,6 +96,9 @@ final class ComputerUseBrowserFormPlannerTests: XCTestCase {
         XCTAssertEqual(complete.partyCriteria.count, 2); XCTAssertEqual(complete.stageIDs.count, 2)
         XCTAssertEqual(complete.inputOperationIDs.count, 1); XCTAssertEqual(complete.stateProofsByTarget.count, 1)
         XCTAssertEqual(owner.confirmedFormHistory, [adultReceipt, childReceipt])
+        XCTAssertEqual(owner.formPartyHistory.count, 2)
+        XCTAssertEqual(owner.formPartyHistory[0].parties.first?.components.map(\.state), [.recorded, .missing])
+        XCTAssertEqual(owner.formPartyHistory[1].parties.first?.components.map(\.state), [.recorded, .recorded])
     }
 
     func testPartyRecordsUseBothObservationAndMixedNativeCompletionOrigins() async throws {
@@ -170,6 +173,117 @@ final class ComputerUseBrowserFormPlannerTests: XCTestCase {
         XCTAssertEqual(fixture.server.count("/results?adults=2&children=0"), 1)
         XCTAssertEqual(owner.confirmedFormHistory, [receipt]); XCTAssertEqual(owner.input, goal.input)
         XCTAssertEqual(next.previous?.partyCoverage.first?.allComponentsRecorded, false)
+        let action = try await owner.planNextAction(using: PartyCoverageActionFixture())
+        XCTAssertTrue(action.input.usesFormPartyHistoryContext); XCTAssertTrue(action.input.needsPlanningDecision)
+        XCTAssertTrue(action.input.queryControlIDs.isEmpty); XCTAssertNil(action.input.queryReceipt)
+        let context = try object(Data(action.input.contextJSON.utf8))
+        XCTAssertEqual(context["version"] as? Int, 25); XCTAssertTrue(context["verified_form_stage"] is NSNull)
+        let history = try XCTUnwrap(context["form_history"] as? [[String: Any]])
+        let snapshot = try XCTUnwrap(history.first?["party_criteria_at_stage"] as? [String: Any])
+        XCTAssertEqual(snapshot["historical"] as? Bool, true); XCTAssertEqual(snapshot["current_field_verification"] as? Bool, false)
+        let parties = try XCTUnwrap(snapshot["parties"] as? [[String: Any]])
+        XCTAssertEqual(parties.first?["party"] as? String, "party1")
+        XCTAssertEqual(parties.first?["current_native_requirement"] as? String, "same_counts")
+        XCTAssertEqual((parties.first?["components_at_stage"] as? [[String: Any]])?.compactMap { $0["state"] as? String }, ["recorded", "missing"])
+        let native = try XCTUnwrap(owner.formPartyHistory.first)
+        XCTAssertFalse(action.input.contextJSON.contains(native.continuationDigest))
+        XCTAssertFalse(action.input.contextJSON.contains(native.sessionIdentity))
+        for source in native.parties.map(\.sourceID) { XCTAssertFalse(action.input.contextJSON.contains(source)) }
+        XCTAssertTrue(ComputerUseLocalBrowserActionPlanner.instructions(for: action.input).contains("party_criteria_at_stage"))
+    }
+
+    func testPartyHistorySurvivesIdenticalNewFormWithoutTransferringFieldVerification() async throws {
+        let goal = try proposal(rows: [row("Find concerts. ", role: "outcome", field: "category"), row("2 adults and 1 child.", field: "quantity")])
+        let fixture = try await FormPlannerFixture(goal: goal, body: partyForm(adults: 1, children: 0),
+            additionalRoutes: ["/results?adults=2&children=0":.init(body: partyForm(adults: 2, children: 1))])
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { fixture.close(); try? FileManager.default.removeItem(at: directory) }
+        let owner = fixture.owner(journalDirectory: directory)
+        defer { owner.retire() }
+        _ = try await owner.interpretGoal()
+        let first = try await owner.prepareFormInput()
+        let firstPlan = try ComputerUseBrowserFormProposal.decode(content: plan([["field":"field1", "normalized":"value2-adults"]]), input: first)
+        let firstReceipt = try await owner.executeForm(firstPlan, input: first)
+        let page = try await owner.observeFormResultPage(after: firstReceipt)
+        let control = try XCTUnwrap(page.page.controls.first { $0.kind == "submit" })
+        _ = try await owner.openFormQuery(after: firstReceipt, controlID: control.id, evidence: page)
+        let second = try await owner.prepareFormInput()
+        XCTAssertNil(second.previous); XCTAssertNotEqual(first.evidence.page.document, second.evidence.page.document)
+        XCTAssertEqual(owner.formPartyHistory.count, 1)
+        let context = try object(Data(second.contextJSON.utf8)), parties = try XCTUnwrap(context["party_criteria"] as? [[String: Any]])
+        XCTAssertEqual((parties.first?["components"] as? [[String: Any]])?.compactMap { $0["state"] as? String }, ["missing", "missing"])
+        let secondPlan = try ComputerUseBrowserFormProposal.decode(content: plan([
+            ["field":"field1", "normalized":"value2-adults"], ["field":"field2", "normalized":"value2-children"]]), input: second)
+        let secondReceipt = try await owner.executeForm(secondPlan, input: second)
+        XCTAssertEqual(secondReceipt.editCount, 0); XCTAssertEqual(secondReceipt.verifiedWithoutInputCount, 2)
+        let third = try await owner.prepareFormInput(), continuation = try XCTUnwrap(third.previous)
+        XCTAssertEqual(continuation.stageIDs, [secondReceipt.stageID]); XCTAssertTrue(continuation.inputOperationIDs.isEmpty)
+        XCTAssertEqual(continuation.partyCoverage.first?.allComponentsRecorded, true)
+        XCTAssertEqual(owner.formPartyHistory.map(\.receipt), [firstReceipt, secondReceipt])
+        XCTAssertEqual(owner.formPartyHistory[0].parties.first?.components.map(\.state), [.recorded, .missing])
+        XCTAssertEqual(owner.formPartyHistory[1].parties.first?.components.map(\.state), [.recorded, .recorded])
+        owner.retire()
+        XCTAssertTrue(owner.formPartyHistory.isEmpty)
+    }
+
+    func testPartyHistoryRejectsForeignSessionsMissingReceiptsAndDuplicateSnapshots() async throws {
+        let goal = try proposal(rows: [row("Find concerts. ", role: "outcome", field: "category"), row("2 adults and 1 child.", field: "quantity")])
+        let fixture = try await FormPlannerFixture(goal: goal, body: partyForm(adults: 1, children: 0))
+        let other = try await FormPlannerFixture(goal: goal, body: partyForm(adults: 1, children: 0))
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { fixture.close(); other.close(); try? FileManager.default.removeItem(at: directory) }
+        let owner = fixture.owner(journalDirectory: directory)
+        defer { owner.retire() }
+        _ = try await owner.interpretGoal()
+        let input = try await owner.prepareFormInput()
+        let proposed = try ComputerUseBrowserFormProposal.decode(content: plan([["field":"field1", "normalized":"value2-adults"]]), input: input)
+        let receipt = try await owner.executeForm(proposed, input: input), history = try XCTUnwrap(owner.formPartyHistory.first)
+        XCTAssertThrowsError(try ComputerUseBrowserActionInput(interpretation: goal, evidence: other.input.evidence.page,
+            navigationHistory: [], formHistory: [receipt], latestForm: nil, changedFormTargetIDs: [], formPartyHistory: [history]))
+        for receipts: [ComputerUseBrowserResearchFormReceipt] in [[], [receipt]] {
+            let snapshots = receipts.isEmpty ? [history] : [history, history]
+            XCTAssertThrowsError(try ComputerUseBrowserActionInput(interpretation: goal, evidence: input.evidence.page,
+                navigationHistory: [], formHistory: receipts, latestForm: nil, changedFormTargetIDs: [], formPartyHistory: snapshots))
+        }
+    }
+
+    func testHistoricalPartySnapshotKeepsItsCountsWhenARepartitionedAnswerBecomesUnresolved() async throws {
+        let goal = try proposal(rows: [row("Find concerts. ", role: "outcome", field: "category"), row("2 adults and 1 child.", field: "quantity")])
+        let fixture = try await FormPlannerFixture(goal: goal, body: partyForm(adults: 1, children: 0))
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { fixture.close(); try? FileManager.default.removeItem(at: directory) }
+        let owner = fixture.owner(journalDirectory: directory)
+        defer { owner.retire() }
+        _ = try await owner.interpretGoal()
+        let input = try await owner.prepareFormInput()
+        let proposed = try ComputerUseBrowserFormProposal.decode(content: plan([["field":"field1", "normalized":"value2-adults"]]), input: input)
+        let receipt = try await owner.executeForm(proposed, input: input), snapshot = try XCTUnwrap(owner.formPartyHistory.first)
+        for answer in ["2 adults", "3 adults"] {
+            let state = ComputerUseBrowserGoalClarification(input: goal.input)
+            let scope = try ComputerUseBrowserGoalClarification.Context(controllerID: "fixture-controller", controllerSessionID: "fixture-session",
+                browserSessionDigest: String(repeating: "a", count: 64))
+            let question = try state.issue(proposal: goal, topic: .quantity, requirementIDs: [goal.requirements[1].id], context: scope)
+            let revised = try state.consume(questionID: question.id, answerTaskID: "party-answer", answer: answer, context: scope)
+            var answerRow = row(answer, field: "quantity"); answerRow["turn"] = 1
+            let current = try decodeGoal([row("Find concerts. ", role: "outcome", field: "category")]
+                + ["2", " adults and ", "1", " child."].map { row($0, role: "prohibition", field: "navigationSource") }
+                + [answerRow], input: revised)
+            let action = try ComputerUseBrowserActionInput(interpretation: current, evidence: input.evidence.page,
+                navigationHistory: [], formHistory: [receipt], latestForm: nil, changedFormTargetIDs: [], formPartyHistory: [snapshot])
+            let context = try object(Data(action.contextJSON.utf8)), rows = try XCTUnwrap(context["form_history"] as? [[String: Any]])
+            XCTAssertEqual(rows.first?["current_goal_revision"] as? Bool, false)
+            let recorded = try XCTUnwrap(rows.first?["party_criteria_at_stage"] as? [String: Any])
+            XCTAssertEqual(recorded["accepted_answer_count_at_stage"] as? Int, 0)
+            let parties = try XCTUnwrap(recorded["parties"] as? [[String: Any]])
+            XCTAssertEqual(parties.first?["current_native_requirement"] as? String, answer == "2 adults" ? "same_counts" : "unresolved")
+            let components = try XCTUnwrap(parties.first?["components_at_stage"] as? [[String: Any]])
+            XCTAssertEqual(components.compactMap { $0["value"] as? String }, ["2", "1"])
+            XCTAssertEqual(components.compactMap { $0["state"] as? String }, ["recorded", "missing"])
+            let sources = try XCTUnwrap(parties.first?["sources"] as? [[String: Any]])
+            XCTAssertEqual(sources.first?["requirements"] as? [Int], [1, 2, 3, 4])
+            XCTAssertTrue(context["verified_form_stage"] is NSNull)
+        }
+        XCTAssertEqual(owner.formPartyHistory, [snapshot])
     }
 
     private func partyForm(adults: Int, children: Int) -> String {

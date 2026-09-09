@@ -102,9 +102,9 @@ struct ComputerUseBrowserFormPartyCoverage: Equatable, Sendable {
          "components":components.map { ["unit":$0.unit, "value":$0.value, "state":$0.state.rawValue, "recorded_fields":$0.targetIDs.count] as [String: Any] }]
     }
     /// Context-local references never expose native task or target digests.
-    static func aliases(for coverage: [Self], records: [String: ComputerUseBrowserFormPartyCriterion]) -> [String: String] {
+    static func aliases(for coverage: [Self], records: [String: ComputerUseBrowserFormPartyCriterion], historicalSources: [String] = []) -> [String: String] {
         var aliases: [String: String] = [:]
-        for source in coverage.map(\.partySourceID) + records.keys.sorted().compactMap({ records[$0]?.partySourceID }) {
+        for source in coverage.map(\.partySourceID) + historicalSources + records.keys.sorted().compactMap({ records[$0]?.partySourceID }) {
             if aliases[source] == nil { aliases[source] = "party\(aliases.count + 1)" }
         }
         return aliases

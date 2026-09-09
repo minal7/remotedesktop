@@ -109,6 +109,7 @@ final class ComputerUseBrowserResearchTask {
     private var hasQuestion = false
     private(set) var confirmedNavigationHistory: [ComputerUseBrowserResearchVisit] = []
     private(set) var confirmedFormHistory: [ComputerUseBrowserResearchFormReceipt] = []
+    private(set) var formPartyHistory: [ComputerUseBrowserFormPartyHistory] = []
     private(set) var retiredFormHistory: [ComputerUseBrowserResearchFormStage.Retirement] = []
     private(set) var retiredHistoryNavigations: [ComputerUseBrowserResearchHistoryNavigation.Retirement] = []
     private(set) var popupHistory: [ComputerUseBrowserResearchPopupRecord] = []
@@ -487,7 +488,8 @@ final class ComputerUseBrowserResearchTask {
                     popupControlIDs: popupControls, popupHistory: popupHistory,
                     allowOptionInspection: optionSelectionSequence < 32 && navigationDirectory != nil && optionReads.isEmpty,
                     optionReadControls: optionReads, optionChoices: optionChoices, optionSelectionHistory: optionSelectionHistory,
-                    effectControlReviews: effectReviews, formEffectScope: formScope, preparationReview: preparation?.reviewContext)
+                    effectControlReviews: effectReviews, formEffectScope: formScope, preparationReview: preparation?.reviewContext,
+                    formPartyHistory: formPartyHistory)
                 // Retain the selected form/query through metadata review. Newly
                 // read query criteria still require an explicit model decision.
                 let readyScope = context.effectScopeAllowsActions ? formScope : nil
@@ -1130,11 +1132,15 @@ final class ComputerUseBrowserResearchTask {
         guard !isRetired else { return }
         guard formStage === stage, stage.nativeReceipt == receipt,
               receipt.taskID == taskID, receipt.rootDigest == goal.rootDigest else { throw Failure.goalChanged }
+        let partyHistory = try ComputerUseBrowserFormPartyHistory(receipt: receipt, stage: stage)
         if let previous = confirmedFormHistory.first(where: { $0.stageID == receipt.stageID }) {
-            guard previous == receipt else { throw Failure.goalChanged }
+            guard previous == receipt, formPartyHistory.first(where: { $0.receipt.stageID == receipt.stageID }) == partyHistory else {
+                throw Failure.goalChanged
+            }
         } else {
             guard receipt.goalRevision == goal.digest, receipt.index == confirmedFormHistory.count else { throw Failure.goalChanged }
             confirmedFormHistory.append(receipt)
+            if let partyHistory { formPartyHistory.append(partyHistory) }
         }
         if let resolution = stage.nativePrefixResolution {
             guard resolution.receipt == receipt else { throw Failure.goalChanged }
@@ -1621,7 +1627,7 @@ final class ComputerUseBrowserResearchTask {
         formPreparation = nil
         confirmedNavigationHistory.removeAll()
         formStage?.retire(); formStage = nil; lastVerifiedFormStage?.retire(); lastVerifiedFormStage = nil
-        confirmedFormHistory.removeAll(); retiredFormHistory.removeAll()
+        confirmedFormHistory.removeAll(); formPartyHistory.removeAll(); retiredFormHistory.removeAll()
         formNavigation?.retire(); formNavigation = nil
         historyNavigation?.retire(); historyNavigation = nil
         retiredHistoryNavigations.removeAll()
