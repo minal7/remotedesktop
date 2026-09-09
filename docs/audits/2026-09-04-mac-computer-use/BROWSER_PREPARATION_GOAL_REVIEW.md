@@ -2,6 +2,8 @@
 
 Status: source repair for goal interpretation and follow-up questions. Revised form execution remains incomplete; no runtime or model qualification is claimed.
 
+Follow-up: [revised form-scope review](BROWSER_PREPARATION_SCOPE_REVISION_REVIEW.md) now carries original purposes into a fresh metadata review under current source restrictions. Transferring that review into native preparation remains pending.
+
 ## Failure and repair
 
 The [retained preparation path](BROWSER_LATER_PREPARATION_RECOVERY_REVIEW.md) correctly keeps original private observations and earlier verified criteria when a clarification answer arrives. However, `interpretGoal` and `proposedQuestionRequest` rejected every pending form. The driver tried to resume the old preparation before interpreting the new answer, so the task could neither reconsider the complete request nor ask a necessary follow-up question.

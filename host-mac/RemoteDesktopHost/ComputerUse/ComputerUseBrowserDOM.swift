@@ -1887,8 +1887,27 @@ struct ComputerUseBrowserFormEvidence: Equatable, Sendable, CustomStringConverti
     fileprivate init(page: ComputerUseBrowserPageEvidence, fields: [Field], adapterID: UUID) {
         self.page = page; self.fields = fields; self.adapterID = adapterID
     }
+    /// Keep adapter identity sealed while adopting the original observation
+    /// nonce after a fresh comparison of the complete retained page content.
+    func retainingOriginalPage(_ original: ComputerUseBrowserPageEvidence) throws -> Self {
+        guard page.document == original.document, page.documentID == original.documentID,
+              page.page.matchesFormObservation(original.page) else { throw ComputerUseBrowserError.pageChanged }
+        return .init(page: original, fields: fields, adapterID: adapterID)
+    }
     var description: String { "BrowserFormEvidence(fields: \(fields.count))" }
     var debugDescription: String { description }
+}
+
+extension ComputerUseBrowserPageSnapshot {
+    /// Form input uses retained controls, not viewport coordinates. Every
+    /// content/metadata/state field must match; only nonce and viewport vary.
+    func matchesFormObservation(_ original: Self) -> Bool {
+        Self(id: original.id, texts: texts, links: links, controls: controls,
+            truncated: truncated, omittedEmbeddedContent: omittedEmbeddedContent, omittedControls: omittedControls,
+            viewport: original.viewport, containers: containers, omittedStructure: omittedStructure,
+            controlStates: controlStates, controlStateObserved: controlStateObserved, scopedControlIDs: scopedControlIDs,
+            omittedControlMetadata: omittedControlMetadata) == original
+    }
 }
 
 /// A text adapter sealed to one owned page and one set of retained DOM objects.

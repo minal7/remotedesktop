@@ -159,7 +159,10 @@ final class ComputerUseBrowserResearchTask {
 
     private func configureSourcePolicy(_ policy: ComputerUseBrowserSourcePolicy, sources: ComputerUseBrowserResearchSources?) throws {
         try requireIdle()
-        guard !hasPendingForm else { throw Failure.formPending }
+        try requireFormGoalReview()
+        if formPreparation != nil {
+            guard interpretation?.proposal.input == input, interpretation?.proposal.disposition == .research else { throw Failure.interpretationRequired }
+        }
         guard !hasPendingNavigation, !hasQuestion, policy.taskID == taskID,
               policy.rootDigest == input.rootDigest, policy.goalRevision == input.digest else { throw Failure.goalChanged }
         if let sourcePolicy, sourcePolicy.goalRevision == policy.goalRevision, sourcePolicy != policy { throw Failure.goalChanged }
@@ -369,9 +372,53 @@ final class ComputerUseBrowserResearchTask {
         return action
     }
 
+    /// Reconsider metadata under an accepted answer without rediscovering
+    /// fields or consuming the original preparation. The returned proposal is
+    /// held separately until native preparation can carry the revised scope.
+    func reviewFormPreparation(using planner: any ComputerUseBrowserActionPlanning, budget: Duration = .seconds(30)) async throws -> ComputerUseBrowserActionProposal {
+        try requireIdle(); try requireFormGoalReview()
+        guard !hasPendingNavigation else { throw Failure.navigationPending }
+        guard !hasQuestion else { throw Failure.questionPending }
+        guard let preparation = formPreparation, hasRevisedFormPreparationGoal,
+              let interpretation, interpretation.proposal.input == input,
+              interpretation.proposal.disposition == .research else { throw Failure.interpretationRequired }
+        guard sourcePolicy == nil || (sourcePolicyInstalled && sourcePolicy?.goalRevision == input.digest) else { throw Failure.navigationUnavailable }
+        let captured = input
+        let deadline = ContinuousClock.now.advanced(by: min(.seconds(30), max(.zero, budget)))
+        latestCandidates = nil; latestForm = nil; latestAction = nil
+        return try await operate { [self] in
+            return try await withThrowingTaskGroup(of: ComputerUseBrowserActionProposal.self) { group in
+                group.addTask { @MainActor [self] in
+                    guard ContinuousClock.now < deadline else { throw ComputerUseBrowserActionPlanError.deadlineExceeded }
+                    if let cached = preparation.revisedAction, cached.input.interpretation == interpretation.proposal {
+                        _ = try await preparation.restoreForReview(browser: browser, checkCurrent: { try self.checkCurrent(captured) })
+                        return cached
+                    }
+                    return try await selectAction(using: planner, interpretation: interpretation.proposal, deadline: deadline, preparation: preparation)
+                }
+                group.addTask {
+                    try await Task.sleep(until: deadline, clock: .continuous)
+                    try Task.checkCancellation()
+                    throw ComputerUseBrowserActionPlanError.deadlineExceeded
+                }
+                defer { group.cancelAll() }
+                guard let action = try await group.next() else { throw ComputerUseBrowserActionPlanError.invalidProposal }
+                try checkCurrent(captured)
+                guard formPreparation === preparation, ContinuousClock.now < deadline else { throw ComputerUseBrowserActionPlanError.deadlineExceeded }
+                switch action.step {
+                case .editForm: try preparation.retainRevisedAction(action)
+                case .question, .unavailable: break
+                default: throw ComputerUseBrowserActionPlanError.invalidProposal
+                }
+                return action
+            }
+        }
+    }
+
     private func selectAction(using planner: any ComputerUseBrowserActionPlanning,
                               interpretation: ComputerUseBrowserGoalProposal,
-                              deadline: ContinuousClock.Instant) async throws -> ComputerUseBrowserActionProposal {
+                              deadline: ContinuousClock.Instant,
+                              preparation: ComputerUseBrowserResearchFormPreparation? = nil) async throws -> ComputerUseBrowserActionProposal {
         let captured = interpretation.input
         func check() throws {
             try checkCurrent(captured)
@@ -379,12 +426,17 @@ final class ComputerUseBrowserResearchTask {
             guard ContinuousClock.now < deadline else { throw ComputerUseBrowserActionPlanError.deadlineExceeded }
         }
         try check()
-        var page = try await observeOwnedPage(goal: captured, enforceSources: true)
+        var page: ComputerUseBrowserPageEvidence
+        if let preparation {
+            page = try await preparation.restoreForReview(browser: browser, checkCurrent: check)
+            try browser.validateSourceDocument(page.document)
+        } else { page = try await observeOwnedPage(goal: captured, enforceSources: true) }
         do {
             let archive = try researchEvidence(for: captured)
-            var recalled: [Int] = [], optionReads: [ComputerUseBrowserControlRead] = []
+            var recalled: [Int] = [], optionReads = try preparation?.reviewContext.readings(in: interpretation) ?? []
             var effectReviews: [ComputerUseBrowserEffectControlReview] = []
-            var formScope: ComputerUseBrowserFormEffectScope?
+            var formScope = try preparation.map { try ComputerUseBrowserFormEffectScope(preparationReview: $0.reviewContext,
+                interpretation: interpretation, evidence: page) }
             var selectedFormScopes: Set<String> = []
             while true {
                 var changed: Set<String> = []
@@ -408,7 +460,7 @@ final class ComputerUseBrowserResearchTask {
                     popupControlIDs: popupControls, popupHistory: popupHistory,
                     allowOptionInspection: optionSelectionSequence < 32 && navigationDirectory != nil && optionReads.isEmpty,
                     optionReadControls: optionReads, optionChoices: optionChoices, optionSelectionHistory: optionSelectionHistory,
-                    effectControlReviews: effectReviews, formEffectScope: formScope)
+                    effectControlReviews: effectReviews, formEffectScope: formScope, preparationReview: preparation?.reviewContext)
                 // Retain the selected form/query through metadata review. Newly
                 // read query criteria still require an explicit model decision.
                 let readyScope = context.effectScopeAllowsActions ? formScope : nil

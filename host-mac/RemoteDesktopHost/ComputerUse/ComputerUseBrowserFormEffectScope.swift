@@ -74,6 +74,15 @@ struct ComputerUseBrowserFormEffectScope: Equatable, Sendable, CustomStringConve
         try self.init(kind: kind, preservedControls: preserved, fieldIntents: [], interpretation: input.interpretation, evidence: input.evidence)
     }
 
+    /// A new interpretation must review every field intention again. Only
+    /// original preservation sources seed the new selection automatically.
+    init(preparationReview: ComputerUseBrowserFormPreparationReviewContext,
+         interpretation: ComputerUseBrowserGoalProposal, evidence: ComputerUseBrowserPageEvidence) throws {
+        try preparationReview.validate(interpretation: interpretation, evidence: evidence)
+        try self.init(kind: .form(preparationReview.formID), preservedControls: preparationReview.preservation(in: interpretation),
+            fieldIntents: [], interpretation: interpretation, evidence: evidence)
+    }
+
     private init(kind: Kind, preservedControls: [ComputerUseBrowserControlPreservation], fieldIntents: [FieldIntent],
                  interpretation: ComputerUseBrowserGoalProposal, evidence: ComputerUseBrowserPageEvidence) throws {
         let ids = preservedControls.map(\.controlID) + fieldIntents.map(\.controlID)

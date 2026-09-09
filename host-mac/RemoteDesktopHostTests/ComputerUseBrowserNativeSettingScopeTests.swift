@@ -243,6 +243,55 @@ final class ComputerUseBrowserNativeSettingScopeTests: XCTestCase {
         XCTAssertFalse(before.page.controlStateObserved); XCTAssertFalse(after.page.controlStateObserved)
     }
 
+    func testRevisedPreparationReviewCarriesOriginalReadPurposesAndRequiresTheirControls() async throws {
+        let fixture = try await prepared()
+        defer { fixture.close() }
+        let (input, _) = try await categoryInput(fixture), owner = try fixture.owner()
+        try await beginGoalReview(fixture, input: input)
+        let firstReview = fixture.actions.inputs.count, history = owner.confirmedFormHistory
+        let action = try await owner.reviewFormPreparation(using: fixture.actions)
+        let context = try XCTUnwrap(action.input.preparationReview)
+        XCTAssertEqual(context.readSources.count, 6)
+        XCTAssertTrue(context.readSources.allSatisfy { $0.source.source == "Review displayed search settings. " })
+        XCTAssertEqual(action.input.optionReadControls.map(\.requirementIndex), Array(repeating: 0, count: 6))
+        let initial = try XCTUnwrap(fixture.actions.inputs.dropFirst(firstReview).first)
+        XCTAssertTrue(Set(context.readSources.map(\.controlID)).isSubset(of: Set(initial.effectRequiredControlIDs)))
+        let body: [String: Any] = ["review_controls":initial.effectReviewNextControlIDs.map {
+            ["control":$0,"relationship":"unrelated","requirements":[],"evidence":[$0]] as [String: Any]
+        }]
+        XCTAssertThrowsError(try ComputerUseBrowserActionProposal.decode(content: ResearchAnswerFixture.json(body), input: initial))
+        XCTAssertEqual(owner.confirmedFormHistory, history)
+        XCTAssertTrue(owner.hasPendingFormPreparation)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 1)
+    }
+
+    func testChangedOriginalResearchReadingBlocksGoalRevisionReviewBeforeAProposal() async throws {
+        let fixture = try await prepared(extra: OptionSelectionFixture.signal("document.getElementById('date').value='2026-09-21';"), heldSignal: true)
+        defer { fixture.close() }
+        let (input, _) = try await categoryInput(fixture), owner = try fixture.owner()
+        try await beginGoalReview(fixture, input: input)
+        try await release(fixture)
+        let decisions = fixture.actions.inputs.count, history = owner.confirmedFormHistory
+        do { _ = try await owner.reviewFormPreparation(using: fixture.actions); XCTFail("An answer cannot replace the original observed setting") }
+        catch { }
+        XCTAssertEqual(fixture.actions.inputs.count, decisions)
+        XCTAssertEqual(owner.confirmedFormHistory, history)
+        XCTAssertTrue(owner.hasPendingFormPreparation)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 1)
+    }
+
+    private func beginGoalReview(_ fixture: ResearchDriverFixture, input: ComputerUseBrowserResearchFormInput) async throws {
+        let owner = try fixture.owner()
+        let question = try owner.issueQuestion(topic: .location, requirementIDs: [input.interpretation.requirements[0].id],
+            controllerID: "phone", controllerSessionID: "session")
+        _ = try owner.answerQuestion(questionID: question.id, answerTaskID: "settings-answer", answer: "Seattle.",
+            controllerID: "phone", controllerSessionID: "session")
+        fixture.goal.select = nil
+        let interpretation = try await owner.interpretGoal()
+        try owner.configureResearchSources(XCTUnwrap(try fixture.policy.sources(for: interpretation)))
+        configure(fixture, mode: .reviseCategory)
+    }
+
     private enum Mode { case form, query, reviseCategory }
     private func configure(_ fixture: ResearchDriverFixture, mode: Mode, rejectMixed: Bool = false) {
         fixture.actions.select = { input in

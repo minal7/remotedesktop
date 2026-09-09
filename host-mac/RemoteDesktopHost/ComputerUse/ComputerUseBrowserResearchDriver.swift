@@ -250,9 +250,21 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
             if owner.hasPendingFormPreparation {
                 if owner.hasRevisedFormPreparationGoal {
                     progress("Reviewing your answer…")
-                    _ = try await owner.interpretGoal()
+                    let interpretation = try await owner.interpretGoal()
                     try check()
                     if let question = try owner.proposedQuestionRequest() { return .browserClarificationRequired(question) }
+                    guard interpretation.proposal.disposition == .research else {
+                        return .userInterventionRequired("The complete request still has unresolved work. Review the original task before continuing.")
+                    }
+                    if run.sources?.policy.goalRevision != run.input.digest {
+                        guard let sources = try planning.sources(for: interpretation) else {
+                            return .userInterventionRequired("I need a search source that matches your request. The original task is still pending.")
+                        }
+                        try check(); try owner.configureResearchSources(sources); run.sources = sources
+                    }
+                    let reviewed = try await owner.reviewFormPreparation(using: actionPlanner)
+                    try check()
+                    if let question = reviewed.questionRequest { return .browserClarificationRequired(question) }
                     // Goal interpretation supplies no authority to reuse the
                     // old form review or rebase its captured private values.
                     // Keep that frame until the revised form scope is carried.

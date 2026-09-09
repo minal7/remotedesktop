@@ -417,15 +417,7 @@ final class ComputerUseBrowserResearchFormStage {
             current = try await browser.observeResearchControls(for: review.restoredReadProposal(for: metadata))
         } else { current = metadata }
         try checkCurrent()
-        let page = current.page, before = original.page
-        // Field input does not use viewport coordinates. Ignore only the
-        // observation nonce and viewport; all captured page content stays fixed.
-        let comparable = ComputerUseBrowserPageSnapshot(id: before.id, texts: page.texts, links: page.links, controls: page.controls,
-            truncated: page.truncated, omittedEmbeddedContent: page.omittedEmbeddedContent, omittedControls: page.omittedControls,
-            viewport: before.viewport, containers: page.containers, omittedStructure: page.omittedStructure,
-            controlStates: page.controlStates, controlStateObserved: page.controlStateObserved, scopedControlIDs: page.scopedControlIDs,
-            omittedControlMetadata: page.omittedControlMetadata)
-        guard current.documentID == original.documentID, comparable == before else {
+        guard current.documentID == original.documentID, current.page.matchesFormObservation(original.page) else {
             throw ComputerUseBrowserResearchFormError.inputChanged
         }
         if let review {
