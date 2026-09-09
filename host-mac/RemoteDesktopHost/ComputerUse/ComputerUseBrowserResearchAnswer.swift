@@ -50,6 +50,10 @@ struct ComputerUseBrowserResearchAnswer: Equatable, Sendable, CustomStringConver
                 return nil
             }
             resultCounts = counts
+            let historicalScalars = Set(scalars.entries.compactMap { entry -> String? in
+                if case .bound(let condition) = entry.resolution, condition.hasHistoricalSource { return entry.requirementID }
+                return nil
+            })
             var passages: [Int: String] = [:], controls: [Int: String] = [:]
             for (index, candidate) in reading.candidates.enumerated() {
                 // Retain unread values as unknown. Only a complete, current
@@ -63,23 +67,24 @@ struct ComputerUseBrowserResearchAnswer: Equatable, Sendable, CustomStringConver
                 guard evaluations.count == interpretation.requirements.count else { continue }
                 let covered = interpretation.requirements.enumerated().allSatisfy { offset, requirement in
                     let status = evaluations[offset].status
+                    let retainedScalar = historicalScalars.contains(requirement.id)
                     // A host-bound literal scalar parameter keeps its typed
                     // meaning even if the model labeled it as a source clause.
                     if status == .clarificationApplied { return [.outcome, .condition].contains(requirement.role) }
                     // An answer-source exclusion is checked against the
                     // native document and the exact compiled policy. It is
                     // not an unsupported content prohibition or a page claim.
-                    if requirement.field == .answerSource { return status == .sourceOriginPermitted }
+                    if requirement.field == .answerSource && !retainedScalar { return status == .sourceOriginPermitted }
                     // Execution restrictions remain in the complete model
                     // request and answer ledger. They are not page facts.
-                    if requirement.role == .prohibition {
+                    if requirement.role == .prohibition && !retainedScalar {
                         guard let source = interpretation.source(of: requirement) else { return false }
                         let clause = source.trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: ".!"))).lowercased()
                         return ["do not buy", "do not book", "do not purchase", "do not reserve",
                             "don't buy", "don't book", "don't purchase", "don't reserve"].contains(clause)
                     }
-                    guard [.outcome, .condition].contains(requirement.role) else { return false }
-                    if [.source, .navigationSource].contains(requirement.field) { return false }
+                    guard retainedScalar || [.outcome, .condition].contains(requirement.role) else { return false }
+                    if [.source, .navigationSource].contains(requirement.field) && !retainedScalar { return false }
                     if status == .needsResultSet { return counts.contains { $0.requirementID == requirement.id } }
                     if status == .quotedCapacitySufficient {
                         // A stock number alone cannot reconcile a selected

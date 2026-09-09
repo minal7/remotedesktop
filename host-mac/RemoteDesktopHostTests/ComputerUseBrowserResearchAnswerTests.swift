@@ -4,6 +4,68 @@ import XCTest
 
 @MainActor
 final class ComputerUseBrowserResearchAnswerTests: XCTestCase {
+    func testRetainedBudgetAndResultCountStillGovernAnswerEligibilityAfterRelabeling() async throws {
+        for price in ["USD 40", "USD 60"] {
+            let fixture = try await ResearchAnswerFixture.make(requested: 2, price: price, resultLocation: "Paris")
+            defer { fixture.source.close() }
+            _ = try await fixture.source.start()
+            let owner = try fixture.source.owner(), original = try await owner.interpretGoal()
+            let question = try owner.issueQuestion(topic: .location, requirementIDs: [original.proposal.requirements[0].id],
+                controllerID: "phone", controllerSessionID: "session")
+            let updated = try owner.answerQuestion(questionID: question.id, answerTaskID: "location", answer: "Paris",
+                controllerID: "phone", controllerSessionID: "session")
+            var rows: [[String: Any]] = try original.proposal.requirements.map { requirement in
+                ["turn":requirement.sourceTurnIndex, "source":try XCTUnwrap(original.proposal.source(of: requirement)),
+                 "role":requirement.field == .price ? "prohibition" : requirement.role.rawValue,
+                 "field":requirement.field == .price ? "answerSource" : (requirement.field == .quantity ? "navigationSource" : requirement.field.rawValue),
+                 "relation":"unspecified", "values":[String]()]
+            }
+            rows.append(["turn":1, "source":"Paris", "role":"condition", "field":"location", "relation":"unspecified", "values":[String]()])
+            fixture.source.goal.select = { _ in try ResearchAnswerFixture.json([
+                "disposition":"research", "requirements":rows, "question":["topic":"none", "requirements":[]]]) }
+            let interpreted = try await owner.interpretGoal()
+            XCTAssertTrue(interpreted.sources.unresolved.isEmpty)
+            XCTAssertFalse(interpreted.sources.requiresNavigationHistory)
+            try owner.configureResearchSources(XCTUnwrap(interpreted.sources.selectSources(from: [fixture.source.policy.provider])))
+            let current = try await owner.readCandidates(), assessment = try XCTUnwrap(current.requirementAssessment)
+            let priceIndex = try XCTUnwrap(original.proposal.requirements.firstIndex { $0.field == .price })
+            let countIndex = try XCTUnwrap(original.proposal.requirements.firstIndex { $0.field == .quantity })
+            XCTAssertEqual(assessment.candidates[0].requirements[priceIndex].status, price == "USD 40" ? .quotedValueMatches : .quotedValueConflicts)
+            XCTAssertEqual(assessment.candidates[0].requirements[countIndex].status, .needsResultSet)
+            let page = try XCTUnwrap(current.answerPage(goal: updated))
+            XCTAssertEqual(page.candidateIndices, price == "USD 40" ? [0] : [])
+            let eligibility = try XCTUnwrap(current.answerEligibility(goal: updated))
+            XCTAssertTrue(eligibility.selectionCounts.isEmpty, "One offer cannot satisfy the retained request for two options")
+            XCTAssertThrowsError(try eligibility.selection([0]))
+            XCTAssertEqual(updated.rootDigest, original.proposal.input.rootDigest)
+            XCTAssertEqual(fixture.source.server.count("/search?q=concerts"), 1)
+        }
+    }
+
+    func testMergedHistoricalScalarClausesCannotBecomeAReviewedCategoryOnlyAnswer() async throws {
+        let fixture = try await ResearchAnswerFixture.make(requested: 2, resultLocation: "Paris")
+        defer { fixture.source.close() }
+        _ = try await fixture.source.start()
+        let owner = try fixture.source.owner(), original = try await owner.interpretGoal()
+        let question = try owner.issueQuestion(topic: .location, requirementIDs: [original.proposal.requirements[0].id],
+            controllerID: "phone", controllerSessionID: "session")
+        let updated = try owner.answerQuestion(questionID: question.id, answerTaskID: "location", answer: "Paris",
+            controllerID: "phone", controllerSessionID: "session")
+        let rows: [[String: Any]] = [
+            ["turn":0, "source":updated.prompt, "role":"outcome", "field":"category", "relation":"unspecified", "values":[String]()],
+            ["turn":1, "source":"Paris", "role":"condition", "field":"location", "relation":"unspecified", "values":[String]()]]
+        fixture.source.goal.select = { _ in try ResearchAnswerFixture.json([
+            "disposition":"research", "requirements":rows, "question":["topic":"none", "requirements":[]]]) }
+        let interpreted = try await owner.interpretGoal()
+        try owner.configureResearchSources(XCTUnwrap(interpreted.sources.selectSources(from: [fixture.source.policy.provider])))
+        let current = try await owner.readCandidates(), assessment = try XCTUnwrap(current.requirementAssessment)
+        XCTAssertEqual(current.review?.candidates[0].requirements?[0].judgment, .supports)
+        XCTAssertEqual(assessment.candidates[0].requirements[0].status, .uncompiledRequirement)
+        XCTAssertTrue(try XCTUnwrap(current.answerPage(goal: updated)).candidateIndices.isEmpty)
+        XCTAssertTrue(try XCTUnwrap(current.answerEligibility(goal: updated)).selectionCounts.isEmpty)
+        XCTAssertEqual(fixture.source.server.count("/search?q=concerts"), 1)
+    }
+
     func testNavigationReadingBindsItsCompleteOwnerVisitSnapshotWithoutQualifyingTheRoute() async throws {
         let fixture = try await ResearchAnswerFixture.make(navigationExclusionRole: "condition")
         defer { fixture.source.close() }

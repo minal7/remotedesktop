@@ -670,6 +670,9 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
                    [.ambiguousClarification, .clarificationScope, .contradictoryClarification].contains(reason) {
                     return result(.uncompiledRequirement)
                 }
+                let retainedScalar: Bool
+                if case .bound(let condition)? = conditions[requirement.id] { retainedScalar = condition.hasHistoricalSource }
+                else { retainedScalar = false }
                 if unresolvedSources.contains(requirement.id) { return result(.uncompiledRequirement) }
                 // Page citations and the current source policy cannot prove
                 // earlier automated visits. Retained constraints also apply
@@ -677,7 +680,8 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
                 if sources.hasNavigationHistoryObligation(for: requirement.id) { return result(.navigationHistoryUnverified) }
                 if sources.hasAnswerPolicyObligation(for: requirement.id), reading.documentAnswerSourceStatus != .unconfigured,
                    !reading.matchesAnswerSourceRequirements(sources) { return result(.sourcePolicyMismatch) }
-                if requirement.field == .answerSource {
+                if conditions[requirement.id] == .unresolved(.historicalScalarScope) { return result(.uncompiledRequirement) }
+                if requirement.field == .answerSource && !retainedScalar {
                     guard reading.documentAnswerSourceStatus != .unconfigured else { return result(.sourceUnconfigured) }
                     guard reading.matchesAnswerSourceRequirements(sources) else { return result(.sourcePolicyMismatch) }
                     switch reading.documentAnswerSourceStatus {

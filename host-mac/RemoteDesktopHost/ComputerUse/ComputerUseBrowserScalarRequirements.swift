@@ -9,6 +9,7 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
     enum UnresolvedReason: String, Sendable {
         case unresolvedDisposition, notScalar, unrecognizedSource, invalidValue, contradictoryProposal, ambiguousDate
         case ambiguousClarification, clarificationScope, contradictoryClarification
+        case historicalScalarScope
     }
     enum Resolution: Equatable, Sendable { case bound(Condition), clarification(ClarificationBinding), unresolved(UnresolvedReason) }
     struct ClarificationBinding: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
@@ -157,9 +158,13 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
         let id: String
         let requirementID: String
         let predicate: Predicate
-        fileprivate init(inputDigest: String, requirementID: String, predicate: Predicate) {
+        let historicalRequirementIDs: [String]
+        var hasHistoricalSource: Bool { !historicalRequirementIDs.isEmpty }
+        fileprivate init(inputDigest: String, requirementID: String, predicate: Predicate, historicalRequirementIDs: [String] = []) {
             self.requirementID = requirementID; self.predicate = predicate
-            id = ComputerUseTaskContract.digest(["browser-scalar-condition-v1", inputDigest, requirementID] + predicate.identity)
+            self.historicalRequirementIDs = historicalRequirementIDs
+            id = ComputerUseTaskContract.digest([historicalRequirementIDs.isEmpty ? "browser-scalar-condition-v1" : "browser-historical-scalar-condition-v1",
+                inputDigest, requirementID] + predicate.identity + historicalRequirementIDs)
         }
         /// This is an arithmetic/civil-date comparison, never whole-result or
         /// task completion. Different units, currencies or incomplete prices
@@ -244,30 +249,80 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
             guard proposal.disposition == .research else {
                 return Entry(requirementID: requirement.id, resolution: .unresolved(.unresolvedDisposition))
             }
-            guard requirement.role == .condition, [.date, .quantity, .price].contains(requirement.field),
-                  let original = proposal.source(of: requirement) else {
-                return Entry(requirementID: requirement.id, resolution: .unresolved(.notScalar))
-            }
-            let source = Self.conditionSource(original)
-            let parsed: Result<(Predicate, ComputerUseBrowserGoalProposal.Relation), BindingFailure>
-            switch requirement.field {
-            case .quantity: parsed = Self.quantity(source)
-            case .price: parsed = Self.price(source)
-            case .date: parsed = Self.date(source, input: proposal.input)
-            default: parsed = .failure(.init(reason: .notScalar))
-            }
-            switch parsed {
-            case .success(let (predicate, relation)):
-                guard requirement.relation == .unspecified || requirement.relation == relation else {
-                    return Entry(requirementID: requirement.id, resolution: .unresolved(.contradictoryProposal))
-                }
-                return Entry(requirementID: requirement.id, resolution: .bound(.init(inputDigest: proposal.input.digest,
-                    requirementID: requirement.id, predicate: predicate)))
-            case .failure(let failure): return Entry(requirementID: requirement.id, resolution: .unresolved(failure.reason))
-            }
+            return Self.baseEntry(requirement, input: proposal.input)
         }
         entries = Self.reconcilingClarificationTargets(Self.applyingDateClarifications(proposal,
-            to: Self.applyingPriceClarifications(proposal, to: baseEntries)))
+            to: Self.applyingPriceClarifications(proposal, to: Self.retainingHistoricalScalars(proposal, entries: baseEntries))))
+    }
+
+    private static func baseEntry(_ requirement: ComputerUseBrowserGoalProposal.Requirement, input: ComputerUseBrowserGoalInput) -> Entry {
+        guard requirement.role == .condition, [.date, .quantity, .price].contains(requirement.field),
+              let original = input.source(of: requirement) else {
+            return Entry(requirementID: requirement.id, resolution: .unresolved(.notScalar))
+        }
+        let source = Self.conditionSource(original)
+        let parsed: Result<(Predicate, ComputerUseBrowserGoalProposal.Relation), BindingFailure>
+        switch requirement.field {
+        case .quantity: parsed = Self.quantity(source)
+        case .price: parsed = Self.price(source)
+        case .date: parsed = Self.date(source, input: input)
+        default: parsed = .failure(.init(reason: .notScalar))
+        }
+        switch parsed {
+        case .success(let (predicate, relation)):
+            guard requirement.relation == .unspecified || requirement.relation == relation else {
+                return Entry(requirementID: requirement.id, resolution: .unresolved(.contradictoryProposal))
+            }
+            return Entry(requirementID: requirement.id, resolution: .bound(.init(inputDigest: input.digest,
+                requirementID: requirement.id, predicate: predicate)))
+        case .failure(let failure): return Entry(requirementID: requirement.id, resolution: .unresolved(failure.reason))
+        }
+    }
+
+    /// An answer does not authorize dropping a previously parsed constraint.
+    /// Restore only an exact native clause occurrence. Merged/split meanings
+    /// stay unresolved until their complete obligations can be reconciled.
+    private static func retainingHistoricalScalars(_ proposal: ComputerUseBrowserGoalProposal, entries original: [Entry]) -> [Entry] {
+        guard proposal.disposition == .research else { return original }
+        var entries = original
+        for answer in proposal.input.clarifications {
+            for historical in answer.priorRequirements {
+                guard case .bound(let previous) = Self.baseEntry(historical, input: proposal.input).resolution,
+                      let oldSpan = Self.scalarSpan(historical, input: proposal.input) else { continue }
+                let overlaps = proposal.requirements.indices.filter {
+                    let current = proposal.requirements[$0]
+                    return current.sourceTurnIndex == historical.sourceTurnIndex
+                        && current.sourceByteOffset < oldSpan.end
+                        && oldSpan.start < current.sourceByteOffset + current.sourceByteCount
+                }
+                let exact = overlaps.filter {
+                    Self.scalarSpan(proposal.requirements[$0], input: proposal.input) == oldSpan
+                }
+                guard overlaps.count == 1, let target = exact.first else {
+                    for index in overlaps { entries[index] = .init(requirementID: entries[index].requirementID, resolution: .unresolved(.historicalScalarScope)) }
+                    continue
+                }
+                if entries[target].resolution == .unresolved(.historicalScalarScope) { continue }
+                let ids: [String]
+                if case .bound(let current) = entries[target].resolution {
+                    ids = current.historicalRequirementIDs
+                } else { ids = [] }
+                let retained = ids.contains(historical.id) ? ids : ids + [historical.id]
+                entries[target] = .init(requirementID: entries[target].requirementID,
+                    resolution: .bound(.init(inputDigest: proposal.input.digest, requirementID: entries[target].requirementID,
+                        predicate: previous.predicate, historicalRequirementIDs: retained)))
+            }
+        }
+        return entries
+    }
+
+    private struct ScalarSpan: Equatable { let turn: Int; let start: Int; let end: Int }
+    private static func scalarSpan(_ requirement: ComputerUseBrowserGoalProposal.Requirement, input: ComputerUseBrowserGoalInput) -> ScalarSpan? {
+        guard let source = input.source(of: requirement) else { return nil }
+        let clause = conditionSource(source)
+        guard !clause.isEmpty, let range = source.range(of: clause, options: .literal) else { return nil }
+        let start = requirement.sourceByteOffset + source[..<range.lowerBound].utf8.count
+        return .init(turn: requirement.sourceTurnIndex, start: start, end: start + clause.utf8.count)
     }
 
     /// Resolve only whole, explicit parameter answers from authenticated
@@ -313,7 +368,7 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
                 guard case .bound(let condition) = entries[target].resolution,
                       let predicate = Self.applying(parameter, to: condition.predicate) else { continue }
                 replacements.append((target, .init(inputDigest: proposal.input.digest,
-                    requirementID: condition.requirementID, predicate: predicate)))
+                    requirementID: condition.requirementID, predicate: predicate, historicalRequirementIDs: condition.historicalRequirementIDs)))
             }
             // A multi-clause answer applies atomically: a conflict in one
             // clause cannot silently change the others or overwrite an
@@ -340,7 +395,9 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
         let answerTurns = Set(proposal.input.clarifications.enumerated().compactMap { $0.element.topic == .date ? $0.offset + 1 : nil })
         let dateIndices = proposal.requirements.indices.filter {
             let requirement = proposal.requirements[$0]
-            return requirement.role == .condition && requirement.field == .date && !answerTurns.contains(requirement.sourceTurnIndex)
+            guard !answerTurns.contains(requirement.sourceTurnIndex) else { return false }
+            if case .bound(let condition) = original[$0].resolution, case .day = condition.predicate { return true }
+            return requirement.role == .condition && requirement.field == .date
         }
         var previousTargets: [Int: [Int]] = [:]
         for (index, answer) in proposal.input.clarifications.enumerated() where answer.topic == .date {
@@ -397,8 +454,12 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
             }
             guard compatible else { unresolved(.contradictoryClarification); continue }
             for target in ordered {
+                let historicalIDs: [String]
+                if case .bound(let condition) = entries[target].resolution { historicalIDs = condition.historicalRequirementIDs }
+                else { historicalIDs = [] }
                 entries[target] = .init(requirementID: original[target].requirementID,
-                    resolution: .bound(.init(inputDigest: proposal.input.digest, requirementID: original[target].requirementID, predicate: .day(range))))
+                    resolution: .bound(.init(inputDigest: proposal.input.digest, requirementID: original[target].requirementID,
+                        predicate: .day(range), historicalRequirementIDs: historicalIDs)))
             }
             let binding = ClarificationBinding(input: proposal.input, turn: turn, parameter: .date(range),
                 targets: ordered.map { original[$0].requirementID })

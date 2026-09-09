@@ -7,6 +7,89 @@ final class ComputerUseBrowserGoalClarificationTests: XCTestCase {
     private typealias Clarification = ComputerUseBrowserGoalClarification
     private typealias Scalars = ComputerUseBrowserScalarRequirements
 
+    func testUnrelatedAnswerRetainsNativeBudgetDateAndQuantityDespiteNewFieldRoleAndRelationLabels() throws {
+        let rows = [row("Find tickets. "), row("Under USD 50. ", role: "condition", field: "price"),
+            row("On 2026-10-16. ", role: "condition", field: "date"), row("3 tickets.", role: "condition", field: "quantity")]
+        let original = try input(rows.compactMap { $0["source"] as? String }.joined()), state = Clarification(input: original)
+        let initial = try proposal(original, rows: rows)
+        let question = try state.issue(proposal: initial, topic: .location, requirementIDs: [initial.requirements[0].id], context: context())
+        let updated = try state.consume(questionID: question.id, answerTaskID: "location", answer: "Paris", context: context())
+        var changed = rows
+        for (index, field) in [(1, "answerSource"), (2, "location"), (3, "navigationSource")] {
+            changed[index]["field"] = field; changed[index]["role"] = "prohibition"; changed[index]["relation"] = "above"
+        }
+        changed.append(row("Paris", turn: 1, role: "condition", field: "location"))
+        let current = try proposal(updated, rows: changed, disposition: "research"), ledger = Scalars(proposal: current)
+        let baseline = Scalars(proposal: try proposal(original, rows: rows, disposition: "research"))
+        for index in 1...3 {
+            guard case .bound(let condition) = ledger.entries[index].resolution,
+                  case .bound(let before) = baseline.entries[index].resolution else { return XCTFail("Native literal constraints must remain bound") }
+            XCTAssertEqual(condition.predicate, before.predicate)
+            XCTAssertEqual(condition.historicalRequirementIDs, [initial.requirements[index].id])
+            XCTAssertEqual(condition.requirementID, current.requirements[index].id)
+            XCTAssertTrue(condition.hasHistoricalSource); XCTAssertNotEqual(condition.id, before.id)
+            XCTAssertFalse(String(reflecting: condition).contains(initial.requirements[index].id))
+        }
+        XCTAssertTrue(ComputerUseBrowserSourceRequirements(proposal: current).unresolved.isEmpty)
+        XCTAssertFalse(ComputerUseBrowserSourceRequirements(proposal: current).requiresNavigationHistory)
+        XCTAssertEqual(updated.userTurns, [original.prompt, "Paris"])
+    }
+
+    func testHistoricalNativeScalarsCannotDisappearInsideMergedOrSplitSourceCoverage() throws {
+        let rows = [row("Find tickets. "), row("Under USD 50. ", role: "condition", field: "price"), row("2 options.", role: "condition", field: "quantity")]
+        let original = try input(rows.compactMap { $0["source"] as? String }.joined()), state = Clarification(input: original)
+        let initial = try proposal(original, rows: rows)
+        let question = try state.issue(proposal: initial, topic: .location, requirementIDs: [initial.requirements[0].id], context: context())
+        let updated = try state.consume(questionID: question.id, answerTaskID: "location", answer: "Paris", context: context())
+        let answer = row("Paris", turn: 1, role: "condition", field: "location")
+        let merged = Scalars(proposal: try proposal(updated, rows: [row(original.prompt), answer], disposition: "research"))
+        XCTAssertEqual(merged.entries[0].resolution, .unresolved(.historicalScalarScope))
+        let splitRows = [rows[0], row("Under "), row("USD 50. ", role: "condition", field: "price"), rows[2], answer]
+        let split = Scalars(proposal: try proposal(updated, rows: splitRows, disposition: "research"))
+        XCTAssertEqual(split.entries[1].resolution, .unresolved(.historicalScalarScope))
+        XCTAssertEqual(split.entries[2].resolution, .unresolved(.historicalScalarScope))
+        guard case .bound(let count) = split.entries[3].resolution else { return XCTFail("The separately preserved count must remain bound") }
+        XCTAssertTrue(count.hasHistoricalSource)
+        let shiftedRows = [row("Find tickets. "), row("Under USD 50", field: "other"), row(". "), rows[2], answer]
+        let shifted = Scalars(proposal: try proposal(updated, rows: shiftedRows, disposition: "research"))
+        guard case .bound(let price) = shifted.entries[1].resolution else { return XCTFail("Moving only boundary punctuation does not change the price clause") }
+        XCTAssertTrue(price.hasHistoricalSource)
+    }
+
+    func testPriceParametersStillApplyAfterTheirOriginalClauseIsRestoredFromQuestionHistory() throws {
+        let rows = [row("Find tickets. "), row("Under $50.", role: "condition", field: "price")]
+        let original = try input("Find tickets. Under $50."), state = Clarification(input: original)
+        let initial = try proposal(original, rows: rows)
+        let question = try state.issue(proposal: initial, topic: .currency, requirementIDs: [initial.requirements[1].id], context: context())
+        let updated = try state.consume(questionID: question.id, answerTaskID: "currency", answer: "USD", context: context())
+        let currentRows = [rows[0], row("Under $50.", role: "condition", field: "source"), row("USD", turn: 1, role: "condition", field: "source")]
+        let current = try proposal(updated, rows: currentRows, disposition: "research"), ledger = Scalars(proposal: current)
+        guard case .bound(let price) = ledger.entries[1].resolution,
+              case .clarification(let answer) = ledger.entries[2].resolution,
+              case .price(.below, let amount, .unspecified, .unspecified) = price.predicate else { return XCTFail("Restore the clause before applying its currency answer") }
+        XCTAssertEqual(amount.currency, .usd); XCTAssertEqual(amount.hundredths, 5_000)
+        XCTAssertEqual(price.historicalRequirementIDs, [initial.requirements[1].id])
+        XCTAssertEqual(answer.targetRequirementIDs, [current.requirements[1].id])
+        XCTAssertTrue(ComputerUseBrowserSourceRequirements(proposal: current).unresolved.isEmpty)
+    }
+
+    func testAConcreteConstraintIntroducedByAnEarlierAnswerSurvivesALaterUnrelatedAnswer() throws {
+        let original = try input("Find concerts."), state = Clarification(input: original)
+        let initial = try proposal(original, rows: [row(original.prompt)])
+        let countQuestion = try state.issue(proposal: initial, topic: .quantity, requirementIDs: [initial.requirements[0].id], context: context())
+        let withCount = try state.consume(questionID: countQuestion.id, answerTaskID: "count", answer: "3 tickets", context: context())
+        let countRows = [row(original.prompt), row("3 tickets", turn: 1, role: "condition", field: "quantity")]
+        let counted = try proposal(withCount, rows: countRows, disposition: "research")
+        let locationQuestion = try state.issue(proposal: counted, topic: .location, requirementIDs: [counted.requirements[0].id], context: context())
+        let updated = try state.consume(questionID: locationQuestion.id, answerTaskID: "location", answer: "Paris", context: context())
+        let ledger = Scalars(proposal: try proposal(updated, rows: [countRows[0], row("3 tickets", turn: 1, field: "other"),
+            row("Paris", turn: 2, role: "condition", field: "location")], disposition: "research"))
+        guard case .bound(let count) = ledger.entries[1].resolution else { return XCTFail("A later answer must retain the earlier ticket count") }
+        XCTAssertEqual(count.predicate, .quantity(.equal, 3, .tickets))
+        XCTAssertEqual(count.historicalRequirementIDs, [counted.requirements[1].id])
+        XCTAssertEqual(updated.userTurns, [original.prompt, "3 tickets", "Paris"])
+    }
+
     func testDateAnswerBindsOnlyTheSelectedRepeatedWeekdayOccurrence() throws {
         let rows = [row("Find flights departing "), row("Friday", role: "condition", field: "date"),
             row(" and returning "), row("Friday.", role: "condition", field: "date")]

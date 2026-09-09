@@ -40,13 +40,15 @@ struct ComputerUseBrowserSourceRequirements: Sendable {
         goal = proposal.input; interpretationDigest = proposal.digest
         isResearch = proposal.disposition == .research
         var navigation = Scope(), answers = Scope(), unresolved: [Unresolved] = []
-        let parameterAnswers = Set(ComputerUseBrowserScalarRequirements(proposal: proposal).entries.compactMap { entry -> String? in
-            if case .clarification = entry.resolution { return entry.requirementID }; return nil
+        let nativeScalarSources = Set(ComputerUseBrowserScalarRequirements(proposal: proposal).entries.compactMap { entry -> String? in
+            if case .clarification = entry.resolution { return entry.requirementID }
+            if case .bound(let condition) = entry.resolution, condition.hasHistoricalSource { return entry.requirementID }
+            return nil
         })
         for requirement in proposal.requirements {
-            // A whole literal answer to a sealed scalar-parameter question
-            // has host-known meaning even if its model field label is wrong.
-            if parameterAnswers.contains(requirement.id) { continue }
+            // A sealed literal answer or retained native scalar clause has
+            // host-known meaning even if its model field label is wrong.
+            if nativeScalarSources.contains(requirement.id) { continue }
             guard [.source, .navigationSource, .answerSource].contains(requirement.field) else { continue }
             func reject(_ reason: UnresolvedReason) { unresolved.append(.init(requirementID: requirement.id, reason: reason)) }
             guard proposal.disposition == .research else { reject(.unresolvedDisposition); continue }
@@ -75,7 +77,7 @@ struct ComputerUseBrowserSourceRequirements: Sendable {
         for answer in proposal.input.clarifications {
             for requirement in answer.priorRequirements {
                 guard [.navigationSource, .answerSource].contains(requirement.field),
-                      let source = Self.historicalSource(requirement, in: proposal.input) else { continue }
+                      let source = proposal.input.source(of: requirement) else { continue }
                 let includes = (requirement.role == .condition || requirement.role == .outcome)
                     && (requirement.relation == .include || requirement.relation == .equal)
                 let excludes = (requirement.role == .condition || requirement.role == .prohibition)
@@ -88,9 +90,9 @@ struct ComputerUseBrowserSourceRequirements: Sendable {
                         && $0.sourceByteOffset < requirement.sourceByteOffset + requirement.sourceByteCount
                         && requirement.sourceByteOffset < $0.sourceByteOffset + $0.sourceByteCount
                 }.map(\.id)
-                // Host-bound scalar parameters remain parameters even if an
-                // old model assigned their literal answer a website field.
-                guard !currentIDs.isEmpty, !currentIDs.allSatisfy(parameterAnswers.contains) else { continue }
+                // Native scalar literals keep their meaning even if an old
+                // model assigned those same source bytes a website field.
+                guard !currentIDs.isEmpty, !currentIDs.allSatisfy(nativeScalarSources.contains) else { continue }
                 var scope = requirement.field == .navigationSource ? navigation : answers
                 let additionalIDs = currentIDs.filter { !scope.requirementIDs.contains($0) }
                 scope.requirementIDs.append(contentsOf: additionalIDs)
@@ -131,15 +133,6 @@ struct ComputerUseBrowserSourceRequirements: Sendable {
               parts.percentEncodedPath.isEmpty || parts.percentEncodedPath == "/",
               let url = parts.url else { throw ComputerUseBrowserError.sourceNotAllowed }
         return try ComputerUseBrowserSourceOrigin(url)
-    }
-
-    private static func historicalSource(_ requirement: ComputerUseBrowserGoalProposal.Requirement,
-                                         in input: ComputerUseBrowserGoalInput) -> String? {
-        guard input.userTurns.indices.contains(requirement.sourceTurnIndex) else { return nil }
-        let bytes = Array(input.userTurns[requirement.sourceTurnIndex].utf8)
-        let start = requirement.sourceByteOffset, count = requirement.sourceByteCount
-        guard start >= 0, count > 0, start <= bytes.count, count <= bytes.count - start else { return nil }
-        return String(bytes: bytes[start..<(start + count)], encoding: .utf8)
     }
 
     /// Copying a host substring out of an email, longer host or path-restricted
