@@ -895,7 +895,7 @@ final class ComputerUseBrowserResearchTask {
         try requireIdle(); try requireFormGoalReview()
         guard !hasPendingNavigation else { throw Failure.navigationPending }
         guard !hasQuestion else { throw Failure.questionPending }
-        guard let preparation = formPreparation, preparation.preparedInput?.isRetainOnly == true else { return false }
+        guard let preparation = formPreparation, preparation.permitsCriteriaRecovery else { return false }
         let captured = input
         latestCandidates = nil; latestForm = nil; latestAction = nil
         return try await operate { [self] in

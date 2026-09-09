@@ -46,6 +46,8 @@ Allowed checks: six changed Swift files parsed with `swiftc -frontend -parse`; t
 
 ## Remaining repair order
 
+The subsequent [incomplete-retention capture repair](BROWSER_INCOMPLETE_RETENTION_CAPTURE_REVIEW.md) separates private captures from valid planning inputs and covers the earlier retain-only boundary. The list below records this checkpoint’s earlier scope; later physical preparations and clarification transitions remain open.
+
 - Handle value changes before the original private capture/binding has produced a complete input. Preserve its callback captures and duties without treating a partially constructed input as authority. This change deliberately refuses that earlier boundary.
 - Review subsequent changed criteria during an already revised physical preparation, clarification and cancellation. The fresh revision remains held and cannot automatically adopt another value.
 - Continue explicit supersession and changed goals, including conflicts with preserved criteria. Historical source overlap is not semantic equivalence or permission to remove an obligation.
