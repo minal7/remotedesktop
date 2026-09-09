@@ -1355,17 +1355,7 @@ final class ComputerUseBrowserResearchPreservationTests: XCTestCase {
     func testNewlyRecognizedEditablePreservationSurvivesAnotherAnswerWithItsOriginalSource() async throws {
         let fixture = try await make(notes: true, category: true)
         defer { fixture.close() }
-        _ = try await fixture.start(); configure(fixture, category: true)
-        let initialSelection = fixture.actions.select
-        fixture.actions.select = { input in
-            // The initial authored review missed Notes. No input has run;
-            // a later complete review must retain its newly recognized duty.
-            if let review = try FormEffectScopeFixture.response(input, unrelated: ["Notes"], editing: ["Query":[0]],
-                deferring: ["Category":[0]], preserving: ["Reference":1]) { return review }
-            return try initialSelection?(input) ?? #"{"unavailable":true}"#
-        }
-        let owner = try fixture.owner(), action = try await owner.planNextAction(using: fixture.actions)
-        let original = try await owner.prepareFormInput(for: action)
+        let original = try await prepareWithMissedNotes(fixture), owner = try fixture.owner()
         XCTAssertFalse(original.evidence.fields.contains { $0.control.label == "Notes" })
         _ = try await beginPreparationReview(fixture, input: original); configurePreparedRevision(fixture, notes: true)
         let reviewed = try await owner.reviewFormPreparation(using: fixture.actions)
@@ -1480,6 +1470,237 @@ final class ComputerUseBrowserResearchPreservationTests: XCTestCase {
         XCTAssertFalse(owner.hasPendingFormPreparation)
         await expectFailure { _ = try await owner.resumeFormPreparation() }
         XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 0)
+    }
+
+    func testPartialPreservationSurvivesAQuestionAndResegmentedAnswerBeforeAnyPrivateCapture() async throws {
+        let fixture = try await make(notes: true, category: true)
+        defer { fixture.close() }
+        let original = try await prepareWithMissedNotes(fixture), owner = try fixture.owner()
+        _ = try await beginPreparationReview(fixture, input: original)
+        configurePartialNotesReview(fixture) { _ in #"{"question":{"topic":"location","requirements":[0]}}"# }
+        let partial = try await owner.reviewFormPreparation(using: fixture.actions)
+        let notesID = try XCTUnwrap(partial.input.evidence.page.controls.first { $0.label == "Notes" }?.id)
+        let source = try XCTUnwrap(partial.input.preparationReview?.preservedSources.first { $0.controlID == notesID }?.source)
+        XCTAssertEqual(source.source, original.interpretation.input.prompt)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .reviseFormFields }.count, 0)
+        XCTAssertFalse(partial.input.contextJSON.contains("private-notes"))
+        let request = try XCTUnwrap(partial.questionRequest)
+        let question = try owner.issueQuestion(topic: request.topic, requirementIDs: request.requirementIDs,
+            controllerID: "phone", controllerSessionID: "session")
+        _ = try owner.answerQuestion(questionID: question.id, answerTaskID: "second-answer", answer: "Seattle.",
+            controllerID: "phone", controllerSessionID: "session")
+        fixture.goal.select = { _ in try ResearchAnswerFixture.json(["disposition":"research","requirements":[
+            ["turn":0,"source":"Find concerts. ","role":"outcome","field":"category","relation":"unspecified","values":[]],
+            ["turn":0,"source":"Leave Reference and Notes unchanged. ","role":"condition","field":"other","relation":"unspecified","values":[]],
+            ["turn":0,"source":"Do not buy.","role":"prohibition","field":"other","relation":"unspecified","values":[]],
+            ["turn":1,"source":"Tomorrow.","role":"condition","field":"other","relation":"unspecified","values":[]],
+            ["turn":2,"source":"Seattle.","role":"condition","field":"other","relation":"unspecified","values":[]]],
+            "question":["topic":"none","requirements":[]]]) }
+        let interpretation = try await owner.interpretGoal()
+        try owner.configureResearchSources(XCTUnwrap(try fixture.policy.sources(for: interpretation)))
+        configurePreparedRevision(fixture) // No new Notes decision is supplied.
+        let reviewed = try await owner.reviewFormPreparation(using: fixture.actions)
+        XCTAssertEqual(reviewed.input.preparationReview?.preservedSources.first { $0.controlID == notesID }?.source, source)
+        let current = try await owner.applyFormPreparationReview(reviewed)
+        XCTAssertEqual(current.requiredPreservation.first?.source, source)
+        XCTAssertFalse(current.preparationBaseline?.capturedControlIDs.contains(notesID) == true)
+        XCTAssertTrue(current.preparationBaseline?.preservedSources.contains { $0.controlID == notesID && $0.source == source } == true)
+        XCTAssertEqual(current.nativePreservedSources, original.nativePreservedSources)
+        _ = try await owner.executeForm(.decode(content: categoryPlan(current), input: current), input: current)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .formFields }.count, 1)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .reviseFormFields }.count, 1)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 1)
+    }
+
+    func testPartialPreservationIsRetainedBeforeCancellationOfItsPageCheck() async throws {
+        let fixture = try await make(notes: true, category: true)
+        defer { fixture.close() }
+        let original = try await prepareWithMissedNotes(fixture), owner = try fixture.owner()
+        _ = try await beginPreparationReview(fixture, input: original)
+        var offeredPreservation = false
+        configurePartialNotesReview(fixture, onPreserve: { offeredPreservation = true }) { _ in #"{"unavailable":true}"# }
+        fixture.state.onCommand = { command in
+            guard offeredPreservation, command == .validatePageSnapshot else { return }
+            fixture.state.onCommand = nil; owner.pause()
+        }
+        await expectFailure { _ = try await owner.reviewFormPreparation(using: fixture.actions) }
+        XCTAssertTrue(offeredPreservation); XCTAssertTrue(owner.hasPendingFormPreparation)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .reviseFormFields }.count, 0)
+        try await owner.resumeAfterUserControl(); configurePreparedRevision(fixture)
+        let reviewed = try await owner.reviewFormPreparation(using: fixture.actions)
+        let notes = try XCTUnwrap(reviewed.input.evidence.page.controls.first { $0.label == "Notes" }?.id)
+        XCTAssertTrue(reviewed.input.preparationReview?.preservedSources.contains { $0.controlID == notes } == true)
+        let current = try await owner.applyFormPreparationReview(reviewed)
+        XCTAssertEqual(current.requiredPreservation.count, 1)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .formFields }.count, 1)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 0)
+    }
+
+    func testUnavailableOrFailedPlannerCannotDiscardAnAcceptedPartialPreservationDuty() async throws {
+        for failure in [false, true] {
+            let fixture = try await make(notes: true, category: true)
+            defer { fixture.close() }
+            let original = try await prepareWithMissedNotes(fixture), owner = try fixture.owner()
+            _ = try await beginPreparationReview(fixture, input: original)
+            var source: ComputerUseBrowserFormSource?
+            configurePartialNotesReview(fixture) { input in
+                let notes = try XCTUnwrap(input.evidence.page.controls.first { $0.label == "Notes" }?.id)
+                source = input.preparationReview?.preservedSources.first { $0.controlID == notes }?.source
+                if failure { throw ComputerUseBrowserActionPlanError.invalidProposal }
+                return #"{"unavailable":true}"#
+            }
+            if failure { await expectFailure { _ = try await owner.reviewFormPreparation(using: fixture.actions) } }
+            else {
+                let unavailable = try await owner.reviewFormPreparation(using: fixture.actions)
+                XCTAssertEqual(unavailable.step, .unavailable)
+            }
+            let accepted = try XCTUnwrap(source)
+            configurePreparedRevision(fixture)
+            let reviewed = try await owner.reviewFormPreparation(using: fixture.actions)
+            let current = try await owner.applyFormPreparationReview(reviewed)
+            XCTAssertEqual(current.requiredPreservation.first?.source, accepted)
+            XCTAssertEqual(fixture.state.commands.filter { $0 == .reviseFormFields }.count, 1)
+            XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 0)
+        }
+    }
+
+    func testPartialPreservationSurvivesTheSharedReviewDeadline() async throws {
+        let fixture = try await make(notes: true, category: true)
+        defer { fixture.close() }
+        let original = try await prepareWithMissedNotes(fixture), owner = try fixture.owner()
+        _ = try await beginPreparationReview(fixture, input: original)
+        configurePartialNotesReview(fixture) { _ in #"{"unavailable":true}"# }
+        var waitingAfterPreservation = false
+        fixture.actions.beforeReply = {
+            let input = try XCTUnwrap(fixture.actions.inputs.last)
+            if input.preparationReview?.preservedSources.count == 2 {
+                waitingAfterPreservation = true
+                try await Task.sleep(for: .seconds(10))
+            }
+        }
+        await expectFailure { _ = try await owner.reviewFormPreparation(using: fixture.actions, budget: .seconds(3)) }
+        XCTAssertTrue(waitingAfterPreservation)
+        fixture.actions.beforeReply = nil; configurePreparedRevision(fixture)
+        let reviewed = try await owner.reviewFormPreparation(using: fixture.actions)
+        XCTAssertEqual(reviewed.input.preparationReview?.preservedSources.count, 2)
+        let current = try await owner.applyFormPreparationReview(reviewed)
+        XCTAssertEqual(current.requiredPreservation.count, 1)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 0)
+    }
+
+    func testInvalidPreservationProposalCannotAddAPartialDuty() async throws {
+        let fixture = try await make(notes: true, category: true)
+        defer { fixture.close() }
+        let original = try await prepareWithMissedNotes(fixture), owner = try fixture.owner()
+        _ = try await beginPreparationReview(fixture, input: original)
+        configurePartialNotesReview(fixture) { _ in #"{"unavailable":true}"# }
+        let validSelection = fixture.actions.select
+        fixture.actions.select = { input in
+            if let notes = input.evidence.page.controls.first(where: { $0.label == "Notes" }),
+               input.effectAdditionalPreservationControlIDs.contains(notes.id) {
+                return try ResearchAnswerFixture.json(["preserve_controls":[["control":notes.id,"requirement":999]]])
+            }
+            return try validSelection?(input) ?? #"{"unavailable":true}"#
+        }
+        await expectFailure { _ = try await owner.reviewFormPreparation(using: fixture.actions) }
+        let before = fixture.actions.inputs.count
+        configurePreparedRevision(fixture, notes: true)
+        _ = try await owner.reviewFormPreparation(using: fixture.actions)
+        let first = try XCTUnwrap(fixture.actions.inputs.dropFirst(before).first)
+        XCTAssertEqual(first.preparationReview?.preservedSources.count, 1)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .reviseFormFields || $0 == .edit }.count, 0)
+    }
+
+    func testPartialDutyRejectsStaleReviewContextAndCannotClaimAnEarlierGoalObservation() async throws {
+        let fixture = try await make(notes: true, category: true)
+        defer { fixture.close() }
+        let original = try await prepareWithMissedNotes(fixture), owner = try fixture.owner()
+        _ = try await beginPreparationReview(fixture, input: original)
+        var before: ComputerUseBrowserActionInput?
+        configurePartialNotesReview(fixture, onPreserve: { before = fixture.actions.inputs.last }) { _ in #"{"unavailable":true}"# }
+        _ = try await owner.reviewFormPreparation(using: fixture.actions)
+        let input = try XCTUnwrap(before), context = try XCTUnwrap(input.preparationReview)
+        let notes = try XCTUnwrap(input.evidence.page.controls.first { $0.label == "Notes" }?.id)
+        let action = try ComputerUseBrowserActionProposal.decode(content: ResearchAnswerFixture.json([
+            "preserve_controls":[["control":notes,"requirement":0]]]), input: input)
+        let updated = try context.retainingPreservation(from: action)
+        XCTAssertEqual(context.preservedSources.count, 1); XCTAssertEqual(updated.preservedSources.count, 2)
+        XCTAssertThrowsError(try updated.retainingPreservation(from: action))
+        XCTAssertThrowsError(try updated.validate(interpretation: original.interpretation, evidence: original.evidence.page))
+        XCTAssertFalse(String(describing: updated).contains("private-notes"))
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .reviseFormFields || $0 == .edit }.count, 0)
+    }
+
+    func testChangedPageAfterPartialPreservationCannotSupplyANewBaseline() async throws {
+        let fixture = try await make(notes: true, category: true,
+            mutation: "const n=document.querySelector('input[value=private-notes]'); n.replaceWith(n.cloneNode(true));")
+        defer { fixture.close() }
+        let original = try await prepareWithMissedNotes(fixture), owner = try fixture.owner()
+        _ = try await beginPreparationReview(fixture, input: original)
+        configurePartialNotesReview(fixture) { _ in #"{"question":{"topic":"location","requirements":[0]}}"# }
+        let partial = try await owner.reviewFormPreparation(using: fixture.actions)
+        XCTAssertEqual(partial.input.preparationReview?.preservedSources.count, 2)
+        try await release(fixture)
+        configurePreparedRevision(fixture)
+        let decisions = fixture.actions.inputs.count
+        await expectFailure { _ = try await owner.reviewFormPreparation(using: fixture.actions) }
+        XCTAssertEqual(fixture.actions.inputs.count, decisions)
+        XCTAssertTrue(owner.hasPendingFormPreparation)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .formFields }.count, 1)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .reviseFormFields || $0 == .edit }.count, 0)
+    }
+
+    func testFormSelectionPreservationSurvivesAnUnfinishedReviewWithoutGrantingAnEdit() async throws {
+        let fixture = try await make(notes: true, category: true)
+        defer { fixture.close() }
+        let original = try await prepareWithMissedNotes(fixture), owner = try fixture.owner()
+        _ = try await beginPreparationReview(fixture, input: original)
+        fixture.actions.select = { input in
+            let notes = try XCTUnwrap(input.evidence.page.controls.first { $0.label == "Notes" }?.id)
+            if input.preparationReview?.preservedSources.contains(where: { $0.controlID == notes }) == true {
+                return #"{"unavailable":true}"#
+            }
+            return try ResearchAnswerFixture.json(["form":XCTUnwrap(input.formEffectScope?.formID),
+                "preserve":[["control":notes,"requirement":0]]])
+        }
+        let partial = try await owner.reviewFormPreparation(using: fixture.actions)
+        XCTAssertEqual(partial.step, .unavailable)
+        XCTAssertEqual(partial.input.preparationReview?.preservedSources.count, 2)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .reviseFormFields || $0 == .edit }.count, 0)
+        configurePreparedRevision(fixture)
+        let reviewed = try await owner.reviewFormPreparation(using: fixture.actions)
+        let current = try await owner.applyFormPreparationReview(reviewed)
+        XCTAssertEqual(current.requiredPreservation.count, 1)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 0)
+    }
+
+    private func prepareWithMissedNotes(_ fixture: ResearchDriverFixture) async throws -> ComputerUseBrowserResearchFormInput {
+        _ = try await fixture.start(); configure(fixture, category: true)
+        let initialSelection = fixture.actions.select
+        fixture.actions.select = { input in
+            // The initial authored review missed Notes. No input has run;
+            // subsequent review must retain its newly recognized duty.
+            if let review = try FormEffectScopeFixture.response(input, unrelated: ["Notes"], editing: ["Query":[0]],
+                deferring: ["Category":[0]], preserving: ["Reference":1]) { return review }
+            return try initialSelection?(input) ?? #"{"unavailable":true}"#
+        }
+        let owner = try fixture.owner(), action = try await owner.planNextAction(using: fixture.actions)
+        return try await owner.prepareFormInput(for: action)
+    }
+
+    private func configurePartialNotesReview(_ fixture: ResearchDriverFixture, onPreserve: (() -> Void)? = nil,
+                                            after: @escaping (ComputerUseBrowserActionInput) throws -> String) {
+        fixture.actions.select = { input in
+            guard input.preparationReview != nil else { return #"{"unavailable":true}"# }
+            let notes = try XCTUnwrap(input.evidence.page.controls.first { $0.label == "Notes" }?.id)
+            if input.formEffectScope?.preservedControls.contains(where: { $0.controlID == notes }) == true { return try after(input) }
+            if input.effectAdditionalPreservationControlIDs.contains(notes) {
+                onPreserve?()
+                return try ResearchAnswerFixture.json(["preserve_controls":[["control":notes,"requirement":0]]])
+            }
+            return try FormEffectScopeFixture.response(input, editing: ["Category":[0]], deferring: ["Query":[0]],
+                preserving: ["Reference":0,"Notes":0]) ?? #"{"unavailable":true}"#
+        }
     }
 
     private func configurePreparedRevision(_ fixture: ResearchDriverFixture, retainingQuery: Bool = false, notes: Bool = false) {

@@ -2,6 +2,8 @@
 
 Status: source integration into the owner, form planner, contract and driver. Runtime and model behavior remain unqualified; no assertions executed.
 
+Subsequent source work retains accepted preservation decisions from unfinished reviews in the [partial-review preservation checkpoint](BROWSER_PARTIAL_PREPARATION_PRESERVATION_REVIEW.md).
+
 ## First principles and source changes
 
 A clarification changes future work without erasing earlier observations or events. A captured field that is no longer needed for editing must not disappear from verification, become editable merely because it was captured, or acquire an invented user preservation clause. Newly needed fields need their own actual observations. Earlier input receipts must remain historical facts, and a fresh review must justify current edits independently.

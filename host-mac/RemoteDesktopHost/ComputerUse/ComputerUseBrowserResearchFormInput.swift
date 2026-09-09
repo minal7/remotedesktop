@@ -165,7 +165,7 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
                   }) else { throw ComputerUseBrowserResearchFormError.inputChanged }
         }
         var carriedControls = previous?.preservedControls ?? []
-        for item in preparationBaseline?.reviewContext.preservedSources ?? [] {
+        for item in preparationBaseline?.preservedSources ?? [] {
             if let old = carriedControls.first(where: { $0.controlID == item.controlID }) {
                 guard old.source == item.source else { throw ComputerUseBrowserResearchFormError.inputChanged }
             } else { carriedControls.append(item) }

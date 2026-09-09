@@ -470,6 +470,10 @@ final class ComputerUseBrowserResearchTask {
                 else { proposal = try await planner.propose(context) }
                 try check()
                 try proposal.validate(for: context)
+                // Preserve accepted duties even if the next metadata check,
+                // planner call or question interrupts this unfinished review.
+                // Their values and native correspondence remain unproven.
+                try preparation?.retainReviewObligations(from: proposal)
                 // Recall never refreshes or replaces native authority. A
                 // changed page invalidates even a no-effect recall decision.
                 try await browser.validatePageEvidence(page)
