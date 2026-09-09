@@ -2,6 +2,8 @@
 
 Status: source integration through retained research stages, planner context, subsequent stages and explicit query preparation/navigation. Compilation, assertions, real native behavior and model qualification remain pending.
 
+Follow-up: [leading criteria in mixed stages](BROWSER_MIXED_FORM_PREFIX_REVIEW.md) now verifies the initial matching segment before later input, with mixed counts and prefix recovery. Fresh decisions at later field positions remain open.
+
 ## First principles
 
 A requested criterion can already be true before the application acts. Requiring an input receipt for every completed field confuses the requested outcome with an implementation action and creates unnecessary site events. However, treating that observation as an input receipt would hide uncertain history. The task therefore needs two facts: the latest verified criterion and the actual input history. Both must remain tied to original native controls and user source purposes.

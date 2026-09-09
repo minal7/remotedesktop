@@ -237,16 +237,21 @@ struct ComputerUseBrowserFormStatePlan: Equatable, Sendable, CustomStringConvert
     let expectedValues: [String: String]
     let digest: String
 
-    init(input: ComputerUseBrowserResearchFormInput, proposal: ComputerUseBrowserFormProposal) throws {
+    init(input: ComputerUseBrowserResearchFormInput, proposal: ComputerUseBrowserFormProposal, verifyingTargetIDs: Set<String>? = nil) throws {
         try proposal.validate(for: input)
         guard input.scopeReview?.formScope != nil, input.selectedFormID != nil,
               input.previous?.pendingEdits.isEmpty != false, proposal.resumptions.isEmpty,
               let contract = try proposal.textContract(for: input), (1...8).contains(contract.steps.count) else {
             throw ComputerUseBrowserResearchFormError.invalidInput
         }
+        let selected = verifyingTargetIDs ?? Set(contract.steps.map(\.targetID))
+        guard !selected.isEmpty, selected.isSubset(of: Set(contract.steps.map(\.targetID))) else {
+            throw ComputerUseBrowserResearchFormError.invalidInput
+        }
         self.input = input
-        expectedValues = Dictionary(uniqueKeysWithValues: contract.steps.map { ($0.targetID, $0.after) })
-        digest = ComputerUseTaskContract.digest(["browser-form-state-plan-v1", contract.contractDigest])
+        expectedValues = Dictionary(uniqueKeysWithValues: contract.steps.filter { selected.contains($0.targetID) }.map { ($0.targetID, $0.after) })
+        digest = verifyingTargetIDs == nil ? ComputerUseTaskContract.digest(["browser-form-state-plan-v1", contract.contractDigest])
+            : ComputerUseTaskContract.digest(["browser-form-state-plan-v2", contract.contractDigest] + selected.sorted())
     }
 
     func validate(for current: ComputerUseBrowserResearchFormInput) throws {
@@ -260,4 +265,50 @@ struct ComputerUseBrowserFormStatePlan: Equatable, Sendable, CustomStringConvert
     }
     var description: String { "BrowserFormStatePlan(criteria: \(expectedValues.count))" }
     var debugDescription: String { description }
+}
+
+/// Preserve proposed order. Only a leading run of already-matching criteria
+/// can be verified before any input. A later initial match may be reset by an
+/// earlier edit and must not be hoisted into an invariant at this boundary.
+/// The remaining input transaction keeps its existing order and recovery.
+struct ComputerUseBrowserFormExecutionPlan: Sendable {
+    let contract: ComputerUseTextTaskContract
+    let inputEdits: [ComputerUseBrowserFormProposal.Edit]
+    let observedEdits: [ComputerUseBrowserFormProposal.Edit]
+    let statePlan: ComputerUseBrowserFormStatePlan?
+    let verificationOnly: Bool
+    var isMixed: Bool { statePlan != nil && !verificationOnly }
+
+    init(input: ComputerUseBrowserResearchFormInput, proposal: ComputerUseBrowserFormProposal, stageID: String) throws {
+        guard let original = try proposal.textContract(for: input, stageID: stageID) else {
+            throw ComputerUseBrowserResearchFormError.invalidProposal
+        }
+        let eligible = input.scopeReview != nil && input.previous?.pendingEdits.isEmpty != false && proposal.resumptions.isEmpty
+        let count = eligible ? original.steps.prefix { $0.before.utf8.elementsEqual($0.after.utf8) }.count : 0
+        observedEdits = Array(proposal.edits.prefix(count))
+        verificationOnly = count == proposal.edits.count
+        guard count > 0 else {
+            contract = original; inputEdits = proposal.edits; statePlan = nil; return
+        }
+        let targets = Set(original.steps.prefix(count).map(\.targetID))
+        let state = try ComputerUseBrowserFormStatePlan(input: input, proposal: proposal,
+            verifyingTargetIDs: verificationOnly ? nil : targets)
+        statePlan = state
+        if verificationOnly {
+            // Keep the original planned journal identity and its actual-input
+            // recovery path for an older attempted/uncertain task.
+            contract = original; inputEdits = proposal.edits; return
+        }
+        inputEdits = Array(proposal.edits.dropFirst(count))
+        let operations: [ComputerUseTextGoalOperation] = original.steps.dropFirst(count).map { step in
+            if step.isChoiceSelection { return .selectChoice(targetID: step.targetID, choiceID: step.after) }
+            return .enterText(.init(targetID: step.targetID, mode: step.mode, text: step.payload))
+        }
+        // The omitted leading criteria have become completed obligations.
+        // Check them before/after every remaining input, not only at a query.
+        contract = try .init(taskID: original.taskID,
+            prompt: ComputerUseTaskContract.digest(["browser-form-leading-state-input-v1", original.contractDigest, state.digest]),
+            fields: input.evidence.fields.map(\.editable), operations: operations,
+            unchangedTargetIDs: Set(original.unchangedValues.keys).union(targets).sorted())
+    }
 }

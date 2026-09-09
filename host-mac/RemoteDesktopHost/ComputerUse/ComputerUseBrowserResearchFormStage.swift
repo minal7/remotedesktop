@@ -26,28 +26,43 @@ struct ComputerUseBrowserResearchFormContinuation: Equatable, Sendable, CustomSt
     let digest: String
 
     @MainActor fileprivate init(stage: ComputerUseBrowserResearchFormStage, current: ComputerUseTextTaskContinuation,
-                               completedEditCount: Int? = nil) throws {
-        let count = completedEditCount ?? stage.proposal.edits.count
-        guard (1...stage.proposal.edits.count).contains(count), current.inputOperationIDs.count == count,
+                               completedEditCount: Int? = nil, stateProof: ComputerUseBrowserFormStateProof? = nil) throws {
+        let executionEdits = stage.executionPlan.inputEdits, count = completedEditCount ?? executionEdits.count
+        guard (1...executionEdits.count).contains(count), current.inputOperationIDs.count == count,
               current.taskID == stage.input.interpretation.input.taskID,
               current.contractDigest == stage.contract.contractDigest else { throw ComputerUseBrowserResearchFormStage.Failure.invalidStage }
-        try self.init(stage: stage, count: count, finalValues: current.finalValues, inputIDs: current.inputOperationIDs,
-            actualEdits: current.editedTargetIDs, proof: nil, evidenceDigest: current.digest)
+        var verified = Array(executionEdits.prefix(count))
+        if stage.executionPlan.isMixed {
+            guard let stateProof, let plan = stage.executionPlan.statePlan else { throw ComputerUseBrowserResearchFormStage.Failure.notVerified }
+            try Self.validate(stateProof, plan: plan, stage: stage)
+            verified = stage.executionPlan.observedEdits + verified
+        } else if stateProof != nil { throw ComputerUseBrowserResearchFormStage.Failure.invalidStage }
+        try self.init(stage: stage, verifiedEdits: verified, pending: Array(executionEdits.dropFirst(count)),
+            finalValues: current.finalValues, inputIDs: current.inputOperationIDs,
+            actualEdits: current.editedTargetIDs, proof: stateProof,
+            evidenceDigest: stateProof.map { ComputerUseTaskContract.digest(["browser-form-mixed-evidence-v1", current.digest, $0.digest]) } ?? current.digest)
     }
 
-    @MainActor fileprivate init(stage: ComputerUseBrowserResearchFormStage, proof: ComputerUseBrowserFormStateProof,
-                               plan: ComputerUseBrowserFormStatePlan) throws {
+    @MainActor private static func validate(_ proof: ComputerUseBrowserFormStateProof, plan: ComputerUseBrowserFormStatePlan,
+                                            stage: ComputerUseBrowserResearchFormStage) throws {
         try plan.validate(for: stage.input)
         guard proof.planDigest == plan.digest, proof.verifiedValues == plan.expectedValues,
               proof.goalRevision == stage.input.interpretation.input.digest,
               proof.document == stage.input.evidence.page.document, proof.documentID == stage.input.evidence.page.documentID else {
             throw ComputerUseBrowserResearchFormStage.Failure.invalidStage
         }
-        try self.init(stage: stage, count: stage.proposal.edits.count, finalValues: stage.contract.finalValues,
+    }
+
+    @MainActor fileprivate init(stage: ComputerUseBrowserResearchFormStage, proof: ComputerUseBrowserFormStateProof,
+                               plan: ComputerUseBrowserFormStatePlan) throws {
+        guard stage.executionPlan.verificationOnly else { throw ComputerUseBrowserResearchFormStage.Failure.invalidStage }
+        try Self.validate(proof, plan: plan, stage: stage)
+        try self.init(stage: stage, verifiedEdits: stage.proposal.edits, pending: [], finalValues: stage.contract.finalValues,
             inputIDs: [], actualEdits: [], proof: proof, evidenceDigest: proof.digest)
     }
 
-    @MainActor private init(stage: ComputerUseBrowserResearchFormStage, count: Int, finalValues currentValues: [String: String],
+    @MainActor private init(stage: ComputerUseBrowserResearchFormStage, verifiedEdits: [ComputerUseBrowserFormProposal.Edit],
+                            pending: [ComputerUseBrowserFormProposal.Edit], finalValues currentValues: [String: String],
                             inputIDs: [String], actualEdits: Set<String>, proof: ComputerUseBrowserFormStateProof?, evidenceDigest: String) throws {
         let input = stage.input, previous = input.previous
         guard previous == nil || (previous.map { input.interpretation.input.continues($0.goal) } == true
@@ -66,7 +81,7 @@ struct ComputerUseBrowserResearchFormContinuation: Equatable, Sendable, CustomSt
         // suffix work keeps its earlier values and exact source purposes.
         finalValues = (previous?.finalValues ?? [:]).merging(currentValues) { _, current in current }
         editedTargetIDs = (previous?.editedTargetIDs ?? []).union(actualEdits)
-        let verified = Set(try stage.proposal.edits.prefix(count).map { try input.field(for: $0.field).editable.snapshot.targetID })
+        let verified = Set(try verifiedEdits.map { try input.field(for: $0.field).editable.snapshot.targetID })
         verifiedTargetIDs = (previous?.verifiedTargetIDs ?? []).union(verified)
         guard !verifiedTargetIDs.isEmpty, verifiedTargetIDs.isSubset(of: Set(finalValues.keys)),
               editedTargetIDs.isSubset(of: verifiedTargetIDs),
@@ -80,7 +95,7 @@ struct ComputerUseBrowserResearchFormContinuation: Equatable, Sendable, CustomSt
         preservedTargetIDs = Set(try stage.proposal.preserved.map { try input.field(for: $0.field).editable.snapshot.targetID })
         var editedSources = previous?.editedSources ?? [:], sources = previous?.verifiedSources ?? [:]
         var proofs = previous?.stateProofsByTarget ?? [:]
-        for edit in stage.proposal.edits.prefix(count) {
+        for edit in verifiedEdits {
             let targetID = try input.field(for: edit.field).editable.snapshot.targetID
             sources[targetID] = try stage.proposal.sources(for: edit)
             if actualEdits.contains(targetID) { editedSources[targetID] = sources[targetID]; proofs.removeValue(forKey: targetID) }
@@ -88,10 +103,10 @@ struct ComputerUseBrowserResearchFormContinuation: Equatable, Sendable, CustomSt
             else { throw ComputerUseBrowserResearchFormStage.Failure.invalidStage }
         }
         self.editedSources = editedSources; verifiedSources = sources; stateProofsByTarget = proofs
-        pendingEdits = try stage.proposal.edits.dropFirst(count).map { try stage.proposal.pendingEdit(for: $0) }
-        digest = ComputerUseTaskContract.digest(["browser-research-form-continuation-v6", taskID, rootDigest, goalRevision,
+        pendingEdits = try pending.map { try stage.proposal.pendingEdit(for: $0) }
+        digest = ComputerUseTaskContract.digest([stage.executionPlan.isMixed ? "browser-research-form-continuation-v7" : "browser-research-form-continuation-v6", taskID, rootDigest, goalRevision,
             document.contextID, String(document.generation), documentID, formID ?? "", previous?.digest ?? "", evidenceDigest]
-            + [stage.contract.contractDigest, String(count)] + stageIDs + inputOperationIDs
+            + [stage.contract.contractDigest, String(verifiedEdits.count)] + stageIDs + inputOperationIDs
             + proofs.keys.sorted().flatMap { [$0,proofs[$0]!.digest] })
     }
 
@@ -112,13 +127,13 @@ struct ComputerUseBrowserResearchFormReceipt: Equatable, Sendable, CustomStringC
     let plannedEditCount: Int
     let verifiedWithoutInputCount: Int
     var isCompleteStage: Bool { editCount + verifiedWithoutInputCount == plannedEditCount }
-    @MainActor fileprivate init(stage: ComputerUseBrowserResearchFormStage, completedEditCount: Int? = nil, verifiedWithoutInput: Bool = false) {
+    @MainActor fileprivate init(stage: ComputerUseBrowserResearchFormStage, completedEditCount: Int? = nil, verifiedWithoutInputCount: Int = 0) {
         taskID = stage.input.interpretation.input.taskID; rootDigest = stage.input.interpretation.input.rootDigest
         goalRevision = stage.input.interpretation.input.digest
         stageID = stage.id; index = stage.index; contractDigest = stage.contract.contractDigest
-        plannedEditCount = stage.contract.steps.count
-        editCount = verifiedWithoutInput ? 0 : (completedEditCount ?? plannedEditCount)
-        verifiedWithoutInputCount = verifiedWithoutInput ? plannedEditCount : 0
+        plannedEditCount = stage.proposal.edits.count
+        editCount = completedEditCount ?? stage.contract.steps.count
+        self.verifiedWithoutInputCount = verifiedWithoutInputCount
     }
     var description: String { "BrowserResearchFormReceipt(edits: \(editCount), verifiedWithoutInput: \(verifiedWithoutInputCount))" }
     var debugDescription: String { description }
@@ -165,7 +180,8 @@ final class ComputerUseBrowserResearchFormStage {
     private var retirementPending = false
     private var retirement: Retirement?
     private var observedNativeAttempt = false
-    private let statePlan: ComputerUseBrowserFormStatePlan?
+    fileprivate let executionPlan: ComputerUseBrowserFormExecutionPlan
+    private var statePlan: ComputerUseBrowserFormStatePlan? { executionPlan.statePlan }
     private var stateCapture: ComputerUseBrowserDOMReadCapture?
     private var stateProof: ComputerUseBrowserFormStateProof?
     private(set) var nativePrefixResolution: PrefixResolution?
@@ -180,15 +196,12 @@ final class ComputerUseBrowserResearchFormStage {
         self.input = input; self.proposal = proposal; self.target = target; self.browser = browser; self.index = index
         id = ComputerUseTaskContract.digest(["browser-research-form-stage-v2", input.interpretation.input.taskID,
             input.interpretation.input.rootDigest, String(index), String(sequence ?? index)])
-        guard let contract = try proposal.textContract(for: input, stageID: id) else { throw Failure.invalidStage }
-        if input.scopeReview != nil, input.previous?.pendingEdits.isEmpty != false {
-            let candidate = try ComputerUseBrowserFormStatePlan(input: input, proposal: proposal)
-            statePlan = candidate.capturedValuesMatch ? candidate : nil
-        } else { statePlan = nil }
-        guard (input.previous?.inputOperationIDs.count ?? 0) + (statePlan == nil ? contract.steps.count : 0) <= 64 else {
+        let plan = try ComputerUseBrowserFormExecutionPlan(input: input, proposal: proposal, stageID: id)
+        executionPlan = plan
+        guard (input.previous?.inputOperationIDs.count ?? 0) + (plan.verificationOnly ? 0 : plan.contract.steps.count) <= 64 else {
             throw ComputerUseBrowserResearchFormError.stageLimit
         }
-        self.contract = contract
+        contract = plan.contract
         directory = journalDirectory.appendingPathComponent("Research Forms", isDirectory: true).appendingPathComponent(id, isDirectory: true)
         self.makeStore = makeStore
     }
@@ -263,11 +276,18 @@ final class ComputerUseBrowserResearchFormStage {
                 try check(); try lease.assertOwnership()
                 guard let persisted else { throw ComputerUseTextTaskError.journalMismatch }
                 try store.confirmRecoveredProgress(persisted)
-                continuation = try .init(stage: self, proof: stateProof, plan: statePlan)
-                let receipt = ComputerUseBrowserResearchFormReceipt(stage: self, verifiedWithoutInput: true)
-                completed = receipt
-                return receipt
+                if executionPlan.verificationOnly {
+                    continuation = try .init(stage: self, proof: stateProof, plan: statePlan)
+                    let receipt = ComputerUseBrowserResearchFormReceipt(stage: self, completedEditCount: 0,
+                        verifiedWithoutInputCount: proposal.edits.count)
+                    completed = receipt
+                    return receipt
+                }
             }
+            // A mixed contract omitted real operations only after observing
+            // its leading criteria. Recovery cannot recreate that evidence
+            // from current values after an input may already have occurred.
+            guard !executionPlan.isMixed || stateProof != nil else { throw Failure.notVerified }
             // An attempted/uncertain journal always uses input reconciliation,
             // even if the original desired values were already present.
             guard (input.previous?.inputOperationIDs.count ?? 0) + contract.steps.count <= 64 else {
@@ -287,9 +307,21 @@ final class ComputerUseBrowserResearchFormStage {
                 try await target.validateFormPreservation(binding)
                 try check(); try lease.assertOwnership()
             }
-            continuation = try .init(stage: self, current: task.verifiedContinuation())
-            let receipt = ComputerUseBrowserResearchFormReceipt(stage: self)
-            completed = receipt
+            let retained = try ComputerUseBrowserResearchFormContinuation(stage: self, current: task.verifiedContinuation(),
+                stateProof: executionPlan.isMixed ? stateProof : nil)
+            if executionPlan.isMixed {
+                // Validate historical observation origins against the now
+                // extended real-input ledger and the current final values.
+                let page = try await browser.observePage(document: input.evidence.page.document)
+                try check(); try lease.assertOwnership()
+                let changed = try await target.inspectChangedCriteria(page: page, after: retained)
+                try check(); try lease.assertOwnership()
+                guard changed.isEmpty, let persisted else { throw ComputerUseBrowserResearchFormError.inputChanged }
+                try store.confirmRecoveredProgress(persisted)
+            }
+            let receipt = ComputerUseBrowserResearchFormReceipt(stage: self,
+                verifiedWithoutInputCount: executionPlan.isMixed ? executionPlan.observedEdits.count : 0)
+            continuation = retained; completed = receipt
             return receipt
         } catch {
             await browser.joinDOMCompletion(document: input.evidence.page.document)
@@ -380,7 +412,8 @@ final class ComputerUseBrowserResearchFormStage {
                 || (persisted.retirementDigest == digest && persisted.retainedPrefixCount == count) else {
             throw ComputerUseTextTaskError.journalMismatch
         }
-        let retained = try ComputerUseBrowserResearchFormContinuation(stage: self, current: prefix, completedEditCount: count)
+        let retained = try ComputerUseBrowserResearchFormContinuation(stage: self, current: prefix, completedEditCount: count,
+            stateProof: executionPlan.isMixed ? stateProof : nil)
         let retired = ComputerUseTaskJournal(taskID: persisted.taskID, promptDigest: persisted.promptDigest,
             contractDigest: persisted.contractDigest, stepIDs: persisted.stepIDs, statuses: persisted.statuses,
             retirementDigest: digest, retainedPrefixCount: count)
@@ -399,7 +432,8 @@ final class ComputerUseBrowserResearchFormStage {
             }
             try check()
             try store.retireRemainingInput(retired, replacing: persisted)
-            let receipt = ComputerUseBrowserResearchFormReceipt(stage: self, completedEditCount: count)
+            let receipt = ComputerUseBrowserResearchFormReceipt(stage: self, completedEditCount: count,
+                verifiedWithoutInputCount: executionPlan.isMixed ? executionPlan.observedEdits.count : 0)
             let resolution = PrefixResolution(retirement: .init(stage: self, digest: digest), receipt: receipt)
             continuation = retained; completed = receipt; nativePrefixResolution = resolution
             // Persisted native facts survive a late Pause. A later return can
