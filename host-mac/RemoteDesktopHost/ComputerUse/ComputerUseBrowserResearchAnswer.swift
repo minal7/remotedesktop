@@ -63,7 +63,7 @@ struct ComputerUseBrowserResearchAnswer: Equatable, Sendable, CustomStringConver
                 guard evaluations.count == interpretation.requirements.count else { continue }
                 let covered = interpretation.requirements.enumerated().allSatisfy { offset, requirement in
                     let status = evaluations[offset].status
-                    // A host-bound literal price parameter keeps its typed
+                    // A host-bound literal scalar parameter keeps its typed
                     // meaning even if the model labeled it as a source clause.
                     if status == .clarificationApplied { return [.outcome, .condition].contains(requirement.role) }
                     // An answer-source exclusion is checked against the

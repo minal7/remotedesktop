@@ -254,8 +254,13 @@ final class ComputerUseBrowserResearchTask {
         guard interpretation.proposal.disposition == .research else { return nil }
         let unresolved = Set(interpretation.sources.unresolved.map(\.requirementID))
         let scope = interpretation.proposal.requirements.filter { unresolved.contains($0.id) && ComputerUseBrowserClarificationTopic.source.accepts($0) }
-        guard !scope.isEmpty else { return nil }
-        return .init(taskID: taskID, inputDigest: input.digest, topic: .source, requirementIDs: Array(scope.prefix(8)).map(\.id))
+        if !scope.isEmpty {
+            return .init(taskID: taskID, inputDigest: input.digest, topic: .source, requirementIDs: Array(scope.prefix(8)).map(\.id))
+        }
+        if let dateID = interpretation.scalars.dateQuestionRequirementID {
+            return .init(taskID: taskID, inputDigest: input.digest, topic: .date, requirementIDs: [dateID])
+        }
+        return nil
     }
 
     /// Interpreting the complete retained conversation is not a form effect.

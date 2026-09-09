@@ -13,11 +13,12 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
     enum Resolution: Equatable, Sendable { case bound(Condition), clarification(ClarificationBinding), unresolved(UnresolvedReason) }
     struct ClarificationBinding: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
         enum Parameter: Equatable, Sendable {
-            case currency(Currency), priceBasis(PriceBasis), fees(Fees)
+            case currency(Currency), priceBasis(PriceBasis), fees(Fees), date(DayRange)
             fileprivate var identity: [String] {
                 switch self { case .currency(let value): return ["currency", value.rawValue]
                 case .priceBasis(let value): return ["priceBasis", value.rawValue]
-                case .fees(let value): return ["fees", value.rawValue] }
+                case .fees(let value): return ["fees", value.rawValue]
+                case .date(let value): return Predicate.day(value).identity }
             }
         }
         let id: String
@@ -26,10 +27,10 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
         let targetRequirementIDs: [String]
         fileprivate init(input: ComputerUseBrowserGoalInput, turn: Int, parameter: Parameter, targets: [String]) {
             answerTurn = turn; self.parameter = parameter; targetRequirementIDs = targets
-            id = ComputerUseTaskContract.digest(["browser-price-clarification-v1", input.digest,
+            id = ComputerUseTaskContract.digest(["browser-scalar-clarification-v2", input.digest,
                 input.clarifications[turn - 1].digest, String(turn)] + parameter.identity + targets)
         }
-        var description: String { "BrowserPriceClarification(turn: \(answerTurn), targets: \(targetRequirementIDs.count))" }
+        var description: String { "BrowserScalarClarification(turn: \(answerTurn), targets: \(targetRequirementIDs.count))" }
         var debugDescription: String { description }
     }
     struct Entry: Equatable, Sendable {
@@ -222,6 +223,18 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
     var unresolvedRequirementIDs: [String] {
         entries.compactMap { if case .unresolved = $0.resolution { return $0.requirementID }; return nil }
     }
+    /// Ask about one resolvable weekday occurrence at a time. Separate trip
+    /// legs must not be grouped into an ambiguous native fallback question.
+    var dateQuestionRequirementID: String? {
+        for (requirement, entry) in zip(proposal.requirements, entries) {
+            guard entry.resolution == .unresolved(.ambiguousDate),
+                  [.unspecified, .equal].contains(requirement.relation),
+                  let source = proposal.source(of: requirement),
+                  Self.unqualifiedWeekday(Self.conditionSource(source)) != nil else { continue }
+            return requirement.id
+        }
+        return nil
+    }
     var description: String { "BrowserScalarRequirements(entries: \(entries.count), unresolved: \(unresolvedRequirementIDs.count))" }
     var debugDescription: String { description }
 
@@ -253,7 +266,8 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
             case .failure(let failure): return Entry(requirementID: requirement.id, resolution: .unresolved(failure.reason))
             }
         }
-        entries = Self.applyingPriceClarifications(proposal, to: baseEntries)
+        entries = Self.reconcilingClarificationTargets(Self.applyingDateClarifications(proposal,
+            to: Self.applyingPriceClarifications(proposal, to: baseEntries)))
     }
 
     /// Resolve only whole, explicit parameter answers from authenticated
@@ -313,6 +327,108 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
             for row in answerIndices { entries[row] = .init(requirementID: original[row].requirementID, resolution: .clarification(binding)) }
             previousTargets[turn] = ordered
         }
+        return entries
+    }
+
+    /// A date answer can resolve a selected weekday occurrence or confirm an
+    /// already concrete date/range. It cannot replace a different concrete
+    /// value, choose between several dates in one broad scope, or discard a
+    /// relative-week modifier whose meaning has not been compiled.
+    private static func applyingDateClarifications(_ proposal: ComputerUseBrowserGoalProposal, to original: [Entry]) -> [Entry] {
+        guard proposal.disposition == .research else { return original }
+        var entries = original
+        let answerTurns = Set(proposal.input.clarifications.enumerated().compactMap { $0.element.topic == .date ? $0.offset + 1 : nil })
+        let dateIndices = proposal.requirements.indices.filter {
+            let requirement = proposal.requirements[$0]
+            return requirement.role == .condition && requirement.field == .date && !answerTurns.contains(requirement.sourceTurnIndex)
+        }
+        var previousTargets: [Int: [Int]] = [:]
+        for (index, answer) in proposal.input.clarifications.enumerated() where answer.topic == .date {
+            let turn = index + 1
+            let answerIndices = proposal.requirements.indices.filter { proposal.requirements[$0].sourceTurnIndex == turn }
+            var targets: Set<Int> = [], possibleTargets: Set<Int> = [], invalidScope = false
+            var onlyMissingDetailScopes = true, hasMissingDetailScope = false
+            for scope in answer.scope {
+                guard scope.turn < turn else { invalidScope = true; continue }
+                let matching = dateIndices.filter { Self.contains(scope, requirement: proposal.requirements[$0], proposal: proposal) }
+                possibleTargets.formUnion(matching)
+                if matching.count == 1 { targets.insert(matching[0]); onlyMissingDetailScopes = false }
+                else if matching.isEmpty, scope.turn > 0, let previous = previousTargets[scope.turn],
+                        let expected = Self.answeredDate(proposal.input.userTurns[scope.turn], input: proposal.input),
+                        Self.answeredDate(scope.source, input: proposal.input) == expected {
+                    targets.formUnion(previous); possibleTargets.formUnion(previous); onlyMissingDetailScopes = false
+                } else if matching.isEmpty,
+                          answer.priorRequirements.first(where: { $0.id == scope.requirementID })?.role == .outcome {
+                    // A genuinely missing date remains a new answer condition,
+                    // subject to the existing complete-goal semantic review.
+                    // It is not a replacement for a prior date clause.
+                    hasMissingDetailScope = true
+                } else { invalidScope = true }
+            }
+            func unresolved(_ reason: UnresolvedReason) {
+                for row in possibleTargets.union(targets).union(answerIndices) {
+                    entries[row] = .init(requirementID: original[row].requirementID, resolution: .unresolved(reason))
+                }
+            }
+            guard !invalidScope, !(hasMissingDetailScope && !targets.isEmpty) else { unresolved(.clarificationScope); continue }
+            guard let range = Self.answeredDate(answer.answer, input: proposal.input) else { unresolved(.ambiguousClarification); continue }
+            if targets.isEmpty && onlyMissingDetailScopes { continue }
+            guard !targets.isEmpty else { unresolved(.clarificationScope); continue }
+            let ordered = targets.sorted()
+            let compatible = ordered.allSatisfy { target in
+                let requirement = proposal.requirements[target]
+                guard let source = proposal.source(of: requirement) else { return false }
+                // Repartitioning a known date clause must not remove its
+                // modifier/comparator and then resolve the shortened clause.
+                for scope in answer.scope where Self.contains(scope, requirement: requirement, proposal: proposal) {
+                    if let prior = answer.priorRequirements.first(where: { $0.id == scope.requirementID }),
+                       prior.field == .date, prior.role == .condition,
+                       Self.conditionSource(scope.source) != Self.conditionSource(source) { return false }
+                }
+                switch entries[target].resolution {
+                case .bound(let condition): return condition.predicate == .day(range)
+                case .unresolved(.ambiguousDate):
+                    guard [.unspecified, .equal].contains(requirement.relation),
+                          let weekday = Self.unqualifiedWeekday(Self.conditionSource(source)),
+                          let day = range.lower, range.upper == day, range.lowerInclusive, range.upperInclusive else { return false }
+                    return Self.weekday(of: day) == weekday
+                default: return false
+                }
+            }
+            guard compatible else { unresolved(.contradictoryClarification); continue }
+            for target in ordered {
+                entries[target] = .init(requirementID: original[target].requirementID,
+                    resolution: .bound(.init(inputDigest: proposal.input.digest, requirementID: original[target].requirementID, predicate: .day(range))))
+            }
+            let binding = ClarificationBinding(input: proposal.input, turn: turn, parameter: .date(range),
+                targets: ordered.map { original[$0].requirementID })
+            for row in answerIndices { entries[row] = .init(requirementID: original[row].requirementID, resolution: .clarification(binding)) }
+            previousTargets[turn] = ordered
+        }
+        return entries
+    }
+
+    private static func answeredDate(_ source: String, input: ComputerUseBrowserGoalInput) -> DayRange? {
+        guard case .success((.day(let range), _)) = date(conditionSource(source), input: input) else { return nil }
+        return range
+    }
+
+    private static func unqualifiedWeekday(_ source: String) -> Int? {
+        guard let values = groups(#"^(?:(?:on|for)\s+)?(Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday)$"#, source) else { return nil }
+        return ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"].firstIndex(of: values[0].lowercased())
+    }
+
+    /// Proleptic Gregorian civil arithmetic, matching CivilDay's validation.
+    /// January 1 of year 1 is Monday; each full seven-day block repeats it.
+    private static func weekday(of day: CivilDay) -> Int {
+        let year = day.year - 1
+        let beforeMonth = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334][day.month - 1]
+        let leap = day.year % 4 == 0 && (day.year % 100 != 0 || day.year % 400 == 0)
+        return (365 * year + year / 4 - year / 100 + year / 400 + beforeMonth + (leap && day.month > 2 ? 1 : 0) + day.day) % 7
+    }
+
+    private static func reconcilingClarificationTargets(_ original: [Entry]) -> [Entry] {
+        var entries = original
         let current = Dictionary(uniqueKeysWithValues: entries.map { ($0.requirementID, $0.resolution) })
         for index in entries.indices {
             guard case .clarification(let binding) = entries[index].resolution else { continue }
@@ -384,6 +500,7 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
             guard basis == .unspecified || basis == value else { return nil }; basis = value
         case .fees(let value):
             guard fees == .unspecified || fees == value else { return nil }; fees = value
+        case .date: return nil
         }
         guard let amount = Amount(hundredths: original.hundredths, currency: currency) else { return nil }
         return .price(comparison, amount, basis, fees)

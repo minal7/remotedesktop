@@ -326,6 +326,70 @@ final class ComputerUseBrowserResultAssessmentTests: XCTestCase {
         XCTAssertEqual(result.fixture.server.count("/details"), 0)
     }
 
+    func testScopedDateAnswerReachesFreshNativeAssessmentWithoutRepeatingTheSearch() async throws {
+        var rows = [row("Find concerts. "), row("Friday.", field: "date")]
+        let fixture = try await ResearchDriverFixture.make(candidateBodyHTML: "<p>2026-10-16</p>")
+        defer { fixture.close() }
+        let original = try ComputerUseBrowserGoalInput(taskID: ResearchDriverFixture.root, prompt: "Find concerts. Friday.",
+            referenceDate: ResearchDriverFixture.date, timeZoneIdentifier: "America/Los_Angeles")
+        let initial = try proposal(rows, input: original), goals = AssessmentGoalFixture(value: initial)
+        let driver = ComputerUseBrowserResearchDriver(goalPlanner: goals,
+            resultPlanner: AssessmentResultFixture(fields: [.init(.date, ["2026-10-16"])], empty: false),
+            searchPlanner: fixture.search, actionPlanner: BrowserResearchActionFixture(), formPlanner: BrowserResearchFormFixture(),
+            planning: ComputerUseModelBrowserResearchPlanning(providers: [fixture.policy.provider], linkPlanner: AssessmentLinkFixture()),
+            now: { ResearchDriverFixture.date }, timeZoneIdentifier: { "America/Los_Angeles" })
+        let first = try await driver.executeBrowserResearch(taskID: original.taskID, prompt: original.prompt, tools: fixture.tools, progress: { _ in })
+        guard case .browserClarificationRequired(let request)? = first else { return XCTFail("A resolvable weekday must reach the real question route before search") }
+        let owner = try fixture.owner()
+        XCTAssertEqual(request.topic, .date)
+        XCTAssertEqual(request.requirementIDs, [initial.requirements[1].id])
+        XCTAssertFalse(fixture.browser.hasSession); XCTAssertEqual(fixture.server.requestCount, 0)
+        XCTAssertTrue(fixture.search.inputs.isEmpty)
+        let question = try owner.issueQuestion(topic: request.topic, requirementIDs: request.requirementIDs,
+            controllerID: "phone", controllerSessionID: "session")
+        let input = try owner.answerQuestion(questionID: question.id, answerTaskID: "event-date", answer: "2026-10-16",
+            controllerID: "phone", controllerSessionID: "session")
+        var answer = row("2026-10-16", field: "source"); answer["turn"] = 1; rows.append(answer)
+        let current = try proposal(rows, input: input); goals.value = current
+        let continued = try await driver.continueBrowserResearch(taskID: "event-date", research: owner, tools: fixture.tools, progress: { _ in })
+        guard case .browserResearchProgress = continued else { return XCTFail("The scoped answer must allow the retained research to continue") }
+        XCTAssertNil(try owner.proposedQuestionRequest(), "A bound date answer cannot become a website restriction")
+        let batch = try await owner.readCandidates(), assessment = try XCTUnwrap(batch.requirementAssessment)
+        XCTAssertEqual(assessment.candidates[0].requirements.map(\.status), [.needsSemanticVerification, .quotedValueMatches, .clarificationApplied])
+        XCTAssertEqual(input.rootDigest, original.rootDigest)
+        XCTAssertEqual(input.referenceMilliseconds, original.referenceMilliseconds)
+        XCTAssertEqual(input.userTurns, [original.prompt, "2026-10-16"])
+        try await fixture.browser.validateResultAssessment(assessment, reading: batch, interpretation: current)
+        _ = try await driver.continueBrowserResearch(taskID: "event-date", research: owner, tools: fixture.tools, progress: { _ in })
+        XCTAssertEqual(fixture.search.inputs.map(\.input), [input])
+        XCTAssertEqual(fixture.server.count("/search?q=concerts"), 1)
+        XCTAssertEqual(fixture.server.count("/details"), 0)
+    }
+
+    func testNativeDateAndPriceClarificationConflictsRemainUncompiledAfterAnswerRelabeling() async throws {
+        for (source, field, topic, answerText) in [("2026-10-16.", "date", ComputerUseBrowserClarificationTopic.date, "2026-10-15"),
+            ("Under USD 50.", "price", .currency, "CAD")] {
+            for answerField in ["category", "location", "other"] {
+                var rows = [row("Find concerts. "), row(source, field: field)]
+                let result = try await reading(rows, fields: [.init(.date, ["2026-10-16"]), .init(.price, ["USD 40"])])
+                defer { result.fixture.close() }
+                let question = try result.owner.issueQuestion(topic: topic, requirementIDs: [result.interpretation.requirements[1].id],
+                    controllerID: "phone", controllerSessionID: "session")
+                let input = try result.owner.answerQuestion(questionID: question.id, answerTaskID: "conflicting-answer", answer: answerText,
+                    controllerID: "phone", controllerSessionID: "session")
+                var answer = row(answerText, field: answerField); answer["turn"] = 1; rows.append(answer)
+                let current = try proposal(rows, input: input); result.goals.value = current
+                _ = try await result.owner.interpretGoal()
+                let sources = try XCTUnwrap(ComputerUseBrowserSourceRequirements(proposal: current).selectSources(from: [result.fixture.policy.provider]))
+                try result.owner.configureResearchSources(sources)
+                let batch = try await result.owner.readCandidates(), assessment = try XCTUnwrap(batch.requirementAssessment)
+                XCTAssertEqual(assessment.candidates[0].requirements[1].status, .uncompiledRequirement)
+                XCTAssertEqual(assessment.candidates[0].requirements[2].status, .uncompiledRequirement,
+                    "Changing a native-conflicting answer to \(answerField) cannot send it to semantic review")
+            }
+        }
+    }
+
     private struct Reading {
         let fixture: ResearchDriverFixture
         let owner: ComputerUseBrowserResearchTask

@@ -44,7 +44,7 @@ struct ComputerUseBrowserSourceRequirements: Sendable {
             if case .clarification = entry.resolution { return entry.requirementID }; return nil
         })
         for requirement in proposal.requirements {
-            // A whole literal answer to a sealed price-parameter question
+            // A whole literal answer to a sealed scalar-parameter question
             // has host-known meaning even if its model field label is wrong.
             if parameterAnswers.contains(requirement.id) { continue }
             guard [.source, .navigationSource, .answerSource].contains(requirement.field) else { continue }
@@ -88,7 +88,7 @@ struct ComputerUseBrowserSourceRequirements: Sendable {
                         && $0.sourceByteOffset < requirement.sourceByteOffset + requirement.sourceByteCount
                         && requirement.sourceByteOffset < $0.sourceByteOffset + $0.sourceByteCount
                 }.map(\.id)
-                // Host-bound price parameters remain parameters even if an
+                // Host-bound scalar parameters remain parameters even if an
                 // old model assigned their literal answer a website field.
                 guard !currentIDs.isEmpty, !currentIDs.allSatisfy(parameterAnswers.contains) else { continue }
                 var scope = requirement.field == .navigationSource ? navigation : answers

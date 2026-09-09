@@ -666,6 +666,10 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
                 }
                 guard interpretation.disposition == .research else { return result(.uncompiledRequirement) }
                 if case .clarification? = conditions[requirement.id] { return result(.clarificationApplied) }
+                if case .unresolved(let reason)? = conditions[requirement.id],
+                   [.ambiguousClarification, .clarificationScope, .contradictoryClarification].contains(reason) {
+                    return result(.uncompiledRequirement)
+                }
                 if unresolvedSources.contains(requirement.id) { return result(.uncompiledRequirement) }
                 // Page citations and the current source policy cannot prove
                 // earlier automated visits. Retained constraints also apply

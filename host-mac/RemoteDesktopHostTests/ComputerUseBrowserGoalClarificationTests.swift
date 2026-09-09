@@ -5,6 +5,129 @@ import XCTest
 @MainActor
 final class ComputerUseBrowserGoalClarificationTests: XCTestCase {
     private typealias Clarification = ComputerUseBrowserGoalClarification
+    private typealias Scalars = ComputerUseBrowserScalarRequirements
+
+    func testDateAnswerBindsOnlyTheSelectedRepeatedWeekdayOccurrence() throws {
+        let rows = [row("Find flights departing "), row("Friday", role: "condition", field: "date"),
+            row(" and returning "), row("Friday.", role: "condition", field: "date")]
+        let original = try input("Find flights departing Friday and returning Friday."), state = Clarification(input: original)
+        let proposed = try proposal(original, rows: rows)
+        let question = try state.issue(proposal: proposed, topic: .date, requirementIDs: [proposed.requirements[3].id], context: context())
+        let updated = try state.consume(questionID: question.id, answerTaskID: "return-date", answer: "2026-10-16", context: context())
+        let current = try proposal(updated, rows: rows + [row("2026-10-16", turn: 1, role: "condition", field: "date")], disposition: "research")
+        let ledger = Scalars(proposal: current), day = try XCTUnwrap(Scalars.CivilDay(year: 2026, month: 10, day: 16))
+        XCTAssertEqual(ledger.entries[1].resolution, .unresolved(.ambiguousDate))
+        XCTAssertEqual(ledger.dateQuestionRequirementID, current.requirements[1].id)
+        guard case .bound(let condition) = ledger.entries[3].resolution,
+              case .clarification(let binding) = ledger.entries[4].resolution else { return XCTFail("The selected date and its answer must bind together") }
+        XCTAssertEqual(condition.evaluate(.day(day)), .satisfied)
+        XCTAssertEqual(binding.targetRequirementIDs, [current.requirements[3].id])
+        XCTAssertEqual(binding.answerTurn, 1)
+        XCTAssertEqual(updated.rootDigest, original.rootDigest)
+        XCTAssertEqual(updated.referenceMilliseconds, original.referenceMilliseconds)
+        XCTAssertEqual(updated.userTurns, [original.prompt, "2026-10-16"])
+    }
+
+    func testDateClarificationsRespectCivilWeekdaysAndConfirmConcreteRangesUsingTheOriginalClock() throws {
+        for (source, answer) in [("Monday", "0001-01-01"), ("Tuesday", "2000-02-29"),
+            ("Thursday", "1900-03-01"), ("Friday", "2026-10-16"), ("Saturday", "2026-10-17"),
+            ("Sunday", "2026-10-18"), ("Wednesday", "2026-10-21"),
+            ("tomorrow", "tomorrow"), ("On 2026-10-16.", "for 2026-10-16"),
+            ("from 2026-10-16 through 2026-10-18", "from 2026-10-16 through 2026-10-18")] {
+            let ledger = try dateLedger(source: source, answer: answer)
+            guard case .bound(let condition) = ledger.entries[1].resolution,
+                  case .clarification(let binding) = ledger.entries[2].resolution,
+                  case .date(let range) = binding.parameter else { return XCTFail("Expected a scoped date binding for \(source)") }
+            XCTAssertEqual(condition.predicate, .day(range))
+            XCTAssertNil(ledger.dateQuestionRequirementID)
+            XCTAssertEqual(binding.targetRequirementIDs, [ledger.entries[1].requirementID])
+            XCTAssertFalse(String(reflecting: binding).contains(answer))
+        }
+    }
+
+    func testDateClarificationsDoNotOverrideConcreteDatesDropModifiersOrExtractAnAnswerSubstring() throws {
+        let cases: [(String, String, Scalars.UnresolvedReason)] = [
+            ("Friday", "2026-10-15", .contradictoryClarification),
+            ("next Friday", "2026-10-16", .contradictoryClarification),
+            ("this Friday", "2026-10-16", .contradictoryClarification),
+            ("2026-10-16", "2026-10-23", .contradictoryClarification),
+            ("before 2026-10-16", "2026-10-15", .contradictoryClarification),
+            ("Friday", "from 2026-10-16 through 2026-10-23", .contradictoryClarification),
+            ("Friday", "2026-02-30", .ambiguousClarification),
+            ("Friday", "not 2026-10-16", .ambiguousClarification),
+            ("Friday", "2026-10-16 or 2026-10-23", .ambiguousClarification),
+            ("Friday", "2026-10-16 and buy the tickets", .ambiguousClarification)]
+        for (source, answer, reason) in cases {
+            let ledger = try dateLedger(source: source, answer: answer)
+            XCTAssertEqual(ledger.entries[1].resolution, .unresolved(reason), answer)
+            XCTAssertEqual(ledger.entries[2].resolution, .unresolved(reason), answer)
+        }
+    }
+
+    func testDateClarificationScopesCannotGuessBetweenDatesOrPartiallyApplyAConflictingAnswer() throws {
+        let original = try input("Find flights Friday and return Saturday."), rows = [row("Find flights "),
+            row("Friday", role: "condition", field: "date"), row(" and return "), row("Saturday.", role: "condition", field: "date")]
+        for broad in [true, false] {
+            let state = Clarification(input: original), initial = try proposal(original, rows: broad ? [row(original.prompt)] : rows)
+            let scope = broad ? [initial.requirements[0].id] : [initial.requirements[1].id, initial.requirements[3].id]
+            let question = try state.issue(proposal: initial, topic: .date, requirementIDs: scope, context: context())
+            let updated = try state.consume(questionID: question.id, answerTaskID: "dates", answer: "2026-10-16", context: context())
+            let ledger = Scalars(proposal: try proposal(updated, rows: rows + [row("2026-10-16", turn: 1, role: "condition", field: "date")], disposition: "research"))
+            for index in [1, 3, 4] {
+                XCTAssertEqual(ledger.entries[index].resolution, .unresolved(broad ? .clarificationScope : .contradictoryClarification))
+            }
+        }
+    }
+
+    func testDateFollowUpsRetainTheOriginalTargetAndInvalidateEarlierAnswersOnConflict() throws {
+        let original = try input("Find tickets Friday."), state = Clarification(input: original)
+        var rows = [row("Find tickets "), row("Friday.", role: "condition", field: "date")]
+        var current = try proposal(original, rows: rows)
+        for (index, answer) in ["2026-10-16", "on 2026-10-16", "2026-10-23"].enumerated() {
+            let question = try state.issue(proposal: current, topic: .date, requirementIDs: [current.requirements.last!.id], context: context())
+            let updated = try state.consume(questionID: question.id, answerTaskID: "date-\(index)", answer: answer, context: context())
+            rows.append(row(answer, turn: index + 1, role: "condition", field: "date"))
+            current = try proposal(updated, rows: rows, disposition: "research")
+            let ledger = Scalars(proposal: current)
+            if index < 2 {
+                for entry in ledger.entries.dropFirst(2) {
+                    guard case .clarification(let binding) = entry.resolution else { return XCTFail("Expected a retained date chain") }
+                    XCTAssertEqual(binding.targetRequirementIDs, [current.requirements[1].id])
+                }
+            } else {
+                XCTAssertTrue(ledger.entries.dropFirst().allSatisfy { $0.resolution == .unresolved(.contradictoryClarification) })
+            }
+        }
+    }
+
+    func testDateQuestionCannotLoseItsPriorModifierOrDateScopeThroughResegmentation() throws {
+        for (modifier, literal) in [("next ", "Friday."), ("before ", "2026-10-16.")] {
+            let original = try input("Find tickets " + modifier + literal), state = Clarification(input: original)
+            let initial = try proposal(original, rows: [row("Find tickets "), row(modifier + literal, role: "condition", field: "date")])
+            let question = try state.issue(proposal: initial, topic: .date, requirementIDs: [initial.requirements[1].id], context: context())
+            let updated = try state.consume(questionID: question.id, answerTaskID: "date", answer: "2026-10-16", context: context())
+            let split = [row("Find tickets " + modifier), row(literal, role: "condition", field: "date"), row("2026-10-16", turn: 1)]
+            let ledger = Scalars(proposal: try proposal(updated, rows: split, disposition: "research"))
+            XCTAssertEqual(ledger.entries[1].resolution, .unresolved(.contradictoryClarification))
+            XCTAssertEqual(ledger.entries[2].resolution, .unresolved(.contradictoryClarification))
+            let relabeled = Scalars(proposal: try proposal(updated, rows: [row(original.prompt), row("2026-10-16", turn: 1)], disposition: "research"))
+            XCTAssertEqual(relabeled.entries[1].resolution, .unresolved(.clarificationScope))
+        }
+    }
+
+    func testMissingDateRemainsANewConditionAndACompoundAnswerCannotHideBehindModelLabels() throws {
+        let original = try input("Find concerts."), state = Clarification(input: original), initial = try proposal(original, rows: [row(original.prompt)])
+        let question = try state.issue(proposal: initial, topic: .date, requirementIDs: [initial.requirements[0].id], context: context())
+        let updated = try state.consume(questionID: question.id, answerTaskID: "date", answer: "2026-10-16", context: context())
+        let ledger = Scalars(proposal: try proposal(updated, rows: [row(original.prompt), row("2026-10-16", turn: 1, role: "condition", field: "date")], disposition: "research"))
+        XCTAssertEqual(ledger.entries[0].resolution, .unresolved(.notScalar))
+        guard case .bound = ledger.entries[1].resolution else { return XCTFail("A genuinely missing date keeps its own condition") }
+        let invalidState = Clarification(input: original)
+        let invalidQuestion = try invalidState.issue(proposal: initial, topic: .date, requirementIDs: [initial.requirements[0].id], context: context())
+        let compound = try invalidState.consume(questionID: invalidQuestion.id, answerTaskID: "compound", answer: "2026-10-16 or not", context: context())
+        let invalid = Scalars(proposal: try proposal(compound, rows: [row(original.prompt), row("2026-10-16", turn: 1, role: "condition", field: "date"), row(" or not", turn: 1)], disposition: "research"))
+        XCTAssertTrue(invalid.entries.dropFirst().allSatisfy { $0.resolution == .unresolved(.ambiguousClarification) })
+    }
 
     func testAnswerPreservesOriginalBrowserRootClockAndExactUserBytes() throws {
         let original = try input("Find Café e\u{301} movie tickets tomorrow. Do not buy.")
@@ -295,6 +418,14 @@ final class ComputerUseBrowserGoalClarificationTests: XCTestCase {
         XCTAssertEqual(requests[0].httpBody, try planner.makeRequest(continued).httpBody)
     }
 
+    private func dateLedger(source: String, answer: String) throws -> Scalars {
+        let original = try input("Find tickets. " + source), state = Clarification(input: original)
+        let rows = [row("Find tickets. "), row(source, role: "condition", field: "date")]
+        let initial = try proposal(original, rows: rows)
+        let question = try state.issue(proposal: initial, topic: .date, requirementIDs: [initial.requirements[1].id], context: context())
+        let updated = try state.consume(questionID: question.id, answerTaskID: "date", answer: answer, context: context())
+        return Scalars(proposal: try proposal(updated, rows: rows + [row(answer, turn: 1, role: "condition", field: "date")], disposition: "research"))
+    }
     private func input(_ prompt: String, taskID: String = "browser-original-root") throws -> ComputerUseBrowserGoalInput {
         try .init(taskID: taskID, prompt: prompt, referenceDate: Date(timeIntervalSince1970: 1_800_000_000), timeZoneIdentifier: "America/Los_Angeles")
     }
