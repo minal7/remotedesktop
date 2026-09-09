@@ -363,6 +363,7 @@ final class ComputerUseBrowserResearchTask {
         do {
             let archive = try researchEvidence(for: captured)
             var recalled: [Int] = [], optionReads: [ComputerUseBrowserControlRead] = []
+            var effectReviews: [ComputerUseBrowserEffectControlReview] = []
             while true {
                 var changed: Set<String> = []
                 if let stage = formStage, let receipt = stage.nativeReceipt, confirmedFormHistory.last == receipt,
@@ -384,7 +385,8 @@ final class ComputerUseBrowserResearchTask {
                     changedFormTargetIDs: changed, researchEvidence: archive, recalledReadings: recalled, historyOptions: historyOptions,
                     popupControlIDs: popupControls, popupHistory: popupHistory,
                     allowOptionInspection: optionSelectionSequence < 32 && navigationDirectory != nil && optionReads.isEmpty,
-                    optionReadControls: optionReads, optionChoices: optionChoices, optionSelectionHistory: optionSelectionHistory)
+                    optionReadControls: optionReads, optionChoices: optionChoices, optionSelectionHistory: optionSelectionHistory,
+                    effectControlReviews: effectReviews)
                 let proposal = try await planner.propose(context)
                 try check()
                 try proposal.validate(for: context)
@@ -393,9 +395,11 @@ final class ComputerUseBrowserResearchTask {
                 try await browser.validatePageEvidence(page)
                 try check(); try browser.validateSourceDocument(page.document)
                 if case .recall(let index) = proposal.step { recalled.append(index); continue }
-                if case .inspectOptions = proposal.step {
+                if case .reviewControls(let review) = proposal.step { effectReviews.append(review); continue }
+                if proposal.step == .inspectOptions || proposal.step == .extendInspection {
                     page = try await browser.observeResearchControls(for: proposal)
                     optionReads = proposal.readControls
+                    effectReviews = [] // A new scoped snapshot requires a fresh metadata review.
                     try check()
                     continue
                 }
@@ -430,7 +434,8 @@ final class ComputerUseBrowserResearchTask {
         guard popupSequence < 32 else { throw Failure.popupLimit }
         let captured = input
         let intent = try ComputerUseBrowserPopupIntent(interpretation: action.input.interpretation,
-            evidence: action.input.evidence, controlID: controlID, requirementIndex: requirement)
+            evidence: action.input.evidence, controlID: controlID, requirementIndex: requirement,
+            scopeReview: ComputerUseBrowserEffectScopeReview(input: action.input))
         latestAction = nil; latestCandidates = nil; latestForm = nil
         try requireOriginalPopupCriteria(in: intent.evidence)
         try await operate { [self] in
@@ -511,7 +516,8 @@ final class ComputerUseBrowserResearchTask {
         guard optionSelectionSequence < 32 else { throw Failure.optionSelectionLimit }
         let captured = input
         let intent = try ComputerUseBrowserOptionSelectionIntent(interpretation: action.input.interpretation,
-            evidence: action.input.evidence, controlID: controlID, optionID: optionID, requirementIndex: requirement)
+            evidence: action.input.evidence, controlID: controlID, optionID: optionID, requirementIndex: requirement,
+            scopeReview: ComputerUseBrowserEffectScopeReview(input: action.input))
         latestAction = nil; latestCandidates = nil; latestForm = nil
         try requireOriginalPopupCriteria(in: intent.evidence)
         try requireOriginalOptionSelectionCriteria(intent)

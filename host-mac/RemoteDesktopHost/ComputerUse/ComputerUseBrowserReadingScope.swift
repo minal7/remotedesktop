@@ -27,7 +27,7 @@ extension ComputerUseOwnedBrowser {
     /// then reads only the explicitly selected restricted controls in that invocation.
     func observeResearchControls(for action: ComputerUseBrowserActionProposal) async throws -> ComputerUseBrowserPageEvidence {
         let evidence = action.input.evidence
-        guard action.step == .readResults || action.step == .inspectOptions, !action.readControls.isEmpty,
+        guard action.step == .readResults || action.step == .inspectOptions || action.step == .extendInspection, !action.readControls.isEmpty,
               action.input.interpretation.input.taskID == evidence.document.taskID,
               hasRequiredPresentation else { throw ComputerUseBrowserActionPlanError.inputChanged }
         try validateSourceDocument(evidence.document)

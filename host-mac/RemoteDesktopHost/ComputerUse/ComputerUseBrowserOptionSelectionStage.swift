@@ -51,7 +51,7 @@ final class ComputerUseBrowserOptionSelectionStage {
                 .init(id: "prepared", entityID: entity, kind: "option-selection-preflight", expectedDigest: target.payloadDigest),
                 .init(id: "selected", entityID: entity, kind: "option-selection-receipt", expectedDigest: target.payloadDigest)],
             steps: [.init(id: stepID, dependencies: [], operation: .init(capabilityID: "browser.selectOption", entityID: entity,
-                payloadDigest: target.payloadDigest, payloadVersion: 1), preconditions: ["prepared"], postconditions: ["selected"])],
+                payloadDigest: target.payloadDigest, payloadVersion: target.intent.scopeReview == nil ? 1 : 3), preconditions: ["prepared"], postconditions: ["selected"])],
             invariants: ["owned"], outcomes: ["selected"])
         self.contract = contract
         let operationID = contract.effectIdentity(for: contract.steps[0]); self.operationID = operationID

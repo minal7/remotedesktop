@@ -28,14 +28,14 @@ final class ComputerUseBrowserResearchOptionSelectionTests: XCTestCase {
         configureActions(fixture)
         let action = try await owner.planNextAction(using: fixture.actions)
         guard case .selectOption(let control, let option, let requirement) = action.step else { return XCTFail("Expected a freshly scoped selection") }
-        XCTAssertEqual(requirement, 1); XCTAssertEqual(fixture.actions.inputs.count, count + 2)
+        XCTAssertEqual(requirement, 1); XCTAssertEqual(fixture.actions.inputs.count, count + 5)
         let metadata = fixture.actions.inputs[count], scoped = action.input
         XCTAssertFalse(metadata.contextJSON.contains("General admission USD 40 total")); XCTAssertFalse(metadata.contextJSON.contains("2026-09-20"))
         XCTAssertTrue(scoped.contextJSON.contains("General admission USD 40 total")); XCTAssertTrue(scoped.contextJSON.contains("Admission conditions"))
         XCTAssertTrue(scoped.contextJSON.contains("2026-09-20")); XCTAssertFalse(scoped.contextJSON.contains("privateUnscoped"))
-        XCTAssertTrue(scoped.optionInspectionControlIDs.isEmpty); XCTAssertEqual(scoped.optionReadControls.count, 2)
+        XCTAssertTrue(scoped.optionInspectionControlIDs.isEmpty); XCTAssertEqual(scoped.optionReadControls.count, 3)
         XCTAssertTrue(scoped.optionChoices.contains { $0.controlID == control && $0.optionIDs.contains(option) })
-        XCTAssertEqual(try object(scoped.contextJSON)["version"] as? Int, 13)
+        XCTAssertEqual(try object(scoped.contextJSON)["version"] as? Int, 15)
         for invalid in [selection("c999", option), selection(control, "o999"), selection(control, option, requirement: 3),
             "{\"select_option\":{\"control\":\"\(control)\",\"option\":\"\(option)\",\"requirement\":true}}",
             "{\"select_option\":{\"control\":\"\(control)\",\"option\":\"\(option)\",\"requirement\":1,\"text\":\"buy\"}}",
@@ -46,7 +46,7 @@ final class ComputerUseBrowserResearchOptionSelectionTests: XCTestCase {
         let local = try ComputerUseLocalBrowserActionPlanner(connection: .init(baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:54321")),
             bearerToken: "fixture", modelAlias: "fixture-model"), transport: ControlStateUnusedTransport())
         let body = try ResearchAnswerFixture.object(XCTUnwrap(local.makeRequest(scoped).httpBody))
-        XCTAssertEqual(((body["response_format"] as? [String: Any])?["json_schema"] as? [String: Any])?["name"] as? String, "browser_research_action_v13")
+        XCTAssertEqual(((body["response_format"] as? [String: Any])?["json_schema"] as? [String: Any])?["name"] as? String, "browser_research_action_v15")
         XCTAssertFalse(owner.hasPendingOptionSelection); XCTAssertTrue(try journals(fixture).isEmpty)
         XCTAssertEqual(fixture.server.count("/chosen"), 0)
     }
@@ -278,6 +278,7 @@ final class ComputerUseBrowserResearchOptionSelectionTests: XCTestCase {
     private func configureActions(_ fixture: ResearchDriverFixture, first: Bool = false) {
         fixture.actions.select = { input in
             if input.optionSelectionHistory.last?.outcome == .selected { return try self.read(input) }
+            if let review = try EffectScopeFixture.response(input) { return review }
             if let choice = input.optionChoices.first { return self.selection(choice.controlID, try XCTUnwrap(first ? choice.optionIDs.first : choice.optionIDs.last)) }
             return try self.inspect(input)
         }

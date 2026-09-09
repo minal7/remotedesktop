@@ -209,21 +209,24 @@ struct ComputerUseBrowserPageSnapshot: Decodable, Equatable, Sendable, CustomStr
     let truncated: Bool
     let omittedEmbeddedContent: Bool
     let omittedControls: Bool
+    /// Missing control metadata, distinct from a known control whose value is unavailable.
+    let omittedControlMetadata: Bool
     let viewport: ComputerUseBrowserViewport?
 
     init(id: String, texts: [Text], links: [Link], controls: [Control] = [],
          truncated: Bool, omittedEmbeddedContent: Bool, omittedControls: Bool = false,
          viewport: ComputerUseBrowserViewport? = nil, containers: [Container] = [], omittedStructure: Bool = true,
-         controlStates: [ComputerUseBrowserControlState] = [], controlStateObserved: Bool = false, scopedControlIDs: [String] = []) {
+         controlStates: [ComputerUseBrowserControlState] = [], controlStateObserved: Bool = false, scopedControlIDs: [String] = [], omittedControlMetadata: Bool? = nil) {
         self.id = id; self.texts = texts; self.links = links; self.controls = controls
         self.controlStates = controlStates; self.controlStateObserved = controlStateObserved
         self.scopedControlIDs = scopedControlIDs
         self.truncated = truncated; self.omittedEmbeddedContent = omittedEmbeddedContent; self.omittedControls = omittedControls
+        self.omittedControlMetadata = omittedControlMetadata ?? omittedControls
         self.viewport = viewport
         self.containers = containers; self.omittedStructure = omittedStructure
     }
 
-    private enum CodingKeys: String, CodingKey { case id, texts, links, controls, controlStates, controlStateObserved, scopedControlIDs, containers, omittedStructure, truncated, omittedEmbeddedContent, omittedControls, viewport }
+    private enum CodingKeys: String, CodingKey { case id, texts, links, controls, controlStates, controlStateObserved, scopedControlIDs, containers, omittedStructure, truncated, omittedEmbeddedContent, omittedControls, omittedControlMetadata, viewport }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         let controls: [Control]
@@ -246,7 +249,8 @@ struct ComputerUseBrowserPageSnapshot: Decodable, Equatable, Sendable, CustomStr
             omittedStructure: values.contains(.omittedStructure) ? try values.decode(Bool.self, forKey: .omittedStructure) : true,
             controlStates: values.contains(.controlStates) ? try values.decode([ComputerUseBrowserControlState].self, forKey: .controlStates) : [],
             controlStateObserved: values.contains(.controlStateObserved) ? try values.decode(Bool.self, forKey: .controlStateObserved) : false,
-            scopedControlIDs: values.contains(.scopedControlIDs) ? try values.decode([String].self, forKey: .scopedControlIDs) : [])
+            scopedControlIDs: values.contains(.scopedControlIDs) ? try values.decode([String].self, forKey: .scopedControlIDs) : [],
+            omittedControlMetadata: values.contains(.omittedControlMetadata) ? try values.decode(Bool.self, forKey: .omittedControlMetadata) : omittedControls)
     }
 
     var description: String {
@@ -274,7 +278,7 @@ struct ComputerUseBrowserPageSnapshot: Decodable, Equatable, Sendable, CustomStr
     }
 
     var isWellFormed: Bool {
-        guard scopedControlIDs.count <= 16, Set(scopedControlIDs).count == scopedControlIDs.count,
+        guard !omittedControlMetadata || omittedControls, scopedControlIDs.count <= 16, Set(scopedControlIDs).count == scopedControlIDs.count,
               scopedControlIDs.isEmpty || controlStateObserved,
               scopedControlIDs.allSatisfy({ id in controls.contains { $0.id == id && ComputerUseBrowserControlRead.allows($0) } }) else { return false }
         if controlStateObserved {
@@ -952,7 +956,7 @@ enum ComputerUseBrowserDOM {
         const texts = [], links = [], controls = [], controlStates = [], structure = [], anchors = new Map(), buttons = new Map(), containers = new Map();
         const textRange = doc.createRange();
         const pageParent = node => node.assignedSlot || parent(node);
-        let count = 0, bytes = 0, truncated = false, omittedEmbeddedContent = false, omittedControls = false, omittedStructure = false;
+        let count = 0, bytes = 0, truncated = false, omittedEmbeddedContent = false, omittedControls = false, omittedControlMetadata = false, omittedStructure = false;
         const containerTags = new Set(['html','body','p','li','tr','article','section','div','h1','h2','h3','h4','h5','h6',
           'form','main','nav','aside','header','footer','table','tbody','thead','tfoot','ul','ol']);
         function containerIDFor(node) {
@@ -1011,7 +1015,7 @@ enum ComputerUseBrowserDOM {
             return NodeFilter.FILTER_ACCEPT;
           }
         };
-        if (filter.acceptNode(root) === NodeFilter.FILTER_REJECT) return {texts, links, controls, controlStates, controlStateObserved:includeControlState, scopedControlIDs, containers:structure, omittedStructure, truncated, omittedEmbeddedContent, omittedControls, viewport: readViewport()};
+        if (filter.acceptNode(root) === NodeFilter.FILTER_REJECT) return {texts, links, controls, controlStates, controlStateObserved:includeControlState, scopedControlIDs, containers:structure, omittedStructure, truncated, omittedEmbeddedContent, omittedControls, omittedControlMetadata, viewport: readViewport()};
         // display:contents has no own rectangle but its descendants can render.
         const walkers = [doc.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, filter)];
         while (walkers.length) {
@@ -1096,7 +1100,7 @@ enum ComputerUseBrowserDOM {
                 || style.display === 'none' || style.visibility !== 'visible' || Number(style.opacity) === 0) return false;
             if (node === root) return true;
           }
-          omittedControls = true;
+          omittedControls = omittedControlMetadata = true;
           return false;
         }
         function formMetadata(element, kind) {
@@ -1181,7 +1185,7 @@ enum ComputerUseBrowserDOM {
         while (controlWalkers.length) {
           const walker = controlWalkers[controlWalkers.length - 1], element = walker.nextNode();
           if (!element) { controlWalkers.pop(); continue; }
-          if (++controlNodes > 10000) { truncated = true; omittedControls = true; break; }
+          if (++controlNodes > 10000) { truncated = true; omittedControls = omittedControlMetadata = true; break; }
           if (element.shadowRoot) controlWalkers.push(doc.createTreeWalker(element.shadowRoot, NodeFilter.SHOW_ELEMENT, controlFilter));
           const native = element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement
             || element instanceof HTMLSelectElement || element instanceof HTMLButtonElement;
@@ -1192,17 +1196,21 @@ enum ComputerUseBrowserDOM {
             && (['checkbox','radio','switch','slider','spinbutton','combobox','listbox'].includes(role) ? role
               : ((role === 'button' || (!role && element instanceof HTMLButtonElement)) && element.hasAttribute('aria-pressed') ? 'button' : null));
           if ((!native && !declaredRole) || (element instanceof HTMLButtonElement && role && role !== 'button' && !declaredRole)) {
-            if ((element.isContentEditable || role.split(/\s+/).some(value => ['button','textbox','searchbox','combobox','listbox','checkbox','radio','slider','spinbutton','switch','tab','option','menuitemcheckbox','menuitemradio'].includes(value)) || element instanceof HTMLButtonElement)
-                && renderedControl(element)) omittedControls = true;
+            // Known unsupported widgets and focusable custom surfaces are
+            // missing metadata, not evidence that no task control exists.
+            if ((element.isContentEditable || role.split(/\s+/).some(value => ['button','textbox','searchbox','combobox','listbox','checkbox','radio','slider','spinbutton','switch','tab','tablist','option','menu','menubar','menuitem','menuitemcheckbox','menuitemradio','tree','treeitem','treegrid','grid','gridcell','rowheader','columnheader','application'].includes(value))
+                || (element.hasAttribute('tabindex') && element.tabIndex >= 0 && !(element instanceof HTMLAnchorElement && element.hasAttribute('href')))
+                || element instanceof HTMLButtonElement)
+                && renderedControl(element)) omittedControls = omittedControlMetadata = true;
             continue;
           }
-          if (declaredRole && element.isContentEditable) { if (renderedControl(element)) omittedControls = true; continue; }
-          if (role === 'combobox' && native && !declaredRole && !nativeCombobox) { if (renderedControl(element)) omittedControls = true; continue; }
+          if (declaredRole && element.isContentEditable) { if (renderedControl(element)) omittedControls = omittedControlMetadata = true; continue; }
+          if (role === 'combobox' && native && !declaredRole && !nativeCombobox) { if (renderedControl(element)) omittedControls = omittedControlMetadata = true; continue; }
           if (!renderedControl(element)) continue;
           const kind = declaredRole ? 'aria-' + declaredRole : element instanceof HTMLTextAreaElement ? 'textarea' : element instanceof HTMLSelectElement ? 'select' : element.type;
           const compositeRole = nativeCombobox ? 'combobox' : ['combobox','listbox'].includes(declaredRole) ? declaredRole : null;
-          if (!declaredRole && !controlKinds.has(kind)) { omittedControls = true; continue; }
-          if (controls.length >= 64) { truncated = true; omittedControls = true; break; }
+          if (!declaredRole && !controlKinds.has(kind)) { omittedControls = omittedControlMetadata = true; continue; }
+          if (controls.length >= 64) { truncated = true; omittedControls = omittedControlMetadata = true; break; }
           let label = labelFor(element).label;
           if (!label && declaredRole && ['checkbox','radio','switch','button'].includes(declaredRole)) label = labelText(element).trim();
           if (!label && element instanceof HTMLButtonElement) label = (buttons.get(element) || []).map(entry => entry.text).join(' ');
@@ -1210,12 +1218,12 @@ enum ComputerUseBrowserDOM {
             // Browser-localized default captions are not literal page labels.
             label = kind === 'image' ? (element.getAttribute('alt') || '') : (element.getAttribute('value') || '');
           }
-          if (compositeRole && !label.trim()) { omittedControls = true; continue; }
+          if (compositeRole && !label.trim()) { omittedControls = omittedControlMetadata = true; continue; }
           const name = declaredRole ? '' : element.name || '', constraints = {};
           if (!declaredRole) for (const attribute of constraintNames) if (element.hasAttribute(attribute)) constraints[attribute] = element.getAttribute(attribute);
           const form = declaredRole ? null : formMetadata(element, kind);
           if (!small(label, 256) || !small(name, 256) || Object.values(constraints).some(value => !small(value, 512)) || form === undefined) {
-            truncated = true; omittedControls = true; continue;
+            truncated = true; omittedControls = omittedControlMetadata = true; continue;
           }
           const options = [];
           let valid = true;
@@ -1229,10 +1237,10 @@ enum ComputerUseBrowserDOM {
                 ({id, label, value, groupLabel, disabled, hidden})));
             }
           }
-          if (!valid) { truncated = true; omittedControls = true; continue; }
+          if (!valid) { truncated = true; omittedControls = omittedControlMetadata = true; continue; }
           if (!pageControlIDs.has(element)) pageControlIDs.set(element, 'c' + (++nextPageControlID));
           const containerID = containerIDFor(element);
-          if (!containerID) { omittedControls = true; continue; }
+          if (!containerID) { omittedControls = omittedControlMetadata = true; continue; }
           const control = {id: pageControlIDs.get(element), containerID, label, kind, name,
             disabled: element.matches(':disabled') || element.getAttribute('aria-disabled') === 'true',
             readOnly: declaredRole ? element.getAttribute('aria-readonly') === 'true' : !!element.readOnly,
@@ -1243,7 +1251,7 @@ enum ComputerUseBrowserDOM {
           const details = {references:[]};
           const state = includeControlState ? researchControlState(element, control, details) : null;
           const size = encoder.encode(JSON.stringify(control)).length + (state ? encoder.encode(JSON.stringify(state)).length : 0);
-          if (bytes + size > 65536) { truncated = true; omittedControls = true; continue; }
+          if (bytes + size > 65536) { truncated = true; omittedControls = omittedControlMetadata = true; continue; }
           bytes += size; controls.push(control);
           if (state) controlStates.push(state);
           if (compositeRole === 'listbox') representedLists.add(element);
@@ -1258,9 +1266,9 @@ enum ComputerUseBrowserDOM {
           for (let node = pageParent(option), depth = 0; node && depth < 128; node = pageParent(node), depth++) {
             if (representedLists.has(node)) { represented = true; break; }
           }
-          if (!represented) omittedControls = true;
+          if (!represented) omittedControls = omittedControlMetadata = true;
         }
-        return {texts, links, controls, controlStates, controlStateObserved:includeControlState, scopedControlIDs, containers:structure, omittedStructure, truncated, omittedEmbeddedContent, omittedControls, viewport: readViewport()};
+        return {texts, links, controls, controlStates, controlStateObserved:includeControlState, scopedControlIDs, containers:structure, omittedStructure, truncated, omittedEmbeddedContent, omittedControls, omittedControlMetadata, viewport: readViewport()};
       }
       function readFormQuery(binding) {
         if (!binding || binding.metadata.kind !== 'submit' || binding.metadata.disabled || !binding.form) return {status:'unsupported'};

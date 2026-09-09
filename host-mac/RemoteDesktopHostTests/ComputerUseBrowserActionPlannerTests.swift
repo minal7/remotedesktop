@@ -195,7 +195,7 @@ final class ComputerUseBrowserActionPlannerTests: XCTestCase {
                 if !requests.isEmpty {
                     let request = try XCTUnwrap(requests.first), body = try object(String(decoding: XCTUnwrap(request.httpBody), as: UTF8.self))
                     let messages = try XCTUnwrap(body["messages"] as? [[String: String]])
-                    XCTAssertEqual(messages[1]["content"], input.contextJSON); XCTAssertEqual(messages[0]["content"], ComputerUseLocalBrowserActionPlanner.instructions)
+                    XCTAssertEqual(messages[1]["content"], input.contextJSON); XCTAssertEqual(messages[0]["content"], ComputerUseLocalBrowserActionPlanner.instructions(for: input))
                     XCTAssertEqual(request.url?.host, "127.0.0.1"); XCTAssertEqual(request.timeoutInterval, 30)
                     XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer fixture-token-value")
                     XCTAssertEqual(body["max_tokens"] as? Int, 1_024); XCTAssertEqual(body["cache_prompt"] as? Bool, false); XCTAssertNil(body["tools"])

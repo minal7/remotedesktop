@@ -12,8 +12,9 @@ struct ComputerUseBrowserPopupIntent: Equatable, Sendable, CustomStringConvertib
     let requirementIndex: Int
     let observedPreservedControlIDs: [String]
     let baselineDigest: String
+    let scopeReview: ComputerUseBrowserEffectScopeReview?
     init(interpretation: ComputerUseBrowserGoalProposal, evidence: ComputerUseBrowserPageEvidence,
-         controlID: String, requirementIndex: Int) throws {
+         controlID: String, requirementIndex: Int, scopeReview: ComputerUseBrowserEffectScopeReview? = nil) throws {
         guard interpretation.input.taskID == evidence.document.taskID, interpretation.disposition == .research,
               interpretation.requirements.indices.contains(requirementIndex),
               ComputerUseBrowserControlRead.accepts(interpretation.requirements[requirementIndex]),
@@ -28,6 +29,8 @@ struct ComputerUseBrowserPopupIntent: Equatable, Sendable, CustomStringConvertib
         }.map(\.controlID)
         observedPreservedControlIDs = preserved
         baselineDigest = try ComputerUseBrowserObservedCriteria.digest(controlIDs: [controlID] + preserved, page: evidence.page)
+        guard scopeReview == nil || scopeReview?.matches(interpretation: interpretation, evidence: evidence) == true else { throw ComputerUseBrowserPopupError.invalidIntent }
+        self.scopeReview = scopeReview
         self.interpretation = interpretation; self.evidence = evidence
         self.controlID = controlID; self.requirementIndex = requirementIndex
     }
@@ -62,9 +65,9 @@ struct ComputerUseBrowserPopupTarget: Equatable, Sendable, CustomStringConvertib
     let intent: ComputerUseBrowserPopupIntent
     let binding: ComputerUseBrowserPopupBinding
     var payloadDigest: String {
-        ComputerUseTaskContract.digest(["browser-popup-opening-v2", intent.interpretation.input.digest,
+        ComputerUseTaskContract.digest([intent.scopeReview == nil ? "browser-popup-opening-v2" : "browser-popup-opening-v3", intent.interpretation.input.digest,
             intent.evidence.document.contextID, intent.evidence.documentID, intent.evidence.page.id,
-            binding.id, binding.controlID, String(intent.requirementIndex), intent.baselineDigest])
+            binding.id, binding.controlID, String(intent.requirementIndex), intent.baselineDigest] + (intent.scopeReview.map { [$0.digest] } ?? []))
     }
     var description: String { "BrowserPopupTarget" }
     var debugDescription: String { description }

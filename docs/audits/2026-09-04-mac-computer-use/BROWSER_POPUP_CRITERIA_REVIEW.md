@@ -2,6 +2,8 @@
 
 Source checkpoint following `41e7cbf`. [Option selection is connected to research](BROWSER_OPTION_SELECTION_DRIVER_REVIEW.md), but opening the dropdown previously required only metadata and could change another criterion before selection captured its baseline. This checkpoint requires scoped inspection before opening, binds observed criteria to the opening operation, and retains those original values into subsequent choice/read preparation. The source remains uncompiled and unexecuted.
 
+Follow-up: [unread-control effect-scope review](BROWSER_EFFECT_SCOPE_REVIEW.md) now adds explicit metadata accounting, additive read scopes and completed-review contract binding for normal dropdown effects. Semantic correctness and universal scope enforcement remain open.
+
 ## First-principles failures and repair
 
 The baseline must precede the effect it constrains. Reading a date after a dropdown handler has reset it cannot establish that the user's original date was preserved. A receipt that proves only that the list became visible also cannot establish that opening left selection or other settings intact.

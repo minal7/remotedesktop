@@ -65,8 +65,9 @@ struct ComputerUseBrowserOptionSelectionIntent: Equatable, Sendable, CustomStrin
     let selectionMode: String
     let needsDispatch: Bool
     let baselineDigest: String
+    let scopeReview: ComputerUseBrowserEffectScopeReview?
     init(interpretation: ComputerUseBrowserGoalProposal, evidence: ComputerUseBrowserPageEvidence,
-         controlID: String, optionID: String, requirementIndex: Int) throws {
+         controlID: String, optionID: String, requirementIndex: Int, scopeReview: ComputerUseBrowserEffectScopeReview? = nil) throws {
         let invalid = ComputerUseBrowserOptionSelectionError.invalidIntent
         guard interpretation.input.taskID == evidence.document.taskID, interpretation.disposition == .research,
               interpretation.requirements.indices.contains(requirementIndex),
@@ -93,6 +94,8 @@ struct ComputerUseBrowserOptionSelectionIntent: Equatable, Sendable, CustomStrin
             }
             preserved.append(state.controlID)
         }
+        guard scopeReview == nil || scopeReview?.matches(interpretation: interpretation, evidence: evidence) == true else { throw ComputerUseBrowserOptionSelectionError.invalidIntent }
+        self.scopeReview = scopeReview
         self.interpretation = interpretation; self.evidence = evidence; self.controlID = controlID; self.optionID = optionID
         self.requirementIndex = requirementIndex; observedPreservedControlIDs = preserved
         selectionMode = reading.mode; needsDispatch = reading.selectedID != optionID
@@ -134,11 +137,11 @@ struct ComputerUseBrowserOptionSelectionTarget: Equatable, Sendable, CustomStrin
     let intent: ComputerUseBrowserOptionSelectionIntent
     let binding: ComputerUseBrowserOptionSelectionBinding
     var payloadDigest: String {
-        ComputerUseTaskContract.digest(["browser-option-selection-v2",intent.interpretation.input.digest,
+        ComputerUseTaskContract.digest([intent.scopeReview == nil ? "browser-option-selection-v2" : "browser-option-selection-v3",intent.interpretation.input.digest,
             intent.evidence.document.contextID,intent.evidence.documentID,intent.evidence.page.id,binding.id,
             intent.controlID,intent.optionID,String(intent.requirementIndex),intent.selectionMode,
             String(intent.needsDispatch),intent.baselineDigest]
-            + intent.observedPreservedControlIDs)
+            + intent.observedPreservedControlIDs + (intent.scopeReview.map { [$0.digest] } ?? []))
     }
     var description: String { "BrowserOptionSelectionTarget" }
     var debugDescription: String { description }

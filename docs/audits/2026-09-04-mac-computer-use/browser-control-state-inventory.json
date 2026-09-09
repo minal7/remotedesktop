@@ -131,7 +131,8 @@
     "RemoteDesktopHostTests/ComputerUseBrowserOptionSelectionTests",
     "RemoteDesktopHostTests/ComputerUseBrowserOptionSelectionStageTests",
     "RemoteDesktopHostTests/ComputerUseBrowserResearchOptionSelectionTests",
-    "RemoteDesktopHostTests/ComputerUseBrowserPopupCriteriaTests"
+    "RemoteDesktopHostTests/ComputerUseBrowserPopupCriteriaTests",
+    "RemoteDesktopHostTests/ComputerUseBrowserEffectScopeTests"
   ],
   "expectedTests": [
     "RemoteDesktopHostTests/ComputerUseBrowserActionPlannerTests/testActionContextRetainsTheWholeGoalAndObservedFormsWithoutPrivateValuesOrTargets",
@@ -234,6 +235,18 @@
     "RemoteDesktopHostTests/ComputerUseBrowserDeclaredStateTests/testInvalidDeclarationsStayUnavailableWithoutInventingDefaultsOrRepairs",
     "RemoteDesktopHostTests/ComputerUseBrowserDeclaredStateTests/testProtectedAndUnsupportedCustomControlsCannotBecomeReadableNativeActions",
     "RemoteDesktopHostTests/ComputerUseBrowserDeclaredStateTests/testScopedDeclarationsKeepCompleteAttributesAndExplicitProvenance",
+    "RemoteDesktopHostTests/ComputerUseBrowserEffectScopeTests/testActionInstructionsFollowAvailableCapabilitiesAndKeepTheWholeGoal",
+    "RemoteDesktopHostTests/ComputerUseBrowserEffectScopeTests/testCompletedReviewEntersPopupAndSelectionContractsWithoutRawValues",
+    "RemoteDesktopHostTests/ComputerUseBrowserEffectScopeTests/testKnownLazyOwnerDoesNotPretendItsUnavailableValueIsMissingMetadata",
+    "RemoteDesktopHostTests/ComputerUseBrowserEffectScopeTests/testMultipleReviewPartsStayBoundedAndCannotReleasePendingControls",
+    "RemoteDesktopHostTests/ComputerUseBrowserEffectScopeTests/testNativeChangeDuringReviewInvalidatesTheOriginalScopedEvidence",
+    "RemoteDesktopHostTests/ComputerUseBrowserEffectScopeTests/testOmittedDateBlocksOpeningUntilAdditiveReadingAndFreshReview",
+    "RemoteDesktopHostTests/ComputerUseBrowserEffectScopeTests/testOpaqueControlMetadataCannotBeClearedByReviewingVisibleControls",
+    "RemoteDesktopHostTests/ComputerUseBrowserEffectScopeTests/testPauseDuringReviewExpiresAuthorityAndHandbackRetainsTheCompleteTask",
+    "RemoteDesktopHostTests/ComputerUseBrowserEffectScopeTests/testReviewIsBoundToExactSnapshotAndOriginalGoal",
+    "RemoteDesktopHostTests/ComputerUseBrowserEffectScopeTests/testReviewPartsShareTheDecisionDeadlineAndJoinCancellation",
+    "RemoteDesktopHostTests/ComputerUseBrowserEffectScopeTests/testReviewRejectsMissingReorderedDuplicateForeignAndUntypedReferences",
+    "RemoteDesktopHostTests/ComputerUseBrowserEffectScopeTests/testScopeExtensionCannotDropReassignDuplicateOrReadUnrelatedControls",
     "RemoteDesktopHostTests/ComputerUseBrowserFormBindingTests/testBindingAndMalformedIDRequestsPreserveVerifiedInputReceipts",
     "RemoteDesktopHostTests/ComputerUseBrowserFormBindingTests/testBindingRejectsSupersededPageAndForeignAdapterWithoutRediscovery",
     "RemoteDesktopHostTests/ComputerUseBrowserFormBindingTests/testBindingRejectsValueCaretMembershipAndNativeIdentityChanges",

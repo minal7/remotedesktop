@@ -276,6 +276,7 @@ final class ComputerUseBrowserPopupCriteriaTests: XCTestCase {
         fixture.actions.select = { input in
             if input.optionSelectionHistory.last?.outcome == .selected { return try self.scope(input, inspection: false) }
             if input.optionReadControls.isEmpty { return try self.scope(input, inspection: true) }
+            if let review = try EffectScopeFixture.response(input) { return review }
             if let owner = input.popupControlIDs.first { return self.opening(owner) }
             if readOnly { return #"{"read_results":true}"# }
             let choice = try XCTUnwrap(input.optionChoices.first), option = try XCTUnwrap(choice.optionIDs.last)
