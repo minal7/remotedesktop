@@ -7,6 +7,54 @@ final class ComputerUseBrowserResultAssessmentTests: XCTestCase {
     private typealias Status = ComputerUseBrowserResultAssessment.Status
     private typealias Spec = AssessmentResultFixture.Spec
 
+    func testMixedPartyQuotesCannotHideConflictingSingleCategoryCapacityQuotes() async throws {
+        let cases: [(String, [String], Status)] = [
+            ("2 adults", ["2 adults and 1 child"], .quotedCapacitySufficient),
+            ("3 people", ["2 adults and 1 child"], .quotedCapacitySufficient),
+            ("2 adults", ["2 adults", "1 adult and 2 children"], .ambiguousQuotes),
+            ("3 tickets", ["3 tickets", "2 adults and 1 child"], .incompatibleLiteral)]
+        for (source, texts, expected) in cases {
+            let result = try await reading([row("Find concerts. "), row(source, field: "quantity")],
+                fields: texts.map { .init(.quantity, [$0]) }, extraHTML: "<p>Available for this offer</p>",
+                reviewer: AssessmentInventoryReview(meanings: Array(repeating: .availableQuantity, count: texts.count)))
+            defer { result.fixture.close() }
+            XCTAssertEqual(result.batch.requirementAssessment?.candidates.first?.requirements[1].status, expected)
+        }
+    }
+
+    func testMixedPartyAssessmentRequiresAllCategoriesAndRejectsConflictingOrUnrelatedTotals() async throws {
+        let cases: [([String], Status)] = [
+            (["3 adults", "2 children"], .quotedCapacitySufficient), (["2 adults and 1 child"], .quotedCapacitySufficient),
+            (["1 adult", "2 children"], .quotedCapacityInsufficient), (["2 adults"], .needsPartyCapacity),
+            (["3 people"], .needsPartyCapacity), (["2 adults", "1 child", "2 people"], .quotedCapacityInsufficient),
+            (["2 adults", "1 child", "3 people"], .quotedCapacitySufficient),
+            (["2 adults", "1 child", "3 tickets"], .incompatibleLiteral),
+            (["2 adults and 1 child", "2 adults"], .ambiguousQuotes),
+            (["2 adults", "1 child", "some children"], .unparsedQuote)]
+        for (texts, expected) in cases {
+            let result = try await reading([row("Find concerts. "), row("2 adults and 1 child.", field: "quantity")],
+                fields: texts.map { .init(.quantity, [$0]) }, extraHTML: "<p>Available for this offer</p>",
+                reviewer: AssessmentInventoryReview(meanings: Array(repeating: .availableQuantity, count: texts.count)))
+            defer { result.fixture.close() }
+            let assessment = try XCTUnwrap(result.batch.requirementAssessment)
+            XCTAssertEqual(assessment.requirements[1].quantityScope, .party)
+            XCTAssertEqual(assessment.candidates[0].requirements[1].status, expected, texts.joined(separator: "; "))
+            XCTAssertEqual(assessment.candidates[0].requirements[1].quoteIndices, Array(texts.indices))
+        }
+    }
+
+    func testMixedPartySelectionPackageAndLimitQuotesDoNotBecomeAvailability() async throws {
+        let cases: [(ComputerUseBrowserResultReview.QuantityMeaning, Status)] = [
+            (.selectedQuantity, .reviewSelectedQuantity), (.purchaseLimit, .reviewPurchaseLimit), (.packageSize, .reviewPackageSize)]
+        for (meaning, expected) in cases {
+            let result = try await reading([row("Find concerts. "), row("2 adults and 1 child.", field: "quantity")],
+                fields: [.init(.quantity, ["2 adults and 1 child"])], extraHTML: "<p>Available for this offer</p>",
+                reviewer: AssessmentInventoryReview(meanings: [meaning]))
+            defer { result.fixture.close() }
+            XCTAssertEqual(result.batch.requirementAssessment?.candidates.first?.requirements[1].status, expected)
+        }
+    }
+
     func testNativeQuantityQuestionPrecedesSearchAndItsAnswerReachesCapacityAssessment() async throws {
         for (answer, quote) in [("adults", "3 adults"), ("tickets", "1 ticket")] {
             let fixture = try await ResearchDriverFixture.make(candidateBodyHTML: "<p>\(quote)</p><p>Available for this offer</p>")

@@ -7,6 +7,62 @@ final class ComputerUseBrowserGoalClarificationTests: XCTestCase {
     private typealias Clarification = ComputerUseBrowserGoalClarification
     private typealias Scalars = ComputerUseBrowserScalarRequirements
 
+    func testMixedPartyAnswersRefineCompatibleTotalsOrComponentsWithoutDiscardingTheirCounts() throws {
+        let party = try XCTUnwrap(Scalars.PartyComposition(adults: 2, children: 1))
+        for source in ["3", "3 people", "2 adults", "1 child", "1 child and 2 adults"] {
+            let ledger = try quantityLedger(source: source, answer: "2 adults and 1 child")
+            guard case .bound(let count) = ledger.entries[1].resolution,
+                  case .clarification(let answer) = ledger.entries[2].resolution else { return XCTFail("A compatible composition must stay bound to its selected source") }
+            XCTAssertEqual(count.predicate, .party(party)); XCTAssertTrue(count.hasHistoricalSource)
+            XCTAssertEqual(answer.targetRequirementIDs, [count.requirementID])
+            XCTAssertTrue(ComputerUseBrowserSourceRequirements(proposal: ledger.proposal).unresolved.isEmpty)
+            XCTAssertEqual(ComputerUseBrowserResearchFormInput.normalizations(for: ledger.proposal).map(\.value), ["2", "1"])
+        }
+    }
+
+    func testMixedPartyAnswersRejectCountReplacementAndScalarConfirmationsKeepTheComposition() throws {
+        for source in ["2", "4 people", "3 tickets", "3 adults", "at least 3 people", "3 adults and 0 children"] {
+            let ledger = try quantityLedger(source: source, answer: "2 adults and 1 child")
+            XCTAssertEqual(ledger.entries[1].resolution, .unresolved(.contradictoryClarification))
+            XCTAssertEqual(ledger.entries[2].resolution, .unresolved(.contradictoryClarification))
+            XCTAssertTrue(ComputerUseBrowserSourceRequirements(proposal: ledger.proposal).unresolved.isEmpty)
+        }
+        let party = try XCTUnwrap(Scalars.PartyComposition(adults: 2, children: 1))
+        for answer in ["2 adults", "1 child", "3 people"] {
+            let ledger = try quantityLedger(source: "2 adults and 1 child", answer: answer)
+            guard case .bound(let retained) = ledger.entries[1].resolution else { return XCTFail("A component confirmation cannot remove another component") }
+            XCTAssertEqual(retained.predicate, .party(party))
+        }
+        for answer in ["adults", "2", "3 adults", "exactly 2 people"] {
+            XCTAssertEqual(try quantityLedger(source: "2 adults and 1 child", answer: answer).entries[1].resolution, .unresolved(.contradictoryClarification))
+        }
+    }
+
+    func testNewMixedPartyAnswerAndItsLaterComponentConfirmationRetainTheWholeGoal() throws {
+        let original = try input("Find concerts."), state = Clarification(input: original)
+        let initial = try proposal(original, rows: [row(original.prompt)])
+        let question = try state.issue(proposal: initial, topic: .quantity, requirementIDs: [initial.requirements[0].id], context: context())
+        let withParty = try state.consume(questionID: question.id, answerTaskID: "party", answer: "2 adults and 1 child", context: context())
+        let current = try proposal(withParty, rows: [row(original.prompt), row("2 adults and 1 child", turn: 1, role: "condition", field: "quantity")], disposition: "research")
+        let first = Scalars(proposal: current)
+        guard case .bound(let newCount) = first.entries[1].resolution else { return XCTFail("The whole answer needs its own composition") }
+        XCTAssertFalse(newCount.hasHistoricalSource)
+        let followup = try state.issue(proposal: current, topic: .quantity, requirementIDs: [current.requirements[1].id], context: context())
+        let updated = try state.consume(questionID: followup.id, answerTaskID: "child", answer: "1 child", context: context())
+        let final = Scalars(proposal: try proposal(updated, rows: [row(original.prompt),
+            row("2 adults and 1 child", turn: 1, role: "prohibition", field: "navigationSource"),
+            row("1 child", turn: 2, role: "prohibition", field: "navigationSource")], disposition: "research"))
+        guard case .bound(let retained) = final.entries[1].resolution,
+              case .clarification(let binding) = final.entries[2].resolution else { return XCTFail("The later answer must retain the earlier adult count") }
+        XCTAssertEqual(retained.predicate, newCount.predicate)
+        XCTAssertEqual(retained.historicalRequirementIDs, [current.requirements[1].id])
+        XCTAssertEqual(binding.targetRequirementIDs, [retained.requirementID])
+        XCTAssertEqual(final.entries[0].resolution, .unresolved(.notScalar))
+        XCTAssertTrue(ComputerUseBrowserSourceRequirements(proposal: final.proposal).unresolved.isEmpty)
+        XCTAssertEqual(updated.rootDigest, original.rootDigest)
+        XCTAssertEqual(updated.userTurns, [original.prompt, "2 adults and 1 child", "1 child"])
+    }
+
     func testScopedQuantityAnswersPreserveCountsComparatorsAndPartyRefinements() throws {
         let cases: [(String, String, Scalars.Comparison, Scalars.QuantityUnit)] = [
             ("2", "adults", .equal, .adults), ("at least 2", "2 tickets", .atLeast, .tickets),
@@ -26,7 +82,7 @@ final class ComputerUseBrowserGoalClarificationTests: XCTestCase {
     }
 
     func testQuantityAnswersCannotReplaceCountsComparatorsOrKnownUnitScopes() throws {
-        for (source, answer) in [("2", "3 tickets"), ("at least 2", "exactly 2 tickets"),
+        for (source, answer) in [("2", "3 tickets"), ("2", "2 adults and 1 child"), ("at least 2", "exactly 2 tickets"),
             ("2 tickets", "people"), ("2 adults", "people"), ("2 children", "adults"),
             ("2 options", "tickets")] {
             let ledger = try quantityLedger(source: source, answer: answer)
@@ -35,7 +91,7 @@ final class ComputerUseBrowserGoalClarificationTests: XCTestCase {
             XCTAssertTrue(ComputerUseBrowserSourceRequirements(proposal: ledger.proposal).unresolved.isEmpty,
                 "A conflicting quantity literal is still not a website instruction")
         }
-        for answer in ["2 adults and 1 child", "maybe tickets", "adults or children"] {
+        for answer in ["maybe tickets", "adults or children"] {
             let ledger = try quantityLedger(source: "2", answer: answer)
             XCTAssertEqual(ledger.entries[1].resolution, .unresolved(.ambiguousClarification))
             XCTAssertEqual(ledger.entries[2].resolution, .unresolved(.ambiguousClarification))

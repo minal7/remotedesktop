@@ -24,13 +24,15 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
         enum Parameter: Equatable, Sendable {
             case currency(Currency), priceBasis(PriceBasis), fees(Fees), date(DayRange)
             case quantity(Comparison?, Int64?, QuantityUnit?)
+            case party(PartyComposition)
             fileprivate var identity: [String] {
                 switch self { case .currency(let value): return ["currency", value.rawValue]
                 case .priceBasis(let value): return ["priceBasis", value.rawValue]
                 case .fees(let value): return ["fees", value.rawValue]
                 case .date(let value): return Predicate.day(value).identity
                 case .quantity(let comparison, let count, let unit):
-                    return ["quantity", comparison?.rawValue ?? "unchanged", count.map(String.init) ?? "unchanged", unit?.rawValue ?? "unchanged"] }
+                    return ["quantity", comparison?.rawValue ?? "unchanged", count.map(String.init) ?? "unchanged", unit?.rawValue ?? "unchanged"]
+                case .party(let value): return Predicate.party(value).identity }
             }
         }
         let id: String
@@ -98,6 +100,28 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
         var isPartySize: Bool { scope == .party }
     }
     enum PriceBasis: String, Sendable { case unspecified, total, perPerson, perTicket }
+    /// Exact requested categories. This does not define a provider's ages,
+    /// ticket types or whether the categories are jointly bookable.
+    struct PartyComposition: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+        let adults: Int64
+        let children: Int64
+        var total: Int64 { adults + children }
+        init?(adults: Int64, children: Int64) {
+            guard (0...999).contains(adults), (0...999).contains(children) else { return nil }
+            self.adults = adults; self.children = children
+        }
+        func count(for unit: QuantityUnit) -> Int64? {
+            switch unit { case .adults: return adults; case .children: return children; case .people: return total; default: return nil }
+        }
+        func compareCapacity(adults availableAdults: Int64?, children availableChildren: Int64?, people: Int64? = nil) -> Evaluation {
+            guard [availableAdults, availableChildren, people].compactMap({ $0 }).allSatisfy({ $0 >= 0 }),
+                  adults == 0 || availableAdults != nil, children == 0 || availableChildren != nil else { return .unverifiable }
+            return (availableAdults ?? 0) >= adults && (availableChildren ?? 0) >= children && (people.map { $0 >= total } ?? true)
+                ? .satisfied : .notSatisfied
+        }
+        var description: String { "BrowserPartyComposition" }
+        var debugDescription: String { description }
+    }
     enum Fees: String, Sendable { case unspecified, included, excluded }
     enum Currency: String, Sendable {
         case usd = "USD", eur = "EUR", gbp = "GBP", cad = "CAD", aud = "AUD", jpy = "JPY"
@@ -152,12 +176,14 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
     }
     enum Predicate: Equatable, Sendable {
         case quantity(Comparison, Int64, QuantityUnit)
+        case party(PartyComposition)
         case price(Comparison, Amount, PriceBasis, Fees)
         case day(DayRange)
         fileprivate var identity: [String] {
             switch self {
             case .quantity(let comparison, let count, let unit):
                 return ["quantity", comparison.rawValue, String(count), unit.rawValue]
+            case .party(let value): return ["party", String(value.adults), String(value.children)]
             case .price(let comparison, let amount, let basis, let fees):
                 return ["price", comparison.rawValue, String(amount.hundredths), amount.currency.rawValue, basis.rawValue, fees.rawValue]
             case .day(let range):
@@ -169,6 +195,7 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
     /// source, offer association, exactness and scope before supplying it.
     enum Observation: Equatable, Sendable {
         case quantity(Int64, QuantityUnit)
+        case party(PartyComposition)
         case price(Amount, PriceBasis, Fees, isExact: Bool)
         case day(CivilDay)
     }
@@ -176,6 +203,7 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
     /// inventory nor association is established by a literal's spelling.
     enum Literal: Equatable, Sendable {
         case quantity(Int64, QuantityUnit)
+        case party(PartyComposition)
         case price(Amount, PriceBasis, Fees)
         case day(CivilDay)
     }
@@ -200,6 +228,7 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
         func evaluate(_ observation: Observation) -> Evaluation {
             switch observation {
             case .quantity(let count, let unit): return compareLiteral(.quantity(count, unit))
+            case .party(let value): return compareLiteral(.party(value))
             case .day(let day): return compareLiteral(.day(day))
             case .price(let amount, let basis, let fees, let isExact):
                 guard isExact else { return .unverifiable }
@@ -214,6 +243,7 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
             case (.quantity(let comparison, let expected, let unit), .quantity(let actual, let observedUnit)):
                 guard actual >= 0, unit == observedUnit else { return .unverifiable }
                 accepted = comparison.accepts(actual, expected: expected)
+            case (.party(let expected), .party(let actual)): accepted = actual == expected
             case (.price(let comparison, let expected, let basis, let fees), .price(let actual, let actualBasis, let actualFees)):
                 guard actual.currency == expected.currency,
                       basis == .unspecified || basis == actualBasis,
@@ -229,6 +259,12 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
         /// selection or a bookable offer. Never call it on selected counts,
         /// package sizes, policy limits or the number of result cards.
         func compareProposedCapacity(_ literal: Literal) -> Evaluation {
+            if case .party(let expected) = predicate, case .party(let actual) = literal {
+                return expected.compareCapacity(adults: actual.adults, children: actual.children)
+            }
+            if case .quantity(_, _, let unit) = predicate, case .party(let actual) = literal, let count = actual.count(for: unit) {
+                return compareProposedCapacity(.quantity(count, unit))
+            }
             guard case .quantity(let comparison, let expected, let unit) = predicate,
                   unit.scope != .resultSet, expected >= 0,
                   case .quantity(let actual, let observedUnit) = literal, actual >= 0, observedUnit == unit else {
@@ -576,7 +612,8 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
             let requirement = proposal.requirements[$0]
             guard !answerTurns.contains(requirement.sourceTurnIndex) else { return false }
             switch original[$0].resolution {
-            case .bound(let condition): if case .quantity = condition.predicate { return true }
+            case .bound(let condition):
+                switch condition.predicate { case .quantity, .party: return true; default: break }
             case .historicalQuantityUnit, .unresolved(.missingQuantityUnit): return true
             default: break
             }
@@ -613,20 +650,26 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
                 }
             }
             guard !invalidScope, !(missingDetail && !targets.isEmpty) else { unresolved(.clarificationScope); continue }
-            guard let parameter = Self.quantityAnswer(answer.answer), case .quantity(let statedComparison, let statedCount, let statedUnit) = parameter else {
+            guard let parameter = Self.quantityAnswer(answer.answer) else {
                 unresolved(.ambiguousClarification); continue
             }
             if targets.isEmpty && missingDetail {
                 // The entire answer is a new quantity clause. Do not attach
                 // its predicate to the earlier, broader outcome requirement.
-                guard let count = statedCount, let span = Self.answerSpan(answer.answer, turn: turn) else { unresolved(.clarificationScope); continue }
+                guard let span = Self.answerSpan(answer.answer, turn: turn) else { unresolved(.clarificationScope); continue }
                 let matches = answerIndices.filter { Self.scalarSpan(proposal.requirements[$0], input: proposal.input) == span }
                 guard matches.count == 1, let primary = matches.first else { unresolved(.clarificationScope); continue }
                 let ids = history(entries[primary].resolution)
                 let resolution: Resolution
-                if let unit = statedUnit {
+                let predicate: Predicate?
+                switch parameter {
+                case .party(let party): predicate = .party(party)
+                case .quantity(let comparison, let count?, let unit): predicate = unit.map { .quantity(comparison ?? .equal, count, $0) }
+                default: unresolved(.clarificationScope); continue
+                }
+                if let predicate {
                     resolution = .bound(.init(inputDigest: proposal.input.digest, requirementID: entries[primary].requirementID,
-                        predicate: .quantity(statedComparison ?? .equal, count, unit), historicalRequirementIDs: ids))
+                        predicate: predicate, historicalRequirementIDs: ids))
                 } else { resolution = ids.isEmpty ? .unresolved(.missingQuantityUnit) : .historicalQuantityUnit(ids) }
                 entries[primary] = .init(requirementID: entries[primary].requirementID, resolution: resolution)
                 let binding = ClarificationBinding(input: proposal.input, turn: turn, parameter: parameter, targets: [entries[primary].requirementID])
@@ -646,6 +689,35 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
                     return Self.conditionSource(scope.source) != Self.conditionSource(source)
                 }
                 guard !changedScope else { continue }
+                let ids = history(entries[target].resolution)
+                if case .party(let party) = parameter {
+                    let compatible: Bool
+                    switch entries[target].resolution {
+                    case .bound(let condition):
+                        switch condition.predicate {
+                        case .party(let original): compatible = party == original
+                        case .quantity(.equal, let count, let unit): compatible = party.count(for: unit) == count
+                        default: compatible = false
+                        }
+                    case .historicalQuantityUnit, .unresolved(.missingQuantityUnit):
+                        let parts = Self.quantityParts(Self.conditionSource(source))
+                        compatible = parts?.comparison == .equal && parts?.unit == nil && parts?.count == party.total
+                    default: compatible = false
+                    }
+                    guard compatible else { continue }
+                    replacements.append((target, .bound(.init(inputDigest: proposal.input.digest, requirementID: requirement.id,
+                        predicate: .party(party), historicalRequirementIDs: ids))))
+                    continue
+                }
+                guard case .quantity(let statedComparison, let statedCount, let statedUnit) = parameter else { continue }
+                if case .bound(let condition) = entries[target].resolution, case .party(let party) = condition.predicate {
+                    guard statedComparison == nil || statedComparison == .equal, let count = statedCount, let unit = statedUnit,
+                          party.count(for: unit) == count else { continue }
+                    // Confirm a known component or total without replacing
+                    // the retained adult/child composition with that scalar.
+                    replacements.append((target, .bound(condition)))
+                    continue
+                }
                 let comparison: Comparison, count: Int64, unit: QuantityUnit?
                 switch entries[target].resolution {
                 case .bound(let condition):
@@ -659,7 +731,6 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
                 guard statedComparison == nil || statedComparison == comparison, statedCount == nil || statedCount == count else { continue }
                 if let unit, let statedUnit, unit != statedUnit,
                    !(unit == .people && [.adults, .children].contains(statedUnit)) { continue }
-                let ids = history(entries[target].resolution)
                 if let finalUnit = statedUnit ?? unit {
                     replacements.append((target, .bound(.init(inputDigest: proposal.input.digest, requirementID: requirement.id,
                         predicate: .quantity(comparison, count, finalUnit), historicalRequirementIDs: ids))))
@@ -785,7 +856,7 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
             guard basis == .unspecified || basis == value else { return nil }; basis = value
         case .fees(let value):
             guard fees == .unspecified || fees == value else { return nil }; fees = value
-        case .date, .quantity: return nil
+        case .date, .quantity, .party: return nil
         }
         guard let amount = Amount(hundredths: original.hundredths, currency: currency) else { return nil }
         return .price(comparison, amount, basis, fees)
@@ -818,6 +889,7 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
         }
     }
     private static func quantity(_ source: String) -> Result<(Predicate, ComputerUseBrowserGoalProposal.Relation), BindingFailure> {
+        if let party = partyLiteral(source) { return .success((.party(party), .equal)) }
         guard let parts = quantityParts(source) else { return .failure(.init(reason: .unrecognizedSource)) }
         guard let unit = parts.unit else { return .failure(.init(reason: .missingQuantityUnit)) }
         return .success((.quantity(parts.comparison, parts.count, unit), parts.comparison.relation))
@@ -837,15 +909,32 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
     }
     private static func quantityAnswer(_ answer: String) -> ClarificationBinding.Parameter? {
         let source = conditionSource(answer)
+        if let party = partyLiteral(source) { return .party(party) }
         if let unit = QuantityUnit.literal(source) { return .quantity(nil, nil, unit) }
         guard let parts = quantityParts(source) else { return nil }
         return .quantity(parts.explicitComparison ? parts.comparison : nil, parts.count, parts.unit)
     }
     private static func quantityScope(_ scope: String, within answer: String) -> Bool {
+        if let party = partyLiteral(conditionSource(answer)) {
+            if let selected = partyLiteral(conditionSource(scope)) { return selected == party }
+            guard case .quantity(let comparison, let count?, let unit?)? = quantityAnswer(scope),
+                  comparison == nil || comparison == .equal else { return false }
+            return party.count(for: unit) == count
+        }
         guard case .quantity(let comparison, let count, let unit)? = quantityAnswer(scope),
               case .quantity(let expectedComparison, let expectedCount, let expectedUnit)? = quantityAnswer(answer) else { return false }
         return (comparison == nil || comparison == expectedComparison)
             && (count == nil || count == expectedCount) && (unit == nil || unit == expectedUnit)
+    }
+    static func partyLiteral(_ source: String) -> PartyComposition? {
+        let number = #"[0-9]{1,3}|one|two|three|four|five|six|seven|eight|nine|ten"#
+        let component = "(" + number + #")\s+(adults?|children|child)"#
+        let separator = #"(?:\s*,?\s+and\s+|\s*,\s*|\s*&\s*|\s+)"#
+        guard let parts = groups(#"^(?:for\s+)?(?:exactly\s+)?"# + component + separator + component + "$", source),
+              let firstUnit = QuantityUnit.literal(parts[1]), let secondUnit = QuantityUnit.literal(parts[3]), firstUnit != secondUnit else { return nil }
+        let words: [String: Int64] = ["one":1, "two":2, "three":3, "four":4, "five":5, "six":6, "seven":7, "eight":8, "nine":9, "ten":10]
+        guard let first = Int64(parts[0]) ?? words[parts[0].lowercased()], let second = Int64(parts[2]) ?? words[parts[2].lowercased()] else { return nil }
+        return .init(adults: firstUnit == .adults ? first : second, children: firstUnit == .children ? first : second)
     }
     private static func price(_ source: String) -> Result<(Predicate, ComputerUseBrowserGoalProposal.Relation), BindingFailure> {
         let pattern = #"^(under|below|less than|at most|no more than|over|above|more than|at least|exactly)\s+((?:USD|EUR|GBP|CAD|AUD|JPY)|[$€£¥])\s*((?:[0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)(?:\.[0-9]{1,2})?)(?:\s+(total|per person|per ticket))?(?:\s+(including fees|excluding fees))?$"#

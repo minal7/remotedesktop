@@ -643,8 +643,8 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
         let conditions = Dictionary(uniqueKeysWithValues: scalars.entries.map { ($0.requirementID, $0.resolution) })
         requirements = interpretation.requirements.map { requirement in
             let scope: Scalars.QuantityScope?
-            if case .bound(let condition)? = conditions[requirement.id], case .quantity(_, _, let unit) = condition.predicate {
-                scope = unit.scope
+            if case .bound(let condition)? = conditions[requirement.id] {
+                switch condition.predicate { case .quantity(_, _, let unit): scope = unit.scope; case .party: scope = .party; default: scope = nil }
             } else { scope = nil }
             return .init(id: requirement.id, turn: requirement.sourceTurnIndex, sourceByteOffset: requirement.sourceByteOffset,
                 sourceByteCount: requirement.sourceByteCount, role: requirement.role, field: requirement.field,
@@ -706,6 +706,46 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
                 }
                 // The number of discovered cards is not the number of unique,
                 // qualifying offers, nor evidence of inventory for a party.
+                if case .party(let party) = condition.predicate {
+                    let indices = quotes.indices.filter { quotes[$0].kind == .quantity }
+                    guard !incomplete else { return result(.incompletePage, quotes: indices) }
+                    guard let review, !indices.isEmpty else { return result(.needsPartyCapacity, quotes: indices) }
+                    guard review.association != .mixedOffers else { return result(.reviewMixedOffers, quotes: indices) }
+                    guard review.association == .singleOffer else { return result(.reviewUnresolved, quotes: indices) }
+                    let available = indices.filter { review.fields[quotes[$0].fieldIndex].quantity == .availableQuantity }
+                    if available.isEmpty {
+                        let meanings = indices.map { review.fields[quotes[$0].fieldIndex].quantity }
+                        if meanings.allSatisfy({ $0 == .selectedQuantity }) { return result(.reviewSelectedQuantity, quotes: indices) }
+                        if meanings.allSatisfy({ $0 == .purchaseLimit }) { return result(.reviewPurchaseLimit, quotes: indices) }
+                        if meanings.allSatisfy({ $0 == .packageSize }) { return result(.reviewPackageSize, quotes: indices) }
+                        return result(.reviewQuantityUnresolved, quotes: indices)
+                    }
+                    guard available.allSatisfy({ quotes[$0].literal != nil }) else { return result(.unparsedQuote, quotes: available) }
+                    var capacities: [Scalars.QuantityUnit: Int64] = [:]
+                    var duplicate = false, incompatible = false
+                    for index in available {
+                        let values: [(Scalars.QuantityUnit, Int64)]
+                        switch quotes[index].literal {
+                        case .party(let value)?: values = [(.adults, value.adults), (.children, value.children)]
+                        case .quantity(let count, let unit)? where unit.isPartySize: values = [(unit, count)]
+                        default: incompatible = true; continue
+                        }
+                        for (unit, count) in values {
+                            if capacities[unit] != nil { duplicate = true }
+                            else { capacities[unit] = count }
+                        }
+                    }
+                    guard !incompatible else { return result(.incompatibleLiteral, quotes: available) }
+                    guard !duplicate else { return result(.ambiguousQuotes, quotes: available) }
+                    // A total is an additional bound, never a substitute for
+                    // the requested adult/child capacities. No cross-offer
+                    // pooling, ticket conversion or duplicate summation.
+                    switch party.compareCapacity(adults: capacities[.adults], children: capacities[.children], people: capacities[.people]) {
+                    case .satisfied: return result(.quotedCapacitySufficient, quotes: available)
+                    case .notSatisfied: return result(.quotedCapacityInsufficient, quotes: available)
+                    case .unverifiable: return result(.needsPartyCapacity, quotes: available)
+                    }
+                }
                 if case .quantity(_, _, let unit) = condition.predicate {
                     let indices = quotes.indices.filter { quotes[$0].kind == .quantity }
                     if unit.scope == .resultSet { return result(.needsResultSet) }
@@ -725,8 +765,12 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
                     // Do not discard another proposed capacity whose unit or
                     // complete literal cannot be parsed; it could conflict.
                     guard available.allSatisfy({ quotes[$0].literal != nil }) else { return result(.unparsedQuote, quotes: available) }
+                    if !unit.isPartySize && available.contains(where: { if case .party? = quotes[$0].literal { return true }; return false }) {
+                        return result(.incompatibleLiteral, quotes: available)
+                    }
                     let matching = available.filter {
                         if case .quantity(_, let observedUnit)? = quotes[$0].literal { return observedUnit == unit }
+                        if case .party(let party)? = quotes[$0].literal { return party.count(for: unit) != nil }
                         return false
                     }
                     guard !matching.isEmpty else { return result(.incompatibleLiteral, quotes: available) }
@@ -739,7 +783,8 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
                     }
                 }
                 let kind: ComputerUseBrowserResultProposal.Kind
-                switch condition.predicate { case .price: kind = .price; case .day: kind = .date; case .quantity: return result(.needsResultSet) }
+                switch condition.predicate { case .price: kind = .price; case .day: kind = .date; case .quantity: return result(.needsResultSet)
+                case .party: return result(.needsPartyCapacity) }
                 let allIndices = quotes.indices.filter { quotes[$0].kind == kind }
                 let selections = allIndices.filter { quotes[$0].sourceKind != .pageText }
                 let indices = allIndices.filter { quotes[$0].sourceKind == .pageText }
@@ -823,6 +868,7 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
         case .price: return price(text)
         case .date: return day(text).map { .day($0) }
         case .quantity:
+            if let party = Scalars.partyLiteral(text) { return .party(party) }
             guard let parts = groups(#"^([0-9]{1,3}) ("# + Scalars.QuantityUnit.literalPattern + #")$"#, text),
                   let count = Int64(parts[0]), let unit = Scalars.QuantityUnit.literal(parts[1]) else { return nil }
             return .quantity(count, unit)

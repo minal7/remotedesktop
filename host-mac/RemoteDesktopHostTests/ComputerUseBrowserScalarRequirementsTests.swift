@@ -5,6 +5,44 @@ import XCTest
 final class ComputerUseBrowserScalarRequirementsTests: XCTestCase {
     private typealias Scalar = ComputerUseBrowserScalarRequirements
 
+    func testMixedPartyGrammarKeepsBothCategoriesAndCanonicalizesTheirOrder() throws {
+        let party = try XCTUnwrap(Scalar.PartyComposition(adults: 2, children: 1))
+        for source in ["2 adults and 1 child", "1 child, 2 adults", "for two adults & one child.",
+            "exactly 2 adults, and 1 child", "2 adults 1 child"] {
+            let bound = try compile(source, field: "quantity")
+            XCTAssertEqual(bound.predicate, .party(party))
+            XCTAssertEqual(bound.evaluate(.party(party)), .satisfied)
+            XCTAssertEqual(bound.evaluate(.quantity(3, .people)), .unverifiable)
+        }
+        XCTAssertEqual(try compile("2 adults and 0 children", field: "quantity").predicate,
+            .party(try XCTUnwrap(Scalar.PartyComposition(adults: 2, children: 0))))
+        for source in ["2 adults or 1 child", "2 adults and 1 adult", "2 adults and 1 infant", "2 adults and 1 child aged 8",
+            "at least 2 adults and 1 child", "2 adults and 1000 children", "2 tickets and 1 child"] {
+            XCTAssertEqual(try resolution(source, field: "quantity"), .unresolved(.unrecognizedSource))
+        }
+        XCTAssertEqual(try resolution("2 adults and 1 child", field: "quantity", relation: "above"), .unresolved(.contradictoryProposal))
+    }
+
+    func testMixedPartyCapacityNeedsEachRequestedCategoryAndHonorsAnAdditionalTotal() throws {
+        let party = try XCTUnwrap(Scalar.PartyComposition(adults: 2, children: 1))
+        XCTAssertEqual(party.total, 3)
+        XCTAssertEqual(party.compareCapacity(adults: 3, children: 2), .satisfied)
+        XCTAssertEqual(party.compareCapacity(adults: 1, children: 2), .notSatisfied)
+        XCTAssertEqual(party.compareCapacity(adults: 2, children: 1, people: 2), .notSatisfied)
+        XCTAssertEqual(party.compareCapacity(adults: 2, children: 1, people: 3), .satisfied)
+        XCTAssertEqual(party.compareCapacity(adults: nil, children: nil, people: 3), .unverifiable)
+        XCTAssertEqual(party.compareCapacity(adults: 3, children: nil), .unverifiable)
+        XCTAssertEqual(party.compareCapacity(adults: -1, children: 1), .unverifiable)
+        let noChildren = try XCTUnwrap(Scalar.PartyComposition(adults: 2, children: 0))
+        XCTAssertEqual(noChildren.compareCapacity(adults: 2, children: nil), .satisfied)
+        let condition = try compile("2 adults and 1 child", field: "quantity")
+        let larger = try XCTUnwrap(Scalar.PartyComposition(adults: 3, children: 2))
+        XCTAssertEqual(condition.compareLiteral(.party(larger)), .notSatisfied)
+        XCTAssertEqual(condition.compareProposedCapacity(.party(larger)), .satisfied)
+        XCTAssertNil(Scalar.PartyComposition(adults: -1, children: 1))
+        XCTAssertNil(Scalar.PartyComposition(adults: 2, children: 1000))
+    }
+
     func testSingularQuantitiesKeepTheirUnitsAndBareCountsRequireAUnit() throws {
         let aliases: [(String, Scalar.QuantityUnit)] = [("result", .results), ("option", .options), ("flight", .flights),
             ("concert", .concerts), ("movie", .movies), ("ticket", .tickets), ("person", .people),
@@ -16,7 +54,7 @@ final class ComputerUseBrowserScalarRequirementsTests: XCTestCase {
             XCTAssertEqual(try resolution(source, field: "quantity"), .unresolved(.missingQuantityUnit))
         }
         XCTAssertEqual(try resolution("at least 2", field: "quantity", relation: "below"), .unresolved(.contradictoryProposal))
-        for source in ["1000 tickets", "-1 ticket", "1.5 adults", "2 adults and 1 child", "2 infants", "tickets"] {
+        for source in ["1000 tickets", "-1 ticket", "1.5 adults", "2 infants", "tickets"] {
             XCTAssertEqual(try resolution(source, field: "quantity"), .unresolved(.unrecognizedSource))
         }
     }

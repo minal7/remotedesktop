@@ -4,6 +4,51 @@ import XCTest
 
 @MainActor
 final class ComputerUseBrowserFormPlannerTests: XCTestCase {
+    func testMixedPartyNormalizationsHaveSeparateStableUnitsUnderOneRequirement() throws {
+        for source in ["2 adults and 1 child. ", "1 child and 2 adults. "] {
+            let goal = try proposal(rows: [row("Find concerts. ", role: "outcome", field: "category"),
+                row(source, field: "quantity"), row("3 options.", field: "quantity")])
+            let values = ComputerUseBrowserResearchFormInput.normalizations(for: goal)
+            XCTAssertEqual(values.map(\.id), ["value2-adults", "value2-children"])
+            XCTAssertEqual(values.map(\.requirementIndex), [1, 1])
+            XCTAssertEqual(values.map(\.kind), [.partySize, .partySize])
+            XCTAssertEqual(values.map(\.unit), ["adults", "children"])
+            XCTAssertEqual(values.map(\.value), ["2", "1"])
+        }
+    }
+
+    func testMixedPartyCountsReachBothNativeFieldsAndOneVerifiedQuery() async throws {
+        let goal = try proposal(rows: [row("Find concert options. ", role: "outcome", field: "category"),
+            row("two adults and one child. ", field: "quantity"), row("three options.", field: "quantity")])
+        let body = """
+        <form action='/results'><label>Adults<input type='number' name='adults' min='1' max='8' value='1'></label>
+        <label>Children<input type='number' name='children' min='0' max='8' value='0'></label><button>Search</button></form>
+        """
+        var edits = 0
+        let fixture = try await FormPlannerFixture(goal: goal, body: body,
+            additionalRoutes: ["/results?adults=2&children=1":.init(body: "<p>Search received</p>")],
+            domScriptDidDispatch: { if $0 == .edit { edits += 1 } })
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { fixture.close(); try? FileManager.default.removeItem(at: directory) }
+        let owner = fixture.owner(journalDirectory: directory)
+        defer { owner.retire() }
+        _ = try await owner.interpretGoal()
+        let input = try await owner.prepareFormInput()
+        let content = try plan([["field":"field1", "normalized":"value2-adults"], ["field":"field2", "normalized":"value2-children"]])
+        let proposed = try await owner.planForm(input, using: local(FormPlannerTransport(content: content)))
+        XCTAssertEqual(input.normalizations.map(\.requirementIndex), [1, 1])
+        XCTAssertEqual(input.normalizations.map(\.value), ["2", "1"])
+        XCTAssertEqual(edits, 0)
+        let receipt = try await owner.executeForm(proposed, input: input)
+        let page = try await owner.observeFormResultPage(after: receipt), control = try XCTUnwrap(page.page.controls.first { $0.kind == "submit" }).id
+        let first = try await owner.openFormQuery(after: receipt, controlID: control, evidence: page)
+        let repeated = try await owner.openFormQuery(after: receipt, controlID: control, evidence: page)
+        XCTAssertEqual(first, repeated); XCTAssertEqual(edits, 2)
+        XCTAssertEqual(fixture.server.count("/results?adults=2&children=1"), 1)
+        XCTAssertEqual(owner.confirmedFormHistory, [receipt]); XCTAssertEqual(owner.input, goal.input)
+        XCTAssertEqual(owner.confirmedNavigationHistory.map(\.kind), [.formQuery])
+    }
+
     func testCarriedPreservationRejectsConflictingReferencesAndCannotBecomeAnEdit() async throws {
         let fixture = try await FormPlannerFixture(goal: proposal(preserveReference: true))
         defer { fixture.close() }

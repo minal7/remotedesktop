@@ -4,6 +4,24 @@ import XCTest
 
 @MainActor
 final class ComputerUseBrowserResearchAnswerTests: XCTestCase {
+    func testMixedPartyAnswerEligibilityRequiresCapacityForEachRequestedCategory() async throws {
+        for capacity in ["2 adults and 1 child", "1 adult and 2 children"] {
+            let fixture = try await ResearchAnswerFixture.make(extra: ("2 adults and 1 child. ", "condition", "quantity"), partyCapacity: capacity)
+            defer { fixture.source.close() }
+            let result = try await fixture.source.start()
+            if capacity == "2 adults and 1 child" {
+                guard case .browserResearchAnswer? = result else { return XCTFail("A complete reviewed composition must reach answer selection") }
+            } else if case .browserResearchAnswer? = result { return XCTFail("An equal total cannot hide insufficient adult capacity") }
+            let owner = try fixture.source.owner(), interpreted = try await owner.interpretGoal()
+            let reading = try await owner.readCandidates(), assessment = try XCTUnwrap(reading.requirementAssessment)
+            XCTAssertEqual(assessment.candidates[0].requirements[2].status,
+                capacity == "2 adults and 1 child" ? .quotedCapacitySufficient : .quotedCapacityInsufficient)
+            let page = try XCTUnwrap(reading.answerPage(goal: interpreted.proposal.input))
+            XCTAssertEqual(page.candidateIndices, capacity == "2 adults and 1 child" ? [0] : [])
+            XCTAssertEqual(fixture.source.server.count("/search?q=concerts"), 1)
+        }
+    }
+
     func testNewScopedResultCountControlsAnswerSelectionDespiteNavigationAndProhibitionLabels() async throws {
         let fixture = try await ResearchAnswerFixture.make(count: 2)
         defer { fixture.source.close() }
@@ -676,7 +694,7 @@ struct ResearchAnswerFixture {
     func modelCalls() async -> (counts: [URLRequest], completions: [URLRequest]) { await transport.calls }
     static func make(count: Int = 1, requested: Int? = nil, price: String = "USD 40", duplicate: Bool = false,
                      extra: (String, String, String)? = nil, omitDetailLinks: Bool = false,
-                     inventory: Int? = nil, quantityPolicy: ComputerUseBrowserResultReview.QuantityMeaning? = nil,
+                     inventory: Int? = nil, quantityPolicy: ComputerUseBrowserResultReview.QuantityMeaning? = nil, partyCapacity: String? = nil,
                      includeControls: Bool = false, multiPage: Bool = false, repeatedPage: Bool = false,
                      historyRoute: Bool = false, controlHTML: String = "", resultDate: String? = nil, resultLocation: String? = nil,
                      surroundingHTML: String = "", controlRelationships: [ComputerUseBrowserControlRelevance.Relationship]? = nil,
@@ -709,12 +727,13 @@ struct ResearchAnswerFixture {
         }.joined() + "<p>Read the conditions</p>" + surroundingHTML + (includeControls ? "<label>Ticket notes<input value='Unscoped private text'></label>" : "")
         let inventoryHTML = inventory.map { "<p>\($0) tickets</p>" + (quantityPolicy == nil ? "" : "<p>2 tickets</p>")
             + "<p>Available for this concert</p>" } ?? ""
+        let partyHTML = partyCapacity.map { "<p>\($0)</p><p>Available for this concert</p>" } ?? ""
         let second = repeatedPage ? "<article><h2>Concert Alpha</h2><a href='/more'>Alpha details</a><p>USD 40</p></article>"
             : "<article><h2>Concert Beta</h2><a href='/more'>Beta details</a><p>USD 45</p></article>"
         let alpha = "<article><h2>Concert Alpha</h2><a href='/details'>Alpha details</a><p>USD 40</p></article>"
         let beta = "<article><h2>Concert Beta</h2><a href='/beta'>Beta details</a><p>USD 45</p></article>"
         let source = try await ResearchDriverFixture.make(linkPlanner: planner, resultPlanner: reviewed,
-            additionalCardHTML: additional, candidateBodyHTML: "<p>\(price)</p>" + inventoryHTML + controlHTML
+            additionalCardHTML: additional, candidateBodyHTML: "<p>\(price)</p>" + inventoryHTML + partyHTML + controlHTML
                 + (resultDate.map { "<p>Date: \($0)</p>" } ?? "") + (resultLocation.map { "<p>Location: \($0)</p>" } ?? ""), request: request,
             heldSignal: heldSignal, offersBodyHTML: multiPage ? second + "<p>Beta conditions apply</p>" : nil,
             searchBodyHTML: historyRoute ? alpha + beta : nil,
@@ -761,7 +780,9 @@ private final class ResearchAnswerReader: ComputerUseBrowserResultPlanning {
             let title = try XCTUnwrap(contained.first { ($0["text"] as? String)?.hasPrefix("Concert ") == true }?["id"] as? String)
             let price = try XCTUnwrap(contained.first { ($0["text"] as? String)?.hasPrefix("USD ") == true }?["id"] as? String)
             var fields: [[String: Any]] = [["kind":"title", "texts":[title]], ["kind":"price", "texts":[price]]]
-            for record in contained where record["kind"] as? String == "text" && (record["text"] as? String)?.hasSuffix(" tickets") == true {
+            for record in contained where record["kind"] as? String == "text" {
+                guard let text = record["text"] as? String,
+                      text.hasSuffix(" tickets") || ComputerUseBrowserScalarRequirements.partyLiteral(text) != nil else { continue }
                 fields.append(["kind":"quantity", "texts":[try XCTUnwrap(record["id"] as? String)]])
             }
             if let available = contained.first(where: { $0["text"] as? String == "Available for this concert" })?["id"] as? String {

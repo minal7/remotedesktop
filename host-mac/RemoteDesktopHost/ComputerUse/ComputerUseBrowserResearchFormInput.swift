@@ -106,21 +106,25 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
     /// of desired results cannot silently become an exact day or booking size.
     static func normalizations(for interpretation: ComputerUseBrowserGoalProposal) -> [Normalization] {
         let ledger = ComputerUseBrowserScalarRequirements(proposal: interpretation)
-        return ledger.entries.enumerated().compactMap { index, entry in
-            guard case .bound(let condition) = entry.resolution else { return nil }
+        return ledger.entries.enumerated().flatMap { index, entry -> [Normalization] in
+            guard case .bound(let condition) = entry.resolution else { return [] }
             switch condition.predicate {
             case .day(let range):
-                guard let day = range.lower, range.upper == day, range.lowerInclusive, range.upperInclusive else { return nil }
-                return .init(id: "value\(index + 1)", requirementIndex: index, kind: .date, value: day.iso8601, unit: "civilDay")
+                guard let day = range.lower, range.upper == day, range.lowerInclusive, range.upperInclusive else { return [] }
+                return [.init(id: "value\(index + 1)", requirementIndex: index, kind: .date, value: day.iso8601, unit: "civilDay")]
+            case .party(let party):
+                return [("adults", party.adults), ("children", party.children)].map { unit, count in
+                    .init(id: "value\(index + 1)-\(unit)", requirementIndex: index, kind: .partySize, value: String(count), unit: unit)
+                }
             case .quantity(.equal, let count, let unit):
                 let kind: Normalization.Kind
                 switch unit.scope {
-                case .resultSet: return nil
+                case .resultSet: return []
                 case .ticketInventory: kind = .ticketCount
                 case .party: kind = .partySize
                 }
-                return .init(id: "value\(index + 1)", requirementIndex: index, kind: kind, value: String(count), unit: unit.rawValue)
-            default: return nil
+                return [.init(id: "value\(index + 1)", requirementIndex: index, kind: kind, value: String(count), unit: unit.rawValue)]
+            default: return []
             }
         }
     }
