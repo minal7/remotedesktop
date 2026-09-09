@@ -18,6 +18,12 @@ final class ComputerUseBrowserResearchHistoryTests: XCTestCase {
         let afterBack = try fixture.browser.navigationDispatchHistory(taskID: owner.taskID)
         XCTAssertEqual(afterBack.attempts.last?.historySourceOperationID, back.operationID)
         XCTAssertEqual(afterBack.attempts.last?.outcome, .documentCommitted)
+        if #available(macOS 26.0, *) {
+            let decision = try XCTUnwrap(afterBack.observations.first {
+                $0.phase == .historyRequest && $0.attemptID == afterBack.attempts.last?.id
+            })
+            XCTAssertEqual(decision.binding, .exactHistoryItem); XCTAssertEqual(decision.decision, .allowed)
+        }
         let search = try await owner.readCandidates(), forward = try XCTUnwrap(search.historyOptions.first { $0.visit == 1 })
         XCTAssertEqual(forward.mode, .forward, "A real history traversal preserves the forward entry")
         let resumed = try await owner.revisitAfterReading(forward)
@@ -28,7 +34,7 @@ final class ComputerUseBrowserResearchHistoryTests: XCTestCase {
         let replay = try await owner.resumeHistoryNavigation()
         XCTAssertEqual(replay, resumed)
         XCTAssertEqual(fixture.server.count("/details"), calls)
-        XCTAssertEqual(try fixture.browser.navigationDispatchHistory(taskID: owner.taskID), afterForward,
+        XCTAssertEqual(try fixture.browser.navigationDispatchHistory(taskID: owner.taskID).attempts, afterForward.attempts,
             "Replaying a confirmed history result cannot create another native dispatch")
         let reread = try await owner.readCandidates(), toSearch = try XCTUnwrap(reread.historyOptions.first { $0.mode == .back })
         _ = try await owner.revisitAfterReading(toSearch)

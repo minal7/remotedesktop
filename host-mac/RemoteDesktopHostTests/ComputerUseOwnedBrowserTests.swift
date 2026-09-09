@@ -850,6 +850,16 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
             try await browser.reacquireAfterUserControl(taskID: "popup-login", requirement: requirement)
             let current = try XCTUnwrap(browser.currentDocument(taskID: "popup-login"))
             XCTAssertEqual(current.source, .userControlObservation)
+            let history = try browser.navigationDispatchHistory(taskID: "popup-login")
+            let signInObservations = history.observations.filter { $0.surface == .signInWindow }
+            XCTAssertFalse(signInObservations.isEmpty)
+            XCTAssertTrue(signInObservations.contains { $0.phase == .response && $0.decision == .allowed && $0.control == .userControl })
+            XCTAssertTrue(signInObservations.allSatisfy {
+                $0.attemptID == nil && $0.navigationCorrelationID == nil && $0.binding == .none
+                    && $0.configuredPolicy == nil && $0.policyCheck == .notChecked
+            })
+            XCTAssertEqual(history.attempts.count, 1)
+            for observation in signInObservations { XCTAssertFalse(String(reflecting: observation).contains("private-")) }
             XCTAssertFalse(browser.validate(original))
             XCTAssertEqual(browser.receipt(taskID: "popup-login", operationID: "login"), original)
             XCTAssertNil(browser.receipt(taskID: "popup-login", operationID: current.operationID))

@@ -4,6 +4,113 @@ import XCTest
 
 @MainActor
 final class ComputerUseBrowserSourcePolicyTests: XCTestCase {
+    func testNativePolicyObservationsKeepSlotCorrelationSeparateFromExactNavigationCallbacks() async throws {
+        let server = try OwnedBrowserHTTPFixture(), base = try await server.start()
+        defer { server.stop() }
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+        defer { browser.close() }
+        let input = try goal(), session = try browser.prepareWorkflowSession(taskID: input.taskID)
+        let origin = try ComputerUseBrowserSourceOrigin(base)
+        let policy = try ComputerUseBrowserSourcePolicy(goal: input, allowedOrigins: [origin])
+        try browser.installSourcePolicy(policy, replacing: nil, session: session)
+        _ = try await browser.navigate(taskID: input.taskID, operationID: "native", to: base)
+        let history = try browser.navigationDispatchHistory(taskID: input.taskID)
+        let attempt = try XCTUnwrap(history.attempts.first)
+        let action = try XCTUnwrap(history.observations.first { $0.phase == .navigationAction && $0.attemptID == attempt.id })
+        let response = try XCTUnwrap(history.observations.first { $0.phase == .response && $0.attemptID == attempt.id })
+        let start = try XCTUnwrap(history.observations.first { $0.phase == .provisionalStart && $0.attemptID == attempt.id })
+        let commit = try XCTUnwrap(history.observations.first { $0.phase == .documentCommitStarted && $0.attemptID == attempt.id })
+        let finish = try XCTUnwrap(history.observations.first { $0.phase == .documentFinished && $0.attemptID == attempt.id })
+        for event in [action, response] {
+            XCTAssertEqual(event.binding, .pendingSlot); XCTAssertEqual(event.decision, .allowed)
+            XCTAssertEqual(event.policyCheck, .permitted); XCTAssertEqual(event.configuredPolicy, policy)
+            XCTAssertEqual(event.origin, origin)
+        }
+        XCTAssertEqual(action.control, .automationAllowed)
+        XCTAssertEqual(response.control, .unknown, "Response policy enforcement does not query the pending operation's current control gate")
+        for event in [start, commit, finish] {
+            XCTAssertEqual(event.binding, .exactPendingNavigation); XCTAssertEqual(event.decision, .observed)
+            XCTAssertEqual(event.policyCheck, .notChecked)
+        }
+        for event in [action, response, start, commit, finish] {
+            XCTAssertEqual(event.attemptID, attempt.id)
+            XCTAssertEqual(event.parentSessionID, attempt.sessionID)
+            XCTAssertEqual(event.ownershipEpoch, attempt.ownershipEpoch)
+            XCTAssertEqual(event.generation, attempt.generation)
+            XCTAssertEqual(event.navigationCorrelationID, start.navigationCorrelationID)
+        }
+        XCTAssertNotNil(start.navigationCorrelationID)
+        XCTAssertTrue(history.observations.contains { $0.phase == .locationChanged })
+        XCTAssertFalse(history.observationsOverflowed)
+    }
+
+    func testRedirectCallbacksRemainObservationsRatherThanInventedRequestDecisions() async throws {
+        let destination = try OwnedBrowserHTTPFixture(), target = try await destination.start()
+        let server = try OwnedBrowserHTTPFixture(routes: ["/redirect": .init(status: 302, location: target.absoluteString + "/callback?code=private-code#private-fragment")])
+        let base = try await server.start()
+        defer { server.stop(); destination.stop() }
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+        defer { browser.close() }
+        let input = try goal(), session = try browser.prepareWorkflowSession(taskID: input.taskID)
+        let policy = try ComputerUseBrowserSourcePolicy(goal: input,
+            allowedOrigins: [ComputerUseBrowserSourceOrigin(base), ComputerUseBrowserSourceOrigin(target)])
+        try browser.installSourcePolicy(policy, replacing: nil, session: session)
+        _ = try await browser.navigate(taskID: input.taskID, operationID: "redirect", to: base.appendingPathComponent("redirect"))
+        let history = try browser.navigationDispatchHistory(taskID: input.taskID)
+        let attempt = try XCTUnwrap(history.attempts.first)
+        let redirect = try XCTUnwrap(history.observations.first { $0.phase == .serverRedirect && $0.attemptID == attempt.id })
+        XCTAssertEqual(redirect.binding, .exactPendingNavigation); XCTAssertEqual(redirect.attemptID, attempt.id)
+        XCTAssertEqual(redirect.decision, .observed); XCTAssertEqual(redirect.policyCheck, .notChecked)
+        XCTAssertEqual(redirect.control, .unknown); XCTAssertEqual(redirect.configuredPolicy, policy)
+        // WebKit's redirect callback has no destination argument. Do not
+        // assert that its live location snapshot is the next requested origin.
+        XCTAssertEqual(attempt.committedOrigin, try ComputerUseBrowserSourceOrigin(target))
+        XCTAssertTrue(history.observations.contains {
+            $0.phase == .response && $0.decision == .allowed && $0.origin == attempt.committedOrigin
+        })
+        for observation in history.observations {
+            let text = String(reflecting: observation)
+            XCTAssertFalse(text.contains("private-code")); XCTAssertFalse(text.contains("private-fragment"))
+            XCTAssertFalse(text.contains(base.absoluteString)); XCTAssertFalse(text.contains(target.absoluteString))
+        }
+    }
+
+    func testScriptedNavigationHasItsOwnObservedIdentityWithoutCreatingAnAutomatedDispatch() async throws {
+        let destination = try OwnedBrowserHTTPFixture(), target = try await destination.start()
+        let script = "fetch('/go').then(() => location.href = '\(target.absoluteString)/landed');"
+        let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: "<h1>Starting page</h1><script>\(script)</script>"), "/go": .init(held: true)])
+        let base = try await server.start()
+        defer { server.stop(); destination.stop() }
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+        defer { browser.close() }
+        let input = try goal(), session = try browser.prepareWorkflowSession(taskID: input.taskID)
+        let policy = try ComputerUseBrowserSourcePolicy(goal: input,
+            allowedOrigins: [ComputerUseBrowserSourceOrigin(base), ComputerUseBrowserSourceOrigin(target)])
+        try browser.installSourcePolicy(policy, replacing: nil, session: session)
+        _ = try await browser.navigate(taskID: input.taskID, operationID: "first", to: base.appendingPathComponent("page"))
+        try await waitUntil { server.count("/go") == 1 }
+        let before = try browser.navigationDispatchHistory(taskID: input.taskID)
+        let targetOrigin = try ComputerUseBrowserSourceOrigin(target)
+        server.releaseHeldResponses()
+        try await waitUntil {
+            (try? browser.navigationDispatchHistory(taskID: input.taskID).observations.dropFirst(before.observations.count).contains {
+                $0.phase == .documentFinished && $0.binding == .exactObservedNavigation && $0.origin == targetOrigin
+            }) == true
+        }
+        let after = try browser.navigationDispatchHistory(taskID: input.taskID)
+        let added = after.observations.dropFirst(before.observations.count)
+        let started = try XCTUnwrap(added.first { $0.phase == .provisionalStart && $0.binding == .exactObservedNavigation })
+        let finished = try XCTUnwrap(added.first { $0.phase == .documentFinished && $0.binding == .exactObservedNavigation })
+        XCTAssertEqual(started.control, .automationAllowed)
+        XCTAssertEqual(started.navigationCorrelationID, finished.navigationCorrelationID)
+        XCTAssertNotNil(started.navigationCorrelationID)
+        XCTAssertNil(started.attemptID); XCTAssertNil(finished.attemptID)
+        XCTAssertEqual(after.attempts, before.attempts)
+        XCTAssertNotEqual(after.identity, before.identity)
+        XCTAssertEqual(finished.origin, try ComputerUseBrowserSourceOrigin(target))
+        XCTAssertEqual(destination.count("/landed"), 1)
+    }
+
     func testDispatchHistoryKeepsNativeOriginsAndThePolicyUsedByEachAttempt() async throws {
         let server = try OwnedBrowserHTTPFixture(), base = try await server.start()
         defer { server.stop() }
@@ -27,7 +134,7 @@ final class ComputerUseBrowserSourcePolicyTests: XCTestCase {
         let nextPolicy = try ComputerUseBrowserSourcePolicy(goal: input, allowedOrigins: [origin],
             excludedOrigins: [ComputerUseBrowserSourceOrigin(url("https://blocked.test"))])
         try browser.installSourcePolicy(nextPolicy, replacing: firstPolicy.digest, session: session)
-        XCTAssertEqual(try browser.navigationDispatchHistory(taskID: input.taskID), first,
+        XCTAssertEqual(try browser.navigationDispatchHistory(taskID: input.taskID).attempts, first.attempts,
             "Installing a new policy cannot rewrite which policy governed earlier work")
         _ = try await browser.navigate(taskID: input.taskID, operationID: "second", to: base)
         let second = try browser.navigationDispatchHistory(taskID: input.taskID)
@@ -71,6 +178,11 @@ final class ComputerUseBrowserSourcePolicyTests: XCTestCase {
         XCTAssertTrue(failed.attempts.allSatisfy { $0.policy == nil && $0.committedOrigin == nil })
         XCTAssertEqual(failed.attempts.map(\.requestedOrigin), [try ComputerUseBrowserSourceOrigin(base), try ComputerUseBrowserSourceOrigin(base)])
         XCTAssertNil(browser.receipt(taskID: input.taskID, operationID: "failed"))
+        let rejectedResponse = try XCTUnwrap(failed.observations.first {
+            $0.phase == .response && $0.attemptID == failed.attempts.last?.id && $0.decision == .cancelled
+        })
+        XCTAssertEqual(rejectedResponse.policyCheck, .notChecked, "HTTP failure is rejected before source policy assessment")
+        XCTAssertEqual(rejectedResponse.binding, .pendingSlot)
     }
 
     func testDispatchHistoryRetainsATimedOutNativeAttempt() async throws {
@@ -388,6 +500,13 @@ final class ComputerUseBrowserSourcePolicyTests: XCTestCase {
         XCTAssertEqual(server.count("/search?q=concerts"), 1); XCTAssertEqual(results.inputs.count, readings + 1)
         let afterLogin = try browser.navigationDispatchHistory(taskID: owner.taskID)
         XCTAssertEqual(afterLogin.attempts, beforeLogin.attempts, "Manual sign-in navigation is not an automated dispatch receipt")
+        let loginOrigin = try ComputerUseBrowserSourceOrigin(loginBase)
+        let manual = try XCTUnwrap(afterLogin.observations.first {
+            $0.phase == .navigationAction && $0.origin == loginOrigin && $0.decision == .allowed
+        })
+        XCTAssertEqual(manual.control, .userControl); XCTAssertEqual(manual.policyCheck, .notChecked)
+        XCTAssertNil(manual.attemptID)
+        XCTAssertNotNil(manual.configuredPolicy, "A configured task policy is not automatically applied to a human's login")
     }
 
     func testSourcePolicyBlocksScriptedHistoryToAnEarlierOutsidePage() async throws {
@@ -410,6 +529,12 @@ final class ComputerUseBrowserSourcePolicyTests: XCTestCase {
             XCTAssertEqual(retained.committedURL, document.committedURL)
         }
         XCTAssertEqual(earlier.requestCount, 1)
+        let history = try browser.navigationDispatchHistory(taskID: input.taskID)
+        let outsideOrigin = try ComputerUseBrowserSourceOrigin(outside)
+        XCTAssertTrue(history.observations.contains {
+            [.historyRequest, .navigationAction].contains($0.phase) && $0.origin == outsideOrigin
+                && $0.decision == .cancelled && $0.policyCheck == .blocked && $0.attemptID == nil
+        })
     }
 
     private func goal(id: String = "source-policy") throws -> ComputerUseBrowserGoalInput {

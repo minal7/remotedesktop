@@ -2,6 +2,8 @@
 
 Source checkpoint: 2026-09-09. Parent: `46f9a55`. Native history foundation and authored regressions only. Compilation, assertions, inference, app/browser execution and live qualification remain paused.
 
+Follow-up: the [native observation foundation](BROWSER_NAVIGATION_OBSERVATION_HISTORY_REVIEW.md) adds policy decisions, redirect/commit callbacks, URL observations and explicit attribution strength, including manual/sign-in distinctions. Full route qualification remains open; the counts below describe this earlier checkpoint.
+
 ## First-principles finding
 
 A completion check needs evidence about actions that actually reached dispatch admission, including unsuccessful work. A set of operation IDs proves that attempts were recorded, but does not say which source policy governed them. A later successful page or policy installation cannot reconstruct that missing association. Cancellation also cannot turn a dispatched request back into an unattempted operation.

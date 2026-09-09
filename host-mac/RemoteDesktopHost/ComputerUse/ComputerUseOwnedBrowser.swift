@@ -188,6 +188,47 @@ struct ComputerUseBrowserNavigationReceipt: Equatable, Sendable, CustomStringCon
 /// queries, fragments and credentials; this value never enters planner JSON.
 struct ComputerUseBrowserNavigationDispatchHistory: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     enum Outcome: String, Sendable { case pending, documentCommitted, failed, sourceBlocked, ownershipLost, timedOut }
+    enum Phase: String, Sendable {
+        case navigationAction, response, serverRedirect, historyRequest, popupRequest
+        case provisionalStart, documentCommitStarted, documentFinished, navigationFailure, webContentTerminated
+        case locationChanged, unorderedLocationChange
+    }
+    enum Decision: String, Sendable { case observed, allowed, cancelled }
+    enum Binding: String, Sendable {
+        case none, pendingSlot, observedSlot, exactPendingNavigation, exactObservedNavigation, exactHistoryItem
+    }
+    /// State of the control gate at this event, not proof of who initiated it.
+    enum Control: String, Sendable { case unknown, automationAllowed, userControl }
+    enum Surface: String, Sendable { case mainDocument, signInWindow }
+    enum PolicyCheck: String, Sendable { case notChecked, unconfigured, permitted, blocked }
+    struct Observation: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+        let phase: Phase
+        let decision: Decision
+        let binding: Binding
+        let control: Control
+        let surface: Surface
+        let policyCheck: PolicyCheck
+        let configuredPolicy: ComputerUseBrowserSourcePolicy?
+        let origin: ComputerUseBrowserSourceOrigin?
+        let attemptID: UUID?
+        let navigationCorrelationID: UUID?
+        let parentSessionID: UUID
+        let ownershipEpoch: UUID
+        let generation: UInt64
+
+        fileprivate init(phase: Phase, decision: Decision, binding: Binding, control: Control, surface: Surface,
+                         policyCheck: PolicyCheck, configuredPolicy: ComputerUseBrowserSourcePolicy?, url: URL?,
+                         attemptID: UUID?, navigationCorrelationID: UUID?, parentSessionID: UUID,
+                         ownershipEpoch: UUID, generation: UInt64) {
+            self.phase = phase; self.decision = decision; self.binding = binding; self.control = control
+            self.surface = surface; self.policyCheck = policyCheck; self.configuredPolicy = configuredPolicy
+            origin = url.flatMap { try? .init($0) }; self.attemptID = attemptID
+            self.navigationCorrelationID = navigationCorrelationID; self.parentSessionID = parentSessionID
+            self.ownershipEpoch = ownershipEpoch; self.generation = generation
+        }
+        var description: String { "BrowserNavigationObservation(phase: \(phase.rawValue), binding: \(binding.rawValue))" }
+        var debugDescription: String { description }
+    }
     struct Attempt: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
         let id: UUID
         let operationID: String
@@ -220,6 +261,8 @@ struct ComputerUseBrowserNavigationDispatchHistory: Equatable, Sendable, CustomS
     fileprivate(set) var hasClaimBoundary = false
     fileprivate(set) var overflowed = false
     fileprivate(set) var attempts: [Attempt] = []
+    fileprivate(set) var observations: [Observation] = []
+    fileprivate(set) var observationsOverflowed = false
     private let ledgerID = UUID()
     private var revision = UUID()
 
@@ -227,7 +270,7 @@ struct ComputerUseBrowserNavigationDispatchHistory: Equatable, Sendable, CustomS
         self.taskID = taskID; self.contextID = contextID; self.beganAfterAnotherClaim = beganAfterAnotherClaim
     }
     var identity: String {
-        ComputerUseTaskContract.digest(["browser-navigation-dispatch-history-v1", taskID, contextID,
+        ComputerUseTaskContract.digest(["browser-navigation-dispatch-history-v2", taskID, contextID,
             ledgerID.uuidString, revision.uuidString])
     }
     fileprivate mutating func recordClaimBoundary() {
@@ -251,6 +294,22 @@ struct ComputerUseBrowserNavigationDispatchHistory: Equatable, Sendable, CustomS
         advanceRevision()
         attempts[index].outcome = outcome
         attempts[index].committedOrigin = committedURL.flatMap { try? .init($0) }
+    }
+    fileprivate mutating func observe(phase: Phase, decision: Decision, binding: Binding, control: Control, surface: Surface,
+                                      policyCheck: PolicyCheck, configuredPolicy: ComputerUseBrowserSourcePolicy?, url: URL?,
+                                      attemptID: UUID?, navigationCorrelationID: UUID?, parentSessionID: UUID,
+                                      ownershipEpoch: UUID, generation: UInt64) {
+        // Retain the first bounded observations and an explicit gap. Once
+        // saturated, callbacks do no further allocation or origin parsing.
+        guard observations.count < 512 else {
+            if !observationsOverflowed { observationsOverflowed = true; advanceRevision() }
+            return
+        }
+        advanceRevision()
+        observations.append(.init(phase: phase, decision: decision, binding: binding, control: control, surface: surface,
+            policyCheck: policyCheck, configuredPolicy: configuredPolicy, url: url, attemptID: attemptID,
+            navigationCorrelationID: navigationCorrelationID, parentSessionID: parentSessionID,
+            ownershipEpoch: ownershipEpoch, generation: generation))
     }
     private mutating func advanceRevision() {
         revision = UUID()
@@ -296,6 +355,7 @@ enum ComputerUseBrowserError: Error, LocalizedError, Equatable {
 /// receipts come from the exact WKNavigation owned by the current task.
 @MainActor
 final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelegate, NSWindowDelegate {
+    private typealias NavigationHistory = ComputerUseBrowserNavigationDispatchHistory
     let contextID = UUID().uuidString
     @Published private(set) var displayedSite = ComputerUseBrowserSite.displayName(for: nil)
     @Published private(set) var detail = "Ready"
@@ -349,6 +409,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     private var signInScope: (taskID: String, ownerID: UUID)?
 
     private struct ObservedNavigation {
+        let id = UUID()
         let navigation: WKNavigation
         let generation: UInt64
         let taskID: String
@@ -1507,6 +1568,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         guard browser === view, view.url == url else { return }
         locationRevision &+= 1
         if url != nil || !ordered { sessionHasNavigationActivity = true }
+        recordNavigationSlot(ordered ? .locationChanged : .unorderedLocationChange, url: url)
         displayedSite = ComputerUseBrowserSite.displayName(for: url)
         let changed = document.map { $0.committedURL != url } ?? false
         let observedChanged = (observedUserPage.map { $0.url != url } ?? false)
@@ -1675,84 +1737,153 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         pending.continuation.resume(throwing: error)
     }
 
+    private func recordNavigationObservation(_ phase: NavigationHistory.Phase, decision: NavigationHistory.Decision = .observed,
+                                             url: URL?, binding: NavigationHistory.Binding, control: NavigationHistory.Control = .unknown,
+                                             policyCheck: NavigationHistory.PolicyCheck = .notChecked,
+                                             surface: NavigationHistory.Surface = .mainDocument,
+                                             attemptID: UUID? = nil, navigationCorrelationID: UUID? = nil) {
+        navigationDispatchLog?.observe(phase: phase, decision: decision, binding: binding, control: control, surface: surface,
+            policyCheck: policyCheck, configuredPolicy: surface == .mainDocument ? sourcePolicy : nil,
+            url: url, attemptID: attemptID, navigationCorrelationID: navigationCorrelationID,
+            parentSessionID: browserSessionID, ownershipEpoch: ownershipEpoch, generation: generation)
+    }
+
+    /// Legacy policy/URL callbacks do not supply a WKNavigation. Being in the
+    /// pending slot is weaker than an exact native-object match. Recording an
+    /// event does not add another control-gate query.
+    private func recordNavigationSlot(_ phase: NavigationHistory.Phase, decision: NavigationHistory.Decision = .observed,
+                                      url: URL?, control: NavigationHistory.Control = .unknown,
+                                      policyCheck: NavigationHistory.PolicyCheck = .notChecked,
+                                      surface: NavigationHistory.Surface = .mainDocument, exactHistoryItem: Bool = false) {
+        let pending = surface == .mainDocument ? self.pending : nil
+        let observed = surface == .mainDocument ? observedNavigation : nil
+        let binding: NavigationHistory.Binding = pending != nil ? (exactHistoryItem ? .exactHistoryItem : .pendingSlot)
+            : (observed != nil ? .observedSlot : .none)
+        recordNavigationObservation(phase, decision: decision, url: url, binding: binding, control: control,
+            policyCheck: policyCheck, surface: surface, attemptID: pending?.sourceAttemptID,
+            navigationCorrelationID: pending?.id ?? observed?.id)
+    }
+
+    private func recordNavigationCallback(_ phase: NavigationHistory.Phase, in view: WKWebView, navigation: WKNavigation?,
+                                          control: NavigationHistory.Control = .unknown) {
+        if view === signInBrowser {
+            recordNavigationObservation(phase, url: view.url, binding: .none, control: control, surface: .signInWindow)
+            return
+        }
+        guard view === browser else { return }
+        if let navigation, let pending, navigation === pending.navigation {
+            recordNavigationObservation(phase, url: view.url, binding: .exactPendingNavigation, control: control,
+                attemptID: pending.sourceAttemptID, navigationCorrelationID: pending.id)
+        } else if let navigation, let observed = observedNavigation, navigation === observed.navigation {
+            recordNavigationObservation(phase, url: view.url, binding: .exactObservedNavigation, control: control,
+                navigationCorrelationID: observed.id)
+        } else {
+            recordNavigationObservation(phase, url: view.url, binding: .none, control: control)
+        }
+    }
+
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
                  decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void) {
+        func decide(_ decision: WKNavigationActionPolicy, control: NavigationHistory.Control = .unknown,
+                    policyCheck: NavigationHistory.PolicyCheck = .notChecked) {
+            if navigationAction.targetFrame?.isMainFrame == true || navigationAction.targetFrame == nil {
+                if webView === browser || webView === signInBrowser {
+                    recordNavigationSlot(navigationAction.targetFrame == nil ? .popupRequest : .navigationAction,
+                        decision: decision == .allow ? .allowed : .cancelled, url: navigationAction.request.url,
+                        control: control, policyCheck: policyCheck, surface: webView === browser ? .mainDocument : .signInWindow)
+                }
+            }
+            decisionHandler(decision)
+        }
         if webView === signInBrowser {
             guard canNavigateSignInWindow, let frame = navigationAction.targetFrame else {
-                decisionHandler(.cancel)
+                decide(.cancel)
                 return
             }
             let permitted = frame.isMainFrame ? Self.isSignInLocation(navigationAction.request.url)
                 : ["http", "https", "about", "data", "blob"].contains(navigationAction.request.url?.scheme?.lowercased() ?? "")
             if !permitted { signInDetail = "This sign-in destination is not supported in the AI browser. Close this window to return." }
-            decisionHandler(permitted ? .allow : .cancel)
+            decide(permitted ? .allow : .cancel, control: .userControl)
             return
         }
-        guard webView === browser else { decisionHandler(.cancel); return }
+        guard webView === browser else { decide(.cancel); return }
         if !["GET", "HEAD"].contains((navigationAction.request.httpMethod ?? "").uppercased()) {
             pending?.readOnlyRequests = false
             if let pending, pending.historyOperationID != nil {
-                decisionHandler(.cancel); failPending(id: pending.id, error: .navigationFailed); return
+                decide(.cancel); failPending(id: pending.id, error: .navigationFailed); return
             }
         }
         // A popup cannot consume the main navigation's continuation. Admission
         // is rechecked when WebKit asks for the concrete child configuration.
         guard let frame = navigationAction.targetFrame else {
-            decisionHandler(canOpenSignInWindow && Self.isSignInCreationLocation(navigationAction.request.url) ? .allow : .cancel)
+            let permitted = canOpenSignInWindow && Self.isSignInCreationLocation(navigationAction.request.url)
+            decide(permitted ? .allow : .cancel, control: permitted ? .userControl : .unknown)
             return
         }
         guard frame.isMainFrame else {
             let scheme = navigationAction.request.url?.scheme?.lowercased() ?? ""
-            decisionHandler(["http", "https", "about", "data", "blob"].contains(scheme) ? .allow : .cancel)
+            decide(["http", "https", "about", "data", "blob"].contains(scheme) ? .allow : .cancel)
             return
         }
         sessionHasNavigationActivity = true
         guard let url = navigationAction.request.url, Self.validatedURL(url) != nil else {
-            decisionHandler(.cancel)
+            decide(.cancel)
             if let pending { failPending(id: pending.id, error: .invalidURL) }
             return
         }
         if let pending, !hasOwnership(taskID: pending.taskID) {
-            decisionHandler(.cancel)
+            decide(.cancel)
             failPending(id: pending.id, error: .ownershipLost)
             return
         }
-        if (pending != nil || mayAct()), sourcePolicy?.permits(url) == false {
-            decisionHandler(.cancel)
+        let appliesPolicy = pending != nil || mayAct()
+        if appliesPolicy, sourcePolicy?.permits(url) == false {
+            decide(.cancel, control: .automationAllowed, policyCheck: .blocked)
             detail = "Blocked a page outside this task's allowed sources."
             if let pending { failPending(id: pending.id, error: .sourceNotAllowed) }
             return
         }
-        decisionHandler(.allow)
+        decide(.allow, control: appliesPolicy ? .automationAllowed : .userControl,
+            policyCheck: appliesPolicy ? (sourcePolicy == nil ? .unconfigured : .permitted) : .notChecked)
     }
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse,
                  decisionHandler: @escaping @MainActor @Sendable (WKNavigationResponsePolicy) -> Void) {
+        func decide(_ decision: WKNavigationResponsePolicy, control: NavigationHistory.Control = .unknown,
+                    policyCheck: NavigationHistory.PolicyCheck = .notChecked) {
+            if navigationResponse.isForMainFrame, webView === browser || webView === signInBrowser {
+                recordNavigationSlot(.response, decision: decision == .allow ? .allowed : .cancelled,
+                    url: navigationResponse.response.url, control: control, policyCheck: policyCheck,
+                    surface: webView === browser ? .mainDocument : .signInWindow)
+            }
+            decisionHandler(decision)
+        }
         if webView === signInBrowser {
-            guard canNavigateSignInWindow else { decisionHandler(.cancel); return }
-            guard navigationResponse.isForMainFrame else { decisionHandler(.allow); return }
+            guard canNavigateSignInWindow else { decide(.cancel); return }
+            guard navigationResponse.isForMainFrame else { decide(.allow); return }
             // Error pages may explain a provider refusal to the person. They
             // are display only and never become task/navigation evidence.
             let permitted = navigationResponse.canShowMIMEType && Self.isSignInLocation(navigationResponse.response.url)
             if !permitted { signInDetail = "The sign-in page cannot be displayed. Close this window to return." }
-            decisionHandler(permitted ? .allow : .cancel)
+            decide(permitted ? .allow : .cancel, control: .userControl)
             return
         }
-        guard webView === browser else { decisionHandler(.cancel); return }
-        guard navigationResponse.isForMainFrame else { decisionHandler(.allow); return }
+        guard webView === browser else { decide(.cancel); return }
+        guard navigationResponse.isForMainFrame else { decide(.allow); return }
         guard navigationResponse.canShowMIMEType,
               let response = navigationResponse.response as? HTTPURLResponse,
               (200...299).contains(response.statusCode),
               let url = response.url, Self.validatedURL(url) != nil else {
-            decisionHandler(.cancel)
+            decide(.cancel)
             observedNavigation = nil
             observedUserPage = nil
             observedActivePage = nil
             if let pending { failPending(id: pending.id, error: .navigationFailed) }
             return
         }
-        if (pending != nil || mayAct()), sourcePolicy?.permits(url) == false {
-            decisionHandler(.cancel)
+        let appliesPolicy = pending != nil || mayAct()
+        if appliesPolicy, sourcePolicy?.permits(url) == false {
+            decide(.cancel, control: pending != nil ? .unknown : .automationAllowed, policyCheck: .blocked)
             detail = "Blocked a page outside this task's allowed sources."
             observedNavigation = nil; observedUserPage = nil; observedActivePage = nil
             if let pending { failPending(id: pending.id, error: .sourceNotAllowed) }
@@ -1760,7 +1891,8 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         }
         pending?.receivedSuccessfulResponse = true
         observedNavigation?.successfulResponseURL = response.url
-        decisionHandler(.allow)
+        decide(.allow, control: pending != nil ? .unknown : (appliesPolicy ? .automationAllowed : .userControl),
+            policyCheck: appliesPolicy ? (sourcePolicy == nil ? .unconfigured : .permitted) : .notChecked)
     }
 
     /// Instant Back can restore a suspended page without the normal load
@@ -1769,29 +1901,48 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     func webView(_ webView: WKWebView, shouldGoTo backForwardListItem: WKBackForwardListItem,
                  willUseInstantBack: Bool, completionHandler: @escaping (Bool) -> Void) {
         let url = backForwardListItem.url
+        func decide(_ permitted: Bool, control: NavigationHistory.Control = .unknown,
+                    policyCheck: NavigationHistory.PolicyCheck = .notChecked, exactHistoryItem: Bool = false) {
+            if webView === browser || webView === signInBrowser {
+                recordNavigationSlot(.historyRequest, decision: permitted ? .allowed : .cancelled, url: url,
+                    control: control, policyCheck: policyCheck, surface: webView === browser ? .mainDocument : .signInWindow,
+                    exactHistoryItem: exactHistoryItem)
+            }
+            completionHandler(permitted)
+        }
         if webView === signInBrowser {
-            completionHandler(canNavigateSignInWindow && Self.isSignInLocation(url))
+            let canNavigate = canNavigateSignInWindow
+            decide(canNavigate && Self.isSignInLocation(url), control: canNavigate ? .userControl : .unknown)
             return
         }
-        guard webView === browser, Self.validatedURL(url) != nil else { completionHandler(false); return }
+        guard webView === browser, Self.validatedURL(url) != nil else { decide(false); return }
         if let pending, !hasOwnership(taskID: pending.taskID) {
-            completionHandler(false); failPending(id: pending.id, error: .ownershipLost)
+            decide(false); failPending(id: pending.id, error: .ownershipLost)
             return
         }
-        if (pending != nil || mayAct()), sourcePolicy?.permits(url) == false {
-            completionHandler(false)
+        let appliesPolicy = pending != nil || mayAct()
+        if appliesPolicy, sourcePolicy?.permits(url) == false {
+            decide(false, control: .automationAllowed, policyCheck: .blocked)
             detail = "Blocked a page outside this task's allowed sources."
             if let pending { failPending(id: pending.id, error: .sourceNotAllowed) }
             return
         }
-        if willUseInstantBack, let operationID = pending?.historyOperationID,
+        var exactHistoryItem = false
+        if let operationID = pending?.historyOperationID,
            let saved = historyReceipts[operationID], saved.item === backForwardListItem, saved.url == url {
-            pending?.instantBackApproved = true
+            exactHistoryItem = true
+            if willUseInstantBack { pending?.instantBackApproved = true }
         }
-        completionHandler(true)
+        decide(true, control: appliesPolicy ? .automationAllowed : .userControl,
+            policyCheck: appliesPolicy ? (sourcePolicy == nil ? .unconfigured : .permitted) : .notChecked,
+            exactHistoryItem: exactHistoryItem)
     }
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        if webView === signInBrowser {
+            recordNavigationCallback(.provisionalStart, in: webView, navigation: navigation)
+            return
+        }
         guard webView === browser else { return }
         sessionHasNavigationActivity = true
         locationRevision &+= 1
@@ -1806,13 +1957,28 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
                 observedNavigation = ObservedNavigation(navigation: navigation, generation: generation,
                     taskID: taskID, startedWhileActive: mayAct())
             }
+            recordNavigationCallback(.provisionalStart, in: webView, navigation: navigation,
+                control: observedNavigation.map { $0.startedWhileActive ? .automationAllowed : .userControl } ?? .unknown)
             detail = "Page changed"
             return
         }
+        recordNavigationCallback(.provisionalStart, in: webView, navigation: navigation)
         guard navigation === pending.navigation else { failPending(id: pending.id, error: .pageChanged); return }
     }
 
+    func webView(_ webView: WKWebView, didReceiveServerRedirectForProvisionalNavigation navigation: WKNavigation!) {
+        // This callback supplies a WKNavigation, not a destination request.
+        // The live WebView URL is a location observation, never a fabricated
+        // redirect target or an allow/cancel policy decision.
+        recordNavigationCallback(.serverRedirect, in: webView, navigation: navigation)
+    }
+
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        recordNavigationCallback(.documentCommitStarted, in: webView, navigation: navigation)
+    }
+
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        recordNavigationCallback(.documentFinished, in: webView, navigation: navigation)
         guard webView === browser else { return }
         if pending == nil {
             guard let observed = observedNavigation,
@@ -1878,6 +2044,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        recordNavigationCallback(.navigationFailure, in: webView, navigation: navigation)
         if webView === signInBrowser {
             signInDetail = "The sign-in page did not finish loading. Close this window to return."
             return
@@ -1889,6 +2056,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         if let pending, navigation === pending.navigation { failPending(id: pending.id, error: .navigationFailed) }
     }
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        recordNavigationCallback(.navigationFailure, in: webView, navigation: navigation)
         if webView === signInBrowser {
             signInDetail = "The sign-in page did not finish loading. Close this window to return."
             return
@@ -1900,6 +2068,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         if let pending, navigation === pending.navigation { failPending(id: pending.id, error: .navigationFailed) }
     }
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        recordNavigationCallback(.webContentTerminated, in: webView, navigation: nil)
         if webView === signInBrowser {
             closeSignInWindow()
             detail = "The sign-in window stopped. Check the main page before continuing."
