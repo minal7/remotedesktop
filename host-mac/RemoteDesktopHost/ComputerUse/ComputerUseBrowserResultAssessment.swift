@@ -184,10 +184,13 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
             case overflow, malformedEvent, outOfOrderEvents, duplicateAcceptance, duplicateAdoption
             case claimTransferUnreconciled, acceptanceBindingMismatch, unmatchedAdoption, adoptionBindingMismatch
             case requiredHandbackMissing, unmatchedNativeHandback, sameDocumentSourceUnqualified
+            case unmatchedRetirement, retirementBindingMismatch, duplicateDisposition
         }
         let acceptedCount: Int
         let adoptedCount: Int
+        let retiredCount: Int
         let matchedAdoptionCount: Int
+        let matchedRetirementCount: Int
         let nativeHandbackLinkedAdoptionCount: Int
         let sameDocumentCandidateCount: Int
         let gaps: [Gap]
@@ -196,6 +199,7 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
             var found: Set<Gap> = []
             if history.pageObservationEventsOverflowed { found.insert(.overflow) }
             var accepted: [UUID: Event] = [:], adopted: Set<UUID> = [], matched = 0, linked = 0
+            var retired: Set<UUID> = [], matchedRetirements = 0
             var lastOrder: Int?
             for event in history.pageObservationEvents {
                 if let lastOrder, event.order <= lastOrder { found.insert(.outOfOrderEvents) }
@@ -207,20 +211,36 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
                 }
                 if page.basis == .sameDocumentCandidate { found.insert(.sameDocumentSourceUnqualified) }
                 let sameClaim = page.taskID == history.taskID && event.parentSessionID == page.parentSessionID
-                    && event.ownershipEpoch == page.ownershipEpoch && event.generation == page.generation
+                    && event.ownershipEpoch == page.ownershipEpoch
                 if !sameClaim { found.insert(.claimTransferUnreconciled) }
                 if event.phase == .accepted {
-                    guard sameClaim, event.adoptedSource == nil, event.nativeReacquisitionID == nil else {
+                    guard sameClaim, event.generation == page.generation, event.adoptedSource == nil,
+                          event.nativeReacquisitionID == nil, event.retirement == nil else {
                         found.insert(.acceptanceBindingMismatch); continue
                     }
                     if accepted.updateValue(event, forKey: page.id) != nil { found.insert(.duplicateAcceptance) }
                     continue
                 }
+                if event.phase == .retired {
+                    guard !adopted.contains(page.id), retired.insert(page.id).inserted else { found.insert(.duplicateDisposition); continue }
+                    guard let original = accepted[page.id], original.observation == page, original.order < event.order else {
+                        found.insert(.unmatchedRetirement); continue
+                    }
+                    // A replacement load may already have changed generation.
+                    // Retirement is about the old candidate, never the new page.
+                    guard sameClaim, event.retirement != nil, event.adoptedSource == nil, event.nativeReacquisitionID == nil else {
+                        found.insert(.retirementBindingMismatch); continue
+                    }
+                    matchedRetirements += 1
+                    continue
+                }
+                guard !retired.contains(page.id) else { found.insert(.duplicateDisposition); continue }
                 guard adopted.insert(page.id).inserted else { found.insert(.duplicateAdoption); continue }
                 guard let original = accepted[page.id], original.observation == page, original.order < event.order else {
                     found.insert(.unmatchedAdoption); continue
                 }
-                guard sameClaim, event.adoptedSource == page.source else { found.insert(.adoptionBindingMismatch); continue }
+                guard sameClaim, event.generation == page.generation, event.adoptedSource == page.source,
+                      event.retirement == nil else { found.insert(.adoptionBindingMismatch); continue }
                 if let nativeID = event.nativeReacquisitionID {
                     let native = history.controlEvents.filter { $0.nativeOperationID == nativeID }
                     let starts = native.filter { $0.phase == .nativeReacquisitionStarted }
@@ -244,6 +264,8 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
             }
             acceptedCount = history.pageObservationEvents.filter { $0.phase == .accepted }.count
             adoptedCount = history.pageObservationEvents.filter { $0.phase == .adopted }.count
+            retiredCount = history.pageObservationEvents.filter { $0.phase == .retired }.count
+            matchedRetirementCount = matchedRetirements
             matchedAdoptionCount = matched; nativeHandbackLinkedAdoptionCount = linked
             sameDocumentCandidateCount = history.pageObservationEvents.filter {
                 $0.phase == .accepted && $0.observation.basis == .sameDocumentCandidate
@@ -252,7 +274,8 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
         }
 
         var plannerContext: [String: Any] {
-            ["accepted_count":acceptedCount, "adopted_count":adoptedCount, "matched_adoption_count":matchedAdoptionCount,
+            ["accepted_count":acceptedCount, "adopted_count":adoptedCount, "retired_count":retiredCount,
+             "matched_adoption_count":matchedAdoptionCount, "matched_retirement_count":matchedRetirementCount,
              "native_handback_linked_adoption_count":nativeHandbackLinkedAdoptionCount,
              "same_document_candidate_count":sameDocumentCandidateCount, "gaps":gaps.map(\.rawValue)]
         }
@@ -269,9 +292,12 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
             case unfinishedEpisode, observedAdmissionUnverified, unscopedWebContentTermination
             case commitBasisMissing, commitOriginMissing, unmatchedCommittedAttempt, historySourceMissing, instantBackApprovalMissing
             case responseAssociationUnqualified, responseOriginMissing, responseOriginMismatch, redirectDestinationsUnqualified
+            case observedEndMissing, observedEndMismatch
         }
         let dispatchEpisodeCount: Int
         let observedEpisodeCount: Int
+        let endedObservedEpisodeCount: Int
+        let rejectedObservedEpisodeCount: Int
         let observedFinishCallbackCount: Int
         let matchedObservedAdmissionCount: Int
         let matchedCommittedAttemptCount: Int
@@ -293,12 +319,13 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
             var groups: [UUID: [Observation]] = [:]
             for observation in main {
                 if observation.phase == .webContentTerminated { found.insert(.unscopedWebContentTermination) }
-                guard callbackPhases.contains(observation.phase) else { continue }
+                guard callbackPhases.contains(observation.phase) || observation.phase == .observedNavigationEnded else { continue }
                 guard [.exactPendingNavigation, .exactObservedNavigation].contains(observation.binding),
                       let id = observation.navigationCorrelationID else { found.insert(.callbackIdentityMissing); continue }
                 groups[id, default: []].append(observation)
             }
             var dispatches = 0, observed = 0, validFinishes: [UUID: [Observation]] = [:]
+            var endedObserved = 0, rejectedObserved = 0
             for records in groups.values {
                 guard let first = records.first, records.allSatisfy({
                     $0.binding == first.binding && $0.attemptID == first.attemptID
@@ -320,20 +347,34 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
                     guard first.attemptID == nil else { found.insert(.callbackBindingMismatch); continue }
                     attempt = nil; observed += 1
                 }
-                let starts = records.filter { $0.phase == .provisionalStart }
+                let callbacks = records.filter { $0.phase != .observedNavigationEnded }
+                let endings = records.filter { $0.phase == .observedNavigationEnded }
+                let starts = callbacks.filter { $0.phase == .provisionalStart }
                 let commits = records.filter { $0.phase == .documentCommitStarted }
                 let terminals = records.filter { [.documentFinished, .navigationFailure].contains($0.phase) }
                 var valid = true
+                var observedEnd: Observation?
+                if first.binding == .exactObservedNavigation {
+                    if endings.isEmpty {
+                        if !terminals.isEmpty { found.insert(.observedEndMissing) }
+                    } else if endings.count == 1, let end = endings.first, let reason = end.observedEnd,
+                              callbacks.allSatisfy({ $0.order < end.order }),
+                              (reason != .finished && reason != .finishRejected || terminals.first?.phase == .documentFinished),
+                              (reason != .callbackFailed || terminals.first?.phase == .navigationFailure) {
+                        observedEnd = end
+                    } else { found.insert(.observedEndMismatch); valid = false }
+                } else if !endings.isEmpty { found.insert(.observedEndMismatch); valid = false }
                 if starts.count > 1 || commits.count > 1 || terminals.count > 1 { found.insert(.duplicateCallbackPhase); valid = false }
                 if zip(records, records.dropFirst()).contains(where: { pair in pair.0.order >= pair.1.order }) { found.insert(.callbackOrderMismatch); valid = false }
                 let cached = attempt?.commitBasis == .historyItemAndFinish || attempt?.commitBasis == .instantBackHistoryItem
-                let nativeFailure = attempt.map { $0.outcome != .pending && $0.outcome != .documentCommitted && $0.terminalOrder != nil } ?? false
+                let nativeFailure = (attempt.map { $0.outcome != .pending && $0.outcome != .documentCommitted && $0.terminalOrder != nil } ?? false)
+                    || (observedEnd.map { $0.observedEnd != .finished } ?? false)
                 if starts.isEmpty && !cached && !nativeFailure { found.insert(.missingProvisionalStart); valid = false }
                 if let start = starts.first, records.contains(where: { $0.phase != .provisionalStart && $0.order < start.order }) {
                     found.insert(.callbackOrderMismatch); valid = false
                 }
                 if let terminal = terminals.first {
-                    if records.contains(where: { $0.order > terminal.order }) { found.insert(.callbackOrderMismatch); valid = false }
+                    if callbacks.contains(where: { $0.order > terminal.order }) { found.insert(.callbackOrderMismatch); valid = false }
                     if terminal.phase == .documentFinished && commits.isEmpty && !cached { found.insert(.missingDocumentCommitCallback); valid = false }
                 } else if !nativeFailure && attempt?.commitBasis != .instantBackHistoryItem { found.insert(.unfinishedEpisode); valid = false }
                 if let commit = commits.first, records.contains(where: { $0.phase == .serverRedirect && $0.order > commit.order }) {
@@ -341,6 +382,11 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
                 }
                 if valid, let attempt, let finished = terminals.first, finished.phase == .documentFinished {
                     validFinishes[attempt.id, default: []].append(finished)
+                }
+                if valid, let observedEnd, let reason = observedEnd.observedEnd {
+                    endedObserved += 1
+                    if [.responseRejected, .sourceBlocked, .callbackFailed, .finishRejected].contains(reason) { rejectedObserved += 1 }
+                    if [.responseRejected, .sourceBlocked].contains(reason) { found.insert(.responseAssociationUnqualified) }
                 }
                 if attempt == nil, let finished = terminals.first, finished.phase == .documentFinished {
                     let admissions = acceptedNavigationPages.filter {
@@ -351,10 +397,11 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
                             && $0.parentSessionID == page.parentSessionID && $0.ownershipEpoch == page.ownershipEpoch
                             && $0.generation == page.generation && $0.order > finished.order && page.origin != nil && page.origin == finished.origin
                     }
-                    if valid, admissions.count == 1, let admission = admissions.first {
+                    if valid, let observedEnd, observedEnd.observedEnd == .finished,
+                       admissions.count == 1, let admission = admissions.first, observedEnd.order < admission.order {
                         matchedAdmissions.insert(admission.order); found.insert(.responseAssociationUnqualified)
                     }
-                    else { found.insert(.observedAdmissionUnverified) }
+                    else if observedEnd?.observedEnd != .finishRejected || !admissions.isEmpty { found.insert(.observedAdmissionUnverified) }
                 }
             }
             if acceptedNavigationPages.contains(where: { !matchedAdmissions.contains($0.order) }) { found.insert(.observedAdmissionUnverified) }
@@ -394,6 +441,7 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
                 if supported { matched.insert(attempt.id) } else { found.insert(.unmatchedCommittedAttempt) }
             }
             dispatchEpisodeCount = dispatches; observedEpisodeCount = observed
+            endedObservedEpisodeCount = endedObserved; rejectedObservedEpisodeCount = rejectedObserved
             observedFinishCallbackCount = main.filter { $0.binding == .exactObservedNavigation && $0.phase == .documentFinished }.count
             matchedObservedAdmissionCount = matchedAdmissions.count
             matchedCommittedAttemptCount = matched.count
@@ -407,6 +455,7 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
 
         var plannerContext: [String: Any] {
             ["dispatch_episode_count":dispatchEpisodeCount, "observed_episode_count":observedEpisodeCount,
+             "ended_observed_episode_count":endedObservedEpisodeCount, "rejected_observed_episode_count":rejectedObservedEpisodeCount,
              "observed_finish_callback_count":observedFinishCallbackCount, "matched_observed_admission_count":matchedObservedAdmissionCount,
              "matched_committed_attempt_count":matchedCommittedAttemptCount,
              "history_restoration_commit_count":historyRestorationCommitCount, "redirect_callback_count":redirectCallbackCount,
@@ -741,7 +790,7 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
             || candidates.contains { $0.requirements.contains { $0.status == .navigationHistoryUnverified } }
         let policyAssessment = requirements.contains { $0.field == .answerSource }
             || candidates.contains { $0.requirements.contains { $0.status == .sourcePolicyMismatch } }
-        var context: [String: Any] = ["version":navigationAssessment ? 11 : (policyAssessment ? 5 : (candidates.contains { $0.quotes.contains { !$0.controlIDs.isEmpty } } ? 4 : 3)),
+        var context: [String: Any] = ["version":navigationAssessment ? 12 : (policyAssessment ? 5 : (candidates.contains { $0.quotes.contains { !$0.controlIDs.isEmpty } } ? 4 : 3)),
          "requirements":requirements.enumerated().map { index, value in
              ["index":index, "turn":value.turn, "sourceByteOffset":value.sourceByteOffset, "sourceByteCount":value.sourceByteCount,
               "role":value.role.rawValue, "field":value.field.rawValue, "relation":value.relation.rawValue,

@@ -195,6 +195,13 @@ struct ComputerUseBrowserNavigationDispatchHistory: Equatable, Sendable, CustomS
         case navigationAction, response, serverRedirect, historyRequest, popupRequest
         case provisionalStart, documentCommitStarted, documentFinished, navigationFailure, webContentTerminated
         case locationChanged, unorderedLocationChange
+        case observedNavigationEnded
+    }
+    /// Why the native owner stopped tracking this observed load. This is
+    /// not proof of network cancellation, response association or adoption.
+    enum ObservedNavigationEnd: String, Sendable {
+        case finished, finishRejected, responseRejected, sourceBlocked, callbackFailed
+        case superseded, stopped, closed, browserReleased, processTerminated
     }
     enum Decision: String, Sendable { case observed, allowed, cancelled }
     enum Binding: String, Sendable {
@@ -236,7 +243,11 @@ struct ComputerUseBrowserNavigationDispatchHistory: Equatable, Sendable, CustomS
         var debugDescription: String { description }
     }
     struct PageObservationEvent: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
-        enum Phase: String, Sendable { case accepted, adopted }
+        enum Phase: String, Sendable { case accepted, adopted, retired }
+        enum Retirement: String, Sendable {
+            case navigationStarted, locationChanged, identityMismatch, claimChanged, taskAdmission
+            case stopped, closed, browserReleased, processTerminated, responseRejected, sourceBlocked, navigationFailed
+        }
         let order: Int
         let phase: Phase
         let observation: PageObservation
@@ -245,13 +256,15 @@ struct ComputerUseBrowserNavigationDispatchHistory: Equatable, Sendable, CustomS
         let generation: UInt64
         let adoptedSource: ComputerUseBrowserDocument.Source?
         let nativeReacquisitionID: UUID?
+        let retirement: Retirement?
 
         fileprivate init(order: Int, phase: Phase, observation: PageObservation, parentSessionID: UUID,
                          ownershipEpoch: UUID, generation: UInt64, adoptedSource: ComputerUseBrowserDocument.Source?,
-                         nativeReacquisitionID: UUID?) {
+                         nativeReacquisitionID: UUID?, retirement: Retirement?) {
             self.order = order; self.phase = phase; self.observation = observation; self.parentSessionID = parentSessionID
             self.ownershipEpoch = ownershipEpoch; self.generation = generation
             self.adoptedSource = adoptedSource; self.nativeReacquisitionID = nativeReacquisitionID
+            self.retirement = phase == .retired ? retirement : nil
         }
         var description: String { "BrowserPageObservationEvent(phase: \(phase.rawValue))" }
         var debugDescription: String { description }
@@ -301,6 +314,7 @@ struct ComputerUseBrowserNavigationDispatchHistory: Equatable, Sendable, CustomS
         let order: Int
         let phase: Phase
         let instantBack: Bool?
+        let observedEnd: ObservedNavigationEnd?
         let decision: Decision
         let binding: Binding
         let control: Control
@@ -318,9 +332,10 @@ struct ComputerUseBrowserNavigationDispatchHistory: Equatable, Sendable, CustomS
         fileprivate init(order: Int, phase: Phase, decision: Decision, binding: Binding, control: Control, surface: Surface,
                          policyCheck: PolicyCheck, configuredPolicy: ComputerUseBrowserSourcePolicy?, url: URL?,
                          attemptID: UUID?, navigationCorrelationID: UUID?, parentSessionID: UUID,
-                         ownershipEpoch: UUID, generation: UInt64, signInWindowID: UUID?, instantBack: Bool?) {
+                         ownershipEpoch: UUID, generation: UInt64, signInWindowID: UUID?, instantBack: Bool?, observedEnd: ObservedNavigationEnd?) {
             self.order = order; self.signInWindowID = signInWindowID
             self.instantBack = phase == .historyRequest ? instantBack : nil
+            self.observedEnd = phase == .observedNavigationEnded ? observedEnd : nil
             self.phase = phase; self.decision = decision; self.binding = binding; self.control = control
             self.surface = surface; self.policyCheck = policyCheck; self.configuredPolicy = configuredPolicy
             origin = url.flatMap { try? .init($0) }; self.attemptID = attemptID
@@ -389,7 +404,7 @@ struct ComputerUseBrowserNavigationDispatchHistory: Equatable, Sendable, CustomS
         self.taskID = taskID; self.contextID = contextID; self.beganAfterAnotherClaim = beganAfterAnotherClaim
     }
     var identity: String {
-        ComputerUseTaskContract.digest(["browser-navigation-dispatch-history-v6", taskID, contextID,
+        ComputerUseTaskContract.digest(["browser-navigation-dispatch-history-v7", taskID, contextID,
             ledgerID.uuidString, revision.uuidString])
     }
     fileprivate mutating func recordClaimBoundary() {
@@ -434,7 +449,7 @@ struct ComputerUseBrowserNavigationDispatchHistory: Equatable, Sendable, CustomS
     fileprivate mutating func observe(phase: Phase, decision: Decision, binding: Binding, control: Control, surface: Surface,
                                       policyCheck: PolicyCheck, configuredPolicy: ComputerUseBrowserSourcePolicy?, url: URL?,
                                       attemptID: UUID?, navigationCorrelationID: UUID?, parentSessionID: UUID,
-                                      ownershipEpoch: UUID, generation: UInt64, signInWindowID: UUID?, instantBack: Bool?) {
+                                      ownershipEpoch: UUID, generation: UInt64, signInWindowID: UUID?, instantBack: Bool?, observedEnd: ObservedNavigationEnd? = nil) {
         // Retain bounded observations and a gap. Omitted callbacks still
         // invalidate snapshots, without allocating a record or parsing URLs.
         advanceRevision()
@@ -446,7 +461,7 @@ struct ComputerUseBrowserNavigationDispatchHistory: Equatable, Sendable, CustomS
         observations.append(.init(order: order, phase: phase, decision: decision, binding: binding, control: control, surface: surface,
             policyCheck: policyCheck, configuredPolicy: configuredPolicy, url: url, attemptID: attemptID,
             navigationCorrelationID: navigationCorrelationID, parentSessionID: parentSessionID,
-            ownershipEpoch: ownershipEpoch, generation: generation, signInWindowID: signInWindowID, instantBack: instantBack))
+            ownershipEpoch: ownershipEpoch, generation: generation, signInWindowID: signInWindowID, instantBack: instantBack, observedEnd: observedEnd))
     }
     fileprivate mutating func recordControl(phase: ControlPhase, parentSessionID: UUID, ownershipEpoch: UUID,
                                             generation: UInt64, url: URL?, handback: ComputerUseBrowserHandbackRequirement?,
@@ -463,13 +478,13 @@ struct ComputerUseBrowserNavigationDispatchHistory: Equatable, Sendable, CustomS
     }
     fileprivate mutating func recordPageObservation(phase: PageObservationEvent.Phase, observation: PageObservation,
                                                     parentSessionID: UUID, ownershipEpoch: UUID, generation: UInt64,
-                                                    adoptedSource: ComputerUseBrowserDocument.Source?, nativeReacquisitionID: UUID?) {
+                                                    adoptedSource: ComputerUseBrowserDocument.Source?, nativeReacquisitionID: UUID?, retirement: PageObservationEvent.Retirement?) {
         advanceRevision()
         guard pageObservationEvents.count < 128 else { pageObservationEventsOverflowed = true; return }
         let order = takeOrder()
         pageObservationEvents.append(.init(order: order, phase: phase, observation: observation,
             parentSessionID: parentSessionID, ownershipEpoch: ownershipEpoch, generation: generation,
-            adoptedSource: adoptedSource, nativeReacquisitionID: nativeReacquisitionID))
+            adoptedSource: adoptedSource, nativeReacquisitionID: nativeReacquisitionID, retirement: retirement))
     }
     private mutating func takeOrder() -> Int {
         defer { nextOrder += 1 }
@@ -578,6 +593,8 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         let navigation: WKNavigation
         let generation: UInt64
         let taskID: String
+        let parentSessionID: UUID
+        let ownershipEpoch: UUID
         let startedWhileActive: Bool
         var successfulResponseURL: URL?
     }
@@ -675,6 +692,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         guard pending == nil, pendingDOM == nil, observedNavigation == nil else { throw ComputerUseBrowserError.busy }
         guard mayAct(), !taskID.isEmpty else { throw ComputerUseBrowserError.ownershipLost }
         if self.taskID != taskID {
+            retirePageObservations(.claimChanged)
             if navigationDispatchLog?.taskID == taskID {
                 navigationDispatchLog?.recordClaimBoundary()
             } else {
@@ -686,8 +704,6 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             sourcePolicy = nil
             generation &+= 1
             document = nil
-            observedUserPage = nil
-            observedActivePage = nil
             receipts.removeAll()
             historyReceipts.removeAll()
             navigationAttemptIDs.removeAll()
@@ -848,7 +864,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         document = ComputerUseBrowserDocument(contextID: contextID, taskID: taskID, generation: self.generation,
             operationID: "task-admission-\(UUID().uuidString)", requestedURL: url, committedURL: url, source: .taskAdmissionObservation)
         loadedPageIdentity = identity
-        observedUserPage = nil; observedActivePage = nil
+        retirePageObservations(.taskAdmission)
         guard let requirement = handbackRequirement(taskID: taskID, required: true) else { throw ComputerUseBrowserError.handbackContextLost }
         try validateWorkflowSession(requirement)
         detail = "Checking the page for the new request"
@@ -1004,8 +1020,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         try Task.checkCancellation()
         guard isCurrentObservation() else { throw ComputerUseBrowserError.pageChanged }
         if case .sameDocument(let expectedIdentity) = observed.proof, identity != expectedIdentity {
-            observedUserPage = nil
-            observedActivePage = nil
+            retirePageObservations(.identityMismatch)
             loadedPageIdentity = nil
             throw ComputerUseBrowserError.pageChanged
         }
@@ -1629,8 +1644,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             requestedURL: url, historySourceOperationID: historySourceOperationID)
         document = nil
         loadedPageIdentity = nil
-        observedActivePage = nil
-        observedUserPage = nil
+        retirePageObservations(.navigationStarted)
         displayedSite = ComputerUseBrowserSite.displayName(for: url)
         detail = "Opening page…"
         let id = UUID()
@@ -1692,21 +1706,22 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         closeSignInWindow(restoreParent: false)
         if let pending { failPending(id: pending.id, error: .ownershipLost) }
         if let pendingDOM { interruptDOM(id: pendingDOM.id, error: ComputerUseBrowserError.ownershipLost) }
+        endObservedNavigation(.stopped)
+        retirePageObservations(.stopped)
         if taskID != nil { navigationDispatchLog?.recordClaimBoundary() }
         taskID = nil
         sourcePolicy = nil
         ownershipEpoch = UUID()
         generation &+= 1
         document = nil
-        observedNavigation = nil
-        observedUserPage = nil
-        observedActivePage = nil
         loadedPageIdentity = nil
         browser?.stopLoading()
         detail = "Stopped"
     }
 
     func close() {
+        endObservedNavigation(.closed)
+        retirePageObservations(.closed)
         stop()
         window?.delegate = nil
         window?.close()
@@ -1717,13 +1732,12 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
 
     private func releaseBrowser() {
         closeSignInWindow(restoreParent: false)
+        endObservedNavigation(.browserReleased)
+        retirePageObservations(.browserReleased)
         if let pendingDOM { interruptDOM(id: pendingDOM.id, error: ComputerUseBrowserError.closed) }
         pendingDOM?.capture?.finish(.failure(ComputerUseBrowserError.closed))
         let waiters = pendingDOM?.completionWaiters ?? []
         pendingDOM = nil
-        observedNavigation = nil
-        observedUserPage = nil
-        observedActivePage = nil
         loadedPageIdentity = nil
         urlObservation = nil
         browser?.navigationDelegate = nil
@@ -1801,8 +1815,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         let previousIdentity = loadedPageIdentity
         generation &+= 1
         document = nil
-        observedUserPage = nil
-        observedActivePage = nil
+        retirePageObservations(.locationChanged)
         if ordered, let taskID, !view.isLoading, observedNavigation == nil,
            let previousIdentity, let url, Self.validatedURL(url) != nil {
             let source: ComputerUseBrowserDocument.Source = mayAct() ? .activePageObservation : .userControlObservation
@@ -1987,10 +2000,35 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     }
 
     private func recordPageObservation(_ phase: NavigationHistory.PageObservationEvent.Phase, page: ObservedPage,
-                                       adoptedSource: ComputerUseBrowserDocument.Source? = nil, nativeReacquisitionID: UUID? = nil) {
+                                       adoptedSource: ComputerUseBrowserDocument.Source? = nil, nativeReacquisitionID: UUID? = nil,
+                                       retirement: NavigationHistory.PageObservationEvent.Retirement? = nil) {
         navigationDispatchLog?.recordPageObservation(phase: phase, observation: page.evidence,
             parentSessionID: browserSessionID, ownershipEpoch: ownershipEpoch, generation: generation,
-            adoptedSource: adoptedSource, nativeReacquisitionID: nativeReacquisitionID)
+            adoptedSource: adoptedSource, nativeReacquisitionID: nativeReacquisitionID, retirement: retirement)
+    }
+
+    private func retirePageObservations(_ reason: NavigationHistory.PageObservationEvent.Retirement) {
+        if let page = observedUserPage {
+            recordPageObservation(.retired, page: page, retirement: reason)
+        }
+        if let page = observedActivePage, page.id != observedUserPage?.id {
+            recordPageObservation(.retired, page: page, retirement: reason)
+        }
+        observedUserPage = nil
+        observedActivePage = nil
+    }
+
+    private func endObservedNavigation(_ reason: NavigationHistory.ObservedNavigationEnd) {
+        guard let observed = observedNavigation else { return }
+        if navigationDispatchLog?.taskID == observed.taskID {
+            navigationDispatchLog?.observe(phase: .observedNavigationEnded, decision: .observed,
+                binding: .exactObservedNavigation, control: .unknown, surface: .mainDocument,
+                policyCheck: .notChecked, configuredPolicy: nil, url: nil, attemptID: nil,
+                navigationCorrelationID: observed.id, parentSessionID: observed.parentSessionID,
+                ownershipEpoch: observed.ownershipEpoch, generation: observed.generation,
+                signInWindowID: nil, instantBack: nil, observedEnd: reason)
+        }
+        observedNavigation = nil
     }
 
     /// Legacy policy/URL callbacks do not supply a WKNavigation. Being in the
@@ -2120,9 +2158,8 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
               (200...299).contains(response.statusCode),
               let url = response.url, Self.validatedURL(url) != nil else {
             decide(.cancel)
-            observedNavigation = nil
-            observedUserPage = nil
-            observedActivePage = nil
+            endObservedNavigation(.responseRejected)
+            retirePageObservations(.responseRejected)
             if let pending { failPending(id: pending.id, error: .navigationFailed) }
             return
         }
@@ -2130,7 +2167,8 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         if appliesPolicy, sourcePolicy?.permits(url) == false {
             decide(.cancel, control: pending != nil ? .unknown : .automationAllowed, policyCheck: .blocked)
             detail = "Blocked a page outside this task's allowed sources."
-            observedNavigation = nil; observedUserPage = nil; observedActivePage = nil
+            endObservedNavigation(.sourceBlocked)
+            retirePageObservations(.sourceBlocked)
             if let pending { failPending(id: pending.id, error: .sourceNotAllowed) }
             return
         }
@@ -2192,15 +2230,14 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         sessionHasNavigationActivity = true
         locationRevision &+= 1
         guard let pending else {
+            endObservedNavigation(.superseded)
             generation &+= 1
             document = nil
             loadedPageIdentity = nil
-            observedUserPage = nil
-            observedActivePage = nil
-            observedNavigation = nil
+            retirePageObservations(.navigationStarted)
             if let navigation, let taskID {
                 observedNavigation = ObservedNavigation(navigation: navigation, generation: generation,
-                    taskID: taskID, startedWhileActive: mayAct())
+                    taskID: taskID, parentSessionID: browserSessionID, ownershipEpoch: ownershipEpoch, startedWhileActive: mayAct())
             }
             recordNavigationCallback(.provisionalStart, in: webView, navigation: navigation,
                 control: observedNavigation.map { $0.startedWhileActive ? .automationAllowed : .userControl } ?? .unknown)
@@ -2228,10 +2265,10 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         if pending == nil {
             guard let observed = observedNavigation,
                   navigation === observed.navigation else { return }
-            observedNavigation = nil
             guard taskID == observed.taskID, observed.generation == generation,
                   let url = webView.url, Self.responseURL(observed.successfulResponseURL, matchesDocumentURL: url),
-                  Self.validatedURL(url) != nil else { return }
+                  Self.validatedURL(url) != nil else { endObservedNavigation(.finishRejected); return }
+            endObservedNavigation(.finished)
             let evidence = NavigationHistory.PageObservation(taskID: observed.taskID, parentSessionID: browserSessionID,
                 ownershipEpoch: ownershipEpoch, generation: generation, url: url, basis: .completedNavigation,
                 navigationCorrelationID: observed.id, source: observed.startedWhileActive ? .activePageObservation : .userControlObservation,
@@ -2308,7 +2345,8 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         }
         guard webView === browser else { return }
         if let observed = observedNavigation, navigation === observed.navigation {
-            observedNavigation = nil; observedUserPage = nil; observedActivePage = nil
+            endObservedNavigation(.callbackFailed)
+            retirePageObservations(.navigationFailed)
         }
         if let pending, navigation === pending.navigation { failPending(id: pending.id, error: .navigationFailed) }
     }
@@ -2320,7 +2358,8 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         }
         guard webView === browser else { return }
         if let observed = observedNavigation, navigation === observed.navigation {
-            observedNavigation = nil; observedUserPage = nil; observedActivePage = nil
+            endObservedNavigation(.callbackFailed)
+            retirePageObservations(.navigationFailed)
         }
         if let pending, navigation === pending.navigation { failPending(id: pending.id, error: .navigationFailed) }
     }
@@ -2334,12 +2373,11 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         guard webView === browser else { return }
         closeSignInWindow(restoreParent: false)
         if let pending { failPending(id: pending.id, error: .navigationFailed) }
+        endObservedNavigation(.processTerminated)
+        retirePageObservations(.processTerminated)
         generation &+= 1
         document = nil
         loadedPageIdentity = nil
-        observedNavigation = nil
-        observedUserPage = nil
-        observedActivePage = nil
         detail = "Browser process stopped"
     }
 }

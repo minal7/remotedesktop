@@ -1104,6 +1104,8 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
             XCTAssertEqual(observationHistory.matchedAdoptionCount, 1)
             XCTAssertEqual(observationHistory.nativeHandbackLinkedAdoptionCount, 1)
             XCTAssertEqual(observationHistory.gaps, [.sameDocumentSourceUnqualified])
+            XCTAssertEqual(observationHistory.retiredCount, observationHistory.matchedRetirementCount)
+            XCTAssertEqual(observationHistory.acceptedCount, observationHistory.adoptedCount + observationHistory.retiredCount)
             XCTAssertTrue(history.pageObservationEvents.allSatisfy { $0.observation.navigationCorrelationID == nil })
             XCTAssertFalse(browser.validate(original), "An A -> B -> A history transition cannot revive an old document")
             XCTAssertNil(browser.receipt(taskID: "active-history", operationID: current.operationID))
@@ -1206,7 +1208,12 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
             let requirement = try XCTUnwrap(browser.handbackRequirement(taskID: "interrupted-observation", required: true))
             try await waitUntil { server.count("/signal") == 1 }
             server.releaseHeldResponses()
-            try await waitUntil { server.count("/results") == 1 && browser.isLoadingPage }
+            try await waitUntil {
+                server.count("/results") == 1 && browser.isLoadingPage
+                    && (try? browser.navigationDispatchHistory(taskID: "interrupted-observation").observations.contains {
+                        $0.phase == .provisionalStart && $0.binding == .exactObservedNavigation
+                    }) == true
+            }
             var started = false
             let waiting = Task { started = true; return try await browser.acquireObservedDocument(taskID: "interrupted-observation") }
             defer { waiting.cancel() }
@@ -1240,6 +1247,21 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
                 XCTAssertEqual(assessment.matchedAdoptionCount, 1)
                 XCTAssertEqual(assessment.nativeHandbackLinkedAdoptionCount, interruption == "pause" ? 1 : 0)
                 XCTAssertTrue(assessment.gaps.isEmpty)
+            } else {
+                let history = try browser.navigationDispatchHistory(taskID: "interrupted-observation")
+                let ended = try XCTUnwrap(history.observations.first { $0.phase == .observedNavigationEnded })
+                let started = try XCTUnwrap(history.observations.first {
+                    $0.phase == .provisionalStart && $0.navigationCorrelationID == ended.navigationCorrelationID
+                })
+                XCTAssertEqual(ended.observedEnd, .stopped)
+                XCTAssertEqual(ended.parentSessionID, started.parentSessionID)
+                XCTAssertEqual(ended.ownershipEpoch, started.ownershipEpoch)
+                XCTAssertEqual(ended.generation, started.generation)
+                let episodes = ComputerUseBrowserResultAssessment.NavigationEpisodes(history: history)
+                XCTAssertEqual(episodes.endedObservedEpisodeCount, 1)
+                XCTAssertEqual(episodes.rejectedObservedEpisodeCount, 0)
+                XCTAssertFalse(episodes.gaps.contains(.unfinishedEpisode), "The old tracked load ended before the replacement claim")
+                XCTAssertTrue(history.pageObservationEvents.isEmpty)
             }
             XCTAssertEqual(server.count("/results"), 1)
         }
@@ -1900,6 +1922,49 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
         }
     }
 
+    func testSupersededObservedCandidateIsRetiredBeforeTheReplacementIsAdopted() async throws {
+        let script = """
+            (async () => {
+                await fetch('/first'); history.replaceState({}, '', '/discarded'); await fetch('/first-changed');
+                await fetch('/second'); history.replaceState({}, '', '/current'); await fetch('/second-changed');
+            })();
+            """
+        let server = try OwnedBrowserHTTPFixture(routes: ["/start": .init(body: "<script>\(script)</script>"),
+            "/first": .init(held: true), "/second": .init(held: true)])
+        let base = try await server.start()
+        defer { server.stop() }
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+        defer { browser.close() }
+        try browser.claim(taskID: "superseded-observation")
+        _ = try await browser.navigate(taskID: "superseded-observation", operationID: "open", to: base.appendingPathComponent("start"))
+        try await waitUntil { server.count("/first") == 1 }
+        server.releaseHeldResponses()
+        try await waitUntil { server.count("/first-changed") == 1 && server.count("/second") == 1 }
+        let before = try browser.navigationDispatchHistory(taskID: "superseded-observation")
+        let first = try XCTUnwrap(before.pageObservationEvents.first)
+        XCTAssertEqual(before.pageObservationEvents.map(\.phase), [.accepted])
+        server.releaseHeldResponses()
+        try await waitUntil { server.count("/second-changed") == 1 }
+        let current = try await browser.acquireObservedDocument(taskID: "superseded-observation")
+        let history = try browser.navigationDispatchHistory(taskID: "superseded-observation")
+        XCTAssertEqual(history.pageObservationEvents.map(\.phase), [.accepted, .retired, .accepted, .adopted])
+        let retired = try XCTUnwrap(history.pageObservationEvents.first { $0.phase == .retired })
+        let adopted = try XCTUnwrap(history.pageObservationEvents.last)
+        XCTAssertEqual(retired.observation, first.observation)
+        XCTAssertEqual(retired.retirement, .locationChanged)
+        XCTAssertNil(retired.adoptedSource); XCTAssertNil(retired.nativeReacquisitionID)
+        XCTAssertNotEqual(adopted.observation.id, first.observation.id)
+        XCTAssertEqual(current.operationID, "page-observation-\(adopted.observation.id.uuidString)")
+        XCTAssertEqual(current.committedURL, base.appendingPathComponent("current"))
+        XCTAssertNil(browser.receipt(taskID: "superseded-observation", operationID: current.operationID))
+        let assessment = ComputerUseBrowserResultAssessment.PageObservationHistory(history: history)
+        XCTAssertEqual(assessment.acceptedCount, 2); XCTAssertEqual(assessment.matchedAdoptionCount, 1)
+        XCTAssertEqual(assessment.retiredCount, 1); XCTAssertEqual(assessment.matchedRetirementCount, 1)
+        XCTAssertEqual(assessment.gaps, [.sameDocumentSourceUnqualified])
+        XCTAssertEqual(history.attempts.count, 1)
+        XCTAssertEqual(server.count("/discarded"), 0); XCTAssertEqual(server.count("/current"), 0)
+    }
+
     func testObservedPageTransferRetainsItsOriginalClaimWithoutInventingAcceptanceHistory() async throws {
         let server = try OwnedBrowserHTTPFixture(routes: [
             "/start": .init(body: "<script>fetch('/signal').then(() => location.href='/destination')</script>"),
@@ -2033,6 +2098,11 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
             XCTAssertEqual(history.attempts.first?.operationID, original.operationID)
             XCTAssertEqual(history.attempts.first?.outcome, .documentCommitted)
             let observations = ComputerUseBrowserResultAssessment.PageObservationHistory(history: history)
+            let episodes = ComputerUseBrowserResultAssessment.NavigationEpisodes(history: history)
+            XCTAssertEqual(episodes.endedObservedEpisodeCount, 1)
+            XCTAssertEqual(episodes.rejectedObservedEpisodeCount, row.status == 200 ? 0 : 1)
+            XCTAssertFalse(episodes.gaps.contains(.unfinishedEpisode))
+            XCTAssertEqual(episodes.matchedObservedAdmissionCount, row.status == 200 ? 1 : 0)
             XCTAssertEqual(observations.acceptedCount, row.status == 200 ? 1 : 0)
             XCTAssertEqual(observations.adoptedCount, row.status == 200 ? 1 : 0)
             XCTAssertEqual(observations.matchedAdoptionCount, row.status == 200 ? 1 : 0)

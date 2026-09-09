@@ -39,6 +39,8 @@ Six changed Swift files pass parse-only syntax checking. The new repeated-histor
 
 ## Remaining work
 
+Follow-up: [observation disposition history](BROWSER_OBSERVATION_DISPOSITION_REVIEW.md) now records why tracked loads end and why accepted candidates are retired. It distinguishes these native transitions from finished callbacks, adoption and network-cancellation proof.
+
 Recorded native admission/adoption is now available for continued reconciliation. Full claim/retirement timelines, source-policy and goal lineage through manual login, complete control intervals and qualified response/redirect/platform coverage remain open. Native observed-page adoption still does not establish successful login or the correct continuation of the parent research/form task. Continue those repairs and the deferred qualification scenarios in the [checklist](../../../TODO.md).
 
 Transfer of an already current document through `acquireCurrentDocument` still has claim-boundary evidence only; that path did not accept or adopt a new observation. Rejected loads and superseded candidates also need their appropriate temporal treatment, without treating every unadopted historical candidate as a current failure.
