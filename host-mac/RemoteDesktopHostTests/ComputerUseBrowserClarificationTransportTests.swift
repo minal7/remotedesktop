@@ -4,6 +4,68 @@ import XCTest
 
 @MainActor
 final class ComputerUseBrowserClarificationTransportTests: XCTestCase {
+    func testQuestionDeliveryRequiresRegisteredOwnerAndUnchangedLiveScope() async throws {
+        var now = Date(timeIntervalSince1970: 1_800_000_000)
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true }), planner = BrowserResearchGoalFixture()
+        defer { browser.close() }
+        let owner = try makeOwner(browser, planner: planner, now: { now }), original = owner.input
+        let proposal = try await owner.interpretGoal().proposal, bridge = ComputerUseBrowserClarificationTransport()
+        let envelope = request(original.taskID)
+        let question = try bridge.issue(.init(taskID: original.taskID, inputDigest: original.digest, topic: .location,
+            requirementIDs: [proposal.requirements[0].id]), owner: owner, for: envelope)
+        XCTAssertTrue(bridge.retainsRegisteredQuestion(question.reference, for: envelope, retainedOwner: { _ in owner }))
+        XCTAssertFalse(bridge.retainsRegisteredQuestion(question.reference, for: envelope, retainedOwner: { _ in nil }))
+        let replacement = try makeOwner(browser, planner: planner)
+        XCTAssertFalse(bridge.retainsRegisteredQuestion(question.reference, for: envelope, retainedOwner: { _ in replacement }))
+        XCTAssertFalse(bridge.retainsRegisteredQuestion(question.reference, for: request(original.taskID, sender: "other"), retainedOwner: { _ in owner }))
+        XCTAssertFalse(bridge.retainsRegisteredQuestion(question.reference, for: request(original.taskID, session: "other"), retainedOwner: { _ in owner }))
+        now = question.reference.expiresAt
+        XCTAssertFalse(bridge.retainsRegisteredQuestion(question.reference, for: envelope, retainedOwner: { _ in owner }))
+        XCTAssertEqual(owner.input, original)
+    }
+
+    func testLedgerRetainsBrowserQuestionKindWithoutInventingLegacyOwnersOrRestoringCancelledReferences() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("ledger.json"), ledger = ComputerUseTaskLedger(fileURL: url)
+        let reference = try ComputerUseClarificationReference(taskID: "browser", expiresAt: Date().addingTimeInterval(600))
+        _ = try ledger.claim(taskID: "browser", senderID: "phone", sessionID: "session", promptBody: "Find tickets.")
+        XCTAssertThrowsError(try ledger.complete(taskID: "browser", response: "Done", outcome: .taskCompleted, clarificationOwner: .browser))
+        _ = try ledger.complete(taskID: "browser", response: "Which location?", outcome: .userInterventionRequired,
+            clarification: reference, clarificationOwner: .browser)
+        let restored = ComputerUseTaskLedger(fileURL: url)
+        XCTAssertEqual(restored.clarificationOwner(taskID: "browser"), .browser); XCTAssertEqual(restored.terminalClarification(taskID: "browser"), reference)
+        _ = try restored.complete(taskID: "browser", response: "Late result", outcome: .unableToComplete)
+        XCTAssertEqual(ComputerUseTaskLedger(fileURL: url).clarificationOwner(taskID: "browser"), .browser)
+        let records = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        for mutation in ["legacy", "unknown-kind", "wrong-task", "no-reference", "wrong-outcome"] {
+            var changed = records, row = try XCTUnwrap(records["browser"] as? [String: Any])
+            switch mutation {
+            case "legacy": row.removeValue(forKey: "clarificationOwner")
+            case "unknown-kind": row["clarificationOwner"] = "unrecognized"
+            case "wrong-task":
+                var ref = try XCTUnwrap(row["clarification"] as? [String: Any]); ref["taskID"] = "other"; row["clarification"] = ref
+            case "no-reference": row.removeValue(forKey: "clarification")
+            default: row["outcome"] = ComputerUseTerminalOutcome.taskCompleted.rawValue
+            }
+            changed["browser"] = row
+            let changedURL = directory.appendingPathComponent(mutation + ".json")
+            try JSONSerialization.data(withJSONObject: changed).write(to: changedURL)
+            let reopened = ComputerUseTaskLedger(fileURL: changedURL)
+            if mutation == "legacy" {
+                XCTAssertNil(reopened.clarificationOwner(taskID: "browser"))
+                XCTAssertEqual(reopened.terminalClarification(taskID: "browser"), reference)
+                XCTAssertEqual(try reopened.claim(taskID: "browser", senderID: "phone", sessionID: "session", promptBody: "Find tickets."), .completed("Which location?"))
+            } else {
+                XCTAssertThrowsError(try reopened.claim(taskID: "new", senderID: "phone", sessionID: "session", promptBody: "New request"))
+            }
+        }
+        _ = try restored.cancelLocally(taskID: "browser", senderID: "phone", sessionID: "session")
+        let cancelled = ComputerUseTaskLedger(fileURL: url)
+        XCTAssertEqual(cancelled.clarificationOwner(taskID: "browser"), .browser); XCTAssertTrue(cancelled.isCancelled(taskID: "browser"))
+        XCTAssertNil(cancelled.terminalClarification(taskID: "browser"))
+    }
+
     func testRetryWireNegotiatesOnlyExplicitAnswerSupportAndKeepsTheCompleteQuestion() throws {
         let reference = try ComputerUseClarificationReference(taskID: "root", expiresAt: Date().addingTimeInterval(600))
         for negotiated in [false, true] {

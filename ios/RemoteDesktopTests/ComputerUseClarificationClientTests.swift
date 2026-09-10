@@ -3,6 +3,31 @@ import XCTest
 
 @MainActor
 final class ComputerUseClarificationClientTests: XCTestCase {
+    func testUnavailableBrowserQuestionReplayEndsRecoveryWithoutOpeningAnAnswerComposer() async throws {
+        let fixture = ClarificationClientFixture()
+        defer { fixture.model.stop() }
+        fixture.model.start(); XCTAssertTrue(fixture.model.sendPrompt("Find concert tickets."))
+        let original = try await fixture.channel.prompt(at: 0)
+        fixture.model.stop()
+        let channel = ClarificationClientChannel()
+        let recovered = ComputerUseSessionModel(hostName: "Mac", pairingCode: "123456", hostID: "HOST-ID",
+            pendingStore: fixture.store, channel: channel)
+        defer { recovered.stop() }
+        recovered.start()
+        let replay = try await channel.prompt(at: 0)
+        XCTAssertEqual(replay.id, original.id); XCTAssertTrue(replay.body.utf8.elementsEqual(original.body.utf8))
+        await channel.deliver(try ComputerUseTaskUpdate(taskID: original.id,
+            text: "The original question is no longer active. Start a new request with the complete instruction.",
+            outcome: .unableToComplete).encodedBody())
+        try await channel.waitForDelivery()
+        XCTAssertEqual(recovered.latestTerminalOutcome, .unableToComplete)
+        XCTAssertEqual(recovered.composerMode, .request); XCTAssertFalse(recovered.hasActivePrompt)
+        XCTAssertNil(recovered.restoredClarificationDraft); XCTAssertNil(fixture.store.load(hostID: "HOST-ID", pairingCode: "123456"))
+        XCTAssertTrue(recovered.sendPrompt("Find movie tickets in Paris."))
+        let next = try ComputerUsePromptRequest.decodeBody(await channel.prompt(at: 1).body)
+        XCTAssertNil(next.clarification); XCTAssertTrue(next.conversation.isEmpty)
+    }
+
     func testRejectedAnswerRestoresExactDraftQuestionAndOriginalDeadlineBeforeCorrection() async throws {
         var now = Date()
         let fixture = ClarificationClientFixture(now: { now })

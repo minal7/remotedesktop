@@ -2,6 +2,8 @@
 
 Source repair; execution pending. This follows the [answer-admission policy repair](BROWSER_ANSWER_ADMISSION_POLICY_REVIEW.md). No build, typecheck, test/assertion, app, browser, model, login or SSH run was performed.
 
+Follow-up: the [live question replay repair](CLARIFICATION_LIVE_REPLAY_REVIEW.md) now checks normal browser/native text questions and retries after the outbound queue wait, before channel handoff. It also requires live native proof for older unclassified question records; process/session reconstruction remains open.
+
 ## First-principles findings
 
 A submitted message and an accepted instruction are different events. If an answer exceeds the native conversation capacity or contains no usable text, it must not change the task's source, scope, clock or accepted-answer identity. Rejection also does not mean the original question disappeared. Previously, native admission retained that question but the manager sent a generic terminal failure telling the phone to start over.

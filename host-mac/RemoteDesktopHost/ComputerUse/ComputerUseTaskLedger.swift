@@ -53,6 +53,8 @@ final class ComputerUseTaskLedger {
         case unavailable
     }
 
+    enum ClarificationOwner: String, Codable { case browser, text }
+
     struct TerminalResult: Equatable {
         let response: String
         let outcome: ComputerUseTerminalOutcome?
@@ -170,6 +172,8 @@ final class ComputerUseTaskLedger {
         var outcome: ComputerUseTerminalOutcome?
         var clarification: ComputerUseClarificationReference?
         var clarificationRetry: ComputerUseClarificationRetry? = nil
+        /// Historical owner kind, not proof that a native owner still exists.
+        var clarificationOwner: ClarificationOwner? = nil
         var control: ControlSnapshot?
         var hostControlEpoch: UInt64 = 0
         var localControlState: ControlState?
@@ -224,6 +228,7 @@ final class ComputerUseTaskLedger {
             case outcome
             case clarification
             case clarificationRetry
+            case clarificationOwner
             case control
             case hostControlEpoch
             case localControlState
@@ -247,6 +252,7 @@ final class ComputerUseTaskLedger {
             }
             clarification = try values.decodeIfPresent(ComputerUseClarificationReference.self, forKey: .clarification)
             clarificationRetry = try values.decodeIfPresent(ComputerUseClarificationRetry.self, forKey: .clarificationRetry)
+            clarificationOwner = try values.decodeIfPresent(ClarificationOwner.self, forKey: .clarificationOwner)
             control = try values.decodeIfPresent(
                 ControlSnapshot.self,
                 forKey: .control)
@@ -276,6 +282,11 @@ final class ComputerUseTaskLedger {
             approvedAction = try values.decodeIfPresent(ApprovedActionRecord.self, forKey: .approvedAction)
             approvedActionPlan = try values.decodeIfPresent(ApprovedActionPlan.self, forKey: .approvedActionPlan)
             approvedActionSteps = try values.decodeIfPresent([ApprovedActionRecord].self, forKey: .approvedActionSteps)
+            if clarificationOwner != nil {
+                guard outcome == .userInterventionRequired, let response, ComputerUseClarificationText.isValid(response),
+                      promptClaimed, promptDigest != nil, clarificationRetry == nil,
+                      clarification != nil || control?.state == .cancelled else { throw LedgerError.unavailable }
+            }
             if clarificationRetry != nil {
                 guard outcome == .userInterventionRequired, clarification == nil,
                       let response, ComputerUseClarificationText.isValid(response),
@@ -334,6 +345,7 @@ final class ComputerUseTaskLedger {
             guard decoded.allSatisfy({ key, record in
                 (record.approvedActionPlan.map { $0.taskID == key } ?? true)
                     && (record.clarificationRetry.map { $0.reference.taskID != key } ?? true)
+                    && (record.clarificationOwner == nil || record.clarification == nil || record.clarification?.taskID == key)
             }) else {
                 throw LedgerError.unavailable
             }
@@ -585,7 +597,8 @@ final class ComputerUseTaskLedger {
         response: String,
         outcome: ComputerUseTerminalOutcome? = nil,
         clarification: ComputerUseClarificationReference? = nil,
-        clarificationRetry: ComputerUseClarificationRetry? = nil
+        clarificationRetry: ComputerUseClarificationRetry? = nil,
+        clarificationOwner: ClarificationOwner? = nil
     ) throws -> TerminalResult {
         try ensureAvailable()
         guard var record = records[taskID] else {
@@ -599,6 +612,11 @@ final class ComputerUseTaskLedger {
                 outcome: record.outcome, clarification: record.clarification, clarificationRetry: record.clarificationRetry)
         }
         let retainedQuestion = outcome == .userInterventionRequired && clarification?.taskID == taskID ? clarification : nil
+        if clarificationOwner != nil {
+            guard retainedQuestion != nil, clarificationRetry == nil, record.promptClaimed, record.promptDigest != nil else {
+                throw LedgerError.invalidClarification
+            }
+        }
         if let retry = clarificationRetry {
             guard outcome == .userInterventionRequired, clarification == nil, retry.reference.taskID != taskID,
                   record.promptClaimed, record.promptDigest != nil,
@@ -620,6 +638,7 @@ final class ComputerUseTaskLedger {
         record.outcome = outcome
         record.clarification = retainedQuestion
         record.clarificationRetry = clarificationRetry
+        record.clarificationOwner = clarificationOwner
         try commit(record, for: taskID)
         return TerminalResult(
             response: record.response ?? "",
@@ -760,6 +779,11 @@ final class ComputerUseTaskLedger {
 
     func isCancelled(taskID: String) -> Bool {
         initializationError == nil && records[taskID]?.effectiveControlState == .cancelled
+    }
+
+    func clarificationOwner(taskID: String) -> ClarificationOwner? {
+        guard initializationError == nil else { return nil }
+        return records[taskID]?.clarificationOwner
     }
 
     func rejectedAnswerReference(taskID: String) -> ComputerUseClarificationReference? {

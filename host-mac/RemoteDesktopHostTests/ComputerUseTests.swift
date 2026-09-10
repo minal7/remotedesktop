@@ -741,6 +741,169 @@ final class ComputerUseTests: XCTestCase {
                                          promptBody: "Find tickets"), .completed(ComputerUseTaskLedger.stoppedResponse))
     }
 
+    func test_managerReplaysTextAndUnclassifiedQuestionsOnlyWithTheirLiveNativeScope() async throws {
+        for change in ["missing", "scope", "legacy-restart"] {
+            let url = temporaryLedgerURL(), executor = ScopedClarificationTestExecutor(), channel = FakeHostComputerUseChannel()
+            defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+            let manager = HostComputerUseManager(injector: InputInjector(), executor: executor,
+                taskLedger: ComputerUseTaskLedger(fileURL: url), allowsExternalServices: false, channelFactory: { _ in channel })
+            defer { manager.stop() }
+            let root = makeEnvelope(id: "text-question-replay", kind: .prompt, body: "Put blue in a field.")
+            manager.authorizePeer(senderID: root.senderID)
+            XCTAssertTrue(manager.handle(root, channel: channel))
+            let first = try await clarificationUpdate(taskID: root.id, channel: channel)
+            let reference = try XCTUnwrap(first.clarification)
+            XCTAssertEqual(ComputerUseTaskLedger(fileURL: url).clarificationOwner(taskID: root.id), .text)
+            let beforeLive = await channel.sentMessages().count
+            XCTAssertTrue(manager.handle(root, channel: channel))
+            let live = try await clarificationUpdate(taskID: root.id, channel: channel, afterCount: beforeLive)
+            XCTAssertEqual(live.clarification, reference); XCTAssertEqual(live.text, first.text)
+            if change == "legacy-restart" {
+                var records = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+                var row = try XCTUnwrap(records[root.id] as? [String: Any]); row.removeValue(forKey: "clarificationOwner"); records[root.id] = row
+                let legacyURL = url.deletingLastPathComponent().appendingPathComponent("legacy.json")
+                try JSONSerialization.data(withJSONObject: records).write(to: legacyURL)
+                let restartedExecutor = ScopedClarificationTestExecutor(), restartedChannel = FakeHostComputerUseChannel()
+                let restarted = HostComputerUseManager(injector: InputInjector(), executor: restartedExecutor,
+                    taskLedger: ComputerUseTaskLedger(fileURL: legacyURL), allowsExternalServices: false, channelFactory: { _ in restartedChannel })
+                defer { restarted.stop() }
+                restarted.authorizePeer(senderID: root.senderID)
+                XCTAssertTrue(restarted.handle(root, channel: restartedChannel))
+                let reply = try await clarificationUpdate(taskID: root.id, channel: restartedChannel)
+                XCTAssertEqual(reply.outcome, .unableToComplete); XCTAssertNil(reply.clarification)
+                XCTAssertTrue(restartedExecutor.normalPrompts.isEmpty); XCTAssertEqual(restartedExecutor.effects, 0)
+            } else {
+                if change == "missing" { executor.pending = nil }
+                else {
+                    let pending = try XCTUnwrap(executor.pending)
+                    executor.pending = .init(taskID: pending.taskID, goal: pending.goal, question: pending.question,
+                        scope: String(repeating: "b", count: 64), expiresAt: pending.expiresAt)
+                }
+                let before = await channel.sentMessages().count
+                XCTAssertTrue(manager.handle(root, channel: channel))
+                let reply = try await clarificationUpdate(taskID: root.id, channel: channel, afterCount: before)
+                XCTAssertEqual(reply.outcome, .unableToComplete); XCTAssertNil(reply.clarification)
+                XCTAssertNil(reply.clarificationAnswerPolicy); XCTAssertNil(reply.clarificationRetry)
+            }
+            XCTAssertEqual(executor.normalPrompts, [root.body]); XCTAssertTrue(executor.answers.isEmpty); XCTAssertEqual(executor.effects, 0)
+            XCTAssertEqual(ComputerUseTaskLedger(fileURL: url).terminalClarification(taskID: root.id), reference)
+        }
+    }
+
+    func test_managerReplaysBrowserQuestionsOnlyWhileTheirOriginalOwnerAndQuestionRemainLive() async throws {
+        for change in ["retired", "accepted-answer", "new-request", "restart"] {
+            let url = temporaryLedgerURL(), executor = BrowserQuestionLifecycleExecutor()
+            defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+            let fixture = try browserControlFixture(executor: executor.capabilityExecutor(), ledgerURL: url)
+            defer { fixture.manager.stop(); fixture.browser.close() }
+            let root = makeEnvelope(id: "question-replay-root", kind: .prompt, body: "Find concert tickets.")
+            fixture.manager.authorizePeer(senderID: root.senderID)
+            XCTAssertTrue(fixture.manager.handle(root, channel: fixture.channel))
+            let first = try await clarificationUpdate(taskID: root.id, channel: fixture.channel)
+            let reference = try XCTUnwrap(first.clarification), owner = try XCTUnwrap(executor.owner)
+            XCTAssertEqual(ComputerUseTaskLedger(fileURL: url).clarificationOwner(taskID: root.id), .browser)
+            let liveBefore = await fixture.channel.sentMessages().count
+            XCTAssertTrue(fixture.manager.handle(root, channel: fixture.channel))
+            let live = try await clarificationUpdate(taskID: root.id, channel: fixture.channel, afterCount: liveBefore)
+            XCTAssertEqual(live.clarification, reference); XCTAssertEqual(live.text, first.text)
+            XCTAssertEqual(executor.planner.inputs.count, 1)
+            var successorID: String?
+            switch change {
+            case "retired": owner.retire()
+            case "accepted-answer", "new-request":
+                let next = makeEnvelope(id: "next-question", kind: .prompt, body: change == "accepted-answer"
+                    ? try ComputerUsePromptRequest.answering(reference, text: "Paris").encodedBody() : "Find movie tickets.")
+                XCTAssertTrue(fixture.manager.handle(next, channel: fixture.channel))
+                _ = try await clarificationUpdate(taskID: next.id, channel: fixture.channel); successorID = next.id
+            default: fixture.manager.stop()
+            }
+            let calls = executor.planner.inputs.count
+            if change == "restart" {
+                let newExecutor = BrowserQuestionLifecycleExecutor()
+                let recovered = try browserControlFixture(executor: newExecutor.capabilityExecutor(), ledgerURL: url)
+                defer { recovered.manager.stop(); recovered.browser.close() }
+                recovered.manager.authorizePeer(senderID: root.senderID)
+                XCTAssertTrue(recovered.manager.handle(root, channel: recovered.channel))
+                let reply = try await clarificationUpdate(taskID: root.id, channel: recovered.channel)
+                XCTAssertEqual(reply.outcome, .unableToComplete); XCTAssertNil(reply.clarification)
+                XCTAssertNil(reply.clarificationAnswerPolicy); XCTAssertNil(reply.clarificationRetry)
+                XCTAssertTrue(newExecutor.planner.inputs.isEmpty); XCTAssertNil(newExecutor.owner)
+            } else {
+                let before = await fixture.channel.sentMessages().count
+                XCTAssertTrue(fixture.manager.handle(root, channel: fixture.channel))
+                let reply = try await clarificationUpdate(taskID: root.id, channel: fixture.channel, afterCount: before)
+                XCTAssertEqual(reply.outcome, .unableToComplete); XCTAssertNil(reply.clarification)
+                XCTAssertNil(reply.clarificationAnswerPolicy); XCTAssertNil(reply.clarificationRetry)
+                XCTAssertEqual(executor.planner.inputs.count, calls)
+                if let successorID {
+                    let current = try XCTUnwrap(executor.owner)
+                    XCTAssertEqual(current.executionTaskID, successorID)
+                    XCTAssertNotNil(try current.pendingQuestion(controllerID: root.senderID, controllerSessionID: root.sessionID))
+                }
+            }
+            XCTAssertEqual(ComputerUseTaskLedger(fileURL: url).terminalClarification(taskID: root.id), reference,
+                "Historical terminal evidence stays intact; only its live projection changes")
+        }
+    }
+
+    func test_managerRechecksQueuedBrowserQuestionsAndRetriesBeforeDelivery() async throws {
+        for isRetry in [false, true] {
+            for retirement in ["retire", "cancel", "revoke"] {
+                let url = temporaryLedgerURL(), executor = BrowserQuestionLifecycleExecutor()
+                defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+                let fixture = try browserControlFixture(executor: executor.capabilityExecutor(), ledgerURL: url)
+                defer { fixture.manager.stop(); fixture.browser.close() }
+                let gate = ComputerUsePlanningTestGate<Bool>(started: expectation(description: "Question delivery held"),
+                    returned: expectation(description: "Question delivery released"))
+                defer { gate.finish(true) }
+                let root = makeEnvelope(id: "queued-question-root", kind: .prompt, body: "Find concert tickets.")
+                fixture.manager.authorizePeer(senderID: root.senderID)
+                if !isRetry { await fixture.channel.holdNextStatusSend(gate) }
+                XCTAssertTrue(fixture.manager.handle(root, channel: fixture.channel))
+                var deliveredTaskID = root.id
+                if isRetry {
+                    let first = try await clarificationUpdate(taskID: root.id, channel: fixture.channel)
+                    let reference = try XCTUnwrap(first.clarification)
+                    await waitUntil { await fixture.channel.sentMessages().contains {
+                        $0.kind == .status && (try? ComputerUseTaskUpdate.decodeBody($0.body).text) == "ready"
+                    } }
+                    await fixture.channel.holdNextStatusSend(gate)
+                    XCTAssertTrue(fixture.manager.handle(root, channel: fixture.channel))
+                    await fulfillment(of: [gate.started], timeout: 1)
+                    let attempt = makeEnvelope(id: "queued-rejected-answer", kind: .prompt,
+                        body: try ComputerUsePromptRequest.answering(reference, text: " \n ", supportsClarificationRetry: true).encodedBody())
+                    deliveredTaskID = attempt.id
+                    XCTAssertTrue(fixture.manager.handle(attempt, channel: fixture.channel))
+                    XCTAssertNotNil(ComputerUseTaskLedger(fileURL: url).terminalClarificationRetry(taskID: attempt.id))
+                } else {
+                    await fulfillment(of: [gate.started], timeout: 1)
+                    await waitUntil { ComputerUseTaskLedger(fileURL: url).clarificationOwner(taskID: root.id) == .browser }
+                }
+                let before = await fixture.channel.sentMessages().count
+                if retirement == "revoke" {
+                    fixture.manager.revokePeerAuthorization(); fixture.manager.authorizePeer(senderID: root.senderID)
+                } else if retirement == "cancel" {
+                    XCTAssertTrue(fixture.manager.handle(try makeControlEnvelope(kind: .cancel, taskID: deliveredTaskID, revision: 1), channel: fixture.channel))
+                } else { try XCTUnwrap(executor.owner).retire() }
+                gate.finish(true)
+                await fulfillment(of: [gate.returned], timeout: 1)
+                await waitUntil { await fixture.channel.sentMessages().dropFirst(before).contains {
+                    guard $0.kind == .status, let update = try? ComputerUseTaskUpdate.decodeBody($0.body) else { return false }
+                    return update.taskID == deliveredTaskID && update.text == "ready"
+                } }
+                let replies = await fixture.channel.sentMessages().dropFirst(before).filter { $0.kind == .assistant }
+                    .compactMap { try? ComputerUseTaskUpdate.decodeBody($0.body) }.filter { $0.taskID == deliveredTaskID }
+                if retirement == "revoke" { XCTAssertTrue(replies.isEmpty, "Renewed authorization cannot release a former generation's question") }
+                else {
+                    let reply = try XCTUnwrap(replies.first)
+                    XCTAssertEqual(reply.outcome, .unableToComplete); XCTAssertNil(reply.clarification)
+                    XCTAssertNil(reply.clarificationRetry); XCTAssertNil(reply.clarificationAnswerPolicy)
+                }
+                XCTAssertEqual(executor.planner.inputs.count, 1); XCTAssertTrue(executor.continued.isEmpty)
+            }
+        }
+    }
+
     func test_managerRetriesRejectedBrowserAnswersWithoutAcceptingThemAndRetiresStaleRetryReplays() async throws {
         let url = temporaryLedgerURL(), executor = BrowserQuestionLifecycleExecutor()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }

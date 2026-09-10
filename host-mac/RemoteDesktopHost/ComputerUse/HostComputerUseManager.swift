@@ -7031,14 +7031,20 @@ final class HostComputerUseManager: ObservableObject {
         // Only this host's exact retained browser question can carry its
         // original owner across a terminal transport reply. All other results
         // end the current execution, including failed terminal persistence.
-        let preservesBrowserQuestion = browserClarifications.retains(clarification, for: envelope)
+        // Origin classification survives a failed liveness check. Otherwise
+        // a retired browser question could be stored as an unclassified one.
+        let identifiesBrowserQuestion = clarification.map { browserClarifications.matches($0) } ?? false
+        let identifiesTextQuestion = clarification.map { textClarifications.matches($0) } ?? false
+        let preservesBrowserQuestion = browserClarifications.retainsRegisteredQuestion(clarification, for: envelope,
+            retainedOwner: { tools.ownedBrowserResearch(taskID: $0) })
         if !preservesBrowserQuestion { tools.retireOwnedBrowserResearch(taskID: envelope.id) }
         do {
             let terminal = try taskLedger.complete(
                 taskID: envelope.id,
                 response: response,
                 outcome: outcome,
-                clarification: clarification)
+                clarification: clarification,
+                clarificationOwner: identifiesBrowserQuestion ? .browser : identifiesTextQuestion ? .text : nil)
             if !preservesBrowserQuestion || terminal.clarification != clarification || terminal.outcome != .userInterventionRequired {
                 browserClarifications.invalidate(for: envelope)
                 tools.retireOwnedBrowserResearch(taskID: envelope.id)
@@ -7143,21 +7149,61 @@ final class HostComputerUseManager: ObservableObject {
             wireBody = body
         }
         let previousDelivery = outboundDeliveryTask
+        let guardedGeneration = clarification != nil || clarificationRetry != nil
+            ? (transport: transportGeneration, authorization: actionEvidenceAuthorizationGeneration) : evidenceDeliveryGeneration
         let delivery = Task { [weak self] in
             if let previousDelivery { await previousDelivery.value }
-            if let evidenceDeliveryGeneration {
-                guard let self, self.transportGeneration == evidenceDeliveryGeneration.transport,
-                      self.actionEvidenceAuthorizationGeneration == evidenceDeliveryGeneration.authorization,
+            if let guardedGeneration {
+                guard let self, self.transportGeneration == guardedGeneration.transport,
+                      self.actionEvidenceAuthorizationGeneration == guardedGeneration.authorization,
                       self.authorizedPeerID == envelope.senderID else { return }
+            }
+            var deliveredBody = wireBody
+            if clarification != nil || liveRetry != nil {
+                guard let self, let freshBody = self.revalidateClarificationDelivery(wireBody, replyingTo: envelope,
+                    question: clarification, retry: liveRetry) else { return }
+                deliveredBody = freshBody
             }
             _ = try? await channel.send(
                 kind: kind,
-                body: wireBody,
+                body: deliveredBody,
                 to: envelope.senderID,
                 sessionID: envelope.sessionID,
                 messageID: nil)
         }
         outboundDeliveryTask = delivery
+    }
+
+    /// Recheck after preceding deliveries finish, immediately before handing
+    /// this reply to the channel. A historical question is not a live owner.
+    private func revalidateClarificationDelivery(_ body: String, replyingTo envelope: ComputerUseEnvelope,
+                                                question: ComputerUseClarificationReference?,
+                                                retry: ComputerUseClarificationRetry?) -> String? {
+        guard let original = try? ComputerUseTaskUpdate.decodeBody(body), original.taskID == envelope.id,
+              original.clarification == question, original.clarificationRetry == retry else { return nil }
+        let liveQuestion = question.map {
+            taskLedger.terminalClarification(taskID: envelope.id) == $0
+                && retainsNativeQuestion($0, for: envelope)
+        } ?? true
+        let liveRetry = retry.map {
+            taskLedger.terminalClarificationRetry(taskID: envelope.id) == $0
+                && browserClarifications.retainsRetry($0, for: envelope,
+                    retainedOwner: { tools.ownedBrowserResearch(taskID: $0) })
+        } ?? true
+        guard !liveQuestion || !liveRetry else { return body }
+        return try? ComputerUseTaskUpdate(taskID: original.taskID,
+            text: "The original question is no longer active. Start a new request with the complete instruction.",
+            appliedControlRevision: original.appliedControlRevision, hostControlEpoch: original.hostControlEpoch,
+            outcome: .unableToComplete, approvedActionEvidence: original.approvedActionEvidence).encodedBody()
+    }
+
+    private func retainsNativeQuestion(_ reference: ComputerUseClarificationReference, for envelope: ComputerUseEnvelope) -> Bool {
+        let kind = taskLedger.clarificationOwner(taskID: envelope.id)
+        if kind != .text, browserClarifications.retainsRegisteredQuestion(reference, for: envelope,
+            retainedOwner: { tools.ownedBrowserResearch(taskID: $0) }) { return true }
+        guard kind != .browser, textClarifications.matches(reference),
+              let native = try? (executor as? any ComputerUseTextClarificationContinuing)?.clarification(taskID: envelope.id) else { return false }
+        return textClarifications.retains(reference, native: native, for: envelope)
     }
 
     private var modelStateDetail: String {

@@ -121,6 +121,20 @@ final class ComputerUseTextClarificationStore {
         return goal
     }
 
+    func matches(_ reference: ComputerUseClarificationReference) -> Bool { pending?.reference == reference }
+
+    /// The wire store and native executor must still hold the same unresolved
+    /// goal, question and form scope. A saved terminal reply cannot recreate it.
+    func retains(_ reference: ComputerUseClarificationReference, native: ComputerUseNativeTextExecutor.Clarification,
+                 for request: ComputerUseEnvelope) -> Bool {
+        guard let pending, pending.reference == reference, reference.taskID == request.id,
+              pending.senderID == request.senderID, pending.sessionID == request.sessionID,
+              now() < reference.expiresAt, reference.expiresAt <= native.expiresAt,
+              native.taskID == request.id, native.scope == pending.scope, native.goal == pending.goal,
+              native.question.utf8.elementsEqual(pending.question.utf8) else { return false }
+        return true
+    }
+
     func reference(for request: ComputerUseEnvelope) -> ComputerUseClarificationReference? {
         guard let pending, pending.reference.taskID == request.id,
               pending.senderID == request.senderID, pending.sessionID == request.sessionID else { return nil }

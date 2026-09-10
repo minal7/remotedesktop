@@ -3,6 +3,28 @@ import XCTest
 
 @MainActor
 final class ComputerUseTextClarificationTests: XCTestCase {
+    func testQuestionDeliveryRequiresMatchingNativeGoalScopeQuestionAndLifetime() throws {
+        var now = Date(timeIntervalSince1970: 1_000)
+        let store = ComputerUseTextClarificationStore(now: { now })
+        let goal = try ComputerUseUnresolvedTextGoal(userRequest: "Put blue in a field"), question = "Which e\u{301} field?"
+        let envelope = request("question"), expiry = now.addingTimeInterval(300)
+        let reference = try store.issue(goal: goal, question: question, scope: scope, expiresAt: expiry, for: envelope)
+        let native = ComputerUseNativeTextExecutor.Clarification(taskID: envelope.id, goal: goal, question: question, scope: scope, expiresAt: expiry)
+        XCTAssertTrue(store.retains(reference, native: native, for: envelope))
+        for changed in [
+            ComputerUseNativeTextExecutor.Clarification(taskID: "other", goal: goal, question: question, scope: scope, expiresAt: expiry),
+            .init(taskID: envelope.id, goal: try .init(userRequest: "Put red in a field"), question: question, scope: scope, expiresAt: expiry),
+            .init(taskID: envelope.id, goal: goal, question: "Which é field?", scope: scope, expiresAt: expiry),
+            .init(taskID: envelope.id, goal: goal, question: question, scope: String(repeating: "b", count: 64), expiresAt: expiry),
+            .init(taskID: envelope.id, goal: goal, question: question, scope: scope, expiresAt: expiry.addingTimeInterval(-1)),
+        ] { XCTAssertFalse(store.retains(reference, native: changed, for: envelope)) }
+        XCTAssertFalse(store.retains(reference, native: native, for: request("question", sender: "other")))
+        XCTAssertFalse(store.retains(reference, native: native, for: request("question", session: "other")))
+        XCTAssertFalse(ComputerUseTextClarificationStore(now: { now }).retains(reference, native: native, for: envelope))
+        now = expiry
+        XCTAssertFalse(store.retains(reference, native: native, for: envelope))
+    }
+
     func testExecutionDecoderAdmitsCurrentClientRequestsAndExactAnswersWithEvidenceCapability() throws {
         let reference = try ComputerUseClarificationReference(taskID: "question", expiresAt: Date(timeIntervalSince1970: 1_800_000_000))
         let exact = "  東京 e\u{301} 😀\n  "

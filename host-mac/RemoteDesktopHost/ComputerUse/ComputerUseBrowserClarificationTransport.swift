@@ -150,6 +150,14 @@ final class ComputerUseBrowserClarificationTransport {
         return (try? pending.owner.pendingQuestion(controllerID: envelope.senderID, controllerSessionID: envelope.sessionID)) == pending.question
     }
 
+    /// Delivery additionally requires the same owner in the host registry.
+    /// A retained bridge pointer or durable reference alone is insufficient.
+    func retainsRegisteredQuestion(_ reference: ComputerUseClarificationReference?, for envelope: ComputerUseEnvelope,
+                                   retainedOwner: (String) -> ComputerUseBrowserResearchTask?) -> Bool {
+        guard retains(reference, for: envelope), let pending else { return false }
+        return retainedOwner(pending.owner.taskID) === pending.owner
+    }
+
     func invalidate(for envelope: ComputerUseEnvelope) {
         guard let pending, pending.reference.taskID == envelope.id, pending.belongs(to: envelope) else { return }
         invalidate()
