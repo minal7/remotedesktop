@@ -1,5 +1,7 @@
 # Read and verify the final permitted page
 
+Subsequent source work: the [active-work review](BROWSER_ACTIVE_WORK_REVIEW.md) adds cumulative driver-active admission time without resetting it on handback or accepted answers. Semantic progress detection and runtime qualification remain open.
+
 Source checkpoint: 2026-09-09. Parent: `fe1f8c3`. Source repair and authored regressions only. Compilation, assertions, inference, app/browser execution and live qualification remain paused.
 
 ## First-principles finding

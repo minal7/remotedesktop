@@ -557,6 +557,97 @@ final class ComputerUseBrowserResearchDriverTests: XCTestCase {
         XCTAssertEqual(owner.confirmedNavigationHistory.map(\.kind), [.search, .formQuery])
     }
 
+    func testActiveWorkExcludesManualTimeAndKeepsTheAllowanceAcrossAnAcceptedAnswer() async throws {
+        let clock = BrowserWorkFixtureClock()
+        let fixture = try await ResearchDriverFixture.make(activeWorkLimit: .seconds(10), monotonicNow: { clock.instant })
+        defer { fixture.close() }
+        fixture.goal.base.questionTopic = .location
+        fixture.goal.base.beforeReply = { clock.advance(.seconds(3)) }
+        let first = try await fixture.start()
+        guard case .browserClarificationRequired(let request)? = first else { return XCTFail("The first active segment must retain the question") }
+        let owner = try fixture.owner(), original = owner.input
+        let question = try owner.issueQuestion(topic: request.topic, requirementIDs: request.requirementIDs, controllerID: "phone", controllerSessionID: "session")
+        clock.advance(.seconds(3_600)) // Monotonic manual time only; no wall-clock expiry is fabricated.
+        let updated = try owner.answerQuestion(questionID: question.id, answerTaskID: "answer", answer: "Paris",
+            controllerID: "phone", controllerSessionID: "session")
+        fixture.goal.base.questionTopic = nil
+        fixture.goal.base.beforeReply = { clock.advance(.seconds(4)) }
+        fixture.search.beforeReply = { clock.advance(.seconds(2)) }
+        fixture.actions.beforeReply = { clock.advance(.seconds(1)) }
+        let continued = try await fixture.resume()
+        guard case .userInterventionRequired(let message) = continued else { return XCTFail("The accepted answer must retain the three seconds already consumed") }
+        XCTAssertTrue(message.contains("research time limit"))
+        XCTAssertEqual(owner.input, updated); XCTAssertEqual(updated.rootDigest, original.rootDigest)
+        XCTAssertEqual(updated.referenceMilliseconds, original.referenceMilliseconds)
+        XCTAssertEqual(fixture.goal.inputs, [original, updated]); XCTAssertEqual(fixture.search.inputs.map(\.input), [updated])
+        XCTAssertEqual(fixture.server.count("/search?q=concerts"), 1, "Time outside execution must not consume the remaining allowance")
+        XCTAssertTrue(fixture.results.inputs.isEmpty, "No next reading starts once active work consumes the allowance")
+        let calls = fixture.state.commands
+        clock.advance(.seconds(3_600))
+        _ = try await fixture.resume()
+        XCTAssertEqual(fixture.state.commands, calls); XCTAssertEqual(fixture.actions.inputs.count, 1)
+    }
+
+    func testActiveWorkExpiryAfterFormProposalCannotStartInputOrResetOnHandback() async throws {
+        let clock = BrowserWorkFixtureClock()
+        let fixture = try await ResearchDriverFixture.make(searchForm: true, activeWorkLimit: .seconds(10), monotonicNow: { clock.instant })
+        defer { fixture.close() }
+        configureAutomaticFormQueries(fixture)
+        fixture.forms.beforeReply = { clock.advance(.seconds(10)) }
+        let result = try await fixture.start()
+        guard case .userInterventionRequired(let message)? = result else { return XCTFail("A proposal cannot start an edit after the task's allowance expires") }
+        XCTAssertTrue(message.contains("research time limit"))
+        let owner = try fixture.owner(), original = owner.input
+        XCTAssertTrue(owner.hasPendingFormPreparation); XCTAssertTrue(owner.confirmedFormHistory.isEmpty)
+        XCTAssertFalse(fixture.state.commands.contains(.edit)); XCTAssertEqual(fixture.forms.inputs.count, 1)
+        owner.pause(); clock.advance(.seconds(3_600)); try await owner.resumeAfterUserControl()
+        let commands = fixture.state.commands
+        _ = try await fixture.resume()
+        XCTAssertEqual(fixture.state.commands, commands); XCTAssertEqual(owner.input, original)
+        XCTAssertTrue(owner.hasPendingFormPreparation); XCTAssertEqual(fixture.forms.inputs.count, 1)
+        XCTAssertEqual(fixture.server.count("/filtered?q=concerts"), 0)
+    }
+
+    func testActiveWorkExpiryDuringAdmittedInputKeepsItsReceiptAndBlocksTheNextStage() async throws {
+        let clock = BrowserWorkFixtureClock()
+        let fixture = try await ResearchDriverFixture.make(searchForm: true, activeWorkLimit: .seconds(10), monotonicNow: { clock.instant })
+        defer { fixture.close() }
+        configureAutomaticFormQueries(fixture)
+        fixture.state.onCommand = { command in
+            if command == .edit { fixture.state.onCommand = nil; clock.advance(.seconds(10)) }
+        }
+        let result = try await fixture.start()
+        guard case .userInterventionRequired(let message)? = result else { return XCTFail("Expiry must stop the next stage after the admitted input finishes") }
+        XCTAssertTrue(message.contains("research time limit"))
+        let owner = try fixture.owner(), history = owner.confirmedFormHistory
+        XCTAssertEqual(history.count, 1); XCTAssertFalse(owner.hasPendingForm)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 1)
+        XCTAssertEqual(fixture.server.count("/filtered?q=concerts"), 0)
+        let commands = fixture.state.commands
+        _ = try await fixture.resume()
+        XCTAssertEqual(fixture.state.commands, commands); XCTAssertEqual(owner.confirmedFormHistory, history)
+        XCTAssertEqual(owner.confirmedNavigationHistory.map(\.kind), [.search])
+    }
+
+    func testFailedAdmissionRetryKeepsItsConsumedWorkAlongsideTheOriginalClock() async throws {
+        let clock = BrowserWorkFixtureClock()
+        let fixture = try await ResearchDriverFixture.make(activeWorkLimit: .seconds(5), monotonicNow: { clock.instant })
+        defer { fixture.close() }
+        fixture.goal.select = { _ in clock.advance(.seconds(4)); throw ComputerUseBrowserGoalPlanError.invalidInput }
+        do { _ = try await fixture.start(); XCTFail("The failed initial proposal should reach its caller") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserGoalPlanError, .invalidInput) }
+        let original = try XCTUnwrap(fixture.goal.inputs.first)
+        XCTAssertNil(fixture.tools.ownedBrowserResearch(taskID: original.taskID)); XCTAssertFalse(fixture.browser.hasSession)
+        clock.advance(.seconds(3_600)); fixture.goal.select = nil
+        fixture.search.beforeReply = { clock.advance(.seconds(1)) }
+        let retried = try await fixture.start()
+        guard case .userInterventionRequired(let message)? = retried else { return XCTFail("Admission retry cannot create a fresh work allowance") }
+        XCTAssertTrue(message.contains("research time limit"))
+        XCTAssertEqual(fixture.goal.inputs, [original, original]); XCTAssertEqual(try fixture.owner().input, original)
+        XCTAssertEqual(try fixture.owner().initialSearchState, .notPrepared)
+        XCTAssertFalse(fixture.browser.hasSession); XCTAssertEqual(fixture.server.requestCount, 0)
+    }
+
     func testLastPageFindingsRemainAvailableWithoutResettingNavigationCapacity() async throws {
         let fixture = try await ResearchDriverFixture.make(navigationLimit: 1, candidateBodyHTML: "<p>From USD 40. Fees apply.</p>")
         defer { fixture.close() }
@@ -724,6 +815,76 @@ final class ComputerUseBrowserResearchDriverTests: XCTestCase {
 }
 
 @MainActor
+final class ComputerUseBrowserWorkBudgetTests: XCTestCase {
+    func testActiveSegmentsAccumulateWithoutChargingManualTimeOrRefillingOnFinish() throws {
+        let clock = BrowserWorkFixtureClock(), budget = ComputerUseBrowserWorkBudget(allowance: .seconds(10), clock: { clock.instant })
+        try budget.begin(); clock.advance(.seconds(4)); budget.finish(); budget.finish()
+        clock.advance(.seconds(3_600)); try budget.begin()
+        XCTAssertEqual(try budget.planningTimeout(maximum: 30), 6, accuracy: 0.000_001)
+        clock.advance(.seconds(6))
+        XCTAssertThrowsError(try budget.admit()) { XCTAssertEqual($0 as? ComputerUseBrowserWorkBudget.Failure, .exhausted) }
+        budget.finish(); clock.advance(.seconds(3_600))
+        XCTAssertThrowsError(try budget.begin()) { XCTAssertEqual($0 as? ComputerUseBrowserWorkBudget.Failure, .exhausted) }
+        XCTAssertThrowsError(try budget.planningTimeout(maximum: 30), "An inactive owner cannot bypass exhausted capacity")
+    }
+
+    func testRepeatedCheckpointsChargeEachActiveIntervalOnlyOnce() throws {
+        let clock = BrowserWorkFixtureClock(), budget = ComputerUseBrowserWorkBudget(allowance: .seconds(10), clock: { clock.instant })
+        try budget.begin(); defer { budget.finish() }
+        clock.advance(.seconds(2)); try budget.admit(); try budget.admit()
+        XCTAssertEqual(try budget.planningTimeout(maximum: 30), 8, accuracy: 0.000_001)
+        clock.advance(.seconds(3)); try budget.admit()
+        XCTAssertEqual(try budget.planningTimeout(maximum: 30), 5, accuracy: 0.000_001)
+        XCTAssertEqual(try budget.planningTimeout(maximum: 2), 2, accuracy: 0.000_001)
+    }
+
+    func testOverlappingBeginCannotReplaceAnActiveSegmentOrRefundItsTime() throws {
+        let clock = BrowserWorkFixtureClock(), budget = ComputerUseBrowserWorkBudget(allowance: .seconds(10), clock: { clock.instant })
+        try budget.begin(); defer { budget.finish() }; clock.advance(.seconds(3))
+        XCTAssertThrowsError(try budget.begin()) { XCTAssertEqual($0 as? ComputerUseBrowserWorkBudget.Failure, .alreadyActive) }
+        XCTAssertEqual(try budget.planningTimeout(maximum: 30), 7, accuracy: 0.000_001)
+    }
+
+    func testInvalidAllowancesFailBeforeOpeningASegment() {
+        for allowance in [Duration.zero, .seconds(-1), ComputerUseBrowserWorkBudget.maximumAllowance + .seconds(1)] {
+            var clockCalls = 0
+            let budget = ComputerUseBrowserWorkBudget(allowance: allowance, clock: { clockCalls += 1; return .now })
+            XCTAssertThrowsError(try budget.begin()) { XCTAssertEqual($0 as? ComputerUseBrowserWorkBudget.Failure, .invalidAllowance) }
+            XCTAssertThrowsError(try budget.planningTimeout(maximum: 30))
+            budget.finish(); XCTAssertEqual(clockCalls, 0)
+        }
+    }
+
+    func testRegressedClockCannotRefundOrReviveWorkCapacity() throws {
+        let clock = BrowserWorkFixtureClock(), budget = ComputerUseBrowserWorkBudget(allowance: .seconds(10), clock: { clock.instant })
+        try budget.begin(); clock.advance(.seconds(-1))
+        XCTAssertThrowsError(try budget.admit()) { XCTAssertEqual($0 as? ComputerUseBrowserWorkBudget.Failure, .exhausted) }
+        budget.finish(); clock.advance(.seconds(3_600))
+        XCTAssertThrowsError(try budget.begin()) { XCTAssertEqual($0 as? ComputerUseBrowserWorkBudget.Failure, .exhausted) }
+    }
+
+    func testProposalAllowanceUsesRemainingFractionalTimeAndRejectsInvalidStageLimits() throws {
+        let clock = BrowserWorkFixtureClock(), budget = ComputerUseBrowserWorkBudget(allowance: .milliseconds(150), clock: { clock.instant })
+        try budget.begin(); defer { budget.finish() }
+        XCTAssertEqual(try budget.planningTimeout(maximum: 30), 0.15, accuracy: 0.000_001)
+        clock.advance(.milliseconds(100))
+        XCTAssertEqual(try budget.planningTimeout(maximum: 30), 0.05, accuracy: 0.000_001)
+        for maximum in [0, -1, .infinity, .nan, ComputerUsePlanningWorker.maximumWait + 1] {
+            XCTAssertThrowsError(try budget.planningTimeout(maximum: maximum)) {
+                XCTAssertEqual($0 as? ComputerUsePlanningWorker.Failure, .invalidDeadline)
+            }
+        }
+        XCTAssertEqual(try budget.planningTimeout(maximum: 30), 0.05, accuracy: 0.000_001)
+    }
+}
+
+@MainActor
+final class BrowserWorkFixtureClock {
+    var instant = ContinuousClock.now
+    func advance(_ duration: Duration) { instant = instant.advanced(by: duration) }
+}
+
+@MainActor
 struct ResearchDriverFixture {
     static let root = "research-driver"
     static let prompt = "Find concerts under USD 50. Do not buy."
@@ -756,7 +917,9 @@ struct ResearchDriverFixture {
                      searchFormHTML: String? = nil, heldSignal: Bool = false, offersBodyHTML: String? = nil,
                      searchBodyHTML: String? = nil, detailsBodyHTML: String? = nil, betaBodyHTML: String? = nil,
                      planningWorker: ComputerUsePlanningWorker = .init(), planningTimeout: TimeInterval = 30,
-                     now: @escaping () -> Date = { ResearchDriverFixture.date }, timeZoneIdentifier: @escaping () -> String = { "America/Los_Angeles" }) async throws -> Self {
+                     now: @escaping () -> Date = { ResearchDriverFixture.date }, timeZoneIdentifier: @escaping () -> String = { "America/Los_Angeles" },
+                     activeWorkLimit: Duration = ComputerUseBrowserWorkBudget.defaultAllowance,
+                     monotonicNow: @escaping @MainActor () -> ContinuousClock.Instant = { .now }) async throws -> Self {
         func card(_ path: String) -> String { "<article><h2>Concert Alpha</h2><a href='\(linkDestinationOverride ?? path)'>Alpha details</a>\(candidateBodyHTML)</article>" + additionalCardHTML }
         let form = searchFormHTML ?? (searchForm ? "<form action='/filtered'><label>Query<input name='q' value='old'></label><button>Search</button></form>" : "")
         let server = try OwnedBrowserHTTPFixture(routes: ["/signal": .init(held: heldSignal), "/before": .init(body: card("/old")),
@@ -793,7 +956,7 @@ struct ResearchDriverFixture {
             else { planning = policy }
             let driver = ComputerUseBrowserResearchDriver(goalPlanner: goal, resultPlanner: resultPlanner ?? results, searchPlanner: search, actionPlanner: actionPlanner ?? actions, formPlanner: formPlanner ?? forms,
                 planning: planning, navigationLimit: navigationLimit, now: now, timeZoneIdentifier: timeZoneIdentifier,
-                planningWorker: planningWorker, planningTimeout: planningTimeout)
+                planningWorker: planningWorker, planningTimeout: planningTimeout, activeWorkLimit: activeWorkLimit, monotonicNow: monotonicNow)
             return .init(request: request, server: server, base: base, directory: directory, browser: browser, coordinator: coordinator,
                 tools: tools, goal: goal, results: results, search: search, actions: actions, forms: forms, policy: policy, state: state, driver: driver, planningWorker: planningWorker)
         } catch { browser.close(); server.stop(); try? FileManager.default.removeItem(at: directory); throw error }

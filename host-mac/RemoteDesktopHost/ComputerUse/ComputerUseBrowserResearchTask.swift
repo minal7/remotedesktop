@@ -71,6 +71,7 @@ final class ComputerUseBrowserResearchTask {
     private let resultPlanner: any ComputerUseBrowserResultPlanning
     private let planningWorker: ComputerUsePlanningWorker
     private let planningTimeout: TimeInterval
+    private let workBudget: ComputerUseBrowserWorkBudget?
     private let mayAct: @MainActor () -> Bool
     private let clarification: ComputerUseBrowserGoalClarification
     private let navigation: ComputerUseBrowserResearchNavigation?
@@ -231,9 +232,11 @@ final class ComputerUseBrowserResearchTask {
          navigationStore: @escaping (URL) throws -> ComputerUseTaskJournalStore = { try .init(directory: $0) },
          browserAdmission: (any ComputerUseBrowserResearchAdmitting)? = nil,
          planningWorker: ComputerUsePlanningWorker = .shared, planningTimeout: TimeInterval = 30,
+         workBudget: ComputerUseBrowserWorkBudget? = nil,
          mayAct: @escaping @MainActor () -> Bool, now: @escaping () -> Date = Date.init) {
         taskID = input.taskID; self.browser = browser; self.goalPlanner = goalPlanner; self.resultPlanner = resultPlanner
         self.planningWorker = planningWorker; self.planningTimeout = planningTimeout
+        self.workBudget = workBudget
         retainedEvidence = .init(goal: input)
         self.mayAct = mayAct; clarification = .init(input: input, now: now)
         navigationDirectory = navigationJournalDirectory; self.navigationStore = navigationStore
@@ -1927,14 +1930,19 @@ final class ComputerUseBrowserResearchTask {
         guard planningTimeout.isFinite, planningTimeout > 0, planningTimeout <= ComputerUsePlanningWorker.maximumWait else {
             throw ComputerUsePlanningWorker.Failure.invalidDeadline
         }
-        var timeout = planningTimeout
+        var timeout = try workBudget?.planningTimeout(maximum: planningTimeout) ?? planningTimeout
         if let deadline {
             let remaining = ContinuousClock.now.duration(to: deadline)
             guard remaining > .zero else { throw timeoutError }
             timeout = min(timeout, Double(remaining.components.seconds) + Double(remaining.components.attoseconds) / 1e18)
         }
         do { return try await planningWorker.perform(timeout: timeout, operation) }
-        catch ComputerUsePlanningWorker.Failure.timedOut { throw timeoutError }
+        catch ComputerUsePlanningWorker.Failure.timedOut {
+            // Prefer the exhausted whole-task allowance when it caused this
+            // proposal deadline. A shorter per-stage deadline stays typed.
+            _ = try workBudget?.planningTimeout(maximum: planningTimeout)
+            throw timeoutError
+        }
     }
 
     private func requireIdle(allowPendingPopup: Bool = false, allowPendingOptionSelection: Bool = false) throws {

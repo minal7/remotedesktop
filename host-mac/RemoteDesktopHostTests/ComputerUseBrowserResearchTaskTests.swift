@@ -258,6 +258,38 @@ final class ComputerUseBrowserResearchTaskTests: XCTestCase {
         XCTAssertEqual(planner.inputs, [input]); XCTAssertEqual(owner.initialSearchState, .notPrepared)
     }
 
+    func testActiveWorkAllowanceBoundsAStalledOwnerProposalAndKeepsItsActualPermit() async throws {
+        let budget = ComputerUseBrowserWorkBudget(allowance: .milliseconds(150)), worker = ComputerUsePlanningWorker()
+        let planner = BrowserResearchGoalFixture(), browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+        let gate = ComputerUsePlanningTestGate<Bool>(started: expectation(description: "budgeted proposal started"), returned: expectation(description: "budgeted proposal returned"))
+        defer { gate.finish(true); budget.finish(); browser.close() }
+        let input = try goal()
+        let owner = ComputerUseBrowserResearchTask(input: input, browser: browser, goalPlanner: planner, resultPlanner: BrowserResearchResultFixture(),
+            planningWorker: worker, planningTimeout: 30, workBudget: budget, mayAct: { true })
+        planner.beforeReply = { _ = await gate.wait() }
+        try budget.begin()
+        let delivered = expectation(description: "active-work deadline delivered")
+        let call = Task { () -> Result<ComputerUseBrowserResearchTask.Interpretation, Error> in
+            defer { delivered.fulfill() }
+            do { return .success(try await owner.interpretGoal()) } catch { return .failure(error) }
+        }
+        await fulfillment(of: [gate.started, delivered], timeout: 2, enforceOrder: true)
+        XCTAssertFalse(owner.isOperating); XCTAssertEqual(owner.input, input); XCTAssertNil(browser.taskID)
+        XCTAssertThrowsError(try worker.requireAvailable()) { XCTAssertEqual($0 as? ComputerUsePlanningWorker.Failure, .busy) }
+        gate.finish(true)
+        switch await call.value {
+        case .failure(let error): XCTAssertEqual(error as? ComputerUseBrowserWorkBudget.Failure, .exhausted)
+        case .success: XCTFail("A 30-second stage limit cannot ignore the shorter active-work allowance")
+        }
+        await fulfillment(of: [gate.returned], timeout: 1)
+        try await waitForAvailablePlanningWorker(worker)
+        budget.finish()
+        planner.beforeReply = nil
+        do { _ = try await owner.interpretGoal(); XCTFail("Returning a late model call cannot refill its owner's exhausted allowance") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserWorkBudget.Failure, .exhausted) }
+        XCTAssertEqual(planner.inputs, [input])
+    }
+
     func testInvalidBrowserPlanningDeadlinesDoNotInvokeTheGoalPlanner() async throws {
         let worker = ComputerUsePlanningWorker(), planner = BrowserResearchGoalFixture()
         let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })

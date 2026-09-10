@@ -1223,6 +1223,7 @@ final class ComputerUseHostTools {
         goalPlanner: any ComputerUseBrowserGoalPlanning, resultPlanner: any ComputerUseBrowserResultPlanning,
         referenceDate: Date = Date(), timeZoneIdentifier: String = TimeZone.current.identifier,
         planningWorker: ComputerUsePlanningWorker = .shared, planningTimeout: TimeInterval = 30,
+        workBudget: ComputerUseBrowserWorkBudget? = nil,
         didPrepare: (@MainActor (ComputerUseBrowserResearchTask) throws -> Void)? = nil) throws -> ComputerUseBrowserResearchTask {
         try validateBrowserResearchAdmission()
         if browserNavigationTask == nil {
@@ -1234,7 +1235,7 @@ final class ComputerUseHostTools {
         guard let browserNavigationTask else { throw ComputerUseBrowserError.closed }
         let owner = try browserNavigationTask.prepareResearchTask(taskID: taskID, prompt: prompt, goalPlanner: goalPlanner,
             resultPlanner: resultPlanner, mayAct: mayAct, referenceDate: referenceDate, timeZoneIdentifier: timeZoneIdentifier,
-            planningWorker: planningWorker, planningTimeout: planningTimeout)
+            planningWorker: planningWorker, planningTimeout: planningTimeout, workBudget: workBudget)
         // Capture admission synchronously. The owner may be closed/replaced
         // while the driver awaits, so a later lookup cannot prove no admission.
         try didPrepare?(owner)

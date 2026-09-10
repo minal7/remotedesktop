@@ -1,5 +1,67 @@
 import Foundation
 
+/// Cumulative driver-active time, not wall time or a measure of model/GPU
+/// lifetime. Native stages admitted before expiry keep their cleanup/receipts.
+/// Only explicit execution segments charge time; manual handback is outside.
+@MainActor
+final class ComputerUseBrowserWorkBudget {
+    nonisolated static let defaultAllowance: Duration = .seconds(600)
+    nonisolated static let maximumAllowance: Duration = .seconds(3_600)
+    enum Failure: Error, Equatable, LocalizedError {
+        case exhausted, invalidAllowance, alreadyActive
+        var errorDescription: String? {
+            switch self {
+            case .exhausted:
+                return "The browser reached this task's research time limit. The original request remains pending. You can continue manually; Resume does not extend this limit."
+            case .invalidAllowance: return "Browser research could not start because its research time limit was invalid."
+            case .alreadyActive: return "The browser is already working on this research task."
+            }
+        }
+    }
+    private let allowance: Duration
+    private let clock: @MainActor () -> ContinuousClock.Instant
+    private var remaining: Duration
+    private var activeAt: ContinuousClock.Instant?
+
+    init(allowance: Duration = ComputerUseBrowserWorkBudget.defaultAllowance, clock: @escaping @MainActor () -> ContinuousClock.Instant = { .now }) {
+        self.allowance = allowance; remaining = allowance; self.clock = clock
+    }
+    func begin() throws {
+        guard activeAt == nil else { throw Failure.alreadyActive }
+        guard allowance > .zero, allowance <= Self.maximumAllowance else { throw Failure.invalidAllowance }
+        guard remaining > .zero else { throw Failure.exhausted }
+        activeAt = clock()
+    }
+    func finish() {
+        chargeActiveTime()
+        activeAt = nil
+    }
+    func admit() throws {
+        guard activeAt != nil else { throw Failure.exhausted }
+        chargeActiveTime()
+        guard remaining > .zero else { throw Failure.exhausted }
+    }
+    /// Direct owner inspection/handback does not open an autonomous segment.
+    /// The driver owns begin/finish; a late model callback cannot refill it.
+    func planningTimeout(maximum: TimeInterval) throws -> TimeInterval {
+        guard maximum.isFinite, maximum > 0, maximum <= ComputerUsePlanningWorker.maximumWait else {
+            throw ComputerUsePlanningWorker.Failure.invalidDeadline
+        }
+        guard allowance > .zero, allowance <= Self.maximumAllowance else { throw Failure.invalidAllowance }
+        chargeActiveTime()
+        guard remaining > .zero else { throw Failure.exhausted }
+        return min(maximum, Double(remaining.components.seconds) + Double(remaining.components.attoseconds) / 1e18)
+    }
+    private func chargeActiveTime() {
+        guard let previous = activeAt else { return }
+        let current = clock()
+        // A faulty injected clock must not refund already consumed work.
+        if current < previous { remaining = .zero }
+        else { remaining = max(.zero, remaining - previous.duration(to: current)) }
+        activeAt = current
+    }
+}
+
 /// Provider policy is host-owned; link selection is a no-effect proposal.
 /// Implementations must consider the entire goal, including source limits.
 /// Native candidate binding and action journals remain the owner's authority.
@@ -42,15 +104,17 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
     }
     @MainActor private final class Run {
         let owner: ComputerUseBrowserResearchTask
+        let budget: ComputerUseBrowserWorkBudget
         var input: ComputerUseBrowserGoalInput
         var visits: [ComputerUseBrowserResearchVisit] = []
         var sources: ComputerUseBrowserResearchSources?
-        init(owner: ComputerUseBrowserResearchTask) { self.owner = owner; input = owner.input }
+        init(owner: ComputerUseBrowserResearchTask, budget: ComputerUseBrowserWorkBudget) { self.owner = owner; self.budget = budget; input = owner.input }
     }
     private struct AdmissionInput {
         let input: ComputerUseBrowserGoalInput
         let date: Date
         let zone: String
+        let budget: ComputerUseBrowserWorkBudget
     }
     private var admissionInput: AdmissionInput?
     private let goalPlanner: any ComputerUseBrowserGoalPlanning
@@ -61,6 +125,8 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
     private let planning: any ComputerUseBrowserResearchPlanning
     private let planningWorker: ComputerUsePlanningWorker
     private let planningTimeout: TimeInterval
+    private let activeWorkLimit: Duration
+    private let monotonicNow: @MainActor () -> ContinuousClock.Instant
     private let now: () -> Date
     private let timeZoneIdentifier: () -> String
     private let navigationLimit: Int
@@ -72,11 +138,14 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
          formPlanner: any ComputerUseBrowserFormPlanning, planning: any ComputerUseBrowserResearchPlanning,
          navigationLimit: Int = 24, now: @escaping () -> Date = Date.init,
          timeZoneIdentifier: @escaping () -> String = { TimeZone.current.identifier },
-         planningWorker: ComputerUsePlanningWorker = .shared, planningTimeout: TimeInterval = 30) {
+         planningWorker: ComputerUsePlanningWorker = .shared, planningTimeout: TimeInterval = 30,
+         activeWorkLimit: Duration = ComputerUseBrowserWorkBudget.defaultAllowance,
+         monotonicNow: @escaping @MainActor () -> ContinuousClock.Instant = { .now }) {
         self.goalPlanner = goalPlanner; self.resultPlanner = resultPlanner; self.searchPlanner = searchPlanner
         self.actionPlanner = actionPlanner; self.formPlanner = formPlanner
         self.planning = planning; self.now = now; self.timeZoneIdentifier = timeZoneIdentifier
         self.planningWorker = planningWorker; self.planningTimeout = planningTimeout
+        self.activeWorkLimit = activeWorkLimit; self.monotonicNow = monotonicNow
         self.navigationLimit = min(32, max(1, navigationLimit))
     }
 
@@ -95,17 +164,20 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
             admission = original
         } else {
             let date = now(), zone = timeZoneIdentifier()
-            admission = .init(input: try ComputerUseBrowserGoalInput(taskID: taskID, prompt: prompt, referenceDate: date, timeZoneIdentifier: zone), date: date, zone: zone)
+            admission = .init(input: try ComputerUseBrowserGoalInput(taskID: taskID, prompt: prompt, referenceDate: date, timeZoneIdentifier: zone), date: date, zone: zone,
+                budget: .init(allowance: activeWorkLimit, clock: monotonicNow))
             admissionInput = admission
         }
         let input = admission.input
+        try admission.budget.begin()
+        defer { admission.budget.finish() }
         // Text-only admission can decline before a browser owner is retained.
         // It sees no page/account data and cannot open or alter the browser.
         progress("Understanding the complete research request…")
         try tools.validateBrowserResearchAdmission()
         let proposal: ComputerUseBrowserGoalProposal
         do {
-            proposal = try await planningWorker.perform(timeout: planningTimeout) { [goalPlanner] in
+            proposal = try await planningWorker.perform(timeout: admission.budget.planningTimeout(maximum: planningTimeout)) { [goalPlanner] in
                 try await goalPlanner.propose(input)
             }
         } catch ComputerUsePlanningWorker.Failure.busy {
@@ -120,12 +192,13 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
         try tools.validateBrowserResearchAdmission()
         guard proposal.input == input else { throw Failure.invalidProposal }
         if proposal.disposition == .unsupported { return nil }
+        try admission.budget.admit()
         guard tools.ownedBrowserResearch(taskID: taskID) == nil else { throw Failure.invalidContinuation }
         let owner = try tools.prepareOwnedBrowserResearch(taskID: taskID, prompt: prompt,
             goalPlanner: SeededGoalPlanner(seed: proposal, base: goalPlanner), resultPlanner: resultPlanner,
-            referenceDate: admission.date, timeZoneIdentifier: admission.zone, planningWorker: planningWorker, planningTimeout: planningTimeout, didPrepare: { [self] owner in
+            referenceDate: admission.date, timeZoneIdentifier: admission.zone, planningWorker: planningWorker, planningTimeout: planningTimeout, workBudget: admission.budget, didPrepare: { [self] owner in
                 guard owner.input == input else { throw Failure.invalidContinuation }
-                retained = Run(owner: owner) // Survives a later admission-observer error.
+                retained = Run(owner: owner, budget: admission.budget) // Survives a later admission-observer error.
             })
         guard let run = retained, run.owner === owner else { throw Failure.invalidContinuation }
         return try await advance(run, tools: tools, progress: progress)
@@ -147,12 +220,22 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
         }
         try research.validateDriverContinuation(input)
         run.input = input
+        do { try run.budget.begin() }
+        catch ComputerUseBrowserWorkBudget.Failure.exhausted {
+            try validate(run, tools: tools)
+            return activeWorkLimitRequired
+        }
+        defer { run.budget.finish() }
         return try await advance(run, tools: tools, progress: progress)
     }
 
     private func advance(_ run: Run, tools: ComputerUseHostTools,
                          progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
         do { return try await navigate(run, tools: tools, progress: progress) }
+        catch ComputerUseBrowserWorkBudget.Failure.exhausted {
+            try validate(run, tools: tools)
+            return activeWorkLimitRequired
+        }
         catch ComputerUseBrowserError.observedNavigationUncertain, ComputerUseTaskExecutionError.uncertainEffect,
               ComputerUseTaskExecutionError.journalMismatch, ComputerUseTextTaskError.uncertainEffect,
               ComputerUseTextTaskError.journalMismatch, ComputerUseTextEditError.deliveryUncertain,
@@ -233,6 +316,7 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                           progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
         let owner = run.owner
         func check() throws { try validate(run, tools: tools) }
+        func admitWork() throws { try check(); try run.budget.admit() }
         func synchronizeHistory() throws {
             let confirmed = owner.confirmedNavigationHistory
             guard confirmed.count >= run.visits.count,
@@ -249,12 +333,12 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
             return fresh
         }
         func hasNavigationCapacity() throws -> Bool {
-            try check()
+            try admitWork()
             try synchronizeHistory()
             return run.visits.count < navigationLimit
         }
         func stopAtNavigationLimit() async throws -> ComputerUseExecutionResult {
-            try check()
+            try admitWork()
             // Report only a completed, still-current reading. Pending native
             // effects retain their original reconciliation obligations.
             if !owner.hasPendingForm, !owner.hasPendingNavigation,
@@ -273,7 +357,7 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
         // A navigation limit restricts another navigation, not observation or
         // verification of the final page already opened under this task.
         while true {
-            try check()
+            try admitWork()
             if owner.hasPendingOptionSelection {
                 progress("Checking the pending dropdown choice…")
                 do { _ = try await owner.resumeOptionSelection() }
@@ -321,6 +405,7 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                             }
                             try check(); try owner.configureResearchSources(sources); run.sources = sources
                         }
+                        try admitWork()
                         let reviewed = try await owner.reviewFormPreparation(using: actionPlanner)
                         try check()
                         if let question = reviewed.questionRequest { return .browserClarificationRequired(question) }
@@ -328,11 +413,13 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                             return .userInterventionRequired("I could not identify justified changes to this form. Your answer and the original task remain pending.")
                         }
                         progress("Checking the revised form preparation…")
+                        try admitWork()
                         input = try await owner.applyFormPreparationReview(reviewed)
                     } else {
                         progress("Checking the pending form preparation…")
                         input = try await owner.resumeFormPreparation()
                     }
+                    try admitWork()
                     proposal = try await owner.planForm(input, using: formPlanner)
                 } catch {
                     guard try await recoverPendingForm(owner, after: error) else { throw error }
@@ -344,6 +431,7 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                 guard !proposal.isUnavailable else {
                     return .userInterventionRequired("I could not justify the requested form criteria. The original request remains pending.")
                 }
+                try admitWork()
                 do { _ = try await owner.executeForm(proposal, input: input) }
                 catch { guard try await recoverPendingForm(owner, after: error) else { throw error } }
                 try check()
@@ -386,6 +474,7 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                 try check()
                 switch result {
                 case .requiresReconciliation, .updated:
+                    guard try hasNavigationCapacity() else { return try await stopAtNavigationLimit() }
                     guard let receipt = try await owner.resumeCandidateNavigation(),
                           try record(.resultLink, receipt.document) else { return reconciliationRequired }
                 case .noSelection: return selectionRequired
@@ -422,18 +511,21 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                 guard try record(.search, document) else { return reconciliationRequired }
             } else {
                 progress("Choosing the next step for the complete request…")
+                try admitWork()
                 let action = try await owner.planNextAction(using: actionPlanner)
                 try check()
                 switch action.step {
                 case .recall, .inspectOptions, .extendInspection, .preserveControls, .planFields, .reviewControls: throw Failure.invalidProposal // Resolved inside the owner, never an executable action.
                 case .selectOption:
                     progress("Selecting the requested option…")
+                    try admitWork()
                     do { _ = try await owner.selectOption(for: action) }
                     catch { guard try await retireProvenUnsentOptionSelection(owner, after: error) else { throw error } }
                     try check()
                     continue // Selection needs fresh application/result evidence.
                 case .openPopup:
                     progress("Opening the requested dropdown…")
+                    try admitWork()
                     do { _ = try await owner.openPopup(for: action) }
                     catch { guard try await retireProvenUnsentPopup(owner, after: error) else { throw error } }
                     try check()
@@ -455,8 +547,10 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                     let input: ComputerUseBrowserResearchFormInput
                     let proposal: ComputerUseBrowserFormProposal
                     do {
+                        try admitWork()
                         input = try await owner.prepareFormInput(for: action)
                         progress("Preparing the requested form criteria…")
+                        try admitWork()
                         proposal = try await owner.planForm(input, using: formPlanner)
                     } catch {
                         guard try await recoverPendingForm(owner, after: error) else { throw error }
@@ -468,6 +562,7 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                     guard !proposal.isUnavailable else {
                         return .userInterventionRequired("I could not justify the requested form criteria. The original request remains pending.")
                     }
+                    try admitWork()
                     do { _ = try await owner.executeForm(proposal, input: input) }
                     catch {
                         guard try await recoverPendingForm(owner, after: error) else { throw error }
@@ -491,6 +586,7 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                 }
                 progress("Reading the page against the original request…")
                 let history = run.visits
+                try admitWork()
                 let decision = try await owner.planResearchDecision(for: action, select: { [planning] goal, candidates in
                     try await planning.selectDecision(goal: goal, candidates: candidates, history: history, evidence: owner.researchEvidence(for: goal))
                 })
@@ -506,10 +602,12 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                     }
                     continue
                 case .answer(let selection):
+                    try admitWork()
                     let answer = try await owner.prepareAnswer(selection)
                     try check()
                     return .browserResearchAnswer(answer)
                 case .unresolved:
+                    try admitWork()
                     if let report = try await owner.prepareProgressReport(pauseReason: run.visits.count >= navigationLimit ? .navigationLimit : nil) {
                         try check()
                         return .browserResearchProgress(report)
@@ -527,6 +625,9 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
 
     private var navigationLimitRequired: ComputerUseExecutionResult {
         .userInterventionRequired("The browser reached this task's navigation limit. The research answer is still unverified and earlier actions keep their reconciliation requirements. You can continue manually, then choose Resume to review the current page; Resume does not allow additional navigation for this task.")
+    }
+    private var activeWorkLimitRequired: ComputerUseExecutionResult {
+        .userInterventionRequired(ComputerUseBrowserWorkBudget.Failure.exhausted.localizedDescription)
     }
     private var selectionRequired: ComputerUseExecutionResult {
         .userInterventionRequired("I could not select another result link that advances the complete request. More page interaction or result verification is needed; the original task is still pending.")
