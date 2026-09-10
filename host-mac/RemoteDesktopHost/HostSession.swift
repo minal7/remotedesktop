@@ -823,7 +823,7 @@ final class HostSession: ObservableObject {
                                 audioEnabled: permissions.audioEnabled,
                                 peerSenderID: offerSenderID,
                                 onUserInput: { [weak computerUse] in
-                                    if computerUse?.blockActionsForUserIntervention() == true {
+                                    if computerUse?.recordUserInputForIntervention() == true {
                                         Task { @MainActor [weak computerUse] in
                                             computerUse?.userIntervened()
                                         }

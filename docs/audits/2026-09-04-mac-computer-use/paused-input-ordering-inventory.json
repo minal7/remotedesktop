@@ -1,0 +1,22 @@
+{
+  "selectors": [
+    "RemoteDesktopHostTests/ComputerUseTests/testLegacyResumeCannotBypassInputRecordedDuringAPrePromptPause",
+    "RemoteDesktopHostTests/ComputerUseTests/testLocalHandbackIncludesItsPrecedingInputWithoutInvalidatingItsOwnClick",
+    "RemoteDesktopHostTests/ComputerUseTests/testPausedInputBurstAdvancesOneDurableEpochBeforeRejectingADelayedResume",
+    "RemoteDesktopHostTests/ComputerUseTests/testPausedInputCannotBeAcknowledgedByForeignControlAndStopRetiresItBeforeANewTask",
+    "RemoteDesktopHostTests/ComputerUseTests/testPausedInputPersistenceFailureRetainsTheMarkerAndDoesNotAcknowledgeResume",
+    "RemoteDesktopHostTests/ComputerUseTests/testPausedInputSnapshotsCannotAcknowledgeLaterInputOrCrossAReplacementOwner",
+    "RemoteDesktopHostTests/ComputerUseTests/testResumeReadinessKeepsBrowserOwnershipAndOldToolsClosedUntilTheSameAdmissionIsAdopted",
+    "RemoteDesktopHostTests/ComputerUseTests/test_managerRejectsEarlyPopupHandbackThenContinuesTheExactNativeGoal"
+  ],
+  "expectedTests": [
+    "RemoteDesktopHostTests/ComputerUseTests/testLegacyResumeCannotBypassInputRecordedDuringAPrePromptPause",
+    "RemoteDesktopHostTests/ComputerUseTests/testLocalHandbackIncludesItsPrecedingInputWithoutInvalidatingItsOwnClick",
+    "RemoteDesktopHostTests/ComputerUseTests/testPausedInputBurstAdvancesOneDurableEpochBeforeRejectingADelayedResume",
+    "RemoteDesktopHostTests/ComputerUseTests/testPausedInputCannotBeAcknowledgedByForeignControlAndStopRetiresItBeforeANewTask",
+    "RemoteDesktopHostTests/ComputerUseTests/testPausedInputPersistenceFailureRetainsTheMarkerAndDoesNotAcknowledgeResume",
+    "RemoteDesktopHostTests/ComputerUseTests/testPausedInputSnapshotsCannotAcknowledgeLaterInputOrCrossAReplacementOwner",
+    "RemoteDesktopHostTests/ComputerUseTests/testResumeReadinessKeepsBrowserOwnershipAndOldToolsClosedUntilTheSameAdmissionIsAdopted",
+    "RemoteDesktopHostTests/ComputerUseTests/test_managerRejectsEarlyPopupHandbackThenContinuesTheExactNativeGoal"
+  ]
+}

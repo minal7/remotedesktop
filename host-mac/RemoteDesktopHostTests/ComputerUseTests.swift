@@ -239,10 +239,17 @@ final class ComputerUseTests: XCTestCase {
         let originalControls = try XCTUnwrap(fixture.browser.taskControls)
         server.releaseHeldResponses()
         await waitUntil(timeoutIterations: 1_000) { fixture.browser.hasOpenSignInWindow && server.count("/finish-signal") == 1 }
+        XCTAssertFalse(fixture.manager.recordUserInputForIntervention())
         XCTAssertTrue(fixture.manager.handle(try makeControlEnvelope(kind: .resume, taskID: taskID,
             revision: 1, hostEpoch: 1), channel: fixture.channel))
+        XCTAssertEqual(fixture.manager.activity, .paused)
+        XCTAssertEqual(fixture.ledger.hostControlEpoch(taskID: taskID), 2)
+        XCTAssertTrue(fixture.browser.hasOpenSignInWindow)
+        XCTAssertEqual(taskIDs, [taskID])
+        XCTAssertTrue(fixture.manager.handle(try makeControlEnvelope(kind: .resume, taskID: taskID,
+            revision: 2, hostEpoch: 2), channel: fixture.channel))
         await waitUntil(timeoutIterations: 1_000) {
-            guard fixture.manager.activity == .paused, fixture.ledger.hostControlEpoch(taskID: taskID) == 2 else { return false }
+            guard fixture.manager.activity == .paused, fixture.ledger.hostControlEpoch(taskID: taskID) == 3 else { return false }
             return await fixture.channel.sentMessages().contains {
                 $0.body.contains(ComputerUseBrowserError.signInWindowOpen.localizedDescription)
             }
@@ -263,7 +270,7 @@ final class ComputerUseTests: XCTestCase {
         XCTAssertFalse(pausedMessages.contains { $0.kind == .assistant })
         XCTAssertFalse(fixture.browser.validate(try XCTUnwrap(original)))
         XCTAssertTrue(fixture.manager.handle(try makeControlEnvelope(kind: .resume, taskID: taskID,
-            revision: 2, hostEpoch: 2), channel: fixture.channel))
+            revision: 3, hostEpoch: 3), channel: fixture.channel))
         await waitUntil(timeoutIterations: 1_000) {
             guard fixture.manager.activity == .idle, server.count("/edited?value=Paris") == 1 else { return false }
             return await fixture.channel.sentMessages().contains { $0.kind == .assistant }
@@ -6453,6 +6460,173 @@ final class ComputerUseTests: XCTestCase {
             "A canceled task must replay its terminal result without running again")
     }
 
+    func testPausedInputSnapshotsCannotAcknowledgeLaterInputOrCrossAReplacementOwner() throws {
+        let gate = ComputerUseActionGate(), firstOwner = UUID()
+        gate.endAutomation(allowsActions: false)
+        gate.trackPausedInput(scopeID: firstOwner)
+        let before = try XCTUnwrap(gate.pausedInputSnapshot(scopeID: firstOwner))
+        for _ in 0..<1_000 { XCTAssertFalse(gate.recordUserInput()) }
+        XCTAssertTrue(gate.hasUnacknowledgedInput(before))
+        gate.acknowledgePausedInput(before)
+        XCTAssertTrue(gate.hasUnacknowledgedInput(before), "A checkpoint from before the input cannot clear it")
+        let checkpoint = try XCTUnwrap(gate.pausedInputSnapshot(scopeID: firstOwner))
+        XCTAssertFalse(gate.recordUserInput())
+        gate.acknowledgePausedInput(checkpoint)
+        XCTAssertNil(gate.reservePendingAutomation(after: checkpoint), "Input during persistence must prevent admission")
+        let current = try XCTUnwrap(gate.pausedInputSnapshot(scopeID: firstOwner))
+        gate.acknowledgePausedInput(current)
+        let reserved = try XCTUnwrap(gate.reservePendingAutomation(after: current))
+        XCTAssertTrue(gate.recordUserInput())
+        XCTAssertFalse(gate.adoptPendingAutomation(reserved), "Input after reservation revokes the same continuation")
+        let replacement = UUID()
+        gate.trackPausedInput(scopeID: replacement)
+        XCTAssertFalse(gate.recordUserInput())
+        gate.acknowledgePausedInput(current)
+        XCTAssertNil(gate.reservePendingAutomation(after: current))
+        let replacementInput = try XCTUnwrap(gate.pausedInputSnapshot(scopeID: replacement))
+        XCTAssertTrue(gate.hasUnacknowledgedInput(replacementInput))
+        gate.acknowledgePausedInput(replacementInput)
+        let replacementReservation = try XCTUnwrap(gate.reservePendingAutomation(after: replacementInput))
+        XCTAssertTrue(gate.adoptPendingAutomation(replacementReservation))
+        XCTAssertFalse(gate.activatePendingAutomation(reserved))
+        XCTAssertTrue(gate.activatePendingAutomation(replacementReservation))
+    }
+
+    func testPausedInputBurstAdvancesOneDurableEpochBeforeRejectingADelayedResume() async throws {
+        let executor = ReadinessHookComputerUseExecutor(results: [.userInterventionRequired("Finish signing in."), .completed("Continued")])
+        let url = temporaryLedgerURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let fixture = try browserControlFixture(executor: executor, ledgerURL: url)
+        defer { fixture.manager.stop(); fixture.browser.close() }
+        let prompt = makeEnvelope(id: "paused-input-burst", kind: .prompt, body: "Find concert tickets")
+        fixture.manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(fixture.manager.handle(prompt, channel: fixture.channel))
+        await waitUntil { fixture.manager.activity == .paused }
+        let priorData = try Data(contentsOf: url), epoch = fixture.ledger.hostControlEpoch(taskID: prompt.id)
+        let owner = try XCTUnwrap(fixture.browser.taskControls?.ownerID)
+        for _ in 0..<1_000 { XCTAssertFalse(fixture.manager.recordUserInputForIntervention()) }
+        XCTAssertEqual(try Data(contentsOf: url), priorData, "A paused input burst performs no per-event ledger writes")
+        XCTAssertEqual(fixture.ledger.hostControlEpoch(taskID: prompt.id), epoch)
+        let delayed = try makeControlEnvelope(kind: .resume, taskID: prompt.id, revision: 1, hostEpoch: epoch)
+        XCTAssertTrue(fixture.manager.handle(delayed, channel: fixture.channel))
+        XCTAssertEqual(fixture.manager.activity, .paused); XCTAssertEqual(executor.callCount, 1)
+        XCTAssertEqual(fixture.ledger.hostControlEpoch(taskID: prompt.id), epoch + 1)
+        XCTAssertNil(fixture.ledger.appliedControlRevision(taskID: prompt.id))
+        XCTAssertEqual(fixture.browser.taskControls?.ownerID, owner)
+        await waitUntil {
+            await fixture.channel.sentMessages().contains {
+                guard let update = try? ComputerUseTaskUpdate.decodeBody($0.body) else { return false }
+                return update.taskID == prompt.id && update.hostControlEpoch == epoch + 1
+                    && update.text.contains("You used the Mac")
+            }
+        }
+        XCTAssertTrue(fixture.manager.handle(delayed, channel: fixture.channel))
+        XCTAssertEqual(fixture.ledger.hostControlEpoch(taskID: prompt.id), epoch + 1, "Replay without new input cannot refill the local epoch")
+        XCTAssertTrue(fixture.manager.handle(try makeControlEnvelope(kind: .resume, taskID: prompt.id, revision: 2, hostEpoch: epoch + 1), channel: fixture.channel))
+        await waitUntil { executor.callCount == 2 && fixture.manager.activity == .idle }
+        XCTAssertEqual(executor.trustedUserPrompts, [prompt.body, prompt.body])
+    }
+
+    func testLocalHandbackIncludesItsPrecedingInputWithoutInvalidatingItsOwnClick() async throws {
+        let executor = ReadinessHookComputerUseExecutor(results: [.userInterventionRequired("Finish signing in."), .completed("Continued")])
+        let url = temporaryLedgerURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let fixture = try browserControlFixture(executor: executor, ledgerURL: url)
+        defer { fixture.manager.stop(); fixture.browser.close() }
+        let prompt = makeEnvelope(id: "local-input-handback", kind: .prompt, body: "Find movie tickets")
+        fixture.manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(fixture.manager.handle(prompt, channel: fixture.channel))
+        await waitUntil { fixture.manager.activity == .paused }
+        let displayed = try XCTUnwrap(fixture.browser.taskControls), epoch = fixture.ledger.hostControlEpoch(taskID: prompt.id)
+        for _ in 0..<30 { XCTAssertFalse(fixture.manager.recordUserInputForIntervention()) }
+        // Includes the local Resume mouse-down, before its explicit action.
+        XCTAssertFalse(fixture.manager.recordUserInputForIntervention())
+        fixture.browser.requestTaskControl(.resume, displayed: displayed)
+        await waitUntil { executor.callCount == 2 && fixture.manager.activity == .idle }
+        XCTAssertEqual(fixture.ledger.hostControlEpoch(taskID: prompt.id), epoch + 1)
+        XCTAssertEqual(executor.trustedUserPrompts, [prompt.body, prompt.body])
+    }
+
+    func testPausedInputPersistenceFailureRetainsTheMarkerAndDoesNotAcknowledgeResume() async throws {
+        let executor = ReadinessHookComputerUseExecutor(results: [.userInterventionRequired("Finish signing in."), .completed("Continued")])
+        let url = temporaryLedgerURL(), directory = url.deletingLastPathComponent()
+        let moved = directory.appendingPathExtension("held")
+        defer { try? FileManager.default.removeItem(at: directory); try? FileManager.default.removeItem(at: moved) }
+        let fixture = try browserControlFixture(executor: executor, ledgerURL: url)
+        defer { fixture.manager.stop(); fixture.browser.close() }
+        let prompt = makeEnvelope(id: "paused-input-storage", kind: .prompt, body: "Find travel tickets")
+        fixture.manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(fixture.manager.handle(prompt, channel: fixture.channel))
+        await waitUntil { fixture.manager.activity == .paused }
+        XCTAssertFalse(fixture.manager.recordUserInputForIntervention())
+        let epoch = fixture.ledger.hostControlEpoch(taskID: prompt.id), owner = fixture.browser.taskControls?.ownerID
+        let delayed = try makeControlEnvelope(kind: .resume, taskID: prompt.id, revision: 1, hostEpoch: epoch)
+        try FileManager.default.moveItem(at: directory, to: moved)
+        try Data("blocked fixture directory".utf8).write(to: directory)
+        XCTAssertFalse(fixture.manager.handle(makeEnvelope(kind: .resume, body: ""), channel: fixture.channel),
+            "Legacy controls must also remain unacknowledged when the input checkpoint cannot be saved")
+        XCTAssertFalse(fixture.manager.handle(delayed, channel: fixture.channel))
+        XCTAssertEqual(fixture.manager.activity, .paused); XCTAssertEqual(executor.callCount, 1)
+        XCTAssertEqual(fixture.ledger.hostControlEpoch(taskID: prompt.id), epoch)
+        XCTAssertNil(fixture.ledger.appliedControlRevision(taskID: prompt.id))
+        XCTAssertEqual(fixture.browser.taskControls?.ownerID, owner)
+        try FileManager.default.removeItem(at: directory)
+        try FileManager.default.moveItem(at: moved, to: directory)
+        XCTAssertTrue(fixture.manager.handle(delayed, channel: fixture.channel))
+        XCTAssertEqual(fixture.manager.activity, .paused); XCTAssertEqual(executor.callCount, 1)
+        XCTAssertEqual(fixture.ledger.hostControlEpoch(taskID: prompt.id), epoch + 1)
+        XCTAssertTrue(fixture.manager.handle(try makeControlEnvelope(kind: .resume, taskID: prompt.id, revision: 2, hostEpoch: epoch + 1), channel: fixture.channel))
+        await waitUntil { executor.callCount == 2 && fixture.manager.activity == .idle }
+    }
+
+    func testLegacyResumeCannotBypassInputRecordedDuringAPrePromptPause() async throws {
+        let executor = ReadinessHookComputerUseExecutor(results: [.completed("First execution")])
+        let url = temporaryLedgerURL(), channel = FakeHostComputerUseChannel(), ledger = ComputerUseTaskLedger(fileURL: url)
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let manager = HostComputerUseManager(injector: InputInjector(), executor: executor, taskLedger: ledger,
+            allowsExternalServices: false, channelFactory: { _ in channel })
+        defer { manager.stop() }
+        let prompt = makeEnvelope(id: "legacy-paused-input", kind: .prompt, body: "Find concert tickets")
+        manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(manager.handle(try makeControlEnvelope(kind: .pause, taskID: prompt.id, revision: 1), channel: channel))
+        XCTAssertTrue(manager.handle(prompt, channel: channel)); XCTAssertEqual(manager.activity, .paused)
+        XCTAssertEqual(ledger.hostControlEpoch(taskID: prompt.id), 0)
+        XCTAssertFalse(manager.recordUserInputForIntervention())
+        XCTAssertTrue(manager.handle(makeEnvelope(kind: .resume, body: ""), channel: channel))
+        XCTAssertEqual(manager.activity, .paused); XCTAssertEqual(executor.callCount, 0)
+        XCTAssertEqual(ledger.hostControlEpoch(taskID: prompt.id), 1)
+        XCTAssertTrue(manager.handle(try makeControlEnvelope(kind: .resume, taskID: prompt.id, revision: 2, hostEpoch: 1), channel: channel))
+        await waitUntil { executor.callCount == 1 && manager.activity == .idle }
+        XCTAssertEqual(executor.trustedUserPrompts, [prompt.body])
+    }
+
+    func testPausedInputCannotBeAcknowledgedByForeignControlAndStopRetiresItBeforeANewTask() async throws {
+        let executor = ReadinessHookComputerUseExecutor(results: [.userInterventionRequired("First handoff"), .userInterventionRequired("Second handoff"), .completed("Continued")])
+        let url = temporaryLedgerURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let fixture = try browserControlFixture(executor: executor, ledgerURL: url)
+        defer { fixture.manager.stop(); fixture.browser.close() }
+        let first = makeEnvelope(id: "old-input-owner", kind: .prompt, body: "Find concerts")
+        fixture.manager.authorizePeer(senderID: first.senderID)
+        XCTAssertTrue(fixture.manager.handle(first, channel: fixture.channel))
+        await waitUntil { fixture.manager.activity == .paused }
+        XCTAssertFalse(fixture.manager.recordUserInputForIntervention())
+        let epoch = fixture.ledger.hostControlEpoch(taskID: first.id)
+        _ = fixture.manager.handle(try makeControlEnvelope(kind: .resume, taskID: first.id, revision: 1, sessionID: "other", hostEpoch: epoch), channel: fixture.channel)
+        XCTAssertEqual(fixture.ledger.hostControlEpoch(taskID: first.id), epoch)
+        XCTAssertEqual(fixture.manager.activity, .paused); XCTAssertEqual(executor.callCount, 1)
+        XCTAssertTrue(fixture.manager.handle(try makeControlEnvelope(kind: .cancel, taskID: first.id, revision: 2, hostEpoch: 0), channel: fixture.channel))
+        XCTAssertTrue(fixture.ledger.isCancelled(taskID: first.id))
+        XCTAssertEqual(fixture.ledger.hostControlEpoch(taskID: first.id), epoch, "Stop does not wait for an extra input checkpoint")
+        let second = makeEnvelope(id: "new-input-owner", kind: .prompt, body: "Find movies")
+        XCTAssertTrue(fixture.manager.handle(second, channel: fixture.channel))
+        await waitUntil { fixture.manager.activity == .paused && executor.callCount == 2 }
+        let secondEpoch = fixture.ledger.hostControlEpoch(taskID: second.id)
+        XCTAssertTrue(fixture.manager.handle(try makeControlEnvelope(kind: .resume, taskID: second.id, revision: 1, hostEpoch: secondEpoch), channel: fixture.channel))
+        await waitUntil { executor.callCount == 3 && fixture.manager.activity == .idle }
+        XCTAssertEqual(executor.trustedUserPrompts, [first.body, second.body, second.body])
+    }
+
     func testResumeReadinessKeepsBrowserOwnershipAndOldToolsClosedUntilTheSameAdmissionIsAdopted() async throws {
         for localResume in [false, true] {
           for intervene in [false, true] {
@@ -6476,7 +6650,7 @@ final class ComputerUseTests: XCTestCase {
                 XCTAssertThrowsError(try oldTools.perform(.typeText("stale task input"))) {
                     guard let error = $0 as? ComputerUseHostTools.ToolError, case .paused = error else { return XCTFail("Expected closed action gate") }
                 }
-                if intervene { inputRevokedAdmission = fixture.manager.blockActionsForUserIntervention() }
+                if intervene { inputRevokedAdmission = fixture.manager.recordUserInputForIntervention() }
             }
             if localResume { fixture.browser.requestTaskControl(.resume, displayed: controls) }
             else {

@@ -3085,13 +3085,47 @@ final class ComputerUseHostTools {
     }
 }
 
-private final class ComputerUseActionGate: @unchecked Sendable {
+final class ComputerUseActionGate: @unchecked Sendable {
     private let lock = NSLock()
     private var value = true
     private var pendingAutomationID: UUID?
     private var pendingAutomationAdopted = false
     private var automationActive = false
     private var approvalPending = false
+    struct PausedInputSnapshot: Equatable, Sendable {
+        let scopeID: UUID
+        let generation: UInt64
+    }
+    private var pausedInputScopeID: UUID?
+    private var pausedInputGeneration: UInt64 = 0
+    private var pausedInputUnacknowledged = false
+
+    func trackPausedInput(scopeID: UUID?) {
+        lock.withLock {
+            guard pausedInputScopeID != scopeID else { return }
+            pausedInputScopeID = scopeID
+            pausedInputGeneration = 0
+            pausedInputUnacknowledged = false
+        }
+    }
+    func pausedInputSnapshot(scopeID: UUID) -> PausedInputSnapshot? {
+        lock.withLock {
+            guard pausedInputScopeID == scopeID else { return nil }
+            return .init(scopeID: scopeID, generation: pausedInputGeneration)
+        }
+    }
+    func hasUnacknowledgedInput(_ snapshot: PausedInputSnapshot) -> Bool {
+        lock.withLock {
+            pausedInputScopeID == snapshot.scopeID && pausedInputUnacknowledged
+        }
+    }
+    func acknowledgePausedInput(_ snapshot: PausedInputSnapshot) {
+        lock.withLock {
+            guard pausedInputScopeID == snapshot.scopeID, pausedInputGeneration == snapshot.generation,
+                  pausedInputGeneration < UInt64.max else { return }
+            pausedInputUnacknowledged = false
+        }
+    }
 
     var allowsActions: Bool {
         lock.withLock { value }
@@ -3105,15 +3139,23 @@ private final class ComputerUseActionGate: @unchecked Sendable {
     /// join. Actions stay closed, but direct input still owns an intervention
     /// race and can invalidate this pending claim synchronously off-main.
     func reservePendingAutomation() -> UUID {
+        lock.withLock { reservePendingAutomationLocked() }
+    }
+    func reservePendingAutomation(after snapshot: PausedInputSnapshot) -> UUID? {
         lock.withLock {
-            let id = UUID()
-            value = false
-            pendingAutomationID = id
-            pendingAutomationAdopted = false
-            automationActive = false
-            approvalPending = false
-            return id
+            guard pausedInputScopeID == snapshot.scopeID, pausedInputGeneration == snapshot.generation,
+                  !pausedInputUnacknowledged else { return nil }
+            return reservePendingAutomationLocked()
         }
+    }
+    private func reservePendingAutomationLocked() -> UUID {
+        let id = UUID()
+        value = false
+        pendingAutomationID = id
+        pendingAutomationAdopted = false
+        automationActive = false
+        approvalPending = false
+        return id
     }
 
     /// Resume reserves before readiness/claim work. Adoption cannot recreate
@@ -3197,18 +3239,28 @@ private final class ComputerUseActionGate: @unchecked Sendable {
         }
     }
 
-    func blockForIntervention() -> Bool {
+    /// Record occurrence only. A paused burst schedules no actor callback or
+    /// disk write; an arriving control reconciles its newest generation.
+    func recordUserInput() -> Bool {
         lock.withLock {
-            guard pendingAutomationID != nil
-                    || automationActive
-                    || approvalPending else { return false }
-            value = false
-            pendingAutomationID = nil
-            pendingAutomationAdopted = false
-            automationActive = false
-            approvalPending = false
-            return true
+            if pausedInputScopeID != nil {
+                if pausedInputGeneration < UInt64.max { pausedInputGeneration += 1 }
+                pausedInputUnacknowledged = true
+            }
+            return blockForInterventionLocked()
         }
+    }
+    func blockForIntervention() -> Bool {
+        lock.withLock { blockForInterventionLocked() }
+    }
+    private func blockForInterventionLocked() -> Bool {
+        guard pendingAutomationID != nil || automationActive || approvalPending else { return false }
+        value = false
+        pendingAutomationID = nil
+        pendingAutomationAdopted = false
+        automationActive = false
+        approvalPending = false
+        return true
     }
 }
 
@@ -3722,6 +3774,16 @@ final class HostComputerUseManager: ObservableObject {
     }
     private var browserControlIdentity: BrowserControlIdentity?
     private var browserControlSnapshot: ComputerUseBrowserTaskControls?
+    private struct PausedInputOwner: Equatable {
+        let taskID: String
+        let senderID: String
+        let sessionID: String
+        init(_ context: ExecutionContext) {
+            taskID = context.envelope.id; senderID = context.envelope.senderID; sessionID = context.envelope.sessionID
+        }
+    }
+    private var pausedInputOwner: PausedInputOwner?
+    private var pausedInputScopeID: UUID?
 
     private var executorIsReady: Bool {
         guard let executor, executor.isReady else { return false }
@@ -4463,6 +4525,13 @@ final class HostComputerUseManager: ObservableObject {
     /// person's event. Cancellation and UI state then follow on MainActor.
     /// This closes the small race where the model could otherwise inject one
     /// more action after the user had already touched the screen.
+    /// Actual physical/direct input, including while already paused. The
+    /// callback carries no key, text, pointer coordinate or authentication data.
+    @discardableResult
+    nonisolated func recordUserInputForIntervention() -> Bool {
+        injector.interruptAutomation { [actionGate] in actionGate.recordUserInput() }
+    }
+
     @discardableResult
     nonisolated func blockActionsForUserIntervention() -> Bool {
         injector.interruptAutomation { [actionGate] in
@@ -4707,6 +4776,16 @@ final class HostComputerUseManager: ObservableObject {
     }
 
     private func refreshBrowserTaskControls() {
+        // A reconnect of this same retained task keeps unacknowledged input.
+        // Leaving paused ownership or replacing the task retires that scope.
+        let inputOwner: PausedInputOwner?
+        if !isShuttingDown, case .paused = activity, let pausedExecution { inputOwner = .init(pausedExecution) }
+        else { inputOwner = nil }
+        if inputOwner != pausedInputOwner {
+            pausedInputOwner = inputOwner
+            pausedInputScopeID = inputOwner == nil ? nil : UUID()
+            actionGate.trackPausedInput(scopeID: pausedInputScopeID)
+        }
         let context: ExecutionContext?
         let phase: ComputerUseBrowserTaskControls.Phase
         switch activity {
@@ -4767,11 +4846,12 @@ final class HostComputerUseManager: ObservableObject {
             // instead accepts that same run's earlier presentation.
             guard displayed == current, current.phase == .paused, current.canResume,
                   isPeerAuthorizedForComputerUse(senderID: context.envelope.senderID) else { return }
-            guard persistLocalControl(.resume, context: context) else {
+            let input = pausedInputSnapshot(for: context)
+            guard persistLocalControl(.resume, context: context, acknowledgingInput: input) else {
                 pauseExecution(context, guidance: Self.localControlPersistenceFailureGuidance)
                 return
             }
-            resumeExecution(context)
+            resumeExecution(context, afterInput: input)
         case .stop:
             // Stop is absorbing. Its durable Cancel must be replayable with
             // the revision of a delayed phone control; an unversioned local
@@ -4799,15 +4879,15 @@ final class HostComputerUseManager: ObservableObject {
         _ envelope: ComputerUseEnvelope,
         channel: any HostComputerUseChannel
     ) -> Bool {
+        refreshBrowserTaskControls()
         defer { refreshBrowserTaskControls() }
         guard let control = ledgerControl(for: envelope.kind) else { return true }
 
         if envelope.body.isEmpty {
-            handleLegacyControl(
+            return handleLegacyControl(
                 control,
                 envelope: envelope,
                 channel: channel)
-            return true
         }
 
         guard let request = try? ComputerUseControlRequest.decodeBody(
@@ -4823,6 +4903,12 @@ final class HostComputerUseManager: ObservableObject {
             taskID: request.taskID,
             matching: envelope)
 
+        var inputChanged = false
+        var resumeInput: ComputerUseActionGate.PausedInputSnapshot?
+        if control != .cancel, let context {
+            guard let reconciled = reconcilePausedInputBeforeRemoteControl(context) else { return false }
+            inputChanged = reconciled.changed; resumeInput = reconciled.snapshot
+        }
         let resolution: ComputerUseTaskLedger.ControlResolution
         let rejectedQuestion = taskLedger.rejectedAnswerReference(taskID: request.taskID)
         do {
@@ -4893,7 +4979,7 @@ final class HostComputerUseManager: ObservableObject {
         switch resolution.state {
         case .paused:
             if let context {
-                pauseExecution(context)
+                pauseExecution(context, guidance: inputChanged ? Self.pausedInputChangedGuidance : nil)
             } else {
                 // The Prompt may still be in flight. Its stable ID is used for
                 // correlation even though no execution context exists yet.
@@ -4914,10 +5000,10 @@ final class HostComputerUseManager: ObservableObject {
                     // the current screen so only a revision-current approval
                     // can be presented or accepted.
                     pauseExecution(context)
-                    resumeExecution(context, controlEnvelope: envelope)
+                    resumeExecution(context, controlEnvelope: envelope, afterInput: resumeInput)
                 } else if pausedExecution?.envelope.id
                     == context.envelope.id {
-                    resumeExecution(context, controlEnvelope: envelope)
+                    resumeExecution(context, controlEnvelope: envelope, afterInput: resumeInput)
                 } else {
                     sendCurrentStatus(
                         for: context,
@@ -4946,19 +5032,24 @@ final class HostComputerUseManager: ObservableObject {
         _ control: ComputerUseTaskLedger.Control,
         envelope: ComputerUseEnvelope,
         channel: any HostComputerUseChannel
-    ) {
+    ) -> Bool {
         // Empty bodies are the compatibility path for shipped clients. With no
         // task ID or revision, they may only touch the one live context owned
         // by the same sender and session. In particular, nil-context Pause is
         // a no-op instead of placing the whole host in a phantom paused state.
         guard let context = legacyExecutionContext(matching: envelope) else {
-            return
+            return true
+        }
+        var resumeInput: ComputerUseActionGate.PausedInputSnapshot?
+        if control != .cancel {
+            guard let reconciled = reconcilePausedInputBeforeRemoteControl(context) else { return false }
+            resumeInput = reconciled.snapshot
         }
         // An empty legacy control cannot have observed a local handoff. Stop
         // remains available; Pause/Resume need a versioned, current command.
         if control != .cancel, taskLedger.hostControlEpoch(taskID: context.envelope.id) > 0 {
             sendCurrentStatus(for: context, fallback: "paused", replyingTo: context.envelope, channel: context.channel)
-            return
+            return true
         }
 
         switch control {
@@ -4966,9 +5057,9 @@ final class HostComputerUseManager: ObservableObject {
             pauseExecution(context)
         case .resume:
             guard pausedExecution?.envelope.id == context.envelope.id else {
-                return
+                return true
             }
-            resumeExecution(context, controlEnvelope: envelope)
+            resumeExecution(context, controlEnvelope: envelope, afterInput: resumeInput)
         case .cancel:
             sendDurableTerminal(
                 ComputerUseTaskLedger.stoppedResponse,
@@ -4981,6 +5072,7 @@ final class HostComputerUseManager: ObservableObject {
                 replyingTo: context.envelope,
                 channel: context.channel)
         }
+        return true
     }
 
     private func ledgerControl(
@@ -5021,11 +5113,32 @@ final class HostComputerUseManager: ObservableObject {
     private static let localControlPersistenceFailureGuidance =
         "AI is paused, but the Mac couldn't safely save this handoff. Keep control of the Mac until its task storage is available."
 
-    private func persistLocalControl(_ control: ComputerUseTaskLedger.Control, context: ExecutionContext) -> Bool {
+    private static let pausedInputChangedGuidance =
+        "You used the Mac while AI was paused. Choose Resume again when you are ready."
+
+    private func pausedInputSnapshot(for context: ExecutionContext) -> ComputerUseActionGate.PausedInputSnapshot? {
+        guard case .paused = activity, pausedInputOwner == PausedInputOwner(context), let scope = pausedInputScopeID else { return nil }
+        return actionGate.pausedInputSnapshot(scopeID: scope)
+    }
+    private func reconcilePausedInputBeforeRemoteControl(_ context: ExecutionContext)
+        -> (snapshot: ComputerUseActionGate.PausedInputSnapshot?, changed: Bool)? {
+        guard let input = pausedInputSnapshot(for: context) else { return (nil, false) }
+        guard actionGate.hasUnacknowledgedInput(input) else { return (input, false) }
+        guard persistLocalControl(.pause, context: context, acknowledgingInput: input) else {
+            pauseExecution(context, guidance: Self.localControlPersistenceFailureGuidance)
+            return nil
+        }
+        return (pausedInputSnapshot(for: context), true)
+    }
+
+    private func persistLocalControl(_ control: ComputerUseTaskLedger.Control, context: ExecutionContext,
+        acknowledgingInput: ComputerUseActionGate.PausedInputSnapshot? = nil) -> Bool {
+        let input = acknowledgingInput ?? pausedInputSnapshot(for: context)
         defer { refreshBrowserTaskControls() }
         do {
             try taskLedger.applyLocalControl(control, taskID: context.envelope.id,
                 senderID: context.envelope.senderID, sessionID: context.envelope.sessionID)
+            if let input { actionGate.acknowledgePausedInput(input) }
             return true
         } catch {
             actionGate.endAutomation(allowsActions: false)
@@ -5091,13 +5204,14 @@ final class HostComputerUseManager: ObservableObject {
 
     private func resumeExecution(
         _ context: ExecutionContext,
-        controlEnvelope: ComputerUseEnvelope
+        controlEnvelope: ComputerUseEnvelope,
+        afterInput: ComputerUseActionGate.PausedInputSnapshot? = nil
     ) {
         guard context.belongs(to: controlEnvelope) else { return }
-        resumeExecution(context)
+        resumeExecution(context, afterInput: afterInput)
     }
 
-    private func resumeExecution(_ context: ExecutionContext) {
+    private func resumeExecution(_ context: ExecutionContext, afterInput: ComputerUseActionGate.PausedInputSnapshot? = nil) {
         guard case .paused = activity,
               let pausedExecution,
               pausedExecution.envelope.id == context.envelope.id,
@@ -5112,7 +5226,14 @@ final class HostComputerUseManager: ObservableObject {
 
         // Own a closed admission before readiness checks or durable prompt
         // claiming. Direct input can revoke it even while activity is idle.
-        let pendingAutomationID = actionGate.reservePendingAutomation()
+        let pendingAutomationID: UUID
+        if let input = afterInput ?? pausedInputSnapshot(for: context) {
+            guard let reservation = actionGate.reservePendingAutomation(after: input) else {
+                pauseForLocalIntervention(context, guidance: Self.pausedInputChangedGuidance)
+                return
+            }
+            pendingAutomationID = reservation
+        } else { pendingAutomationID = actionGate.reservePendingAutomation() }
         defer { actionGate.abandonReservedAutomation(pendingAutomationID) }
         if !pausedExecution.hasStarted {
             // An unstarted prompt owns no live browser handoff. The ordinary
@@ -7304,7 +7425,7 @@ final class HostComputerUseManager: ObservableObject {
         ]
         let interrupt: @Sendable (NSEvent) -> Void = { [weak self] event in
             guard !InputInjector.isSynthetic(event),
-                  self?.blockActionsForUserIntervention() == true else { return }
+                  self?.recordUserInputForIntervention() == true else { return }
             Task { @MainActor [weak self] in self?.userIntervened() }
         }
         if let global = NSEvent.addGlobalMonitorForEvents(

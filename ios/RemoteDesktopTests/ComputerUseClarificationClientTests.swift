@@ -509,6 +509,41 @@ final class ComputerUseClarificationClientTests: XCTestCase {
         XCTAssertNil(next.clarification); XCTAssertTrue(next.conversation.isEmpty)
     }
 
+    func testNewPausedInputEpochRetiresADelayedResumeAndTheNextHandbackUsesTheCurrentEpoch() async throws {
+        let fixture = ClarificationClientFixture()
+        defer { fixture.model.stop() }
+        fixture.model.start(); XCTAssertTrue(fixture.model.sendPrompt("Find travel tickets"))
+        let root = try await fixture.channel.prompt(at: 0)
+        await fixture.channel.deliver(try ComputerUseTaskUpdate(taskID: root.id,
+            text: ComputerUseStatusSignal.userIntervention("Finish signing in."), outcome: .userInterventionRequired,
+            hostControlEpoch: 1).encodedBody(), kind: .status)
+        try await fixture.channel.waitForDelivery()
+        XCTAssertEqual(fixture.model.state, .paused)
+        fixture.model.resumeAI()
+        let delayed = try await fixture.channel.control(afterRevision: 0), first = try ComputerUseControlRequest.decodeBody(delayed.body)
+        XCTAssertEqual(delayed.kind, .resume); XCTAssertEqual(first.observedHostControlEpoch, 1)
+        await fixture.channel.deliver(try ComputerUseTaskUpdate(taskID: root.id,
+            text: ComputerUseStatusSignal.userIntervention("You used the Mac while AI was paused. Choose Resume again when you are ready."),
+            outcome: .userInterventionRequired, hostControlEpoch: 2).encodedBody(), kind: .status)
+        try await fixture.channel.waitForDelivery()
+        XCTAssertEqual(fixture.model.state, .paused); XCTAssertTrue(fixture.model.hasActivePrompt)
+        let saved = try XCTUnwrap(fixture.store.load(hostID: "HOST-ID", pairingCode: "123456"))
+        XCTAssertEqual(saved.messageID, root.id); XCTAssertEqual(saved.hostControlEpoch, 2); XCTAssertNil(saved.lastControlKind)
+        await fixture.channel.deliver(try ComputerUseTaskUpdate(taskID: root.id, text: "working",
+            appliedControlRevision: first.revision, hostControlEpoch: 1).encodedBody(), kind: .status)
+        try await fixture.channel.waitForDelivery()
+        XCTAssertEqual(fixture.model.state, .paused)
+        fixture.model.resumeAI()
+        let fresh = try await fixture.channel.control(afterRevision: first.revision), second = try ComputerUseControlRequest.decodeBody(fresh.body)
+        XCTAssertEqual(fresh.kind, .resume); XCTAssertEqual(second.taskID, root.id)
+        XCTAssertEqual(second.observedHostControlEpoch, 2); XCTAssertGreaterThan(second.revision, first.revision)
+        await fixture.channel.deliver(try ComputerUseTaskUpdate(taskID: root.id, text: "working",
+            appliedControlRevision: second.revision, hostControlEpoch: 2).encodedBody(), kind: .status)
+        try await fixture.channel.waitForDelivery()
+        XCTAssertEqual(fixture.model.state, .working)
+        XCTAssertEqual(fixture.store.load(hostID: "HOST-ID", pairingCode: "123456")?.messageID, root.id)
+    }
+
     func testWholePartyQuestionRetainsAnIncompleteDraftAndSendsBothCountsUnderTheOriginalReference() async throws {
         let fixture = ClarificationClientFixture()
         defer { fixture.model.stop() }
@@ -1211,6 +1246,7 @@ private final class ClarificationClientFixture {
 private actor ClarificationClientChannel: ComputerUseSessionChannel {
     enum Failure: Error { case timeout, requested }
     private var prompts: [ComputerUseEnvelope] = []
+    private var controls: [ComputerUseEnvelope] = []
     private var probes: [ComputerUseClarificationProbe] = []
     private var incoming: [ComputerUseEnvelope] = []
     private var deliveredCount = 0
@@ -1225,6 +1261,7 @@ private actor ClarificationClientChannel: ComputerUseSessionChannel {
             prompts.append(envelope)
             if failPrompt { failPrompt = false; throw Failure.requested }
         }
+        if [.pause, .resume, .cancel].contains(kind) { controls.append(envelope) }
         if kind == .status, let probe = try? ComputerUseClarificationProbe.decodeBody(body) { probes.append(probe) }
         return envelope
     }
@@ -1237,6 +1274,14 @@ private actor ClarificationClientChannel: ComputerUseSessionChannel {
         pairingCode: String = "123456", sessionID: String = "session-1") {
         deliveredCount += 1
         incoming.append(.init(senderID: senderID, targetID: "IOS-ID", pairingCode: pairingCode, sessionID: sessionID, kind: kind, body: body))
+    }
+    func control(afterRevision revision: UInt64) async throws -> ComputerUseEnvelope {
+        let deadline = ContinuousClock.now + .seconds(3)
+        while true {
+            if let control = controls.first(where: { (try? ComputerUseControlRequest.decodeBody($0.body).revision).map { $0 > revision } == true }) { return control }
+            guard ContinuousClock.now < deadline else { throw Failure.timeout }
+            try await Task.sleep(for: .milliseconds(5))
+        }
     }
     func promptCount() -> Int { prompts.count }
     func sentCount() -> Int { allSentCount }

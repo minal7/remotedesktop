@@ -32,11 +32,11 @@ The [focused seven-method inventory](resume-admission-inventory.json) also inclu
 
 Two Swift files pass parse-only checks. Source inventories select **1879 default host / 1196 focused host** methods; client core remains **34**. Syntax and source registration are not execution, typechecking, native input evidence, provider qualification or model qualification. Local documentation checks cover 211 Markdown files and 1,718 local targets with no broken targets. Whitespace checks are clean, and the effective hook directory contains no executable non-sample hooks.
 
-## Separate remaining control-ordering gap
+## Subsequent paused-input ordering repair
 
-Further physical input while a task is already paused is still ignored by `userIntervened`, and the synchronous gate callback returns false when no pending/active/approval claim exists. A delayed phone Resume can therefore carry the epoch from before continued manual work. This repair protects admission after Resume begins; it does not establish ordering for every input that preceded that admission.
+At this checkpoint, further physical input while already paused was ignored and a delayed phone Resume could carry an older handoff epoch. The subsequent [paused-input ordering repair](PAUSED_INPUT_ORDERING_REVIEW.md) records scoped input occurrence, coalesces durable checkpoints and checks the same generation through Resume reservation. Both source repairs remain unqualified by execution.
 
-The next repair must:
+The follow-up source repair implements the following sequence, with actual native and transport qualification still pending:
 
 1. Record a bounded native indication of new manual input while the actual task owner is paused, without reading or retaining key contents, passwords or login data.
 2. Scope the indication to the current task/control ownership so a delayed callback cannot affect a replacement task.
