@@ -515,6 +515,7 @@ final class HostPeerSession: NSObject {
                 self?.recordRecoveryFrame(from: attempt)
             },
             onAudioSample: audioEnabled ? { [weak self] sample in self?.audioBridge.enqueue(sample) } : nil,
+            onVideoUnavailable: { [weak self] attempt in self?.handleCaptureVideoUnavailable(from: attempt) },
             onStopped: { [weak self] receipt, error in
                 // The current stream's synchronous callback revokes input
                 // before the asynchronous recovery/error handler can be delayed.
@@ -590,22 +591,13 @@ final class HostPeerSession: NSObject {
             closeStateLock.lock()
             defer { closeStateLock.unlock() }
             guard !ended else { return }
-            guard ScreenCapture.isSystemStopped(error) else {
+            guard ScreenCapture.isRecoverableStop(error) else {
                 log.error("screen capture stopped: \(String(describing: error), privacy: .public)")
                 ended = true
                 terminalReason = "Screen capture stopped. Reconnect to try again."
                 return
             }
-            if captureRecovery == nil {
-                let episode = CaptureRecoveryEpisode(now: ContinuousClock.now)
-                captureRecovery = episode
-                captureRecoveryDeadlineTask = Task { [weak self] in
-                    do { try await ContinuousClock().sleep(until: episode.deadline) }
-                    catch { return }
-                    self?.endCaptureRecovery(episode.id,
-                        reason: CaptureRecoveryEpisode.Failure.timedOut.message)
-                }
-            }
+            beginCaptureRecoveryLocked()
             guard captureRestartTask == nil, let episode = captureRecovery else { return }
             let worker = UUID()
             captureRestartID = worker
@@ -617,6 +609,29 @@ final class HostPeerSession: NSObject {
             close(reason: terminalReason)
             onEnded(terminalReason)
         }
+    }
+
+    /// Called under capture admission and then the peer lock. Nonterminal
+    /// output loss waits on the continuing stream instead of restarting it.
+    private func beginCaptureRecoveryLocked(waitingForOutputFrom attempt: CaptureAttemptLease? = nil) {
+        guard captureRecovery == nil else { return }
+        let episode = CaptureRecoveryEpisode(now: ContinuousClock.now, waitingForOutputFrom: attempt)
+        captureRecovery = episode
+        captureRecoveryDeadlineTask = Task { [weak self] in
+            do { try await ContinuousClock().sleep(until: episode.deadline) }
+            catch { return }
+            self?.endCaptureRecovery(episode.id, reason: CaptureRecoveryEpisode.Failure.timedOut.message)
+        }
+    }
+
+    private func handleCaptureVideoUnavailable(from attempt: CaptureAttemptLease) {
+        // This callback is synchronous inside the current stream's admission
+        // gate. Clear remembered output before any startup completion can use it.
+        revokeCaptureInput()
+        closeStateLock.lock()
+        defer { closeStateLock.unlock() }
+        guard !ended else { return }
+        beginCaptureRecoveryLocked(waitingForOutputFrom: attempt)
     }
 
     private func ownsCaptureRestart(_ worker: UUID, episode: UUID) -> Bool {
@@ -651,10 +666,10 @@ final class HostPeerSession: NSObject {
 
     private func refreshCaptureInputAvailability() {
         guard let (owner, _) = try? captureStartParameters() else { return }
-        capture.withRunningSession(owner) { runningAttempt in
+        capture.withRunningSession(owner) { runningAttempt, videoAvailable in
             closeStateLock.lock()
             defer { closeStateLock.unlock() }
-            guard !ended, lastVideoAttempt == runningAttempt else { return }
+            guard !ended, videoAvailable, lastVideoAttempt == runningAttempt else { return }
             if let episode = captureRecovery {
                 guard episode.acceptsFrame(lastOutput: lastVideoAttempt, running: runningAttempt,
                                            at: ContinuousClock.now) else { return }
@@ -671,8 +686,11 @@ final class HostPeerSession: NSObject {
         sendHelloAckAndDisplay()
     }
 
-    /// Called synchronously inside the retired stream's capture gate.
+    /// Called synchronously inside the unavailable or retired stream's capture gate.
     private func revokeCaptureInput() {
+        closeStateLock.lock()
+        lastVideoAttempt = nil
+        closeStateLock.unlock()
         switch inputAuthorization.captureChanged(available: false) {
         case .unchanged, .available: break
         case .reconnect:
@@ -708,14 +726,14 @@ final class HostPeerSession: NSObject {
     private func settleCaptureRestart(_ worker: UUID, episode: UUID) -> CaptureStartDisposition {
         guard let (owner, _) = try? captureStartParameters() else { return .retired }
         var result = CaptureStartDisposition.retry
-        capture.withRunningSession(owner) { runningAttempt in
+        capture.withRunningSession(owner) { runningAttempt, videoAvailable in
             closeStateLock.lock()
             defer { closeStateLock.unlock() }
             guard !ended, captureRestartID == worker, let recovery = captureRecovery,
                   recovery.id == episode else { result = .retired; return }
             guard recovery.permitsRecovery(at: ContinuousClock.now) else { return }
-            if recovery.acceptsFrame(lastOutput: lastVideoAttempt, running: runningAttempt,
-                                     at: ContinuousClock.now) {
+            if videoAvailable, recovery.acceptsFrame(lastOutput: lastVideoAttempt, running: runningAttempt,
+                                                     at: ContinuousClock.now) {
                 completeCaptureRecoveryLocked()
                 restoreCaptureInputLocked()
                 result = .restored

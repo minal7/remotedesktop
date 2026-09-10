@@ -80,6 +80,85 @@ struct CaptureVideoFrameOrder {
     }
 }
 
+/// Status-only events need no image buffer. In particular, idle means no
+/// display change, while blank/suspended explicitly withdraw usable output.
+enum CaptureVideoStatus: Equatable {
+    case complete, idle, started, blank, suspended, stopped, invalid
+
+    static func read(_ value: Any?) -> Self {
+        guard let number = value as? NSNumber,
+              CFGetTypeID(number) != CFBooleanGetTypeID(),
+              let raw = number as? Int, number == NSNumber(value: raw) else { return .invalid }
+        switch raw {
+        case SCFrameStatus.complete.rawValue: return .complete
+        case SCFrameStatus.idle.rawValue: return .idle
+        case SCFrameStatus.started.rawValue: return .started
+        case SCFrameStatus.blank.rawValue: return .blank
+        case SCFrameStatus.suspended.rawValue: return .suspended
+        case SCFrameStatus.stopped.rawValue: return .stopped
+        default: return .invalid
+        }
+    }
+
+    static func read(sampleBuffer: CMSampleBuffer) -> Self {
+        guard sampleBuffer.isValid,
+              let rows = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false)
+                as? [[SCStreamFrameInfo: Any]], let row = rows.first else { return .invalid }
+        return read(row[.status])
+    }
+}
+
+/// All accesses occur inside the capture lifecycle gate, including delegate
+/// stop callbacks. The observation boundary is conservative: a queued frame
+/// captured before a reported loss cannot restore source availability.
+struct CaptureVideoAvailability {
+    private var attempt: CaptureAttemptLease?
+    private var hasDeliveredFrame = false
+    private var reportedUnavailable = false
+    private var resumeAfterHostTicks: UInt64?
+
+    mutating func recordUnavailable(from attempt: CaptureAttemptLease,
+                                    observedAtHostTime: UInt64) -> Bool {
+        adopt(attempt)
+        let notify = !reportedUnavailable
+        reportedUnavailable = true
+        resumeAfterHostTicks = max(resumeAfterHostTicks ?? 0, observedAtHostTime)
+        return notify
+    }
+
+    /// The initial started marker is normal startup. A started marker after
+    /// established output withdraws the old image until a new complete frame.
+    mutating func recordStarted(from attempt: CaptureAttemptLease,
+                                observedAtHostTime: UInt64) -> Bool {
+        adopt(attempt)
+        guard hasDeliveredFrame else { return false }
+        return recordUnavailable(from: attempt, observedAtHostTime: observedAtHostTime)
+    }
+
+    func isAvailable(for attempt: CaptureAttemptLease) -> Bool {
+        self.attempt == attempt && hasDeliveredFrame && !reportedUnavailable
+    }
+
+    func permits(_ metadata: CaptureVideoFrameMetadata) -> Bool {
+        resumeAfterHostTicks.map { metadata.displayTimeHostTicks > $0 } ?? true
+    }
+
+    mutating func recordDeliveredFrame(from attempt: CaptureAttemptLease) {
+        adopt(attempt)
+        hasDeliveredFrame = true
+        reportedUnavailable = false
+    }
+
+    private mutating func adopt(_ attempt: CaptureAttemptLease) {
+        guard self.attempt != attempt else { return }
+        self.attempt = attempt
+        hasDeliveredFrame = false
+        reportedUnavailable = false
+        // Keep the clock boundary across native stream replacement. An old
+        // display image is not made fresh by creating a new SCStream object.
+    }
+}
+
 enum CaptureSizing {
     static let targetFramesPerSecond = Int32(DesktopVideoQuality.targetFramesPerSecond)
 
@@ -394,9 +473,13 @@ struct CaptureRecoveryEpisode {
 
     let id = UUID()
     let deadline: ContinuousClock.Instant
+    private let continuingStream: CaptureAttemptLease?
     private(set) var attempts = 0
 
-    init(now: ContinuousClock.Instant) { deadline = now.advanced(by: Self.timeout) }
+    init(now: ContinuousClock.Instant, waitingForOutputFrom continuingStream: CaptureAttemptLease? = nil) {
+        deadline = now.advanced(by: Self.timeout)
+        self.continuingStream = continuingStream
+    }
 
     enum Failure: Equatable {
         case timedOut, attemptsExhausted
@@ -419,7 +502,7 @@ struct CaptureRecoveryEpisode {
 
     func acceptsFrame(lastOutput: CaptureAttemptLease?, running: CaptureAttemptLease,
                       at now: ContinuousClock.Instant) -> Bool {
-        attempts > 0 && permitsRecovery(at: now) && lastOutput == running
+        (attempts > 0 || continuingStream == running) && permitsRecovery(at: now) && lastOutput == running
     }
 
     mutating func reserveAttempt(at now: ContinuousClock.Instant) -> Bool {
@@ -451,11 +534,13 @@ final class ScreenCapture: NSObject, @unchecked Sendable {
     private var loggedFirstVideoAttempt: CaptureAttemptLease?
     private var loggedFirstAudioAttempt: CaptureAttemptLease?
     private var videoFrameOrder = CaptureVideoFrameOrder()
+    private var videoAvailability = CaptureVideoAvailability()
 
     struct Callbacks: Sendable {
         /// Synchronous consumers run inside the stream ownership gate.
         let onVideoFrame: @Sendable (CapturedVideoFrame, CaptureAttemptLease) -> Void
         let onAudioSample: (@Sendable (CMSampleBuffer) -> Void)?
+        let onVideoUnavailable: @Sendable (CaptureAttemptLease) -> Void
         let onStopped: @Sendable (CaptureStopReceipt, Error) -> Void
     }
 
@@ -483,11 +568,13 @@ final class ScreenCapture: NSObject, @unchecked Sendable {
     }
 
     @discardableResult
-    func withRunningSession(_ owner: CaptureOwnerLease, _ body: (CaptureAttemptLease) -> Void) -> Bool {
-        lifecycle.withRunningOwner(owner, body)
+    func withRunningSession(_ owner: CaptureOwnerLease, _ body: (CaptureAttemptLease, Bool) -> Void) -> Bool {
+        lifecycle.withRunningOwner(owner) { attempt in
+            body(attempt, videoAvailability.isAvailable(for: attempt))
+        }
     }
 
-    enum CaptureError: Error { case noDisplay }
+    enum CaptureError: Error { case noDisplay, outputStopped }
 
     /// Picks the display containing the menu bar and starts capturing
     /// at up to 30 fps, adding system audio only when enabled. Throws if ScreenCaptureKit
@@ -585,12 +672,35 @@ extension ScreenCapture: SCStreamDelegate, SCStreamOutput {
         didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
         of type: SCStreamOutputType
     ) {
-        guard sampleBuffer.isValid else { return }
         lifecycle.withStream(stream) { callbacks, attempt in
             switch type {
             case .screen:
-                guard let frame = CapturedVideoFrame(sampleBuffer: sampleBuffer, observedAtHostTime: mach_absolute_time()),
-                      videoFrameOrder.admit(frame.metadata) else { return }
+                let observedAt = mach_absolute_time()
+                switch CaptureVideoStatus.read(sampleBuffer: sampleBuffer) {
+                case .idle: return
+                case .started:
+                    if videoAvailability.recordStarted(from: attempt, observedAtHostTime: observedAt) {
+                        callbacks.onVideoUnavailable(attempt)
+                    }
+                    return
+                case .blank, .suspended, .invalid:
+                    reportVideoUnavailable(attempt, observedAtHostTime: observedAt, callbacks: callbacks)
+                    return
+                case .stopped:
+                    log.warning("capture output reported stopped")
+                    _ = videoAvailability.recordUnavailable(from: attempt, observedAtHostTime: observedAt)
+                    lifecycle.streamStopped(stream) { callbacks, receipt in
+                        callbacks.onStopped(receipt, CaptureError.outputStopped)
+                    }
+                    return
+                case .complete: break
+                }
+                guard let frame = CapturedVideoFrame(sampleBuffer: sampleBuffer, observedAtHostTime: observedAt) else {
+                    reportVideoUnavailable(attempt, observedAtHostTime: observedAt, callbacks: callbacks)
+                    return
+                }
+                guard videoAvailability.permits(frame.metadata), videoFrameOrder.admit(frame.metadata) else { return }
+                videoAvailability.recordDeliveredFrame(from: attempt)
                 if loggedFirstVideoAttempt != attempt {
                     loggedFirstVideoAttempt = attempt
                     let pixelFormat = CVPixelBufferGetPixelFormatType(frame.imageBuffer)
@@ -600,6 +710,7 @@ extension ScreenCapture: SCStreamDelegate, SCStreamOutput {
                 }
                 callbacks.onVideoFrame(frame, attempt)
             case .audio:
+                guard sampleBuffer.isValid else { return }
                 if loggedFirstAudioAttempt != attempt,
                    let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer) {
                     loggedFirstAudioAttempt = attempt
@@ -614,8 +725,16 @@ extension ScreenCapture: SCStreamDelegate, SCStreamOutput {
         }
     }
 
+    private func reportVideoUnavailable(_ attempt: CaptureAttemptLease,
+                                        observedAtHostTime: UInt64, callbacks: Callbacks) {
+        guard videoAvailability.recordUnavailable(from: attempt, observedAtHostTime: observedAtHostTime) else { return }
+        log.warning("capture output unavailable; waiting for a new complete frame")
+        callbacks.onVideoUnavailable(attempt)
+    }
+
     func stream(_ stream: SCStream, didStopWithError error: Error) {
         lifecycle.streamStopped(stream) { callbacks, receipt in
+            _ = videoAvailability.recordUnavailable(from: receipt.attempt, observedAtHostTime: mach_absolute_time())
             if Self.isSystemStopped(error) {
                 log.warning("stream stopped by the system: \(String(describing: error), privacy: .public)")
             } else {
@@ -632,6 +751,11 @@ extension ScreenCapture {
     static func isAlreadyStopped(_ error: Error) -> Bool {
         let nsError = error as NSError
         return isStreamError(nsError, code: -3808)
+    }
+
+    static func isRecoverableStop(_ error: Error) -> Bool {
+        if let captureError = error as? CaptureError, case .outputStopped = captureError { return true }
+        return isSystemStopped(error)
     }
 
     static func isSystemStopped(_ error: Error) -> Bool {

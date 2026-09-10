@@ -5,6 +5,146 @@ import XCTest
 @testable import RemoteDesktopHost
 
 final class ScreenCaptureSizingTests: XCTestCase {
+    func test_captureStatusDistinguishesIdleFromLossAndRejectsMalformedValues() {
+        let known: [(SCFrameStatus, CaptureVideoStatus)] = [
+            (.complete, .complete), (.idle, .idle), (.started, .started),
+            (.blank, .blank), (.suspended, .suspended), (.stopped, .stopped)
+        ]
+        for (native, expected) in known {
+            XCTAssertEqual(CaptureVideoStatus.read(NSNumber(value: native.rawValue)), expected)
+        }
+        let invalid: [Any?] = [nil, true, false, "0", NSNumber(value: 0.5), NSNumber(value: -1), NSNumber(value: 999)]
+        for value in invalid { XCTAssertEqual(CaptureVideoStatus.read(value), .invalid) }
+    }
+
+    func test_captureStatusOnlySamplesDoNotNeedReadyPixelsOrADisplayClock() throws {
+        for status in [SCFrameStatus.blank, .suspended, .idle, .started, .stopped] {
+            let sample = try captureSample(status: NSNumber(value: status.rawValue), displayTime: nil, dataReady: false)
+            XCTAssertEqual(CaptureVideoStatus.read(sampleBuffer: sample), CaptureVideoStatus.read(NSNumber(value: status.rawValue)))
+            XCTAssertNil(CapturedVideoFrame(sampleBuffer: sample, observedAtHostTime: displayTicks(seconds: 43)))
+        }
+        XCTAssertEqual(CaptureVideoStatus.read(sampleBuffer: try captureSample(status: nil)), .invalid)
+        let invalid = try captureSample()
+        XCTAssertEqual(CMSampleBufferInvalidate(invalid), noErr)
+        XCTAssertEqual(CaptureVideoStatus.read(sampleBuffer: invalid), .invalid)
+    }
+
+    func test_captureStartedDoesNotAuthorizeInitialOutputAndWithdrawsAnEstablishedImage() {
+        var availability = CaptureVideoAvailability()
+        let attempt = CaptureAttemptLease()
+        XCTAssertFalse(availability.recordStarted(from: attempt, observedAtHostTime: displayTicks(seconds: 40)))
+        XCTAssertFalse(availability.isAvailable(for: attempt))
+        availability.recordDeliveredFrame(from: attempt)
+        XCTAssertTrue(availability.isAvailable(for: attempt))
+        XCTAssertTrue(availability.recordStarted(from: attempt, observedAtHostTime: displayTicks(seconds: 41)))
+        XCTAssertFalse(availability.isAvailable(for: attempt))
+        XCTAssertFalse(availability.recordStarted(from: attempt, observedAtHostTime: displayTicks(seconds: 42)))
+    }
+
+    func test_captureLossRejectsQueuedFramesAtOrBeforeItsObservationBoundary() throws {
+        let attempt = CaptureAttemptLease()
+        var availability = CaptureVideoAvailability()
+        availability.recordDeliveredFrame(from: attempt)
+        XCTAssertTrue(availability.recordUnavailable(from: attempt, observedAtHostTime: displayTicks(seconds: 42)))
+        XCTAssertFalse(availability.isAvailable(for: attempt))
+        for seconds in [Int64(41), 42] {
+            let queued = try XCTUnwrap(frameMetadata(displayTime: displayTicks(seconds: seconds)))
+            XCTAssertFalse(availability.permits(queued))
+        }
+        let fresh = try XCTUnwrap(frameMetadata(displayTime: displayTicks(seconds: 43)))
+        XCTAssertTrue(availability.permits(fresh))
+        XCTAssertFalse(availability.isAvailable(for: attempt), "Permission to admit a candidate is not delivery")
+        availability.recordDeliveredFrame(from: attempt)
+        XCTAssertTrue(availability.isAvailable(for: attempt))
+    }
+
+    func test_captureRepeatedLossDeduplicatesNotificationButAdvancesTheClockBoundary() throws {
+        let attempt = CaptureAttemptLease()
+        var availability = CaptureVideoAvailability()
+        availability.recordDeliveredFrame(from: attempt)
+        XCTAssertTrue(availability.recordUnavailable(from: attempt, observedAtHostTime: displayTicks(seconds: 41)))
+        XCTAssertFalse(availability.recordUnavailable(from: attempt, observedAtHostTime: displayTicks(seconds: 42)))
+        XCTAssertFalse(availability.recordUnavailable(from: attempt, observedAtHostTime: displayTicks(seconds: 40)))
+        XCTAssertFalse(availability.permits(try XCTUnwrap(frameMetadata())))
+        XCTAssertTrue(availability.permits(try XCTUnwrap(frameMetadata(displayTime: displayTicks(seconds: 43)))))
+        availability.recordDeliveredFrame(from: attempt)
+        XCTAssertTrue(availability.recordUnavailable(from: attempt, observedAtHostTime: displayTicks(seconds: 43)),
+                      "A later interruption must notify again after actual delivery")
+    }
+
+    func test_captureReplacementCannotReuseAvailabilityOrEraseTheLossClockBoundary() throws {
+        let old = CaptureAttemptLease(), replacement = CaptureAttemptLease()
+        var availability = CaptureVideoAvailability()
+        availability.recordDeliveredFrame(from: old)
+        XCTAssertFalse(availability.isAvailable(for: replacement))
+        XCTAssertTrue(availability.recordUnavailable(from: old, observedAtHostTime: displayTicks(seconds: 42)))
+        XCTAssertFalse(availability.recordStarted(from: replacement, observedAtHostTime: displayTicks(seconds: 43)))
+        XCTAssertFalse(availability.isAvailable(for: old)); XCTAssertFalse(availability.isAvailable(for: replacement))
+        XCTAssertFalse(availability.permits(try XCTUnwrap(frameMetadata())))
+        XCTAssertTrue(availability.permits(try XCTUnwrap(frameMetadata(displayTime: displayTicks(seconds: 43)))))
+        availability.recordDeliveredFrame(from: replacement)
+        XCTAssertFalse(availability.isAvailable(for: old)); XCTAssertTrue(availability.isAvailable(for: replacement))
+    }
+
+    func test_captureContinuingStreamRecoveryNeedsNoRestartAndKeepsItsOriginalDeadline() {
+        let now = ContinuousClock.now
+        let continuing = CaptureAttemptLease(), replacement = CaptureAttemptLease()
+        var episode = CaptureRecoveryEpisode(now: now, waitingForOutputFrom: continuing)
+        let id = episode.id, deadline = episode.deadline
+        XCTAssertEqual(episode.attempts, 0)
+        XCTAssertFalse(episode.acceptsFrame(lastOutput: nil, running: continuing, at: now))
+        XCTAssertTrue(episode.acceptsFrame(lastOutput: continuing, running: continuing, at: now))
+        XCTAssertFalse(episode.acceptsFrame(lastOutput: replacement, running: replacement, at: now))
+        XCTAssertTrue(episode.reserveAttempt(at: now.advanced(by: .seconds(2))))
+        XCTAssertTrue(episode.acceptsFrame(lastOutput: replacement, running: replacement, at: now.advanced(by: .seconds(3))))
+        XCTAssertFalse(episode.acceptsFrame(lastOutput: continuing, running: continuing, at: deadline))
+        XCTAssertFalse(episode.acceptsFrame(lastOutput: replacement, running: replacement, at: deadline))
+        XCTAssertEqual(episode.id, id); XCTAssertEqual(episode.deadline, deadline)
+    }
+
+    func test_captureReportedOutputStopUsesBoundedRecoveryWithoutMisclassifyingOtherErrors() {
+        XCTAssertTrue(ScreenCapture.isRecoverableStop(ScreenCapture.CaptureError.outputStopped))
+        XCTAssertTrue(ScreenCapture.isRecoverableStop(NSError(domain: "com.apple.ScreenCaptureKit.SCStreamErrorDomain", code: -3821)))
+        XCTAssertFalse(ScreenCapture.isRecoverableStop(ScreenCapture.CaptureError.noDisplay))
+        XCTAssertFalse(ScreenCapture.isRecoverableStop(NSError(domain: "unrelated", code: -3821)))
+        XCTAssertFalse(ScreenCapture.isRecoverableStop(NSError(domain: "com.apple.ScreenCaptureKit.SCStreamErrorDomain", code: -3808)))
+    }
+
+    func test_captureRunningStreamCannotRestoreFromItsRememberedFrameDuringOutputLoss() async throws {
+        // Composition fixture: fake native lifecycle and source availability.
+        // This does not execute HostPeerSession, SCStream or a remote renderer.
+        let lifecycle = CaptureStreamLifecycle<CaptureLifecycleTestStream, String> { _ in }
+        let stream = CaptureLifecycleTestStream()
+        let owner = lifecycle.beginOwner(context: "peer")
+        try await lifecycle.start(for: owner, prepare: { stream }, startStream: { _ in }).value
+        defer { Task { await lifecycle.endAll().value } }
+        var availability = CaptureVideoAvailability()
+        var remembered: CaptureAttemptLease?
+        lifecycle.withStream(stream) { _, attempt in
+            remembered = attempt
+            availability.recordDeliveredFrame(from: attempt)
+        }
+        let rememberedAttempt = try XCTUnwrap(remembered)
+        let episode = CaptureRecoveryEpisode(now: ContinuousClock.now, waitingForOutputFrom: rememberedAttempt)
+        lifecycle.withStream(stream) { _, attempt in
+            XCTAssertTrue(availability.recordUnavailable(from: attempt, observedAtHostTime: displayTicks(seconds: 42)))
+        }
+        XCTAssertTrue(lifecycle.withRunningOwner(owner) { running in
+            XCTAssertEqual(running, remembered, "The native stream and cached identity are unchanged")
+            XCTAssertTrue(episode.acceptsFrame(lastOutput: remembered, running: running, at: ContinuousClock.now))
+            XCTAssertFalse(availability.isAvailable(for: running), "Running identity alone must not reopen input")
+        })
+        let old = try XCTUnwrap(frameMetadata())
+        let fresh = try XCTUnwrap(frameMetadata(displayTime: displayTicks(seconds: 43)))
+        lifecycle.withStream(stream) { _, attempt in
+            XCTAssertFalse(availability.permits(old))
+            XCTAssertTrue(availability.permits(fresh))
+            availability.recordDeliveredFrame(from: attempt)
+        }
+        XCTAssertTrue(lifecycle.withRunningOwner(owner) { running in XCTAssertTrue(availability.isAvailable(for: running)) })
+        await lifecycle.endAll().value
+    }
+
     func test_captureRecoveryCapsAttemptsWithoutResettingItsOriginalDeadline() {
         let start = ContinuousClock.now
         var episode = CaptureRecoveryEpisode(now: start)
