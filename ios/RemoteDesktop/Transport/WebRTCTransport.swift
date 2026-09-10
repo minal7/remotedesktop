@@ -67,7 +67,8 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
     private var iceDeadlineTask: Task<Void, Never>?
     private var connectionRecoveryTask: Task<Void, Never>?
     private var connectedOnce = false
-    private var sentHello = false
+    private var directInputState = DirectInputClientState()
+    private var inputHandshakeDeadlineTask: Task<Void, Never>?
     private var answerApplied = false
     private var isClosing = false
     private var didReportDisconnect = false
@@ -122,7 +123,9 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         isClosing = false
         didReportDisconnect = false
         connectedOnce = false
-        sentHello = false
+        directInputState = DirectInputClientState()
+        inputHandshakeDeadlineTask?.cancel()
+        inputHandshakeDeadlineTask = nil
         answerApplied = false
         firstVideoFrameProbe.reset()
         connectionRecoveryTask?.cancel()
@@ -184,8 +187,26 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         guard let dataChannel, dataChannel.readyState == .open else {
             return
         }
-        let data = message.encoded(seq: seq, ts: ts)
-        dataChannel.sendData(RTCDataBuffer(data: data, isBinary: false))
+        var stamp: DirectInputStamp?
+        switch message {
+        case .hello:
+            sendHelloIfPossible()
+            return
+        case .pointer, .scroll, .key, .text:
+            guard let permission = directInputState.authorizeNextInput() else {
+                if directInputState.isClosed { finishDisconnect(reason: "Reconnect to start a new input session.") }
+                return
+            }
+            if case .scoped(let value) = permission { stamp = value }
+        case .qos:
+            guard directInputState.isReady else { return }
+        case .bye: break
+        }
+        let data = message.encoded(seq: seq, ts: ts, inputStamp: stamp)
+        if !dataChannel.sendData(RTCDataBuffer(data: data, isBinary: false)), !isClosing {
+            // Retrying text or a key transition could duplicate an effect.
+            finishDisconnect(reason: "Remote input could not be sent. Reconnect to continue.")
+        }
     }
 
     func disconnect(reason: String) {
@@ -211,6 +232,9 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         iceDeadlineTask = nil
         connectionRecoveryTask?.cancel()
         connectionRecoveryTask = nil
+        inputHandshakeDeadlineTask?.cancel()
+        inputHandshakeDeadlineTask = nil
+        directInputState.close()
         connectedOnce = false
         if let renderer {
             remoteVideoTrack?.remove(renderer)
@@ -228,7 +252,6 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
             Task { await signaling.cleanup() }
         }
         signaling = nil
-        sentHello = false
         answerApplied = false
         pendingRemoteICECandidates.removeAll()
         loggedPendingRemoteICE = false
@@ -381,15 +404,25 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
     }
 
     private func sendHelloIfPossible() {
-        guard !sentHello, let dataChannel, dataChannel.readyState == .open else {
+        guard !isClosing, let hello = directInputState.helloToSend,
+              let dataChannel, dataChannel.readyState == .open else {
             return
         }
-        sentHello = true
         log.info("WebRTC control data channel opened; sending client hello")
-        send(
-            .hello(proto: Config.protocolVersion),
-            seq: 0,
-            ts: UInt64(DispatchTime.now().uptimeNanoseconds / 1_000))
+        let data = ControlMessage.hello(proto: Config.protocolVersion).encoded(seq: 0,
+            ts: UInt64(DispatchTime.now().uptimeNanoseconds / 1_000), inputHello: hello)
+        guard dataChannel.sendData(RTCDataBuffer(data: data, isBinary: false)),
+              directInputState.markHelloSent(hello) else {
+            finishDisconnect(reason: "The input handshake could not be sent.")
+            return
+        }
+        inputHandshakeDeadlineTask?.cancel()
+        inputHandshakeDeadlineTask = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(10)) } catch { return }
+            guard let self, !self.isClosing, self.directInputState.hello == hello,
+                  !self.directInputState.isReady else { return }
+            self.finishDisconnect(reason: "The computer did not acknowledge the input session. Reconnect to try again.")
+        }
     }
 
     private func scheduleConnectionRecoveryTimeout() {
@@ -590,15 +623,17 @@ extension WebRTCTransport: RTCPeerConnectionDelegate {
 
     nonisolated func peerConnection(_ peerConnection: RTCPeerConnection, didChange stateChanged: RTCConnectionState) {
         Task { @MainActor [weak self] in
-            guard let self else { return }
+            guard let self, self.peerConnection === peerConnection else { return }
             log.info("peer connection state → \(String(describing: stateChanged), privacy: .public)")
             guard !isClosing else { return }
             switch stateChanged {
             case .connected:
+                guard directInputState.connectionChanged(connected: true) else { return }
                 connectedOnce = true
                 iceDeadlineTask?.cancel()
                 iceDeadlineTask = nil
                 cancelConnectionRecoveryTimeout()
+                sendHelloIfPossible()
             case .failed:
                 if !connectedOnce {
                     finishDisconnect(reason: "Can't reach your computer — try putting both devices on the same Wi-Fi.")
@@ -606,6 +641,12 @@ extension WebRTCTransport: RTCPeerConnectionDelegate {
                     finishDisconnect(reason: "The peer connection failed.")
                 }
             case .disconnected:
+                inputHandshakeDeadlineTask?.cancel()
+                inputHandshakeDeadlineTask = nil
+                guard directInputState.connectionChanged(connected: false) else {
+                    finishDisconnect(reason: "The connection was interrupted. Reconnect to resume remote control.")
+                    return
+                }
                 guard connectedOnce else { return }
                 scheduleConnectionRecoveryTimeout()
             case .closed:
@@ -639,10 +680,15 @@ extension WebRTCTransport: RTCPeerConnectionDelegate {
 
     nonisolated func peerConnection(_ peerConnection: RTCPeerConnection, didOpen dataChannel: RTCDataChannel) {
         Task { @MainActor [weak self] in
-            self?.log.info("peer connection opened the control data channel")
-            self?.dataChannel = dataChannel
+            guard let self, !self.isClosing, self.peerConnection === peerConnection,
+                  dataChannel.label == "control",
+                  self.dataChannel == nil || self.dataChannel === dataChannel else {
+                dataChannel.close(); return
+            }
+            self.log.info("peer connection opened the control data channel")
+            self.dataChannel = dataChannel
             dataChannel.delegate = self
-            self?.sendHelloIfPossible()
+            self.sendHelloIfPossible()
         }
     }
 
@@ -687,15 +733,30 @@ extension WebRTCTransport: RTCPeerConnectionDelegate {
 extension WebRTCTransport: RTCDataChannelDelegate {
     nonisolated func dataChannelDidChangeState(_ dataChannel: RTCDataChannel) {
         Task { @MainActor [weak self] in
-            self?.sendHelloIfPossible()
+            guard let self, !self.isClosing, self.dataChannel === dataChannel else { return }
+            if dataChannel.readyState == .closing || dataChannel.readyState == .closed {
+                self.finishDisconnect(reason: "The input channel closed.")
+                return
+            }
+            self.sendHelloIfPossible()
         }
     }
 
     nonisolated func dataChannel(_ dataChannel: RTCDataChannel, didReceiveMessageWith buffer: RTCDataBuffer) {
         Task { @MainActor [weak self] in
-            guard let self else { return }
+            guard let self, !self.isClosing, self.dataChannel === dataChannel,
+                  dataChannel.readyState == .open else { return }
             switch HostMessage.decode(buffer.data) {
             case .helloAck(let hello):
+                switch directInputState.accept(version: hello.inputSessions, acknowledgement: hello.inputSession) {
+                case .ignored: return
+                case .invalid:
+                    finishDisconnect(reason: "The computer sent an invalid input-session acknowledgement.")
+                    return
+                case .accepted: break
+                }
+                inputHandshakeDeadlineTask?.cancel()
+                inputHandshakeDeadlineTask = nil
                 log.info("host acknowledged the WebRTC control channel")
                 onHostHello?(hello)
             case .display(let display):

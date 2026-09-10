@@ -3,9 +3,31 @@ import Foundation
 /// Wire protocol shared between the iOS client and the Mac host,
 /// as specified in `protocol/PROTOCOL.md` (v1 plus negotiated capabilities).
 ///
-/// The host primarily *decodes* client → host messages; encoding of
-/// host → client messages (`hello_ack`, `display`) is a Phase 3 task
-/// once the WebRTC data channel is wired up.
+/// Semantic messages are separate from the negotiated input-session envelope.
+
+struct ControlPacket {
+    let message: ControlMessage
+    let inputHello: DirectInputHello?
+    let inputStamp: DirectInputStamp?
+
+    static func decode(_ data: Data) -> ControlPacket? {
+        guard let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let message = ControlMessage.decode(object) else { return nil }
+        var hello: DirectInputHello?, stamp: DirectInputStamp?
+        if let metadata = object["inputSession"] {
+            switch message {
+            case .hello:
+                guard let value = DirectInputWire.decode(metadata, as: DirectInputHello.self), value.isValid else { return nil }
+                hello = value
+            case .pointer, .scroll, .key, .text:
+                guard let value = DirectInputWire.decode(metadata, as: DirectInputStamp.self), value.isValid else { return nil }
+                stamp = value
+            case .qos, .bye: break
+            }
+        }
+        return .init(message: message, inputHello: hello, inputStamp: stamp)
+    }
+}
 
 enum InputScrollPhase: String, Codable {
     case begin, changed, end, momentum
@@ -21,11 +43,11 @@ enum ControlMessage: Equatable {
     case bye(reason: String)
 
     static func decode(_ data: Data) -> ControlMessage? {
-        guard let raw = try? JSONSerialization.jsonObject(with: data),
-              let obj = raw as? [String: Any],
-              let t = obj["t"] as? String else {
-            return nil
-        }
+        ControlPacket.decode(data)?.message
+    }
+
+    fileprivate static func decode(_ obj: [String: Any]) -> ControlMessage? {
+        guard let t = obj["t"] as? String else { return nil }
         switch t {
         case "hello":
             let client = obj["client"] as? [String: Any]
@@ -84,9 +106,10 @@ enum HostMessageEncoder {
         audio: Bool,
         monitors: Int,
         seq: UInt32,
-        ts: UInt64
+        ts: UInt64,
+        inputSession: DirectInputAcknowledgement? = nil
     ) -> Data {
-        let obj: [String: Any] = [
+        var obj: [String: Any] = [
             "t": "hello_ack",
             "s": seq,
             "ts": ts,
@@ -105,8 +128,10 @@ enum HostMessageEncoder {
                 "maxFps": DesktopVideoQuality.targetFramesPerSecond,
                 "orderedComputerUseControls":
                     HostConfig.orderedComputerUseControlsVersion,
+                "inputSessions": DirectInputWire.version,
             ],
         ]
+        if let inputSession { obj["inputSession"] = DirectInputWire.object(inputSession) }
         return (try? JSONSerialization.data(withJSONObject: obj)) ?? Data()
     }
 

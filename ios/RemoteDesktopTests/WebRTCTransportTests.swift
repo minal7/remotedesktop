@@ -594,6 +594,59 @@ final class WebRTCTransportTests: XCTestCase {
         model.reset()
     }
 
+    func test_wireInputSessionMetadataIsOnlyAttachedToItsMessageKind() throws {
+        let hello = DirectInputHello(clientID: UUID(), revision: 3)
+        let stamp = DirectInputStamp(hostID: UUID(), generation: 2, sequence: 7)
+        let helloBytes = ControlMessage.hello(proto: 1).encoded(seq: 0, ts: 1, inputHello: hello, inputStamp: stamp)
+        let helloObject = try XCTUnwrap(JSONSerialization.jsonObject(with: helloBytes) as? [String: Any])
+        XCTAssertEqual(DirectInputWire.decode(try XCTUnwrap(helloObject["inputSession"]), as: DirectInputHello.self), hello)
+        let input: [ControlMessage] = [.pointer(x: 12, y: 34, buttons: 1), .key(usage: 4, down: true, modifiers: 0),
+            .scroll(x: 12, y: 34, dx: 0, dy: 4, phase: .changed), .text("  e\u{301} 😀\n")]
+        for message in input {
+            let data = message.encoded(seq: 99, ts: 1, inputHello: hello, inputStamp: stamp)
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            XCTAssertEqual(DirectInputWire.decode(try XCTUnwrap(object["inputSession"]), as: DirectInputStamp.self), stamp)
+            XCTAssertEqual(object["s"] as? Int, 99, "The session sequence is distinct from the legacy envelope counter")
+            if case .text(let value) = message { XCTAssertEqual(object["s2"] as? String, value) }
+        }
+        for message: ControlMessage in [.bye(reason: "done"), .qos(targetFps: 30, maxBitrateKbps: 1000, prefer: "auto")] {
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: message.encoded(seq: 1, ts: 1, inputHello: hello, inputStamp: stamp)) as? [String: Any])
+            XCTAssertNil(object["inputSession"])
+        }
+        let legacy = try XCTUnwrap(JSONSerialization.jsonObject(with: ControlMessage.text("legacy").encoded(seq: 1, ts: 1)) as? [String: Any])
+        XCTAssertNil(legacy["inputSession"])
+    }
+
+    func test_hostInputAcknowledgementDecodingKeepsScopeAndRejectsMalformedClaims() throws {
+        let hello = DirectInputHello(clientID: UUID(), revision: 2)
+        let acknowledgement = DirectInputAcknowledgement(hello: hello, hostID: UUID(), generation: 4)
+        let metadata = try XCTUnwrap(DirectInputWire.object(acknowledgement))
+        let bytes = try JSONSerialization.data(withJSONObject: ["t": "hello_ack", "proto": 1,
+            "caps": ["inputSessions": 1], "inputSession": metadata])
+        guard case .helloAck(let decoded) = HostMessage.decode(bytes) else { return XCTFail("Expected scoped acknowledgement") }
+        XCTAssertEqual(decoded.inputSessions, 1); XCTAssertEqual(decoded.inputSession, acknowledgement)
+        var client = DirectInputClientState(clientID: hello.clientID)
+        client.connectionChanged(connected: true); client.connectionChanged(connected: false); client.connectionChanged(connected: true)
+        XCTAssertTrue(client.markHelloSent(try XCTUnwrap(client.helloToSend)))
+        XCTAssertEqual(client.accept(version: decoded.inputSessions, acknowledgement: decoded.inputSession), .accepted)
+        guard case .scoped(let stamp) = client.authorizeNextInput() else { return XCTFail("A current acknowledgement must permit scoped input") }
+        XCTAssertEqual(stamp.hostID, acknowledgement.hostID); XCTAssertEqual(stamp.generation, 4); XCTAssertEqual(stamp.sequence, 1)
+        for capability: Any in [true, "1", 0.5, -1, NSNull()] {
+            let invalid = try JSONSerialization.data(withJSONObject: ["t": "hello_ack", "proto": 1, "caps": ["inputSessions": capability]])
+            guard case .bye = HostMessage.decode(invalid) else { XCTFail("Malformed capability cannot fall back to legacy input"); continue }
+        }
+        for caps: Any in [NSNull(), "invalid", [1, 2]] {
+            let invalid = try JSONSerialization.data(withJSONObject: ["t": "hello_ack", "proto": 1, "caps": caps])
+            guard case .bye = HostMessage.decode(invalid) else { XCTFail("Invalid capability containers cannot become legacy readiness"); continue }
+        }
+        for field: Any in [NSNull(), "invalid", ["version": 1], metadata.merging(["generation": 0]) { _, new in new }] {
+            let invalid = try JSONSerialization.data(withJSONObject: ["t": "hello_ack", "proto": 1, "caps": ["inputSessions": 1], "inputSession": field])
+            guard case .bye = HostMessage.decode(invalid) else { XCTFail("Malformed acknowledgement cannot authorize input"); continue }
+        }
+        guard case .helloAck(let legacy) = HostMessage.decode(Data(#"{"t":"hello_ack","proto":1}"#.utf8)) else { return XCTFail("Legacy acknowledgement remains decodable") }
+        XCTAssertEqual(legacy.inputSessions, 0); XCTAssertNil(legacy.inputSession)
+    }
+
     func test_wireHelloNegotiatesOrderedComputerUseControlsSeparately() throws {
         let data = ControlMessage.hello(proto: Config.protocolVersion).encoded(
             seq: 0,

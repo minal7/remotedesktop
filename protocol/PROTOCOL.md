@@ -43,6 +43,80 @@ respective hello capability dictionaries. This scoped negotiation keeps
 ordinary protocol-v1 remote control compatible with Windows, Android, and
 staggered iOS/macOS upgrades while preventing mixed-generation automation.
 
+## Negotiated direct-input sessions
+
+The Mac/iOS implementation can opt into `inputSessions: 1` without changing
+base protocol v1. This extension binds pointer, key, scroll and text input to
+a particular authorized connection lifetime. It supplements authenticated peer
+and channel ownership; the UUIDs are freshness identifiers, not credentials.
+
+A supporting client includes an optional `inputSession` object in `hello`:
+
+```json
+{"version":1,"clientID":"6F291DC4-5B15-4B1E-AC62-82AA2F46E313","revision":1}
+```
+
+The client uses a new UUID for each control-channel lifetime and a positive
+UInt32 revision. After an observed transient connection loss, it disables
+outbound input, increments the revision without wrapping, and sends a new hello
+when both the connection and channel are ready. It does not queue or replay
+input while waiting. An exhausted counter requires a new connection.
+
+A supporting host advertises `caps.inputSessions: 1`. When both connected state
+and the current channel's hello are established, its `hello_ack` includes:
+
+```json
+{"inputSession":{"version":1,"clientID":"6F291DC4-5B15-4B1E-AC62-82AA2F46E313","revision":1,"hostID":"75AA76B8-BA2B-4C96-9FBD-927557D7A988","generation":1}}
+```
+
+The host echoes the exact client ID/revision and issues a fresh host UUID and
+increasing positive UInt32 generation whenever its input lifetime changes.
+Its own disconnect/reconnect and a higher client hello revision both retire
+the prior lifetime and its held direct input. A duplicate identical hello
+preserves the lifetime and sequence state. An older revision, changed client
+ID or mode downgrade cannot replace the current handshake on that channel.
+
+The client accepts input readiness only after sending its current hello and
+receiving an acknowledgement for that client ID/revision. It ignores older
+host generations and rejects inconsistent acknowledgements for one generation.
+Duplicate acknowledgements do not reset its packet counter. The Mac can send
+a newer acknowledgement after host-only recovery even if the phone never
+observed a disconnect. A phone hello requires acknowledgement within ten
+seconds in the current implementation; send failure or deadline expiry closes
+the transport instead of retrying possibly accepted input.
+
+Each scoped input message carries a separate envelope, for example:
+
+```json
+{"t":"text","s":42,"ts":1234,"s2":"Exact text 😀","inputSession":{"hostID":"75AA76B8-BA2B-4C96-9FBD-927557D7A988","generation":1,"sequence":1}}
+```
+
+The input sequence is a positive UInt32, separate from the legacy `s` counter.
+The host requires an exact current host ID/generation and a sequence greater
+than the last admitted input sequence. Missing, malformed, duplicate and older
+claims are dropped before the input-interruption callback or native dispatch.
+The admitted packet retains a local session identity which is rechecked under
+the posting lock, including between complete text graphemes. A buffered packet
+from a retired host lifetime cannot acquire authority merely by arriving late.
+These counters are bounded integers; booleans, strings, negative/fractional
+values and overflow are invalid. Unknown extension versions do not silently
+become legacy readiness.
+
+Legacy clients may still use an initial ordinary v1 remote-control connection.
+On an observed loss, the updated Mac terminates a legacy channel rather than
+reusing it after recovery. An updated iOS client likewise closes after a loss
+when paired with an older host that did not negotiate input sessions. A new
+connection is required. Older hosts do not validate this extension; their
+host-only outage behavior is not qualified by the updated Mac implementation.
+
+This extension does not prove that an action reached its intended UI target,
+expire delayed input on an otherwise continuously live channel, or qualify
+native RTC callback order and the channel's reliable-ordered delivery. It also
+does not scope the separate `bye` or video-quality messages. Physical input,
+AI task controls, account handoff and result verification retain their own
+contracts. The source changes and pending qualification are tracked in the
+[wire-input session review](../docs/audits/2026-09-04-mac-computer-use/WIRE_INPUT_SESSION_REVIEW.md).
+
 ## Message types
 
 ### `hello` (client → host)

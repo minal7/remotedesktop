@@ -163,6 +163,7 @@
 		511514C02A183941333B0803 /* MacControlMCPArchiveExtractor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7DEB12F1337DC8272D20BD2A /* MacControlMCPArchiveExtractor.swift */; };
 		538B1C81F0766A5A01A59C66 /* OSAtlasComputerUseExecutorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3349CC549DF18D316358D45F /* OSAtlasComputerUseExecutorTests.swift */; };
 		54C1AC89B9CC946B1165A237 /* DesktopVideoQuality.swift in Sources */ = {isa = PBXBuildFile; fileRef = 79AA547898300FA9722FBDFC /* DesktopVideoQuality.swift */; };
+		C161B077649C1000FEE1DC82 /* DirectInputSessionProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 94EE963F220A4D3D7A12EB3F /* DirectInputSessionProtocol.swift */; };
 		54D17A53E353BCEC918766FD /* LlamaSemanticActionRouterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F4A87471C34A3E1B559DB90 /* LlamaSemanticActionRouterTests.swift */; };
 		55227BD5B94CCCB562083A20 /* CloudKitSignalingClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 52A5F8DD3C3DABAB92FCAE68 /* CloudKitSignalingClient.swift */; };
 		55A2A0BAF6B182A15DF84ED7 /* ComputerUseActionTextPlanTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DED10FA558220D304359BD34 /* ComputerUseActionTextPlanTests.swift */; };
@@ -409,6 +410,7 @@
 		78822BFE81EBBCDA015B9FE4 /* ComputerUseHTTPDownloader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseHTTPDownloader.swift; sourceTree = "<group>"; };
 		7893923A36DECAC9886D28EF /* HostSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostSession.swift; sourceTree = "<group>"; };
 		79AA547898300FA9722FBDFC /* DesktopVideoQuality.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DesktopVideoQuality.swift; sourceTree = "<group>"; };
+		94EE963F220A4D3D7A12EB3F /* DirectInputSessionProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectInputSessionProtocol.swift; sourceTree = "<group>"; };
 		7B70A9E240A239CF7CD29002 /* ComputerUseTextClarificationStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseTextClarificationStore.swift; sourceTree = "<group>"; };
 		7D98C1008558E1DAD992F9B0 /* OS-ATLAS-APACHE-2.0-LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "OS-ATLAS-APACHE-2.0-LICENSE.txt"; sourceTree = "<group>"; };
 		7DEB12F1337DC8272D20BD2A /* MacControlMCPArchiveExtractor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacControlMCPArchiveExtractor.swift; sourceTree = "<group>"; };
@@ -571,6 +573,7 @@
 				52A5F8DD3C3DABAB92FCAE68 /* CloudKitSignalingClient.swift */,
 				0D5CCAA4089039A88CDF73D6 /* ComputerUseProtocol.swift */,
 				79AA547898300FA9722FBDFC /* DesktopVideoQuality.swift */,
+				94EE963F220A4D3D7A12EB3F /* DirectInputSessionProtocol.swift */,
 				073BFD6F71D2AA688EF7F69E /* DeviceIdentity.swift */,
 				48B0DBDEE13640A9F60DC878 /* ICEConfigFetcher.swift */,
 				883356287E3F636BF4AD3816 /* LocalComputerUseCredentials.swift */,
@@ -1248,6 +1251,7 @@
 				746750FC5D04FDA4281C12A7 /* ComputerUseTextStepStore.swift in Sources */,
 				2F34B7B243FAEA2CFCA96DCA /* ComputerUseTextTask.swift in Sources */,
 				54C1AC89B9CC946B1165A237 /* DesktopVideoQuality.swift in Sources */,
+				C161B077649C1000FEE1DC82 /* DirectInputSessionProtocol.swift in Sources */,
 				BF403E7DAA32C64672327159 /* DeviceIdentity.swift in Sources */,
 				2BB4F312F1FA16AD43D21ECB /* FoundationMCPJSONSchemaBridge.swift in Sources */,
 				B52D07F032EEF5EA41C14534 /* HIDUsage.swift in Sources */,

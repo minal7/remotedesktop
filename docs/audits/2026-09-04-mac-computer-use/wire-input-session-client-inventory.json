@@ -1,0 +1,16 @@
+{
+  "selectors": [
+    "RemoteDesktopTests/WebRTCTransportTests/test_hostHelloDecodesOrderedComputerUseControlsCapability",
+    "RemoteDesktopTests/WebRTCTransportTests/test_hostInputAcknowledgementDecodingKeepsScopeAndRejectsMalformedClaims",
+    "RemoteDesktopTests/WebRTCTransportTests/test_localVisualSidecarGatesInputOnCompatibleHelloAndFreshFrame",
+    "RemoteDesktopTests/WebRTCTransportTests/test_wireHelloNegotiatesOrderedComputerUseControlsSeparately",
+    "RemoteDesktopTests/WebRTCTransportTests/test_wireInputSessionMetadataIsOnlyAttachedToItsMessageKind"
+  ],
+  "expectedTests": [
+    "RemoteDesktopTests/WebRTCTransportTests/test_hostHelloDecodesOrderedComputerUseControlsCapability",
+    "RemoteDesktopTests/WebRTCTransportTests/test_hostInputAcknowledgementDecodingKeepsScopeAndRejectsMalformedClaims",
+    "RemoteDesktopTests/WebRTCTransportTests/test_localVisualSidecarGatesInputOnCompatibleHelloAndFreshFrame",
+    "RemoteDesktopTests/WebRTCTransportTests/test_wireHelloNegotiatesOrderedComputerUseControlsSeparately",
+    "RemoteDesktopTests/WebRTCTransportTests/test_wireInputSessionMetadataIsOnlyAttachedToItsMessageKind"
+  ]
+}

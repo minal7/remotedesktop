@@ -6473,6 +6473,185 @@ final class ComputerUseTests: XCTestCase {
         return receipt
     }
 
+    func testInputWireMetadataDecodingRejectsMalformedOrUnversionedClaims() throws {
+        let hello = DirectInputHello(clientID: UUID(), revision: 1)
+        let helloObject = try XCTUnwrap(DirectInputWire.object(hello))
+        let helloData = try JSONSerialization.data(withJSONObject: ["t": "hello", "proto": 1, "inputSession": helloObject])
+        XCTAssertEqual(try XCTUnwrap(ControlPacket.decode(helloData)).inputHello, hello)
+        XCTAssertNil(try XCTUnwrap(ControlPacket.decode(Data(#"{"t":"hello","proto":1}"#.utf8))).inputHello)
+        for field: Any in [NSNull(), "not an object", ["version": 1, "clientID": hello.clientID.uuidString],
+            ["version": 2, "clientID": hello.clientID.uuidString, "revision": 1],
+            ["version": true, "clientID": hello.clientID.uuidString, "revision": 1],
+            ["version": 1, "clientID": "invalid", "revision": 1]] {
+            XCTAssertNil(ControlPacket.decode(try JSONSerialization.data(withJSONObject: ["t": "hello", "inputSession": field])))
+        }
+        let hostID = UUID()
+        for sequence: Any in [0, -1, 0.5, true, "1", UInt64(UInt32.max) + 1, NSNull()] {
+            let data = try JSONSerialization.data(withJSONObject: ["t": "text", "s2": "Never post",
+                "inputSession": ["hostID": hostID.uuidString, "generation": 1, "sequence": sequence]])
+            XCTAssertNil(ControlPacket.decode(data))
+        }
+        let stamp = DirectInputStamp(hostID: hostID, generation: 1, sequence: UInt32.max)
+        let packet = try XCTUnwrap(ControlPacket.decode(JSONSerialization.data(withJSONObject: ["t": "text", "s2": "😀",
+            "inputSession": try XCTUnwrap(DirectInputWire.object(stamp))])))
+        XCTAssertEqual(packet.inputStamp, stamp); XCTAssertEqual(packet.message, .text("😀"))
+        XCTAssertNil(DirectInputWire.capability(in: ["inputSessions": true]))
+        XCTAssertNil(DirectInputWire.capability(in: ["inputSessions": "1"]))
+        XCTAssertEqual(DirectInputWire.capability(in: [:]), 0)
+    }
+
+    func testWireInputReplayCannotPostOrReleaseReplacementInput() throws {
+        let events = CapturedCGEventStore(), injector = InputInjector(eventPoster: { events.append($0) })
+        let authority = HostPeerInputAuthorization(injector: injector)
+        let channel = NSObject(), id = ObjectIdentifier(channel)
+        authority.openChannel(id); authority.connectionChanged(connected: true)
+        let hello = DirectInputHello(clientID: UUID(), revision: 1)
+        XCTAssertTrue(authority.acceptHello(channel: id, orderedControls: 1, inputHello: hello))
+        let first = try XCTUnwrap(authority.readyAcknowledgement(for: id)?.wire)
+        let oldStamp = DirectInputStamp(hostID: first.hostID, generation: first.generation, sequence: 1)
+        let old = try XCTUnwrap(authority.admitInput(channel: id, stamp: oldStamp))
+        injector.applyDirectInput(.key(usage: 0x04, down: true, modifiers: 0), session: old) { false }
+        XCTAssertNil(authority.admitInput(channel: id, stamp: oldStamp))
+        authority.connectionChanged(connected: false); authority.connectionChanged(connected: true)
+        let next = try XCTUnwrap(authority.readyAcknowledgement(for: id)?.wire)
+        XCTAssertNotEqual(next.hostID, first.hostID); XCTAssertEqual(next.generation, first.generation + 1)
+        let currentStamp = DirectInputStamp(hostID: next.hostID, generation: next.generation, sequence: 1)
+        let current = try XCTUnwrap(authority.admitInput(channel: id, stamp: currentStamp))
+        injector.applyDirectInput(.pointer(x: 20, y: 30, buttons: 1), session: current) { false }
+        let count = events.values().count
+        for stamp in [nil, oldStamp, currentStamp,
+            DirectInputStamp(hostID: first.hostID, generation: next.generation, sequence: 2),
+            DirectInputStamp(hostID: next.hostID, generation: first.generation, sequence: 2),
+            DirectInputStamp(hostID: next.hostID, generation: next.generation, sequence: 0)] {
+            XCTAssertNil(authority.admitInput(channel: id, stamp: stamp))
+        }
+        XCTAssertEqual(events.values().count, count)
+        XCTAssertFalse(events.values().contains { $0.type == .leftMouseUp })
+        let release = try XCTUnwrap(authority.admitInput(channel: id,
+            stamp: .init(hostID: next.hostID, generation: next.generation, sequence: 2)))
+        injector.applyDirectInput(.pointer(x: 20, y: 30, buttons: 0), session: release) { false }
+        XCTAssertEqual(injector.admitAutomation { true }, .admitted)
+        authority.close()
+    }
+
+    func testNewInputHelloRetiresHoldsWithoutAllowingOldHelloOrDowngrade() throws {
+        let events = CapturedCGEventStore(), injector = InputInjector(eventPoster: { events.append($0) })
+        let states = PeerInputStateProbe(), authority = HostPeerInputAuthorization(injector: injector, onChange: { states.append($0) })
+        let channel = NSObject(), id = ObjectIdentifier(channel), clientID = UUID()
+        authority.openChannel(id); authority.connectionChanged(connected: true)
+        let first = DirectInputHello(clientID: clientID, revision: 1)
+        XCTAssertTrue(authority.acceptHello(channel: id, orderedControls: 1, inputHello: first))
+        let original = try XCTUnwrap(authority.readyAcknowledgement(for: id))
+        injector.applyDirectInput(.key(usage: 0x04, down: true, modifiers: 0), session: original.session) { false }
+        XCTAssertTrue(authority.acceptHello(channel: id, orderedControls: 1, inputHello: first))
+        XCTAssertEqual(authority.readyAcknowledgement(for: id)?.wire, original.wire)
+        XCTAssertFalse(events.values().contains { $0.type == .keyUp })
+        let second = DirectInputHello(clientID: clientID, revision: 2)
+        XCTAssertTrue(authority.acceptHello(channel: id, orderedControls: 1, inputHello: second))
+        let replacement = try XCTUnwrap(authority.readyAcknowledgement(for: id))
+        XCTAssertNotEqual(replacement.session, original.session)
+        XCTAssertEqual(replacement.wire?.revision, 2)
+        XCTAssertEqual(Array(states.values().suffix(2)), [.init(authorized: false, orderedComputerUseControls: 0), .init(authorized: true, orderedComputerUseControls: 1)])
+        XCTAssertEqual(events.values().filter { $0.type == .keyUp }.count, 1)
+        XCTAssertFalse(authority.acceptHello(channel: id, orderedControls: 1, inputHello: first))
+        XCTAssertFalse(authority.acceptHello(channel: id, orderedControls: 1))
+        XCTAssertFalse(authority.acceptHello(channel: id, orderedControls: 1, inputHello: .init(clientID: UUID(), revision: 3)))
+        XCTAssertEqual(authority.readyAcknowledgement(for: id)?.wire, replacement.wire)
+        authority.close()
+    }
+
+    func testClientInputHandshakeRejectsOldAcksAndKeepsDuplicateAckSequence() throws {
+        var client = DirectInputClientState()
+        XCTAssertNil(client.helloToSend); XCTAssertNil(client.authorizeNextInput())
+        client.connectionChanged(connected: true)
+        let firstHello = try XCTUnwrap(client.helloToSend)
+        let firstAck = DirectInputAcknowledgement(hello: firstHello, hostID: UUID(), generation: 1)
+        XCTAssertEqual(client.accept(version: 1, acknowledgement: firstAck), .ignored)
+        XCTAssertTrue(client.markHelloSent(firstHello)); XCTAssertNil(client.authorizeNextInput())
+        XCTAssertEqual(client.accept(version: 1, acknowledgement: firstAck), .accepted)
+        XCTAssertEqual(client.authorizeNextInput(), .scoped(.init(hostID: firstAck.hostID, generation: 1, sequence: 1)))
+        XCTAssertEqual(client.accept(version: 1, acknowledgement: firstAck), .accepted)
+        XCTAssertEqual(client.authorizeNextInput(), .scoped(.init(hostID: firstAck.hostID, generation: 1, sequence: 2)))
+        XCTAssertTrue(client.connectionChanged(connected: false)); XCTAssertFalse(client.isReady)
+        XCTAssertNil(client.authorizeNextInput()); XCTAssertNil(client.helloToSend)
+        client.connectionChanged(connected: true)
+        let nextHello = try XCTUnwrap(client.helloToSend)
+        XCTAssertEqual(nextHello.clientID, firstHello.clientID); XCTAssertEqual(nextHello.revision, 2)
+        client.markHelloSent(nextHello)
+        XCTAssertEqual(client.accept(version: 1, acknowledgement: firstAck), .ignored)
+        XCTAssertEqual(client.accept(version: 0, acknowledgement: nil), .invalid)
+        XCTAssertEqual(client.accept(version: 1, acknowledgement: .init(hello: nextHello, hostID: UUID(), generation: 1)), .invalid)
+        let nextAck = DirectInputAcknowledgement(hello: nextHello, hostID: UUID(), generation: 2)
+        XCTAssertEqual(client.accept(version: 1, acknowledgement: nextAck), .accepted)
+        XCTAssertEqual(client.authorizeNextInput(), .scoped(.init(hostID: nextAck.hostID, generation: 2, sequence: 1)))
+        XCTAssertEqual(client.accept(version: 1, acknowledgement: firstAck), .ignored)
+        XCTAssertEqual(client.authorizeNextInput(), .scoped(.init(hostID: nextAck.hostID, generation: 2, sequence: 2)))
+        client.close(); XCTAssertFalse(client.connectionChanged(connected: true)); XCTAssertNil(client.authorizeNextInput())
+    }
+
+    func testLegacyInputRequiresANewChannelAfterConnectionLoss() throws {
+        let events = CapturedCGEventStore(), injector = InputInjector(eventPoster: { events.append($0) })
+        let authority = HostPeerInputAuthorization(injector: injector), channel = NSObject()
+        let id = ObjectIdentifier(channel)
+        authority.openChannel(id); authority.connectionChanged(connected: true)
+        authority.acceptHello(channel: id, orderedControls: 0)
+        let session = try XCTUnwrap(authority.admitInput(channel: id, stamp: nil))
+        injector.applyDirectInput(.key(usage: 0x04, down: true, modifiers: 0), session: session) { false }
+        XCTAssertFalse(authority.acceptHello(channel: id, orderedControls: 1, inputHello: .init(clientID: UUID(), revision: 1)))
+        authority.connectionChanged(connected: false)
+        XCTAssertTrue(authority.isClosed); XCTAssertFalse(authority.connectionChanged(connected: true))
+        XCTAssertNil(authority.admitInput(channel: id, stamp: nil))
+        XCTAssertEqual(events.values().filter { $0.type == .keyUp }.count, 1)
+        var client = DirectInputClientState()
+        client.connectionChanged(connected: true); client.markHelloSent(try XCTUnwrap(client.helloToSend))
+        XCTAssertEqual(client.accept(version: 0, acknowledgement: nil), .accepted)
+        XCTAssertEqual(client.authorizeNextInput(), .legacy)
+        XCTAssertFalse(client.connectionChanged(connected: false)); XCTAssertTrue(client.isClosed)
+        XCTAssertFalse(client.connectionChanged(connected: true)); XCTAssertNil(client.authorizeNextInput())
+    }
+
+    func testInputClientAndHostRejectBufferedTextAcrossOneSidedRecovery() throws {
+        let events = CapturedCGEventStore(), injector = InputInjector(eventPoster: { events.append($0) })
+        let authority = HostPeerInputAuthorization(injector: injector), channel = NSObject()
+        let id = ObjectIdentifier(channel)
+        var client = DirectInputClientState()
+        authority.openChannel(id); authority.connectionChanged(connected: true); client.connectionChanged(connected: true)
+        func acknowledge() throws -> DirectInputAcknowledgement {
+            let ready = try XCTUnwrap(authority.readyAcknowledgement(for: id))
+            let bytes = HostMessageEncoder.helloAck(proto: 1, hostname: "Fixture", os: "macOS", audio: false,
+                monitors: 1, seq: 1, ts: 1, inputSession: ready.wire)
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+            XCTAssertEqual((object["caps"] as? [String: Any])?["inputSessions"] as? Int, 1)
+            return try XCTUnwrap(DirectInputWire.decode(try XCTUnwrap(object["inputSession"]), as: DirectInputAcknowledgement.self))
+        }
+        func inputPacket(_ permission: DirectInputClientState.PacketAuthorization?, text: String) throws -> ControlPacket {
+            guard case .scoped(let stamp) = permission else { throw NSError(domain: "Missing input scope", code: 1) }
+            return try XCTUnwrap(ControlPacket.decode(JSONSerialization.data(withJSONObject: ["t": "text", "s2": text,
+                "inputSession": try XCTUnwrap(DirectInputWire.object(stamp))])))
+        }
+        let firstHello = try XCTUnwrap(client.helloToSend); client.markHelloSent(firstHello)
+        authority.acceptHello(channel: id, orderedControls: 1, inputHello: firstHello)
+        XCTAssertEqual(client.accept(version: 1, acknowledgement: try acknowledge()), .accepted)
+        let buffered = try inputPacket(client.authorizeNextInput(), text: "Old login text")
+        // Only the host notices this outage. The old packet first arrives after recovery.
+        authority.connectionChanged(connected: false); authority.connectionChanged(connected: true)
+        XCTAssertNil(authority.admitInput(channel: id, stamp: buffered.inputStamp))
+        XCTAssertEqual(client.accept(version: 1, acknowledgement: try acknowledge()), .accepted)
+        let current = try inputPacket(client.authorizeNextInput(), text: "New 😀")
+        let session = try XCTUnwrap(authority.admitInput(channel: id, stamp: current.inputStamp))
+        XCTAssertTrue(injector.applyDirectInput(current.message, session: session) { false })
+        XCTAssertNil(authority.admitInput(channel: id, stamp: buffered.inputStamp))
+        XCTAssertEqual(events.values().filter { $0.type == .keyDown }.compactMap(\.unicodeText).joined(), "New 😀")
+        // Only the phone notices the next outage; its higher hello revision rotates the host session.
+        client.connectionChanged(connected: false); client.connectionChanged(connected: true)
+        let nextHello = try XCTUnwrap(client.helloToSend); client.markHelloSent(nextHello)
+        XCTAssertTrue(authority.acceptHello(channel: id, orderedControls: 1, inputHello: nextHello))
+        XCTAssertNil(authority.admitInput(channel: id, stamp: current.inputStamp))
+        XCTAssertEqual(client.accept(version: 1, acknowledgement: try acknowledge()), .accepted)
+        XCTAssertTrue(client.isReady)
+        authority.close()
+    }
+
     func testWebRTCDeauthorizationCannotReleaseInputAfterOwnerReplacement() {
         let events = CapturedCGEventStore(), injector = InputInjector(eventPoster: { events.append($0) })
         let fence = ComputerUseWebRTCAuthorizationFence()
@@ -6527,18 +6706,19 @@ final class ComputerUseTests: XCTestCase {
             let injector = InputInjector(eventPoster: { _ in XCTFail("Authorization cannot post input") })
             let states = PeerInputStateProbe()
             let authority = HostPeerInputAuthorization(injector: injector, onChange: { states.append($0) })
+            let wireHello = DirectInputHello(clientID: UUID(), revision: 1)
             let channel = NSObject(), channelID = ObjectIdentifier(channel)
             XCTAssertNil(authority.inputSession(for: channelID))
             XCTAssertTrue(authority.openChannel(channelID))
-            if helloFirst { XCTAssertTrue(authority.acceptHello(channel: channelID, orderedControls: 1)) }
+            if helloFirst { XCTAssertTrue(authority.acceptHello(channel: channelID, orderedControls: 1, inputHello: wireHello)) }
             else { XCTAssertTrue(authority.connectionChanged(connected: true)) }
             XCTAssertNil(authority.inputSession(for: channelID))
             XCTAssertTrue(states.values().isEmpty, "An incomplete initial handshake must not report a control loss")
             if helloFirst { XCTAssertTrue(authority.connectionChanged(connected: true)) }
-            else { XCTAssertTrue(authority.acceptHello(channel: channelID, orderedControls: 1)) }
+            else { XCTAssertTrue(authority.acceptHello(channel: channelID, orderedControls: 1, inputHello: wireHello)) }
             let first = try XCTUnwrap(authority.inputSession(for: channelID))
             XCTAssertEqual(states.values().last, .init(authorized: true, orderedComputerUseControls: 1))
-            XCTAssertTrue(authority.acceptHello(channel: channelID, orderedControls: 0))
+            XCTAssertTrue(authority.acceptHello(channel: channelID, orderedControls: 0, inputHello: wireHello))
             XCTAssertEqual(authority.inputSession(for: channelID), first, "Repeated hello cannot replace a held input lifetime")
             XCTAssertEqual(states.values().last, .init(authorized: true, orderedComputerUseControls: 0))
             XCTAssertTrue(authority.connectionChanged(connected: false))
@@ -6551,7 +6731,7 @@ final class ComputerUseTests: XCTestCase {
             XCTAssertFalse(injector.applyDirectInput(.text("stale retry"), session: first) { XCTFail("Reconnect cannot reauthorize an old packet"); return false })
             authority.close()
             XCTAssertFalse(authority.connectionChanged(connected: true))
-            XCTAssertFalse(authority.acceptHello(channel: channelID, orderedControls: 1))
+            XCTAssertFalse(authority.acceptHello(channel: channelID, orderedControls: 1, inputHello: wireHello))
             XCTAssertFalse(authority.openChannel(channelID))
             XCTAssertNil(authority.inputSession(for: channelID))
         }
@@ -6617,9 +6797,10 @@ final class ComputerUseTests: XCTestCase {
     func testDirectTextRevocationStopsAtACompleteGraphemeAndPreservesReplacementInput() throws {
         let events = CapturedCGEventStore(), injector = InputInjector(eventPoster: { events.append($0) })
         let authority = HostPeerInputAuthorization(injector: injector)
+        let wireHello = DirectInputHello(clientID: UUID(), revision: 1)
         let channel = NSObject(), id = ObjectIdentifier(channel)
         authority.openChannel(id); authority.connectionChanged(connected: true)
-        authority.acceptHello(channel: id, orderedControls: 1)
+        authority.acceptHello(channel: id, orderedControls: 1, inputHello: wireHello)
         let old = try XCTUnwrap(authority.inputSession(for: id))
         var current: InputInjector.DirectInputSession?
         var graphemes = 0, interruptions = 0
@@ -6652,8 +6833,9 @@ final class ComputerUseTests: XCTestCase {
             allowsExternalServices: false, channelFactory: { _ in channel })
         defer { manager.stop() }
         let authority = HostPeerInputAuthorization(injector: injector)
+        let wireHello = DirectInputHello(clientID: UUID(), revision: 1)
         let nativeChannel = NSObject(), channelID = ObjectIdentifier(nativeChannel)
-        authority.openChannel(channelID); authority.connectionChanged(connected: true); authority.acceptHello(channel: channelID, orderedControls: 1)
+        authority.openChannel(channelID); authority.connectionChanged(connected: true); authority.acceptHello(channel: channelID, orderedControls: 1, inputHello: wireHello)
         let old = try XCTUnwrap(authority.inputSession(for: channelID))
         let first = makeEnvelope(id: "old-direct-packet-task", kind: .prompt, body: "Find concerts")
         manager.authorizePeer(senderID: first.senderID)

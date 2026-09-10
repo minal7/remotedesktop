@@ -33,6 +33,10 @@ final class HostPeerInputAuthorization: @unchecked Sendable {
     private var connected = false
     private var closed = false
     private var session: InputInjector.DirectInputSession?
+    private var inputHello: DirectInputHello?
+    private var acknowledgement: DirectInputAcknowledgement?
+    private var inputGeneration: UInt32 = 0
+    private var lastInputSequence: UInt32 = 0
 
     init(injector: InputInjector, onChange: @escaping @Sendable (State) -> Void = { _ in }) {
         self.injector = injector; self.onChange = onChange
@@ -44,14 +48,30 @@ final class HostPeerInputAuthorization: @unchecked Sendable {
             guard !closed else { return false }
             if let channelID { return channelID == id }
             channelID = id; helloCapabilities = nil
+            inputHello = nil; acknowledgement = nil; inputGeneration = 0; lastInputSequence = 0
             return true
         }
     }
 
     @discardableResult
-    func acceptHello(channel id: ObjectIdentifier, orderedControls: Int) -> Bool {
+    func acceptHello(channel id: ObjectIdentifier, orderedControls: Int,
+                     inputHello nextHello: DirectInputHello? = nil) -> Bool {
         lock.withLock {
             guard !closed, channelID == id else { return false }
+            if let nextHello, !nextHello.isValid { return false }
+            if let inputHello {
+                guard let nextHello, nextHello.clientID == inputHello.clientID,
+                      nextHello.revision >= inputHello.revision else { return false }
+                if nextHello.revision > inputHello.revision {
+                    retireSessionLocked()
+                    // A phone-observed loss still fences AI if the host never
+                    // received its own disconnected callback.
+                    publishLocked()
+                }
+            } else if helloCapabilities != nil, nextHello != nil {
+                return false // The negotiated mode cannot change on this channel.
+            }
+            inputHello = nextHello
             helloCapabilities = max(0, orderedControls)
             reconcileLocked(publishWhenUnauthorized: false)
             return true
@@ -62,8 +82,10 @@ final class HostPeerInputAuthorization: @unchecked Sendable {
     func connectionChanged(connected: Bool, terminal: Bool = false) -> Bool {
         lock.withLock {
             guard !closed else { return false }
-            self.connected = connected && !terminal
-            if terminal { closed = true; channelID = nil; helloCapabilities = nil }
+            // Legacy packets cannot prove which recovered lifetime sent them.
+            let mustClose = terminal || (!connected && inputHello == nil)
+            self.connected = connected && !mustClose
+            if mustClose { closed = true; channelID = nil; helloCapabilities = nil }
             reconcileLocked(publishWhenUnauthorized: !self.connected)
             return true
         }
@@ -87,6 +109,31 @@ final class HostPeerInputAuthorization: @unchecked Sendable {
         lock.withLock { !closed && channelID == id ? session : nil }
     }
 
+    var isClosed: Bool { lock.withLock { closed } }
+
+    func readyAcknowledgement(for id: ObjectIdentifier) -> (session: InputInjector.DirectInputSession, wire: DirectInputAcknowledgement?)? {
+        lock.withLock {
+            guard !closed, channelID == id, let session else { return nil }
+            return (session, acknowledgement)
+        }
+    }
+
+    /// Consumes the wire sequence only for this exact live session. The
+    /// injector must still recheck the returned local identity at posting.
+    func admitInput(channel id: ObjectIdentifier, stamp: DirectInputStamp?) -> InputInjector.DirectInputSession? {
+        lock.withLock {
+            guard !closed, channelID == id, let session else { return nil }
+            if inputHello != nil {
+                guard let acknowledgement, let stamp, stamp.isValid,
+                      stamp.hostID == acknowledgement.hostID,
+                      stamp.generation == acknowledgement.generation,
+                      stamp.sequence > lastInputSequence else { return nil }
+                lastInputSequence = stamp.sequence
+            } else if stamp != nil { return nil }
+            return session
+        }
+    }
+
     func close() { _ = connectionChanged(connected: false, terminal: true) }
 
     @discardableResult
@@ -101,12 +148,22 @@ final class HostPeerInputAuthorization: @unchecked Sendable {
 
     private func retireSessionLocked() {
         if let session { injector.endDirectInputSession(session) }
-        session = nil
+        session = nil; acknowledgement = nil; lastInputSequence = 0
     }
 
     private func reconcileLocked(publishWhenUnauthorized: Bool = true) {
         if !closed, connected, channelID != nil, helloCapabilities != nil {
-            if session == nil { session = injector.beginDirectInputSession() }
+            if session == nil {
+                guard inputGeneration < UInt32.max else {
+                    closed = true; connected = false; channelID = nil; helloCapabilities = nil
+                    publishLocked(); return
+                }
+                inputGeneration += 1
+                session = injector.beginDirectInputSession()
+                if let inputHello {
+                    acknowledgement = .init(hello: inputHello, hostID: UUID(), generation: inputGeneration)
+                }
+            }
         } else { retireSessionLocked() }
         // A partially completed initial handshake is not a loss of control.
         // Merely opening the visual sidecar must not interrupt a live LAN task.
@@ -568,7 +625,7 @@ final class HostPeerSession: NSObject {
 
     private func sendHelloAckAndDisplay() {
         guard let dataChannel, dataChannel.readyState == .open,
-              inputAuthorization.inputSession(for: ObjectIdentifier(dataChannel)) != nil else {
+              let ready = inputAuthorization.readyAcknowledgement(for: ObjectIdentifier(dataChannel)) else {
             return
         }
 
@@ -581,8 +638,13 @@ final class HostPeerSession: NSObject {
             audio: audioEnabled,
             monitors: NSScreen.screens.count,
             seq: hostSeq,
-            ts: timestamp)
-        dataChannel.sendData(RTCDataBuffer(data: hello, isBinary: false))
+            ts: timestamp,
+            inputSession: ready.wire)
+        guard dataChannel.sendData(RTCDataBuffer(data: hello, isBinary: false)) else {
+            inputAuthorization.close()
+            onEnded("The input handshake could not be sent.")
+            return
+        }
 
         let frame = NSScreen.main?.frame ?? .zero
         let scale = NSScreen.main?.backingScaleFactor ?? 2.0
@@ -759,7 +821,9 @@ extension HostPeerSession: RTCPeerConnectionDelegate {
             sendHelloAckAndDisplay()
         case .disconnected:
             // ICE may recover, but queued input loses this exact session now.
-            inputAuthorization.connectionChanged(connected: false)
+            if inputAuthorization.connectionChanged(connected: false), inputAuthorization.isClosed {
+                onEnded("The connection was interrupted. Reconnect to resume remote control.")
+            }
             log.warning("peer connection is disconnected (may recover)")
         case .failed, .closed:
             if inputAuthorization.connectionChanged(connected: false, terminal: true) {
@@ -791,9 +855,10 @@ extension HostPeerSession: RTCDataChannelDelegate {
     func dataChannel(_ dataChannel: RTCDataChannel, didReceiveMessageWith buffer: RTCDataBuffer) {
         guard inputAuthorization.ownsChannel(ObjectIdentifier(dataChannel)),
               dataChannel.readyState == .open,
-              let message = ControlMessage.decode(buffer.data) else {
+              let packet = ControlPacket.decode(buffer.data) else {
             return
         }
+        let message = packet.message
         switch message {
         case .hello(let proto, let orderedComputerUseControls):
             guard proto == HostConfig.protocolVersion else {
@@ -804,7 +869,7 @@ extension HostPeerSession: RTCDataChannelDelegate {
                 return
             }
             guard inputAuthorization.acceptHello(channel: ObjectIdentifier(dataChannel),
-                orderedControls: orderedComputerUseControls) else { return }
+                orderedControls: orderedComputerUseControls, inputHello: packet.inputHello) else { return }
             sendHelloAckAndDisplay()
         case .bye(let reason):
             if inputAuthorization.close(ifChannel: ObjectIdentifier(dataChannel)) {
@@ -812,9 +877,9 @@ extension HostPeerSession: RTCDataChannelDelegate {
                 onEnded(reason)
             }
         case .pointer, .scroll, .key, .text:
-            guard let session = inputAuthorization.inputSession(for: ObjectIdentifier(dataChannel)),
+            guard let session = inputAuthorization.admitInput(channel: ObjectIdentifier(dataChannel), stamp: packet.inputStamp),
                   Self.acceptsDirectInput(message, helloAuthenticated: true) else {
-                log.warning("dropping remote input received before authenticated hello")
+                log.warning("dropping remote input without a current authorized input session")
                 return
             }
             injector.applyDirectInput(message, session: session, interruptAutomation: onUserInput)

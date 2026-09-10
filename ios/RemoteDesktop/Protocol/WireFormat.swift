@@ -17,7 +17,8 @@ enum ControlMessage {
     case qos(targetFps: Int, maxBitrateKbps: Int, prefer: String)
     case bye(reason: String)
 
-    func encoded(seq: UInt32, ts: UInt64) -> Data {
+    func encoded(seq: UInt32, ts: UInt64, inputHello: DirectInputHello? = nil,
+                 inputStamp: DirectInputStamp? = nil) -> Data {
         var obj: [String: Any] = ["s": seq, "ts": ts]
         switch self {
         case .hello(let p):
@@ -30,6 +31,7 @@ enum ControlMessage {
                 "osVersion": UIDevice.current.systemVersion,
                 "orderedComputerUseControls": Config.orderedComputerUseControlsVersion,
             ]
+            if let inputHello { obj["inputSession"] = DirectInputWire.object(inputHello) }
         case let .pointer(x, y, b):
             obj["t"] = "pointer"
             obj["x"] = x; obj["y"] = y; obj["buttons"] = b
@@ -49,6 +51,11 @@ enum ControlMessage {
         case .bye(let r):
             obj["t"] = "bye"; obj["reason"] = r
         }
+        switch self {
+        case .pointer, .scroll, .key, .text:
+            if let inputStamp { obj["inputSession"] = DirectInputWire.object(inputStamp) }
+        case .hello, .qos, .bye: break
+        }
         return (try? JSONSerialization.data(withJSONObject: obj)) ?? Data()
     }
 }
@@ -64,6 +71,8 @@ struct HostHello: Equatable {
     let audio: Bool
     let monitors: Int
     let orderedComputerUseControls: Int
+    let inputSessions: Int
+    let inputSession: DirectInputAcknowledgement?
 
     init(
         app: String,
@@ -72,7 +81,9 @@ struct HostHello: Equatable {
         os: String,
         audio: Bool,
         monitors: Int,
-        orderedComputerUseControls: Int = 0
+        orderedComputerUseControls: Int = 0,
+        inputSessions: Int = 0,
+        inputSession: DirectInputAcknowledgement? = nil
     ) {
         self.app = app
         self.version = version
@@ -81,6 +92,8 @@ struct HostHello: Equatable {
         self.audio = audio
         self.monitors = monitors
         self.orderedComputerUseControls = orderedComputerUseControls
+        self.inputSessions = inputSessions
+        self.inputSession = inputSession
     }
 }
 
@@ -109,6 +122,19 @@ enum HostMessage: Equatable {
             }
             let host = obj["host"] as? [String: Any]
             let caps = obj["caps"] as? [String: Any]
+            guard obj["caps"] == nil || caps != nil else {
+                return .bye("invalid host capabilities")
+            }
+            guard let inputSessions = DirectInputWire.capability(in: caps) else {
+                return .bye("invalid input-session capability")
+            }
+            var inputSession: DirectInputAcknowledgement?
+            if let metadata = obj["inputSession"] {
+                guard let value = DirectInputWire.decode(metadata, as: DirectInputAcknowledgement.self), value.isValid else {
+                    return .bye("invalid input-session acknowledgement")
+                }
+                inputSession = value
+            }
             return .helloAck(HostHello(
                 app: host?["app"] as? String ?? "RemoteDesktop-Host",
                 version: host?["version"] as? String ?? "0.1.0",
@@ -117,7 +143,9 @@ enum HostMessage: Equatable {
                 audio: caps?["audio"] as? Bool ?? false,
                 monitors: int(caps?["monitors"]),
                 orderedComputerUseControls: int(
-                    caps?["orderedComputerUseControls"])))
+                    caps?["orderedComputerUseControls"]),
+                inputSessions: inputSessions,
+                inputSession: inputSession))
         case "display":
             return .display(DisplayInfo(
                 w: int(obj["w"]),
