@@ -1,0 +1,26 @@
+{
+  "selectors": [
+    "RemoteDesktopHostTests/ComputerUseTests/testHeldRemoteInputPreventsApprovalAcceptanceBeforeItsActorCallback",
+    "RemoteDesktopHostTests/ComputerUseTests/testLocalHandbackIncludesItsPrecedingInputWithoutInvalidatingItsOwnClick",
+    "RemoteDesktopHostTests/ComputerUseTests/testPhysicalHeldOrUnavailableStateKeepsLocalAndPhoneHandbackPaused",
+    "RemoteDesktopHostTests/ComputerUseTests/testPhysicalInputAdmissionPreservesTheClosedClaimUntilStateIsReleased",
+    "RemoteDesktopHostTests/ComputerUseTests/testPhysicalInputSamplingCoversAllKeyCodesAndDistinguishesHeldFromUnavailable",
+    "RemoteDesktopHostTests/ComputerUseTests/testPhysicalInputStateBlocksNewTaskAndApprovalBeforeModelOrEffect",
+    "RemoteDesktopHostTests/ComputerUseTests/testPhysicalReleaseEventsAdvancePausedInputButSyntheticReleasesDoNot",
+    "RemoteDesktopHostTests/ComputerUseTests/testRemoteHeldInputBlocksLocalAndPhoneResumeUntilTheGestureIsReleased",
+    "RemoteDesktopHostTests/ComputerUseTests/test_approvalResponseIsScopedAndContinuesOnlyAfterApproval",
+    "RemoteDesktopHostTests/ComputerUseTests/test_managerRejectsEarlyPopupHandbackThenContinuesTheExactNativeGoal"
+  ],
+  "expectedTests": [
+    "RemoteDesktopHostTests/ComputerUseTests/testHeldRemoteInputPreventsApprovalAcceptanceBeforeItsActorCallback",
+    "RemoteDesktopHostTests/ComputerUseTests/testLocalHandbackIncludesItsPrecedingInputWithoutInvalidatingItsOwnClick",
+    "RemoteDesktopHostTests/ComputerUseTests/testPhysicalHeldOrUnavailableStateKeepsLocalAndPhoneHandbackPaused",
+    "RemoteDesktopHostTests/ComputerUseTests/testPhysicalInputAdmissionPreservesTheClosedClaimUntilStateIsReleased",
+    "RemoteDesktopHostTests/ComputerUseTests/testPhysicalInputSamplingCoversAllKeyCodesAndDistinguishesHeldFromUnavailable",
+    "RemoteDesktopHostTests/ComputerUseTests/testPhysicalInputStateBlocksNewTaskAndApprovalBeforeModelOrEffect",
+    "RemoteDesktopHostTests/ComputerUseTests/testPhysicalReleaseEventsAdvancePausedInputButSyntheticReleasesDoNot",
+    "RemoteDesktopHostTests/ComputerUseTests/testRemoteHeldInputBlocksLocalAndPhoneResumeUntilTheGestureIsReleased",
+    "RemoteDesktopHostTests/ComputerUseTests/test_approvalResponseIsScopedAndContinuesOnlyAfterApproval",
+    "RemoteDesktopHostTests/ComputerUseTests/test_managerRejectsEarlyPopupHandbackThenContinuesTheExactNativeGoal"
+  ]
+}

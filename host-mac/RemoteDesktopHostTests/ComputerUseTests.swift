@@ -6472,6 +6472,158 @@ final class ComputerUseTests: XCTestCase {
         return receipt
     }
 
+    func testPhysicalInputSamplingCoversAllKeyCodesAndDistinguishesHeldFromUnavailable() {
+        XCTAssertEqual(InputInjector.samplePhysicalInputState(isTrusted: { false },
+            pressedMouseButtons: { XCTFail("No input query without Accessibility trust"); return 0 },
+            modifierFlags: { XCTFail("No modifier query without trust"); return [] },
+            keyIsDown: { _ in XCTFail("No key query without trust"); return false }), .unavailable)
+        var queried: [CGKeyCode] = []
+        XCTAssertEqual(InputInjector.samplePhysicalInputState(isTrusted: { true }, pressedMouseButtons: { 0 },
+            modifierFlags: { [.capsLock, .numericPad] }, keyIsDown: { queried.append($0); return false }), .released)
+        XCTAssertEqual(queried, (0..<256).map(CGKeyCode.init))
+        for held: CGKeyCode in [0, 57, 127, 255] {
+            XCTAssertEqual(InputInjector.samplePhysicalInputState(isTrusted: { true }, pressedMouseButtons: { 0 },
+                modifierFlags: { [] }, keyIsDown: { $0 == held }), .held)
+        }
+        for modifier: NSEvent.ModifierFlags in [.shift, .control, .option, .command, .function] {
+            XCTAssertEqual(InputInjector.samplePhysicalInputState(isTrusted: { true }, pressedMouseButtons: { 0 },
+                modifierFlags: { modifier }, keyIsDown: { _ in XCTFail("Held modifier already denies admission"); return false }), .held)
+        }
+        XCTAssertEqual(InputInjector.samplePhysicalInputState(isTrusted: { true }, pressedMouseButtons: { 1 << 31 },
+            modifierFlags: { [] }, keyIsDown: { _ in XCTFail("Other mouse buttons also block admission"); return false }), .held)
+        var mouseReads = 0
+        XCTAssertEqual(InputInjector.samplePhysicalInputState(isTrusted: { true }, pressedMouseButtons: {
+            mouseReads += 1; return mouseReads == 1 ? 0 : 1
+        }, modifierFlags: { [] }, keyIsDown: { _ in false }), .held)
+        var modifierReads = 0
+        XCTAssertEqual(InputInjector.samplePhysicalInputState(isTrusted: { true }, pressedMouseButtons: { 0 }, modifierFlags: {
+            modifierReads += 1; return modifierReads == 1 ? [] : .command
+        }, keyIsDown: { _ in false }), .held)
+        var trustReads = 0
+        XCTAssertEqual(InputInjector.samplePhysicalInputState(isTrusted: { trustReads += 1; return trustReads == 1 },
+            pressedMouseButtons: { 0 }, modifierFlags: { [] }, keyIsDown: { _ in false }), .unavailable)
+    }
+
+    func testPhysicalInputAdmissionPreservesTheClosedClaimUntilStateIsReleased() throws {
+        let physical = PhysicalInputStateProbe(.held), gate = ComputerUseActionGate()
+        let injector = InputInjector(eventPoster: { _ in XCTFail("Admission must not post releases or other events") },
+            physicalInputState: { physical.read() })
+        let pending = gate.reservePendingAutomation()
+        XCTAssertTrue(gate.adoptPendingAutomation(pending))
+        var attempts = 0
+        XCTAssertEqual(injector.admitAutomation { attempts += 1; return gate.activatePendingAutomation(pending) }, .inputHeld)
+        physical.set(.unavailable)
+        XCTAssertEqual(injector.admitAutomation { attempts += 1; return gate.activatePendingAutomation(pending) }, .inputStateUnavailable)
+        XCTAssertFalse(gate.allowsActions); XCTAssertEqual(attempts, 0)
+        physical.set(.released)
+        XCTAssertEqual(injector.admitAutomation { attempts += 1; return gate.activatePendingAutomation(pending) }, .admitted)
+        XCTAssertTrue(gate.allowsActions); XCTAssertEqual(attempts, 1)
+    }
+
+    func testPhysicalHeldOrUnavailableStateKeepsLocalAndPhoneHandbackPaused() async throws {
+        for localResume in [false, true] {
+          for state: InputInjector.PhysicalInputState in [.held, .unavailable] {
+            let physical = PhysicalInputStateProbe(.released)
+            let injector = InputInjector(eventPoster: { _ in XCTFail("Handback cannot synthesize input") }, physicalInputState: { physical.read() })
+            let executor = ReadinessHookComputerUseExecutor(results: [.userInterventionRequired("Finish signing in."), .completed("Continued")])
+            let url = temporaryLedgerURL()
+            defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+            let fixture = try browserControlFixture(executor: executor, ledgerURL: url, injector: injector)
+            defer { fixture.manager.stop(); fixture.browser.close() }
+            let prompt = makeEnvelope(id: "physical-input-handback", kind: .prompt, body: "Find travel tickets")
+            fixture.manager.authorizePeer(senderID: prompt.senderID)
+            XCTAssertTrue(fixture.manager.handle(prompt, channel: fixture.channel))
+            await waitUntil { fixture.manager.activity == .paused }
+            let owner = try XCTUnwrap(fixture.browser.taskControls?.ownerID)
+            physical.set(state)
+            if localResume { fixture.browser.requestTaskControl(.resume, displayed: try XCTUnwrap(fixture.browser.taskControls)) }
+            else { XCTAssertTrue(fixture.manager.handle(try makeControlEnvelope(kind: .resume, taskID: prompt.id, revision: 1, hostEpoch: 1), channel: fixture.channel)) }
+            let expectedEpoch: UInt64 = localResume ? 3 : 2
+            await waitUntil { fixture.manager.activity == .paused && fixture.ledger.hostControlEpoch(taskID: prompt.id) == expectedEpoch }
+            XCTAssertEqual(executor.callCount, 1); XCTAssertEqual(fixture.browser.taskControls?.ownerID, owner)
+            let guidance = state == .held ? "release any held keys or mouse buttons" : "Check Accessibility access"
+            await waitUntil { await fixture.channel.sentMessages().contains { $0.body.contains(guidance) } }
+            physical.set(.released)
+            if localResume { fixture.browser.requestTaskControl(.resume, displayed: try XCTUnwrap(fixture.browser.taskControls)) }
+            else { XCTAssertTrue(fixture.manager.handle(try makeControlEnvelope(kind: .resume, taskID: prompt.id, revision: 2, hostEpoch: expectedEpoch), channel: fixture.channel)) }
+            await waitUntil { executor.callCount == 2 && fixture.manager.activity == .idle }
+            XCTAssertEqual(executor.trustedUserPrompts, [prompt.body, prompt.body])
+          }
+        }
+    }
+
+    func testPhysicalReleaseEventsAdvancePausedInputButSyntheticReleasesDoNot() async throws {
+        let executor = ReadinessHookComputerUseExecutor(results: [.userInterventionRequired("Finish signing in."), .completed("Continued")])
+        let url = temporaryLedgerURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let fixture = try browserControlFixture(executor: executor, ledgerURL: url)
+        defer { fixture.manager.stop(); fixture.browser.close() }
+        let prompt = makeEnvelope(id: "physical-release-events", kind: .prompt, body: "Find concert tickets")
+        fixture.manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(fixture.manager.handle(prompt, channel: fixture.channel))
+        await waitUntil { fixture.manager.activity == .paused }
+        let keyUp = try XCTUnwrap(CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false))
+        let mouseUp = try XCTUnwrap(CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: .zero, mouseButton: .left))
+        for (index, raw) in [keyUp, mouseUp].enumerated() {
+            let event = try XCTUnwrap(NSEvent(cgEvent: raw))
+            XCTAssertTrue(InputInjector.isPhysicalIntervention(event))
+            XCTAssertNil(fixture.manager.recordPhysicalInputForIntervention(event))
+            XCTAssertTrue(fixture.manager.handle(try makeControlEnvelope(kind: .resume, taskID: prompt.id,
+                revision: UInt64(index + 1), hostEpoch: UInt64(index + 1)), channel: fixture.channel))
+            XCTAssertEqual(fixture.manager.activity, .paused)
+            XCTAssertEqual(fixture.ledger.hostControlEpoch(taskID: prompt.id), UInt64(index + 2))
+            XCTAssertEqual(executor.callCount, 1)
+        }
+        for raw in [keyUp, mouseUp] {
+            raw.setIntegerValueField(.eventSourceUserData, value: InputInjector.syntheticEventTag)
+            let event = try XCTUnwrap(NSEvent(cgEvent: raw))
+            XCTAssertFalse(InputInjector.isPhysicalIntervention(event))
+            XCTAssertNil(fixture.manager.recordPhysicalInputForIntervention(event))
+        }
+        XCTAssertTrue(fixture.manager.handle(try makeControlEnvelope(kind: .resume, taskID: prompt.id, revision: 3, hostEpoch: 3), channel: fixture.channel))
+        await waitUntil { executor.callCount == 2 && fixture.manager.activity == .idle }
+        XCTAssertEqual(fixture.ledger.hostControlEpoch(taskID: prompt.id), 3)
+        XCTAssertEqual(executor.trustedUserPrompts, [prompt.body, prompt.body])
+    }
+
+    func testPhysicalInputStateBlocksNewTaskAndApprovalBeforeModelOrEffect() async throws {
+        for state: InputInjector.PhysicalInputState in [.held, .unavailable] {
+            let physical = PhysicalInputStateProbe(state)
+            let injector = InputInjector(eventPoster: { _ in XCTFail("Physical state checks must not post input") }, physicalInputState: { physical.read() })
+            let executor = ReadinessHookComputerUseExecutor(results: [.completed("First task done"),
+                .approvalRequired(message: "Send", action: .key(usage: 0x28, modifiers: 0), continuation: .init(taskID: "", nonce: UUID())), .completed("Continued")])
+            let channel = FakeHostComputerUseChannel(), url = temporaryLedgerURL(), ledger = ComputerUseTaskLedger(fileURL: url)
+            defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+            let manager = HostComputerUseManager(injector: injector, executor: executor, taskLedger: ledger,
+                allowsExternalServices: false, approvalTargetProvider: { _ in
+                    .init(context: "Fixture send", applicationID: "com.threadmark.tests.fixture", accessibilityIdentity: "fixture-send")
+                }, actionPerformer: { _ in XCTFail("Held physical input must prevent the approved action") }, channelFactory: { _ in channel })
+            defer { manager.stop() }
+            let first = makeEnvelope(id: "physical-before-new-task", kind: .prompt, body: "Find movie tickets")
+            manager.authorizePeer(senderID: first.senderID)
+            XCTAssertTrue(manager.handle(first, channel: channel))
+            await waitUntil { manager.activity == .paused }
+            XCTAssertEqual(executor.callCount, 0)
+            physical.set(.released)
+            XCTAssertTrue(manager.handle(try makeControlEnvelope(kind: .resume, taskID: first.id, revision: 1, hostEpoch: 1), channel: channel))
+            await waitUntil { executor.callCount == 1 && manager.activity == .idle }
+            let next = makeEnvelope(id: "physical-before-approval", kind: .prompt, body: "Reply to the message")
+            XCTAssertTrue(manager.handle(next, channel: channel))
+            await waitUntil { await channel.sentMessages().contains { $0.kind == .approvalRequest } }
+            let messages = await channel.sentMessages()
+            let request = try ComputerUseApprovalRequest.decodeBody(try XCTUnwrap(messages.first { $0.kind == .approvalRequest }).body)
+            physical.set(state)
+            XCTAssertTrue(manager.handle(makeEnvelope(kind: .approvalResponse,
+                body: try ComputerUseApprovalResponse(requestID: request.requestID, approved: true).encodedBody()), channel: channel))
+            XCTAssertEqual(manager.activity, .paused); XCTAssertEqual(executor.callCount, 2)
+            XCTAssertEqual(executor.cancelledVisualApprovals.count, 1)
+            physical.set(.released)
+            XCTAssertTrue(manager.handle(try makeControlEnvelope(kind: .resume, taskID: next.id, revision: 1, hostEpoch: 1), channel: channel))
+            await waitUntil { executor.callCount == 3 && manager.activity == .idle }
+            XCTAssertEqual(executor.trustedUserPrompts, [first.body, next.body, next.body])
+        }
+    }
+
     func testDirectInputRecordsBeforePostingAndKeepsHeldKeysAndButtonsUntilRelease() throws {
         let events = CapturedCGEventStore(), gate = ComputerUseActionGate()
         let injector = InputInjector(eventPoster: { events.append($0) })
@@ -11262,6 +11414,14 @@ private struct CapturedCGEvent {
     let keyCode: Int64
     let modifierFlags: CGEventFlags
     let syntheticTag: Int64
+}
+
+private final class PhysicalInputStateProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var state: InputInjector.PhysicalInputState
+    init(_ state: InputInjector.PhysicalInputState) { self.state = state }
+    func set(_ state: InputInjector.PhysicalInputState) { lock.withLock { self.state = state } }
+    func read() -> InputInjector.PhysicalInputState { lock.withLock { state } }
 }
 
 private final class CapturedCGEventStore: @unchecked Sendable {

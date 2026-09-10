@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import CoreGraphics
 import Foundation
 import os
@@ -12,12 +13,19 @@ import os
 /// yields between key transitions while retaining explicit release ownership.
 final class InputInjector: @unchecked Sendable {
     static let syntheticEventTag: Int64 = 0x52444D414349 // "RDMACI"
+    static let physicalInterventionEventMask: NSEvent.EventTypeMask = [
+        .leftMouseDown, .rightMouseDown, .otherMouseDown,
+        .leftMouseUp, .rightMouseUp, .otherMouseUp,
+        .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged,
+        .scrollWheel, .keyDown, .keyUp, .flagsChanged,
+    ]
 
     private let source = CGEventSource(stateID: .hidSystemState)
     private let lock = NSLock()
     private let log = Logger(subsystem: "com.threadmark.remotedesktop.host", category: "inject")
     private let eventPoster: @Sendable (CGEvent) -> Void
     private let uptime: @Sendable () -> TimeInterval
+    private let physicalInputState: @Sendable () -> PhysicalInputState
 
     // Track the most recent button state so transitions can be
     // synthesized as the right CGEventType.
@@ -39,10 +47,17 @@ final class InputInjector: @unchecked Sendable {
         },
         uptime: @escaping @Sendable () -> TimeInterval = {
             ProcessInfo.processInfo.systemUptime
-        }
+        },
+        physicalInputState: (@Sendable () -> PhysicalInputState)? = nil
     ) {
         self.eventPoster = eventPoster
         self.uptime = uptime
+        // Ordinary deterministic XCTest fixtures must not depend on whatever
+        // the person is pressing on the test Mac. Native qualification must
+        // explicitly inject readCurrentPhysicalInputState instead.
+        if let physicalInputState { self.physicalInputState = physicalInputState }
+        else if HostRuntimeContext.isRunningUnitTests { self.physicalInputState = { .released } }
+        else { self.physicalInputState = { InputInjector.readCurrentPhysicalInputState() } }
     }
 
     func apply(_ message: ControlMessage) {
@@ -52,7 +67,38 @@ final class InputInjector: @unchecked Sendable {
     enum AutomationGateError: Error { case interrupted }
 
     enum AutomationAdmission: Equatable {
-        case admitted, inputHeld, interrupted
+        case admitted, inputHeld, inputStateUnavailable, interrupted
+    }
+
+    enum PhysicalInputState: Equatable, Sendable {
+        case released, held, unavailable
+    }
+
+    static func readCurrentPhysicalInputState() -> PhysicalInputState {
+        samplePhysicalInputState(isTrusted: { AXIsProcessTrusted() },
+            pressedMouseButtons: { UInt(truncatingIfNeeded: NSEvent.pressedMouseButtons) },
+            modifierFlags: { NSEvent.modifierFlags },
+            keyIsDown: { CGEventSource.keyState(.combinedSessionState, key: $0) })
+    }
+
+    /// One bounded admission sample, not a keyboard history. The macOS SDK's
+    /// ev_keymap.h defines NX_NUMKEYCODES as 256. Include codes outside our
+    /// wire HID mapping and all mouse buttons reported by AppKit.
+    static func samplePhysicalInputState(isTrusted: () -> Bool,
+        pressedMouseButtons: () -> UInt, modifierFlags: () -> NSEvent.ModifierFlags,
+        keyIsDown: (CGKeyCode) -> Bool) -> PhysicalInputState {
+        guard isTrusted() else { return .unavailable }
+        let momentaryModifiers: NSEvent.ModifierFlags = [.shift, .control, .option, .command, .function]
+        guard pressedMouseButtons() == 0,
+              modifierFlags().intersection(momentaryModifiers).isEmpty else { return .held }
+        for key in UInt16(0)..<UInt16(256) {
+            if keyIsDown(key) { return .held }
+        }
+        // Re-read the cheap aggregate state after the key scan. This remains
+        // a sample; event callbacks still fence input arriving afterward.
+        guard pressedMouseButtons() == 0,
+              modifierFlags().intersection(momentaryModifiers).isEmpty else { return .held }
+        return isTrusted() ? .released : .unavailable
     }
 
     /// A handback cannot activate automation between a direct-input callback
@@ -63,6 +109,11 @@ final class InputInjector: @unchecked Sendable {
         defer { lock.unlock() }
         guard directInputTransactions == 0, prevButtons == 0,
               pressedKeys.isEmpty, pendingUnicodeStroke == nil else { return .inputHeld }
+        switch physicalInputState() {
+        case .held: return .inputHeld
+        case .unavailable: return .inputStateUnavailable
+        case .released: break
+        }
         guard admission() else { return .interrupted }
         heldInputIsDirect = false
         return .admitted
@@ -431,5 +482,11 @@ final class InputInjector: @unchecked Sendable {
     static func isSynthetic(_ event: NSEvent) -> Bool {
         event.cgEvent?.getIntegerValueField(.eventSourceUserData)
             == syntheticEventTag
+    }
+
+    static func isPhysicalIntervention(_ event: NSEvent) -> Bool {
+        guard event.type.rawValue < 64 else { return false }
+        return !isSynthetic(event) && physicalInterventionEventMask.contains(
+            NSEvent.EventTypeMask(rawValue: 1 << event.type.rawValue))
     }
 }

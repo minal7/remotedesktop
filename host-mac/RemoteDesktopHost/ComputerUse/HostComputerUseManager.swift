@@ -4504,6 +4504,7 @@ final class HostComputerUseManager: ObservableObject {
         let pendingTransportTeardown = stopTransport()
         actionGate.setAllowsActions(false)
         activity = .idle
+        removeLocalInterventionMonitors()
 
         pendingExecution?.cancel()
         setupTask?.cancel()
@@ -4548,6 +4549,11 @@ final class HostComputerUseManager: ObservableObject {
     func applyUserInputIntervention(_ intervention: ComputerUseActionGate.InputIntervention) {
         guard actionGate.consumeInputIntervention(intervention) else { return }
         userIntervened()
+    }
+
+    nonisolated func recordPhysicalInputForIntervention(_ event: NSEvent) -> ComputerUseActionGate.InputIntervention? {
+        guard InputInjector.isPhysicalIntervention(event) else { return nil }
+        return recordUserInputForIntervention()
     }
 
     /// Physical input closes the gate under the injection lock before its
@@ -5157,6 +5163,23 @@ final class HostComputerUseManager: ObservableObject {
     private static let heldInputGuidance =
         "Finish the current input and release any held keys or mouse buttons, then choose Resume."
 
+    private static func admissionGuidance(_ admission: InputInjector.AutomationAdmission) -> String? {
+        switch admission {
+        case .inputHeld: return heldInputGuidance
+        case .inputStateUnavailable:
+            return "I couldn't check keyboard and mouse input. Check Accessibility access for RemoteDesktopHost, then choose Resume."
+        case .admitted, .interrupted: return nil
+        }
+    }
+
+    private func admitAutomation(_ admission: () -> Bool) -> InputInjector.AutomationAdmission {
+        if allowsExternalServices, !HostRuntimeContext.isRunningUnitTests {
+            if localInputMonitors.count != 2 { installLocalInterventionMonitors() }
+            guard localInputMonitors.count == 2 else { return .inputStateUnavailable }
+        }
+        return injector.admitAutomation(admission)
+    }
+
     private func pausedInputSnapshot(for context: ExecutionContext) -> ComputerUseActionGate.PausedInputSnapshot? {
         guard case .paused = activity, pausedInputOwner == PausedInputOwner(context), let scope = pausedInputScopeID else { return nil }
         return actionGate.pausedInputSnapshot(scopeID: scope)
@@ -5417,14 +5440,14 @@ final class HostComputerUseManager: ObservableObject {
             return
         }
 
-        let admission = injector.admitAutomation { actionGate.beginApprovedAutomation() }
+        let admission = admitAutomation { actionGate.beginApprovedAutomation() }
         guard admission == .admitted else {
             // Direct input can close the gate synchronously before its
             // MainActor lifecycle callback arrives. That close owns the race:
             // keep the held task resumable and never execute the approval.
             cancelApprovalIfNeeded(pendingApproval)
             pauseForLocalIntervention(pendingApproval.context,
-                guidance: admission == .inputHeld ? Self.heldInputGuidance : nil)
+                guidance: Self.admissionGuidance(admission))
             return
         }
 
@@ -6469,10 +6492,10 @@ final class HostComputerUseManager: ObservableObject {
             await precedingExecution?.value
             guard !Task.isCancelled,
                   currentExecutionToken == token else { return }
-            let admission = injector.admitAutomation { actionGate.activatePendingAutomation(admissionID) }
+            let admission = admitAutomation { actionGate.activatePendingAutomation(admissionID) }
             guard admission == .admitted else {
                 pauseAfterPendingAutomationWasBlocked(context: context, token: token,
-                    guidance: admission == .inputHeld ? Self.heldInputGuidance : nil)
+                    guidance: Self.admissionGuidance(admission))
                 return
             }
             do {
@@ -7461,18 +7484,20 @@ final class HostComputerUseManager: ObservableObject {
         }
     }
 
+    private func removeLocalInterventionMonitors() {
+        for monitor in localInputMonitors { NSEvent.removeMonitor(monitor) }
+        localInputMonitors.removeAll()
+    }
+
     private func installLocalInterventionMonitors() {
         guard !HostRuntimeContext.isRunningUnitTests else {
             return
         }
-        let mask: NSEvent.EventTypeMask = [
-            .leftMouseDown, .rightMouseDown, .otherMouseDown,
-            .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged,
-            .scrollWheel, .keyDown, .flagsChanged,
-        ]
+        guard !isShuttingDown, localInputMonitors.count != 2 else { return }
+        removeLocalInterventionMonitors()
+        let mask = InputInjector.physicalInterventionEventMask
         let interrupt: @Sendable (NSEvent) -> Void = { [weak self] event in
-            guard !InputInjector.isSynthetic(event),
-                  let intervention = self?.recordUserInputForIntervention() else { return }
+            guard let intervention = self?.recordPhysicalInputForIntervention(event) else { return }
             Task { @MainActor [weak self] in self?.applyUserInputIntervention(intervention) }
         }
         if let global = NSEvent.addGlobalMonitorForEvents(

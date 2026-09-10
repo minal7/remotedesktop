@@ -174,7 +174,12 @@
     "RemoteDesktopHostTests/ComputerUseTests/testDirectInputRecordsBeforePostingAndKeepsHeldKeysAndButtonsUntilRelease",
     "RemoteDesktopHostTests/ComputerUseTests/testHeldRemoteInputPreventsApprovalAcceptanceBeforeItsActorCallback",
     "RemoteDesktopHostTests/ComputerUseTests/testNewPromptWaitsForAlreadyHeldRemoteInputBeforeStartingInference",
-    "RemoteDesktopHostTests/ComputerUseTests/testRemoteHeldInputBlocksLocalAndPhoneResumeUntilTheGestureIsReleased"
+    "RemoteDesktopHostTests/ComputerUseTests/testRemoteHeldInputBlocksLocalAndPhoneResumeUntilTheGestureIsReleased",
+    "RemoteDesktopHostTests/ComputerUseTests/testPhysicalHeldOrUnavailableStateKeepsLocalAndPhoneHandbackPaused",
+    "RemoteDesktopHostTests/ComputerUseTests/testPhysicalInputAdmissionPreservesTheClosedClaimUntilStateIsReleased",
+    "RemoteDesktopHostTests/ComputerUseTests/testPhysicalInputSamplingCoversAllKeyCodesAndDistinguishesHeldFromUnavailable",
+    "RemoteDesktopHostTests/ComputerUseTests/testPhysicalInputStateBlocksNewTaskAndApprovalBeforeModelOrEffect",
+    "RemoteDesktopHostTests/ComputerUseTests/testPhysicalReleaseEventsAdvancePausedInputButSyntheticReleasesDoNot"
   ],
   "expectedTests": [
     "RemoteDesktopHostTests/ComputerUseBrowserActionPlannerTests/testActionContextRetainsTheWholeGoalAndObservedFormsWithoutPrivateValuesOrTargets",
@@ -1328,6 +1333,11 @@
     "RemoteDesktopHostTests/ComputerUseTests/testPausedInputCannotBeAcknowledgedByForeignControlAndStopRetiresItBeforeANewTask",
     "RemoteDesktopHostTests/ComputerUseTests/testPausedInputPersistenceFailureRetainsTheMarkerAndDoesNotAcknowledgeResume",
     "RemoteDesktopHostTests/ComputerUseTests/testPausedInputSnapshotsCannotAcknowledgeLaterInputOrCrossAReplacementOwner",
+    "RemoteDesktopHostTests/ComputerUseTests/testPhysicalHeldOrUnavailableStateKeepsLocalAndPhoneHandbackPaused",
+    "RemoteDesktopHostTests/ComputerUseTests/testPhysicalInputAdmissionPreservesTheClosedClaimUntilStateIsReleased",
+    "RemoteDesktopHostTests/ComputerUseTests/testPhysicalInputSamplingCoversAllKeyCodesAndDistinguishesHeldFromUnavailable",
+    "RemoteDesktopHostTests/ComputerUseTests/testPhysicalInputStateBlocksNewTaskAndApprovalBeforeModelOrEffect",
+    "RemoteDesktopHostTests/ComputerUseTests/testPhysicalReleaseEventsAdvancePausedInputButSyntheticReleasesDoNot",
     "RemoteDesktopHostTests/ComputerUseTests/testPrePromptResumeReservationCannotBeRecreatedAfterInputDuringFirstReadinessCheck",
     "RemoteDesktopHostTests/ComputerUseTests/testRemoteHeldInputBlocksLocalAndPhoneResumeUntilTheGestureIsReleased",
     "RemoteDesktopHostTests/ComputerUseTests/testResumeReadinessKeepsBrowserOwnershipAndOldToolsClosedUntilTheSameAdmissionIsAdopted",
