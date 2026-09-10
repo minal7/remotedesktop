@@ -84,6 +84,6 @@ Observed: **154 executor methods + 13 extra selections = 167; configured expecte
 
 Apple's Foundation Models availability and session context guidance support F18/F19. Apple's CGDisplayCreateImage documentation and the local SDK declaration support F11; the local declaration uses SCREEN_CAPTURE_OBSOLETE(10.6,14.4,15.0). Apple's NSEvent global-monitor documentation establishes asynchronous event delivery for F08. The OS-Atlas model card distinguishes Base grounding and Pro action-generation roles and shows dynamic preprocessing for F12/F21.
 
-Links and exact source locations appear alongside their claims in [AUDIT.md](</Users/michael/Documents/ChatGPT/remote desktop/docs/audits/2026-09-04-mac-computer-use/AUDIT.md>). Model performance, end-to-end task accuracy, stop latency, and physical 8 GiB behavior were not measured.
+Links and exact source locations appear alongside their claims in [AUDIT.md](AUDIT.md). Model performance, end-to-end task accuracy, stop latency, and physical 8 GiB behavior were not measured.
 
 Temporary full build logs and DerivedData are under /tmp and are not included as permanent evidence; they are not needed to understand the signing failure. The audit artifacts retain only the commands, minimal result summaries, and privacy-safe probe output.

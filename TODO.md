@@ -1,6 +1,6 @@
 **Computer Use repair TODO — live implementation tracker**
 
-Companion to [the detailed audit](</Users/michael/Documents/ChatGPT/remote desktop/docs/audits/2026-09-04-mac-computer-use/AUDIT.md>). Baseline: main at 603e79e9f877a4a1c9a0b462d8db4da06dc46cf2. Status: in progress. This is the authoritative working TODO for the repair goal. A checkbox is completed only after the implementation and its stated verification are recorded here. The audit checklist is retained as the original plan.
+Companion to [the detailed audit](docs/audits/2026-09-04-mac-computer-use/AUDIT.md). Baseline: main at 603e79e9f877a4a1c9a0b462d8db4da06dc46cf2. Status: in progress. This is the authoritative working TODO for the repair goal. A checkbox is completed only after the implementation and its stated verification are recorded here. The audit checklist is retained as the original plan.
 
 **Current user constraint — live tests deferred**
 
@@ -21,6 +21,8 @@ The user explicitly requires lightweight inference targeting Macs with **8 GB RA
 - [ ] **F28:** Before seeking permission, document readiness evidence for multi-step navigation/search, date and location controls, results extraction, compound-goal completion, cancellation, bounded resource use and cleanup. Identify remaining limitations and a small bounded run plan. No claim of universal or exact natural-language correctness follows from a few passing scenarios.
 
 **Current user requirement — browsing and account-login handoff**
+
+- [x] **F08 / F26 / F27 / F28 — inspect media-witness boundaries (source investigation; implementation remains open):** Current factories pass through to bundled codecs. Installed headers expose candidate hooks; immutable reference source shows SPS rewriting, parameter insertion and asynchronous decode/reset. Raw whole-buffer hashes cannot be assumed stable, and omitting parameters would weaken picture identity. Recorded nine source hashes and four installed-header hashes; binary provenance and native behavior remain unverified. No production/test source changed or execution ran. The [codec-boundary review](docs/audits/2026-09-04-mac-computer-use/MEDIA_WITNESS_BOUNDARY_REVIEW.md) specifies the integrated capture/codec/presentation work; bounded canonical H.264 evidence is the next source step.
 
 - [x] **F08 / F26 / F27 / F28 — redraw stationary images across continuous local layout changes (source repair; execution pending):** One retained latest image can move into a new eligible layout in the same live window, preserving its decode ID and requiring a new drawable receipt. Hidden/windowless/replaced surfaces discard it. Late uncommitted restores cannot regress a newer consumed decode; a current failure discards its image before layout refresh. Continuous changes preserve retry/attempt/deadline bounds. Seven methods are authored and unrun; three Swift files pass parse-only checks. Nine inventories match source, including 146 client core / 99 presentation surface / 2025 default host / 1342 focused host. Fresh capture on reveal, source-to-media identity, native presentation/input ordering, login/tasks and 8 GB resources remain unqualified. See the [stationary layout review](docs/audits/2026-09-04-mac-computer-use/STATIONARY_LAYOUT_REDRAW_REVIEW.md).
 

@@ -1,5 +1,7 @@
 # Establish capture evidence before claiming a recovered screen is current
 
+Follow-up: the [codec-boundary investigation](MEDIA_WITNESS_BOUNDARY_REVIEW.md) identifies parameter rewriting, frame reconstruction and asynchronous callback requirements. It supersedes any assumption that a raw encoder/decoder buffer hash or an unscoped timestamp map would close the media-proof gap. No witness capability is implemented or qualified by that investigation.
+
 Source repair at capture admission; end-to-end frame proof remains open. This continues the [presentation recovery](INPUT_PRESENTATION_RECOVERY_REVIEW.md), [source ownership](INPUT_SOURCE_OWNERSHIP_REVIEW.md) and [activity](INPUT_ACTIVITY_REVIEW.md) repairs. No build, typecheck, test/assertion execution, app/device/browser operation, model run or SSH retry was performed. SDK headers and upstream repository/documentation files were read. No framework/model artifact was downloaded, rebuilt or replaced.
 
 ## First-principles findings

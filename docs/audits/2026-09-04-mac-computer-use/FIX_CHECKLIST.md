@@ -1,6 +1,6 @@
 **Ordered repair checklist — Mac local-AI computer use**
 
-Companion to [the detailed audit](</Users/michael/Documents/ChatGPT/remote desktop/docs/audits/2026-09-04-mac-computer-use/AUDIT.md>). Baseline: main at 603e79e9f877a4a1c9a0b462d8db4da06dc46cf2. These boxes describe proposed implementation work; the audit did not implement these fixes.
+Companion to [the detailed audit](AUDIT.md). Baseline: main at 603e79e9f877a4a1c9a0b462d8db4da06dc46cf2. These boxes describe proposed implementation work; the audit did not implement these fixes.
 
 **Phase 1 · Make evidence trustworthy and define the supported product**
 
