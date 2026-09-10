@@ -37,9 +37,18 @@ final class HostPeerInputAuthorization: @unchecked Sendable {
     private var acknowledgement: DirectInputAcknowledgement?
     private var inputGeneration: UInt32 = 0
     private var lastInputSequence: UInt32 = 0
+    private var captureAvailable: Bool
+    private var inputInvalidation: Int?
+    private var hasAuthorizedInput = false
 
-    init(injector: InputInjector, onChange: @escaping @Sendable (State) -> Void = { _ in }) {
+    enum CaptureChange: Equatable {
+        case unchanged, available, unavailable(DirectInputAcknowledgement?), reconnect
+    }
+
+    init(injector: InputInjector, initialCaptureAvailable: Bool = false,
+         onChange: @escaping @Sendable (State) -> Void = { _ in }) {
         self.injector = injector; self.onChange = onChange
+        captureAvailable = initialCaptureAvailable
     }
 
     @discardableResult
@@ -49,15 +58,20 @@ final class HostPeerInputAuthorization: @unchecked Sendable {
             if let channelID { return channelID == id }
             channelID = id; helloCapabilities = nil
             inputHello = nil; acknowledgement = nil; inputGeneration = 0; lastInputSequence = 0
+            inputInvalidation = nil; hasAuthorizedInput = false
             return true
         }
     }
 
     @discardableResult
     func acceptHello(channel id: ObjectIdentifier, orderedControls: Int,
-                     inputHello nextHello: DirectInputHello? = nil) -> Bool {
+                     inputHello nextHello: DirectInputHello? = nil,
+                     inputInvalidation nextInvalidation: Int = 0) -> Bool {
         lock.withLock {
-            guard !closed, channelID == id else { return false }
+            guard !closed, channelID == id,
+                  (0...DirectInputWire.inputInvalidationVersion).contains(nextInvalidation),
+                  nextInvalidation == 0 || nextHello != nil,
+                  inputInvalidation == nil || inputInvalidation == nextInvalidation else { return false }
             if let nextHello, !nextHello.isValid { return false }
             if let inputHello {
                 guard let nextHello, nextHello.clientID == inputHello.clientID,
@@ -72,6 +86,7 @@ final class HostPeerInputAuthorization: @unchecked Sendable {
                 return false // The negotiated mode cannot change on this channel.
             }
             inputHello = nextHello
+            inputInvalidation = nextInvalidation
             helloCapabilities = max(0, orderedControls)
             reconcileLocked(publishWhenUnauthorized: false)
             return true
@@ -88,6 +103,25 @@ final class HostPeerInputAuthorization: @unchecked Sendable {
             if mustClose { closed = true; channelID = nil; helloCapabilities = nil }
             reconcileLocked(publishWhenUnauthorized: !self.connected)
             return true
+        }
+    }
+
+    /// Capture is independent of transport connectivity. Retire the posting
+    /// session and release its holds before returning the scope to notify.
+    func captureChanged(available: Bool) -> CaptureChange {
+        lock.withLock {
+            guard !closed, captureAvailable != available else { return .unchanged }
+            captureAvailable = available
+            if available {
+                reconcileLocked(publishWhenUnauthorized: false)
+                return .available
+            }
+            let previous = acknowledgement
+            let hadSession = session != nil
+            let mustReconnect = hasAuthorizedInput && inputInvalidation != DirectInputWire.inputInvalidationVersion
+            if mustReconnect { closed = true; connected = false; channelID = nil; helloCapabilities = nil }
+            reconcileLocked(publishWhenUnauthorized: hadSession)
+            return mustReconnect ? .reconnect : .unavailable(previous)
         }
     }
 
@@ -111,10 +145,10 @@ final class HostPeerInputAuthorization: @unchecked Sendable {
 
     var isClosed: Bool { lock.withLock { closed } }
 
-    func readyAcknowledgement(for id: ObjectIdentifier) -> (session: InputInjector.DirectInputSession, wire: DirectInputAcknowledgement?)? {
+    func readyAcknowledgement(for id: ObjectIdentifier) -> (session: InputInjector.DirectInputSession, wire: DirectInputAcknowledgement?, inputInvalidation: Int)? {
         lock.withLock {
             guard !closed, channelID == id, let session else { return nil }
-            return (session, acknowledgement)
+            return (session, acknowledgement, inputInvalidation ?? 0)
         }
     }
 
@@ -152,7 +186,7 @@ final class HostPeerInputAuthorization: @unchecked Sendable {
     }
 
     private func reconcileLocked(publishWhenUnauthorized: Bool = true) {
-        if !closed, connected, channelID != nil, helloCapabilities != nil {
+        if !closed, captureAvailable, connected, channelID != nil, helloCapabilities != nil {
             if session == nil {
                 guard inputGeneration < UInt32.max else {
                     closed = true; connected = false; channelID = nil; helloCapabilities = nil
@@ -160,6 +194,7 @@ final class HostPeerInputAuthorization: @unchecked Sendable {
                 }
                 inputGeneration += 1
                 session = injector.beginDirectInputSession()
+                hasAuthorizedInput = true
                 if let inputHello {
                     acknowledgement = .init(hello: inputHello, hostID: UUID(), generation: inputGeneration)
                 }
@@ -481,8 +516,9 @@ final class HostPeerSession: NSObject {
             },
             onAudioSample: audioEnabled ? { [weak self] sample in self?.audioBridge.enqueue(sample) } : nil,
             onStopped: { [weak self] receipt, error in
-                // Do not acquire the peer lock inside the capture gate. The
-                // one-use receipt is rechecked after this queue handoff.
+                // The current stream's synchronous callback revokes input
+                // before the asynchronous recovery/error handler can be delayed.
+                self?.revokeCaptureInput()
                 Task { [weak self] in self?.handleCaptureStopped(receipt, error: error) }
             }))
     }
@@ -511,6 +547,7 @@ final class HostPeerSession: NSObject {
         let (owner, limit) = try captureStartParameters()
         try await capture.start(for: owner, audioEnabled: audioEnabled,
                                 maximumMacroblocksPerFrame: limit)
+        refreshCaptureInputAvailability()
     }
 
     private func applyVideoSenderPolicy(
@@ -608,16 +645,57 @@ final class HostPeerSession: NSObject {
         closeStateLock.lock()
         guard !ended else { closeStateLock.unlock(); return }
         lastVideoAttempt = attempt
-        let owner = captureOwner
         closeStateLock.unlock()
-        guard let owner else { return }
+        refreshCaptureInputAvailability()
+    }
+
+    private func refreshCaptureInputAvailability() {
+        guard let (owner, _) = try? captureStartParameters() else { return }
         capture.withRunningSession(owner) { runningAttempt in
             closeStateLock.lock()
             defer { closeStateLock.unlock() }
-            guard !ended, let episode = captureRecovery,
-                  episode.acceptsFrame(lastOutput: lastVideoAttempt, running: runningAttempt,
-                                       at: ContinuousClock.now) else { return }
-            completeCaptureRecoveryLocked()
+            guard !ended, lastVideoAttempt == runningAttempt else { return }
+            if let episode = captureRecovery {
+                guard episode.acceptsFrame(lastOutput: lastVideoAttempt, running: runningAttempt,
+                                           at: ContinuousClock.now) else { return }
+                completeCaptureRecoveryLocked()
+            }
+            restoreCaptureInputLocked()
+        }
+    }
+
+    /// Called under the current capture gate and peer lock, after current
+    /// source output is available. This is not remote presentation proof.
+    private func restoreCaptureInputLocked() {
+        guard inputAuthorization.captureChanged(available: true) == .available else { return }
+        sendHelloAckAndDisplay()
+    }
+
+    /// Called synchronously inside the retired stream's capture gate.
+    private func revokeCaptureInput() {
+        switch inputAuthorization.captureChanged(available: false) {
+        case .unchanged, .available: break
+        case .reconnect:
+            scheduleCaptureTerminalFailure("Screen capture was interrupted. Reconnect to restore control.")
+        case .unavailable(let scope):
+            if let scope, !sendInputUnavailable(scope) {
+                inputAuthorization.close()
+                scheduleCaptureTerminalFailure("The screen interruption could not be sent. Reconnect to restore control.")
+            }
+        }
+    }
+
+    private func scheduleCaptureTerminalFailure(_ reason: String) {
+        closeStateLock.lock()
+        guard !ended else { closeStateLock.unlock(); return }
+        ended = true
+        closeStateLock.unlock()
+        // Native teardown must run after this capture callback releases its
+        // gate. Input has already been revoked synchronously.
+        Task { [weak self] in
+            guard let self else { return }
+            self.close(reason: reason)
+            self.onEnded(reason)
         }
     }
 
@@ -639,6 +717,7 @@ final class HostPeerSession: NSObject {
             if recovery.acceptsFrame(lastOutput: lastVideoAttempt, running: runningAttempt,
                                      at: ContinuousClock.now) {
                 completeCaptureRecoveryLocked()
+                restoreCaptureInputLocked()
                 result = .restored
             } else {
                 captureRestartID = nil
@@ -744,6 +823,8 @@ final class HostPeerSession: NSObject {
     }
 
     private func send(_ message: ControlMessage) {
+        closeStateLock.lock()
+        defer { closeStateLock.unlock() }
         guard let dataChannel, dataChannel.readyState == .open else {
             return
         }
@@ -767,8 +848,21 @@ final class HostPeerSession: NSObject {
         }
     }
 
+    private func sendInputUnavailable(_ scope: DirectInputAcknowledgement) -> Bool {
+        closeStateLock.lock()
+        defer { closeStateLock.unlock() }
+        guard !ended, let dataChannel, dataChannel.readyState == .open,
+              inputAuthorization.ownsChannel(ObjectIdentifier(dataChannel)) else { return false }
+        hostSeq &+= 1
+        let timestamp = UInt64(DispatchTime.now().uptimeNanoseconds / 1_000)
+        let payload = HostMessageEncoder.inputUnavailable(scope, seq: hostSeq, ts: timestamp)
+        return dataChannel.sendData(RTCDataBuffer(data: payload, isBinary: false))
+    }
+
     private func sendHelloAckAndDisplay() {
-        guard let dataChannel, dataChannel.readyState == .open,
+        closeStateLock.lock()
+        defer { closeStateLock.unlock() }
+        guard !ended, let dataChannel, dataChannel.readyState == .open,
               let ready = inputAuthorization.readyAcknowledgement(for: ObjectIdentifier(dataChannel)) else {
             return
         }
@@ -783,10 +877,11 @@ final class HostPeerSession: NSObject {
             monitors: NSScreen.screens.count,
             seq: hostSeq,
             ts: timestamp,
-            inputSession: ready.wire)
+            inputSession: ready.wire,
+            inputInvalidation: ready.inputInvalidation)
         guard dataChannel.sendData(RTCDataBuffer(data: hello, isBinary: false)) else {
             inputAuthorization.close()
-            onEnded("The input handshake could not be sent.")
+            scheduleCaptureTerminalFailure("The input handshake could not be sent. Reconnect to restore control.")
             return
         }
 
@@ -800,7 +895,11 @@ final class HostPeerSession: NSObject {
             seq: hostSeq,
             ts: timestamp,
             inputSession: ready.wire)
-        dataChannel.sendData(RTCDataBuffer(data: display, isBinary: false))
+        guard dataChannel.sendData(RTCDataBuffer(data: display, isBinary: false)) else {
+            inputAuthorization.close()
+            scheduleCaptureTerminalFailure("The screen layout could not be sent. Reconnect to restore control.")
+            return
+        }
     }
 
     private func iceCandidate(from payload: [String: String]) -> RTCIceCandidate? {
@@ -980,7 +1079,9 @@ extension HostPeerSession: RTCPeerConnectionDelegate {
     }
 
     func peerConnection(_ peerConnection: RTCPeerConnection, didOpen dataChannel: RTCDataChannel) {
-        guard self.peerConnection === peerConnection, dataChannel.label == "control",
+        closeStateLock.lock()
+        defer { closeStateLock.unlock() }
+        guard !ended, self.peerConnection === peerConnection, dataChannel.label == "control",
               inputAuthorization.openChannel(ObjectIdentifier(dataChannel)) else {
             dataChannel.close()
             return
@@ -1014,7 +1115,8 @@ extension HostPeerSession: RTCDataChannelDelegate {
                 return
             }
             guard inputAuthorization.acceptHello(channel: ObjectIdentifier(dataChannel),
-                orderedControls: orderedComputerUseControls, inputHello: packet.inputHello) else { return }
+                orderedControls: orderedComputerUseControls, inputHello: packet.inputHello,
+                inputInvalidation: packet.inputInvalidation) else { return }
             sendHelloAckAndDisplay()
         case .bye(let reason):
             if inputAuthorization.close(ifChannel: ObjectIdentifier(dataChannel)) {

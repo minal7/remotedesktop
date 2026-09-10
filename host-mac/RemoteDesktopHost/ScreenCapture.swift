@@ -388,7 +388,7 @@ final class CaptureStreamLifecycle<Stream: AnyObject, Context: Sendable>: @unche
 /// video. A native await does not extend the deadline or reset the attempt cap.
 struct CaptureRecoveryEpisode {
     static let maximumAttempts = 5
-    static let timeoutSeconds = 30
+    static let timeoutSeconds = DirectInputWire.captureRecoveryTimeoutSeconds
     static let timeout: Duration = .seconds(timeoutSeconds)
     private static let retryDelays: [Duration] = [.milliseconds(250), .seconds(1), .seconds(2), .seconds(5)]
 

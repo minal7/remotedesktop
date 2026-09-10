@@ -34,11 +34,21 @@ struct DirectInputStamp: Codable, Equatable, Sendable {
 
 enum DirectInputWire {
     static let version = 1
+    static let inputInvalidationVersion = 1
+    static let captureRecoveryTimeoutSeconds = 30
+    static let captureHandshakeTimeout: Duration = .seconds(captureRecoveryTimeoutSeconds + 5)
     private struct Capabilities: Decodable { let inputSessions: Int }
     static func capability(in object: [String: Any]?) -> Int? {
         guard let object, object["inputSessions"] != nil else { return 0 }
         guard let value = decode(object, as: Capabilities.self), value.inputSessions >= 0 else { return nil }
         return value.inputSessions
+    }
+    private struct InvalidationCapability: Decodable { let inputInvalidation: Int }
+    static func invalidationCapability(in object: [String: Any]?) -> Int? {
+        guard let object, object["inputInvalidation"] != nil else { return 0 }
+        guard let value = decode(object, as: InvalidationCapability.self),
+              (0...inputInvalidationVersion).contains(value.inputInvalidation) else { return nil }
+        return value.inputInvalidation
     }
     static func object<Value: Encodable>(_ value: Value) -> [String: Any]? {
         guard let data = try? JSONEncoder().encode(value) else { return nil }
@@ -65,6 +75,7 @@ struct DirectInputClientState {
     private var acknowledged: DirectInputAcknowledgement?
     private var lastAcknowledged: DirectInputAcknowledgement?
     private var sequence: UInt32 = 0
+    private var inputInvalidationVersion: Int?
 
     init(clientID: UUID = UUID()) { hello = .init(clientID: clientID, revision: 1) }
 
@@ -91,11 +102,16 @@ struct DirectInputClientState {
         return true
     }
 
-    mutating func accept(version: Int, acknowledgement: DirectInputAcknowledgement?) -> AckResult {
+    mutating func accept(version: Int, acknowledgement: DirectInputAcknowledgement?,
+                         inputInvalidation: Int = 0) -> AckResult {
         guard !isClosed, connected, helloSent else { return .ignored }
+        guard (0...DirectInputWire.inputInvalidationVersion).contains(inputInvalidation),
+              inputInvalidation == 0 || (version == DirectInputWire.version && acknowledgement != nil),
+              inputInvalidationVersion == nil || inputInvalidationVersion == inputInvalidation else { return .invalid }
         if version == 0 {
             guard acknowledgement == nil, lastAcknowledged == nil, hello.revision == 1 else { return .invalid }
             legacyReady = true
+            inputInvalidationVersion = inputInvalidation
             return .accepted
         }
         guard version == DirectInputWire.version, !legacyReady,
@@ -110,6 +126,19 @@ struct DirectInputClientState {
         }
         if acknowledgement != acknowledged { sequence = 0 }
         acknowledged = acknowledgement; lastAcknowledged = acknowledgement
+        inputInvalidationVersion = inputInvalidation
+        return .accepted
+    }
+
+    /// Invalidate only the currently acknowledged host scope. Advancing the
+    /// hello revision makes a delayed duplicate acknowledgement unable to
+    /// reopen input while capture is still unavailable.
+    mutating func invalidate(_ scope: DirectInputAcknowledgement) -> AckResult {
+        guard !isClosed, connected, scope == acknowledged else { return .ignored }
+        guard scope.isValid, inputInvalidationVersion == DirectInputWire.inputInvalidationVersion else { return .invalid }
+        acknowledged = nil; helloSent = false; sequence = 0
+        guard hello.revision < UInt32.max else { close(); return .invalid }
+        hello = .init(clientID: hello.clientID, revision: hello.revision + 1)
         return .accepted
     }
 
@@ -126,5 +155,6 @@ struct DirectInputClientState {
     mutating func close() {
         isClosed = true; connected = false; helloSent = false; legacyReady = false
         acknowledged = nil; lastAcknowledged = nil; sequence = 0
+        inputInvalidationVersion = nil
     }
 }

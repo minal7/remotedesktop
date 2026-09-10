@@ -62,8 +62,10 @@ outbound input, increments the revision without wrapping, and sends a new hello
 when both the connection and channel are ready. It does not queue or replay
 input while waiting. An exhausted counter requires a new connection.
 
-A supporting host advertises `caps.inputSessions: 1`. When both connected state
-and the current channel's hello are established, its `hello_ack` includes:
+A supporting host advertises `caps.inputSessions: 1`. The current Mac also
+requires a running capture attempt with admitted complete video output before
+it authorizes input. When capture, connected state and the current channel's
+hello are established, its `hello_ack` includes:
 
 ```json
 {"inputSession":{"version":1,"clientID":"6F291DC4-5B15-4B1E-AC62-82AA2F46E313","revision":1,"hostID":"75AA76B8-BA2B-4C96-9FBD-927557D7A988","generation":1}}
@@ -95,6 +97,54 @@ that media freshness boundary still needs native qualification. These display
 requirements are part of the unreleased `inputSessions: 1` extension and require
 the matching host and phone implementation. See the
 [presentation recovery review](../docs/audits/2026-09-04-mac-computer-use/INPUT_PRESENTATION_RECOVERY_REVIEW.md).
+
+### Capture-loss invalidation
+
+A client that supports scoped capture-loss recovery adds `caps.inputInvalidation: 1`
+to its `hello`, alongside `inputSession`. The host returns the selected
+`caps.inputInvalidation` value in `hello_ack`; absent or zero means unsupported.
+The mode is fixed for that control channel. Values must be integers 0 or 1;
+booleans, strings, fractional values and unsupported versions are rejected.
+Selecting 1 requires input-session metadata.
+
+On a current ScreenCaptureKit stream-stop callback, the Mac synchronously
+revokes the input session and releases its held input before deferred recovery
+work. Capture availability is separate from ICE/channel state: neither a
+connected callback nor a repeated hello can authorize input while capture is
+unavailable. A supporting peer receives the exact revoked acknowledgement:
+
+```json
+{"t":"input_unavailable","s":43,"ts":1235,"inputSession":{"version":1,"clientID":"6F291DC4-5B15-4B1E-AC62-82AA2F46E313","revision":1,"hostID":"75AA76B8-BA2B-4C96-9FBD-927557D7A988","generation":1}}
+```
+
+The phone acts only when this scope equals its current acknowledgement. It
+revokes input and screen readiness, retires old input/probe generations,
+increments the client hello revision and sends a new hello. Duplicate or
+superseded invalidations do not restart that handshake or clear newer readiness.
+A delayed old acknowledgement cannot reopen the revoked revision. Malformed
+recognized invalidations and unnegotiated current-scope invalidations terminate
+the transport.
+
+The Mac waits for complete output from the current running capture attempt,
+then creates a fresh input generation and sends its acknowledgement and scoped
+dimensions. Both event/ack arrival orders are supported; input stamped before
+the outage remains rejected. Failure to send invalidation, hello or dimensions
+revokes input and closes the peer. A client without this negotiated capability,
+including an earlier input-session client, must reconnect after capture loss
+once it has had authorized input. A new phone using an older host cannot infer
+this protection from `inputSessions` alone.
+
+The capture-only re-handshake timeout is 35 seconds: the shared 30-second host
+recovery budget plus a five-second delivery allowance. Initial/transport hello
+waits remain 10 seconds and ICE recovery retains its separate timeout; concurrent
+outages may therefore end sooner. These are configured limits, not measured
+network guarantees.
+
+This source implementation handles reported stream stops. Silent video stalls
+and blank/suspended output require further availability handling. Source output
+and a later decoded-frame callback do not prove that current pixels reached the
+phone's renderer. End-to-end media identity and native compatibility remain
+unqualified; see the [capture/input review](../docs/audits/2026-09-04-mac-computer-use/CAPTURE_INPUT_INVALIDATION_REVIEW.md).
 
 Each scoped input message carries a separate envelope, for example:
 

@@ -6473,6 +6473,194 @@ final class ComputerUseTests: XCTestCase {
         return receipt
     }
 
+    func testCaptureAvailabilityIsIndependentOfHelloAndConnectionReadiness() throws {
+        let states = PeerInputStateProbe()
+        let injector = InputInjector(eventPoster: { _ in })
+        let authority = HostPeerInputAuthorization(injector: injector, onChange: { states.append($0) })
+        let channel = NSObject(), id = ObjectIdentifier(channel)
+        let hello = DirectInputHello(clientID: UUID(), revision: 1)
+        authority.openChannel(id); authority.connectionChanged(connected: true)
+        XCTAssertTrue(authority.acceptHello(channel: id, orderedControls: 1, inputHello: hello, inputInvalidation: 1))
+        XCTAssertNil(authority.readyAcknowledgement(for: id))
+        XCTAssertNil(authority.admitInput(channel: id, stamp: nil))
+        XCTAssertTrue(states.values().isEmpty, "Opening a sidecar before capture must not report a loss of an active task")
+        XCTAssertEqual(authority.captureChanged(available: true), .available)
+        let ready = try XCTUnwrap(authority.readyAcknowledgement(for: id))
+        XCTAssertEqual(ready.inputInvalidation, 1)
+        XCTAssertEqual(states.values(), [.init(authorized: true, orderedComputerUseControls: 1)])
+        XCTAssertEqual(authority.captureChanged(available: true), .unchanged)
+        XCTAssertEqual(authority.readyAcknowledgement(for: id)?.wire, ready.wire)
+        authority.close()
+    }
+
+    func testCaptureLossReleasesHeldInputAndBlocksHelloOrConnectionFromReopeningIt() throws {
+        let events = CapturedCGEventStore(), injector = InputInjector(eventPoster: { events.append($0) })
+        let authority = HostPeerInputAuthorization(injector: injector), channel = NSObject()
+        let id = ObjectIdentifier(channel), hello = DirectInputHello(clientID: UUID(), revision: 1)
+        authority.openChannel(id); authority.connectionChanged(connected: true)
+        authority.acceptHello(channel: id, orderedControls: 1, inputHello: hello, inputInvalidation: 1)
+        _ = authority.captureChanged(available: true)
+        let original = try XCTUnwrap(authority.readyAcknowledgement(for: id))
+        let ack = try XCTUnwrap(original.wire)
+        injector.applyDirectInput(.key(usage: 4, down: true, modifiers: 0), session: original.session) { false }
+        injector.applyDirectInput(.pointer(x: 20, y: 30, buttons: 1), session: original.session) { false }
+        XCTAssertEqual(authority.captureChanged(available: false), .unavailable(ack))
+        XCTAssertEqual(events.values().filter { $0.type == .keyUp }.count, 1)
+        XCTAssertEqual(events.values().filter { $0.type == .leftMouseUp }.count, 1)
+        let afterRelease = events.values().count
+        XCTAssertFalse(injector.applyDirectInput(.text("retired"), session: original.session) { XCTFail("No stale interruption"); return false })
+        XCTAssertEqual(authority.captureChanged(available: false), .unchanged)
+        XCTAssertTrue(authority.connectionChanged(connected: true))
+        XCTAssertTrue(authority.acceptHello(channel: id, orderedControls: 1, inputHello: hello, inputInvalidation: 1))
+        let nextHello = DirectInputHello(clientID: hello.clientID, revision: 2)
+        XCTAssertTrue(authority.acceptHello(channel: id, orderedControls: 1, inputHello: nextHello, inputInvalidation: 1))
+        XCTAssertNil(authority.readyAcknowledgement(for: id)); XCTAssertEqual(events.values().count, afterRelease)
+        XCTAssertEqual(authority.captureChanged(available: true), .available)
+        let next = try XCTUnwrap(authority.readyAcknowledgement(for: id)?.wire)
+        XCTAssertEqual(next.revision, 2); XCTAssertGreaterThan(next.generation, ack.generation)
+        XCTAssertNotEqual(next.hostID, ack.hostID)
+        XCTAssertNil(authority.admitInput(channel: id, stamp: .init(hostID: ack.hostID, generation: ack.generation, sequence: 100)))
+        XCTAssertNotNil(authority.admitInput(channel: id, stamp: .init(hostID: next.hostID, generation: next.generation, sequence: 1)))
+        authority.close()
+    }
+
+    func testCaptureRecoveryCannotOverrideDisconnectedOrClosedTransport() throws {
+        for terminal in [false, true] {
+            let injector = InputInjector(eventPoster: { _ in })
+            let authority = HostPeerInputAuthorization(injector: injector), channel = NSObject()
+            let id = ObjectIdentifier(channel), hello = DirectInputHello(clientID: UUID(), revision: 1)
+            authority.openChannel(id); authority.connectionChanged(connected: true)
+            authority.acceptHello(channel: id, orderedControls: 1, inputHello: hello, inputInvalidation: 1)
+            _ = authority.captureChanged(available: true)
+            let original = try XCTUnwrap(authority.readyAcknowledgement(for: id)?.wire)
+            _ = authority.captureChanged(available: false)
+            authority.connectionChanged(connected: false, terminal: terminal)
+            _ = authority.captureChanged(available: true)
+            XCTAssertNil(authority.readyAcknowledgement(for: id))
+            XCTAssertNil(authority.admitInput(channel: id, stamp: .init(hostID: original.hostID, generation: original.generation, sequence: 1)))
+            XCTAssertEqual(authority.connectionChanged(connected: true), !terminal)
+            XCTAssertEqual(authority.readyAcknowledgement(for: id) != nil, !terminal)
+            authority.close()
+        }
+    }
+
+    func testCaptureLossRequiresReconnectWhenTheClientCannotInvalidateItsScreen() throws {
+        for scoped in [false, true] {
+            let events = CapturedCGEventStore(), injector = InputInjector(eventPoster: { events.append($0) })
+            let authority = HostPeerInputAuthorization(injector: injector), channel = NSObject()
+            let id = ObjectIdentifier(channel)
+            authority.openChannel(id); authority.connectionChanged(connected: true)
+            authority.acceptHello(channel: id, orderedControls: 1,
+                inputHello: scoped ? .init(clientID: UUID(), revision: 1) : nil)
+            _ = authority.captureChanged(available: true)
+            let original = try XCTUnwrap(authority.readyAcknowledgement(for: id))
+            injector.applyDirectInput(.key(usage: 4, down: true, modifiers: 0), session: original.session) { false }
+            XCTAssertEqual(authority.captureChanged(available: false), .reconnect)
+            XCTAssertTrue(authority.isClosed)
+            XCTAssertEqual(events.values().filter { $0.type == .keyUp }.count, 1)
+            XCTAssertEqual(authority.captureChanged(available: true), .unchanged)
+            XCTAssertFalse(authority.connectionChanged(connected: true))
+            XCTAssertNil(authority.readyAcknowledgement(for: id))
+        }
+    }
+
+    func testCaptureInvalidationCapabilityIsStrictAndCannotChangeOnAnExistingChannel() throws {
+        let hello = DirectInputHello(clientID: UUID(), revision: 1)
+        let metadata = try XCTUnwrap(DirectInputWire.object(hello))
+        for invalid: Any in [true, "1", -1, 0.5, 2, NSNull()] {
+            XCTAssertNil(DirectInputWire.invalidationCapability(in: ["inputInvalidation": invalid]))
+            XCTAssertNil(ControlPacket.decode(try JSONSerialization.data(withJSONObject: ["t": "hello", "inputSession": metadata,
+                "caps": ["inputInvalidation": invalid]])))
+        }
+        XCTAssertNil(ControlPacket.decode(Data(#"{"t":"hello","caps":{"inputInvalidation":1}}"#.utf8)))
+        XCTAssertNil(ControlPacket.decode(Data(#"{"t":"hello","caps":"invalid"}"#.utf8)))
+        let packet = try XCTUnwrap(ControlPacket.decode(JSONSerialization.data(withJSONObject: ["t": "hello", "inputSession": metadata,
+            "caps": ["inputInvalidation": 1]])))
+        XCTAssertEqual(packet.inputInvalidation, 1)
+        let authority = HostPeerInputAuthorization(injector: InputInjector(eventPoster: { _ in })), channel = NSObject()
+        let id = ObjectIdentifier(channel)
+        authority.openChannel(id); authority.connectionChanged(connected: true)
+        XCTAssertTrue(authority.acceptHello(channel: id, orderedControls: 1, inputHello: hello, inputInvalidation: 1))
+        XCTAssertFalse(authority.acceptHello(channel: id, orderedControls: 1, inputHello: hello, inputInvalidation: 0))
+        XCTAssertFalse(authority.acceptHello(channel: id, orderedControls: 1,
+            inputHello: .init(clientID: hello.clientID, revision: 2), inputInvalidation: 0))
+        _ = authority.captureChanged(available: true)
+        XCTAssertEqual(authority.readyAcknowledgement(for: id)?.inputInvalidation, 1)
+        authority.close()
+    }
+
+    func testCaptureInvalidationClientAndHostRejectBufferedInputInEitherRecoveryOrder() throws {
+        for restoreFirst in [false, true] {
+            let events = CapturedCGEventStore(), injector = InputInjector(eventPoster: { events.append($0) })
+            let authority = HostPeerInputAuthorization(injector: injector), channel = NSObject()
+            let id = ObjectIdentifier(channel)
+            var client = DirectInputClientState()
+            client.connectionChanged(connected: true)
+            let hello = try XCTUnwrap(client.helloToSend); client.markHelloSent(hello)
+            authority.openChannel(id); authority.connectionChanged(connected: true)
+            authority.acceptHello(channel: id, orderedControls: 1, inputHello: hello, inputInvalidation: 1)
+            _ = authority.captureChanged(available: true)
+            let first = try XCTUnwrap(authority.readyAcknowledgement(for: id)?.wire)
+            XCTAssertEqual(client.accept(version: 1, acknowledgement: first, inputInvalidation: 1), .accepted)
+            guard case .scoped(let buffered) = client.authorizeNextInput() else { return XCTFail("Missing input scope") }
+            XCTAssertEqual(authority.captureChanged(available: false), .unavailable(first))
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: HostMessageEncoder.inputUnavailable(first, seq: 9, ts: 10)) as? [String: Any])
+            XCTAssertEqual(object["t"] as? String, "input_unavailable")
+            let revoked = try XCTUnwrap(DirectInputWire.decode(try XCTUnwrap(object["inputSession"]), as: DirectInputAcknowledgement.self))
+            if restoreFirst {
+                _ = authority.captureChanged(available: true)
+                let next = try XCTUnwrap(authority.readyAcknowledgement(for: id)?.wire)
+                XCTAssertEqual(client.accept(version: 1, acknowledgement: next, inputInvalidation: 1), .accepted)
+                XCTAssertEqual(client.invalidate(revoked), .ignored, "A later acknowledgement already superseded this notification")
+            } else {
+                XCTAssertEqual(client.invalidate(revoked), .accepted)
+                XCTAssertNil(client.authorizeNextInput())
+                let nextHello = try XCTUnwrap(client.helloToSend); client.markHelloSent(nextHello)
+                authority.acceptHello(channel: id, orderedControls: 1, inputHello: nextHello, inputInvalidation: 1)
+                XCTAssertNil(authority.readyAcknowledgement(for: id))
+                XCTAssertEqual(client.accept(version: 1, acknowledgement: first, inputInvalidation: 1), .ignored)
+                _ = authority.captureChanged(available: true)
+                XCTAssertEqual(client.accept(version: 1, acknowledgement: try XCTUnwrap(authority.readyAcknowledgement(for: id)?.wire), inputInvalidation: 1), .accepted)
+            }
+            XCTAssertNil(authority.admitInput(channel: id, stamp: buffered))
+            guard case .scoped(let current) = client.authorizeNextInput() else { return XCTFail("Missing restored input scope") }
+            let session = try XCTUnwrap(authority.admitInput(channel: id, stamp: current))
+            XCTAssertTrue(injector.applyDirectInput(.text("current"), session: session) { false })
+            XCTAssertEqual(client.invalidate(revoked), .ignored)
+            guard case .scoped(let next) = client.authorizeNextInput() else { return XCTFail("Stale invalidation closed new input") }
+            XCTAssertEqual(next.sequence, current.sequence + 1)
+            XCTAssertEqual(events.values().filter { $0.type == .keyDown }.compactMap(\.unicodeText).joined(), "current")
+            authority.close()
+        }
+    }
+
+    func testCurrentCaptureStopRevokesInputBeforeItsDeferredHandlerWhileOldStreamsCannot() async throws {
+        let injector = InputInjector(eventPoster: { _ in })
+        let authority = HostPeerInputAuthorization(injector: injector), channel = NSObject()
+        let id = ObjectIdentifier(channel), hello = DirectInputHello(clientID: UUID(), revision: 1)
+        authority.openChannel(id); authority.connectionChanged(connected: true)
+        authority.acceptHello(channel: id, orderedControls: 1, inputHello: hello, inputInvalidation: 1)
+        let lifecycle = CaptureStreamLifecycle<NSObject, HostPeerInputAuthorization> { _ in }
+        let old = NSObject(), current = NSObject()
+        let owner = lifecycle.beginOwner(context: authority)
+        try await lifecycle.start(for: owner, prepare: { old }, startStream: { _ in }).value
+        let successor = lifecycle.beginOwner(context: authority)
+        try await lifecycle.start(for: successor, prepare: { current }, startStream: { _ in }).value
+        _ = authority.captureChanged(available: true)
+        XCTAssertFalse(lifecycle.streamStopped(old) { context, _ in _ = context.captureChanged(available: false) })
+        XCTAssertNotNil(authority.readyAcknowledgement(for: id))
+        var receipt: CaptureStopReceipt?
+        XCTAssertTrue(lifecycle.streamStopped(current) { context, event in
+            _ = context.captureChanged(available: false)
+            receipt = event
+            XCTAssertNil(context.readyAcknowledgement(for: id), "Input is already revoked before queuing recovery work")
+        })
+        XCTAssertTrue(lifecycle.consumeStop(try XCTUnwrap(receipt)))
+        XCTAssertNil(authority.readyAcknowledgement(for: id))
+        await lifecycle.endAll().value
+        authority.close()
+    }
+
     func testDisplayEncodingBindsDimensionsToTheCurrentInputAcknowledgement() throws {
         let acknowledgement = DirectInputAcknowledgement(hello: .init(clientID: UUID(), revision: 2), hostID: UUID(), generation: 3)
         let bytes = HostMessageEncoder.display(width: 1920, height: 1080, scale: 2, seq: 4, ts: 5, inputSession: acknowledgement)
@@ -6512,7 +6700,7 @@ final class ComputerUseTests: XCTestCase {
 
     func testWireInputReplayCannotPostOrReleaseReplacementInput() throws {
         let events = CapturedCGEventStore(), injector = InputInjector(eventPoster: { events.append($0) })
-        let authority = HostPeerInputAuthorization(injector: injector)
+        let authority = HostPeerInputAuthorization(injector: injector, initialCaptureAvailable: true)
         let channel = NSObject(), id = ObjectIdentifier(channel)
         authority.openChannel(id); authority.connectionChanged(connected: true)
         let hello = DirectInputHello(clientID: UUID(), revision: 1)
@@ -6546,7 +6734,7 @@ final class ComputerUseTests: XCTestCase {
 
     func testNewInputHelloRetiresHoldsWithoutAllowingOldHelloOrDowngrade() throws {
         let events = CapturedCGEventStore(), injector = InputInjector(eventPoster: { events.append($0) })
-        let states = PeerInputStateProbe(), authority = HostPeerInputAuthorization(injector: injector, onChange: { states.append($0) })
+        let states = PeerInputStateProbe(), authority = HostPeerInputAuthorization(injector: injector, initialCaptureAvailable: true, onChange: { states.append($0) })
         let channel = NSObject(), id = ObjectIdentifier(channel), clientID = UUID()
         authority.openChannel(id); authority.connectionChanged(connected: true)
         let first = DirectInputHello(clientID: clientID, revision: 1)
@@ -6601,7 +6789,7 @@ final class ComputerUseTests: XCTestCase {
 
     func testLegacyInputRequiresANewChannelAfterConnectionLoss() throws {
         let events = CapturedCGEventStore(), injector = InputInjector(eventPoster: { events.append($0) })
-        let authority = HostPeerInputAuthorization(injector: injector), channel = NSObject()
+        let authority = HostPeerInputAuthorization(injector: injector, initialCaptureAvailable: true), channel = NSObject()
         let id = ObjectIdentifier(channel)
         authority.openChannel(id); authority.connectionChanged(connected: true)
         authority.acceptHello(channel: id, orderedControls: 0)
@@ -6622,7 +6810,7 @@ final class ComputerUseTests: XCTestCase {
 
     func testInputClientAndHostRejectBufferedTextAcrossOneSidedRecovery() throws {
         let events = CapturedCGEventStore(), injector = InputInjector(eventPoster: { events.append($0) })
-        let authority = HostPeerInputAuthorization(injector: injector), channel = NSObject()
+        let authority = HostPeerInputAuthorization(injector: injector, initialCaptureAvailable: true), channel = NSObject()
         let id = ObjectIdentifier(channel)
         var client = DirectInputClientState()
         authority.openChannel(id); authority.connectionChanged(connected: true); client.connectionChanged(connected: true)
@@ -6715,7 +6903,7 @@ final class ComputerUseTests: XCTestCase {
         for helloFirst in [false, true] {
             let injector = InputInjector(eventPoster: { _ in XCTFail("Authorization cannot post input") })
             let states = PeerInputStateProbe()
-            let authority = HostPeerInputAuthorization(injector: injector, onChange: { states.append($0) })
+            let authority = HostPeerInputAuthorization(injector: injector, initialCaptureAvailable: true, onChange: { states.append($0) })
             let wireHello = DirectInputHello(clientID: UUID(), revision: 1)
             let channel = NSObject(), channelID = ObjectIdentifier(channel)
             XCTAssertNil(authority.inputSession(for: channelID))
@@ -6749,7 +6937,7 @@ final class ComputerUseTests: XCTestCase {
 
     func testDirectInputChannelReplacementRejectsForeignAndLateCallbacks() throws {
         let events = CapturedCGEventStore(), injector = InputInjector(eventPoster: { events.append($0) })
-        let states = PeerInputStateProbe(), authority = HostPeerInputAuthorization(injector: injector, onChange: { states.append($0) })
+        let states = PeerInputStateProbe(), authority = HostPeerInputAuthorization(injector: injector, initialCaptureAvailable: true, onChange: { states.append($0) })
         let first = NSObject(), second = NSObject()
         let firstID = ObjectIdentifier(first), secondID = ObjectIdentifier(second)
         XCTAssertTrue(authority.connectionChanged(connected: true))
@@ -6806,7 +6994,7 @@ final class ComputerUseTests: XCTestCase {
 
     func testDirectTextRevocationStopsAtACompleteGraphemeAndPreservesReplacementInput() throws {
         let events = CapturedCGEventStore(), injector = InputInjector(eventPoster: { events.append($0) })
-        let authority = HostPeerInputAuthorization(injector: injector)
+        let authority = HostPeerInputAuthorization(injector: injector, initialCaptureAvailable: true)
         let wireHello = DirectInputHello(clientID: UUID(), revision: 1)
         let channel = NSObject(), id = ObjectIdentifier(channel)
         authority.openChannel(id); authority.connectionChanged(connected: true)
@@ -6842,7 +7030,7 @@ final class ComputerUseTests: XCTestCase {
         let manager = HostComputerUseManager(injector: injector, executor: executor, taskLedger: ledger,
             allowsExternalServices: false, channelFactory: { _ in channel })
         defer { manager.stop() }
-        let authority = HostPeerInputAuthorization(injector: injector)
+        let authority = HostPeerInputAuthorization(injector: injector, initialCaptureAvailable: true)
         let wireHello = DirectInputHello(clientID: UUID(), revision: 1)
         let nativeChannel = NSObject(), channelID = ObjectIdentifier(nativeChannel)
         authority.openChannel(channelID); authority.connectionChanged(connected: true); authority.acceptHello(channel: channelID, orderedControls: 1, inputHello: wireHello)

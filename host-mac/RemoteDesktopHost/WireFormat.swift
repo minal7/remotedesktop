@@ -9,6 +9,7 @@ struct ControlPacket {
     let message: ControlMessage
     let inputHello: DirectInputHello?
     let inputStamp: DirectInputStamp?
+    let inputInvalidation: Int
 
     static func decode(_ data: Data) -> ControlPacket? {
         guard let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
@@ -25,7 +26,16 @@ struct ControlPacket {
             case .qos, .bye: break
             }
         }
-        return .init(message: message, inputHello: hello, inputStamp: stamp)
+        var inputInvalidation = 0
+        if case .hello = message {
+            let caps = object["caps"] as? [String: Any]
+            guard object["caps"] == nil || caps != nil,
+                  let version = DirectInputWire.invalidationCapability(in: caps),
+                  version == 0 || hello != nil else { return nil }
+            inputInvalidation = version
+        }
+        return .init(message: message, inputHello: hello, inputStamp: stamp,
+                     inputInvalidation: inputInvalidation)
     }
 }
 
@@ -107,7 +117,8 @@ enum HostMessageEncoder {
         monitors: Int,
         seq: UInt32,
         ts: UInt64,
-        inputSession: DirectInputAcknowledgement? = nil
+        inputSession: DirectInputAcknowledgement? = nil,
+        inputInvalidation: Int = 0
     ) -> Data {
         var obj: [String: Any] = [
             "t": "hello_ack",
@@ -129,10 +140,18 @@ enum HostMessageEncoder {
                 "orderedComputerUseControls":
                     HostConfig.orderedComputerUseControlsVersion,
                 "inputSessions": DirectInputWire.version,
+                "inputInvalidation": inputInvalidation,
             ],
         ]
         if let inputSession { obj["inputSession"] = DirectInputWire.object(inputSession) }
         return (try? JSONSerialization.data(withJSONObject: obj)) ?? Data()
+    }
+
+    static func inputUnavailable(_ inputSession: DirectInputAcknowledgement,
+                                 seq: UInt32, ts: UInt64) -> Data {
+        let object: [String: Any] = ["t": "input_unavailable", "s": seq, "ts": ts,
+            "inputSession": DirectInputWire.object(inputSession) ?? [:]]
+        return (try? JSONSerialization.data(withJSONObject: object)) ?? Data()
     }
 
     static func display(

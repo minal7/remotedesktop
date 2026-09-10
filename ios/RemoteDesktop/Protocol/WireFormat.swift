@@ -31,7 +31,10 @@ enum ControlMessage {
                 "osVersion": UIDevice.current.systemVersion,
                 "orderedComputerUseControls": Config.orderedComputerUseControlsVersion,
             ]
-            if let inputHello { obj["inputSession"] = DirectInputWire.object(inputHello) }
+            if let inputHello {
+                obj["inputSession"] = DirectInputWire.object(inputHello)
+                obj["caps"] = ["inputInvalidation": DirectInputWire.inputInvalidationVersion]
+            }
         case let .pointer(x, y, b):
             obj["t"] = "pointer"
             obj["x"] = x; obj["y"] = y; obj["buttons"] = b
@@ -73,6 +76,7 @@ struct HostHello: Equatable {
     let orderedComputerUseControls: Int
     let inputSessions: Int
     let inputSession: DirectInputAcknowledgement?
+    let inputInvalidation: Int
 
     init(
         app: String,
@@ -83,7 +87,8 @@ struct HostHello: Equatable {
         monitors: Int,
         orderedComputerUseControls: Int = 0,
         inputSessions: Int = 0,
-        inputSession: DirectInputAcknowledgement? = nil
+        inputSession: DirectInputAcknowledgement? = nil,
+        inputInvalidation: Int = 0
     ) {
         self.app = app
         self.version = version
@@ -94,6 +99,7 @@ struct HostHello: Equatable {
         self.orderedComputerUseControls = orderedComputerUseControls
         self.inputSessions = inputSessions
         self.inputSession = inputSession
+        self.inputInvalidation = inputInvalidation
     }
 }
 
@@ -111,6 +117,7 @@ struct DisplayInfo: Equatable {
 enum HostMessage: Equatable {
     case helloAck(HostHello)
     case display(DisplayInfo)
+    case inputUnavailable(DirectInputAcknowledgement)
     case bye(String)
 
     static func decode(_ data: Data) -> HostMessage? {
@@ -130,7 +137,8 @@ enum HostMessage: Equatable {
             guard obj["caps"] == nil || caps != nil else {
                 return .bye("invalid host capabilities")
             }
-            guard let inputSessions = DirectInputWire.capability(in: caps) else {
+            guard let inputSessions = DirectInputWire.capability(in: caps),
+                  let inputInvalidation = DirectInputWire.invalidationCapability(in: caps) else {
                 return .bye("invalid input-session capability")
             }
             var inputSession: DirectInputAcknowledgement?
@@ -150,7 +158,14 @@ enum HostMessage: Equatable {
                 orderedComputerUseControls: int(
                     caps?["orderedComputerUseControls"]),
                 inputSessions: inputSessions,
-                inputSession: inputSession))
+                inputSession: inputSession,
+                inputInvalidation: inputInvalidation))
+        case "input_unavailable":
+            guard let metadata = obj["inputSession"],
+                  let scope = DirectInputWire.decode(metadata, as: DirectInputAcknowledgement.self), scope.isValid else {
+                return .bye("invalid input-unavailable scope")
+            }
+            return .inputUnavailable(scope)
         case "display":
             var inputSession: DirectInputAcknowledgement?
             if let metadata = obj["inputSession"] {

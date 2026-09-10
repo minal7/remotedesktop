@@ -401,7 +401,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         }
     }
 
-    private func sendHelloIfPossible() {
+    private func sendHelloIfPossible(timeout: Duration = .seconds(10)) {
         guard !isClosing, let hello = directInputState.helloToSend,
               let dataChannel, dataChannel.readyState == .open else {
             return
@@ -416,7 +416,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         }
         inputHandshakeDeadlineTask?.cancel()
         inputHandshakeDeadlineTask = Task { [weak self] in
-            do { try await Task.sleep(for: .seconds(10)) } catch { return }
+            do { try await Task.sleep(for: timeout) } catch { return }
             guard let self, !self.isClosing, self.directInputState.hello == hello,
                   !self.directInputState.isReady else { return }
             self.finishDisconnect(reason: "The computer did not acknowledge the input session. Reconnect to try again.")
@@ -767,7 +767,8 @@ extension WebRTCTransport: RTCDataChannelDelegate {
                   dataChannel.readyState == .open else { return }
             switch HostMessage.decode(buffer.data) {
             case .helloAck(let hello):
-                switch directInputState.accept(version: hello.inputSessions, acknowledgement: hello.inputSession) {
+                switch directInputState.accept(version: hello.inputSessions, acknowledgement: hello.inputSession,
+                                               inputInvalidation: hello.inputInvalidation) {
                 case .ignored: return
                 case .invalid:
                     finishDisconnect(reason: "The computer sent an invalid input-session acknowledgement.")
@@ -778,10 +779,23 @@ extension WebRTCTransport: RTCDataChannelDelegate {
                 inputHandshakeDeadlineTask = nil
                 if inputPresentation.matches(hello.inputSession) { return }
                 invalidateInputPresentation()
+                guard !isClosing, self.dataChannel === dataChannel, directInputState.isReady else { return }
                 inputPresentation.begin(hello.inputSession)
                 installFrameProbe()
                 log.info("host acknowledged the WebRTC control channel")
                 onHostHello?(hello)
+            case .inputUnavailable(let scope):
+                switch directInputState.invalidate(scope) {
+                case .ignored: return
+                case .invalid:
+                    finishDisconnect(reason: "The computer sent an invalid input-unavailable event.")
+                    return
+                case .accepted: break
+                }
+                inputHandshakeDeadlineTask?.cancel()
+                inputHandshakeDeadlineTask = nil
+                invalidateInputPresentation()
+                sendHelloIfPossible(timeout: DirectInputWire.captureHandshakeTimeout)
             case .display(let display):
                 guard directInputState.isReady, inputPresentation.matches(display.inputSession) else { return }
                 onDisplay?(display)

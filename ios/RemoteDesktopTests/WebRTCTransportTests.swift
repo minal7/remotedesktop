@@ -9,6 +9,89 @@ final class WebRTCTransportTests: XCTestCase {
     private let accountBinding = CloudKitAccountBinding(
         rawValue: String(repeating: "c", count: 64))!
 
+    func test_captureInvalidationNegotiatesOnlyWithScopedInputAndDecodesTheSelectedMode() throws {
+        let hello = DirectInputHello(clientID: UUID(), revision: 1)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: ControlMessage.hello(proto: 1).encoded(seq: 0, ts: 0, inputHello: hello)) as? [String: Any])
+        XCTAssertEqual((object["caps"] as? [String: Any])?["inputInvalidation"] as? Int, 1)
+        let legacy = try XCTUnwrap(JSONSerialization.jsonObject(with: ControlMessage.hello(proto: 1).encoded(seq: 0, ts: 0)) as? [String: Any])
+        XCTAssertNil(legacy["caps"])
+        let ack = DirectInputAcknowledgement(hello: hello, hostID: UUID(), generation: 1)
+        let bytes = try JSONSerialization.data(withJSONObject: ["t": "hello_ack", "proto": 1,
+            "caps": ["inputSessions": 1, "inputInvalidation": 1], "inputSession": try XCTUnwrap(DirectInputWire.object(ack))])
+        guard case .helloAck(let decoded) = HostMessage.decode(bytes) else { return XCTFail("Expected selected capability") }
+        XCTAssertEqual(decoded.inputInvalidation, 1)
+        var client = DirectInputClientState(clientID: hello.clientID)
+        client.connectionChanged(connected: true); client.markHelloSent(hello)
+        XCTAssertEqual(client.accept(version: decoded.inputSessions, acknowledgement: decoded.inputSession,
+            inputInvalidation: decoded.inputInvalidation), .accepted)
+        XCTAssertEqual(client.invalidate(ack), .accepted)
+    }
+
+    func test_captureInvalidationDecoderRejectsMalformedScopeAndCapability() throws {
+        let ack = DirectInputAcknowledgement(hello: .init(clientID: UUID(), revision: 1), hostID: UUID(), generation: 1)
+        let metadata = try XCTUnwrap(DirectInputWire.object(ack))
+        let bytes = try JSONSerialization.data(withJSONObject: ["t": "input_unavailable", "inputSession": metadata])
+        XCTAssertEqual(HostMessage.decode(bytes), .inputUnavailable(ack))
+        var invalidGeneration = metadata; invalidGeneration["generation"] = true
+        for value: Any in [NSNull(), "invalid", 1, ["version": 1], invalidGeneration] {
+            let malformed = try JSONSerialization.data(withJSONObject: ["t": "input_unavailable", "inputSession": value])
+            guard case .bye = HostMessage.decode(malformed) else { return XCTFail("Malformed revocation must close the transport") }
+        }
+        guard case .bye = HostMessage.decode(Data(#"{"t":"input_unavailable"}"#.utf8)) else { return XCTFail("Missing scope") }
+        for value: Any in [true, "1", -1, 0.5, 2, NSNull()] {
+            let malformed = try JSONSerialization.data(withJSONObject: ["t": "hello_ack", "proto": 1,
+                "caps": ["inputSessions": 1, "inputInvalidation": value], "inputSession": metadata])
+            guard case .bye = HostMessage.decode(malformed) else { return XCTFail("Malformed capability") }
+        }
+    }
+
+    func test_captureInvalidationRetiresPresentationAndRequiresANewHelloRevision() throws {
+        var client = DirectInputClientState(), presentation = RemoteInputPresentationState()
+        client.connectionChanged(connected: true)
+        let hello = try XCTUnwrap(client.helloToSend); client.markHelloSent(hello)
+        let old = DirectInputAcknowledgement(hello: hello, hostID: UUID(), generation: 1)
+        XCTAssertEqual(client.accept(version: 1, acknowledgement: old, inputInvalidation: 1), .accepted)
+        presentation.begin(old)
+        let oldFrame = try XCTUnwrap(presentation.armProbe())
+        XCTAssertNotNil(client.authorizeNextInput())
+        XCTAssertEqual(client.invalidate(.init(hello: hello, hostID: UUID(), generation: 1)), .ignored)
+        XCTAssertTrue(client.isReady)
+        XCTAssertEqual(client.invalidate(old), .accepted)
+        XCTAssertTrue(presentation.invalidate())
+        XCTAssertFalse(client.isReady); XCTAssertNil(client.authorizeNextInput())
+        XCTAssertFalse(presentation.acceptsFrame(oldFrame)); XCTAssertFalse(presentation.matches(old))
+        let nextHello = try XCTUnwrap(client.helloToSend)
+        XCTAssertEqual(nextHello.clientID, hello.clientID); XCTAssertEqual(nextHello.revision, 2)
+        XCTAssertEqual(client.invalidate(old), .ignored)
+        XCTAssertEqual(client.helloToSend, nextHello, "Duplicate events must not restart the handshake deadline")
+        client.markHelloSent(nextHello)
+        XCTAssertEqual(client.accept(version: 1, acknowledgement: old, inputInvalidation: 1), .ignored)
+        let next = DirectInputAcknowledgement(hello: nextHello, hostID: UUID(), generation: 2)
+        XCTAssertEqual(client.accept(version: 1, acknowledgement: next, inputInvalidation: 1), .accepted)
+        presentation.begin(next)
+        let newFrame = try XCTUnwrap(presentation.armProbe())
+        XCTAssertFalse(presentation.matches(old)); XCTAssertFalse(presentation.acceptsFrame(oldFrame))
+        XCTAssertTrue(presentation.acceptsFrame(newFrame))
+        XCTAssertEqual(client.invalidate(old), .ignored)
+        XCTAssertTrue(presentation.matches(next)); XCTAssertTrue(client.isReady)
+        XCTAssertEqual(client.authorizeNextInput(), .scoped(.init(hostID: next.hostID, generation: next.generation, sequence: 1)))
+    }
+
+    func test_captureInvalidationRequiresTheNegotiatedModeAndCannotDowngradeIt() throws {
+        for negotiated in [0, 1] {
+            var client = DirectInputClientState()
+            client.connectionChanged(connected: true)
+            let hello = try XCTUnwrap(client.helloToSend); client.markHelloSent(hello)
+            let ack = DirectInputAcknowledgement(hello: hello, hostID: UUID(), generation: 1)
+            XCTAssertEqual(client.accept(version: 1, acknowledgement: ack, inputInvalidation: negotiated), .accepted)
+            XCTAssertEqual(client.accept(version: 1, acknowledgement: ack, inputInvalidation: 1 - negotiated), .invalid)
+            XCTAssertEqual(client.invalidate(ack), negotiated == 1 ? .accepted : .invalid)
+            client.close()
+            XCTAssertEqual(client.invalidate(ack), .ignored)
+            XCTAssertFalse(client.connectionChanged(connected: true))
+        }
+    }
+
     func test_localRecoveryReadFailureStopsBeforeHandshakeOrVisualConnection() async throws {
         let unexpectedTransport = RecordingTargetTransport(connected: XCTestExpectation(description: "unexpected connection"))
         let expectedBinding = accountBinding
