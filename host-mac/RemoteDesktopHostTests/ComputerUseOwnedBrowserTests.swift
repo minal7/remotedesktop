@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import Network
+import WebKit
 import XCTest
 @testable import RemoteDesktopHost
 
@@ -2920,6 +2921,230 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
 
 @MainActor
 final class ComputerUseOwnedBrowserVisibleAcceptanceTests: XCTestCase {
+    private func fixtureWindow(_ title: String) throws -> (NSWindow, WKWebView) {
+        let window = try XCTUnwrap(NSApp.windows.first { $0.title == title && $0.isVisible })
+        func webView(in view: NSView) -> WKWebView? {
+            if let webView = view as? WKWebView { return webView }
+            for child in view.subviews { if let found = webView(in: child) { return found } }
+            return nil
+        }
+        return (window, try XCTUnwrap(window.contentView.flatMap { webView(in: $0) }))
+    }
+
+    func testParentProcessFailureRetainsFailedAttemptBeforeReplacementPublication() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_OWNED_BROWSER_VISIBLE_ACCEPTANCE"] == "1" else {
+            throw XCTSkip("Opt-in: injects a process-failure delegate event into a visible local fixture")
+        }
+        let previousPolicy = NSApp.activationPolicy()
+        NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let server = try OwnedBrowserHTTPFixture(routes: ["/pending": .init(held: true)])
+        let base = try await server.start()
+        defer { server.stop() }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true })
+        defer { browser.close() }
+        let original = try browser.prepareWorkflowSession(taskID: "failed-load")
+        let load = Task { try await browser.navigate(taskID: "failed-load", operationID: "pending", to: base.appendingPathComponent("pending")) }
+        defer { load.cancel() }
+        let deadline = ContinuousClock.now + .seconds(5)
+        while server.count("/pending") == 0 && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(server.count("/pending"), 1)
+        let (_, view) = try fixtureWindow("AI Browser — Remote Desktop")
+        var replaced = false
+        var replacement: ComputerUseBrowserHandbackRequirement?
+        let subscription = browser.$detail.sink { status in
+            guard status == "Browser process stopped", !replaced else { return }
+            replaced = true
+            XCTAssertEqual(browser.taskID, "failed-load", "Failure must not invent task cancellation")
+            XCTAssertEqual(browser.handbackRequirement(taskID: "failed-load", required: true), original)
+            XCTAssertNil(browser.currentDocument(taskID: "failed-load"))
+            XCTAssertTrue(browser.hasNavigationAttempt(operationID: "pending"))
+            do {
+                let history = try browser.navigationDispatchHistory(taskID: "failed-load")
+                XCTAssertEqual(history.attempts.last?.outcome, .failed)
+                XCTAssertFalse(history.claimEvents.contains { $0.phase == .retired })
+                browser.close()
+                replacement = try browser.prepareWorkflowSession(taskID: "replacement")
+            } catch { XCTFail("Failure publication must retain evidence and admit a later replacement: \(error)") }
+        }
+        defer { subscription.cancel() }
+        browser.webViewWebContentProcessDidTerminate(view)
+        do { _ = try await load.value; XCTFail("The failed load cannot return a document") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .navigationFailed) }
+        let current = try XCTUnwrap(replacement)
+        XCTAssertNotEqual(current.sessionID, original.sessionID)
+        XCTAssertEqual(browser.handbackRequirement(taskID: "replacement", required: true), current)
+        XCTAssertTrue(try browser.isUnnavigatedSession(current))
+        let next = try await browser.navigate(taskID: "replacement", operationID: "next", to: base.appendingPathComponent("next"))
+        XCTAssertTrue(browser.validate(next))
+        XCTAssertEqual(server.count("/pending"), 1); XCTAssertEqual(server.count("/next"), 1)
+    }
+
+    func testParentProcessFailureWithdrawsDOMResultWithoutReleasingItsJoin() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_OWNED_BROWSER_VISIBLE_ACCEPTANCE"] == "1" else {
+            throw XCTSkip("Opt-in: injects failure after a native DOM dispatch in a visible local fixture")
+        }
+        let previousPolicy = NSApp.activationPolicy()
+        NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let server = try OwnedBrowserHTTPFixture()
+        let base = try await server.start()
+        defer { server.stop() }
+        weak var owner: ComputerUseOwnedBrowser?
+        var view: WKWebView?, interrupted = false
+        let browser = ComputerUseOwnedBrowser(domScriptDidDispatch: { command in
+            guard command == .pageSnapshot, !interrupted, let owner, let view else { return }
+            interrupted = true
+            owner.webViewWebContentProcessDidTerminate(view)
+            XCTAssertEqual(owner.taskID, "failed-dom")
+            XCTAssertThrowsError(try owner.claim(taskID: "replacement")) { XCTAssertEqual($0 as? ComputerUseBrowserError, .busy) }
+        }, mayAct: { true })
+        owner = browser
+        defer { browser.close() }
+        let original = try browser.prepareWorkflowSession(taskID: "failed-dom")
+        let document = try await browser.navigate(taskID: "failed-dom", operationID: "page", to: base)
+        (_, view) = try fixtureWindow("AI Browser — Remote Desktop")
+        do { _ = try await browser.observePage(document: document); XCTFail("Failure must withdraw the current DOM result") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+        XCTAssertTrue(interrupted)
+        await browser.joinDOMCompletion(document: document)
+        XCTAssertEqual(browser.handbackRequirement(taskID: "failed-dom", required: true), original)
+        XCTAssertNil(browser.currentDocument(taskID: "failed-dom"))
+        XCTAssertFalse(browser.validate(document))
+        XCTAssertEqual(browser.receipt(taskID: "failed-dom", operationID: "page"), document, "Historical navigation is retained, not current-page proof")
+        let next = try await browser.navigate(taskID: "failed-dom", operationID: "next", to: base.appendingPathComponent("next"))
+        XCTAssertTrue(browser.validate(next))
+        XCTAssertEqual(server.count("/"), 1); XCTAssertEqual(server.count("/next"), 1)
+    }
+
+    func testProcessFailureChildPublicationPreservesParentOrReplacement() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_OWNED_BROWSER_VISIBLE_ACCEPTANCE"] == "1" else {
+            throw XCTSkip("Opt-in: injects parent/child failure into visible local sign-in fixtures")
+        }
+        let previousPolicy = NSApp.activationPolicy()
+        NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        for parentFailed in [false, true] {
+            for replace in [false, true] {
+                let server = try OwnedBrowserHTTPFixture(routes: ["/login": .init(body: "<script>fetch('/signal').then(() => window.open('/provider'));</script>"),
+                    "/signal": .init(held: true), "/provider": .init(body: "<script>fetch('/ready');</script>")])
+                let base = try await server.start()
+                defer { server.stop() }
+                var allowed = true
+                let browser = ComputerUseOwnedBrowser(mayAct: { allowed })
+                defer { browser.close() }
+                let original = try browser.prepareWorkflowSession(taskID: "login")
+                let document = try await browser.navigate(taskID: "login", operationID: "page", to: base.appendingPathComponent("login"))
+                let (_, parent) = try fixtureWindow("AI Browser — Remote Desktop")
+                let deadline = ContinuousClock.now + .seconds(5)
+                while server.count("/signal") == 0 && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+                XCTAssertEqual(server.count("/signal"), 1)
+                allowed = false
+                let controls = ComputerUseBrowserTaskControls(taskID: "login", scopeID: UUID(), presentationID: UUID(), phase: .paused, canResume: true)
+                browser.updateTaskControls(controls, handler: { _, _ in XCTFail("Process failure cannot synthesize Resume or Stop") })
+                server.releaseHeldResponses()
+                while server.count("/ready") == 0 && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+                XCTAssertEqual(server.count("/ready"), 1)
+                let (popup, child) = try fixtureWindow("Sign-in window — AI Browser")
+                var cleared = false, replacement: ComputerUseBrowserHandbackRequirement?
+                var details: [String] = []
+                let detailSubscription = browser.$detail.sink { details.append($0) }
+                let subscription = browser.$signInSite.dropFirst().sink { site in
+                    guard site == nil, !cleared else { return }
+                    cleared = true
+                    XCTAssertEqual(browser.taskID, "login")
+                    XCTAssertFalse(browser.hasOpenSignInWindow)
+                    XCTAssertNil(popup.contentView)
+                    allowed = true
+                    if replace {
+                        browser.close()
+                        do { replacement = try browser.prepareWorkflowSession(taskID: "replacement") }
+                        catch { XCTFail("Failure cleanup must finish before publication: \(error)") }
+                    }
+                }
+                defer { subscription.cancel(); detailSubscription.cancel() }
+                browser.webViewWebContentProcessDidTerminate(parentFailed ? parent : child)
+                XCTAssertTrue(cleared)
+                XCTAssertFalse(details.contains { $0.hasPrefix("Sign-in window closed") }, "A failed child must not briefly publish the ordinary close invitation")
+                if replace {
+                    let current = try XCTUnwrap(replacement)
+                    XCTAssertEqual(browser.handbackRequirement(taskID: "replacement", required: true), current)
+                    let status = browser.detail
+                    browser.webViewWebContentProcessDidTerminate(parent)
+                    browser.webViewWebContentProcessDidTerminate(child)
+                    XCTAssertEqual(browser.detail, status, "Detached native views cannot report failure against a replacement")
+                    XCTAssertTrue(try browser.isUnnavigatedSession(current))
+                } else {
+                    XCTAssertEqual(browser.handbackRequirement(taskID: "login", required: true), original)
+                    XCTAssertEqual(browser.taskControls, controls)
+                    XCTAssertEqual(browser.validate(document), !parentFailed)
+                    XCTAssertEqual(browser.detail, parentFailed ? "Browser process stopped" : "The sign-in window stopped. Check the main page before continuing.")
+                }
+                let next = try await browser.navigate(taskID: replace ? "replacement" : "login", operationID: "next", to: base.appendingPathComponent("next"))
+                XCTAssertTrue(browser.validate(next))
+                XCTAssertEqual(server.count("/login"), 1); XCTAssertEqual(server.count("/provider"), 1); XCTAssertEqual(server.count("/next"), 1)
+            }
+        }
+    }
+
+    func testChildFailureCoalescesParentFailureAndPreservesNestedRetirement() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_OWNED_BROWSER_VISIBLE_ACCEPTANCE"] == "1" else {
+            throw XCTSkip("Opt-in: injects shared-process failure during a native child close notification")
+        }
+        let previousPolicy = NSApp.activationPolicy()
+        NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        for ending in ["failure", "stop", "close"] {
+            let server = try OwnedBrowserHTTPFixture(routes: ["/login": .init(body: "<script>fetch('/signal').then(() => window.open('/provider'));</script>"),
+                "/signal": .init(held: true), "/provider": .init(body: "<script>fetch('/ready');</script>")])
+            let base = try await server.start()
+            defer { server.stop() }
+            var allowed = true
+            let browser = ComputerUseOwnedBrowser(mayAct: { allowed })
+            defer { browser.close() }
+            _ = try browser.prepareWorkflowSession(taskID: "shared-process")
+            let document = try await browser.navigate(taskID: "shared-process", operationID: "page", to: base.appendingPathComponent("login"))
+            let (_, parent) = try fixtureWindow("AI Browser — Remote Desktop")
+            let deadline = ContinuousClock.now + .seconds(5)
+            while server.count("/signal") == 0 && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+            XCTAssertEqual(server.count("/signal"), 1)
+            allowed = false
+            browser.updateTaskControls(.init(taskID: "shared-process", scopeID: UUID(), presentationID: UUID(), phase: .paused, canResume: true), handler: { _, _ in })
+            server.releaseHeldResponses()
+            while server.count("/ready") == 0 && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+            XCTAssertEqual(server.count("/ready"), 1)
+            let (popup, child) = try fixtureWindow("Sign-in window — AI Browser")
+            var notifications = 0
+            let subscription = NotificationCenter.default.publisher(for: NSWindow.willCloseNotification, object: popup).sink { _ in
+                notifications += 1
+                browser.webViewWebContentProcessDidTerminate(parent)
+                XCTAssertThrowsError(try browser.claim(taskID: "premature")) { XCTAssertEqual($0 as? ComputerUseBrowserError, .busy) }
+                if ending == "stop" { browser.stop() }
+                if ending == "close" { browser.close() }
+            }
+            defer { subscription.cancel() }
+            browser.webViewWebContentProcessDidTerminate(child)
+            XCTAssertEqual(notifications, 1)
+            allowed = true
+            XCTAssertFalse(browser.validate(document))
+            if ending == "failure" {
+                XCTAssertEqual(browser.taskID, "shared-process")
+                XCTAssertEqual(browser.detail, "Browser process stopped")
+                let history = try browser.navigationDispatchHistory(taskID: "shared-process")
+                XCTAssertEqual(history.observations.filter { $0.phase == .webContentTerminated }.count, 2)
+                XCTAssertFalse(history.claimEvents.contains { $0.phase == .retired })
+            } else {
+                XCTAssertNil(browser.taskID)
+                XCTAssertEqual(browser.detail, "Stopped")
+                XCTAssertEqual(browser.hasSession, ending == "stop")
+            }
+            _ = try browser.prepareWorkflowSession(taskID: "replacement")
+            let next = try await browser.navigate(taskID: "replacement", operationID: "next", to: base.appendingPathComponent("next"))
+            XCTAssertTrue(browser.validate(next))
+            XCTAssertEqual(server.count("/next"), 1)
+        }
+    }
+
     func testUserParentWindowCloseNotifiesItsDisplayedControlOnceAfterRetirement() async throws {
         guard ProcessInfo.processInfo.environment["RUN_OWNED_BROWSER_VISIBLE_ACCEPTANCE"] == "1" else {
             throw XCTSkip("Opt-in: closes a local fixture window through AppKit")

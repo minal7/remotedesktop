@@ -621,6 +621,21 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         }
     }
     private var nativeRetirement: NativeRetirement?
+    @MainActor
+    private final class ProcessFailureCleanup {
+        let parent: WKWebView
+        let taskID: String?
+        let sessionID: UUID
+        let ownershipEpoch: UUID
+        var parentFailed: Bool
+
+        init(parent: WKWebView, taskID: String?, sessionID: UUID, ownershipEpoch: UUID, parentFailed: Bool) {
+            self.parent = parent; self.taskID = taskID; self.sessionID = sessionID
+            self.ownershipEpoch = ownershipEpoch; self.parentFailed = parentFailed
+        }
+    }
+    private var processFailureCleanup: ProcessFailureCleanup?
+    private var isNativeCleanupActive: Bool { nativeRetirement != nil || processFailureCleanup != nil }
     private var urlObservation: NSKeyValueObservation?
     private var pending: PendingNavigation?
     private var pendingDOM: PendingDOM?
@@ -735,7 +750,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     }
 
     func claim(taskID: String) throws {
-        guard nativeRetirement == nil else { throw ComputerUseBrowserError.busy }
+        guard !isNativeCleanupActive else { throw ComputerUseBrowserError.busy }
         guard !hasOpenSignInWindow else { throw ComputerUseBrowserError.signInWindowOpen }
         guard pending == nil, pendingDOM == nil, observedNavigation == nil else { throw ComputerUseBrowserError.busy }
         guard mayAct(), !taskID.isEmpty else { throw ComputerUseBrowserError.ownershipLost }
@@ -764,7 +779,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         }
     }
 
-    func hasOwnership(taskID: String) -> Bool { nativeRetirement == nil && self.taskID == taskID && mayAct() && !hasOpenSignInWindow }
+    func hasOwnership(taskID: String) -> Bool { !isNativeCleanupActive && self.taskID == taskID && mayAct() && !hasOpenSignInWindow }
 
     var hasOpenSignInWindow: Bool { signInBrowser != nil }
     var hasSession: Bool { browser != nil }
@@ -1943,7 +1958,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     }
 
     private func locationChanged(in view: WKWebView, to url: URL?, ordered: Bool) {
-        guard nativeRetirement == nil else { return }
+        guard !isNativeCleanupActive else { return }
         guard browser === view, view.url == url else { return }
         locationRevision &+= 1
         if url != nil || !ordered { sessionHasNavigationActivity = true }
@@ -1981,7 +1996,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     }
 
     private var canOpenSignInWindow: Bool {
-        nativeRetirement == nil && isUserControllingTask && !hasOpenSignInWindow && pending == nil
+        !isNativeCleanupActive && isUserControllingTask && !hasOpenSignInWindow && pending == nil
             && pendingDOM == nil && browser?.isLoading == false
     }
 
@@ -2260,7 +2275,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
 
     private func recordNavigationCallback(_ phase: NavigationHistory.Phase, in view: WKWebView, navigation: WKNavigation?,
                                           control: NavigationHistory.Control = .unknown) {
-        guard nativeRetirement == nil else { return }
+        guard !isNativeCleanupActive else { return }
         if view === signInBrowser {
             recordNavigationObservation(phase, url: view.url, binding: .none, control: control, surface: .signInWindow)
             return
@@ -2299,6 +2314,8 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     }
 
     private func navigationCallbackScope(in view: WKWebView) -> NavigationCallbackScope? {
+        // Failure cleanup may retain its post-invalidation context here;
+        // isCurrentNavigationCallback admits it only after cleanup returns.
         guard nativeRetirement == nil, let browser, view === browser || view === signInBrowser else { return nil }
         return .init(view: view, parent: browser, isSignIn: view === signInBrowser,
             taskID: taskID, sessionID: browserSessionID, ownershipEpoch: ownershipEpoch, takeoverEpoch: takeoverEpoch,
@@ -2308,7 +2325,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     }
 
     private func isCurrentNavigationCallback(_ scope: NavigationCallbackScope?) -> Bool {
-        guard nativeRetirement == nil, let scope else { return false }
+        guard !isNativeCleanupActive, let scope else { return false }
         return browser === scope.parent && scope.view === (scope.isSignIn ? signInBrowser : browser)
             && taskID == scope.taskID && browserSessionID == scope.sessionID && ownershipEpoch == scope.ownershipEpoch
             && takeoverEpoch == scope.takeoverEpoch && generation == scope.generation && locationRevision == scope.locationRevision
@@ -2319,7 +2336,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
                  decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void) {
-        guard nativeRetirement == nil else { decisionHandler(.cancel); return }
+        guard !isNativeCleanupActive else { decisionHandler(.cancel); return }
         let callback = navigationCallbackScope(in: webView)
         func decide(_ decision: WKNavigationActionPolicy, control: NavigationHistory.Control = .unknown,
                     policyCheck: NavigationHistory.PolicyCheck = .notChecked) {
@@ -2393,7 +2410,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse,
                  decisionHandler: @escaping @MainActor @Sendable (WKNavigationResponsePolicy) -> Void) {
-        guard nativeRetirement == nil else { decisionHandler(.cancel); return }
+        guard !isNativeCleanupActive else { decisionHandler(.cancel); return }
         let callback = navigationCallbackScope(in: webView)
         func decide(_ decision: WKNavigationResponsePolicy, control: NavigationHistory.Control = .unknown,
                     policyCheck: NavigationHistory.PolicyCheck = .notChecked) {
@@ -2449,7 +2466,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     @available(macOS 26.0, *)
     func webView(_ webView: WKWebView, shouldGoTo backForwardListItem: WKBackForwardListItem,
                  willUseInstantBack: Bool, completionHandler: @escaping (Bool) -> Void) {
-        guard nativeRetirement == nil else { completionHandler(false); return }
+        guard !isNativeCleanupActive else { completionHandler(false); return }
         let callback = navigationCallbackScope(in: webView)
         let url = backForwardListItem.url
         func decide(_ permitted: Bool, control: NavigationHistory.Control = .unknown,
@@ -2494,7 +2511,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     }
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
-        guard nativeRetirement == nil else { return }
+        guard !isNativeCleanupActive else { return }
         if webView === signInBrowser {
             recordNavigationCallback(.provisionalStart, in: webView, navigation: navigation)
             return
@@ -2533,7 +2550,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        guard nativeRetirement == nil else { return }
+        guard !isNativeCleanupActive else { return }
         recordNavigationCallback(.documentFinished, in: webView, navigation: navigation)
         guard webView === browser else { return }
         if pending == nil {
@@ -2618,7 +2635,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-        guard nativeRetirement == nil else { return }
+        guard !isNativeCleanupActive else { return }
         recordNavigationCallback(.navigationFailure, in: webView, navigation: navigation)
         if webView === signInBrowser {
             signInDetail = "The sign-in page did not finish loading. Close this window to return."
@@ -2632,7 +2649,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         if let pending, navigation === pending.navigation { failPending(id: pending.id, error: .navigationFailed) }
     }
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-        guard nativeRetirement == nil else { return }
+        guard !isNativeCleanupActive else { return }
         recordNavigationCallback(.navigationFailure, in: webView, navigation: navigation)
         if webView === signInBrowser {
             signInDetail = "The sign-in page did not finish loading. Close this window to return."
@@ -2647,21 +2664,64 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     }
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         guard nativeRetirement == nil else { return }
-        recordNavigationCallback(.webContentTerminated, in: webView, navigation: nil)
-        if webView === signInBrowser {
-            closeSignInWindow()
-            detail = "The sign-in window stopped. Check the main page before continuing."
+        if let cleanup = processFailureCleanup {
+            // A child and its opener can report termination during the same
+            // native cleanup. Keep the parent's failure without recursing or
+            // attributing the old notification to a replacement claim.
+            if webView === cleanup.parent, retainsProcessFailureOwner(cleanup), !cleanup.parentFailed {
+                recordNavigationSlot(.webContentTerminated, url: webView.url)
+                cleanup.parentFailed = true
+            }
             return
         }
-        guard webView === browser else { return }
-        closeSignInWindow(restoreParent: false)
-        if let pending { failPending(id: pending.id, error: .navigationFailed) }
-        endObservedNavigation(.processTerminated)
-        retirePageObservations(.processTerminated)
-        generation &+= 1
-        document = nil
-        loadedPageIdentity = nil
-        detail = "Browser process stopped"
+        guard let parent = browser, webView === parent || webView === signInBrowser else { return }
+        recordNavigationCallback(.webContentTerminated, in: webView, navigation: nil)
+        let cleanup = ProcessFailureCleanup(parent: parent, taskID: taskID, sessionID: browserSessionID,
+            ownershipEpoch: ownershipEpoch, parentFailed: webView === parent)
+        processFailureCleanup = cleanup
+        let controlsOwner = taskControls?.ownerID, controlsTask = taskControls?.taskID
+        let child = detachSignInWindow()
+        var failed: PendingNavigation?
+        defer { failed?.continuation.resume(throwing: ComputerUseBrowserError.navigationFailed) }
+        var invalidatedParent = false
+        var projection = navigationCallbackScope(in: parent)
+        func invalidateFailedParent() {
+            guard cleanup.parentFailed, !invalidatedParent, retainsProcessFailureOwner(cleanup) else { return }
+            invalidatedParent = true
+            failed = pending.flatMap { detachPendingFailure(id: $0.id, error: .navigationFailed) }
+            endObservedNavigation(.processTerminated)
+            retirePageObservations(.processTerminated)
+            generation &+= 1
+            document = nil
+            loadedPageIdentity = nil
+            if let pendingDOM { interruptDOM(id: pendingDOM.id, error: ComputerUseBrowserError.pageChanged) }
+            projection = navigationCallbackScope(in: parent)
+        }
+        invalidateFailedParent()
+        if let child { finishSignInNativeCleanup(child) }
+        invalidateFailedParent()
+        if failed?.nativeDispatchStarted == true { parent.stopLoading() }
+        // A real script callback can join its old slot during these calls.
+        // The termination notification alone does not release that join or
+        // prove whether a dispatched script/network effect happened.
+        processFailureCleanup = nil
+        func retainsProjection() -> Bool {
+            retainsProcessFailureOwner(cleanup) && isCurrentNavigationCallback(projection)
+                && taskControls?.ownerID == controlsOwner && taskControls?.taskID == controlsTask
+        }
+        guard retainsProjection() else { return }
+        if signInSite != nil { signInSite = nil }
+        guard retainsProjection() else { return }
+        detail = invalidatedParent ? "Browser process stopped"
+            : "The sign-in window stopped. Check the main page before continuing."
+        guard retainsProjection(), !invalidatedParent, let child,
+              child.wasKey, window === child.parentWindow else { return }
+        child.parentWindow?.makeKeyAndOrderFront(nil)
+    }
+
+    private func retainsProcessFailureOwner(_ cleanup: ProcessFailureCleanup) -> Bool {
+        browser === cleanup.parent && taskID == cleanup.taskID && browserSessionID == cleanup.sessionID
+            && ownershipEpoch == cleanup.ownershipEpoch
     }
 }
 
