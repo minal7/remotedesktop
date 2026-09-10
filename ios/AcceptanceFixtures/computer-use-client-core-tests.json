@@ -4,7 +4,16 @@
     "RemoteDesktopTests/RemoteScreenInteractionTests/test_fullDisplaySurfaceSharesItsVideoAndInputRectangleAcrossAspectRatios",
     "RemoteDesktopTests/RemoteScreenInteractionTests/test_fullDisplaySurfaceRestoresLogicalAspectIndependentlyOfDrawableRounding",
     "RemoteDesktopTests/WebRTCTransportTests/test_displayDecoderRequiresAKnownFullSurfaceMappingAndValidGeometry",
-    "RemoteDesktopTests/WebRTCTransportTests/test_displayDecoderRetainsSurfaceMappingUnderItsInputScope"
+    "RemoteDesktopTests/WebRTCTransportTests/test_displayDecoderRetainsSurfaceMappingUnderItsInputScope",
+    "RemoteDesktopTests/RemoteScreenInteractionTests/test_pointerRoutingRejectsMarginPressesAndUnownedMovementButtons",
+    "RemoteDesktopTests/RemoteScreenInteractionTests/test_pointerRoutingClampsHeldMotionAndReleasesAtLastVisiblePoint",
+    "RemoteDesktopTests/RemoteScreenInteractionTests/test_pointerRoutingResetDropsOldHoldsAndRequiresANewPress",
+    "RemoteDesktopTests/RemoteScreenInteractionTests/test_scrollRoutingRequiresInsideBeginAndTheOwningGesture",
+    "RemoteDesktopTests/RemoteScreenInteractionTests/test_scrollRoutingEndsOnceOnBoundaryLossOrInvalidDelta",
+    "RemoteDesktopTests/RemoteScreenInteractionTests/test_scrollRoutingRequiresObservedLocationAndBoundedDeltas",
+    "RemoteDesktopTests/RemoteScreenInteractionTests/test_screenGeometryUsesAllLogicalCellsAndRejectsInvalidMappings",
+    "RemoteDesktopTests/RemoteScreenInteractionTests/test_screenGeometryClipsZoomedContentBeforeNewGestures",
+    "RemoteDesktopTests/RemoteScreenInteractionTests/test_touchCursorStaysInsideVisibleEdgesAndIgnoresInvalidMotion"
   ],
   "expectedTests": [
     "RemoteDesktopTests/ComputerUseClarificationClientTests/testAnswerRetriesAndRelaunchReuseExactBodyAndTaskIDEvenAfterReferenceExpiry",
@@ -44,6 +53,15 @@
     "RemoteDesktopTests/ComputerUseClarificationClientTests/testWholePartyQuestionRetainsAnIncompleteDraftAndSendsBothCountsUnderTheOriginalReference",
     "RemoteDesktopTests/RemoteScreenInteractionTests/test_fullDisplaySurfaceRestoresLogicalAspectIndependentlyOfDrawableRounding",
     "RemoteDesktopTests/RemoteScreenInteractionTests/test_fullDisplaySurfaceSharesItsVideoAndInputRectangleAcrossAspectRatios",
+    "RemoteDesktopTests/RemoteScreenInteractionTests/test_pointerRoutingClampsHeldMotionAndReleasesAtLastVisiblePoint",
+    "RemoteDesktopTests/RemoteScreenInteractionTests/test_pointerRoutingRejectsMarginPressesAndUnownedMovementButtons",
+    "RemoteDesktopTests/RemoteScreenInteractionTests/test_pointerRoutingResetDropsOldHoldsAndRequiresANewPress",
+    "RemoteDesktopTests/RemoteScreenInteractionTests/test_screenGeometryClipsZoomedContentBeforeNewGestures",
+    "RemoteDesktopTests/RemoteScreenInteractionTests/test_screenGeometryUsesAllLogicalCellsAndRejectsInvalidMappings",
+    "RemoteDesktopTests/RemoteScreenInteractionTests/test_scrollRoutingEndsOnceOnBoundaryLossOrInvalidDelta",
+    "RemoteDesktopTests/RemoteScreenInteractionTests/test_scrollRoutingRequiresInsideBeginAndTheOwningGesture",
+    "RemoteDesktopTests/RemoteScreenInteractionTests/test_scrollRoutingRequiresObservedLocationAndBoundedDeltas",
+    "RemoteDesktopTests/RemoteScreenInteractionTests/test_touchCursorStaysInsideVisibleEdgesAndIgnoresInvalidMotion",
     "RemoteDesktopTests/WebRTCTransportTests/test_displayDecoderRequiresAKnownFullSurfaceMappingAndValidGeometry",
     "RemoteDesktopTests/WebRTCTransportTests/test_displayDecoderRetainsSurfaceMappingUnderItsInputScope"
   ]

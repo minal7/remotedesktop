@@ -249,6 +249,15 @@ posting input. The phone must not add an origin from another display or infer
 one from the host's focused window. Coalesce at the sender — don't send more
 than one per WebRTC frame.
 
+The phone maps the visible content rectangle across all `w` by `h` logical
+cells, flooring the normalized position and bounding the result to the last
+cell. An absolute pointer press must begin inside the visible viewport/content
+intersection; a press in a black margin must not be clamped into a desktop
+click. Held movement may clamp to the visible boundary. A release outside the
+surface uses its last admitted position and must not add buttons. Relative
+finger input controls the visible floating cursor, so its finger position is
+not interpreted as an absolute desktop click.
+
 The host binds this layout to its native capture attempt and local input
 session. A detected display identity, bounds, mode or rotation change retires
 the old input scope through the negotiated capture-loss invalidation path;

@@ -4,7 +4,167 @@ import UIKit
 @testable import RemoteDesktop
 
 final class RemoteScreenInteractionTests: XCTestCase {
-    func test_fullDisplaySurfaceSharesItsVideoAndInputRectangleAcrossAspectRatios() {
+    private var routingGeometry: RemoteScreenGeometry {
+        RemoteScreenGeometry(bounds: CGRect(x: 0, y: 0, width: 200, height: 200),
+            display: DisplayInfo(w: 100, h: 50, scale: 2, fullDisplaySurface: true))
+    }
+
+    func test_pointerRoutingRejectsMarginPressesAndUnownedMovementButtons() {
+        let geometry = routingGeometry, viewport = geometry.bounds
+        var routing = RemoteScreenInputRouting()
+        for point in [CGPoint(x: 100, y: 20), CGPoint(x: 100, y: 180), CGPoint(x: 200, y: 100)] {
+            XCTAssertNil(routing.pointer(at: point, buttons: 1, geometry: geometry, viewport: viewport))
+            XCTAssertEqual(routing.pointerButtons, 0)
+        }
+        XCTAssertEqual(routing.pointer(at: CGPoint(x: 100, y: 100), buttons: 1, allowsNewButtons: false,
+            geometry: geometry, viewport: viewport), .pointer(x: 50, y: 25, buttons: 0),
+            "A moved event cannot create the press that began in a margin")
+        XCTAssertNil(routing.pointer(at: CGPoint(x: 100, y: 20), buttons: 0, geometry: geometry, viewport: viewport))
+        XCTAssertEqual(routing.pointer(at: CGPoint(x: 100, y: 100), buttons: 1,
+            geometry: geometry, viewport: viewport), .pointer(x: 50, y: 25, buttons: 1))
+        XCTAssertNil(routing.pointer(at: CGPoint(x: 100, y: 100), buttons: 1,
+            geometry: geometry, viewport: viewport), "Duplicate admitted events remain coalesced")
+    }
+
+    func test_pointerRoutingClampsHeldMotionAndReleasesAtLastVisiblePoint() {
+        let geometry = routingGeometry, viewport = CGRect(x: 40, y: 70, width: 100, height: 60)
+        var routing = RemoteScreenInputRouting()
+        XCTAssertEqual(routing.pointer(at: CGPoint(x: 100, y: 100), buttons: 3,
+            geometry: geometry, viewport: viewport), .pointer(x: 50, y: 25, buttons: 3))
+        XCTAssertEqual(routing.pointer(at: CGPoint(x: 180, y: 150), buttons: 7,
+            geometry: geometry, viewport: viewport), .pointer(x: 69, y: 39, buttons: 3),
+            "Clamp an existing drag to visible cells without adding an outside button")
+        XCTAssertEqual(routing.pointer(at: nil, buttons: 1, geometry: geometry, viewport: viewport),
+                       .pointer(x: 69, y: 39, buttons: 1))
+        let unavailable = RemoteScreenGeometry(bounds: .zero, display: nil)
+        XCTAssertEqual(routing.pointer(at: CGPoint(x: .nan, y: .infinity), buttons: 0,
+            geometry: unavailable, viewport: .zero), .pointer(x: 69, y: 39, buttons: 0),
+            "Missing geometry cannot prevent release of this routing state's existing hold")
+        XCTAssertNil(routing.pointer(at: nil, buttons: 0, geometry: unavailable, viewport: .zero))
+    }
+
+    func test_pointerRoutingResetDropsOldHoldsAndRequiresANewPress() {
+        let geometry = routingGeometry, viewport = geometry.bounds
+        var routing = RemoteScreenInputRouting()
+        _ = routing.pointer(at: CGPoint(x: 100, y: 100), buttons: 1, geometry: geometry, viewport: viewport)
+        // Production discards this value when its view input-source lease is
+        // retired; SessionModel owns the old lease's actual transport cleanup.
+        routing = RemoteScreenInputRouting()
+        XCTAssertNil(routing.pointer(at: nil, buttons: 0, geometry: geometry, viewport: viewport))
+        XCTAssertEqual(routing.pointer(at: CGPoint(x: 120, y: 110), buttons: 1, allowsNewButtons: false,
+            geometry: geometry, viewport: viewport), .pointer(x: 60, y: 30, buttons: 0))
+        XCTAssertEqual(routing.pointer(at: CGPoint(x: 120, y: 110), buttons: 2,
+            geometry: geometry, viewport: viewport), .pointer(x: 60, y: 30, buttons: 2))
+        XCTAssertNil(routing.pointer(at: CGPoint(x: 120, y: 110), buttons: 8,
+            geometry: geometry, viewport: viewport))
+        XCTAssertEqual(routing.pointerButtons, 2)
+    }
+
+    func test_scrollRoutingRequiresInsideBeginAndTheOwningGesture() {
+        let geometry = routingGeometry, viewport = geometry.bounds
+        var routing = RemoteScreenInputRouting()
+        XCTAssertNil(routing.scroll(at: CGPoint(x: 100, y: 20), dx: 0, dy: 10, phase: .begin,
+            source: .indirect, geometry: geometry, viewport: viewport))
+        XCTAssertNil(routing.scroll(at: CGPoint(x: 100, y: 100), dx: 0, dy: 10, phase: .changed,
+            source: .indirect, geometry: geometry, viewport: viewport))
+        XCTAssertEqual(routing.scroll(at: CGPoint(x: 100, y: 100), dx: 0, dy: 10, phase: .begin,
+            source: .touch, geometry: geometry, viewport: viewport), .scroll(x: 50, y: 25, dx: 0, dy: 10, phase: .begin))
+        XCTAssertNil(routing.scroll(at: CGPoint(x: 100, y: 100), dx: 0, dy: 20, phase: .begin,
+            source: .indirect, geometry: geometry, viewport: viewport))
+        XCTAssertNil(routing.scroll(at: nil, dx: 0, dy: 0, phase: .end,
+            source: .indirect, geometry: geometry, viewport: viewport))
+        XCTAssertEqual(routing.scroll(at: nil, dx: .nan, dy: .infinity, phase: .end,
+            source: .touch, geometry: geometry, viewport: viewport), .scroll(x: 50, y: 25, dx: 0, dy: 0, phase: .end))
+        XCTAssertNil(routing.endScroll())
+        XCTAssertEqual(routing.scroll(at: CGPoint(x: 120, y: 110), dx: 0, dy: 5, phase: .begin,
+            source: .indirect, geometry: geometry, viewport: viewport), .scroll(x: 60, y: 30, dx: 0, dy: 5, phase: .begin))
+        XCTAssertNil(routing.scroll(at: nil, dx: 0, dy: 0, phase: .end,
+            source: .touch, geometry: geometry, viewport: viewport), "Old finger cleanup cannot end the indirect successor")
+        XCTAssertEqual(routing.endScroll(), .scroll(x: 60, y: 30, dx: 0, dy: 0, phase: .end))
+    }
+
+    func test_scrollRoutingEndsOnceOnBoundaryLossOrInvalidDelta() {
+        let geometry = routingGeometry, viewport = geometry.bounds
+        for (point, dy) in [(CGPoint(x: 100, y: 20), CGFloat(1)),
+                            (CGPoint(x: 100, y: 100), CGFloat.nan),
+                            (CGPoint(x: 100, y: 100), CGFloat(Int64(Int32.max) + 1))] {
+            var routing = RemoteScreenInputRouting()
+            _ = routing.scroll(at: CGPoint(x: 100, y: 100), dx: 0, dy: 0, phase: .begin,
+                source: .indirect, geometry: geometry, viewport: viewport)
+            XCTAssertEqual(routing.scroll(at: point, dx: 0, dy: dy, phase: .changed,
+                source: .indirect, geometry: geometry, viewport: viewport), .scroll(x: 50, y: 25, dx: 0, dy: 0, phase: .end))
+            XCTAssertNil(routing.scroll(at: CGPoint(x: 100, y: 100), dx: 0, dy: 10, phase: .changed,
+                source: .indirect, geometry: geometry, viewport: viewport), "Reentry needs a new gesture begin")
+            XCTAssertNil(routing.endScroll())
+        }
+    }
+
+    func test_scrollRoutingRequiresObservedLocationAndBoundedDeltas() {
+        let geometry = routingGeometry, viewport = geometry.bounds
+        var routing = RemoteScreenInputRouting()
+        XCTAssertNil(routing.scroll(at: nil, dx: 0, dy: 10, phase: .begin,
+            source: .indirect, geometry: geometry, viewport: viewport), "No invented initial pointer at (0, 0)")
+        XCTAssertNil(routing.scroll(at: CGPoint(x: 100, y: 100), dx: .infinity, dy: 0, phase: .begin,
+            source: .indirect, geometry: geometry, viewport: viewport))
+        XCTAssertEqual(routing.scroll(at: CGPoint(x: 100, y: 100), dx: -2.4, dy: 3.6, phase: .begin,
+            source: .indirect, geometry: geometry, viewport: viewport), .scroll(x: 50, y: 25, dx: -2, dy: 4, phase: .begin))
+        XCTAssertNil(routing.scroll(at: CGPoint(x: 100, y: 100), dx: 0.1, dy: 0.1, phase: .changed,
+            source: .indirect, geometry: geometry, viewport: viewport))
+        XCTAssertEqual(routing.endScroll(), .scroll(x: 50, y: 25, dx: 0, dy: 0, phase: .end),
+                       "Mode changes can close either scroll source without new deltas")
+    }
+
+    func test_screenGeometryUsesAllLogicalCellsAndRejectsInvalidMappings() throws {
+        let geometry = RemoteScreenGeometry(bounds: CGRect(x: 10, y: 20, width: 100, height: 60),
+            display: DisplayInfo(w: 5, h: 3, scale: 1))
+        for x in 0..<5 {
+            for y in 0..<3 {
+                let point = CGPoint(x: 10 + (Double(x) + 0.5) * 20, y: 20 + (Double(y) + 0.5) * 20)
+                let remote = try XCTUnwrap(geometry.localToRemote(point))
+                XCTAssertEqual(remote.x, x); XCTAssertEqual(remote.y, y)
+            }
+        }
+        XCTAssertNil(geometry.localToRemote(CGPoint(x: 110, y: 80)))
+        XCTAssertNil(geometry.localToRemote(CGPoint(x: .nan, y: 20), clamping: true))
+        for display in [nil, DisplayInfo(w: 0, h: 1, scale: 1),
+                        DisplayInfo(w: Int(Int32.max) + 1, h: 1, scale: 1),
+                        DisplayInfo(w: 5, h: 3, scale: .infinity)] {
+            let invalid = RemoteScreenGeometry(bounds: geometry.bounds, display: display)
+            XCTAssertNil(invalid.localToRemote(CGPoint(x: 50, y: 50), clamping: true))
+        }
+        let invalid = RemoteScreenGeometry(bounds: CGRect(x: .nan, y: 0, width: 100, height: 60), display: geometry.display)
+        XCTAssertNil(invalid.localToRemote(.zero, clamping: true))
+    }
+
+    func test_screenGeometryClipsZoomedContentBeforeNewGestures() {
+        let geometry = routingGeometry, viewport = CGRect(x: 40, y: 70, width: 100, height: 60)
+        XCTAssertEqual(geometry.visibleRect(in: viewport), viewport)
+        XCTAssertEqual(geometry.visibleRect(in: CGRect(x: 500, y: 500, width: 10, height: 10)), .zero)
+        var routing = RemoteScreenInputRouting()
+        XCTAssertNil(routing.pointer(at: CGPoint(x: 20, y: 100), buttons: 1,
+            geometry: geometry, viewport: viewport), "The full desktop contains this point, but it is outside the viewport")
+        XCTAssertEqual(routing.pointer(at: CGPoint(x: 40, y: 70), buttons: 1,
+            geometry: geometry, viewport: viewport), .pointer(x: 20, y: 10, buttons: 1))
+    }
+
+    func test_touchCursorStaysInsideVisibleEdgesAndIgnoresInvalidMotion() throws {
+        let cursor = TouchCursorLayer(), rect = CGRect(x: 0, y: 0, width: 100, height: 50)
+        XCTAssertNil(cursor.positionedCenter)
+        cursor.show(at: .zero, within: rect)
+        XCTAssertEqual(cursor.positionedCenter, .zero, "A positioned origin is distinct from an unpositioned cursor")
+        cursor.move(by: CGPoint(x: 10000, y: 10000), within: rect)
+        XCTAssertTrue(RemoteScreenGeometry.contains(try XCTUnwrap(cursor.positionedCenter), in: rect))
+        let prior = cursor.positionedCenter
+        cursor.move(by: CGPoint(x: .nan, y: .infinity), within: rect)
+        XCTAssertEqual(cursor.positionedCenter, prior)
+        let zoomed = CGRect(x: 25, y: 10, width: 50, height: 20)
+        cursor.clamp(to: zoomed)
+        XCTAssertTrue(RemoteScreenGeometry.contains(try XCTUnwrap(cursor.positionedCenter), in: zoomed))
+        cursor.clamp(to: .zero)
+        XCTAssertTrue(cursor.isHidden)
+    }
+
+    func test_fullDisplaySurfaceSharesItsVideoAndInputRectangleAcrossAspectRatios() throws {
         for viewport in [CGRect(x: 0, y: 0, width: 1024, height: 768),
                          CGRect(x: 10, y: 20, width: 400, height: 900)] {
             for size in [(1920, 1080), (1200, 1920), (1728, 1117)] {
@@ -13,8 +173,8 @@ final class RemoteScreenInteractionTests: XCTestCase {
                 let input = RemoteScreenGeometry(bounds: viewport, display: display)
                 XCTAssertEqual(layout.contentMode, .scaleToFill)
                 XCTAssertEqual(layout.videoRect, input.interactiveRect)
-                let first = input.localToRemote(CGPoint(x: layout.videoRect.minX, y: layout.videoRect.minY))
-                let last = input.localToRemote(CGPoint(x: layout.videoRect.maxX, y: layout.videoRect.maxY))
+                let first = try XCTUnwrap(input.localToRemote(CGPoint(x: layout.videoRect.minX, y: layout.videoRect.minY)))
+                let last = try XCTUnwrap(input.localToRemote(CGPoint(x: layout.videoRect.maxX, y: layout.videoRect.maxY), clamping: true))
                 XCTAssertEqual(first.x, 0); XCTAssertEqual(first.y, 0)
                 XCTAssertEqual(last.x, size.0 - 1); XCTAssertEqual(last.y, size.1 - 1)
             }
@@ -24,7 +184,7 @@ final class RemoteScreenInteractionTests: XCTestCase {
         XCTAssertEqual(legacy.videoRect, bounds); XCTAssertEqual(legacy.contentMode, .scaleAspectFit)
     }
 
-    func test_fullDisplaySurfaceRestoresLogicalAspectIndependentlyOfDrawableRounding() {
+    func test_fullDisplaySurfaceRestoresLogicalAspectIndependentlyOfDrawableRounding() throws {
         let display = DisplayInfo(w: 1728, h: 1117, scale: 2, fullDisplaySurface: true)
         let bounds = CGRect(x: 0, y: 0, width: 1024, height: 768)
         let layout = RemoteScreenRenderingLayout(bounds: bounds, display: display)
@@ -37,7 +197,7 @@ final class RemoteScreenInteractionTests: XCTestCase {
         XCTAssertEqual(layout.contentMode, .scaleToFill,
                        "Fit the full surface to the logical rectangle, not another aspect-fit inside it")
         let input = RemoteScreenGeometry(bounds: bounds, display: display)
-        let center = input.localToRemote(CGPoint(x: layout.videoRect.midX, y: layout.videoRect.midY))
+        let center = try XCTUnwrap(input.localToRemote(CGPoint(x: layout.videoRect.midX, y: layout.videoRect.midY)))
         XCTAssertEqual(center.x, 864); XCTAssertEqual(center.y, 558)
     }
 
@@ -60,16 +220,16 @@ final class RemoteScreenInteractionTests: XCTestCase {
         XCTAssertEqual(rect.height, 576, accuracy: 0.001)
     }
 
-    func test_localToRemote_clampsLetterboxedPointsToDisplayEdges() {
+    func test_localToRemote_clampsLetterboxedPointsToDisplayEdges() throws {
         let geometry = RemoteScreenGeometry(
             bounds: CGRect(x: 0, y: 0, width: 1024, height: 768),
             display: DisplayInfo(w: 1920, h: 1080, scale: 2.0))
 
-        let topLeft = geometry.localToRemote(CGPoint(x: 0, y: 0))
+        let topLeft = try XCTUnwrap(geometry.localToRemote(CGPoint(x: 0, y: 0), clamping: true))
         XCTAssertEqual(topLeft.x, 0)
         XCTAssertEqual(topLeft.y, 0)
 
-        let bottomRight = geometry.localToRemote(CGPoint(x: 1024, y: 768))
+        let bottomRight = try XCTUnwrap(geometry.localToRemote(CGPoint(x: 1024, y: 768), clamping: true))
         XCTAssertEqual(bottomRight.x, 1919)
         XCTAssertEqual(bottomRight.y, 1079)
     }
