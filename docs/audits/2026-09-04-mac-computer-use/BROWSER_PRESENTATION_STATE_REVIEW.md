@@ -57,3 +57,7 @@ No tests/assertions, typechecks, builds, app launches, native capture, browser a
 - Qualify actual host/phone Pause acknowledgement, pending native effects, login providers and explicit handback. The browser child still blocks AI effects and closing it does not resume automatically.
 - Complete the outstanding capability and display/input repairs in [TODO.md](../../../TODO.md), then qualify complete natural-language travel, concert and movie requests on real sites when authorized.
 - Resource measurement and model selection remain later work. This patch establishes no 8 GB, thermal, model-quality or whole-task correctness result.
+
+## Source follow-up
+
+The [sign-in navigation recovery review](SIGN_IN_NAVIGATION_RECOVERY_REVIEW.md) adds child-specific native identity, warning recovery and independent opener/child callback scopes. It preserves explicit handback and does not execute or qualify login behavior.

@@ -52,7 +52,8 @@ final class ComputerUseBrowserPresentation {
         var controls: Controls?
         var handler: Handler?
         var signInSite: String?
-        var signInDetail = "You control this window. AI is paused."
+        var signInStatus = ComputerUseSignInPageStatus()
+        var signInDetail: String { signInStatus.detail }
 
         var taskDetail: String {
             switch task {
@@ -80,7 +81,7 @@ final class ComputerUseBrowserPresentation {
         case claim(String), retire(TaskState, clearSite: Bool)
         case site(String), page(PageActivity, recovered: Bool = false), issue(Issue)
         case controls(Controls?, Handler)
-        case signInSite(String?), signInDetail(String)
+        case signInSite(String?), signInStatus(ComputerUseSignInPageStatus)
     }
     private enum Field: Hashable { case task, site, page, issue, controls, signInSite, signInDetail }
     let objectWillChange = ObservableObjectPublisher()
@@ -112,7 +113,7 @@ final class ComputerUseBrowserPresentation {
         case .issue: fields = [.issue]
         case .controls: fields = [.controls]
         case .signInSite: fields = [.signInSite]
-        case .signInDetail: fields = [.signInDetail]
+        case .signInStatus: fields = [.signInDetail]
         }
         let revision = UUID()
         for field in fields { revisions[field] = revision }
@@ -131,7 +132,7 @@ final class ComputerUseBrowserPresentation {
             if current(.page) { state.page = .ready }
             if current(.issue) { state.issue = nil }
             if current(.signInSite) { state.signInSite = nil }
-            if current(.signInDetail) { state.signInDetail = State().signInDetail }
+            if current(.signInDetail) { state.signInStatus = .init() }
         case .retire(let task, let clearSite):
             if current(.task) { state.task = task; state.taskID = nil }
             if current(.signInSite) { state.signInSite = nil }
@@ -144,7 +145,7 @@ final class ComputerUseBrowserPresentation {
         case .controls(let value, let handler):
             if current(.controls) { state.controls = value; state.handler = handler }
         case .signInSite(let value): if current(.signInSite) { state.signInSite = value }
-        case .signInDetail(let value): if current(.signInDetail) { state.signInDetail = value }
+        case .signInStatus(let value): if current(.signInDetail) { state.signInStatus = value }
         }
         // Queue refreshes, not retained snapshots. A preceding field's
         // subscriber may already have installed another owner. The next field
@@ -162,7 +163,7 @@ final class ComputerUseBrowserPresentation {
         case .page, .issue: notifications.append { self.detailSubject.send(self.state.detail) }
         case .controls: notifications.append { self.controlsSubject.send(self.state.controls) }
         case .signInSite: notifications.append { self.signInSiteSubject.send(self.state.signInSite) }
-        case .signInDetail: notifications.append { self.signInDetailSubject.send(self.state.signInDetail) }
+        case .signInStatus: notifications.append { self.signInDetailSubject.send(self.state.signInDetail) }
         }
         // Nested value sends wait until every subscriber has received the
         // current event. Remaining refreshes use the latest committed state.

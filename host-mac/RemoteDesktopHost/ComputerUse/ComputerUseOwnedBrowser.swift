@@ -664,10 +664,9 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         get { presentation.state.signInSite }
         set { publish(.signInSite(newValue), child: true) }
     }
-    private(set) var signInDetail: String {
-        get { presentation.state.signInDetail }
-        set { publish(.signInDetail(newValue), child: true) }
-    }
+    var signInDetail: String { presentation.state.signInDetail }
+    var signInPageDetail: String? { presentation.state.signInStatus.activity.detail }
+    var signInIssue: String? { presentation.state.signInStatus.warning?.message }
     var displayedSiteChanges: AnyPublisher<String, Never> { presentation.siteChanges }
     var detailChanges: AnyPublisher<String, Never> { presentation.detailChanges }
     var signInSiteChanges: AnyPublisher<String?, Never> { presentation.signInSiteChanges }
@@ -777,6 +776,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     private var loadedPageIdentity: String?
     private var signInBrowser: WKWebView?
     private var signInInstanceID: UUID?
+    private var signInNavigation: ComputerUseSignInNavigation<WKNavigation>?
     private var signInWindow: NSWindow?
     private var signInURLObservation: NSKeyValueObservation?
     private var signInScope: (taskID: String, ownerID: UUID)?
@@ -872,6 +872,9 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     private func publish(_ update: ComputerUseBrowserPresentation.Update, child: Bool = false) {
         let parent = browser, session = browserSessionID, epoch = ownershipEpoch, ownerTask = taskID
         let childView = signInBrowser, childID = signInInstanceID, controlOwner = taskControls?.ownerID
+        let childNavigation = signInNavigation, childRevision = signInNavigation?.revision
+        let retainsChildNavigation: Bool
+        switch update { case .signInStatus: retainsChildNavigation = true; default: retainsChildNavigation = false }
         let pageGeneration = generation, revision = locationRevision, takeover = takeoverEpoch
         let lifecycle: Bool
         switch update { case .claim, .retire: lifecycle = true; default: lifecycle = false }
@@ -880,7 +883,8 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             if lifecycle { return true }
             guard browser === parent, browserSessionID == session, taskControls?.ownerID == controlOwner else { return false }
             if child {
-                return signInBrowser === childView && signInInstanceID == childID && taskControls?.ownerID == controlOwner
+                return signInBrowser === childView && signInInstanceID == childID
+                    && (!retainsChildNavigation || (signInNavigation === childNavigation && signInNavigation?.revision == childRevision))
             }
             return generation == pageGeneration && locationRevision == revision && takeoverEpoch == takeover
         }
@@ -2298,6 +2302,17 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             && taskControls?.ownerID == scope.ownerID
     }
 
+    private func publishSignInStatus() {
+        guard let signInNavigation, canNavigateSignInWindow else { return }
+        publish(.signInStatus(signInNavigation.status), child: true)
+    }
+
+    private func warnSignIn(_ warning: ComputerUseSignInPageStatus.Warning) {
+        guard let signInNavigation, canNavigateSignInWindow else { return }
+        signInNavigation.warn(warning)
+        publishSignInStatus()
+    }
+
     private static func isSignInLocation(_ url: URL?) -> Bool {
         guard let url else { return false }
         // An opener may allocate a blank window before obtaining the provider
@@ -2328,6 +2343,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         signInScope = (controls.taskID, controls.ownerID)
         signInBrowser = child
         signInInstanceID = UUID()
+        signInNavigation = ComputerUseSignInNavigation<WKNavigation>()
         navigationDispatchLog?.recordControl(phase: .signInWindowOpened, parentSessionID: browserSessionID,
             ownershipEpoch: ownershipEpoch, generation: generation, url: navigationAction.request.url,
             handback: nil, workflowOperationID: nil, nativeOperationID: nil, signInWindowID: signInInstanceID)
@@ -2347,7 +2363,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         }
         signInSite = ComputerUseBrowserSite.displayName(for: navigationAction.request.url)
         guard retainsCreation() else { return nil }
-        signInDetail = "You control this window. AI is paused."
+        publishSignInStatus()
         guard retainsCreation() else { return nil }
         let observation = child.observe(\.url, options: [.new]) { [weak self] child, _ in
             Task { @MainActor [weak self, weak child] in
@@ -2415,6 +2431,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         // can neither close a replacement nor change the main page's evidence.
         signInBrowser = nil
         signInInstanceID = nil
+        signInNavigation = nil
         signInScope = nil
         signInURLObservation = nil
         signInWindow = nil
@@ -2582,7 +2599,8 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         }
     }
 
-    private func isRetiredMainNavigation(_ navigation: WKNavigation?, in view: WKWebView) -> Bool {
+    private func isRetiredNavigation(_ navigation: WKNavigation?, in view: WKWebView) -> Bool {
+        if view === signInBrowser { return signInNavigation?.isRetired(navigation) == true }
         guard view === browser, let navigation, knownMainNavigations.contains(navigation) else { return false }
         return navigation !== pending?.navigation && navigation !== observedNavigation?.navigation
     }
@@ -2591,7 +2609,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
                                          navigation: WKNavigation?, replay: @escaping () -> Void) -> Bool {
         guard prepareNavigationCallback(in: view) else { return true }
         guard !isNativeCleanupActive, let dispatch = nativeNavigationDispatch, dispatch.view === view else { return false }
-        guard !isRetiredMainNavigation(navigation, in: view) else { return true }
+        guard !isRetiredNavigation(navigation, in: view) else { return true }
         // Preserve notification order and its original binding. Replaying
         // state handling after load returns must not manufacture a later
         // callback or promote an unbound history entry to an exact receipt.
@@ -2639,6 +2657,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         let userPageID: UUID?
         let activePageID: UUID?
         let signInID: UUID?
+        let signInOwnerID: UUID?
         let sourcePolicy: ComputerUseBrowserSourcePolicy?
     }
 
@@ -2650,12 +2669,19 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             taskID: taskID, sessionID: browserSessionID, ownershipEpoch: ownershipEpoch, takeoverEpoch: takeoverEpoch,
             generation: generation, locationRevision: locationRevision, pendingID: pending?.id,
             observedID: observedNavigation?.id, userPageID: observedUserPage?.id, activePageID: observedActivePage?.id,
-            signInID: signInInstanceID, sourcePolicy: sourcePolicy)
+            signInID: signInInstanceID, signInOwnerID: signInScope?.ownerID, sourcePolicy: sourcePolicy)
     }
 
     private func isCurrentNavigationCallback(_ scope: NavigationCallbackScope?) -> Bool {
-        guard !isNativeCleanupActive, !hasPendingLocationChanges, let scope else { return false }
-        return browser === scope.parent && scope.view === (scope.isSignIn ? signInBrowser : browser)
+        guard !isNativeCleanupActive, let scope else { return false }
+        if scope.isSignIn {
+            return browser === scope.parent && scope.view === signInBrowser && taskID == scope.taskID
+                && browserSessionID == scope.sessionID && ownershipEpoch == scope.ownershipEpoch
+                && signInInstanceID == scope.signInID && signInScope?.ownerID == scope.signInOwnerID
+                && canNavigateSignInWindow
+        }
+        guard !hasPendingLocationChanges else { return false }
+        return browser === scope.parent && scope.view === browser
             && taskID == scope.taskID && browserSessionID == scope.sessionID && ownershipEpoch == scope.ownershipEpoch
             && takeoverEpoch == scope.takeoverEpoch && generation == scope.generation && locationRevision == scope.locationRevision
             && pending?.id == scope.pendingID && observedNavigation?.id == scope.observedID
@@ -2686,7 +2712,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             }
             let permitted = frame.isMainFrame ? Self.isSignInLocation(navigationAction.request.url)
                 : ["http", "https", "about", "data", "blob"].contains(navigationAction.request.url?.scheme?.lowercased() ?? "")
-            if !permitted { signInDetail = "This sign-in destination is not supported in the AI browser. Close this window to return." }
+            if !permitted { warnSignIn(.unsupportedDestination) }
             decide(permitted ? .allow : .cancel, control: .userControl)
             return
         }
@@ -2757,7 +2783,12 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             // Error pages may explain a provider refusal to the person. They
             // are display only and never become task/navigation evidence.
             let permitted = navigationResponse.canShowMIMEType && Self.isSignInLocation(navigationResponse.response.url)
-            if !permitted { signInDetail = "The sign-in page cannot be displayed. Close this window to return." }
+            if !permitted { warnSignIn(.unsupportedDocument) }
+            else if let response = navigationResponse.response as? HTTPURLResponse, (400...599).contains(response.statusCode) {
+                // Keep the provider's page available for the person. Its HTTP
+                // error is a warning, never a sign-in or completion assertion.
+                warnSignIn(.providerError(response.statusCode))
+            }
             decide(permitted ? .allow : .cancel, control: .userControl)
             return
         }
@@ -2849,11 +2880,13 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     private func handleProvisionalStart(in webView: WKWebView, navigation: WKNavigation?, recordCallback: Bool) {
         guard prepareNavigationCallback(in: webView) else { return }
         if webView === signInBrowser {
+            guard !isRetiredNavigation(navigation, in: webView), canNavigateSignInWindow else { return }
             if recordCallback { recordNavigationCallback(.provisionalStart, in: webView, navigation: navigation) }
+            if signInNavigation?.start(navigation) == true { publishSignInStatus() }
             return
         }
         guard webView === browser else { return }
-        guard !isRetiredMainNavigation(navigation, in: webView) else { return }
+        guard !isRetiredNavigation(navigation, in: webView) else { return }
         if let navigation, let observed = observedNavigation, navigation === observed.navigation {
             // A repeated start for the same live navigation is not a second
             // observed load and must not discard its response or handback ID.
@@ -2892,7 +2925,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
 
     func webView(_ webView: WKWebView, didReceiveServerRedirectForProvisionalNavigation navigation: WKNavigation!) {
         if deferNavigationCallback(.serverRedirect, in: webView, navigation: navigation, replay: {}) { return }
-        guard !isRetiredMainNavigation(navigation, in: webView) else { return }
+        guard !isRetiredNavigation(navigation, in: webView) else { return }
         // This callback supplies a WKNavigation, not a destination request.
         // The live WebView URL is a location observation, never a fabricated
         // redirect target or an allow/cancel policy decision.
@@ -2901,7 +2934,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
 
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
         if deferNavigationCallback(.documentCommitStarted, in: webView, navigation: navigation, replay: {}) { return }
-        guard !isRetiredMainNavigation(navigation, in: webView) else { return }
+        guard !isRetiredNavigation(navigation, in: webView) else { return }
         recordNavigationCallback(.documentCommitStarted, in: webView, navigation: navigation)
     }
 
@@ -2914,8 +2947,15 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
 
     private func handleNavigationFinished(in webView: WKWebView, navigation: WKNavigation?, recordCallback: Bool) {
         guard prepareNavigationCallback(in: webView) else { return }
-        guard !isRetiredMainNavigation(navigation, in: webView) else { return }
+        guard !isRetiredNavigation(navigation, in: webView) else { return }
         if recordCallback { recordNavigationCallback(.documentFinished, in: webView, navigation: navigation) }
+        if webView === signInBrowser {
+            guard canNavigateSignInWindow else { return }
+            let url = webView.url
+            if signInNavigation?.finish(navigation, hasSupportedPage: Self.isSignInLocation(url),
+                canClearWarning: url.flatMap(Self.validatedURL) != nil) == true { publishSignInStatus() }
+            return
+        }
         guard webView === browser, let navigation else { return }
         knownMainNavigations.add(navigation)
         if pending == nil {
@@ -3005,24 +3045,27 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
         if deferNavigationCallback(.navigationFailure, in: webView, navigation: navigation, replay: { [weak self] in
-            self?.handleNavigationFailure(in: webView, navigation: navigation, recordCallback: false)
+            self?.handleNavigationFailure(in: webView, navigation: navigation, error: error, recordCallback: false)
         }) { return }
-        handleNavigationFailure(in: webView, navigation: navigation, recordCallback: true)
+        handleNavigationFailure(in: webView, navigation: navigation, error: error, recordCallback: true)
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         if deferNavigationCallback(.navigationFailure, in: webView, navigation: navigation, replay: { [weak self] in
-            self?.handleNavigationFailure(in: webView, navigation: navigation, recordCallback: false)
+            self?.handleNavigationFailure(in: webView, navigation: navigation, error: error, recordCallback: false)
         }) { return }
-        handleNavigationFailure(in: webView, navigation: navigation, recordCallback: true)
+        handleNavigationFailure(in: webView, navigation: navigation, error: error, recordCallback: true)
     }
 
-    private func handleNavigationFailure(in webView: WKWebView, navigation: WKNavigation?, recordCallback: Bool) {
+    private func handleNavigationFailure(in webView: WKWebView, navigation: WKNavigation?, error: Error, recordCallback: Bool) {
         guard prepareNavigationCallback(in: webView) else { return }
-        guard !isRetiredMainNavigation(navigation, in: webView) else { return }
+        guard !isRetiredNavigation(navigation, in: webView) else { return }
         if recordCallback { recordNavigationCallback(.navigationFailure, in: webView, navigation: navigation) }
         if webView === signInBrowser {
-            signInDetail = "The sign-in page did not finish loading. Close this window to return."
+            guard canNavigateSignInWindow else { return }
+            let failure = error as NSError
+            let cancelled = failure.domain == NSURLErrorDomain && failure.code == NSURLErrorCancelled
+            if signInNavigation?.fail(navigation, cancelled: cancelled) == true { publishSignInStatus() }
             return
         }
         guard webView === browser, let navigation else { return }
@@ -3150,7 +3193,12 @@ private struct OwnedBrowserSignInContent: View {
                 Text(site)
                     .lineLimit(1).truncationMode(.middle).textSelection(.enabled)
                     .accessibilityLabel("Website: \(site)")
-                Text(current ? context.signInDetail : "Sign-in window closed").font(.caption).foregroundStyle(.secondary)
+                Text(current ? ComputerUseSignInPageStatus.controlDetail : "Sign-in window closed")
+                    .font(.caption).foregroundStyle(.secondary)
+                if current, let activity = context.signInPageDetail {
+                    Text(activity).font(.caption).foregroundStyle(.secondary)
+                }
+                if current, let issue = context.signInIssue { Text(issue).font(.caption).foregroundStyle(.red) }
                 HStack {
                     Button("Close sign-in window") { context.closeSignInWindow(in: browser) }.disabled(!current)
                     Spacer()

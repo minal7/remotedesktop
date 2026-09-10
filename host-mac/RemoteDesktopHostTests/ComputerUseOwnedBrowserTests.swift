@@ -7,6 +7,174 @@ import XCTest
 
 @MainActor
 final class ComputerUseOwnedBrowserTests: XCTestCase {
+    func testSignInNavigationRequiresCurrentNativeIdentity() {
+        let state = ComputerUseSignInNavigation<NSObject>()
+        let first = NSObject(), foreign = NSObject(), replacement = NSObject()
+        XCTAssertTrue(state.start(first))
+        let revision = state.revision
+        XCTAssertFalse(state.start(first)); XCTAssertEqual(state.revision, revision)
+        XCTAssertFalse(state.finish(foreign, hasSupportedPage: true, canClearWarning: true))
+        XCTAssertTrue(state.isRetired(foreign)); XCTAssertFalse(state.start(foreign))
+        XCTAssertFalse(state.fail(nil, cancelled: false))
+        XCTAssertTrue(state.start(replacement))
+        XCTAssertTrue(state.isRetired(first))
+        XCTAssertFalse(state.fail(first, cancelled: false))
+        XCTAssertEqual(state.status.activity, .opening)
+        XCTAssertTrue(state.finish(replacement, hasSupportedPage: true, canClearWarning: true))
+        XCTAssertEqual(state.status.activity, .opened)
+        XCTAssertFalse(state.fail(replacement, cancelled: false))
+        XCTAssertFalse(state.start(replacement))
+        XCTAssertNil(state.status.warning)
+    }
+
+    func testSignInWarningNeedsASubsequentMatchingSuccessfulLoad() {
+        let state = ComputerUseSignInNavigation<NSObject>()
+        let current = NSObject(), retry = NSObject()
+        state.warn(.loadFailed)
+        XCTAssertTrue(state.start(current))
+        state.warn(.unsupportedDestination)
+        let warned = state.revision
+        XCTAssertFalse(state.start(current), "A duplicate start cannot recapture the newer warning")
+        XCTAssertEqual(state.revision, warned)
+        XCTAssertTrue(state.finish(current, hasSupportedPage: true, canClearWarning: true))
+        XCTAssertEqual(state.status.warning, .unsupportedDestination)
+        XCTAssertTrue(state.start(retry))
+        XCTAssertEqual(state.status.warning, .unsupportedDestination, "Starting a retry is not recovery")
+        XCTAssertFalse(state.finish(current, hasSupportedPage: true, canClearWarning: true))
+        XCTAssertEqual(state.status.warning, .unsupportedDestination)
+        XCTAssertTrue(state.finish(retry, hasSupportedPage: true, canClearWarning: true))
+        XCTAssertNil(state.status.warning)
+    }
+
+    func testSignInCancellationBlankPageAndProviderErrorPreserveWarnings() {
+        let state = ComputerUseSignInNavigation<NSObject>()
+        let cancelled = NSObject(), blank = NSObject(), errorPage = NSObject(), unavailable = NSObject()
+        state.warn(.loadFailed)
+        XCTAssertTrue(state.start(cancelled)); XCTAssertTrue(state.fail(cancelled, cancelled: true))
+        XCTAssertEqual(state.status.activity, .interrupted); XCTAssertEqual(state.status.warning, .loadFailed)
+        XCTAssertTrue(state.start(blank))
+        XCTAssertTrue(state.finish(blank, hasSupportedPage: true, canClearWarning: false))
+        XCTAssertEqual(state.status.warning, .loadFailed, "A blank child is not a recovered provider page")
+        XCTAssertTrue(state.start(errorPage))
+        state.warn(.providerError(403))
+        XCTAssertTrue(state.fail(errorPage, cancelled: false))
+        XCTAssertEqual(state.status.warning, .providerError(403), "A generic failure cannot hide a newer provider refusal")
+        XCTAssertTrue(state.start(unavailable))
+        XCTAssertTrue(state.finish(unavailable, hasSupportedPage: false, canClearWarning: false))
+        XCTAssertEqual(state.status.warning, .pageUnavailable)
+        XCTAssertEqual(state.status.activity, .failed)
+    }
+
+    func testSignInNavigationReleasesCompletedNativeObjects() {
+        let state = ComputerUseSignInNavigation<NSObject>()
+        weak var weakNavigation: NSObject?
+        autoreleasepool {
+            let navigation = NSObject()
+            weakNavigation = navigation
+            XCTAssertTrue(state.start(navigation))
+        }
+        XCTAssertNotNil(weakNavigation, "Only the active navigation needs a strong owner")
+        autoreleasepool {
+            if let navigation = weakNavigation {
+                XCTAssertTrue(state.finish(navigation, hasSupportedPage: true, canClearWarning: true))
+                XCTAssertTrue(state.isRetired(navigation))
+            } else { XCTFail("Missing active navigation") }
+        }
+        XCTAssertNil(weakNavigation, "Retired navigation identity must not pin completed native objects")
+    }
+
+    func testSignInStatusPublicationCannotOverwriteANewerNavigationWarning() {
+        let state = ComputerUseSignInNavigation<NSObject>(), presentation = ComputerUseBrowserPresentation()
+        let first = NSObject(), replacement = NSObject()
+        XCTAssertTrue(state.start(first))
+        XCTAssertTrue(state.finish(first, hasSupportedPage: true, canClearWarning: true))
+        let completed = state.status, revision = state.revision
+        var replaced = false, values: [String] = []
+        let valuesSubscription = presentation.signInDetailChanges.dropFirst().sink { values.append($0) }
+        let subscription = presentation.objectWillChange.sink {
+            guard !replaced else { return }
+            replaced = true
+            XCTAssertTrue(state.start(replacement))
+            state.warn(.unsupportedDestination)
+            presentation.update(.signInStatus(state.status))
+        }
+        presentation.update(.signInStatus(completed), isCurrent: { state.revision == revision })
+        subscription.cancel(); valuesSubscription.cancel()
+        XCTAssertEqual(presentation.state.signInStatus, state.status)
+        XCTAssertEqual(values, [state.status.detail])
+        XCTAssertEqual(state.status.activity, .opening)
+    }
+
+    func testSignInProviderErrorRecoversWithoutReturningControlToAI() async throws {
+        let server = try OwnedBrowserHTTPFixture(routes: ["/login": .init(body: """
+            <script>fetch('/open-signal').then(() => {
+                const child = window.open('/provider-error');
+                fetch('/retry-signal').then(() => child.location = '/provider-recovered');
+            });</script>
+            """), "/open-signal": .init(held: true), "/retry-signal": .init(held: true),
+            "/provider-error": .init(status: 403, body: "<p>Provider refused this request</p>"),
+            "/provider-recovered": .init(body: "<p>Sign in manually</p>")])
+        let base = try await server.start()
+        defer { server.stop() }
+        var allowed = true
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { allowed })
+        defer { browser.close() }
+        let session = try browser.prepareWorkflowSession(taskID: "provider-recovery")
+        let original = try await browser.navigate(taskID: "provider-recovery", operationID: "login", to: base.appendingPathComponent("login"))
+        try await waitUntil { server.count("/open-signal") == 1 }
+        allowed = false
+        browser.updateTaskControls(.init(taskID: "provider-recovery", scopeID: UUID(), presentationID: UUID(), phase: .paused, canResume: true)) { _, _ in }
+        server.releaseHeldResponses()
+        try await waitUntil { browser.signInIssue?.contains("HTTP 403") == true && browser.signInPageDetail == "Sign-in page opened" && server.count("/retry-signal") == 1 }
+        XCTAssertTrue(browser.hasOpenSignInWindow)
+        XCTAssertFalse(browser.hasOwnership(taskID: "provider-recovery"))
+        server.releaseHeldResponses()
+        try await waitUntil { server.count("/provider-recovered") == 1 && browser.signInIssue == nil && browser.signInPageDetail == "Sign-in page opened" }
+        XCTAssertTrue(browser.hasOpenSignInWindow)
+        XCTAssertEqual(browser.taskControls?.phase, .paused)
+        XCTAssertEqual(browser.handbackRequirement(taskID: "provider-recovery", required: true), session)
+        XCTAssertFalse(browser.hasOwnership(taskID: "provider-recovery"))
+        allowed = true
+        XCTAssertThrowsError(try browser.claim(taskID: "other")) { XCTAssertEqual($0 as? ComputerUseBrowserError, .signInWindowOpen) }
+        browser.closeSignInWindow()
+        XCTAssertEqual(browser.currentDocument(taskID: "provider-recovery"), original)
+        XCTAssertEqual(server.count("/provider-error"), 1); XCTAssertEqual(server.count("/provider-recovered"), 1)
+    }
+
+    func testSignInResponseKeepsItsChildOwnerWhileTheParentNavigates() async throws {
+        let server = try OwnedBrowserHTTPFixture(routes: ["/login": .init(body: "<script>fetch('/open-signal').then(() => window.open('/provider-error'));</script>"),
+            "/open-signal": .init(held: true), "/provider-error": .init(status: 403, body: "<script>fetch('/provider-visible');</script>"),
+            "/manual": .init(body: "<p>The person navigated the parent</p>")])
+        let base = try await server.start()
+        defer { server.stop() }
+        var allowed = true, advancedParent = false
+        var parent: WKWebView?
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, nativeNavigationDidDispatch: { view, _ in parent = view }, mayAct: { allowed })
+        defer { browser.close() }
+        let session = try browser.prepareWorkflowSession(taskID: "opener-navigation")
+        _ = try await browser.navigate(taskID: "opener-navigation", operationID: "login", to: base.appendingPathComponent("login"))
+        try await waitUntil { server.count("/open-signal") == 1 }
+        allowed = false
+        browser.updateTaskControls(.init(taskID: "opener-navigation", scopeID: UUID(), presentationID: UUID(), phase: .paused, canResume: true)) { _, _ in }
+        let subscription = browser.signInDetailChanges.sink { detail in
+            guard detail.contains("HTTP 403"), !advancedParent, let parent else { return }
+            advancedParent = true
+            guard let navigation = parent.load(URLRequest(url: base.appendingPathComponent("manual"))) else { return XCTFail("Missing native parent navigation") }
+            // Force the legitimate opener change inside the child's response
+            // publication; the actual repeated start keeps this same identity.
+            browser.webView(parent, didStartProvisionalNavigation: navigation)
+        }
+        defer { subscription.cancel() }
+        server.releaseHeldResponses()
+        try await waitUntil { server.count("/provider-visible") == 1 && server.count("/manual") == 1 }
+        XCTAssertTrue(advancedParent)
+        XCTAssertTrue(browser.hasOpenSignInWindow)
+        XCTAssertTrue(browser.signInIssue?.contains("HTTP 403") == true)
+        XCTAssertEqual(browser.handbackRequirement(taskID: "opener-navigation", required: true), session)
+        XCTAssertEqual(browser.taskControls?.phase, .paused)
+        XCTAssertFalse(browser.hasOwnership(taskID: "opener-navigation"))
+    }
+
     func testPresentationWillChangeKeepsLatestFieldAndIndependentChanges() {
         let state = ComputerUseBrowserPresentation()
         state.update(.retire(.stopped, clearSite: false))
