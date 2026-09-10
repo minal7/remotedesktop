@@ -2,6 +2,8 @@
 
 Source repair; execution pending. This extends the [unobserved initial intent repair](BROWSER_UNOBSERVED_FORM_HANDOFF_REVIEW.md). No build, typecheck, assertion, app, browser, model or account-login execution occurred.
 
+Follow-up: the [same-document form handback repair](BROWSER_SAME_DOCUMENT_FORM_HANDBACK_REVIEW.md) extends unused retirement to changed visible native form membership sealed during explicit handback. It preserves this review's eligibility and adapter-lifetime restrictions and advances the action context to version 31.
+
 ## First-principles distinction
 
 Reading a field's default, promising to preserve a field, verifying a desired value and dispatching input are different events. The preceding repair released only an initial plan with no private observation. It therefore still stranded an otherwise unused preparation when the first field read had completed before a manual login redirect.

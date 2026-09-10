@@ -5,6 +5,113 @@ import XCTest
 /// Authored decisions and native fixture coverage, prepared but not executed.
 @MainActor
 final class ComputerUseBrowserResearchPreservationTests: XCTestCase {
+    func testSameDocumentFormReplacementReplansUnusedFieldsAfterExplicitHandback() async throws {
+        for captured in [false, true] {
+            for replaceForm in [false, true] {
+                let mutation = replaceForm
+                    ? "const old=document.querySelector('form'); const next=old.cloneNode(true); next.querySelector('input').value='replacement-private-default'; old.replaceWith(next);"
+                    : "const old=document.querySelector('input'); const next=old.cloneNode(true); next.value='replacement-private-default'; old.replaceWith(next);"
+                let fixture = try await unusedIntentFixture(mutation: mutation)
+                defer { fixture.close() }
+                let owner: ComputerUseBrowserResearchTask, originalPage: ComputerUseBrowserPageEvidence
+                var oldInput: ComputerUseBrowserResearchFormInput?, oldProposal: ComputerUseBrowserFormProposal?
+                if captured {
+                    _ = try await fixture.start(); configureUnusedIntent(fixture)
+                    owner = try fixture.owner()
+                    let action = try await owner.planNextAction(using: fixture.actions)
+                    originalPage = action.input.evidence
+                    let input = try await owner.prepareFormInput(for: action)
+                    oldInput = input; oldProposal = try ComputerUseBrowserFormProposal.decode(content: plan(input), input: input)
+                    owner.pause()
+                } else {
+                    originalPage = try await pauseUnusedIntent(fixture).input.evidence; owner = try fixture.owner()
+                }
+                let goal = owner.input
+                try await release(fixture); try await owner.resumeAfterUserControl()
+                let recovered = try await owner.recoverPendingFormPreparationCriteria()
+                XCTAssertTrue(recovered)
+                XCTAssertFalse(owner.hasPendingFormPreparation); XCTAssertTrue(owner.confirmedFormHistory.isEmpty)
+                let record = try XCTUnwrap(owner.unusedFormIntentHistory.first)
+                XCTAssertEqual(record.retirementReason, .formStructureChanged)
+                XCTAssertEqual(record.observation, captured ? .initialEditPreconditions : .none)
+                if let oldInput, let oldProposal { await expectFailure { _ = try await owner.executeForm(oldProposal, input: oldInput) } }
+                XCTAssertFalse(fixture.state.commands.contains(.edit))
+                let oldTarget = oldInput?.evidence.fields.first?.editable.snapshot.targetID
+                fixture.forms.select = { fresh in
+                    XCTAssertEqual(fresh.evidence.page.documentID, originalPage.documentID)
+                    XCTAssertEqual(fresh.evidence.fields.first?.editable.snapshot.value, "replacement-private-default")
+                    if let oldTarget { XCTAssertNotEqual(fresh.evidence.fields.first?.editable.snapshot.targetID, oldTarget) }
+                    return try self.plan(fresh)
+                }
+                configureUnusedIntent(fixture, stopAfterStage: true)
+                _ = try await fixture.resume()
+                XCTAssertEqual(owner.input, goal); XCTAssertEqual(fixture.search.inputs.count, 1)
+                XCTAssertEqual(owner.confirmedFormHistory.map(\.index), [0])
+                XCTAssertEqual(fixture.state.commands.filter { $0 == .formFields }.count, captured ? 2 : 1)
+                XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 1)
+                let input = try XCTUnwrap(fixture.actions.inputs.last { $0.usesUnusedFormIntentHistoryContext })
+                let context = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(input.contextJSON.utf8)) as? [String: Any])
+                XCTAssertEqual(context["version"] as? Int, 31)
+                let history = try XCTUnwrap(context["unused_form_intent_history"] as? [[String: Any]])
+                XCTAssertEqual(history.first?["retirement_reason"] as? String, "form_structure_changed")
+                XCTAssertFalse(input.contextJSON.contains("replacement-private-default"))
+            }
+        }
+    }
+
+    func testFormReplacementAfterHandbackCannotRetireUntilAnotherExplicitHandback() async throws {
+        let fixture = try await unusedIntentFixture(mutation: "const old=document.querySelector('input'); old.replaceWith(old.cloneNode(true));")
+        defer { fixture.close() }
+        let oldPage = try await pauseUnusedIntent(fixture).input.evidence, owner = try fixture.owner()
+        try await owner.resumeAfterUserControl()
+        try await release(fixture)
+        do { _ = try await owner.recoverPendingFormPreparationCriteria(); XCTFail("Post-handback structure cannot reuse the earlier seal") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+        XCTAssertTrue(owner.hasPendingFormPreparation); XCTAssertTrue(owner.unusedFormIntentHistory.isEmpty)
+        XCTAssertFalse(fixture.state.commands.contains(.formFields)); XCTAssertFalse(fixture.state.commands.contains(.edit))
+        owner.pause(); try await owner.resumeAfterUserControl()
+        let recovered = try await owner.recoverPendingFormPreparationCriteria()
+        XCTAssertTrue(recovered)
+        XCTAssertEqual(owner.unusedFormIntentHistory.first?.retirementReason, .formStructureChanged)
+        let action = try await owner.planNextAction(using: fixture.actions)
+        XCTAssertEqual(action.input.evidence.documentID, oldPage.documentID)
+    }
+
+    func testValueOnlyChangesDoNotRetireAnUnusedPreparationAsAChangedForm() async throws {
+        for captured in [false, true] {
+            let fixture = try await unusedIntentFixture(mutation: "document.querySelector('input').value='manual-private-value';")
+            defer { fixture.close() }
+            let owner: ComputerUseBrowserResearchTask
+            if captured {
+                _ = try await fixture.start(); configureUnusedIntent(fixture); owner = try fixture.owner()
+                let action = try await owner.planNextAction(using: fixture.actions)
+                _ = try await owner.prepareFormInput(for: action); owner.pause()
+            } else { _ = try await pauseUnusedIntent(fixture); owner = try fixture.owner() }
+            try await release(fixture); try await owner.resumeAfterUserControl()
+            _ = try? await owner.recoverPendingFormPreparationCriteria()
+            XCTAssertTrue(owner.hasPendingFormPreparation); XCTAssertTrue(owner.unusedFormIntentHistory.isEmpty)
+            XCTAssertTrue(owner.confirmedFormHistory.isEmpty); XCTAssertFalse(fixture.state.commands.contains(.edit))
+        }
+    }
+
+    func testUnusedFormStructureRequiresCompleteMetadataAndTracksNativeMembershipOnly() {
+        typealias Structure = ComputerUseBrowserUnusedFormIntent.FormStructure
+        func page(id: String = "field1", label: String = "Query", formID: String = "form1", omitted: Bool = false, unavailableValues: Bool = false, truncated: Bool = false) -> ComputerUseBrowserPageSnapshot {
+            let form = ComputerUseBrowserPageSnapshot.Control.Form(id: formID, method: "get", action: "https://private.test/search", target: "", encoding: "application/x-www-form-urlencoded", noValidate: false)
+            let control = ComputerUseBrowserPageSnapshot.Control(id: id, containerID: "container", label: label, kind: "text", name: "query",
+                disabled: false, readOnly: false, required: false, multiple: false, constraints: [:], options: [], form: form)
+            return .init(id: "snapshot", texts: [], links: [], controls: [control], truncated: truncated,
+                omittedEmbeddedContent: false, omittedControls: omitted || unavailableValues, omittedControlMetadata: omitted)
+        }
+        let original = Structure(page())
+        XCTAssertNotNil(original); XCTAssertEqual(original?.controlsByForm, ["form1":Set(["field1"])])
+        XCTAssertEqual(original, Structure(page(label: "Changed label")))
+        XCTAssertEqual(original, Structure(page(unavailableValues: true)))
+        XCTAssertNotEqual(original, Structure(page(id: "field2")))
+        XCTAssertNotEqual(original, Structure(page(formID: "form2")))
+        XCTAssertNil(Structure(page(omitted: true))); XCTAssertNil(Structure(page(truncated: true)))
+    }
+
     func testCompletedUnusedPreparationReplansFreshDefaultsAfterHandbackWithoutReplayingTheOldProposal() async throws {
         let fixture = try await unusedIntentFixture()
         defer { fixture.close() }
@@ -37,7 +144,7 @@ final class ComputerUseBrowserResearchPreservationTests: XCTestCase {
         let contextInput = try XCTUnwrap(fixture.actions.inputs.last { $0.usesUnusedFormIntentHistoryContext })
         let context = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contextInput.contextJSON.utf8)) as? [String: Any])
         let history = try XCTUnwrap(context["unused_form_intent_history"] as? [[String: Any]])
-        XCTAssertEqual(context["version"] as? Int, 29)
+        XCTAssertEqual(context["version"] as? Int, 31)
         XCTAssertEqual(history.first?["values_observed"] as? Bool, true)
         XCTAssertEqual(history.first?["observation"] as? String, "initial_edit_preconditions")
         XCTAssertEqual(history.first?["old_adapter_retired"] as? Bool, true)
@@ -204,7 +311,7 @@ final class ComputerUseBrowserResearchPreservationTests: XCTestCase {
         XCTAssertEqual(fresh.input.interpretation.input, original)
         let context = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(fresh.input.contextJSON.utf8)) as? [String: Any])
         let history = try XCTUnwrap(context["unused_form_intent_history"] as? [[String: Any]])
-        XCTAssertEqual(context["version"] as? Int, 29)
+        XCTAssertEqual(context["version"] as? Int, 31)
         XCTAssertEqual(history.first?["values_observed"] as? Bool, false)
         XCTAssertEqual(history.first?["input_dispatched"] as? Bool, false)
         let purposes = try XCTUnwrap(history.first?["purposes"] as? [[String: Any]])
@@ -342,9 +449,10 @@ final class ComputerUseBrowserResearchPreservationTests: XCTestCase {
         XCTAssertTrue(fixture.forms.inputs.allSatisfy { $0.interpretation.input == original })
     }
 
-    private func unusedIntentFixture() async throws -> ResearchDriverFixture {
+    private func unusedIntentFixture(mutation: String? = nil) async throws -> ResearchDriverFixture {
         let body = "<form action='/filtered'><label>Query<input name=q value='fresh-private-default'></label><button>Search</button></form>"
-        let fixture = try await ResearchDriverFixture.make(searchForm: true, detailsBodyHTML: body)
+        let original = mutation.map { "<form action='/filtered'><label>Query<input name=q value=old></label><button>Search</button></form><script>fetch('/signal').then(()=>{ \($0) fetch('/changed'); });</script>" }
+        let fixture = try await ResearchDriverFixture.make(searchForm: true, searchFormHTML: original, heldSignal: mutation != nil, detailsBodyHTML: body)
         fixture.policy.choices = [false]
         return fixture
     }
@@ -707,6 +815,8 @@ final class ComputerUseBrowserResearchPreservationTests: XCTestCase {
         await expectFailure { _ = try await owner.prepareFormInput(for: action) }
         try await release(fixture); try await owner.resumeAfterUserControl()
         await expectFailure { _ = try await owner.resumeFormPreparation() }
+        _ = try? await owner.recoverPendingFormPreparationCriteria()
+        XCTAssertTrue(owner.hasPendingFormPreparation); XCTAssertTrue(owner.unusedFormIntentHistory.isEmpty)
         XCTAssertEqual(fixture.state.commands.filter { $0 == .formFields }.count, 1)
         XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 0)
     }

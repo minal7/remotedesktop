@@ -105,6 +105,11 @@ final class ComputerUseBrowserResearchTask {
         let goal: ComputerUseBrowserGoalInput
         let document: ComputerUseBrowserDocument
         let documentID: String
+        let formStructure: ComputerUseBrowserUnusedFormIntent.FormStructure?
+        init(goal: ComputerUseBrowserGoalInput, page: ComputerUseBrowserPageEvidence) {
+            self.goal = goal; document = page.document; documentID = page.documentID
+            formStructure = ComputerUseBrowserUnusedFormIntent.FormStructure(page.page)
+        }
     }
     private struct HandbackOutcome: Sendable {
         let requirement: ComputerUseBrowserHandbackRequirement?
@@ -975,8 +980,7 @@ final class ComputerUseBrowserResearchTask {
             if preparation.unusedInitialIntentObservation != nil,
                unusedFormIntentHistory.count < ComputerUseBrowserUnusedFormIntent.maximumCount,
                let returned = lastHandbackDocument, captured.continues(returned.goal),
-               returned.document.contextID == preparation.page.document.contextID,
-               returned.documentID != preparation.page.documentID {
+               returned.document.contextID == preparation.page.document.contextID {
                 guard sourcePolicy == nil || (sourcePolicyInstalled && sourcePolicy?.goalRevision == captured.digest) else {
                     throw Failure.navigationUnavailable
                 }
@@ -984,22 +988,31 @@ final class ComputerUseBrowserResearchTask {
                 guard page.document == returned.document, page.documentID == returned.documentID else {
                     throw ComputerUseBrowserError.pageChanged
                 }
-                let record = try ComputerUseBrowserUnusedFormIntent(preparation: preparation,
-                    index: unusedFormIntentHistory.count, goal: captured, page: page)
-                do { try await browser.validatePageEvidence(page) }
-                catch {
-                    await browser.joinDOMCompletion(document: page.document)
-                    throw error
+                if let reason = ComputerUseBrowserUnusedFormIntent.retirementReason(preparation: preparation, page: page) {
+                    if reason == .formStructureChanged {
+                        guard let sealed = returned.formStructure,
+                              ComputerUseBrowserUnusedFormIntent.FormStructure(page.page) == sealed else {
+                            throw ComputerUseBrowserError.pageChanged
+                        }
+                    }
+                    let record = try ComputerUseBrowserUnusedFormIntent(preparation: preparation,
+                        index: unusedFormIntentHistory.count, goal: captured, page: page)
+                    do { try await browser.validatePageEvidence(page) }
+                    catch {
+                        await browser.joinDOMCompletion(document: page.document)
+                        throw error
+                    }
+                    try check()
+                    // checkCurrent invokes the action gate, which may reenter
+                    // Pause. Finish with pure checks before changing ownership.
+                    guard !isRetired, !isPaused, input == captured, formPreparation === preparation,
+                          lastHandbackDocument?.document == returned.document,
+                          lastHandbackDocument?.documentID == returned.documentID,
+                          lastHandbackDocument?.formStructure == returned.formStructure else { throw Failure.paused }
+                    try preparation.retireUnusedInitialIntent(observation: record.observation)
+                    unusedFormIntentHistory.append(record); formPreparation = nil
+                    return true
                 }
-                try check()
-                // checkCurrent invokes the action gate, which may reenter
-                // Pause. Finish with pure checks before changing ownership.
-                guard !isRetired, !isPaused, input == captured, formPreparation === preparation,
-                      lastHandbackDocument?.document == returned.document,
-                      lastHandbackDocument?.documentID == returned.documentID else { throw Failure.paused }
-                try preparation.retireUnusedInitialIntent(observation: record.observation)
-                unusedFormIntentHistory.append(record); formPreparation = nil
-                return true
             }
             guard preparation.permitsCriteriaRecovery else { return false }
             return try await preparation.recoverCriteriaForReview(browser: browser, checkCurrent: check)
@@ -1663,7 +1676,7 @@ final class ComputerUseBrowserResearchTask {
                     let document = try await browser.acquireObservedDocument(taskID: taskID)
                     try Task.checkCancellation()
                     let page = try await browser.observePage(document: document)
-                    returnedDocument = .init(goal: captured, document: page.document, documentID: page.documentID)
+                    returnedDocument = .init(goal: captured, page: page)
                     try Task.checkCancellation()
                 }
                 try browser.validateWorkflowSession(expected)
@@ -1686,7 +1699,7 @@ final class ComputerUseBrowserResearchTask {
                 if try !browser.isUnnavigatedSession(prepared) {
                     let document = try await browser.acquireObservedDocument(taskID: taskID)
                     let page = try await browser.observePage(document: document)
-                    returnedDocument = .init(goal: captured, document: page.document, documentID: page.documentID)
+                    returnedDocument = .init(goal: captured, page: page)
                 }
                 try Task.checkCancellation(); try browser.validateWorkflowSession(prepared)
                 return .init(requirement: prepared, document: returnedDocument)

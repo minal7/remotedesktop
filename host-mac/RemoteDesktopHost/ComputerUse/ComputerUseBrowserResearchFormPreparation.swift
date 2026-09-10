@@ -5,6 +5,20 @@ import Foundation
 struct ComputerUseBrowserUnusedFormIntent: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     static let maximumCount = 32
     enum Observation: String, Sendable { case none; case initialEditPreconditions = "initial_edit_preconditions" }
+    enum RetirementReason: String, Sendable { case documentChanged = "document_changed", formStructureChanged = "form_structure_changed" }
+    /// Visible native form membership only, without labels, values, URLs or
+    /// inferred equivalence. Incomplete metadata cannot establish a change.
+    struct FormStructure: Equatable, Sendable {
+        let controlsByForm: [String: Set<String>]
+        init?(_ page: ComputerUseBrowserPageSnapshot) {
+            guard !page.truncated, !page.omittedControlMetadata else { return nil }
+            var forms: [String: Set<String>] = [:]
+            for control in page.controls {
+                if let form = control.form { forms[form.id, default: []].insert(control.id) }
+            }
+            controlsByForm = forms
+        }
+    }
     struct Purpose: Equatable, Sendable {
         let label: String
         let kind: String
@@ -13,19 +27,31 @@ struct ComputerUseBrowserUnusedFormIntent: Equatable, Sendable, CustomStringConv
     }
     let index: Int
     let observation: Observation
+    let retirementReason: RetirementReason
     private let goal: ComputerUseBrowserGoalInput
     private let retiredAtGoal: ComputerUseBrowserGoalInput
     private let sessionIdentity: String
     private let purposes: [Purpose]
 
     @MainActor
+    static func retirementReason(preparation: ComputerUseBrowserResearchFormPreparation,
+                                 page: ComputerUseBrowserPageEvidence) -> RetirementReason? {
+        guard page.document.contextID == preparation.page.document.contextID else { return nil }
+        if page.documentID != preparation.page.documentID { return .documentChanged }
+        guard let original = FormStructure(preparation.page.page), let current = FormStructure(page.page),
+              let before = original.controlsByForm[preparation.reviewContext.formID], !before.isEmpty,
+              before != (current.controlsByForm[preparation.reviewContext.formID] ?? []) else { return nil }
+        return .formStructureChanged
+    }
+
+    @MainActor
     init(preparation: ComputerUseBrowserResearchFormPreparation, index: Int,
          goal: ComputerUseBrowserGoalInput, page: ComputerUseBrowserPageEvidence) throws {
         guard (0..<Self.maximumCount).contains(index), let observation = preparation.unusedInitialIntentObservation,
               goal.continues(preparation.interpretation.input), page.document.taskID == goal.taskID,
-              page.document.contextID == preparation.page.document.contextID,
-              page.documentID != preparation.page.documentID else { throw ComputerUseBrowserActionPlanError.inputChanged }
+              let reason = Self.retirementReason(preparation: preparation, page: page) else { throw ComputerUseBrowserActionPlanError.inputChanged }
         self.index = index; self.observation = observation; self.goal = preparation.interpretation.input; retiredAtGoal = goal
+        retirementReason = reason
         sessionIdentity = page.document.contextID
         purposes = try preparation.reviewContext.fieldPurposes.map { purpose in
             guard let control = preparation.page.page.controls.first(where: { $0.id == purpose.controlID }) else {
@@ -39,6 +65,7 @@ struct ComputerUseBrowserUnusedFormIntent: Equatable, Sendable, CustomStringConv
         guard interpretation.input.continues(goal), interpretation.input.continues(retiredAtGoal),
               evidence.document.contextID == sessionIdentity else { throw ComputerUseBrowserActionPlanError.invalidInput }
         return ["intent":index, "retired_after_handback":true, "values_observed":observation != .none,
+            "retirement_reason":retirementReason.rawValue,
             "observation":observation.rawValue, "input_dispatched":false, "old_adapter_retired":true,
             "current_field_verification":false, "purposes":try purposes.map { purpose -> [String: Any] in
                 ["historical_label":purpose.label, "historical_kind":purpose.kind, "disposition":purpose.disposition.rawValue,
